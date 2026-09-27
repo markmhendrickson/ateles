@@ -25,7 +25,7 @@ Every definition is one sentence and names the concept; how the concept is recor
 and names its owning section. Terms carry no phase marker: the roadmap is `status.md`, and a definition
 does not change when its implementation lands.
 
-**How the inline links are applied.** One rule, so that a later editor follows the same one and the links
+**How the inline links are applied.** One [rule](#rule), so that a later editor follows the same one and the links
 stay predictable rather than accumulating by taste:
 
 - **The first mention of a term in an entry is linked; later mentions in that entry are not.** A short
@@ -283,7 +283,7 @@ branch, and head, related to the [task](#task) it executes.
 **Definition:** the summarized content of one [runner](#runner)'s session — what the session covered and
 concluded — as distinct from the [`agent_session`](#agent_session) that names where it ran and the raw turn
 store that holds every message.
-It carries one rule: **an [agent](#agent)'s [verdict](#verdict) `REFERS_TO` the digest of the session
+It carries one [rule](#rule): **an [agent](#agent)'s [verdict](#verdict) `REFERS_TO` the digest of the session
 that produced it**, required where a digest exists for that session and permitted otherwise, so a reader
 can resolve what the signer was working from as of `signed_at`. Never the `agent_session` (which carries no
 content) and never the raw turns (the wrong grain for a reference resolved as of a time). A registered type
@@ -342,7 +342,7 @@ of its siblings.
 **Not for:** a child with two parents.
 
 ### recurring task
-**Definition:** a [task](#task) carrying a recurrence rule, of which exactly one instance is non-terminal at a time, and whose
+**Definition:** a [task](#task) carrying a recurrence [rule](#rule), of which exactly one instance is non-terminal at a time, and whose
 closing [verdict](#verdict) creates the next instance — a new task copying the rule, entering [intake](#intake), and linked
 `FOLLOWS` to the instance whose completion created it.
 Each instance is an ordinary task with its own [chain](#chain) and [terminal](#terminal) status; the next instance's `due_date` is
@@ -359,7 +359,7 @@ occurrence that passed closes its instance and creates the next).
 
 ### intake rule
 **Definition:** data on the record stating that a described change — to an entity of a named type, of a
-named change kind, matching a predicate over its fields and over its provenance — is work: the rule's
+named change kind, matching a predicate over its fields and over its provenance — is work: the [rule](#rule)'s
 evaluator, a [daemon](#daemon), writes one [task](#task) per matching change, entering [intake](#intake),
 with provenance naming the rule and the change, and nothing else.
 A rule keys on no record of the work model (decision 36; one naming a work-model type is refused at the write) but may key on a field a [step](#step) wrote on
@@ -390,7 +390,7 @@ carries them and their [checkpoints](#checkpoint) to the [operator](#operator), 
 **Definition:** a long-lived process that self-triggers on its own loop, without receiving a task, and takes
 no [action](#action) of its own: it writes the [tasks](#task) its poll produces and [observations](#observation),
 and nothing else — the announcement path of last resort
-([`failure_posture.md#the-rules`](failure_posture.md#the-rules), rule 2) is the sole exception.
+([`failure_posture.md#the-rules`](failure_posture.md#the-rules), [rule](#rule) 2) is the sole exception.
 **See:** [`work_model.md#the-four-execution-mechanisms`](work_model.md#the-four-execution-mechanisms);
 [`work_model.md#contradictions-this-document-settles`](work_model.md#contradictions-this-document-settles) (C2).
 **Never:** an action `PRODUCES` from no task.
@@ -450,7 +450,7 @@ produced, the seat is the **declaration's**, not the file's: the producing work 
 reviewing role is that declaration's optional [review step](#review-step) under an `applies_when`, which
 reads what exists when it opens (decision 110,
 `gates_and_workflows.md#declaration-batch-projection`).
-**The seam between two skills is the seam the design already has.** Where a procedure produces something a
+**The seam between two skills is the seam the design already has.** Where a [procedure](#procedure) produces something a
 second procedure then reads, the two are two steps of one declaration or two declarations joined by a
 [successor](#successor) and a [chain](#chain), and the seam is the producing step's closing condition read as
 the consuming step's `reads_to_enter` — not a property of the files. Splitting a file where the design
@@ -466,6 +466,44 @@ skill is a harness's file, and several skills collapse to one declaration); [age
 role skill mirrors an agent and is not one); [role](#role) for a skill; [step](#step) for a skill; a skill
 for an [artifact](#artifact) or for anything the swarm wrote into the record.
 
+### procedure
+**Definition:** how one piece of recurring work is done — the content a [skill](#skill) file carries, targeted
+at a [workflow](#workflow) declaration, a [step](#step) of one, an [adapter](#adapter)'s operation, or a
+[policy](#policy), and never a design type of its own.
+A procedure is content; a skill is the harness's [carrier](#carrier) for it (`migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes`
+calls the same content a "procedure skill" precisely because the two are distinguishable — what recurring
+work consists of, versus the file a harness loads it from). Two skills may carry the same procedure
+duplicated (`migration.md#the-duplicated-procedure-and-what-the-roles-collapse-to`: several [role](#role) files
+carrying one review procedure verbatim collapse to the design's one [review step](#review-step)), and one
+procedure may be split across no skill at all where a declaration already states the seam
+(`vocabulary.md#skill`, "the seam between two skills is the seam the design already has"). A procedure
+holds no [authority](#authority) and [claims](#claim) nothing itself; what executes it is the [principal](#principal)
+invoking the skill that carries it, under that principal's own [grant](#grant).
+**See:** [`migration.md#five-classes-of-skill`](migration.md#five-classes-of-skill),
+[`migration.md#procedure-skill--workflow-declaration-step-or-adapter-operation`](migration.md#procedure-skill--workflow-declaration-step-or-adapter-operation),
+[`harness_carriers.md#payloads`](harness_carriers.md#payloads) (the [Method](#method) row).
+**Never:** —
+**Not for:** [skill](#skill) for a procedure (the file is the carrier; the content is the procedure, and
+several skills can carry one); [workflow](#workflow) for a procedure (a declaration is the design's target
+for a recurring procedure, not the procedure's own name).
+
+### method
+**Definition:** short for [`harness_carriers.md`](harness_carriers.md)'s Method payload — the design's name,
+in the harness-delivery matrix only, for getting a [procedure](#procedure) into a harness through a
+[skill](#skill) file: "how recurring work is done: procedures a harness loads by name"
+(`harness_carriers.md#payloads`).
+Method names no design type beside procedure and skill; it is the matrix's row label for the same content
+delivered by the same [carrier](#carrier), so that the payload table reads next to Reach, [Rules](#rule), and the other rows it
+shares a column structure with. Outside that table, "method" is ordinary English (an API's method, a
+verification method, the [operator](#operator)'s own method of working) and is left to the author, the same as the
+eighteen ordinary-English terms `#scope`'s own section names.
+**See:** [`harness_carriers.md#payloads`](harness_carriers.md#payloads).
+**Never:** —
+**Not for:** a design type of its own, beside [procedure](#procedure) and [skill](#skill); "method" and
+"skill" used as one compound term ("method/skill") — the two name different things (content and carrier)
+and a compound label obscures which one a sentence means; a synonym for [procedure](#procedure) outside the
+payload matrix (say procedure, which is the content's own name and the one every other document uses).
+
 ## Gate model (`gates_and_workflows.md`)
 
 ### declaration scope
@@ -473,9 +511,9 @@ for an [artifact](#artifact) or for anything the swarm wrote into the record.
 [batch](#batch) is run under — the body of work one instance runs, against which its declarations and its
 roster are keyed.
 Selecting is not owning: a declaration scope says which declaration applies, never that anything owns it
-(decision 70, ruled 2026-09-06). It is **not** the [planning level](#planning-level) named `project`, which
+(decision 70, [ruled](#rule) 2026-09-06). It is **not** the [planning level](#planning-level) named `project`, which
 is an ancestry mark read for justification and owns only its own record — the two share a word in ordinary
-use and the design distinguishes them, which is what invariant 12 obliges a rename for. The swap test:
+use and the design distinguishes them, which is what [invariant](#invariant) 12 obliges a rename for. The swap test:
 "a [task](#task) acquires its `project` from its ascent" and "a task acquires its `declaration_scope`
 from its ascent" do not mean the same thing, because an [ascent](#ascent) yields [planning records](#planning-record)
 and a scope is not one.
@@ -513,7 +551,7 @@ declared on one workflow, its [step owner](#step-owner)'s [role](#role) is table
 `workflows.md#roles-named-in-this-document`, and the reason the [workflow](#workflow) separates it from its
 neighbours is argued in that workflow's own section — three homes a per-name entry would duplicate
 (principle 9). Where a name's separation is the point, the section says so: `verify_deployed` is a step
-apart from `release` because released and landed are different claims (`principles.md`, invariant 10), and
+apart from `release` because released and landed are different claims (`principles.md`, [invariant](#invariant) 10), and
 a [batch](#batch) that closed on the release [action](#action)'s success would record the first as the
 second.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
@@ -660,7 +698,7 @@ or `unknown`, which raises a [checkpoint](#checkpoint) (reason `undetermined_sco
 one-off.
 **Field:** `finding` — an entity of its own, `PART_OF` the verdict that carries it and `REFERS_TO` the batch
 it judges; a hold's finding stands with no verdict while the hold does; its severity, kind, scope, and
-evidence are the fields the rules bind on (`data_model.md#concepts`).
+evidence are the fields the [rules](#rule) bind on (`data_model.md#concepts`).
 **See:** [`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges),
 [`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`](gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
 **Never:** —
@@ -806,7 +844,7 @@ detach); a successor named by anything but the closing verdict.
 **Not for:** gate for a step or a stage.
 
 ### action gate
-**Definition:** the decision, taken by a [principal](#principal) evaluating one [action](#action) against the action policy,
+**Definition:** the decision, taken by a [principal](#principal) evaluating one [action](#action) against the action [policy](#policy),
 whether that action is taken or [checkpointed](#checkpoint).
 Inputs are the action's class, [blast radius](#blast-radius), [confidence](#confidence), and successful recurrences; no PR, [issue](#issue), or
 repository.
@@ -815,7 +853,7 @@ repository.
 **Not for:** "merge gate" for the action gate (merge is one boundary among several).
 
 ### action_policy
-**Definition:** the policy a [principal](#principal) evaluates the [action gate](#action-gate) against, listing the low- and high-blast
+**Definition:** the [policy](#policy) a [principal](#principal) evaluates the [action gate](#action-gate) against, listing the low- and high-blast
 [action](#action) classes, the [confidence](#confidence) threshold, the recurrence count that graduates a series, the
 always-checkpoint boundaries, the [permission scope](#permission-scope), and the consent tolerance per action class — the change
 to an action's consented figures that may be taken without a new [checkpoint](#checkpoint), zero where the
@@ -873,8 +911,8 @@ through an [adapter](#adapter).
 The record is inside that boundary, not across it: the swarm's own state lives there, so writing to it
 crosses nothing. This is the boundary every use of "outside" in these documents means, and it is stated
 once in the [action](#action)'s home section. The host a [daemon](#daemon) runs on is one: its processes and checkouts
-are [artifacts](#artifact), and process control is its adapter's action classes (decision 45). A second
-instance of the record's own software, owned by another party, is **not** one: decision 55 rules it the
+are [artifacts](#artifact), and process [control](#control) is its adapter's action classes (decision 45). A second
+instance of the record's own software, owned by another party, is **not** one: decision 55 [rules](#rule) it the
 same record, extended by replication, reached through the record's own peer-sync substrate rather than an
 adapter, with no [artifact](#artifact) at the seam. The swarm's **own** serving instance is one only while it is
 the object of an operation upon it — decision 78 rules a restart, a redeploy, or a migration of that
@@ -922,7 +960,7 @@ Values include `build`, `docs`, `publish`, `external_api_write` (a write to an
 `merge_pr`, and `operator_only`; a declared but unclassified value fails closed.
 The set of values is `action_policy` data and has no list in the foundation: each [adapter](#adapter)'s
 document tables the classes its [outbound](#outbound) operations carry, every class an adapter can produce is listed in
-the policy (`adapters.md#the-admission-contract`, obligation 6), and the values named here are examples.
+the [policy](#policy) (`adapters.md#the-admission-contract`, obligation 6), and the values named here are examples.
 **No individual class carries an entry of its own**, for the same reason the set has no list: a class is
 policy data, its [blast radius](#blast-radius) is the policy's to resolve, and an entry per class would be
 a second home for a value the policy already declares (principle 9). Where one class's boundary against
@@ -945,13 +983,13 @@ another is load-bearing — the same calendar write being `external_api_write` o
 **Not for:** "severity" for a tier.
 
 ### confidence
-**Definition:** the proposing [agent](#agent)'s score that an [action](#action) is right, compared with the policy's threshold.
+**Definition:** the proposing [agent](#agent)'s score that an [action](#action) is right, compared with the [policy](#policy)'s threshold.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** —
 **Not for:** a default of zero standing in for a score.
 
 ### action series
-**Definition:** a series of successfully taken [actions](#action) of one class that, on reaching the policy's
+**Definition:** a series of successfully taken [actions](#action) of one class that, on reaching the [policy](#policy)'s
 count, graduates that class from [checkpointing](#checkpoint) to being taken without one.
 Named for what the series is made of: the members are actions, and the class they share is what graduates.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
@@ -963,7 +1001,7 @@ graduating (retired: see [Retired names](#retired-names)). The swarm's sense onl
 
 ### operator_only
 **Definition:** the [action_type](#action_type) marking an effect an [agent](#agent) structurally cannot carry out, which resolves to
-`NEVER` ahead of any policy.
+`NEVER` ahead of any [policy](#policy).
 The [task](#task) that carries it is still [claimable](#claimable), by the [operator-facing agent](#operator-facing-agent).
 A [step](#step) of any [workflow](#workflow) whose [action](#action) carries it stays in that workflow: the step carries the
 [checkpoint](#checkpoint), holds for the [action confirmation](#action-confirmation), and closes on it — never on
@@ -982,7 +1020,7 @@ resumes differs and is read from the subject [edge](#edge), not from a second te
 its subject, carrying a [reason class](#reason-class), the needed input, the options, whom it awaits, and who resolved it,
 and ending in a terminal approval. To checkpoint a subject is to write one and hold. The reason classes
 — `gate_hold` for a held action, and the classes a task is [escalated](#escalate) under — are enumerated once, each
-with what raises it, in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; a policy may
+with what raises it, in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; a [policy](#policy) may
 declare more. "Brief" described its content, not its identity, and is
 retired from the name for the same reason as `_record` and `_definition`.
 **See:** [`gates_and_workflows.md#the-checkpoint`](gates_and_workflows.md#the-checkpoint),
@@ -1024,7 +1062,7 @@ step but what its owner does, and no separate review concept exists in the desig
 **Not for:** "reviewer" for a review step's owner, unqualified; CI for a review step.
 
 ### effect dedup
-**Definition:** the rule that every [outbound](#outbound) effect is idempotent or deduplicated on its own
+**Definition:** the [rule](#rule) that every [outbound](#outbound) effect is idempotent or deduplicated on its own
 [idempotency key](#idempotency-key) — the [action](#action)'s `dedup_key` — so a re-claimed [task](#task)
 never repeats an effect that already happened.
 **See:** [`work_model.md#at-least-once-implies-effect-dedup`](work_model.md#at-least-once-implies-effect-dedup),
@@ -1038,7 +1076,7 @@ built on is the [idempotency key](#idempotency-key)).
 [external system](#external-system)'s own delivery id, carried by every [inbound](#inbound)
 [delivery](#delivery) as the idempotency key of the write it produces
 (`data_model.md#record-conventions`), or an [action](#action)'s `dedup_key` on the [outbound](#outbound)
-side, which [effect dedup](#effect-dedup) is the rule for. The two are one mechanism at two boundaries of
+side, which [effect dedup](#effect-dedup) is the [rule](#rule) for. The two are one mechanism at two boundaries of
 one [adapter](#adapter), not two mechanisms: a mismatch on an existing key is refused, and a refusal is
 stronger evidence of a prior commit than a success response is of the present one
 (`failure_posture.md`, rule 6). The key is built from the source's own stable values and never from a
@@ -1085,7 +1123,7 @@ a router (the `route` step is a verdict by a step owner).
 **Definition:** the record, made by a [step owner](#step-owner) on a [verdict](#verdict), that the
 context of the [task](#task) the [batch](#batch) carried shows the [workflow](#workflow) declaration it ran
 under could serve its class better, where nothing the declaration did was a defect.
-The rule that turns on it: like a standing [finding](#finding), it produces a task that `REFERS_TO` it, and
+The [rule](#rule) that turns on it: like a standing [finding](#finding), it produces a task that `REFERS_TO` it, and
 that task's work is an amendment to the declaration, a [governance write](#governance-write) approved at the [action gate](#action-gate) — by the
 swarm where the amendment adds only low-blast [steps](#step), by the [operator](#operator) where it adds a consent point, an
 `operator_only` [action](#action), or a high-blast action, or removes or weakens a consent point, a [review step](#review-step), or a
@@ -1146,7 +1184,7 @@ the system can deliver with its status (handled, deliberately ignored, unhandled
 reason, and the **outbound table**, per [step](#step) the operation, the [action class](#action_type), and
 what confirms it landed. Together the two tables discharge admission obligation 1 — that every delivery
 resolves to one of the four [inbound](#inbound) outcomes or to [dropped](#dropped) — and a delivery outside
-the mapping is exactly what makes the drop counter a control rather than a promise: it resolves to
+the mapping is exactly what makes the drop counter a [control](#control) rather than a promise: it resolves to
 `dropped`, reason `unmapped`, counted per window, so an incomplete mapping is a number that rises on its
 own instead of a silent gap.
 **See:** [`adapters.md#the-admission-contract`](adapters.md#the-admission-contract),
@@ -1164,7 +1202,7 @@ events).
 what routing and declared windows — resolved at runtime by the [adapter](#adapter) that touches the system
 and never named in these documents. One binding type per external system (decision 35), routing a field of
 it; the [host](#external-system) a [daemon](#daemon) runs on takes one like any other system (decision 45).
-It names a credential and never carries its value, on the reference-never-value rule.
+It names a credential and never carries its value, on the reference-never-value [rule](#rule).
 **See:** [`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`](adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance),
 [`adapters.md#where-the-binding-is-declared-no-new-home-is-needed`](adapters.md#where-the-binding-is-declared-no-new-home-is-needed),
 [`adapters.md#scope`](adapters.md#scope).
@@ -1181,7 +1219,7 @@ a [grant](#grant), which says what a credential permits rather than which instan
 host runs and how it is verified — the command, its build arguments, the branch deployed, and the target
 that proves the deployment arrived — resolved when a deployment is performed and never by an
 [adapter](#adapter) mid-step. Distinct from a [vendor_binding](#vendor_binding) by what its fields are read
-for: a binding addresses a system the swarm does not own; this carries out and then checks a procedure on
+for: a binding addresses a system the swarm does not own; this carries out and then checks a [procedure](#procedure) on
 software the swarm does own. A verification target is the mark of it, and no binding carries one.
 **See:** [`adapters.md#what-separates-a-binding-from-a-deployments-configuration`](adapters.md#what-separates-a-binding-from-a-deployments-configuration),
 [`adapters.md#where-a-swarm-is-deployed-and-what-its-deployment-names`](adapters.md#where-a-swarm-is-deployed-and-what-its-deployment-names),
@@ -1196,7 +1234,7 @@ procedure that places it.
 ### signal
 **Definition:** what an [inbound](#inbound) external [event](#event) is to the record: information about an [artifact](#artifact), which an
 [adapter](#adapter) translates into a [verdict](#verdict) by a named [principal](#principal), an [observation](#observation) on an artifact, an [action](#action)
-confirmation, or a new [task](#task) for [intake](#intake), and never into an instruction to a [workflow](#workflow).
+confirmation, or a new [task](#task) for [intake](#intake), and never into an [instruction](#instruction) to a [workflow](#workflow).
 **See:** [`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
 **Never:** —
 **Not for:** "trigger" for a signal (nothing outside the record opens a step); "command" for a signal; an
@@ -1219,7 +1257,7 @@ asks the system for updates, by long polling or on an interval) are its two mode
 the record's own entity changes is not a third mode, because it watches the record and has no visibility
 into any external system
 (`adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`).
-Ruled (decision 16): the receiver may be one shared process for every adapter, built by the swarm or
+[Ruled](#rule) (decision 16): the receiver may be one shared process for every adapter, built by the swarm or
 consumed from a third party, because a socket is a socket and carries no per-system meaning. What it hands
 the adapter is the delivery as the system sent it — headers and body intact, unparsed, unverified,
 unacknowledged.
@@ -1235,7 +1273,7 @@ already holds — that is downstream of an adapter, never a substitute for one).
 ### signature
 **Definition:** the per-[external system](#external-system) authenticity check a [receiver](#receiver)
 hands the [adapter](#adapter) the means to make, and the adapter alone performs, on every
-[delivery](#delivery) before its [disposition](#disposition) is decided. Ruled (decision 16): verification is the
+[delivery](#delivery) before its [disposition](#disposition) is decided. [Ruled](#rule) (decision 16): verification is the
 adapter's because the scheme is a fact about the system, not a general property a shared receiver could
 check — a keyed hash over a shared secret, a secret token the system echoes back in a header, an envelope to verify
 whose payload carries no event, a scheme that varies between rails, or, for a chain, no signature at all,
@@ -1399,9 +1437,9 @@ batch for a planning record; a matter or a case for one (that is what work conce
 the five decision 57 registers — an [ascent](#ascent) mark a [task](#task) reaches along `PART_OF`, read
 for justification and for relative standing.
 It is a [planning record](#planning-record) and nothing more: it owns its own statement, its own `planning`
-[batch](#batch), and the child records its `amend` [step](#step) creates, and it owns no policy, no
+[batch](#batch), and the child records its `amend` [step](#step) creates, and it owns no [policy](#policy), no
 [workflow](#workflow) declaration, and no roster. Which declaration a [batch](#batch) runs under is the
-[declaration scope](#declaration-scope), a different term the design distinguishes (decision 70, ruled
+[declaration scope](#declaration-scope), a different term the design distinguishes (decision 70, [ruled](#rule)
 2026-09-06).
 **See:** [`planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them`](planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them),
 [`planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term`](planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term).
@@ -1526,7 +1564,7 @@ carries `credential_kind: aauth_sub` with that agent's `sub` and `iss` and ends 
 principal that credential identifies; the acts-as edge ends at the **[operator](#operator)**. This pair is
 what joins the two credential systems — an AAuth `sub` binds to the agent that presented it and reaches the
 human principal only through that agent's separate acts-as binding.
-It carries one rule the design turns on: **for a [quorum](#quorum) or a
+It carries one [rule](#rule) the design turns on: **for a [quorum](#quorum) or a
 [separation-of-duties](#separation-of-duties) check, an agent counts as the principal its acts-as binding
 names** — one interest, so two agents bound to one [operator](#operator) cannot satisfy a check meant to
 require two. Attribution is unaffected, and is why the two edges are distinct: the agent is recorded as
@@ -1570,7 +1608,7 @@ or key crosses.
 ### grant
 **Definition:** an `agent_grant` holding the [domain](#domain) and [permission scope](#permission-scope) a
 [principal](#principal) may act in, matched on its [credential](#credential), as operation × entity types ×
-repositories with parameter constraints and an expiry.
+repositories with [parameter constraints](#parameter-constraint) and an expiry.
 Zero grants is deny. A capability also names the tools a principal may invoke, and a harness's own allowlist is
 one enforcement of that (decision 42); a budget — a bound on a resource a capability may consume — is a term
 of its parameter constraints, narrowing down a [delegation](#delegation) chain, and which resources a class's
@@ -1587,7 +1625,7 @@ enforcement of it).
 
 ### permission scope
 **Definition:** the tuple term naming the operations permitted within a [domain](#domain), with per-tool
-parameter constraints, carried by `agent_grant.capabilities`, `param_constraints`, and
+[parameter constraints](#parameter-constraint), carried by `agent_grant.capabilities`, `param_constraints`, and
 `action_policy.permission_scope`.
 A budget is a term of a permission scope's parameter constraints — a bound on a resource a capability may
 consume, narrowing a [delegation](#delegation) chain — and attenuates what a permission scope otherwise
@@ -1776,7 +1814,7 @@ of the classes this term names).
 **Definition:** the [reason class](#reason-class) raised on a [task](#task) whose [lease](#lease) has
 [lapsed](#lapsed) as many times as the instance's [`action_policy`](#action_policy) declares in `lapse_cap`.
 Raised by the [watchdog](#watchdog), carrying the count and the last lease holders; an undeclared
-`lapse_cap` raises none, and the absence is visible in the policy rather than defaulted at runtime. It
+`lapse_cap` raises none, and the absence is visible in the [policy](#policy) rather than defaulted at runtime. It
 holds the task from [claim](#claim), because a re-claim would restart the condition it exists to stop.
 **See:** [`failure_posture.md#repeated-lapse-raises-a-checkpoint`](failure_posture.md#repeated-lapse-raises-a-checkpoint).
 **Never:** —
@@ -1891,6 +1929,183 @@ proved equal to its source by a [reconciler](#reconciler), such as `step_status`
 **Not for:** source of truth for a projection; history for a projection; cache for a projection; a
 projection for a [fast path](#fast-path) (a declared skip of steps).
 
+## Governance and delivery (`data_model.md`, `harness_carriers.md`, `principles.md`)
+
+### rule
+**Definition:** one atomic piece of normative content — what an [agent](#agent) is to do or not do — carried
+in the imperative on an `agent_policy` row's `rule` field
+(`data_model.md#concepts`, the agent behavioural rule row).
+A rule is content, never a record: the record that carries it is `agent_policy`, in code font because it
+names the entity type, and one row carries one rule (`data_model.md#concepts`'s field list gives `rule` no
+plural and no list structure). A rule [binds](#control) an [agent](#agent) or does not, stated by its
+`rule_kind` (**closed**: `mandatory` or `advisory`, absence reading `mandatory` — principle 5); it reaches
+an agent by `GOVERNS` [edge](#edge) to that [agent](#agent)'s row, or by carrying none and reaching every agent its
+`scope` names (decision 114, ruled 2026-09-25, closing gap G34 in `migration.md#gaps-and-contradictions-the-mapping-exposed`);
+the `scope`/`agent_sub` field pair this superseded is read nowhere once the edge resolves. A rule's end is a
+date on `effective_until`, or, where the end is a real-world condition rather than a date, a `REFERS_TO`
+edge to the [task](#task) whose closing retires it (decision 111,
+`data_model.md#whether-a-rules-end-is-a-date-a-condition-or-a-task`) — never a condition written into
+`scope`, which the closed three-value vocabulary does not admit.
+**Cardinality is settled, not open.** `agent_policy`'s one-rule-per-row shape is the design as ruled, not an
+implementation default standing in for an undecided envelope: an agent bound by several rules holds several
+`agent_policy` rows, each one atomic rule, each independently scoped by its own `GOVERNS` edge or `scope`
+value, each independently superseded (`SUPERSEDES` → `agent_policy`) and independently retired. Nothing
+about that shape is a "bundle" needing composition or precedence machinery of its own: two rules in force at
+one scope stating the same subject and disagreeing on `rule_kind` is not a precedence question for a reader
+to resolve — it is a **conflict**, refused at the write and surfaced as a contradiction (`data_model.md#concepts`,
+"whether two rules in force at one scope state the same subject and disagree on `rule_kind`"; live instance
+ateles#1114/#1115). A design that let a later or higher-priority rule silently override an earlier one on
+the same subject would let a `mandatory` safety rule be quietly demoted by an `advisory` sibling nobody
+reviewed as a supersession — exactly the fail-open principle 5 forbids. Where a rule is genuinely replaced,
+the record is `SUPERSEDES`, an edge a reader can follow, never a precedence score a reader must compute.
+**See:** [`data_model.md#concepts`](data_model.md#concepts) (the agent behavioural rule row),
+[`harness_carriers.md#payloads`](harness_carriers.md#payloads) (the Rules row),
+[`principles.md#5-fail-closed-on-the-field-that-carries-the-safety-meaning`](principles.md#5-fail-closed-on-the-field-that-carries-the-safety-meaning).
+**Never:** a rule bundled with others on one row as a list or a prose block; a rule's precedence over
+another computed from anything but [`SUPERSEDES`](#governance-write); an agent identifier written into
+`domain` (that is `domain`'s subject field misused — the agent a rule binds is the `GOVERNS` edge's target,
+never a string in `domain` or the retired `agent_sub` reading).
+**Not for:** [`intake rule`](#intake-rule) for this sense (a different governance type entirely — an
+intake rule turns a change into a task, and carries no `rule_kind`, no `agent_sub`, and no behavioural
+content); a rule for the `agent_policy` row that carries it (the row is the record; the rule is one field of
+it, the same distinction [`conclusion`](#conclusion) draws from [`verdict`](#verdict)); "guideline",
+"policy", or "directive" for a rule (see [policy](#policy), below, for why none of the three earns its own
+entry).
+
+### policy
+**Definition:** not a term of its own; always the qualified compound that names which governance record is
+meant — `agent_policy` (a [rule](#rule)), `action_policy`, `task_policy`, `hook_policy`, `instance_policy`,
+`conformance_policy`, or `insurance_policy` — each a distinct registered type with its own row in
+`data_model.md#concepts`.
+This is the same [finding](#finding) [`#scope`](#scope) states for `scope`'s own bare form ("Bare 'scope' is not one of
+these eighteen and carries no entry of its own"), applied to a second word with the identical shape: bare
+"policy" in this corpus's own prose is
+overwhelmingly anaphora — "the policy" a sentence uses two lines after naming `action_policy` — never a
+fifth, unifying concept the anaphora is short for. The swap test, applied against the corpus's own uses of
+bare "policy", fails to turn up one sentence that means something none of the six named types already means;
+where a sentence needs the general sense of "a stated, governing rule set," it is describing one of the six
+and should name which. **"Guideline" and "directive" are not needed either**, for a sharper reason than
+policy's: neither word is used anywhere in this corpus to mean anything a `rule`, an `action_policy`, or a
+`task_policy` does not already name, so principle 12's "no fewer" floor is not met — a term earns its place
+only when a rule turns on it, and no rule turns on either.
+**See:** [`#scope`](#scope) (the parallel case, bare "scope"), [`action_policy`](#action_policy), [`rule`](#rule).
+**Never:** —
+**Not for:** —
+
+### instruction
+**Definition:** the point-in-time rendering a harness places in a model's context — the [rules](#rule) in
+force for the [principal](#principal) it starts, the session-start context a session must know before its
+first turn, and whatever [method](#method) it names — assembled at delivery and never a second home for the
+content it carries (`harness_carriers.md#payloads`, `harness_carriers.md#targeting`).
+An instruction is not itself normative: what binds is the rule an instruction renders, the record's own
+admission check, or a [guard](#guard)'s refusal — never the act of placing text in context
+(`harness_carriers.md#enforcement`, "an [interactive session](#interactive-session)'s own [actions](#action) bind only where a hook can refuse
+them, and nowhere else"). This is why a chat message is never read as one: `telegram.md#a-chat-message-is-not-an-instruction`
+draws the same line from the [inbound](#inbound) side that this entry draws from the delivery side — an external
+message is a [signal](#signal) about an [artifact](#artifact), never a command a [step](#step) obeys, for the same
+reason a rendered instruction informs rather than enacts. `docs/install.md`'s local instruction file
+(`CLAUDE.md`, `AGENTS.md`) is one **carrier** for this payload (`harness_carriers.md#carriers`) — a file on
+disk is a location; the instruction is what a harness reads from it, live where a hook renders and generated
+only where none exists.
+**See:** [`harness_carriers.md#payloads`](harness_carriers.md#payloads),
+[`harness_carriers.md#enforcement`](harness_carriers.md#enforcement),
+[`telegram.md#a-chat-message-is-not-an-instruction`](telegram.md#a-chat-message-is-not-an-instruction).
+**Never:** —
+**Not for:** [rule](#rule) for an instruction (the rule is content with one home; the instruction is a
+rendering of it, regenerated or re-delivered every session); an inbound message from an [external
+system](#external-system) as an instruction to a [step](#step) or [workflow](#workflow) (it is a
+[signal](#signal)); [guard](#guard) for an instruction (an instruction informs; only a guard can refuse an
+action).
+
+### guard
+**Definition:** a check that runs before an [action](#action) a session itself takes — a shell command, a file write, a
+message sent — and can refuse it, its logic held as harness plumbing while the [rule](#rule) it enforces
+stays a record entity like any other (`harness_carriers.md#payloads`, the Guards row; decision 42).
+A guard is the one payload a [local instruction file](#instruction) cannot carry with [guaranteed
+delivery](harness_carriers.md#capability-matrix): a rule written in a file asks the model not to act, and
+whether it complies is the model's discretion, which is guidance and not a check
+(`harness_carriers.md#capability-matrix`, note 10). Only a pre-action [hook](harness_carriers.md#carriers)
+binds a guard, because only a hook's exit status runs ahead of the action and can stop it
+(`harness_carriers.md#enforcement`, "an [interactive session](#interactive-session)'s own actions bind only where a hook can refuse
+them, and nowhere else"). A guard is therefore a [control](#control) exactly where a hook carries it, and a
+report everywhere else [invariant](#invariant) 1 would call reporting-without-binding.
+**See:** [`harness_carriers.md#payloads`](harness_carriers.md#payloads) (the Guards row),
+[`harness_carriers.md#enforcement`](harness_carriers.md#enforcement),
+[`principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control`](principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control).
+**Never:** —
+**Not for:** [gate](#gate) for a guard (the [action gate](#action-gate) is a decision on an [action](#action)
+taken by a [principal](#principal) against the `action_policy`; a guard is a pre-action check inside a
+harness, and the two can coexist on the same effect without being the same mechanism); [control](#control)
+for a guard where no hook carries it (an unenforced guard is [instruction](#instruction), not a control).
+
+### invariant
+**Definition:** a property every change to the design must hold true, stated once in `principles.md` and
+argued against a decision key, prior art, or an incident that motivated it — never a fact about a checkout,
+which is `status.md`'s (`principles.md#8-every-figure-carries-its-date-and-its-instrument-re-measure-before-acting`).
+An invariant is what a [rule](#rule) may state for one [agent](#agent) or one class of write; the twelve in
+`principles.md` are the design's own, binding every change rather than one agent's behaviour, which is the
+distinction principle 12 itself draws when it declines to state the autonomy goal as an invariant: "an
+invariant is a property every change must hold true, and this one is a test applied to a particular return."
+**See:** [`principles.md#the-invariants`](principles.md#the-invariants).
+**Never:** —
+**Not for:** [rule](#rule) for an invariant (a rule binds an agent's behaviour and is written on
+`agent_policy`; an invariant binds the design itself and is written in `principles.md`, enforced by review
+and by whatever mechanical control each invariant's own "Enforced by" names).
+
+### control
+**Definition:** a mechanism that fails — visibly, and in a way something downstream consumes — when the
+[rule](#rule) or [invariant](#invariant) it exists to enforce is violated; named once, in the invariant that
+states the test: "before treating a linter, gate, review, [conclusion](#conclusion), or status as enforcement, name the
+thing that fails when it is violated. If nothing fails, it is reporting"
+(`principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control`).
+A control is the load-bearing half of a pair this corpus draws constantly and never collapses: a mechanism
+that only records — a status field, an unconsumed [checkpoint](#checkpoint) queue, a guard with no hook to run it, a linter
+wired nowhere a CI [step](#step) reads — is **reporting**, and reporting is not weaker enforcement, it is no
+enforcement, however prominently the report is surfaced. A [guard](#guard), a [gate](#gate), a blocking CI
+step, and the record's own admission check are each a control exactly where something identifiable fails on
+violation; the same mechanism with its failure path removed is the identical text doing a different job.
+**See:** [`principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control`](principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control).
+**Never:** —
+**Not for:** [guard](#guard) or [gate](#gate) for control (each is one instance of a control, named for what
+it is rather than for the class); a control for a mechanism whose failure path is unbuilt, deferred, or
+`continue-on-error` (that is reporting, stated as such, never a control with an asterisk).
+
+### carrier
+**Definition:** one vehicle a harness offers for getting a payload — reach, [method](#method), [rules](#rule),
+session-start context, a [guard](#guard), identity, an interface, long-lived work, or an [operator](#operator)
+decision — into a model's context: the protocol, an integration, a bundle, a local
+[instruction](#instruction) file, or a hook (`harness_carriers.md#payloads`, `harness_carriers.md#carriers`).
+A carrier's delivery of a payload is **guaranteed** (placed in context or run whether or not the model asks)
+or **discretionary** (reached only when the model chooses to fetch or invoke it); the same payload can be
+guaranteed on one carrier and discretionary on another, which is the whole reason the capability matrix
+exists rather than one blanket [claim](#claim) about "how the swarm reaches a harness." A harness is [assigned](#assign) the
+highest **rung** its capabilities support on the delivery ladder — never the vendor's label for the
+carrier — chosen by whether it can run a session-start hook (`harness_carriers.md#targeting`).
+**See:** [`harness_carriers.md#carriers`](harness_carriers.md#carriers),
+[`harness_carriers.md#capability-matrix`](harness_carriers.md#capability-matrix),
+[`harness_carriers.md#targeting`](harness_carriers.md#targeting).
+**Never:** —
+**Not for:** [instruction](#instruction) for a carrier (the file is one carrier; the instruction is the
+payload it renders); "channel" for a carrier in this sense (`telegram.md`'s channel is the operator's chat
+transport for [operator decisions](harness_carriers.md#payloads) and announcements, a narrower and
+different thing than a harness carrier — the two share no swap-tested sentence).
+
+### parameter constraint
+**Definition:** a field allowlist on a write [grant](#grant): the grant admitting
+a [principal](#principal)'s write names which fields of an entity type it may set, and a write outside that allowlist is
+refused the same way a write to an unnamed entity type is (`authority_model.md#grants`).
+Bare "constraint" is ordinary English throughout this corpus — attention as "the protected constraint," a
+[separation-of-duties](#separation-of-duties) constraint attaching to a seat — and is left to the author the same way
+[condition](#condition) is; only the compound is bound, because only the compound carries a [rule](#rule) nothing
+else states: a **budget** is one instance of it, a parameter constraint on a numeric field rather than a
+[gate](#gate) of its own (decision 53, `authority_model.md#budget-is-a-scope-term-that-attenuates`).
+**See:** [`authority_model.md#grants`](authority_model.md#grants),
+[`authority_model.md#budget-is-a-scope-term-that-attenuates`](authority_model.md#budget-is-a-scope-term-that-attenuates).
+**Never:** —
+**Not for:** bare "constraint" for this sense (ordinary English elsewhere is unaffected); a parameter
+constraint for the [grant](#grant) itself (the grant names the entity types and operations; the parameter
+constraint is one further narrowing, on fields, within a write the grant already admits).
+
 ## Conformance (`conformance.md`)
 
 ### kernel document
@@ -1981,7 +2196,7 @@ is as often a refusal as an assent, while the now-retired `sign-off` named one o
 though the other two were exceptions to it.
 
 **The tell was that `signed` was one of the retired `sign-off`'s own conclusion values.** A term whose name is also the
-name of one of its values invites reading the term *as* that value. This was not the ordinary case invariant
+name of one of its values invites reading the term *as* that value. This was not the ordinary case [invariant](#invariant)
 12 leaves to the author — a bound term that is also an ordinary English word — because the collision was
 inside the design, between a record and its own field value, not between the design and English. The
 confusion had already been anticipated and handled by prohibition rather than by naming: the entry carried a
@@ -2004,7 +2219,7 @@ the argument's, and it fails on two independent grounds found in the corpus:
    would sit on a forbidden-field list and a required-field list at once.
 
 Besides those two: 22 adapter table headers read `| Event | Status | Outcome in the record |`, a legacy
-`outcome` entity type survives in imported planning data, and `github.md` carries an explicit rule against
+`outcome` entity type survives in imported planning data, and `github.md` carries an explicit [rule](#rule) against
 inventing a fifth outcome.
 
 **`resolution` and `type` also failed.** `resolution` carries three bound senses across 220 uses, and
@@ -2048,8 +2263,8 @@ writes into the record while executing one is an **entity** of its own type and 
 
 **The objection the dissolution had to survive.** Every review seat the design names takes a
 [batch](#batch)'s change as its subject, and `applies_when` is evaluated against what the batch's [tasks](#task) are
-and what their change touches. If that were the whole rule, an optional review step would not reach what a
-procedure produced, and the dissolution would only look like one.
+and what their change touches. If that were the whole [rule](#rule), an optional review step would not reach what a
+[procedure](#procedure) produced, and the dissolution would only look like one.
 
 **It reaches it.** `gates_and_workflows.md#declaration-batch-projection` rules that an optional step's
 condition **reads what exists when the step would open**, and that a step placed after the step that
@@ -2064,7 +2279,7 @@ it is written**. The seat is therefore real, conditional, and checked at declara
 added to the design. The two rejected candidates: seating the reviewing [role](#role) by [ownership](#ownership) over
 the entity type produced would make the seat a property of the **type**, reaching every producer of it
 through a seat no declaration names and no reading of a declaration would predict — a second mechanism
-beside one that already generalizes, which invariant 6 refuses; and the design declining the question is
+beside one that already generalizes, which [invariant](#invariant) 6 refuses; and the design declining the question is
 moot once the first candidate holds.
 
 **What this does not license.** The seat is the declaration's and never the file's. A procedure invoked by
