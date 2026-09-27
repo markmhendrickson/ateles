@@ -104,16 +104,33 @@ Whether the full tiered index (no baseline) or a budget-bounded delta (an
 ordinary changed set) is rendered, tier C / the delta budget can still
 silently drop individual rows below a one-line mention — `render_index_text`
 tier C names an omitted COUNT, never the dropped rows' ids, and
-`_render_delta` does the same. `rule_index_state.rendered_entity_ids` scans
-the text that was ACTUALLY printed for the bracketed `[entity_id]` token
-every line-producing helper ends its line with, and only entity ids found
-there are passed to `record_delivery`. An omitted row is therefore simply
-absent from the next recorded signature — indistinguishable from a row that
-was never fetched at all — so the very next prompt's diff (or the next
+`_render_delta` does the same. An omitted row is therefore simply absent
+from the next recorded signature — indistinguishable from a row that was
+never fetched at all — so the very next prompt's diff (or the next
 session's SessionStart) treats it as still-undelivered and retries it. This
 is the same "nothing safe to say about a rule that didn't reach the
 session" posture the module already documents for scope changes, applied to
 the render-budget case too.
+
+NEVER INFERRED BY SCANNING RENDERED TEXT (ateles#1323 follow-up, Falco
+security review, task ent_bd3fcf561449b6ebbabc36ca). An earlier revision of
+this fix used `rule_index_state.rendered_entity_ids(text)` — a regex over
+the printed string, matching a trailing `[entity_id]` bracket — to decide
+what was "actually rendered." Falco demonstrated this is spoofable:
+`_mandatory_full_block` prints a mandatory row's raw, UNSANITIZED `body`
+(policy_skill_renderer.py's own standing guarantee is that `body` is never
+read back into rendered index text — this hook's no-baseline path was the
+first caller to violate it), and this repo's rule bodies routinely cite
+other entity ids in prose. A bracket inside one row's body therefore reads
+to a text scanner exactly like a different row's real index line, marking
+THAT OTHER row delivered even when it was the one actually omitted for
+budget. Fixed by tracking emitted ids STRUCTURALLY instead: both
+`render_index_text_with_ids` (the no-baseline path, imported from
+policy_skill_renderer.py) and `_render_delta` below now return the exact
+set of `PolicySkill.entity_id`s whose OWN line/block was included in
+`ordered[:kept]` — built from the same list a line is generated FROM, never
+by reading a row's own text back out. `rule_index_state.rendered_entity_ids`
+and the text-scanning approach are removed entirely.
 
 FAIL-OPEN, STDLIB-ONLY. Any Neotoma unreachability, renderer import failure
 (no httpx — the same reason `session_rule_index.py` treats it as fail-open),
@@ -132,8 +149,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input, load_state, save_state, log  # noqa: E402
 from rule_index_state import (  # noqa: E402
-    hash_signature, last_delivered, record_delivered_subset, rendered_entity_ids,
-    row_signature,
+    hash_signature, last_delivered, record_delivered_subset, row_signature,
 )
 
 _HOOK_DIR = Path(__file__).resolve().parent
@@ -154,8 +170,8 @@ def _log(msg: str) -> None:
 
 def _fetch_rows_and_skills():
     """Live (session-scoped raw rows, session-scoped PolicySkills, the
-    render_index_text function for the no-baseline path), or None on
-    fail-open. Mirrors session_rule_index.py's own import-and-fetch shape
+    render_index_text_with_ids function for the no-baseline path), or None
+    on fail-open. Mirrors session_rule_index.py's own import-and-fetch shape
     exactly — same functions, same order, same exception handling.
 
     `fetch_active_policy_rows` already returns rows run through
@@ -171,7 +187,7 @@ def _fetch_rows_and_skills():
             sys.path.insert(0, str(_LIB_DIR))
         from lib.daemon_runtime.policy_skill_renderer import (  # noqa: PLC0415
             fetch_active_policy_rows,
-            render_index_text,
+            render_index_text_with_ids,
             render_skills,
             _session_scope_ok,
         )
@@ -192,7 +208,7 @@ def _fetch_rows_and_skills():
         _log(f"could not scope/render rows: {type(exc).__name__}: {exc}")
         return None
 
-    return scoped_rows, skills, render_index_text
+    return scoped_rows, skills, render_index_text_with_ids
 
 
 # Same budget session_rule_index.py uses for its own full-index render — the
@@ -222,12 +238,21 @@ _CLOSER = (
 )
 
 
-def _render_delta(added_or_changed: list, budget_chars: int) -> str:
+def _render_delta(added_or_changed: list, budget_chars: int) -> tuple[str, frozenset[str]]:
     """added_or_changed: list[PolicySkill]. Mandatory rows rendered in full
     first (sorted by entity_id for determinism), advisory rows as one-line
     summaries, until the budget runs out — never cuts a rendered row
     mid-way, only drops whole rows and names the omitted count (same
-    degrade-loudly posture as policy_skill_renderer.render_index_text)."""
+    degrade-loudly posture as policy_skill_renderer.render_index_text).
+
+    Returns `(text, emitted_ids)`. `emitted_ids` is built from `ordered[:kept]`
+    — the SAME list `blocks` is generated from — never by reading a row's
+    own `body`/`description` text back out (ateles#1323 follow-up, Falco
+    security review, task ent_bd3fcf561449b6ebbabc36ca: a mandatory row's
+    raw body is unsanitized and can itself contain a bracketed id, so
+    scanning rendered text for "what got delivered" is spoofable by the
+    row's own content).
+    """
     mandatory = sorted(
         (s for s in added_or_changed if s.rule_kind == "mandatory"),
         key=lambda s: s.entity_id,
@@ -254,14 +279,17 @@ def _render_delta(added_or_changed: list, budget_chars: int) -> str:
             kept = n
             break
 
+    kept_pairs = ordered[:kept]
     blocks = [
         _mandatory_full_block(s.entity_id, s.body) if kind == "mandatory"
         else _advisory_summary_line(s)
-        for kind, s in ordered[:kept]
+        for kind, s in kept_pairs
     ]
     omitted = len(ordered) - kept
     tail = f"\n({omitted} more changed rule(s) omitted for space.)" if omitted else ""
-    return _HEADER + "\n".join(blocks) + _CLOSER + tail
+    text = _HEADER + "\n".join(blocks) + _CLOSER + tail
+    emitted_ids = frozenset(s.entity_id for _kind, s in kept_pairs)
+    return text, emitted_ids
 
 
 _FULL_INDEX_HEADER = (
@@ -280,7 +308,7 @@ def main() -> int:
     fetched = _fetch_rows_and_skills()
     if fetched is None:
         return 0  # fail open — nothing to compare against, say nothing
-    scoped_rows, skills, render_index_text = fetched
+    scoped_rows, skills, render_index_text_with_ids = fetched
 
     current_sig = row_signature(scoped_rows)
     current_hash = hash_signature(current_sig)
@@ -297,14 +325,13 @@ def main() -> int:
         # would, not a delta against an empty set (see module docstring:
         # this is the fix for the session that started before the
         # SessionStart hook was wired and so never got one).
-        rendered = render_index_text(skills, INDEX_BUDGET_CHARS)
+        rendered, delivered_ids = render_index_text_with_ids(skills, INDEX_BUDGET_CHARS)
         print(_FULL_INDEX_HEADER)
         print(rendered)
-        # Only rows that actually got at least a one-line mention (tier
-        # A/A2/B: every row; tier C: every KEPT row) count as delivered —
-        # tier C's omitted rows must stay undelivered so a later prompt
-        # retries them, per the module docstring incident.
-        delivered_ids = rendered_entity_ids(rendered)
+        # `delivered_ids` came back structurally from the renderer (tier
+        # A/A2/B: every row; tier C: only the KEPT rows) — never inferred by
+        # scanning `rendered`, which a row's own unsanitized body could
+        # spoof (module docstring, task ent_bd3fcf561449b6ebbabc36ca).
     else:
         changed_ids = {
             eid for eid, ts in current_sig.items() if prior_rows.get(eid) != ts
@@ -317,13 +344,16 @@ def main() -> int:
             by_id = {s.entity_id: s for s in skills}
             added_or_changed = [by_id[eid] for eid in changed_ids if eid in by_id]
             if added_or_changed:
-                rendered = _render_delta(added_or_changed, BUDGET_CHARS)
+                rendered, rendered_ids = _render_delta(added_or_changed, BUDGET_CHARS)
                 print(rendered)
-                # Only rows that actually got a line in the rendered delta
-                # are newly delivered — a row in changed_ids but omitted by
-                # _render_delta's budget must NOT be marked delivered, or it
-                # is never retried (module docstring).
-                delivered_ids |= rendered_entity_ids(rendered) & changed_ids
+                # `rendered_ids` came back structurally from `_render_delta`
+                # (built from `ordered[:kept]`, the same list the blocks are
+                # generated from) — never inferred by scanning `rendered`,
+                # which a mandatory row's own raw body could spoof. Still
+                # intersected with `changed_ids` as a second, independent
+                # narrowing: only a row that was BOTH actually emitted AND
+                # genuinely in this turn's changed set is newly delivered.
+                delivered_ids |= rendered_ids & changed_ids
 
     # Record ONLY the rows that were actually rendered with at least a
     # one-line mention this turn, union'd with whatever was already safely

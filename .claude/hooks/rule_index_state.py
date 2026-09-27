@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 
 STATE_KEY = "rule_index_delivered"  # shared per-session state key
 
@@ -112,37 +111,20 @@ def last_delivered(state: dict) -> tuple[str | None, dict[str, str]]:
     return delivered.get("hash"), (delivered.get("rows") or {})
 
 
-# Every line-producing helper in policy_skill_renderer.py (preamble lines,
-# tier A/A2/B conditional lines, tier C's KEPT lines, and this hook's own
-# mandatory-full-block / advisory-summary-line) ends the line it renders for
-# a row with a bracketed entity id: "...  [ent_xxx]". Tier C's one-line
-# omitted-count statement ("N more ... rule(s) omitted for space. Query
-# Neotoma directly: ...") is the sole exception — it names a COUNT, never an
-# id, precisely because it speaks for rows that got no line of their own.
-# Scanning rendered text for this bracket shape is therefore an exact
-# read of "which rows actually reached the session as at least one line,"
-# without duplicating or reaching into the renderer's tier-selection logic
-# (CLAUDE.md: "extend the mechanism that already generalizes; do not build a
-# parallel one" — here that means reading the renderer's OUTPUT contract
-# rather than adding a second return channel to the renderer itself).
-_ENTITY_ID_IN_LINE = re.compile(r"\[([^\[\]\s]+)\]\s*$")
-
-
-def rendered_entity_ids(text: str) -> set[str]:
-    """Entity ids that appear as a trailing bracketed token on some line of
-    `text` — i.e. rows that were actually rendered with at least a one-line
-    index entry, as opposed to a row silently dropped by tier C and spoken
-    for only by its omitted-count line.
-
-    Used to decide what is safe to mark delivered: recording a row as
-    delivered because it was in the CANDIDATE set, when the rendered text
-    that reached the session never actually mentioned it, is exactly the
-    defect this module exists to prevent (a rule marked delivered that the
-    session never saw even a trigger line for).
-    """
-    ids: set[str] = set()
-    for line in text.splitlines():
-        m = _ENTITY_ID_IN_LINE.search(line.strip())
-        if m:
-            ids.add(m.group(1))
-    return ids
+# NOTE (ateles#1323 follow-up, Falco security review, task
+# ent_bd3fcf561449b6ebbabc36ca): an earlier revision of this module offered
+# `rendered_entity_ids(text)`, a regex scan for a trailing `[entity_id]`
+# bracket, as the way to decide "what did the session actually see." It was
+# removed. `policy_skill_renderer.py` guarantees a mandatory row's `body`
+# (the raw `agent_policy.rule` text) is NEVER sanitized for index rendering,
+# and this repo's own rule bodies routinely cite other entity ids in prose —
+# so a bracket inside one row's OWN body reads to a text scanner exactly
+# like a different row's real index line, marking that other row delivered
+# even when it was the one actually omitted for budget. Falco reproduced
+# this directly. The fix is structural, not textual: both
+# `policy_skill_renderer.render_index_text_with_ids` and
+# `session_rule_delivery.py`'s own `_render_delta` now return the exact set
+# of entity ids whose OWN line/block was included in the list the render
+# loop kept — built from the `PolicySkill` objects themselves, never by
+# reading a row's rendered text back out. Use `record_delivered_subset`
+# with that structurally-produced id set; do not reintroduce a text scan.
