@@ -2255,11 +2255,12 @@ async def _run_provider_attempts(
         # A successful agent may legitimately discuss "usage limits" in its
         # answer. Only inspect stdout when the process itself failed; stderr and
         # explicit runner errors remain diagnostic on every result.
-        failure_kind = _provider_failure_kind(
+        failure_texts = (
             result.error,
             result.stderr,
             result.stdout if not result.ok else "",
         )
+        failure_kind = _provider_failure_kind(*failure_texts)
         launch_failure = result.error.startswith(f"{selected} launch failed:")
 
         if result.ok and failure_kind is None:
@@ -2270,7 +2271,14 @@ async def _run_provider_attempts(
         if failure_kind is None and not launch_failure and not retryable_prompt_failure:
             return result
 
-        cool_down(selected)
+        # Forward the same failure text used to classify capacity/auth above
+        # so cool_down() can parse a provider-stated reset time out of it
+        # (ateles#1257) instead of always applying the fixed-duration
+        # default. Join all three sources exactly as _provider_failure_kind
+        # does above (it scans them jointly) — a reset-time clause can land
+        # in any one of them and an `or`-chain would silently drop the
+        # others.
+        cool_down(selected, reason_text=" ".join(t for t in failure_texts if t))
         last_result = result
         log.warning(
             f"[apis] {skill}: {selected} {failure_kind or 'launch'} failure; "
