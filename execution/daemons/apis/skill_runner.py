@@ -449,6 +449,20 @@ header, a second line that is not your verdict, a second header, or a second ver
 line anywhere leaves the gate pending. Never reproduce an earlier comment's header \
 or verdict line, quoted or not.
 
+**A gate-verdict comment's attribution (header, or avatar on a dedicated account) is \
+already its attribution — omit the generic harness footer on it.** Your harness may \
+separately instruct you to close every reply with a "Generated with…" / \
+`Co-Authored-By:` trailer. \
+That trailer exists to mark AI-authored content when nothing else on the comment does, \
+and on a comment carrying a `<!-- review:<lens> commit=<sha> -->` marker something else \
+already does that job — the attribution header above on a shared account, or the \
+dedicated account's own avatar per the ateles#109 carve-out just above. Either way, do \
+not also append the generic trailer to that comment (ateles#1326: on a shared account \
+the trailer repeats the header's robot emoji, which reads to the dispatcher as a second \
+header on an otherwise valid sign-off). This never leaves a gate-verdict comment with NO \
+attribution at all — it always has one of the two. This applies only to gate-verdict \
+comments; a commit message or PR description still gets the generic trailer as normal.
+
 ### Verdict line — exact, verbatim form
 
 Immediately after the attribution header, on its own line:
