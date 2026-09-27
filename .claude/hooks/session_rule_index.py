@@ -107,6 +107,22 @@ whole index the very next prompt. A fail-open render (Neotoma unreachable,
 etc.) records nothing — there is nothing delivered to record, and the
 delivery hook's "no prior signature" fallback (inject everything once it is
 next asked) is the correct behavior in that case, not a bug to route around.
+
+RECORDS ONLY WHAT `text` ACTUALLY RENDERED, NOT EVERY `scoped_rows` ENTRY
+(task ent_3f5bc7138628cf5b4116d569, filed during PR #1295's review). Two
+ways a session-scoped row can fail to reach a reader despite being in
+`scoped_rows`: `to_skill` skips a row with nothing safe to render after
+sanitizing (title/applies_when both empty — policy_skill_renderer.py's own
+"skip the row and count it"), and tier C drops whole rows under a single
+omitted-count line when even tier B overflows the budget. Recording either
+kind as delivered would silently and permanently exempt it: an unchanged
+signature is never re-diffed, so a row marked delivered without ever having
+been rendered is never delivered by any later mechanism either.
+`rule_index_state.rendered_entity_ids(text)` extracts exactly the entity ids
+that got at least one line (every line-producing helper ends its line with
+a bracketed `[entity_id]`; the tier C omitted-count line is the only
+exception, since it speaks for a count, not an id), and only those are
+passed to `record_delivered_subset`.
 """
 from __future__ import annotations
 
@@ -115,7 +131,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input, load_state, save_state  # noqa: E402
-from rule_index_state import record_delivery  # noqa: E402
+from rule_index_state import record_delivered_subset, rendered_entity_ids  # noqa: E402
 
 # Resolve siblings relative to THIS FILE, never cwd/CLAUDE_PROJECT_DIR — the
 # one property that makes this hook usable from a user-level settings.json
@@ -193,7 +209,20 @@ def main() -> int:
     if session_id:
         try:
             state = load_state(session_id)
-            save_state(session_id, record_delivery(state, scoped_rows))
+            # Record only the rows `text` actually rendered with at least a
+            # one-line mention — not every session-scoped row. Two ways
+            # `scoped_rows` can outrun what was printed: `to_skill` skips a
+            # row with nothing safe to render (policy_skill_renderer.py:
+            # "skip the row and count it"), and tier C drops whole rows
+            # under an omitted-count line when the corpus overflows even
+            # tier B. Recording either as delivered would permanently
+            # exempt it from re-delivery once (if ever) it becomes
+            # renderable or the corpus shrinks — task
+            # ent_3f5bc7138628cf5b4116d569 (Loxia review, PR #1295), the
+            # same structural gap session_rule_delivery.py's no-baseline
+            # path was fixed for.
+            delivered_ids = rendered_entity_ids(text)
+            save_state(session_id, record_delivered_subset(state, scoped_rows, delivered_ids))
         except Exception as exc:  # noqa: BLE001 — never let bookkeeping break delivery
             _log(f"could not record delivered signature: {exc}")
     return 0

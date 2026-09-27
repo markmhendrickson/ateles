@@ -196,14 +196,28 @@ class TestChangedRowIsRedelivered:
 
 
 # ---------------------------------------------------------------------------
-# 4. Mandatory rows get full text; advisory rows get the one-line form only.
+# 4. Mandatory rows get full text; advisory rows get the one-line form only,
+#    in a DELTA render (a baseline already exists; this exercises
+#    _render_delta specifically, not the no-baseline full-index path, which
+#    has its own render shape covered by TestNoBaselineDeliversFullIndex).
 # ---------------------------------------------------------------------------
 class TestRenderShapeByRuleKind:
     def test_mandatory_full_text_advisory_summary_only(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
+        # Establish a baseline first (conditional, non-"always" rows only —
+        # this test is about _render_delta's per-kind rendering, not about
+        # what counts as preamble) so the second call is a genuine delta.
+        handler.rows = [
+            _row("ent_mand", rule="Some other mandatory rule.",
+                 applies_when="doing W", rule_kind="mandatory", title="Do W"),
+        ]
+        baseline = _run(HOOK, REPO_ROOT, project_dir, "sess-4", base_url=base_url)
+        assert baseline.returncode == 0
+
         handler.rows = [
             _row("ent_mand", rule="THE FULL MANDATORY RULE BODY TEXT.",
-                 applies_when="always", rule_kind="mandatory"),
+                 applies_when="doing W", rule_kind="mandatory", title="Do W",
+                 last_observation_at="2026-02-01T00:00:00Z"),
             _row("ent_adv", rule="THE FULL ADVISORY RULE BODY TEXT.",
                  applies_when="doing Z", rule_kind="advisory", title="Do Z"),
         ]
@@ -301,4 +315,136 @@ class TestSessionStartHandoff:
         assert delivery_result.stdout.strip() == "", (
             "the delivery hook re-printed content the SessionStart index "
             f"hook JUST delivered: {delivery_result.stdout!r}"
+        )
+
+
+def _read_state(project_dir: Path, session_id: str) -> dict:
+    p = project_dir / ".claude" / ".session_state" / f"{session_id}.json"
+    return json.loads(p.read_text())
+
+
+def _delivered_ids(project_dir: Path, session_id: str) -> set[str]:
+    state = _read_state(project_dir, session_id)
+    return set((state.get("rule_index_delivered") or {}).get("rows") or {})
+
+
+# ---------------------------------------------------------------------------
+# 8. No baseline (session never got a SessionStart delivery, e.g. it started
+#    before the hook pair was wired) -> the FULL tiered index is delivered
+#    on the delivery hook's own first call, and every rendered row's id is
+#    recorded as the baseline. Regression test for the incident that
+#    motivated this fix (task ent_3f5bc7138628cf5b4116d569): the delivery
+#    hook used to treat "no baseline" as "diff against {}", run the result
+#    through the small delta budget, and then record EVERY candidate row as
+#    delivered regardless of whether it was actually rendered.
+# ---------------------------------------------------------------------------
+class TestNoBaselineDeliversFullIndex:
+    def test_no_baseline_renders_full_index_not_a_budget_bound_delta(
+        self, fake_neotoma, project_dir
+    ):
+        base_url, handler = fake_neotoma
+        # More rows than a small delta budget would ever render in full, but
+        # comfortably inside the full index's own (larger) budget — this
+        # must come back as the full tiered index, not a "(N more ...
+        # omitted)" delta.
+        handler.rows = [
+            _row("ent_always", rule="An always rule.", applies_when="always"),
+        ] + [
+            _row(f"ent_cond{i:03d}", rule=f"Rule body {i}.",
+                 applies_when=f"condition {i}", rule_kind="advisory",
+                 title=f"Do thing {i}")
+            for i in range(20)
+        ]
+        result = _run(HOOK, REPO_ROOT, project_dir, "sess-8", base_url=base_url)
+        assert result.returncode == 0
+        assert "no prior delivery baseline" in result.stdout
+        # Every row must appear (as at least an id) — this is the full
+        # index, not a size-bounded delta that would drop most of them.
+        for i in range(20):
+            assert f"ent_cond{i:03d}" in result.stdout, (
+                f"ent_cond{i:03d} missing from the no-baseline full index"
+            )
+        assert "more changed rule(s) omitted" not in result.stdout, (
+            "no-baseline path must not render the delta form at all"
+        )
+
+        delivered = _delivered_ids(project_dir, "sess-8")
+        assert "ent_always" in delivered
+        for i in range(20):
+            assert f"ent_cond{i:03d}" in delivered, (
+                f"ent_cond{i:03d} was rendered but not recorded as delivered"
+            )
+
+        # Baseline now recorded -> an immediately repeated call is a no-op.
+        repeat = _run(HOOK, REPO_ROOT, project_dir, "sess-8", base_url=base_url)
+        assert repeat.returncode == 0
+        assert repeat.stdout.strip() == "", (
+            "a baseline was just recorded; the very next call with an "
+            f"unchanged corpus must inject nothing, got: {repeat.stdout!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. An overflowing DELTA (baseline exists, many rows change/added at once,
+#    more than the small per-turn budget can render) must never mark an
+#    omitted row as delivered — omitted rows stay undelivered so a later
+#    prompt retries them.
+# ---------------------------------------------------------------------------
+class TestOverflowingDeltaNeverMarksOmittedRowsDelivered:
+    def test_omitted_rows_stay_undelivered_and_are_retried_next_turn(
+        self, fake_neotoma, project_dir
+    ):
+        base_url, handler = fake_neotoma
+        handler.rows = [_row("ent_seed", rule="Seed.", applies_when="always")]
+        baseline = _run(HOOK, REPO_ROOT, project_dir, "sess-9", base_url=base_url)
+        assert baseline.returncode == 0
+        assert "ent_seed" in _delivered_ids(project_dir, "sess-9")
+
+        # A large batch of NEW mandatory rows lands in one turn — more than
+        # the delta budget (BUDGET_CHARS=9000) can render in full at once.
+        handler.rows = [_row("ent_seed", rule="Seed.", applies_when="always")] + [
+            _row(f"ent_new{i:03d}",
+                 rule="A brand new mandatory rule with a reasonably long body "
+                      "of text so the delta renders down to only a few in full.",
+                 applies_when=f"new condition {i}", rule_kind="mandatory",
+                 title=f"Do new thing {i}")
+            for i in range(80)
+        ]
+        result = _run(HOOK, REPO_ROOT, project_dir, "sess-9", base_url=base_url)
+        assert result.returncode == 0
+        assert "more changed rule(s) omitted for space" in result.stdout, (
+            "this batch must overflow the delta budget for the test to be "
+            "meaningful"
+        )
+
+        rendered_new_ids = {
+            f"ent_new{i:03d}" for i in range(80) if f"ent_new{i:03d}" in result.stdout
+        }
+        assert 0 < len(rendered_new_ids) < 80, (
+            "expected a partial render (some rendered, some omitted) — got "
+            f"{len(rendered_new_ids)} of 80"
+        )
+
+        delivered = _delivered_ids(project_dir, "sess-9")
+        omitted_ids = {f"ent_new{i:03d}" for i in range(80)} - rendered_new_ids
+        assert omitted_ids, "expected at least one omitted row for this test to be meaningful"
+        for eid in omitted_ids:
+            assert eid not in delivered, (
+                f"{eid} was OMITTED from the rendered delta but recorded as "
+                "delivered anyway — it will never be retried"
+            )
+        for eid in rendered_new_ids:
+            assert eid in delivered, f"{eid} was rendered but not recorded as delivered"
+
+        # The omitted rows must still show up as changed on the NEXT turn
+        # (unchanged corpus this time) precisely because they were never
+        # marked delivered.
+        retry = _run(HOOK, REPO_ROOT, project_dir, "sess-9", base_url=base_url)
+        assert retry.returncode == 0
+        retried_ids = {
+            eid for eid in omitted_ids if eid in retry.stdout
+        }
+        assert retried_ids, (
+            "omitted rows from the previous turn were not retried on the "
+            f"next prompt with an unchanged corpus: {retry.stdout!r}"
         )
