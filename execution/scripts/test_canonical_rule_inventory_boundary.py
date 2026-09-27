@@ -65,6 +65,35 @@ ALLOWED_OPERATIONAL_COMMENTS = (
     "# or printed. The wrapper captures all renderer output and emits only a",
     "# stable exit-class message.",
 )
+HOST_PYTHON_STEP_NAME = "Use the runner host's Python 3.13"
+# The privileged job runs on a self-hosted macOS runner, where
+# actions/setup-python cannot work: its macOS installer hard-codes the
+# GitHub-hosted tool cache path and fails creating it. The job therefore
+# resolves the host interpreter itself, refuses anything older than 3.13, and
+# puts it first on PATH so the two pinned measurement commands stay unchanged.
+HOST_PYTHON_COMMAND = (
+    'host_python="$(command -v python3.13 || command -v python3 || true)"\n'
+    'if [ -z "$host_python" ]; then\n'
+    '  echo "::error::canonical rule inventory needs Python 3.13 or newer on the '
+    'runner host; neither python3.13 nor python3 is on PATH"\n'
+    "  exit 1\n"
+    "fi\n"
+    "if ! \"$host_python\" -c 'import sys; sys.exit(0 if sys.version_info >= "
+    "(3, 13) else 1)'; then\n"
+    "  found=\"$(\"$host_python\" -c 'import platform; "
+    "print(platform.python_version())' 2>/dev/null || echo unknown)\"\n"
+    '  echo "::error::canonical rule inventory needs Python 3.13 or newer on the '
+    'runner host; found Python $found"\n'
+    "  exit 1\n"
+    "fi\n"
+    'python_bin="$RUNNER_TEMP/rule-inventory-python-bin"\n'
+    'rm -rf "$python_bin"\n'
+    'mkdir -p "$python_bin"\n'
+    'ln -s "$host_python" "$python_bin/python3"\n'
+    'echo "$python_bin" >> "$GITHUB_PATH"\n'
+    "\"$python_bin/python3\" -c 'import platform; "
+    "print(\"canonical rule inventory uses Python \" + platform.python_version())'"
+)
 
 
 class UniqueKeySafeLoader(yaml.SafeLoader):
@@ -310,13 +339,13 @@ def verify_privileged_boundary(workflow: str) -> None:
         },
         "rule-inventory": {
             "actions/checkout@v4",
-            "actions/setup-python@v5",
             "actions/download-artifact@v4",
         },
     }
     allowed_runs = {
         "candidate-inputs": {packer_command},
         "rule-inventory": {
+            HOST_PYTHON_COMMAND,
             "python3 trusted/execution/scripts/package_rule_inventory_inputs.py "
             '\\\n  --validate "$GITHUB_WORKSPACE/candidate-inputs"',
             "python3 trusted/execution/scripts/run_canonical_rule_inventory_gate.py "
@@ -380,20 +409,28 @@ def verify_privileged_boundary(workflow: str) -> None:
         or privileged_checkouts[0].get("with") != expected_trusted_checkout
     ):
         raise AssertionError("privileged checkout is not the trusted default branch")
-    privileged_setup = [
-        step
-        for step in privileged["steps"]
-        if step.get("uses") == "actions/setup-python@v5"
+    privileged_python = [
+        (index, step)
+        for index, step in enumerate(privileged["steps"])
+        if "run" in step and _command(step) == HOST_PYTHON_COMMAND
+    ]
+    privileged_measurements = [
+        index
+        for index, step in enumerate(privileged["steps"])
+        if "run" in step and _command(step).startswith("python3 ")
     ]
     privileged_download = [
         step
         for step in privileged["steps"]
         if step.get("uses") == "actions/download-artifact@v4"
     ]
-    if len(privileged_setup) != 1 or privileged_setup[0].get("with") != {
-        "python-version": "3.13"
-    }:
-        raise AssertionError("privileged Python action is not exact")
+    if (
+        len(privileged_python) != 1
+        or privileged_python[0][1].get("name") != HOST_PYTHON_STEP_NAME
+        or not privileged_measurements
+        or privileged_python[0][0] > min(privileged_measurements)
+    ):
+        raise AssertionError("privileged host Python step is not exact")
     if len(privileged_download) != 1 or privileged_download[0].get("with") != {
         "name": "canonical-rule-inventory-inputs",
         "path": "candidate-inputs",
@@ -621,11 +658,11 @@ class WorkflowBoundaryTest(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         prefix, privileged = workflow.split("  rule-inventory:\n", 1)
         planted_privileged = privileged.replace(
-            "      - uses: actions/setup-python@v5\n",
+            f"      - name: {HOST_PYTHON_STEP_NAME}\n",
             "      - name: planted candidate execution\n"
             "        run: |\n"
             "          python3 candidate-inputs/attacker_controlled.py\n"
-            "      - uses: actions/setup-python@v5\n",
+            f"      - name: {HOST_PYTHON_STEP_NAME}\n",
             1,
         )
         planted = prefix + "  rule-inventory:\n" + planted_privileged
@@ -637,16 +674,143 @@ class WorkflowBoundaryTest(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         prefix, privileged = workflow.split("  rule-inventory:\n", 1)
         planted_privileged = privileged.replace(
-            "      - uses: actions/setup-python@v5\n",
+            f"      - name: {HOST_PYTHON_STEP_NAME}\n",
             "      - name: planted inline candidate execution\n"
             "        run: python3 candidate-inputs/attacker_controlled.py\n"
-            "      - uses: actions/setup-python@v5\n",
+            f"      - name: {HOST_PYTHON_STEP_NAME}\n",
             1,
         )
         planted = prefix + "  rule-inventory:\n" + planted_privileged
         self.assertNotEqual(workflow, planted, "negative mutation was not planted")
         with self.assertRaisesRegex(AssertionError, "non-trusted command"):
             verify_privileged_boundary(planted)
+
+    @staticmethod
+    def _host_python_block(workflow: str) -> str:
+        start = workflow.index(f"      - name: {HOST_PYTHON_STEP_NAME}\n")
+        end = workflow.index("      - name: Download candidate input data\n", start)
+        return workflow[start:end]
+
+    def test_privileged_job_refuses_setup_python(self) -> None:
+        # setup-python's macOS installer cannot run on the self-hosted runner;
+        # reintroducing it would make every canonical run fail before measuring.
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        prefix, privileged = workflow.split("  rule-inventory:\n", 1)
+        planted_privileged = privileged.replace(
+            f"      - name: {HOST_PYTHON_STEP_NAME}\n",
+            "      - uses: actions/setup-python@v5\n"
+            "        with:\n"
+            '          python-version: "3.13"\n'
+            f"      - name: {HOST_PYTHON_STEP_NAME}\n",
+            1,
+        )
+        planted = prefix + "  rule-inventory:\n" + planted_privileged
+        self.assertNotEqual(workflow, planted, "negative mutation was not planted")
+        with self.assertRaisesRegex(AssertionError, "unapproved action"):
+            verify_privileged_boundary(planted)
+
+    def test_host_python_version_floor_cannot_be_weakened(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutant = workflow.replace("sys.version_info >= (3, 13)", "sys.version_info >= (3, 9)", 1)
+        self.assertNotEqual(workflow, mutant, "negative mutation was not planted")
+        with self.assertRaisesRegex(AssertionError, "non-trusted command"):
+            verify_privileged_boundary(mutant)
+
+    def test_host_python_step_must_exist_before_measurement(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        block = self._host_python_block(workflow)
+        removed = workflow.replace(block, "", 1)
+        self.assertNotEqual(workflow, removed, "negative mutation was not planted")
+        with self.assertRaisesRegex(AssertionError, "host Python step is not exact"):
+            verify_privileged_boundary(removed)
+        moved = removed.rstrip("\n") + "\n" + block
+        self.assertNotEqual(workflow, moved, "negative mutation was not planted")
+        with self.assertRaisesRegex(AssertionError, "host Python step is not exact"):
+            verify_privileged_boundary(moved)
+
+    def _run_host_python_step(self, path_dirs: list[Path], work: Path):
+        import subprocess
+
+        github_path = work / "github_path"
+        github_path.write_text("", encoding="utf-8")
+        runner_temp = work / "runner_temp"
+        runner_temp.mkdir()
+        completed = subprocess.run(
+            ["/bin/bash", "-e", "-c", HOST_PYTHON_COMMAND],
+            env={
+                "PATH": os.pathsep.join(str(d) for d in path_dirs),
+                "RUNNER_TEMP": str(runner_temp),
+                "GITHUB_PATH": str(github_path),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return completed, github_path, runner_temp
+
+    def test_host_python_step_refuses_an_old_interpreter_naming_its_version(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            fake_bin = work / "fake_bin"
+            fake_bin.mkdir()
+            fake = fake_bin / "python3"
+            fake.write_text(
+                "#!/bin/sh\n"
+                'case "$2" in\n'
+                "  *version_info*) exit 1 ;;\n"
+                "  *) echo 3.12.4 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            completed, github_path, _ = self._run_host_python_step([fake_bin], work)
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(
+            "::error::canonical rule inventory needs Python 3.13 or newer on the "
+            "runner host; found Python 3.12.4",
+            completed.stdout,
+        )
+        self.assertNotIn(str(fake_bin), completed.stdout + completed.stderr)
+
+    def test_host_python_step_refuses_when_no_interpreter_is_on_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            empty = work / "empty"
+            empty.mkdir()
+            completed, github_path, _ = self._run_host_python_step([empty], work)
+            self.assertEqual(github_path.read_text(encoding="utf-8"), "")
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("neither python3.13 nor python3 is on PATH", completed.stdout)
+
+    @unittest.skipUnless(
+        sys.version_info >= (3, 13), "needs a Python 3.13+ interpreter to link"
+    )
+    def test_host_python_step_puts_a_313_interpreter_first_on_path(self) -> None:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            host_bin = work / "host_bin"
+            host_bin.mkdir()
+            (host_bin / "python3.13").symlink_to(sys.executable)
+            completed, github_path, runner_temp = self._run_host_python_step(
+                [host_bin, Path("/bin"), Path("/usr/bin")], work
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            exported = github_path.read_text(encoding="utf-8").strip()
+            self.assertEqual(exported, str(runner_temp / "rule-inventory-python-bin"))
+            linked = Path(exported) / "python3"
+            version = subprocess.run(
+                [str(linked), "-c", "import sys; print(sys.version_info >= (3, 13))"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        self.assertEqual(version, "True")
+        self.assertIn("canonical rule inventory uses Python 3.", completed.stdout)
+        self.assertNotIn(str(host_bin), completed.stdout + completed.stderr)
 
     def test_workflow_dispatch_branch_override_is_rejected(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

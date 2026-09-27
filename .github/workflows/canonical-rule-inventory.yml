@@ -95,9 +95,24 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           path: trusted
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+      - name: Use the runner host's Python 3.13
+        run: |
+          host_python="$(command -v python3.13 || command -v python3 || true)"
+          if [ -z "$host_python" ]; then
+            echo "::error::canonical rule inventory needs Python 3.13 or newer on the runner host; neither python3.13 nor python3 is on PATH"
+            exit 1
+          fi
+          if ! "$host_python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 13) else 1)'; then
+            found="$("$host_python" -c 'import platform; print(platform.python_version())' 2>/dev/null || echo unknown)"
+            echo "::error::canonical rule inventory needs Python 3.13 or newer on the runner host; found Python $found"
+            exit 1
+          fi
+          python_bin="$RUNNER_TEMP/rule-inventory-python-bin"
+          rm -rf "$python_bin"
+          mkdir -p "$python_bin"
+          ln -s "$host_python" "$python_bin/python3"
+          echo "$python_bin" >> "$GITHUB_PATH"
+          "$python_bin/python3" -c 'import platform; print("canonical rule inventory uses Python " + platform.python_version())'
       - name: Download candidate input data
         uses: actions/download-artifact@v4
         with:
