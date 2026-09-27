@@ -17,17 +17,22 @@ revised after Falco's round-2 security review — see below):
                      a model sees up front, before deciding whether to fetch
                      the full rule). NEVER derived from `rule`/`body` text —
                      a row with no `title` renders trigger + id only.
-  - `body`      — the full rule text plus its entity id, for a FUTURE
-                   transport (an agent explicitly fetching a rule by id);
+  - `body`      — the sanitized rule text (`_sanitize_body`, multi-line
+                   counterpart to `_sanitize_field`) plus its entity id;
                    never read back into the rendered SessionStart index
                    itself (never logged wholesale, since some rules hold
                    operator payment details).
 
-Two channels share this one artifact:
+Three channels share this one artifact:
   1. Now: `.claude/hooks/session_rule_index.py` (SessionStart hook) prints
      `render_index_text()` — the preamble (always-applies rules) followed by
      one summary line per conditional rule.
-  2. Later: the MCP Skills extension (SEP-2640), once an SDK/host supports
+  2. Now: `.claude/hooks/rule_injection_gate.py` (PreToolUse hook, ateles
+     rule-delivery audit `ent_b66293f0dcc8c887d4fdbeae` recommendation 5)
+     reads `.body` for a small set of high-risk categories and injects it
+     verbatim into the acting model's context immediately before a matching
+     tool call — this is why `.body` is sanitized rather than raw.
+  3. Later: the MCP Skills extension (SEP-2640), once an SDK/host supports
      it — `render_skills()` gives the same skill objects; this module is
      designed so adding that transport is additive, not a rewrite.
 
@@ -256,6 +261,13 @@ _LEADING_MARKDOWN = re.compile(r"^[\s]*(?:[#>*`-]+|\d+\.)+\s*")
 _HTML_COMMENT_MARKERS = re.compile(r"<!--|-->")
 _TIER_MARKER_PATTERN = re.compile(r"tier\s*:\s*[A-Za-z]", re.IGNORECASE)
 
+# Same control/separator sweep as `_LINE_BREAKING_CHARS`, minus \r\n
+# themselves — `_sanitize_body_pass` already splits on those to preserve
+# paragraph structure, so this only needs to catch the control/separator
+# characters that can occur WITHIN one line (NEL, U+2028/U+2029, C0 minus
+# \t\r\n, C1, DEL).
+_INLINE_CONTROL_CHARS = re.compile("[\u0085\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
+
 
 def _sanitize_pass(text: str) -> str:
     """One pass of the neutralizing steps, in order: line-breaking/control
@@ -308,6 +320,77 @@ _ENTITY_ID_DISALLOWED = re.compile(r"[^A-Za-z0-9_]")
 
 _APPLIES_WHEN_MAX = 160
 _IMPERATIVE_MAX = 120
+_BODY_MAX = 4000
+
+
+def _sanitize_body_pass(text: str) -> str:
+    """One pass of the neutralizing steps for a MULTI-LINE field, applied
+    per-line so the body keeps its paragraph structure (unlike
+    `_sanitize_pass`, which collapses everything to one line — fine for a
+    160/120-char trigger/imperative, unreadable for a full rule body).
+
+    Same forbidden sequences as `_sanitize_pass` (leading markdown structure,
+    HTML-comment markers, tier-marker patterns), applied to EACH line rather
+    than the whole blob — so a rule body can still open a paragraph with
+    prose while a forged `## Always-applies rules` heading, an embedded
+    `<!-- tier: A -->` marker, or a bullet-list-shaped injected instruction
+    on any line is stripped exactly like `_sanitize_pass` strips it at the
+    start of a single-line field. Blank lines are preserved (collapsed to
+    at most one) so paragraph breaks survive.
+    """
+    lines = text.split("\n")
+    cleaned_lines: list[str] = []
+    for line in lines:
+        line = line.replace("\r", "").strip("\r")
+        line = _INLINE_CONTROL_CHARS.sub(" ", line)
+        line = _LEADING_MARKDOWN.sub("", line)
+        line = _HTML_COMMENT_MARKERS.sub("", line)
+        line = _TIER_MARKER_PATTERN.sub("", line)
+        line = _WHITESPACE_RUN.sub(" ", line).strip()
+        cleaned_lines.append(line)
+    # Collapse runs of blank lines to at most one, and trim leading/trailing
+    # blanks — mirrors _sanitize_field's overall .strip() without losing
+    # every line break the way _LINE_BREAKING_CHARS would.
+    result: list[str] = []
+    for line in cleaned_lines:
+        if line or (result and result[-1]):
+            result.append(line)
+    while result and not result[-1]:
+        result.pop()
+    while result and not result[0]:
+        result.pop(0)
+    return "\n".join(result)
+
+
+def _sanitize_body(raw: str, max_len: int) -> str:
+    """Multi-line counterpart to `_sanitize_field` (same threat model,
+    module header above) — used for `PolicySkill.body`, the one field
+    `to_skill` used to leave unsanitized on the theory that "nothing in this
+    module ever reads `.body` back out" (see `to_skill`'s docstring). That
+    theory no longer holds: `rule_injection_gate.py`'s point-of-use
+    `PreToolUse` hook reads `.body` and injects it verbatim into the acting
+    model's context, which is exactly the delivery path this sanitizer
+    family exists to guard (Falco/Waxwing, PR #1320 round 2 — the same
+    CONFIRMED-injection class as ateles#1268 round 2, now reachable through
+    the one field `_sanitize_field` never covered).
+
+    Runs to a fixed point the same way `_sanitize_field` does — a deletion
+    can expose a new forbidden sequence at a line boundary — then caps
+    length with an ellipsis. Returns "" if nothing survives.
+    """
+    if not raw:
+        return ""
+    text = raw
+    for _ in range(len(raw) + 2):
+        cleaned = _sanitize_body_pass(text)
+        if cleaned == text:
+            break
+        text = cleaned
+    if not text:
+        return ""
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
@@ -473,14 +556,17 @@ def to_skill(snap: dict) -> PolicySkill | None:
     `applies_when` is sanitized before use, same as the imperative, and
     `entity_id` is cut to the id charset — every row-derived field is
     untrusted (Falco's finding applies to the whole row, not only the
-    imperative). `body` still carries
-    the raw `rule` text for the FUTURE MCP Skills-extension transport (an
-    agent that explicitly fetches a rule by id gets the real text, which is
-    fine — that path is not the SessionStart stdout stream this finding is
-    about), but nothing in this module ever reads `.body` back out into the
-    rendered index; `render_index_text`/`_assemble`/`_preamble_lines`/
-    `_conditional_line_*` only ever touch `.description`/`.applies_when`/
-    `.entity_id`.
+    imperative). `body` carries the `rule` text run through `_sanitize_body`
+    — the multi-line counterpart to `_sanitize_field` — for both the FUTURE
+    MCP Skills-extension transport AND `rule_injection_gate.py`'s
+    point-of-use `PreToolUse` hook, which DOES read `.body` back out into
+    live model context (PR #1320 round 2: the "nothing reads `.body` back
+    out" assumption this docstring stated earlier no longer holds now that
+    a second transport consumes it). Sanitizing here, once, keeps every
+    current and future reader of `.body` safe without each needing its own
+    pass; `render_index_text`/`_assemble`/`_preamble_lines`/
+    `_conditional_line_*` still only ever touch `.description`/
+    `.applies_when`/`.entity_id`, unaffected by this change.
     """
     raw_entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "")
     # The server assigns entity ids from a fixed charset; nothing outside it
@@ -519,7 +605,11 @@ def to_skill(snap: dict) -> PolicySkill | None:
         description = f"When {trigger}:"  # tier-B shape even at tier A
 
     domain = str(snap.get("domain") or "")
-    rule = str(snap.get("rule") or "")
+    raw_rule = str(snap.get("rule") or "")
+    rule = _sanitize_body(raw_rule, max_len=_BODY_MAX)
+    # A rule that sanitizes to nothing still gets a body — the "Source:"
+    # citation line alone, so a caller has something to cite even when the
+    # row's own content was entirely forged structure/markup.
     body = f"{rule}\n\nSource: agent_policy {entity_id}".strip()
     return PolicySkill(
         entity_id=entity_id,

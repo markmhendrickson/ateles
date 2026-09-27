@@ -32,9 +32,10 @@ gated tool call, never on free-text `applies_when`:
   - grant_write:    a Neotoma write whose payload targets `agent_grant`
   - policy_write:   a Neotoma write whose payload targets `agent_policy` or
                     `relationship_type`
-  - harness_config: an Edit/Write/NotebookEdit whose file_path is
-                    one of the operator's own harness config files
-                    (~/.cursor/mcp.json, ~/.claude/settings.json,
+  - harness_config: an Edit/Write/NotebookEdit whose file_path, OR a Codex
+                    `apply_patch` payload naming a path it will Add/Update/
+                    Delete/Move to, is one of the operator's own harness
+                    config files (~/.cursor/mcp.json, ~/.claude/settings.json,
                     ~/.neotoma/aauth) — the #2482 breakage this audit traced
   - advisory:       a `gh` CLI call that reads or writes a GitHub security
                     advisory
@@ -67,8 +68,13 @@ carry operator payment details, CLAUDE.md).
 
 Wire under PreToolUse with matcher
 "Edit|Write|NotebookEdit|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store|Bash"
-(no separate MultiEdit tool name in this Claude Code version — every other
-hook in this directory matches the same four-tool set).
+under Claude Code (no separate MultiEdit tool name in this Claude Code
+version — every other hook in this directory matches the same four-tool
+set), and additionally "apply_patch" under Codex
+(`.codex/hooks.json`) — Codex's native file-edit tool, parsed via
+`_apply_patch_paths` (delegated to `sibling_repo_worktree_guard.py`'s parser
+of the same name, not re-implemented) so a harness_config edit made through
+`apply_patch` is caught the same way an Edit/Write is under Claude Code.
 """
 from __future__ import annotations
 
@@ -96,10 +102,6 @@ _CATEGORY_RULE_IDS: dict[str, tuple[str, ...]] = {
 
 _HARNESS_CONFIG_PATH_RE = re.compile(
     r"(\.cursor/mcp\.json|\.claude/settings(\.local)?\.json|\.neotoma/aauth)"
-)
-
-_ADVISORY_RE = re.compile(
-    r"security[-_]advisor|/security-advisories\b", re.IGNORECASE
 )
 
 # --------------------------------------------------------------------------
@@ -238,6 +240,94 @@ def _bash_touches_harness_config(command: str) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------
+# Advisory classifier.
+#
+# A bare `security[-_]advisor|/security-advisories\b` substring search over
+# the WHOLE command matches the words wherever they occur — including inside
+# a `gh pr comment`/`issue create` body or title that merely MENTIONS
+# "security-advisory" as prose. Accipiter's current-head UX review on PR
+# #1320 reproduced this live: `gh pr comment 1320 --body "this PR touches
+# security-advisory handling in the linter"` fired the full advisory
+# injection even though the command neither reads nor writes an actual
+# GitHub security advisory — the identical false-positive SHAPE the
+# harness_config Bash fix above exists to eliminate, left live one category
+# over (the prior test suite even asserted this false positive as correct
+# behavior — `test_bash_gh_advisory_prose_matches_advisory`, now flipped).
+#
+# `gh` has no dedicated `security-advisory` subcommand; the only way to
+# actually read or write a GitHub security advisory through the `gh` CLI is
+# `gh api` (REST, with the advisories path in the endpoint argument) or
+# `gh api graphql` (a GraphQL query/mutation naming a
+# `securityAdvisor(y|ies)` field). So — mirroring `_bash_touches_harness_config`
+# above — this checks the command's SHAPE: a `gh api` invocation whose
+# endpoint argument contains the advisories path, or a `gh api graphql` call
+# whose query/mutation body names a `securityAdvisor` field. A `gh
+# pr`/`issue`/`repo` subcommand whose --body/--title/--message TEXT merely
+# contains the words never matches, because those subcommands are not `gh
+# api` at all — same "affirmative shape, not substring-anywhere" posture as
+# the harness_config fix, using the SAME segment-split
+# (`_SEGMENT_SPLIT`/`_join_line_continuations`) so a mutation hidden after an
+# innocuous first segment is still caught.
+# --------------------------------------------------------------------------
+_GH_API_LEADER_RE = re.compile(r"^gh\s+api\b")
+_ADVISORY_PATH_RE = re.compile(r"/security-advisories\b", re.IGNORECASE)
+_GRAPHQL_ADVISORY_FIELD_RE = re.compile(
+    r"securityAdvisor(y|ies)\b", re.IGNORECASE
+)
+
+
+def _gh_segment_touches_advisory(segment: str) -> bool:
+    """True iff one already-`&&`/`;`/`|`/newline-split command segment is an
+    actual `gh api` call reading or writing a GitHub security advisory —
+    never true for a `gh pr`/`issue`/... subcommand whose free-text body
+    only mentions the words."""
+    if not _GH_API_LEADER_RE.match(segment):
+        return False
+    if _ADVISORY_PATH_RE.search(segment):
+        return True
+    # `gh api graphql -f query='... securityAdvisories { ... }'` — the
+    # advisories path never appears (GraphQL has no REST path), so the
+    # query/mutation body's field name is the only signal.
+    if "graphql" in segment and _GRAPHQL_ADVISORY_FIELD_RE.search(segment):
+        return True
+    return False
+
+
+def _bash_touches_advisory(command: str) -> bool:
+    """Segment-split counterpart to `_bash_touches_harness_config` for the
+    `advisory` category — see the module comment above
+    `_gh_segment_touches_advisory`."""
+    for segment in _SEGMENT_SPLIT.split(_join_line_continuations(command)):
+        normalized = " ".join(segment.split())
+        if not normalized:
+            continue
+        if _gh_segment_touches_advisory(normalized):
+            return True
+    return False
+
+
+def _apply_patch_paths(command: str) -> list[str]:
+    """Every path an `apply_patch` payload says it will mutate.
+
+    Delegates to `sibling_repo_worktree_guard.py`'s own `_apply_patch_paths`
+    — imported lazily (not at module load time) so a broken sibling module
+    degrades this ONE category to "no match" rather than crashing the whole
+    hook before `main()`'s fail-open guard can catch it, and imported (not
+    re-implemented) so the two hooks can never silently drift on what an
+    apply_patch payload's path syntax is (CLAUDE.md "extend the mechanism
+    that already generalizes"; Falco, PR #1320 round 2: this hook's
+    harness_config category was file-path-based by design and the parser
+    already existed next door)."""
+    try:
+        from sibling_repo_worktree_guard import (  # noqa: PLC0415
+            _apply_patch_paths as _shared_apply_patch_paths,
+        )
+    except Exception:  # noqa: BLE001 — fail open (see docstring)
+        return []
+    return _shared_apply_patch_paths(command)
+
+
 _GRANT_ENTITY_TYPES = {"agent_grant"}
 _POLICY_ENTITY_TYPES = {"agent_policy", "relationship_type"}
 
@@ -305,8 +395,24 @@ def matched_categories(tool_name: str, tool_input: dict) -> list[str]:
         if command:
             if _bash_touches_harness_config(command):
                 cats.append("harness_config")
-            if command.strip().startswith("gh ") and _ADVISORY_RE.search(command):
+            if _bash_touches_advisory(command):
                 cats.append("advisory")
+
+    if tool_name == "apply_patch":
+        # Codex's native file-edit tool carries its payload as one string
+        # under `command` (patch-text shape, not `file_path`) — a SEPARATE
+        # branch from the Edit/Write/NotebookEdit `_file_path_from` check
+        # above, not a fallback into it, since the two payloads have nothing
+        # in common. Every path the patch touches (Add/Update/Delete File,
+        # Move to) is checked, so a multi-file patch that touches a
+        # harness-config path alongside unrelated files still matches (Falco,
+        # PR #1320 round 2: this was the exact audited failure — a subagent
+        # rewriting harness config via a file edit with no governing rule
+        # reaching it — now reachable identically through apply_patch).
+        for touched_path in _apply_patch_paths(_bash_command(tool_input)):
+            if _HARNESS_CONFIG_PATH_RE.search(touched_path):
+                cats.append("harness_config")
+                break
 
     # De-duplicate, preserving first-seen order.
     seen: dict[str, None] = {}

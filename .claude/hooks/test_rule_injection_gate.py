@@ -37,6 +37,19 @@ Cases:
       agent was scored purely on `scope` and wrongly injected. The
       companion positive case proves a row edged to THIS session's own
       resolved agent identity still renders.
+  11. Read-only Bash commands and PR-comment prose that merely MENTION a
+      harness_config path or the words "security-advisory" do not match —
+      only an actual mutation shape (harness_config) or an actual `gh api`
+      call to the advisories endpoint (advisory) does. Both classifiers use
+      the same segment-split + affirmative-shape pattern (Falco/Accipiter,
+      PR #1320 round 2 — the advisory fix closes the identical false-
+      positive shape the harness_config fix closed one category earlier).
+  12. A Codex `apply_patch` payload naming a harness_config path (Add/
+      Update/Delete File, or Move to) matches harness_config the same way an
+      Edit/Write does under Claude Code — parsed via `_apply_patch_paths`,
+      delegated to `sibling_repo_worktree_guard.py`'s parser of the same
+      name rather than re-implemented (Falco, PR #1320 round 2 non-blocking
+      finding, now closed).
 """
 from __future__ import annotations
 
@@ -250,15 +263,82 @@ class TestMatchedCategories:
         )
         assert cats == ["harness_config"]
 
+    def test_apply_patch_update_file_matches_harness_config(self):
+        """Codex's native file-edit tool — the coverage gap Falco's PR #1320
+        round-2 non-blocking finding named: harness_config was file-path-
+        based by design, but no apply_patch parser read this tool's payload
+        shape (one string under `command`, not `file_path`), so this exact
+        edit was reproducible under Codex with no rule injected. Confirmed
+        RED before `_apply_patch_paths` was wired in (matched_categories had
+        no apply_patch branch at all)."""
+        patch = (
+            "*** Begin Patch\n"
+            "*** Update File: .claude/settings.json\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+            "*** End Patch"
+        )
+        cats = gate.matched_categories("apply_patch", {"command": patch})
+        assert cats == ["harness_config"]
+
+    def test_apply_patch_add_file_matches_harness_config(self):
+        patch = (
+            "*** Begin Patch\n"
+            "*** Add File: ~/.neotoma/aauth\n"
+            "+new content\n"
+            "*** End Patch"
+        )
+        cats = gate.matched_categories("apply_patch", {"command": patch})
+        assert cats == ["harness_config"]
+
+    def test_apply_patch_move_to_harness_config_matches(self):
+        patch = (
+            "*** Begin Patch\n"
+            "*** Update File: /tmp/scratch.json\n"
+            "*** Move to: /Users/op/.cursor/mcp.json\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+            "*** End Patch"
+        )
+        cats = gate.matched_categories("apply_patch", {"command": patch})
+        assert cats == ["harness_config"]
+
+    def test_apply_patch_unrelated_file_matches_nothing(self):
+        patch = (
+            "*** Begin Patch\n"
+            "*** Update File: src/foo.py\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+            "*** End Patch"
+        )
+        assert gate.matched_categories("apply_patch", {"command": patch}) == []
+
     def test_bash_gh_security_advisory_matches_advisory(self):
         cats = gate.matched_categories(
             "Bash", {"command": "gh api /repos/o/r/security-advisories"}
         )
         assert cats == ["advisory"]
 
-    def test_bash_gh_advisory_prose_matches_advisory(self):
+    def test_bash_gh_advisory_write_matches_advisory(self):
         cats = gate.matched_categories(
-            "Bash", {"command": "gh issue create --title 'security-advisory follow-up'"}
+            "Bash",
+            {"command": "gh api -X PATCH /repos/o/r/security-advisories/GHSA-xxxx"},
+        )
+        assert cats == ["advisory"]
+
+    def test_bash_gh_api_graphql_advisory_field_matches_advisory(self):
+        cats = gate.matched_categories(
+            "Bash",
+            {
+                "command": (
+                    "gh api graphql -f query="
+                    "'query { repository(owner:\"o\",name:\"r\") "
+                    "{ securityAdvisories(first:10) { nodes { id } } } }'"
+                )
+            },
         )
         assert cats == ["advisory"]
 
@@ -453,6 +533,88 @@ class TestBashReadOnlyMentionsDoNotInject:
                         "json.dump(d, open('.claude/settings.json','w'))\""
                     )
                 },
+            )
+            == []
+        )
+
+
+class TestBashAdvisoryProseMentionsDoNotInject:
+    """Accipiter's current-head UX review on PR #1320 reproduced the SAME
+    false-positive SHAPE the harness_config classifier above was built to
+    eliminate, live on the `advisory` category one class over: a bare
+    `security[-_]advisor|/security-advisories\\b` substring search matched a
+    `gh pr comment`/`gh issue create` body or title that merely MENTIONS
+    "security-advisory" in prose, never reading or writing an actual GitHub
+    security advisory. The prior test suite asserted this as CORRECT
+    behavior (`test_bash_gh_advisory_prose_matches_advisory`) — the "test
+    that cannot fail on the thing it watches" pattern; these fail red
+    against that bare substring search and pass green after
+    `_bash_touches_advisory`'s `gh api`-shape classifier lands."""
+
+    def test_gh_issue_create_title_mentioning_advisory_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "gh issue create --title 'security-advisory follow-up'"
+                    )
+                },
+            )
+            == []
+        )
+
+    def test_gh_pr_comment_body_mentioning_advisory_does_not_match(self):
+        """The exact reproduction from Accipiter's UX review."""
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "gh pr comment 1320 --body "
+                        '"this PR touches security-advisory handling '
+                        'in the linter"'
+                    )
+                },
+            )
+            == []
+        )
+
+    def test_gh_pr_view_mentioning_advisory_path_as_prose_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "gh pr view 1320 --json body "
+                        "| grep /security-advisories"
+                    )
+                },
+            )
+            == []
+        )
+
+    def test_commit_message_mentioning_advisory_does_not_match(self):
+        assert (
+            gate.matched_categories(
+                "Bash",
+                {
+                    "command": (
+                        "git commit -m 'docs: note security-advisories "
+                        "workflow in README'"
+                    )
+                },
+            )
+            == []
+        )
+
+    def test_gh_repo_view_readme_mentioning_advisory_does_not_match(self):
+        """A `gh` subcommand other than `api` never matches, regardless of
+        what its output happens to contain — only `gh api` can actually
+        reach the advisories endpoint."""
+        assert (
+            gate.matched_categories(
+                "Bash", {"command": "gh repo view --json description,name"}
             )
             == []
         )
