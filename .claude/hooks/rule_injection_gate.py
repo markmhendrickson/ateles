@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""PreToolUse hook — inject the full text of high-risk rules at point of use.
+
+Audit `ent_b66293f0dcc8c887d4fdbeae` (rule delivery audit, 2026-09-26) found
+the session-start index's own closing instruction — "fetch the full rule by
+id before acting on a conditional rule" — was followed 1 time in 17
+applicable occasions (6%). The index gives a trigger line or a one-line
+summary and trusts the model to notice it needs more and go fetch it; that
+trust does not hold. Two of the audit's own violations are exactly the
+actions this hook targets: a grant write reported "verified" from a
+shape-only read-back that left `entity_types: []` (all Ateles signed writes
+silently disabled for ~2 hours), and a subagent that rewrote Cursor's
+`mcp.json` to a stdio script because its brief never carried the rule
+governing that file. Recommendation 5 of that audit is this hook.
+
+MECHANISM (measured, not inferred). `PreToolUse`'s `additionalContext` field
+is placed into the model's context as its own `<system-reminder>` block,
+immediately before the gated tool executes — confirmed by a controlled probe
+against Claude Code 2.1.283 (a scratch project with a `PreToolUse` hook
+returning `additionalContext`, driven headlessly via `claude -p`, with the
+canary string it emitted read back out of the session transcript's rendered
+attachment). `docs/foundation/harness_carriers.md` names pre-action hooks as
+a Guards carrier but never establishes this as a Rules delivery channel; this
+is that measurement. Unlike the `deny` calls in `git_stash_guard.py` /
+`gmail_send_gate.py` / `refuse_task_chip.py`, this hook always allows — its
+job is injection, not refusal, so exit code is always 0 and
+`permissionDecision` is always `allow`.
+
+TARGET CATEGORIES (from the audit's recommendation 5), matched on the
+gated tool call, never on free-text `applies_when`:
+
+  - grant_write:    a Neotoma write whose payload targets `agent_grant`
+  - policy_write:   a Neotoma write whose payload targets `agent_policy` or
+                    `relationship_type`
+  - harness_config: an Edit/Write/NotebookEdit whose file_path is
+                    one of the operator's own harness config files
+                    (~/.cursor/mcp.json, ~/.claude/settings.json,
+                    ~/.neotoma/aauth) — the #2482 breakage this audit traced
+  - advisory:       a `gh` CLI call that reads or writes a GitHub security
+                    advisory
+
+CATEGORY -> RULE IDS is a small local map (`_CATEGORY_RULE_IDS` below), never
+rule TEXT: only entity ids are named here, mirroring
+`install_codex_hooks.py`'s `MANAGED_SCRIPT_NAMES` precedent for "a short
+local list of identifiers is fine; the governed content stays in the single
+source." The hook fetches those rows live every time (same reader
+`session_rule_index.py` uses: `fetch_active_policy_rows` /
+`_session_scope_ok`) and renders `.body` (the FULL `rule` text) — so an edit
+to a rule's content in Neotoma is picked up on the next matching action with
+no code change, and a rule retired or rescoped away from this session simply
+stops being injected.
+
+GRANT WRITES ALSO GET A PROBE REMINDER. The audited failure was not just a
+missing rule — it was a write reported "verified" from a read-back that
+checked the field's *shape*, not whether the grant still ADMITS. This hook
+appends one line naming the same-turn probe pattern documented in the rule
+delivery evals (`get_session_identity` before AND after an `agent_grant`
+edit; the read-back is the second call, not a shape check on the first). It
+does not attempt to detect whether the probe actually happens — that is a
+downstream audit's job (the eval harness's `check_grant_admission`), not a
+gate that fires before the write itself even lands.
+
+FAIL-OPEN, STDLIB-ONLY, NEVER LOGS A RULE BODY TO STDERR (only entity ids and
+counts — same posture as session_rule_index.py; some `agent_policy` rows
+carry operator payment details, CLAUDE.md).
+
+Wire under PreToolUse with matcher
+"Edit|Write|NotebookEdit|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store|Bash"
+(no separate MultiEdit tool name in this Claude Code version — every other
+hook in this directory matches the same four-tool set).
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _session_integrity import read_hook_input  # noqa: E402
+
+_HOOK_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _HOOK_DIR.parent.parent
+_LIB_DIR = _REPO_ROOT / "lib"
+
+# Category -> the agent_policy entity ids whose FULL TEXT this category
+# injects. Content lives in Neotoma; only ids are named here (see module
+# docstring). Extend this map, never hardcode rule prose here.
+_CATEGORY_RULE_IDS: dict[str, tuple[str, ...]] = {
+    "grant_write": ("ent_1c0cbb99d2c8011358ff1dc3",),
+    "policy_write": ("ent_1c0cbb99d2c8011358ff1dc3", "ent_82b64b6c4104843e43853666"),
+    "harness_config": ("ent_c4d33237ff2d12b4aaec71af", "ent_663888501a290e9aaf60270c"),
+    "advisory": ("ent_e774dddc392478472c3a84c6",),
+}
+
+_HARNESS_CONFIG_PATH_RE = re.compile(
+    r"(\.cursor/mcp\.json|\.claude/settings(\.local)?\.json|\.neotoma/aauth)"
+)
+
+_ADVISORY_RE = re.compile(
+    r"security[-_]advisor|/security-advisories\b", re.IGNORECASE
+)
+
+_GRANT_ENTITY_TYPES = {"agent_grant"}
+_POLICY_ENTITY_TYPES = {"agent_policy", "relationship_type"}
+
+
+def _log(msg: str) -> None:
+    sys.stderr.write(f"[rule_injection_gate] {msg}\n")
+
+
+def _neotoma_entity_types_touched(tool_name: str, tool_input: dict) -> set[str]:
+    """Entity types a Neotoma `correct`/`store` call's payload targets.
+
+    `correct` carries a bare `entity_type` field. `store` carries a list of
+    entity dicts under `entities`, each with its own `entity_type` — reads
+    both shapes since one hook covers both tools (module docstring).
+    """
+    if not tool_name.endswith("__correct") and not tool_name.endswith("__store"):
+        return set()
+    types: set[str] = set()
+    et = tool_input.get("entity_type")
+    if isinstance(et, str) and et:
+        types.add(et)
+    entities = tool_input.get("entities")
+    if isinstance(entities, list):
+        for e in entities:
+            if isinstance(e, dict):
+                et2 = e.get("entity_type")
+                if isinstance(et2, str) and et2:
+                    types.add(et2)
+    return types
+
+
+def _file_path_from(tool_input: dict) -> str:
+    for key in ("file_path", "notebook_path"):
+        v = tool_input.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def _bash_command(tool_input: dict) -> str:
+    v = tool_input.get("command")
+    return v if isinstance(v, str) else ""
+
+
+def matched_categories(tool_name: str, tool_input: dict) -> list[str]:
+    """Every category this ONE tool call belongs to, in a stable order.
+
+    A single call can match more than one category (e.g. a `store` writing
+    both an `agent_grant` and an `agent_policy` row in the same request) —
+    every matching category's rules are injected, not just the first.
+    """
+    cats: list[str] = []
+    touched = _neotoma_entity_types_touched(tool_name, tool_input)
+    if touched & _GRANT_ENTITY_TYPES:
+        cats.append("grant_write")
+    if touched & _POLICY_ENTITY_TYPES:
+        cats.append("policy_write")
+
+    path = _file_path_from(tool_input)
+    if path and _HARNESS_CONFIG_PATH_RE.search(path):
+        cats.append("harness_config")
+
+    if tool_name == "Bash":
+        command = _bash_command(tool_input)
+        if command:
+            if _HARNESS_CONFIG_PATH_RE.search(command):
+                cats.append("harness_config")
+            if command.strip().startswith("gh ") and _ADVISORY_RE.search(command):
+                cats.append("advisory")
+
+    # De-duplicate, preserving first-seen order.
+    seen: dict[str, None] = {}
+    for c in cats:
+        seen.setdefault(c, None)
+    return list(seen)
+
+
+def _fetch_rows_by_id(ids: set[str]) -> dict[str, dict]:
+    """Live-fetch active `agent_policy` rows, keyed by entity id, filtered to
+    `ids`. Returns {} on any transport/import failure (fail-open — the
+    caller then injects nothing rather than block or crash)."""
+    if not ids:
+        return {}
+    try:
+        if str(_REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(_REPO_ROOT))
+        if str(_LIB_DIR) not in sys.path:
+            sys.path.insert(0, str(_LIB_DIR))
+        from lib.daemon_runtime.policy_skill_renderer import (  # noqa: PLC0415
+            _session_scope_ok,
+            fetch_active_policy_rows,
+            to_skill,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail open (e.g. no httpx)
+        _log(f"renderer unavailable: {type(exc).__name__}: {exc}")
+        return {}
+
+    try:
+        rows = fetch_active_policy_rows()
+    except Exception as exc:  # noqa: BLE001 — fail open on transport failure
+        _log(f"could not reach Neotoma: {type(exc).__name__}: {exc}")
+        return {}
+
+    out: dict[str, dict] = {}
+    for row in rows:
+        eid = str(row.get("_entity_id") or row.get("entity_id") or "")
+        # Same scope predicate session_rule_index.py applies before
+        # rendering (`_session_scope_ok`, decision 114) — without it a row
+        # re-scoped to a different agent via a GOVERNS edge would stop
+        # appearing in the session-start index but keep being injected
+        # here, since the two paths would otherwise diverge on the one
+        # thing that determines whether this session may see the row.
+        if eid in ids and _session_scope_ok(row):
+            skill = to_skill(row)
+            if skill is not None:
+                out[eid] = skill
+    return out
+
+
+_GRANT_PROBE_REMINDER = (
+    "\n\nThis is an agent_grant write. Per the rule delivery audit "
+    "(ent_b66293f0dcc8c887d4fdbeae): a shape-only read-back of the field you "
+    "wrote is not verification — it proved the write landed, not that the "
+    "grant still ADMITS. Call the identity/session probe (e.g. "
+    "get_session_identity as the affected agent) BOTH before and after this "
+    "write, and only report the change verified if the AFTER probe still "
+    "admits the access the agent needs."
+)
+
+
+def _render_context(
+    category_to_rows: dict[str, dict[str, object]],
+) -> tuple[str, list[str]]:
+    blocks: list[str] = []
+    injected_ids: list[str] = []
+    for category in sorted(category_to_rows):
+        rows = category_to_rows[category]
+        for eid in sorted(rows):
+            skill = rows[eid]
+            blocks.append(f"### [{category}] rule {eid}\n{skill.body}")
+            injected_ids.append(eid)
+    text = (
+        "Point-of-use rule injection (ateles rule delivery audit "
+        "ent_b66293f0dcc8c887d4fdbeae, recommendation 5): this action matches "
+        "a high-risk category, so the full text of the governing rule(s) is "
+        "below rather than left to a fetch you may not make.\n\n"
+        + "\n\n".join(blocks)
+    )
+    if "grant_write" in category_to_rows:
+        text += _GRANT_PROBE_REMINDER
+    return text, injected_ids
+
+
+def main() -> int:
+    ev = read_hook_input()
+    tool_name = str(ev.get("tool_name") or "")
+    tool_input = ev.get("tool_input")
+    if not tool_name or not isinstance(tool_input, dict):
+        return 0
+
+    categories = matched_categories(tool_name, tool_input)
+    if not categories:
+        return 0
+
+    wanted_ids: set[str] = set()
+    for c in categories:
+        wanted_ids.update(_CATEGORY_RULE_IDS.get(c, ()))
+
+    rows = _fetch_rows_by_id(wanted_ids)
+    category_to_rows = {
+        c: {eid: rows[eid] for eid in _CATEGORY_RULE_IDS.get(c, ()) if eid in rows}
+        for c in categories
+    }
+    # Even with no row fetched (Neotoma unreachable), a grant write still gets
+    # the probe reminder — that instruction does not depend on Neotoma.
+    if not any(category_to_rows.values()) and "grant_write" not in categories:
+        return 0
+
+    context, injected_ids = _render_context(category_to_rows)
+    _log(
+        f"tool={tool_name} categories={','.join(categories)} "
+        f"injected={','.join(injected_ids) or '(none — fail-open)'}"
+    )
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "additionalContext": context,
+                }
+            }
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 — fail open, never block a tool call
+        _log(f"error (ignored): {exc}")
+        sys.exit(0)
