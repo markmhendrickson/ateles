@@ -962,10 +962,14 @@ _LINE_DECORATION_RE = re.compile(r"^(?:\s|>|\||<[^>\n]*>)*")
 # second header placed BEFORE the real footer, both leave the header-emoji
 # count untouched by this strip and still fail the check that follows it.
 # The `Co-Authored-By:` line is optional (some sessions' harness footer is
-# the "Generated with" line alone) and its label is unconstrained prose —
-# the model name varies release to release (e.g. "Claude Sonnet 5", "Claude
-# Opus 5.5") and pinning one would make the pattern stop matching the next
-# release's real trailer.
+# the "Generated with" line alone). Its label is bounded to "Claude
+# <ModelName> <Version>" rather than arbitrary prose: the model name varies
+# release to release (e.g. "Claude Sonnet 5", "Claude Opus 5.5") so the
+# version token is left open, but the label may NOT itself contain the
+# header emoji or another `**...**`-bold span — an unconstrained `[^\n<]+`
+# would let a forged second header hide inside this one optional field and
+# be stripped away along with the real footer, defeating the very
+# exactly-once check this helper feeds (self-review finding on this PR).
 #
 # This pattern is applied to text ALREADY run through
 # `_normalize_for_blocking_scan` (never to the raw reply): that pass's
@@ -976,7 +980,8 @@ _LINE_DECORATION_RE = re.compile(r"^(?:\s|>|\||<[^>\n]*>)*")
 _KNOWN_TERMINAL_FOOTER_RE = re.compile(
     r"\n{1,2}\U0001f916\s*Generated with \[ClaudeCode\]"
     r"\(https://claude\.com/claude-code\)"
-    r"(?:\n{1,2}Co-Authored-By:\s*[^\n<]+\s*<[^>\n]+>)?"
+    r"(?:\n{1,2}Co-Authored-By:\s*Claude\s+[A-Za-z]+(?:\s+[A-Za-z0-9.]+)?"
+    r"\s*<noreply@anthropic\.com>)?"
     r"\n?\s*\Z"
 )
 

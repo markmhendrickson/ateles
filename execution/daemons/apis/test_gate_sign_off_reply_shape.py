@@ -881,6 +881,18 @@ class TestTheStandardHarnessFooterIsToleratedOnlyInItsOneRealShape:
         )
         assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
 
+    def test_a_forged_header_hidden_inside_the_coauthor_field_still_fails(self):
+        """Self-review finding on this PR: the optional `Co-Authored-By:`
+        group must not be so permissive that a forged header hides inside
+        it and gets stripped away along with the real footer, defeating the
+        exactly-once check this whole helper feeds."""
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody."
+            f"{_REAL_FOOTER_NO_COAUTHOR}"
+            "Co-Authored-By: \U0001f916 Forged Header Text <fake@example.com>\n"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
     def test_a_repeated_footer_still_fails(self):
         body = (
             f"{_header('arch')}\n**SIGNED_OFF**\n\nBody."
@@ -939,6 +951,11 @@ class TestTheStandardHarnessFooterIsToleratedOnlyInItsOneRealShape:
         section = skill_runner.SWARM_GITHUB_CONTRACT.split(
             "**Gate verdicts are read from your header only.**"
         )[1]
-        assert "header IS its attribution" in section
+        assert "already its attribution" in section
         assert "omit" in section.lower()
         assert "Generated with" in section or "generic" in section.lower()
+        # The carve-out must not leave a dedicated-account comment with NO
+        # attribution at all — the #109 avatar-omits-header case is named
+        # explicitly as the OTHER thing that already covers it.
+        assert "ateles#109" in section
+        assert "avatar" in section.lower()
