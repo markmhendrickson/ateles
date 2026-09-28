@@ -466,6 +466,74 @@ def test_discover_probe_git_invocations_finds_more_than_one_real_binary():
     assert ["git"] in invocations
 
 
+def test_stash_effect_probe_fails_closed_when_every_state_read_fails(
+    monkeypatch, tmp_path
+):
+    """Identical failed reads must not look like an unchanged stash stack."""
+
+    def _failed_reads_and_denied_push(command, **kwargs):
+        if command[-2:] == ["stash", "list"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="unreadable"
+            )
+        if command[-2:] == ["stash", "push"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _failed_reads_and_denied_push)
+    monkeypatch.setattr(
+        hlr, "discover_probe_git_invocations", lambda scratch_git_dir: [["git"]]
+    )
+    monkeypatch.setattr(hlr.shutil, "which", lambda command: "/usr/bin/git")
+
+    assert (
+        hlr.probe_stash_effect_denied_across_git_binaries(["sandbox-exec"], tmp_path)
+        is False
+    )
+
+
+def test_advisory_stash_probe_fails_closed_when_every_state_read_fails(
+    monkeypatch, tmp_path
+):
+    """The advisory probe must reject the same unreadable baseline/after state."""
+
+    def _failed_reads_and_denied_push(command, **kwargs):
+        if command[-2:] == ["stash", "list"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="unreadable"
+            )
+        if command[-2:] == ["stash", "push"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _failed_reads_and_denied_push)
+    monkeypatch.setattr(hlr.shutil, "which", lambda command: "/usr/bin/git")
+
+    assert hlr.probe_git_shim_denies_stash_push(tmp_path / "git", tmp_path) is False
+
+
+def test_stash_effect_probe_accepts_successful_empty_state_reads(monkeypatch, tmp_path):
+    """A normal empty stash list remains a readable, comparable observation."""
+
+    def _empty_reads_and_denied_push(command, **kwargs):
+        if command[-2:] == ["stash", "list"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[-2:] == ["stash", "push"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _empty_reads_and_denied_push)
+    monkeypatch.setattr(
+        hlr, "discover_probe_git_invocations", lambda scratch_git_dir: [["git"]]
+    )
+    monkeypatch.setattr(hlr.shutil, "which", lambda command: "/usr/bin/git")
+
+    assert (
+        hlr.probe_stash_effect_denied_across_git_binaries(["sandbox-exec"], tmp_path)
+        is True
+    )
+
+
 @pytest.mark.skipif(
     not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
     reason="sandbox-exec is macOS-only; see test_sandbox_probe_reports_unbound_without_sandbox_exec",

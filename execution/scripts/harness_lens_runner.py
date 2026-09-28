@@ -900,7 +900,15 @@ def probe_sandbox_exec_preserves_credential_binding(
     )
 
 
-def _real_stash_list(scratch_git_dir: Path) -> str:
+@dataclass(frozen=True)
+class StashListRead:
+    """One attempt to observe the real stash stack."""
+
+    succeeded: bool
+    listing: str | None
+
+
+def _real_stash_list(scratch_git_dir: Path) -> StashListRead:
     """Read the REAL stash stack directly via the unmodified system git — the
     verification instrument, never the mechanism under test. Every probe
     below refuses to trust its own subject's exit code alone (a shim or
@@ -914,7 +922,9 @@ def _real_stash_list(scratch_git_dir: Path) -> str:
         capture_output=True,
         text=True,
     )
-    return listing.stdout if listing.returncode == 0 else "<unreadable>"
+    if listing.returncode != 0:
+        return StashListRead(succeeded=False, listing=None)
+    return StashListRead(succeeded=True, listing=listing.stdout)
 
 
 def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> bool:
@@ -940,6 +950,8 @@ def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> 
     """
     env = {**os.environ, "PATH": f"{shim_path.parent}:{os.environ.get('PATH', '')}"}
     before = _real_stash_list(scratch_git_dir)
+    if not before.succeeded:
+        return False
     push = subprocess.run(
         ["git", "-C", str(scratch_git_dir), "stash", "push"],
         capture_output=True,
@@ -948,7 +960,8 @@ def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> 
     )
     if push.returncode == 0:
         return False
-    return _real_stash_list(scratch_git_dir) == before
+    after = _real_stash_list(scratch_git_dir)
+    return after.succeeded and after.listing == before.listing
 
 
 def discover_probe_git_invocations(scratch_git_dir: Path) -> list[list[str]]:
@@ -1007,6 +1020,8 @@ def probe_stash_effect_denied_across_git_binaries(
     if not invocations:
         return False
     before = _real_stash_list(scratch_git_dir)
+    if not before.succeeded:
+        return False
     for prefix in invocations:
         attempt = subprocess.run(
             [*command_wrapper, *prefix, "-C", str(scratch_git_dir), "stash", "push"],
@@ -1020,7 +1035,8 @@ def probe_stash_effect_denied_across_git_binaries(
         # report of its result.
         if attempt.returncode == 0:
             return False
-        if _real_stash_list(scratch_git_dir) != before:
+        after = _real_stash_list(scratch_git_dir)
+        if not after.succeeded or after.listing != before.listing:
             return False
     return True
 
