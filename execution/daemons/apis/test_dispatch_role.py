@@ -10,6 +10,7 @@ file-beats-env precedence visible.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
 import dispatch_role  # noqa: E402
+import harness_router  # noqa: E402
 import skill_runner  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
@@ -116,33 +118,60 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
     assert seen["prompt"] == "do the thing"
 
 
-def test_programmatic_dispatch_enables_network_for_github_delivery(monkeypatch) -> None:
-    """A delivery-bearing programmatic dispatch must reach Codex with network.
+@pytest.fixture
+def captured_codex_dispatches(fake_repo, monkeypatch):
+    """Capture real ``run_skill`` subprocess boundaries without launching Codex."""
+    captured: list[dict] = []
+    agent_def = _stub_def()
 
-    This is the manual-dispatch half of ateles#590: ``dispatch_role.dispatch``
-    used to expose no way to set the shared GitHub-contract flag, so the Codex
-    command denied network even when the task explicitly required push/PR
-    delivery.
-    """
-    captured_cmd: list[str] = []
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"codex": 1.0}')
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM_FILE", str(fake_repo / "missing-headroom.json")
+    )
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: agent_def)
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: agent_def)
+    monkeypatch.setattr(skill_runner, "ATELES_REPO", fake_repo)
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": None, "codex": "/bin/codex", "cursor": None},
+    )
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kwargs: None)
+    harness_router.reset_state()
 
-    async def _capture(skill, prompt, **kwargs):
-        command, _ = skill_runner._provider_command(
-            "codex",
-            "/bin/codex",
-            "system",
-            prompt,
-            cwd=None,
-            network=kwargs["include_github_contract"],
-        )
-        captured_cmd.extend(command)
-        return SkillResult(skill, True, 0, "done", "", provider="codex")
+    async def _capture_subprocess(*cmd, **kwargs):
+        invocation = {"cmd": list(cmd), "kwargs": kwargs}
+        captured.append(invocation)
 
-    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+        class _Process:
+            returncode = 0
 
-    import asyncio
+            async def communicate(self, input=None):
+                invocation["stdin"] = input
+                return b"done", b""
 
-    result = asyncio.run(
+        return _Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _capture_subprocess)
+    yield captured
+    harness_router.reset_state()
+
+
+def _assert_delivery_scope(invocation: dict, *, enabled: bool) -> None:
+    command = invocation["cmd"]
+    stdin = invocation["stdin"]
+    network_flag = "sandbox_workspace_write.network_access=true"
+    contract = skill_runner.SWARM_GITHUB_CONTRACT.encode()
+    assert (network_flag in command) is enabled
+    assert (contract in stdin) is enabled
+
+
+def test_programmatic_github_delivery_reaches_real_runner_only_when_opted_in(
+    captured_codex_dispatches,
+) -> None:
+    """Programmatic intent must reach `_run_skill_once` without leaking state."""
+    delivery = asyncio.run(
         dispatch_role.dispatch(
             "cicada",
             "Commit, push, and open the pull request.",
@@ -150,31 +179,34 @@ def test_programmatic_dispatch_enables_network_for_github_delivery(monkeypatch) 
             github_delivery=True,
         )
     )
-
-    assert result.ok
-    assert "sandbox_workspace_write.network_access=true" in captured_cmd
-
-
-def test_cli_github_delivery_enables_network(fake_repo, monkeypatch) -> None:
-    """The CLI flag must traverse the same path as the programmatic surface."""
-    captured_cmd: list[str] = []
-
-    async def _capture(skill, prompt, **kwargs):
-        command, _ = skill_runner._provider_command(
-            "codex",
-            "/bin/codex",
-            "system",
-            prompt,
-            cwd=None,
-            network=kwargs["include_github_contract"],
+    explicit_false = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Inspect local files.",
+            provider="codex",
+            github_delivery=False,
         )
-        captured_cmd.extend(command)
-        return SkillResult(skill, True, 0, "done", "", provider="codex")
+    )
+    ordinary_after_delivery = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Inspect another local file.",
+            provider="codex",
+        )
+    )
 
-    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
-    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: _stub_def())
+    assert delivery.ok and explicit_false.ok and ordinary_after_delivery.ok
+    assert len(captured_codex_dispatches) == 3
+    _assert_delivery_scope(captured_codex_dispatches[0], enabled=True)
+    _assert_delivery_scope(captured_codex_dispatches[1], enabled=False)
+    _assert_delivery_scope(captured_codex_dispatches[2], enabled=False)
 
-    rc = dispatch_role.main(
+
+def test_cli_github_delivery_reaches_real_runner_without_leaking_to_next_run(
+    captured_codex_dispatches,
+) -> None:
+    """The CLI flag must drive the same command and stdin effects as the API."""
+    delivery_rc = dispatch_role.main(
         [
             "--role",
             "cicada",
@@ -185,36 +217,14 @@ def test_cli_github_delivery_enables_network(fake_repo, monkeypatch) -> None:
             "--github-delivery",
         ]
     )
-
-    assert rc == 0
-    assert "sandbox_workspace_write.network_access=true" in captured_cmd
-
-
-def test_cli_default_keeps_network_denied(fake_repo, monkeypatch) -> None:
-    """A CLI caller must opt in; ordinary local work stays network-isolated."""
-    captured_cmd: list[str] = []
-
-    async def _capture(skill, prompt, **kwargs):
-        command, _ = skill_runner._provider_command(
-            "codex",
-            "/bin/codex",
-            "system",
-            prompt,
-            cwd=None,
-            network=kwargs["include_github_contract"],
-        )
-        captured_cmd.extend(command)
-        return SkillResult(skill, True, 0, "done", "", provider="codex")
-
-    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
-    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: _stub_def())
-
-    rc = dispatch_role.main(
+    ordinary_rc = dispatch_role.main(
         ["--role", "cicada", "--task", "Inspect local files.", "--provider", "codex"]
     )
 
-    assert rc == 0
-    assert "sandbox_workspace_write.network_access=true" not in captured_cmd
+    assert delivery_rc == 0 and ordinary_rc == 0
+    assert len(captured_codex_dispatches) == 2
+    _assert_delivery_scope(captured_codex_dispatches[0], enabled=True)
+    _assert_delivery_scope(captured_codex_dispatches[1], enabled=False)
 
 
 def test_dispatch_without_override_leaves_provider_to_the_router(
