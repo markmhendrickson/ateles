@@ -1191,6 +1191,14 @@ _DELIVERY_DENIAL_SIGNATURES: tuple[tuple[str, str], ...] = (
     ),
 )
 
+# The canonical, exact errors emitted when a zero-exit child did useful work
+# but the delivery mechanism refused it. Provider routing must preserve these
+# errors verbatim: they describe a task/delivery failure, not provider capacity
+# or authentication, even when the larger transcript quotes those words.
+_DELIVERY_DENIAL_REASONS = frozenset(
+    reason for _pattern, reason in _DELIVERY_DENIAL_SIGNATURES
+)
+
 
 def _delivery_failure_reason(*texts: str) -> str | None:
     """Name the delivery denial in a child's output, if there is one.
@@ -2338,6 +2346,19 @@ async def _run_provider_attempts(
         attempted.append(selected)
         result = await attempt(selected)
         result.attempted_providers = tuple(attempted)
+        # _run_skill_once deliberately turns a zero-exit delivery denial into
+        # ok=False with one of the exact canonical reasons above. Return that
+        # result unchanged before scanning the child's (potentially very large)
+        # transcript for provider-failure words. Reclassifying a quoted
+        # "session limit" as capacity here used to cool the healthy provider,
+        # attempt failover, and erase the specific delivery signal behind the
+        # generic "providers exhausted" error.
+        if (
+            not result.ok
+            and result.returncode == 0
+            and result.error in _DELIVERY_DENIAL_REASONS
+        ):
+            return result
         # A successful agent may legitimately discuss "usage limits" in its
         # answer. Only inspect stdout when the process itself failed; stderr and
         # explicit runner errors remain diagnostic on every result.

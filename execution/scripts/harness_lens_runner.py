@@ -1696,81 +1696,154 @@ def verify_stash_ref_unchanged_after_dispatch(
     )
 
 
-def _posted_verdict_url(*, repo: str, pr: int, verdict_text: str) -> str:
-    """Return the existing matching verdict comment URL, if readable.
+_REVIEW_MARKER_RE = re.compile(
+    r"^<!-- review:(?P<lens>[a-z0-9_-]+) commit=(?P<head>[0-9a-f]{40}) -->$"
+)
 
-    A failed comment POST can still have landed server-side. The existing
-    swarm fallback pattern lists comments and posts only when the lens marker
-    is missing; this synchronous runner applies the same postcondition before
-    retrying so a lost response does not create duplicate verdict comments.
-    Lookup failure is inconclusive and returns an empty string.
-    """
-    marker = next(
-        (line for line in verdict_text.splitlines() if line.startswith("<!-- review:")),
-        "",
+
+def _verdict_identity(verdict_text: str) -> tuple[str, str]:
+    """Return the strict lens and attribution header for a verdict body."""
+    lines = verdict_text.splitlines()
+    marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+    if len(lines) < 2 or marker is None:
+        raise ValueError("verdict lacks a strict exact-head review marker")
+    attribution = lines[1]
+    if not (
+        attribution.startswith("**\U0001f916 ")
+        and " — Ateles swarm, " in attribution
+        and attribution.endswith("**")
+    ):
+        raise ValueError("verdict lacks the canonical lens attribution header")
+    return marker.group("lens"), attribution
+
+
+def _pr_comments(*, repo: str, pr: int) -> list[dict]:
+    """Read every PR issue comment, failing closed when the list is unreadable."""
+    result = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/issues/{pr}/comments?per_page=100",
+            "--paginate",
+            "--slurp",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    if not marker:
-        return ""
-    try:
-        result = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{repo}/issues/{pr}/comments?per_page=100",
-                "--paginate",
-                "--slurp",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
+    pages = json.loads(result.stdout or "[]")
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise ValueError("GitHub comment listing had an unexpected shape")
+    return [comment for page in pages for comment in page if isinstance(comment, dict)]
+
+
+def _matching_verdict_comments(
+    *, comments: list[dict], lens: str, attribution: str
+) -> list[dict]:
+    """Find this machine account's comments for one lens identity."""
+    matches = []
+    for comment in comments:
+        if ((comment.get("user") or {}).get("login") or "") != "ateles-agent":
+            continue
+        lines = str(comment.get("body") or "").splitlines()
+        marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+        if (
+            len(lines) >= 2
+            and marker is not None
+            and marker.group("lens") == lens
+            and lines[1] == attribution
+        ):
+            matches.append(comment)
+    return matches
+
+
+def _one_verdict_comment(
+    *, repo: str, pr: int, lens: str, attribution: str
+) -> dict | None:
+    matches = _matching_verdict_comments(
+        comments=_pr_comments(repo=repo, pr=pr),
+        lens=lens,
+        attribution=attribution,
+    )
+    if len(matches) > 1:
+        ids = ", ".join(str(comment.get("id") or "<missing>") for comment in matches)
+        raise RuntimeError(
+            f"ambiguous prior review:{lens} comments by ateles-agent ({ids}); "
+            "refusing to choose one to edit"
         )
-        pages = json.loads(result.stdout or "[]")
-    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError):
-        return ""
-    for page in pages if isinstance(pages, list) else []:
-        for comment in page if isinstance(page, list) else []:
-            if isinstance(comment, dict) and marker in (comment.get("body") or ""):
-                return str(comment.get("html_url") or "")
-    return ""
+    return matches[0] if matches else None
 
 
 def post_verdict(*, repo: str, pr: int, verdict_path: Path) -> str:
-    """Post the verdict file as a PR comment and return the comment URL.
+    """Create or update the lens's one PR comment and return its URL.
 
     Never called unless ``validate_verdict(...).ok`` AND the caller passed
-    ``--post`` — the caller (main()) enforces both; this function trusts its
-    caller rather than re-checking, so its own tests can drive it directly.
+    ``--post``. Publication still validates the strict identity fields it needs
+    to honour the canonical edit-not-duplicate contract.
     """
-    command = [
-        "gh",
-        "pr",
-        "comment",
-        str(pr),
-        "-R",
-        repo,
-        "--body-file",
-        str(verdict_path),
-    ]
     verdict_text = verdict_path.read_text(encoding="utf-8")
-    last_error: subprocess.CalledProcessError | None = None
+    lens, attribution = _verdict_identity(verdict_text)
+    last_error: Exception | None = None
     for _attempt in range(1, _POST_VERDICT_ATTEMPTS + 1):
+        existing = _one_verdict_comment(
+            repo=repo,
+            pr=pr,
+            lens=lens,
+            attribution=attribution,
+        )
+        if existing is None:
+            command = [
+                "gh",
+                "pr",
+                "comment",
+                str(pr),
+                "-R",
+                repo,
+                "--body-file",
+                str(verdict_path),
+            ]
+            run_kwargs: dict = {}
+        else:
+            comment_id = existing.get("id")
+            if not isinstance(comment_id, int):
+                raise RuntimeError(
+                    f"prior review:{lens} comment has no integer id; refusing to edit"
+                )
+            command = [
+                "gh",
+                "api",
+                "-X",
+                "PATCH",
+                f"repos/{repo}/issues/comments/{comment_id}",
+                "--input",
+                "-",
+            ]
+            run_kwargs = {"input": json.dumps({"body": verdict_text})}
         try:
-            result = subprocess.run(
+            subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 check=True,
+                **run_kwargs,
             )
-            return result.stdout.strip()
         except subprocess.CalledProcessError as exc:
             last_error = exc
-            landed_url = _posted_verdict_url(
-                repo=repo,
-                pr=pr,
-                verdict_text=verdict_text,
+        landed = _one_verdict_comment(
+            repo=repo,
+            pr=pr,
+            lens=lens,
+            attribution=attribution,
+        )
+        if landed is not None and (landed.get("body") or "") == verdict_text:
+            url = str(landed.get("html_url") or "")
+            if not url:
+                raise RuntimeError(f"review:{lens} write read back without an html_url")
+            return url
+        if last_error is None:
+            last_error = RuntimeError(
+                f"review:{lens} write did not read back with the submitted body"
             )
-            if landed_url:
-                return landed_url
     if last_error is None:  # pragma: no cover - loop always attempts at least once
         raise AssertionError("posting retry loop made no attempt")
     raise last_error

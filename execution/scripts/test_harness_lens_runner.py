@@ -40,6 +40,8 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR), str(_SCRIPTS_DIR)):
         sys.path.insert(0, _p)
 
 import harness_lens_runner as hlr  # noqa: E402
+import harness_router  # noqa: E402
+import skill_runner  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
 SAMPLE_HEAD = "a" * 40
@@ -1400,6 +1402,62 @@ def test_network_delivery_denial_with_valid_local_verdict_reaches_parent_gate(
     assert head_checks == [{"repo": target.repo, "pr": target.pr}]
 
 
+def test_router_preserved_delivery_denial_reaches_parent_gate(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    """Exercise the real router result shape observed in the live PM run."""
+    _install_minimal_lens_worktree(monkeypatch, target)
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+
+    async def _dispatch(role, task, **kwargs):
+        verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+
+        async def _attempt(provider):
+            return SkillResult(
+                role,
+                False,
+                0,
+                SIGNED_OFF_VERDICT + "\nThe input also quoted a session limit.\n",
+                "fatal: unable to access 'https://github.com/o/r/': "
+                "Could not resolve host: github.com",
+                error=NETWORK_DELIVERY_DENIAL,
+                provider=provider,
+            )
+
+        return await skill_runner._run_provider_attempts(
+            role,
+            _attempt,
+            binaries={"codex": "/bin/codex"},
+            provider="codex",
+        )
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is True
+    assert report["delivery_denial_recovered"] is True
+    assert report["lens_verdict"] == "signed_off"
+    assert harness_router.cooling_providers() == set()
+
+
 @pytest.mark.parametrize(
     ("verdict_text", "expected_reason"),
     [
@@ -1588,15 +1646,33 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
     verdict_path = tmp_path / "verdict.md"
     verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
     post_calls = []
+    landed = []
 
     def _run(command, **kwargs):
         if command[1] == "api":
-            return subprocess.CompletedProcess(command, 0, stdout="[[]]\n", stderr="")
+            pages = (
+                [
+                    [
+                        {
+                            "id": 1,
+                            "body": SIGNED_OFF_VERDICT,
+                            "html_url": "comment-url",
+                            "user": {"login": "ateles-agent"},
+                        }
+                    ]
+                ]
+                if landed
+                else [[]]
+            )
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(pages), stderr=""
+            )
         post_calls.append(command)
         if len(post_calls) < 3:
             raise subprocess.CalledProcessError(
                 1, command, stderr="temporary transport failure"
             )
+        landed.append(True)
         return subprocess.CompletedProcess(
             command, 0, stdout="comment-url\n", stderr=""
         )
@@ -1615,21 +1691,29 @@ def test_post_verdict_does_not_duplicate_when_failed_call_already_landed(
     verdict_path = tmp_path / "verdict.md"
     verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
     post_calls = []
+    landed = []
 
     def _run(command, **kwargs):
         if command[1] == "api":
-            pages = [
+            pages = (
                 [
-                    {
-                        "body": SIGNED_OFF_VERDICT,
-                        "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
-                    }
+                    [
+                        {
+                            "id": 1,
+                            "body": SIGNED_OFF_VERDICT,
+                            "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
+                            "user": {"login": "ateles-agent"},
+                        }
+                    ]
                 ]
-            ]
+                if landed
+                else [[]]
+            )
             return subprocess.CompletedProcess(
                 command, 0, stdout=json.dumps(pages), stderr=""
             )
         post_calls.append(command)
+        landed.append(True)
         raise subprocess.CalledProcessError(1, command, stderr="response lost")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
@@ -1649,8 +1733,9 @@ def test_post_verdict_persistent_failure_stays_loud_after_three_attempts(
     post_calls = []
 
     def _run(command, **kwargs):
-        if command[1] == "pr":
-            post_calls.append(command)
+        if command[1] == "api":
+            return subprocess.CompletedProcess(command, 0, stdout="[[]]", stderr="")
+        post_calls.append(command)
         raise subprocess.CalledProcessError(1, command, stderr="permission denied")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
@@ -1658,6 +1743,76 @@ def test_post_verdict_persistent_failure_stays_loud_after_three_attempts(
     with pytest.raises(subprocess.CalledProcessError, match="gh.*pr.*comment"):
         hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
     assert len(post_calls) == 3
+
+
+def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path):
+    verdict_path = tmp_path / "verdict.md"
+    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+    old_body = SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40).replace(
+        "SIGNED_OFF", "REQUEST_CHANGES"
+    )
+    current_body = old_body
+    patch_calls = []
+
+    def _run(command, **kwargs):
+        nonlocal current_body
+        if command[1] == "api" and command[2].startswith(
+            "repos/o/r/issues/1/comments?"
+        ):
+            pages = [
+                [
+                    {
+                        "id": 41,
+                        "body": current_body,
+                        "html_url": "https://github.com/o/r/pull/1#issuecomment-41",
+                        "user": {"login": "ateles-agent"},
+                    }
+                ]
+            ]
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(pages), stderr=""
+            )
+        patch_calls.append((command, kwargs))
+        assert command[:4] == ["gh", "api", "-X", "PATCH"]
+        assert command[4].endswith("/issues/comments/41")
+        current_body = json.loads(kwargs["input"])["body"]
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+
+    url = hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
+
+    assert url.endswith("#issuecomment-41")
+    assert current_body == SIGNED_OFF_VERDICT
+    assert len(patch_calls) == 1
+
+
+def test_post_verdict_refuses_ambiguous_prior_lens_comments(monkeypatch, tmp_path):
+    verdict_path = tmp_path / "verdict.md"
+    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+    writes = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api" and command[2].startswith(
+            "repos/o/r/issues/1/comments?"
+        ):
+            comment = {
+                "body": SIGNED_OFF_VERDICT,
+                "html_url": "url",
+                "user": {"login": "ateles-agent"},
+            }
+            pages = [[{**comment, "id": 1}, {**comment, "id": 2}]]
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(pages), stderr=""
+            )
+        writes.append(command)
+        raise AssertionError("ambiguous comments must prevent every write")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+
+    with pytest.raises(RuntimeError, match="ambiguous prior review:pm"):
+        hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
+    assert writes == []
 
 
 def test_run_one_does_not_post_when_verdict_unreadable(

@@ -2898,6 +2898,104 @@ class TestDeliveryFailureIsReportedAsFailure:
         assert result.ok is True
         assert result.error == ""
 
+    def test_pinned_codex_delivery_denial_is_not_reclassified_as_capacity(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A live Codex transcript mentioned limits after the real denial.
+
+        RED before the fix: the provider router scanned stdout because ok was
+        false, classified this as capacity, cooled Codex, and replaced the
+        exact delivery reason with the generic providers-exhausted message.
+        """
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        attempts: list[str] = []
+        reason = skill_runner._delivery_failure_reason(self.NO_NETWORK)
+        assert reason is not None
+
+        async def attempt(provider: str) -> skill_runner.SkillResult:
+            attempts.append(provider)
+            return skill_runner.SkillResult(
+                "pavo",
+                False,
+                0,
+                "The brief discusses a prior session limit, but the verdict is complete.",
+                self.NO_NETWORK,
+                error=reason,
+                provider=provider,
+            )
+
+        result = asyncio.run(
+            skill_runner._run_provider_attempts(
+                "pavo",
+                attempt,
+                binaries={"codex": "/bin/codex"},
+                provider="codex",
+            )
+        )
+
+        assert attempts == ["codex"]
+        assert result.ok is False
+        assert result.returncode == 0
+        assert result.error == reason
+        assert result.stdout.startswith("The brief discusses")
+        assert result.stderr == self.NO_NETWORK
+        assert result.attempted_providers == ("codex",)
+        assert harness_router.cooling_providers() == set()
+
+    @pytest.mark.parametrize("failure_kind", ["capacity", "auth", "launch"])
+    def test_real_provider_failures_still_fail_over(
+        self, monkeypatch, tmp_path, failure_kind
+    ) -> None:
+        """The delivery carve-out must not widen to real provider failures."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,claude")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        attempts: list[str] = []
+
+        async def attempt(provider: str) -> skill_runner.SkillResult:
+            attempts.append(provider)
+            if provider == "claude":
+                return skill_runner.SkillResult(
+                    "pavo", True, 0, "done", "", provider=provider
+                )
+            if failure_kind == "capacity":
+                return skill_runner.SkillResult(
+                    "pavo", False, 1, "", "quota exceeded", provider=provider
+                )
+            if failure_kind == "auth":
+                return skill_runner.SkillResult(
+                    "pavo",
+                    False,
+                    1,
+                    "",
+                    "Authentication required. Please run 'agent login' first",
+                    provider=provider,
+                )
+            return skill_runner.SkillResult(
+                "pavo",
+                False,
+                None,
+                "",
+                "",
+                error=f"{provider} launch failed: executable unavailable",
+                provider=provider,
+            )
+
+        result = asyncio.run(
+            skill_runner._run_provider_attempts(
+                "pavo",
+                attempt,
+                binaries={"codex": "/bin/codex", "claude": "/bin/claude"},
+            )
+        )
+
+        assert result.ok is True
+        assert result.provider == "claude"
+        assert attempts == ["codex", "claude"]
+        assert "codex" in harness_router.cooling_providers()
+
 
 # ── Per-dispatch usage attribution (model + tokens) ───────────────────────────
 
