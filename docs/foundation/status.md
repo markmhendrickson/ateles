@@ -4381,3 +4381,30 @@ the design-versus-checkout accounting `harness_carriers.md` defers here.
   `ent_0b2da0b1a2d228ce3d981525` (neotoma#2070).
 - **Keying.** `harness_carriers.md` is not keyed: it owns no conformance-suite row, so the reading
   projection would carry nothing for it. Key it when a suite row cites one of its anchors.
+
+## Revision 128 (2026-09-26): Codex reaches the hook rung through a measured user-scope install
+
+Read on 2026-09-26 against `origin/main` at `bb38fb9b`, Codex CLI 0.153.4, Ateles #981, merged PRs #1290,
+#1295, and #1301, and the live foundation tasks `ent_e8ead74a5d4ae9ef81791ecd` and
+`ent_8ef6743f00b589400259f6b5`.
+
+- **User-scope rule delivery binds.** A controlled run installed the repository definition into an isolated
+  Codex home, served one synthetic `agent_policy` row from a loopback endpoint, and omitted its opaque
+  identifier from the user prompt. Codex reported `SessionStart` and `UserPromptSubmit` completed, and the
+  model returned the identifier delivered only through session-start stdout. No live user configuration or
+  production rule row was changed by the measurement.
+- **The repository artifact reuses the existing source and mechanism.** `.codex/hooks.json` wires Codex to
+  the same live rule-index and delta renderers and the same pre-action guard scripts used by Claude Code;
+  `execution/scripts/install_codex_hooks.py` resolves those commands to one checkout and merges only the
+  Ateles handlers into a user hook file. It neither copies rule text nor manufactures Codex's trust
+  decision.
+- **The proof is effect-based.** `execution/scripts/test_codex_rule_hooks.py` was first observed failing
+  with no hook definition, no `apply_patch` guard route, and no installer. It now executes the configured
+  commands against a synthetic local corpus: session start, prompt delta, subagent start, installed hooks
+  from outside a repository, a denied stash, and a denied patch into a sibling shared clone. The existing
+  hook regression slice remains green (129 tests).
+- **The remaining boundary is explicit.** Repository-local hook discovery produced no hook events in the
+  controlled client invocation; the proven installer therefore targets user scope, and an operator must
+  still review and trust the definition in Codex before it affects ordinary sessions. The larger compaction,
+  scenario, daemon, Cursor, and cross-harness evaluation remains task `ent_8ef6743f00b589400259f6b5`; this
+  pass does not duplicate it.

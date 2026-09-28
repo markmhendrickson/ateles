@@ -282,16 +282,21 @@ document is upstream of that ordering, not exempt from it.
 | Claude Code (terminal and desktop code sessions) | yes | yes | not needed | bundle with a hook |
 | Claude chat (web and desktop) | no | `unverified` (a project's instructions may act as one) | yes | integration |
 | ChatGPT | no | no | yes | integration |
-| Codex | `unverified` | yes | not needed | protocol, beside a generated local file |
+| Codex | yes (user-scope command hook, Codex CLI 0.153.4) | yes | not needed | bundle with a hook |
 | Cursor | `unverified` (session-start hooks exist; whether their output reaches context is unmeasured) | yes | not needed | protocol, beside a generated local file |
 
 The Claude Code row is measured: session-start hook output was observed in context at startup, resume, and
-compaction, and its cap was observed. The ChatGPT and Claude chat rows follow from their
-carriers offering no hook. The Codex and Cursor hook cells are `unverified`: a hook package for each exists
-in the Neotoma repository, but no source establishes that a session-start hook's output reaches the model's
-context in either. If it does, the harness moves up to the first rung and the generated local file is
-retired for it. Sources: #1254 and PR #1255 (the Claude Code observations); plan decision
-`harness_delivery_ladder`; the Neotoma repository's harness hook packages, read 2026-09-25.
+compaction, and its cap was observed. The ChatGPT and Claude chat rows follow from their carriers offering
+no hook. The Codex row is also measured: with a repository-owned user-scope hook installed into an isolated
+Codex home, Codex CLI 0.153.4 ran `SessionStart` and placed its stdout in model context; the model returned an
+opaque `agent_policy` entity identifier present only in that stdout. The same run observed
+`UserPromptSubmit` firing. Codex's local instruction file remains a fallback until that hook definition is
+installed and trusted; it is retired once the hook binds. Project-local hook discovery was not observed in
+the same client run, so the repository installer targets user scope. The Cursor hook cell remains
+`unverified`: a hook package exists in the Neotoma repository, but no source establishes that its
+session-start output reaches model context. Sources: #1254 and PR #1255 (the Claude Code observations);
+revision 128's measurement; plan decision `harness_delivery_ladder`; the Neotoma repository's harness hook
+packages, read 2026-09-25.
 
 ### Example: Claude Code traced through the matrix
 
@@ -463,7 +468,28 @@ routing to a provider that enforces no bound is a capability the grant must name
 - **Invalidated by:** either adapter gaining a per-tool deny.
 - Sources: the launch adapters' own comments in the code that starts a runner, read 2026-09-25; decision 87.
 
-### 7. Open questions
+### 7. Codex command-hook delivery reaches model context
+
+A controlled run against Codex CLI 0.153.4 installed the repository hook definition at user scope in an
+isolated Codex home, served one synthetic `agent_policy` row from a loopback endpoint, and asked the model
+to return the identifier it received without placing that identifier in the prompt. The client reported
+both `SessionStart` and `UserPromptSubmit` as completed, and the model returned the opaque identifier from
+the session-start output. That establishes the Codex hook cell above as `yes`; a configuration file's
+presence alone is not the evidence.
+
+The same run did not observe the repository-local hook definition firing without the user-scope install.
+That negative observation does not lower Codex's rung because the installed user-scope hook does bind, but
+it constrains the install path to the measured carrier until a project-local positive exists. The committed
+effect test also executes each configured renderer or guard against synthetic input, including a planted
+live-rule positive and a blocked `git stash`, so wiring drift fails the repository check.
+
+- **Last verified:** 2026-09-26, Codex CLI 0.153.4.
+- **Invalidated by:** a Codex hook lifecycle change, a client release that stops placing command stdout in
+  model context, or a controlled project-local positive that permits the installer scope to narrow.
+- Sources: Ateles #981; the controlled scratch-home run and red-first effect test recorded by revision 128;
+  Codex hook documentation, read 2026-09-26.
+
+### 8. Open questions
 
 Each is a measurement, not a design decision; the design above holds whichever way it lands, and says
 which cells move.
@@ -472,8 +498,10 @@ which cells move.
   budget; no cell changes.
 - **Whether the client's `instructions` cap applies to the field when served by the 2026-07-28 discovery
   call.** No cell changes until a known client connects that way.
-- **Whether Codex and Cursor place session-start hook output in the model's context.** If yes, each moves
-  to the first rung (`#the-harnesses-evaluated`).
+- **Whether Cursor places session-start hook output in the model's context.** If yes, it moves to the first
+  rung (`#the-harnesses-evaluated`).
+- **Whether Codex project-local hook discovery can produce a controlled positive.** The user-scope hook
+  already puts Codex on the first rung; this answer can narrow installation scope but does not move a cell.
 - **Whether a Claude chat project's instructions act as a local instruction file.** If yes, rules and
   session-start context become `guaranteed` there through a generated file.
 - **Which integrations and bundle formats render MCP Apps and honour the Tasks extension** (the
