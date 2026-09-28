@@ -205,6 +205,16 @@ def test_raises_when_a_corpus_file_is_missing(tmp_path: Path) -> None:
             "while paused it remains\ninert until delivery work is restarted elsewhere",
             "recovery-control-reachability",
         ),
+        (
+            "action gate, and confirmed effect read-back required\nbefore the pause",
+            "action gate, and an effect report required\nbefore the pause",
+            "recovery-control-authorization",
+        ),
+        (
+            "a confirmed `resume_plan` writes and reads back its superseding control decision before the delivery\nfrontier is re-derived",
+            "`resume_plan` writes its superseding control decision before the delivery\nfrontier is re-derived",
+            "recovery-interrupted-resume",
+        ),
     ),
 )
 def test_actual_corpus_mutation_breaks_normative_clause(
