@@ -2526,7 +2526,7 @@ def test_run_one_real_repository_without_stash_ref_reaches_dispatch(
 ):
     dispatched = False
 
-    def _ready_build(cls, provider, tmp_root):
+    def _ready_build(cls, provider, tmp_root, **kwargs):
         root = tmp_root / f"{provider}-unit-home"
         root.mkdir(parents=True, exist_ok=True)
         return hlr.HarnessSandbox(
@@ -2540,6 +2540,7 @@ def test_run_one_real_repository_without_stash_ref_reaches_dispatch(
             git_stash_denied=True,
             authentication_ready=True,
             unavailable_guards=(),
+            review_write_confined=True,
         )
 
     monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(_ready_build))
