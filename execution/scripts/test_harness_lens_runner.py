@@ -1848,6 +1848,29 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
         ("error: cursor launch failed: executable unavailable", "launch"),
         ("\x1b[31mAPI Error:\x1b[0m 401 invalid\u00a0api key", "auth"),
         ('\x1b[31m{"error":{"message":"quota\u00a0exceeded"}}\x1b[0m', "capacity"),
+        ('{"error":{"message":"invalid\\u00a0api key"}}', "auth"),
+        (
+            '{"error":"  error: API Error: 401 invalid authentication credentials  "}',
+            "auth",
+        ),
+        (
+            '{"error":{"message":"request rejected","type":"  rate_limit_error  "}}',
+            "capacity",
+        ),
+        (
+            json.dumps(
+                {"error": {"message": "  ERROR: API Error: 429 quota exceeded  "}},
+                indent=2,
+            ),
+            "capacity",
+        ),
+        (
+            json.dumps(
+                {"error": {"message": " error: codex launch failed: unavailable "}},
+                indent=2,
+            ),
+            "launch",
+        ),
     ],
     ids=[
         "https_auth",
@@ -1863,6 +1886,11 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
         "error_launch",
         "ansi_nbsp_api",
         "ansi_nbsp_json",
+        "json_escaped_nbsp",
+        "json_padded_nested_prefixes",
+        "json_padded_type",
+        "formatted_json_capacity",
+        "formatted_json_launch",
     ],
 )
 @pytest.mark.parametrize(
@@ -1890,8 +1918,19 @@ def test_mixed_delivery_diagnostics_never_reach_parent_recovery_or_publication(
     )
     if line_length is not None:
         if diagnostic.startswith(("{", "\x1b[31m{")):
-            padding = ',"padding":"' + "x" * (line_length - len(diagnostic) - 13) + '"'
-            diagnostic = diagnostic.replace("}}", padding + "}}")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", diagnostic)
+            payload = json.loads(plain)
+            payload["padding"] = ""
+            indent = 2 if "\n" in plain else None
+            rendered = json.dumps(payload, indent=indent, separators=(",", ":"))
+            payload["padding"] = "x" * (
+                line_length - len(rendered) - (len(diagnostic) - len(plain))
+            )
+            resized = json.dumps(payload, indent=indent, separators=(",", ":"))
+            if diagnostic.startswith("\x1b[31m"):
+                diagnostic = "\x1b[31m" + resized + "\x1b[0m"
+            else:
+                diagnostic = resized
             assert json.loads(re.sub(r"\x1b\[[0-9;]*m", "", diagnostic))["error"]
         else:
             diagnostic += " " + "x" * (line_length - len(diagnostic) - 1)
@@ -3207,6 +3246,42 @@ def test_main_requires_brief_flag():
                 "codex",
             ]
         )
+
+
+def test_failed_dry_run_preflight_exits_zero_but_reports_not_ok(
+    monkeypatch, capsys, brief_file
+):
+    async def _refuse(*args, **kwargs):
+        raise hlr.HeadroomExhausted("configured headroom is zero")
+
+    monkeypatch.setattr(hlr, "run_one", _refuse)
+
+    rc = hlr.main(
+        [
+            "--repo",
+            "o/r",
+            "--pr",
+            "1",
+            "--head",
+            SAMPLE_HEAD,
+            "--lens",
+            "pm",
+            "--agent",
+            "pavo",
+            "--provider",
+            "codex",
+            "--brief",
+            str(brief_file),
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "reason": "configured headroom is zero",
+    }
 
 
 # ── --agent resolved from review_panel.LENSES when omitted -----------------------

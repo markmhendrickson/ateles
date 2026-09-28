@@ -2744,6 +2744,62 @@ class TestCrossHarnessRouting:
         assert skill_runner._diagnostic_failure_kinds(diagnostic) == {expected}
 
     @pytest.mark.parametrize(
+        ("payload", "indent", "expected"),
+        [
+            ({"error": {"message": "invalid\u00a0api key"}}, None, "auth"),
+            (
+                {
+                    "error": "  error: API Error: 401 invalid authentication "
+                    "credentials  "
+                },
+                None,
+                "auth",
+            ),
+            (
+                {
+                    "error": {
+                        "message": "request rejected",
+                        "type": "  rate_limit_error  ",
+                    }
+                },
+                None,
+                "capacity",
+            ),
+            (
+                {"error": {"message": "  ERROR: API Error: 429 quota\u00a0exceeded  "}},
+                2,
+                "capacity",
+            ),
+            (
+                {"error": {"message": " error: codex launch failed: unavailable "}},
+                2,
+                "launch",
+            ),
+        ],
+        ids=[
+            "escaped_nbsp",
+            "padded_nested_prefixes",
+            "padded_type",
+            "formatted_capacity",
+            "formatted_launch",
+        ],
+    )
+    @pytest.mark.parametrize("line_length", [None, 500, 501])
+    def test_structured_diagnostic_candidates_are_normalized_before_matching(
+        self, payload, indent, expected, line_length
+    ) -> None:
+        payload = dict(payload)
+        if line_length is not None:
+            payload["padding"] = ""
+            rendered = json.dumps(payload, indent=indent, separators=(",", ":"))
+            payload["padding"] = "x" * (line_length - len(rendered))
+        diagnostic = json.dumps(payload, indent=indent, separators=(",", ":"))
+        if line_length is not None:
+            assert len(diagnostic) == line_length
+
+        assert skill_runner._diagnostic_failure_kinds(diagnostic) == {expected}
+
+    @pytest.mark.parametrize(
         "prose",
         [
             "The review discusses quota exceeded; resets in 2 hours.",

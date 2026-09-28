@@ -38,8 +38,7 @@ def _available() -> dict[str, str]:
 
 def test_equal_headroom_round_robins_across_three_providers() -> None:
     first_choices = [
-        harness_router.provider_candidates(_available(), now=100.0)[0]
-        for _ in range(3)
+        harness_router.provider_candidates(_available(), now=100.0)[0] for _ in range(3)
     ]
     assert first_choices == ["claude", "codex", "cursor"]
 
@@ -67,9 +66,7 @@ def test_usable_names_and_candidates_share_eligibility(monkeypatch) -> None:
         '{"claude": 0.05, "codex": 0.8, "cursor": 0.0}',
     )
 
-    assert harness_router.usable_provider_names(_available(), now=100.0) == {
-        "codex"
-    }
+    assert harness_router.usable_provider_names(_available(), now=100.0) == {"codex"}
     assert harness_router.provider_candidates(_available(), now=100.0) == ["codex"]
 
 
@@ -79,38 +76,37 @@ def test_provider_exclusion_reason_names_headroom_floor(monkeypatch) -> None:
         '{"claude": 1.0, "codex": 0.0, "cursor": 1.0}',
     )
 
-    assert harness_router.provider_exclusion_reason(
-        "codex", _available(), now=100.0
-    ) == "headroom=0.000 is at or below minimum=0.050"
+    assert (
+        harness_router.provider_exclusion_reason("codex", _available(), now=100.0)
+        == "headroom=0.000 is at or below minimum=0.050"
+    )
 
 
 def test_provider_exclusion_reason_names_missing_binary() -> None:
     available = _available()
     available["codex"] = None
 
-    assert harness_router.provider_exclusion_reason(
-        "codex", available, now=100.0
-    ) == "binary unavailable"
+    assert (
+        harness_router.provider_exclusion_reason("codex", available, now=100.0)
+        == "binary unavailable"
+    )
 
 
 def test_provider_exclusion_reason_names_cooldown(monkeypatch) -> None:
     monkeypatch.setenv("APIS_HARNESS_COOLDOWN_SECONDS", "30")
     harness_router.cool_down("codex", now=100.0)
 
-    assert harness_router.provider_exclusion_reason(
-        "codex", _available(), now=101.0
-    ) == "cooling down"
+    assert (
+        harness_router.provider_exclusion_reason("codex", _available(), now=101.0)
+        == "cooling down"
+    )
 
 
 def test_capacity_cooldown_removes_provider_until_expiry(monkeypatch) -> None:
     monkeypatch.setenv("APIS_HARNESS_COOLDOWN_SECONDS", "30")
     harness_router.cool_down("claude", now=100.0)
-    assert "claude" not in harness_router.provider_candidates(
-        _available(), now=129.9
-    )
-    assert "claude" in harness_router.provider_candidates(
-        _available(), now=130.0
-    )
+    assert "claude" not in harness_router.provider_candidates(_available(), now=129.9)
+    assert "claude" in harness_router.provider_candidates(_available(), now=130.0)
 
 
 def test_missing_binary_is_not_eligible() -> None:
@@ -120,9 +116,7 @@ def test_missing_binary_is_not_eligible() -> None:
 
 
 def test_operator_order_is_respected_and_deduplicated(monkeypatch) -> None:
-    monkeypatch.setenv(
-        "APIS_HARNESS_PROVIDERS", "cursor,claude,cursor,unknown"
-    )
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,claude,cursor,unknown")
     assert harness_router.configured_providers() == ["cursor", "claude"]
     assert harness_router.provider_candidates(_available(), now=100.0)[0] == "cursor"
 
@@ -136,9 +130,7 @@ def test_invalid_headroom_json_fails_open_to_equal_weights(monkeypatch) -> None:
     }
 
 
-def test_headroom_file_can_be_refreshed_without_restart(
-    monkeypatch, tmp_path
-) -> None:
+def test_headroom_file_can_be_refreshed_without_restart(monkeypatch, tmp_path) -> None:
     headroom_file = tmp_path / "headroom.json"
     headroom_file.write_text(
         '{"claude": 0.1, "codex": 0.9, "cursor": 0.4}',
@@ -164,3 +156,19 @@ def test_malformed_headroom_file_falls_back_to_env(monkeypatch, tmp_path) -> Non
         '{"claude": 0.1, "codex": 0.9, "cursor": 0.4}',
     )
     assert harness_router.provider_candidates(_available(), now=100.0)[0] == "codex"
+
+
+def test_object_headroom_value_uses_numeric_contract_default(
+    monkeypatch, tmp_path
+) -> None:
+    headroom_file = tmp_path / "headroom.json"
+    headroom_file.write_text(
+        '{"claude": {"headroom": 0.15}, "codex": 0.4}', encoding="utf-8"
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(headroom_file))
+
+    assert harness_router.configured_headroom() == {
+        "claude": 1.0,
+        "codex": 0.4,
+        "cursor": 1.0,
+    }

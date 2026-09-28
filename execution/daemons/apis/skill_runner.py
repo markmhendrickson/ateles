@@ -1134,6 +1134,52 @@ def _diagnostic_starts_with(line: str, signature: str) -> bool:
     return line[len(signature)] in " \t:;,.-(["
 
 
+def _normalize_diagnostic_candidate(candidate: str) -> str:
+    """Normalize one anchored diagnostic without searching within its prose."""
+    normalized = _ANSI_SGR_RE.sub("", candidate).replace("\u00a0", " ").strip().lower()
+    while normalized:
+        previous = normalized
+        normalized = _DIAGNOSTIC_PREFIX_RE.sub("", normalized)
+        normalized = _API_ERROR_PREFIX_RE.sub("", normalized)
+        if normalized == previous:
+            break
+    return normalized
+
+
+def _diagnostic_envelope_candidates(envelope: object) -> tuple[str, ...]:
+    """Return only the supported string fields from a provider JSON envelope."""
+    if not isinstance(envelope, dict):
+        return ()
+    error = envelope.get("error")
+    if isinstance(error, str):
+        return (error,)
+    if isinstance(error, dict):
+        return tuple(
+            value
+            for key in ("message", "type")
+            if isinstance(value := error.get(key), str)
+        )
+    return ()
+
+
+def _diagnostic_candidate_kind(candidate: str) -> str | None:
+    """Classify one already-extracted candidate at its normalized start."""
+    normalized = _normalize_diagnostic_candidate(candidate)
+    if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", normalized):
+        return "launch"
+    if _SSH_AUTH_DIAGNOSTIC_RE.match(normalized) or any(
+        _diagnostic_starts_with(normalized, signature)
+        for signature in _AUTH_FAILURE_SIGNATURES
+    ):
+        return "auth"
+    if any(
+        _diagnostic_starts_with(normalized, signature)
+        for signature in _CAPACITY_FAILURE_SIGNATURES
+    ) or any(pattern.match(normalized) for pattern in _CAPACITY_DIAGNOSTIC_PATTERNS):
+        return "capacity"
+    return None
+
+
 def _diagnostic_line_kind(raw_line: str) -> str | None:
     """Classify one provider diagnostic without scanning ordinary prose.
 
@@ -1141,50 +1187,72 @@ def _diagnostic_line_kind(raw_line: str) -> str | None:
     ``error:`` prefixes. Keep matching anchored at the extracted diagnostic
     start so a prompt or verdict discussing these words is excluded.
     """
-    line = _ANSI_SGR_RE.sub("", raw_line).replace("\u00a0", " ").strip().lower()
-    if not line:
+    normalized = _normalize_diagnostic_candidate(raw_line)
+    if not normalized:
         return None
-    normalized = _DIAGNOSTIC_PREFIX_RE.sub("", line)
-    normalized = _API_ERROR_PREFIX_RE.sub("", normalized)
     candidates = [normalized]
     if normalized.startswith("{"):
         try:
             envelope = json.loads(normalized)
         except json.JSONDecodeError:
             envelope = None
-        if isinstance(envelope, dict):
-            error = envelope.get("error")
-            if isinstance(error, str):
-                candidates = [error]
-            elif isinstance(error, dict):
-                candidates = [
-                    value
-                    for key in ("message", "type")
-                    if isinstance(value := error.get(key), str)
-                ]
+        extracted = _diagnostic_envelope_candidates(envelope)
+        if extracted:
+            candidates = list(extracted)
     for candidate in candidates:
-        if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", candidate):
-            return "launch"
-        if _SSH_AUTH_DIAGNOSTIC_RE.match(candidate) or any(
-            _diagnostic_starts_with(candidate, signature)
-            for signature in _AUTH_FAILURE_SIGNATURES
-        ):
-            return "auth"
-        if any(
-            _diagnostic_starts_with(candidate, signature)
-            for signature in _CAPACITY_FAILURE_SIGNATURES
-        ) or any(pattern.match(candidate) for pattern in _CAPACITY_DIAGNOSTIC_PATTERNS):
-            return "capacity"
+        if (kind := _diagnostic_candidate_kind(candidate)) is not None:
+            return kind
     return None
 
 
+def _structured_diagnostic_kinds(text: str) -> set[str]:
+    """Classify JSON envelopes that start at a diagnostic line boundary.
+
+    ``json.JSONDecoder.raw_decode`` lets a formatted envelope end before a
+    following diagnostic line. Requiring the object to start after only the
+    same supported prefixes as the line classifier, and to occupy the rest of
+    its closing line, keeps arbitrary prose out of this structured path.
+    """
+    cleaned = _ANSI_SGR_RE.sub("", text).replace("\u00a0", " ")
+    decoder = json.JSONDecoder()
+    kinds: set[str] = set()
+    line_start = 0
+    while line_start < len(cleaned):
+        line_end = cleaned.find("\n", line_start)
+        if line_end < 0:
+            line_end = len(cleaned)
+        first_line = cleaned[line_start:line_end]
+        brace_offset = first_line.find("{")
+        if brace_offset >= 0:
+            prefix = first_line[:brace_offset]
+            if _normalize_diagnostic_candidate(prefix + "{}") == "{}":
+                object_start = line_start + brace_offset
+                try:
+                    envelope, object_end = decoder.raw_decode(cleaned, object_start)
+                except json.JSONDecodeError:
+                    envelope = None
+                    object_end = object_start
+                closing_line_end = cleaned.find("\n", object_end)
+                if closing_line_end < 0:
+                    closing_line_end = len(cleaned)
+                if not cleaned[object_end:closing_line_end].strip():
+                    for candidate in _diagnostic_envelope_candidates(envelope):
+                        if (kind := _diagnostic_candidate_kind(candidate)) is not None:
+                            kinds.add(kind)
+        line_start = line_end + 1
+    return kinds
+
+
 def _diagnostic_failure_kinds(*texts: str) -> set[str]:
-    return {
+    kinds = {
         kind
         for text in texts
         for raw_line in text.splitlines()
         if (kind := _diagnostic_line_kind(raw_line)) is not None
     }
+    for text in texts:
+        kinds.update(_structured_diagnostic_kinds(text))
+    return kinds
 
 
 def _provider_failure_kind(*texts: str) -> str | None:

@@ -14,31 +14,31 @@ provider credentials, changing `APIS_HARNESS_PROVIDERS`, or any other harness co
 
 ## What this file governs
 
-`~/.config/ateles/harness-headroom.json` is the single file
-`execution/daemons/apis/harness_router.py` reads (via `configured_headroom()`)
-to decide whether Claude, Codex, or Cursor is eligible for the NEXT dispatch —
-including a lens review run through `execution/scripts/harness_lens_runner.py`
-and `execution/daemons/apis/dispatch_role.py`. Its current shape (checked
-2026-09-26, **not edited by this change** — see the hard rule below):
+`execution/daemons/apis/harness_router.py` reads headroom through
+`configured_headroom()` to decide whether Claude, Codex, or Cursor is eligible
+for the NEXT dispatch — including a lens review run through
+`execution/scripts/harness_lens_runner.py` and
+`execution/daemons/apis/dispatch_role.py`. A valid configured file is the first
+source; `APIS_HARNESS_HEADROOM` is consulted only when that file is absent,
+unreadable, malformed, or not a JSON object. The default file is
+`~/.config/ateles/harness-headroom.json`, and
+`APIS_HARNESS_HEADROOM_FILE` selects a different file path.
+
+Each provider value must be a bare JSON number from `0.0` through `1.0`:
 
 ```json
 {
-  "claude": {
-    "cooldown_reason": "quota_error_default",
-    "cooldown_until": "2026-09-25T08:04:21.916748+00:00",
-    "headroom": 0.15
-  },
+  "claude": 0.15,
   "codex": 0.0,
   "cursor": 0.0
 }
 ```
 
-A provider's value is either a bare number `0.0`–`1.0`, or an object carrying
-`headroom` plus `cooldown_reason`/`cooldown_until` (the shape a cooldown
-leaves behind). `configured_headroom()` reads `headroom` out of either shape;
-`harness_lens_runner.check_headroom()` refuses a dispatch outright when the
-resolved value is exactly `0.0`, which is the operator-reset signal this
-runbook is about.
+Missing or non-numeric provider values — including objects with a nested
+`headroom` field — resolve to the default `1.0`; object-shaped cooldown records
+are not part of this file's contract. `harness_lens_runner.check_headroom()`
+refuses a dispatch outright when the resolved value is exactly `0.0`, which is
+the operator-reset signal this runbook is about.
 
 ## Hard rule: this PR does not touch the file
 
@@ -106,11 +106,10 @@ print(configured_headroom())
 "
 ```
 
-`configured_headroom()` must report the restored values — it takes the FIRST
-of (file, env) that parses, so a stray `APIS_HARNESS_HEADROOM` env var could
-otherwise silently override a correctly-edited file (see
-`dispatch_role._headroom_note()`, which exists to surface exactly that
-precedence trap).
+`configured_headroom()` must report the restored values. It takes the first
+valid JSON object from (file, environment), in that order, so a valid file
+overrides `APIS_HARNESS_HEADROOM`; the environment is only a fallback. See
+`dispatch_role._headroom_note()`, which names the source that won.
 
 ## After restoring: the first live test
 
@@ -132,10 +131,13 @@ when the lens is in that registry; pass it explicitly only for a lens outside
 it.)
 
 A `HeadroomExhausted` refusal here means the file was not actually restored
-(or an env var is overriding it) — fix that before spending the first real
-model call. Once the dry run reports `"no_model_call_made": true` with a
-sane `example_command`, the first live test described in this PR's body is
-ready to run.
+(or the selected file path differs from the one edited) — fix that before
+spending the first real model call. The CLI intentionally exits zero for a
+cleanly reported `--dry-run` refusal, so automation and human callers MUST
+inspect the JSON body and require `"ok": true`; exit status alone does not
+mean the preflight passed. Once `"ok": true` and
+`"no_model_call_made": true` appear with a sane `example_command`, the first
+live test described in this PR's body is ready to run.
 
 ## Monitoring a live dispatch from Neotoma alone
 
