@@ -510,6 +510,9 @@ def test_real_profile_confines_review_writes_and_aauth_mcp_reads(tmp_path):
         runtime_write_root=runtime,
         verdict_path=verdict,
     )
+    text = profile.read_text(encoding="utf-8")
+    assert '(literal "/dev/null")' in text
+    assert '(subpath "/dev")' not in text
 
     assert hlr.probe_review_write_confinement(
         profile,
@@ -521,6 +524,58 @@ def test_real_profile_confines_review_writes_and_aauth_mcp_reads(tmp_path):
     control.write_text("control\n", encoding="utf-8")
     assert hlr.probe_sandbox_exec_denies_read(profile, key, control_path=control)
     assert hlr.probe_sandbox_exec_denies_read(profile, mcp, control_path=control)
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_review_write_probe_fails_when_literal_dev_null_allow_is_removed(tmp_path):
+    """Mutation proof: removing only /dev/null's allow makes the guard red."""
+    runtime = tmp_path / "runtime"
+    review_worktree = tmp_path / "review-worktree"
+    verdict = review_worktree / "security1308_verdict.md"
+    runtime.mkdir()
+    review_worktree.mkdir()
+    profile = runtime / "profile.sb"
+    hlr.build_sandbox_exec_profile(
+        profile,
+        runtime_write_root=runtime,
+        verdict_path=verdict,
+    )
+    profile.write_text(
+        profile.read_text(encoding="utf-8").replace('  (literal "/dev/null")\n', "", 1),
+        encoding="utf-8",
+    )
+
+    assert not hlr.probe_review_write_confinement(
+        profile,
+        runtime_root=runtime,
+        verdict_path=verdict,
+        review_worktree=review_worktree,
+    )
+
+    sibling = tmp_path / "sibling-checkout" / "sentinel"
+    tracked = review_worktree / "source-probe"
+    for denied in (tracked, sibling):
+        denied.parent.mkdir(parents=True, exist_ok=True)
+        denied.write_text("unchanged\n", encoding="utf-8")
+        attempt = subprocess.run(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile),
+                "/bin/sh",
+                "-c",
+                'printf changed > "$1"',
+                "probe",
+                str(denied),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert attempt.returncode != 0
+        assert denied.read_text(encoding="utf-8") == "unchanged\n"
 
 
 def test_claude_with_unproved_outer_guards_refuses_before_launch(tmp_path):
@@ -1012,7 +1067,11 @@ def test_sandbox_profile_preserves_credential_binding_with_positive_control(tmp_
     protected_file = protected_dir / ".env-test"
     protected_file.write_text("fixture-not-a-secret\n", encoding="utf-8")
     profile = tmp_path / "profile.sb"
-    hlr.build_sandbox_exec_profile(profile, credential_home_roots=(fixture_home,))
+    hlr.build_sandbox_exec_profile(
+        profile,
+        credential_home_roots=(fixture_home,),
+        runtime_write_root=tmp_path,
+    )
 
     probe_passed = hlr.probe_sandbox_exec_preserves_credential_binding(
         profile,
@@ -1254,6 +1313,7 @@ def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_
         git_stash_denied=True,
         authentication_ready=True,
         unavailable_guards=(),
+        review_write_confined=True,
     )
     unguarded = hlr.HarnessSandbox(
         provider="codex",

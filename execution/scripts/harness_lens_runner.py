@@ -732,7 +732,9 @@ def build_sandbox_exec_profile(
 
     while leaving reads and non-filesystem operations available to the
     provider runtime. Filesystem writes are denied globally and reopened only
-    beneath the isolated runtime root plus the exact verdict pathname.
+    beneath the isolated runtime root plus the exact verdict pathname and the
+    literal ``/dev/null`` device required by Git and subprocess plumbing. No
+    ``/dev`` subpath is allowed.
 
     THE STASH DENY IS BY EFFECT, NOT BY BINARY (round 4's own fix, replacing
     round 3's ``process-exec`` enumeration). Round 3 denied ``process-exec``
@@ -861,6 +863,7 @@ def build_sandbox_exec_profile(
         "(allow default)\n"
         "(deny file-write*)\n"
         "(allow file-write*\n"
+        '  (literal "/dev/null")\n'
         f'  (literal "{runtime_root}")\n'
         f'  (subpath "{runtime_root}")\n'
         f'  (literal "{verdict}")\n'
@@ -994,9 +997,10 @@ def probe_review_write_confinement(
     """Exercise the exact local-review write boundary with disposable files.
 
     The parent creates every negative fixture.  The sandboxed process must be
-    able to write the one verdict and its isolated runtime root, while writes
-    inside the review checkout, a sibling checkout-shaped directory, and an
-    ordinary outside directory all fail without changing their sentinels.
+    able to open literal ``/dev/null`` read-write, write the one verdict and
+    its isolated runtime root, while writes inside the review checkout, a
+    sibling checkout-shaped directory, and an ordinary outside directory all
+    fail without changing their sentinels.
     """
     sandbox_exec = trusted_sandbox_exec_path()
     if sandbox_exec is None:
@@ -1008,6 +1012,20 @@ def probe_review_write_confinement(
     runtime = runtime_root / "write-probe" / "allowed"
     paths = (sibling, outside, tracked)
     try:
+        null_control = subprocess.run(
+            [
+                sandbox_exec,
+                "-f",
+                str(profile_path),
+                "/usr/bin/python3",
+                "-c",
+                "with open('/dev/null', 'r+b', buffering=0) as sink: sink.write(b'x')",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if null_control.returncode != 0:
+            return False
         for path in paths:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("unchanged\n", encoding="utf-8")
