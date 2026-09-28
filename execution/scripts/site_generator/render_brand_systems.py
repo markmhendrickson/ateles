@@ -2,10 +2,10 @@
 """Render canonical Neotoma brand systems into repository mirrors.
 
 Neotoma ``brand_guideline`` entities own brand expression. This renderer
-creates two reviewable derivatives from the same snapshot: a machine contract
-for the site generator and a human guide under ``docs/brand``. Neither output
-is an independent source of truth and both are checked for drift with
-``--check``.
+creates the reviewable derivatives from one render transaction: a machine
+contract for the site generator, a human guide under ``docs/brand``, and the
+product design-token mirrors. None is an independent source of truth and all
+are checked for drift with ``--check``.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ DOC_DIR = REPO_ROOT / "docs" / "brand"
 
 sys.path.insert(0, str(REPO_ROOT / "execution" / "scripts"))
 from neotoma_mirror_lib import load_env, request, unwrap_snapshot  # noqa: E402
+import render_design_tokens as design_token_renderer  # noqa: E402
 from url_policy import local_asset_url, public_href  # noqa: E402
 
 SCHEMA_ENTITY_ID = "ent_73da44b2d434cbafe5d8ecb9"
@@ -474,12 +475,12 @@ def render_contract(
     provenance: dict,
     *,
     fetched_at: str,
-    entity_schema_version: str = "1.0",
 ) -> dict:
     data = {field: snapshot.get(field) for field in REQUIRED_SECTIONS}
-    # The entity API may serialize the entity-schema version as numeric 1.0;
-    # the brand contract keeps it as the schema's declared string value.
-    data["schema_version"] = str(entity_schema_version)
+    # The outer entity ``schema_version`` describes Neotoma storage and can
+    # advance independently. The contract version is the value declared by the
+    # canonical brand-guideline snapshot itself.
+    data["schema_version"] = str(snapshot.get("schema_version") or "1.0")
     doc = {
         "_source": {
             "entity_id": entity_id,
@@ -855,11 +856,24 @@ def fetch_all(base_url: str, token: str) -> tuple[dict, dict[str, dict]]:
             snapshot,
             provenance,
             fetched_at=fetched_at,
-            entity_schema_version=str(payload.get("schema_version") or "1.0"),
         )
         validate_brand_system(contract, schema)
         contracts[product] = contract
     return schema, contracts
+
+
+def fetch_design_tokens(base_url: str, token: str) -> dict[str, dict]:
+    """Read every product token source in the same render transaction."""
+    documents: dict[str, dict] = {}
+    for product in KNOWN_PRODUCTS:
+        default_id = design_token_renderer.DEFAULT_DESIGN_SYSTEM_ENTITY_IDS[product]
+        entity_id = os.environ.get(
+            f"ATELES_{product.upper()}_DESIGN_SYSTEM_ENTITY_ID", default_id
+        )
+        documents[product] = design_token_renderer.render(
+            product, base_url, token, entity_id
+        )
+    return documents
 
 
 def _normalized(document: dict) -> dict:
@@ -869,7 +883,9 @@ def _normalized(document: dict) -> dict:
     return document
 
 
-def write_all(schema: dict, contracts: dict[str, dict]) -> None:
+def write_all(
+    schema: dict, contracts: dict[str, dict], design_tokens: dict[str, dict]
+) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     DOC_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / "schema.v1.json").write_text(
@@ -881,9 +897,13 @@ def write_all(schema: dict, contracts: dict[str, dict]) -> None:
         )
         (DOC_DIR / f"{product}.md").write_text(render_markdown(contract))
         print(f"wrote brand mirrors for {product}")
+    for product, document in design_tokens.items():
+        design_token_renderer.write(product, document)
 
 
-def check_all(schema: dict, contracts: dict[str, dict]) -> bool:
+def check_all(
+    schema: dict, contracts: dict[str, dict], design_tokens: dict[str, dict]
+) -> bool:
     ok = True
     schema_path = OUT_DIR / "schema.v1.json"
     if not schema_path.exists() or json.loads(schema_path.read_text()) != schema:
@@ -900,6 +920,8 @@ def check_all(schema: dict, contracts: dict[str, dict]) -> bool:
         if not doc_path.exists() or doc_path.read_text() != render_markdown(contract):
             print(f"DRIFT: docs/brand/{product}.md differs from Neotoma")
             ok = False
+    for product, document in design_tokens.items():
+        ok = design_token_renderer.check(product, document) and ok
     return ok
 
 
@@ -909,12 +931,16 @@ def main() -> int:
     args = parser.parse_args()
     base_url, token = load_env()
     schema, contracts = fetch_all(base_url, token)
+    design_tokens = fetch_design_tokens(base_url, token)
     if args.check:
-        if check_all(schema, contracts):
-            print("brand system mirror check OK — disk matches Neotoma")
+        if check_all(schema, contracts, design_tokens):
+            print(
+                "brand system and design-token mirror check OK — "
+                "disk matches Neotoma"
+            )
             return 0
         return 1
-    write_all(schema, contracts)
+    write_all(schema, contracts, design_tokens)
     return 0
 
 

@@ -299,3 +299,47 @@ def test_renderer_check_is_deterministic_except_fetch_timestamp(schema, contract
     changed = copy.deepcopy(contract)
     changed["positioning"]["product_promise"] = "stale"
     assert renderer._normalized(contract) != renderer._normalized(changed)
+
+
+def test_contract_version_comes_from_canonical_snapshot_not_storage_schema(contract):
+    snapshot = {
+        key: copy.deepcopy(value)
+        for key, value in contract.items()
+        if not key.startswith("_")
+    }
+    snapshot["schema_version"] = "1.0"
+    rendered = renderer.render_contract(
+        contract["slug"],
+        "ent_fixture",
+        snapshot,
+        {},
+        fetched_at="2026-09-28T00:00:00+00:00",
+    )
+    assert rendered["schema_version"] == "1.0"
+
+
+def test_brand_check_binds_design_tokens_in_the_same_transaction(
+    monkeypatch, schema
+):
+    contracts = {
+        product: json.loads(
+            (GEN_DIR / "brand_systems" / f"{product}.json").read_text()
+        )
+        for product in ("ateles", "neotoma")
+    }
+    checked = []
+
+    def check(product, document):
+        checked.append((product, document))
+        return True
+
+    monkeypatch.setattr(renderer.design_token_renderer, "check", check)
+    renderer.check_all(
+        schema,
+        contracts,
+        {"ateles": {"token": "a"}, "neotoma": {"token": "n"}},
+    )
+    assert checked == [
+        ("ateles", {"token": "a"}),
+        ("neotoma", {"token": "n"}),
+    ]
