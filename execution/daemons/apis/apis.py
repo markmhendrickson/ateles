@@ -662,6 +662,17 @@ async def dispatch_task(
         )
         return
 
+    # VERIFIED means the executor already returned successfully and only the
+    # run's terminal provenance remains unresolved. Re-entering normal dispatch
+    # here would repeat the completed effect; the watchdog owns reconciliation
+    # of this state and never calls the executor for it.
+    if normalize_status(current_status) == TaskStatus.VERIFIED.value:
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} has a completed effect with "
+            f"pending provenance (trigger={trigger}) — not dispatching"
+        )
+        return
+
     # The snapshot read fine, so any prior unreadable streak for this task is
     # over; forget it so a later blip starts counting from zero rather than
     # inheriting an old streak and reporting prematurely.
@@ -1123,6 +1134,22 @@ async def dispatch_task(
             raise
 
         if result.ok:
+            pending_result = (
+                f"{skill} completed (trigger={trigger}); "
+                f"run_session={run_session.native_session_id}; "
+                "provenance=unverified"
+                if run_session
+                else f"{skill} completed (trigger={trigger})"
+            )
+            if run_session:
+                set_task_status(
+                    entity_id,
+                    TaskStatus.VERIFIED,
+                    handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value,
+                    result=pending_result,
+                    key_suffix=trigger,
+                )
             if run_session and not update_run_session_status(
                 run_session, status="completed"
             ):
@@ -1137,15 +1164,16 @@ async def dispatch_task(
                 )
                 set_task_status(
                     entity_id,
-                    TaskStatus.FAILED,
+                    TaskStatus.VERIFIED,
                     handler=DAEMON_NAME,
-                    from_status=TaskStatus.EXECUTING.value,
+                    from_status=TaskStatus.VERIFIED.value,
                     reason=reason,
+                    result=pending_result,
                     key_suffix=trigger,
                 )
                 notifier.send(
                     f"{skill} returned successfully on {entity_id}, but {reason}; "
-                    "task marked FAILED",
+                    "task held VERIFIED for provenance reconciliation",
                     priority=Priority.BLOCKER,
                     handler=DAEMON_NAME,
                 )
@@ -1160,8 +1188,14 @@ async def dispatch_task(
                 entity_id,
                 TaskStatus.DONE,
                 handler=DAEMON_NAME,
-                from_status=TaskStatus.EXECUTING.value,
-                result=f"{skill} completed (trigger={trigger})",
+                from_status=(
+                    TaskStatus.VERIFIED.value
+                    if run_session
+                    else TaskStatus.EXECUTING.value
+                ),
+                result=pending_result.replace(
+                    "provenance=unverified", "provenance=verified"
+                ),
                 key_suffix=trigger,
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")

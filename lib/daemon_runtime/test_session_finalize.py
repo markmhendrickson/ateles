@@ -261,6 +261,97 @@ def test_update_run_session_status_reads_back_terminal_state(monkeypatch):
     assert posted[0]["entities"][0]["status"] == "completed"
 
 
+def test_recover_run_session_finds_exact_existing_run_and_verifies_links(monkeypatch):
+    native_session_id = "ent_task:approved-2"
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.data
+
+    def fake_post(url, **kwargs):
+        assert url.endswith("/entities/query")
+        entity_type = kwargs["json"]["entity_type"]
+        filters = kwargs["json"]["snapshot_filters"]
+        if entity_type == "agent_session":
+            assert filters == {
+                "native_session_id": {"op": "eq", "value": native_session_id}
+            }
+            return _Response({"entities": [{
+                "entity_id": "ent_session99",
+                "snapshot": {
+                    "harness": "ateles-swarm",
+                    "native_session_id": native_session_id,
+                    "status": "active",
+                },
+            }]})
+        assert filters == {
+            "conversation_id": {"op": "eq", "value": native_session_id}
+        }
+        return _Response({"entities": [{
+            "entity_id": "ent_conv99",
+            "snapshot": {
+                "conversation_id": native_session_id,
+                "session_id": native_session_id,
+            },
+        }]})
+
+    def fake_get(url, **_kwargs):
+        if url.endswith("/entities/ent_conv99"):
+            return _Response({
+                "entity_id": "ent_conv99",
+                "entity_type": "conversation",
+                "snapshot": {
+                    "conversation_id": native_session_id,
+                    "session_id": native_session_id,
+                },
+            })
+        if url.endswith("/entities/ent_session99"):
+            return _Response({
+                "entity_id": "ent_session99",
+                "entity_type": "agent_session",
+                "snapshot": {
+                    "harness": "ateles-swarm",
+                    "native_session_id": native_session_id,
+                },
+            })
+        source_entity_id = url.split("/entities/", 1)[1].split("/", 1)[0]
+        targets = {
+            "ent_conv99": ["ent_task", "ent_session99"],
+            "ent_session99": ["ent_task"],
+        }
+        return _Response({"relationships": [
+            {
+                "source_entity_id": source_entity_id,
+                "target_entity_id": target,
+                "relationship_type": "REFERS_TO",
+            }
+            for target in targets[source_entity_id]
+        ]})
+
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(sf.httpx, "post", fake_post)
+    monkeypatch.setattr(sf.httpx, "get", fake_get)
+
+    assert sf.recover_run_session(
+        task_id="ent_task",
+        native_session_id=native_session_id,
+    ) == sf.RunSession("ent_conv99", "ent_session99", native_session_id)
+
+
+def test_recover_run_session_rejects_identity_from_another_task(monkeypatch):
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    assert sf.recover_run_session(
+        task_id="ent_task",
+        native_session_id="ent_other:approved-2",
+    ) is None
+
+
 def test_create_run_conversation_fail_open(monkeypatch):
     monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "")
     assert sf.create_run_conversation(task_id="ent_task", agent="cicada", run_key="r") is None

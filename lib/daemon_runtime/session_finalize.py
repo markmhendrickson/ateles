@@ -415,6 +415,139 @@ def create_run_session(
     )
 
 
+def _query_entity_rows(
+    entity_type: str, *, identity_field: str, identity_value: str
+) -> list[dict]:
+    """Return matching entity rows from the canonical Neotoma read route."""
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning("[finalize] no bearer token — entity query skipped")
+        return []
+    try:
+        response = httpx.post(
+            f"{NEOTOMA_BASE_URL}/entities/query",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json={
+                "entity_type": entity_type,
+                "snapshot_filters": {
+                    identity_field: {"op": "eq", "value": identity_value}
+                },
+                "limit": 25,
+                "include_snapshots": True,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json().get("entities", [])
+    except Exception as exc:  # noqa: BLE001 — recovery retries on the next sweep
+        log.warning("[finalize] %s query failed: %s", entity_type, exc)
+        return []
+
+
+def _row_snapshot(row: dict) -> dict:
+    """Unwrap the snapshot shapes returned by ``/entities/query``."""
+    snapshot = row.get("snapshot")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("snapshot"), dict):
+        return snapshot["snapshot"]
+    if isinstance(snapshot, dict):
+        return snapshot
+    return row
+
+
+def recover_run_session(
+    *, task_id: str, native_session_id: str
+) -> RunSession | None:
+    """Find and verify an already-created run without creating another one.
+
+    Recovery is deliberately exact: the native session identity must belong to
+    ``task_id``, exactly one conversation and one agent session must match, and
+    all three provenance relationships created before execution must still read
+    back. Ambiguity leaves the task in its non-dispatchable verified state.
+    """
+    if not native_session_id.startswith(f"{task_id}:"):
+        log.warning(
+            "[finalize] run identity %r does not belong to task %s",
+            native_session_id,
+            task_id,
+        )
+        return None
+
+    session_matches: list[tuple[str, dict]] = []
+    for row in _query_entity_rows(
+        "agent_session",
+        identity_field="native_session_id",
+        identity_value=native_session_id,
+    ):
+        snapshot = _row_snapshot(row)
+        entity_id = row.get("entity_id") or row.get("id")
+        if (
+            entity_id
+            and snapshot.get("harness") == "ateles-swarm"
+            and snapshot.get("native_session_id") == native_session_id
+        ):
+            session_matches.append((entity_id, snapshot))
+
+    conversation_matches: list[tuple[str, dict]] = []
+    for row in _query_entity_rows(
+        "conversation",
+        identity_field="conversation_id",
+        identity_value=native_session_id,
+    ):
+        snapshot = _row_snapshot(row)
+        entity_id = row.get("entity_id") or row.get("id")
+        if (
+            entity_id
+            and snapshot.get("conversation_id") == native_session_id
+            and snapshot.get("session_id") == native_session_id
+        ):
+            conversation_matches.append((entity_id, snapshot))
+
+    if len(session_matches) != 1 or len(conversation_matches) != 1:
+        log.warning(
+            "[finalize] run recovery is ambiguous for %s: sessions=%d conversations=%d",
+            native_session_id,
+            len(session_matches),
+            len(conversation_matches),
+        )
+        return None
+
+    agent_session_id, _ = session_matches[0]
+    conversation_id, _ = conversation_matches[0]
+    if not _entity_readback_matches(
+        conversation_id,
+        entity_type="conversation",
+        required_fields={
+            "conversation_id": native_session_id,
+            "session_id": native_session_id,
+        },
+    ):
+        return None
+    if not _entity_readback_matches(
+        agent_session_id,
+        entity_type="agent_session",
+        required_fields={
+            "harness": "ateles-swarm",
+            "native_session_id": native_session_id,
+        },
+    ):
+        return None
+    for source_entity_id, target_entity_id in (
+        (conversation_id, task_id),
+        (agent_session_id, task_id),
+        (conversation_id, agent_session_id),
+    ):
+        if not _relationship_readback_matches(
+            source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type="REFERS_TO",
+        ):
+            return None
+    return RunSession(
+        conversation_id=conversation_id,
+        agent_session_id=agent_session_id,
+        native_session_id=native_session_id,
+    )
+
+
 def update_run_session_status(run: RunSession, *, status: str) -> bool:
     """Record and verify a run's terminal lifecycle state."""
     data = _post_store({

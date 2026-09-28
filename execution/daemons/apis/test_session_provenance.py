@@ -15,6 +15,7 @@ for _path in (str(_REPO_ROOT), str(_HERE)):
         sys.path.insert(0, _path)
 
 import apis  # noqa: E402
+import task_watchdog as tw  # noqa: E402
 from lib.daemon_runtime import session_finalize  # noqa: E402
 
 
@@ -250,7 +251,7 @@ async def test_dispatch_refuses_to_spawn_without_verified_session_provenance(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_does_not_report_success_when_terminal_state_is_unverified(
+async def test_dispatch_holds_verified_when_terminal_state_is_unverified(
     monkeypatch,
 ):
     run = SimpleNamespace(
@@ -299,11 +300,96 @@ async def test_dispatch_does_not_report_success_when_terminal_state_is_unverifie
         gate_override=True,
     )
 
-    assert task_statuses[-1][0][1] is apis.TaskStatus.FAILED
+    assert task_statuses[-1][0][1] is apis.TaskStatus.VERIFIED
     assert "terminal" in task_statuses[-1][1]["reason"]
     assert job.finished_events == []
     assert job.failed_events
     assert not any("completed" in turn["content"].lower() for turn in turns)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_reconciles_terminal_provenance_without_repeating_effect(
+    monkeypatch,
+):
+    run = SimpleNamespace(
+        conversation_id="ent_conversation",
+        agent_session_id="ent_session",
+        native_session_id="ent_task:approved-2",
+    )
+    snapshot = {
+        "title": "Implement it",
+        "assigned_to": "cicada",
+        "status": "awaiting_approval",
+        "attempt": 2,
+    }
+    executions: list[str] = []
+    terminal_updates: list[str] = []
+    task_statuses: list[str] = []
+
+    def write_status(_task_id, status, **_kwargs):
+        value = status.value if isinstance(status, apis.TaskStatus) else status
+        snapshot["status"] = value
+        if _kwargs.get("result") is not None:
+            snapshot["result"] = _kwargs["result"]
+        task_statuses.append(value)
+        return True
+
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(
+        apis, "_activity", SimpleNamespace(started=lambda *_args: _Job())
+    )
+    monkeypatch.setattr(apis, "set_task_status", write_status)
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_args: True)
+    monkeypatch.setattr(apis, "create_run_session", lambda **_kwargs: run)
+    monkeypatch.setattr(apis, "append_turn", lambda **_kwargs: True)
+
+    def terminal_update(_run, *, status):
+        terminal_updates.append(status)
+        return len(terminal_updates) > 1
+
+    monkeypatch.setattr(apis, "update_run_session_status", terminal_update)
+
+    async def execute_effect(*_args, **_kwargs):
+        executions.append("executed")
+        return SimpleNamespace(ok=True, error="", returncode=0)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", execute_effect)
+    monkeypatch.setattr(tw, "_query_tasks", lambda _limit: [("ent_task", snapshot)])
+    monkeypatch.setattr(tw, "set_task_status", write_status)
+    monkeypatch.setattr(tw, "recover_run_session", lambda **_kwargs: run)
+    monkeypatch.setattr(tw, "update_run_session_status", terminal_update)
+
+    notifier = _Notifier()
+
+    async def dispatch_again(task_id, current_snapshot, trigger):
+        await apis.dispatch_task(
+            task_id,
+            current_snapshot,
+            trigger,
+            notifier,
+            gate_override=True,
+        )
+
+    await apis.dispatch_task(
+        "ent_task",
+        snapshot,
+        "approved",
+        notifier,
+        gate_override=True,
+    )
+
+    assert executions == ["executed"]
+    assert snapshot["status"] == apis.TaskStatus.VERIFIED.value
+    assert apis.TaskStatus.DONE.value not in task_statuses
+
+    counts = await tw.TaskWatchdog().sweep(notifier, dispatch_again)
+
+    assert counts["reconciled"] == 1
+    assert counts["retried"] == 0
+    assert executions == ["executed"]
+    assert snapshot["status"] == apis.TaskStatus.DONE.value
+    assert terminal_updates == ["completed", "completed"]
 
 
 async def _async_result(value):

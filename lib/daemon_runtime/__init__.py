@@ -156,6 +156,7 @@ from .session_finalize import (
     create_run_session,
     finalize_session,
     load_end_skill,
+    recover_run_session,
     update_run_session_status,
 )
 from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
@@ -227,6 +228,7 @@ __all__ = [
     "build_turn_payload",
     "create_run_conversation",
     "create_run_session",
+    "recover_run_session",
     "RunSession",
     "update_run_session_status",
     "append_turn",
