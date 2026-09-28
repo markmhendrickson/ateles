@@ -1293,7 +1293,107 @@ def test_run_one_refuses_to_post_when_head_moved(
 
     assert report["ok"] is False
     assert "head moved" in report["refusal_reason"]
+    assert report["retryable"] is False
+    assert report["error_kind"] == "head_mismatch"
     assert posted is False
+
+
+def test_run_one_refuses_to_post_when_head_verification_is_unreadable(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    async def _dispatch(role, task, **kwargs):
+        verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **k: "")
+    monkeypatch.setattr(hlr, "gh_login", lambda: "ateles-agent")
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **k: (_ for _ in ()).throw(
+            AssertionError("must not post without an exact live head")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target, provider="codex", post=True, dry_run=False,
+            repo_worktree_name="ateles", scratch_root=tmp_path,
+            brief_path=brief_file, timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert report["lens_verdict"] == "signed_off"
+    assert report["verdict_text"] == SIGNED_OFF_VERDICT
+    assert report["retryable"] is True
+    assert report["error_kind"] == "head_verification_failed"
+
+
+def test_run_one_reports_thrown_head_lookup_as_retryable(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    async def _dispatch(role, task, **kwargs):
+        verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+    monkeypatch.setattr(
+        hlr,
+        "current_pr_head",
+        lambda **k: (_ for _ in ()).throw(RuntimeError("lookup unavailable")),
+    )
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **k: (_ for _ in ()).throw(
+            AssertionError("must not post when head lookup raises")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target, provider="codex", post=True, dry_run=False,
+            repo_worktree_name="ateles", scratch_root=tmp_path,
+            brief_path=brief_file, timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert report["lens_verdict"] == "signed_off"
+    assert report["verdict_text"] == SIGNED_OFF_VERDICT
+    assert report["retryable"] is True
+    assert report["error_kind"] == "head_verification_failed"
+    assert "lookup unavailable" in report["refusal_reason"]
 
 
 def test_run_one_refuses_to_post_under_wrong_gh_identity(

@@ -1570,9 +1570,30 @@ async def run_one(
         # Re-check the head before posting — the brief's own step 1, applied
         # here rather than trusted from before dispatch (a long-running codex
         # attempt could span a force-push).
-        current_head = current_pr_head(repo=target.repo, pr=target.pr)
-        if current_head and current_head != target.head:
+        try:
+            current_head = current_pr_head(repo=target.repo, pr=target.pr)
+        except Exception as exc:
             report["ok"] = False
+            report["retryable"] = True
+            report["error_kind"] = "head_verification_failed"
+            report["refusal_reason"] = (
+                "PR head verification failed before posting "
+                f"({type(exc).__name__}: {exc}) — retry the run"
+            )
+            return report
+        if not current_head:
+            report["ok"] = False
+            report["retryable"] = True
+            report["error_kind"] = "head_verification_failed"
+            report["refusal_reason"] = (
+                "PR head verification returned no readable head before "
+                "posting — retry the run"
+            )
+            return report
+        if current_head != target.head:
+            report["ok"] = False
+            report["retryable"] = False
+            report["error_kind"] = "head_mismatch"
             report["refusal_reason"] = (
                 f"PR head moved from {target.head} to {current_head} during "
                 "the run — refusing to post a verdict against a stale head"
