@@ -25,12 +25,35 @@ This module owns exactly that hole and nothing else.
 
 WHAT IT DOES
 ------------
-Every APIS_RECONCILE_INTERVAL_SECONDS, query tasks, keep the ones that are
-`pending`, un-owned by any in-flight dispatch, and older than a grace window,
-then dispatch up to APIS_RECONCILE_MAX_PER_SWEEP of them through the SAME
-`dispatch_task` used by the SSE path — so the confidence x blast-radius
-execution gate still applies and high-blast work still holds for a checkpoint.
-The sweep does not dispatch anything; it hands each task to Apis's dispatcher.
+Every APIS_RECONCILE_INTERVAL_SECONDS, read a bounded slice of the task table,
+keep the rows that are `pending`, un-owned by any in-flight dispatch, and older
+than a grace window, then dispatch up to APIS_RECONCILE_MAX_PER_SWEEP of them
+through the SAME `dispatch_task` used by the SSE path — so the confidence x
+blast-radius execution gate still applies and high-blast work still holds for a
+checkpoint. The sweep does not dispatch anything; it hands each task to Apis's
+dispatcher.
+
+READING THE TABLE
+-----------------
+`POST /entities/query` caps hydrated pages at 500 rows and returns an opaque
+`next_cursor`. A single fixed query therefore reads the same entity-id-ordered
+slice on every pass and can never reach a pending task outside it.
+
+The current Neotoma contract has a server-side `snapshot_filters` field, but a
+status-equals-pending query cannot include legacy tasks whose status is absent;
+those are intentionally sweepable here. The reconciler therefore keeps status
+selection client-side and walks the canonical cursor instead of maintaining two
+different candidate paths.
+
+The cursor is resumable and bounded: APIS_RECONCILE_PAGES_PER_SWEEP pages per
+pass, resume where the last pass stopped, and restart from the head once the end
+is reached. Every pending task is eventually reachable without making any one
+pass scan the whole table.
+
+When the per-sweep dispatch cap is hit part-way through a page, the cursor is
+deliberately NOT advanced past that page. The next pass re-reads it and drains
+the rest; the claim ledger keeps already-dispatched rows from consuming that
+pass's budget.
 
 NOT DOUBLE-DISPATCHING (the correctness crux)
 ---------------------------------------------
@@ -83,7 +106,8 @@ Environment:
   APIS_RECONCILE_INTERVAL_SECONDS  Sweep cadence (default: 900).
   APIS_RECONCILE_MAX_PER_SWEEP     Max dispatches per pass (default: 5).
   APIS_RECONCILE_GRACE_SECONDS     Min task age before eligible (default: 900).
-  APIS_RECONCILE_QUERY_LIMIT       Tasks fetched per pass (default: 500).
+  APIS_RECONCILE_QUERY_LIMIT       Rows fetched per page (default: 500).
+  APIS_RECONCILE_PAGES_PER_SWEEP   Pages walked per pass (default: 5).
 """
 
 from __future__ import annotations
@@ -125,7 +149,9 @@ ENABLED = os.environ.get("APIS_RECONCILE_ENABLED", "0") == "1"
 
 # Sweep cadence. Slower than the watchdog (300s): this is a backstop for a rare
 # failure, not a hot loop, and every pass costs a full task query.
-INTERVAL_SECONDS = max(60, int(os.environ.get("APIS_RECONCILE_INTERVAL_SECONDS", "900")))
+INTERVAL_SECONDS = max(
+    60, int(os.environ.get("APIS_RECONCILE_INTERVAL_SECONDS", "900"))
+)
 
 # Bounded fan-out per pass — the cap that keeps a backlog drain from becoming
 # its own incident.
@@ -135,8 +161,14 @@ MAX_PER_SWEEP = max(1, int(os.environ.get("APIS_RECONCILE_MAX_PER_SWEEP", "5")))
 # will consider it, so a live SSE dispatch always wins the race to ROUTED.
 GRACE_SECONDS = max(60, int(os.environ.get("APIS_RECONCILE_GRACE_SECONDS", "900")))
 
-# Tasks fetched per pass (client-side filtered, like the watchdog).
+# Rows fetched per page. Status stays client-side so absent-status legacy tasks
+# and explicit `pending` tasks follow the same dispatch path.
 QUERY_LIMIT = max(50, int(os.environ.get("APIS_RECONCILE_QUERY_LIMIT", "500")))
+
+# Bound query work independently from dispatch fan-out. The cursor resumes on
+# the next pass, so every row remains reachable without one pass scanning the
+# whole task table.
+PAGES_PER_SWEEP = max(1, int(os.environ.get("APIS_RECONCILE_PAGES_PER_SWEEP", "5")))
 
 # Double-dispatch layer 1: the only statuses this sweep will act on. An absent
 # or empty status counts as pending — legacy rows predate the lifecycle field.
@@ -151,10 +183,10 @@ class SkipReason(str, Enum):
     resolves to exactly one of these and is logged with it.
     """
 
-    NOT_PENDING = "not_pending"          # layer 1: another mechanism owns it
-    WITHIN_GRACE = "within_grace"        # layer 2: SSE may still be dispatching it
+    NOT_PENDING = "not_pending"  # layer 1: another mechanism owns it
+    WITHIN_GRACE = "within_grace"  # layer 2: SSE may still be dispatching it
     ALREADY_CLAIMED = "already_claimed"  # layer 3: this sweep dispatched it before
-    CAP_REACHED = "cap_reached"          # bounded fan-out: deferred to next pass
+    CAP_REACHED = "cap_reached"  # bounded fan-out: deferred to next pass
 
 
 @dataclass
@@ -166,7 +198,9 @@ class TaskReconciler:
 
     max_per_sweep: int = MAX_PER_SWEEP
     grace_seconds: int = GRACE_SECONDS
+    pages_per_sweep: int = PAGES_PER_SWEEP
     _claimed: set[str] = field(default_factory=set)
+    _cursor: str | None = None
 
     # ── pure decision logic (unit-tested) ──────────────────────────────────
 
@@ -218,6 +252,8 @@ class TaskReconciler:
         now = time.time()
         counts = {
             "scanned": 0,
+            "pages_read": 0,
+            "query_errors": 0,
             "dispatched": 0,
             "dispatch_failed": 0,
             SkipReason.NOT_PENDING.value: 0,
@@ -225,12 +261,70 @@ class TaskReconciler:
             SkipReason.ALREADY_CLAIMED.value: 0,
             SkipReason.CAP_REACHED.value: 0,
         }
-        try:
-            tasks = _query_tasks(QUERY_LIMIT)
-        except Exception as exc:  # noqa: BLE001 — a query error never kills the loop
-            log.warning("[reconciler] task query failed: %s", exc)
-            return counts
+        page_cursor = self._cursor
+        for _ in range(self.pages_per_sweep):
+            try:
+                page, next_cursor = _query_tasks(QUERY_LIMIT, page_cursor)
+            except Exception as exc:  # noqa: BLE001 — a query error never kills the loop
+                # Fail-open per iteration, but not fail-past: keep the cursor at
+                # this page so the next pass retries instead of stranding it.
+                counts["query_errors"] += 1
+                log.warning(
+                    "[reconciler] query-error cursor=%r: %s: %s",
+                    page_cursor,
+                    type(exc).__name__,
+                    exc,
+                )
+                break
 
+            counts["pages_read"] += 1
+            deferred_here = await self._process_page(page, counts, now, dispatch_fn)
+
+            if deferred_here:
+                self._cursor = page_cursor
+                break
+
+            if next_cursor is not None and next_cursor == page_cursor:
+                counts["query_errors"] += 1
+                log.warning(
+                    "[reconciler] query-error cursor did not advance: %r",
+                    page_cursor,
+                )
+                break
+
+            page_cursor = next_cursor
+            self._cursor = page_cursor
+            if page_cursor is None:
+                log.info(
+                    "[reconciler] reached the end of the task table — next pass "
+                    "restarts from the head"
+                )
+                break
+        else:
+            log.info(
+                "[reconciler] scan deferred after %s page(s); next pass resumes "
+                "at cursor=%r",
+                self.pages_per_sweep,
+                self._cursor,
+            )
+
+        # Always log the pass, even an empty one: "the sweep ran and found
+        # nothing" and "the sweep did not run" must not look the same.
+        log.info("[reconciler] sweep: %s", counts)
+        deferred = counts[SkipReason.CAP_REACHED.value]
+        if deferred:
+            log.info(
+                "[reconciler] %s eligible task(s) deferred by the per-sweep cap "
+                "(%s) — next pass in %ss",
+                deferred,
+                self.max_per_sweep,
+                INTERVAL_SECONDS,
+            )
+        return counts
+
+    async def _process_page(self, tasks, counts: dict, now: float, dispatch_fn) -> bool:
+        """Process one page and report whether its eligible rows were deferred."""
+        deferred_before = counts[SkipReason.CAP_REACHED.value]
         for entity_id, snapshot in tasks:
             counts["scanned"] += 1
             status = snapshot.get("status", "")
@@ -250,10 +344,9 @@ class TaskReconciler:
                 # about that task (it is owned elsewhere / it may be racing SSE
                 # / we already dispatched it). The two bulk reasons log at DEBUG
                 # and are reported as totals below instead: NOT_PENDING is every
-                # done/routed task in the query window, and CAP_REACHED is the
-                # whole undrained backlog — on the ~100-task backlog this fix
-                # exists for, that is 95 identical lines per pass, which buries
-                # the five that matter.
+                # done/routed task in the page, and CAP_REACHED is the undrained
+                # backlog — hundreds of identical lines would bury the few that
+                # matter.
                 _log = (
                     log.debug
                     if skip in (SkipReason.NOT_PENDING, SkipReason.CAP_REACHED)
@@ -261,8 +354,11 @@ class TaskReconciler:
                 )
                 _log(
                     "[reconciler] skip %s (%s): status=%s age=%ss title=%r",
-                    entity_id, skip.value, normalize(status) or "(none)",
-                    int(age) if age is not None else "unknown", title,
+                    entity_id,
+                    skip.value,
+                    normalize(status) or "(none)",
+                    int(age) if age is not None else "unknown",
+                    title,
                 )
                 continue
 
@@ -274,7 +370,9 @@ class TaskReconciler:
             log.info(
                 "[reconciler] dispatching stranded task %s (age=%ss, pending since "
                 "creation, never seen by the event path): %r",
-                entity_id, int(age or 0), title,
+                entity_id,
+                int(age or 0),
+                title,
             )
             try:
                 await dispatch_fn(entity_id, snapshot, "reconcile")
@@ -283,24 +381,12 @@ class TaskReconciler:
                 counts["dispatch_failed"] += 1
                 log.warning(
                     "[reconciler] dispatch of %s failed: %s: %s",
-                    entity_id, type(exc).__name__, exc,
+                    entity_id,
+                    type(exc).__name__,
+                    exc,
                 )
 
-        # Always log the pass, even an empty one: "the sweep ran and found
-        # nothing" and "the sweep did not run" must not look the same.
-        log.info("[reconciler] sweep: %s", counts)
-        # The undrained remainder is the one number an operator watching a
-        # backlog drain actually wants, and it is the number that says whether
-        # the cap is set sensibly. Stated explicitly rather than left to be
-        # read out of the counts dict.
-        deferred = counts[SkipReason.CAP_REACHED.value]
-        if deferred:
-            log.info(
-                "[reconciler] %s eligible task(s) deferred by the per-sweep cap "
-                "(%s) — next pass in %ss",
-                deferred, self.max_per_sweep, INTERVAL_SECONDS,
-            )
-        return counts
+        return counts[SkipReason.CAP_REACHED.value] > deferred_before
 
     async def run(self, dispatch_fn) -> None:
         """Sweep forever on INTERVAL_SECONDS. Fail-open per iteration."""
@@ -312,8 +398,12 @@ class TaskReconciler:
             return
         log.info(
             "[reconciler] starting (interval=%ss, cap=%s/sweep, grace=%ss, "
-            "query_limit=%s)",
-            INTERVAL_SECONDS, self.max_per_sweep, self.grace_seconds, QUERY_LIMIT,
+            "page=%s rows x %s pages/sweep)",
+            INTERVAL_SECONDS,
+            self.max_per_sweep,
+            self.grace_seconds,
+            QUERY_LIMIT,
+            self.pages_per_sweep,
         )
         while True:
             try:
@@ -326,18 +416,24 @@ class TaskReconciler:
 # ── module-level I/O helpers ────────────────────────────────────────────────
 
 
-def _query_tasks(limit: int) -> list[tuple[str, dict]]:
-    """Return [(entity_id, snapshot), …] for tasks, via POST /entities/query.
+def _query_tasks(
+    limit: int, cursor: str | None = None
+) -> tuple[list[tuple[str, dict]], str | None]:
+    """Return one task page and its opaque continuation cursor.
 
-    Raises on transport error (the caller swallows it). Returns [] when no token.
+    Raises on transport error (the caller swallows it). Returns ``([], None)``
+    when no token is configured.
     """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[reconciler] no bearer token — cannot query tasks")
-        return []
+        return [], None
+    body: dict = {"entity_type": "task", "limit": limit}
+    if cursor:
+        body["cursor"] = cursor
     resp = httpx.post(
         f"{NEOTOMA_BASE_URL}/entities/query",
         headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-        json={"entity_type": "task", "limit": limit},
+        json=body,
         timeout=20,
     )
     resp.raise_for_status()
@@ -349,7 +445,7 @@ def _query_tasks(limit: int) -> list[tuple[str, dict]]:
         snap = _unwrap_snapshot(row)
         if eid and isinstance(snap, dict):
             out.append((eid, snap))
-    return out
+    return out, data.get("next_cursor") or None
 
 
 # Stamps that live at the ROW level of an EntitySnapshot, as siblings of

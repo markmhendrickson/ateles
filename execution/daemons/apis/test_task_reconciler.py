@@ -44,6 +44,25 @@ def _recorder():
     return calls, dispatch_fn
 
 
+def _pages(*pages):
+    """Return a cursor-paginated `_query_tasks` fake and its request log."""
+    requested: list[str | None] = []
+
+    def query(limit, cursor=None):
+        requested.append(cursor)
+        index = 0 if cursor is None else int(cursor.removeprefix("page-"))
+        rows = list(pages[index]) if index < len(pages) else []
+        next_cursor = f"page-{index + 1}" if index + 1 < len(pages) else None
+        return rows, next_cursor
+
+    return requested, query
+
+
+def _one_page(rows):
+    """Return a one-page `_query_tasks` fake for decision-logic tests."""
+    return _pages(rows)[1]
+
+
 # ── 1. the stranded task IS dispatched ───────────────────────────────────────
 
 
@@ -55,10 +74,22 @@ def test_task_stranded_by_dead_sse_path_is_dispatched(monkeypatch):
     `pending` as NONE. The sweep must pick it up.
     """
     rec = tr.TaskReconciler()
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        ("ent_stranded", {"status": "pending", "title": "never dispatched",
-                          "updated_at": tr._iso_ago(_OLD)}),
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                (
+                    "ent_stranded",
+                    {
+                        "status": "pending",
+                        "title": "never dispatched",
+                        "updated_at": tr._iso_ago(_OLD),
+                    },
+                ),
+            ]
+        ),
+    )
     calls, dispatch_fn = _recorder()
 
     counts = asyncio.run(rec.sweep(dispatch_fn))
@@ -70,9 +101,18 @@ def test_task_stranded_by_dead_sse_path_is_dispatched(monkeypatch):
 def test_absent_status_counts_as_pending(monkeypatch):
     """Legacy rows predate the lifecycle field; an absent status is sweepable."""
     rec = tr.TaskReconciler()
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        ("ent_legacy", {"title": "no status field", "updated_at": tr._iso_ago(_OLD)}),
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                (
+                    "ent_legacy",
+                    {"title": "no status field", "updated_at": tr._iso_ago(_OLD)},
+                ),
+            ]
+        ),
+    )
     calls, dispatch_fn = _recorder()
 
     asyncio.run(rec.sweep(dispatch_fn))
@@ -91,14 +131,28 @@ def test_inflight_statuses_are_never_swept(monkeypatch):
     `pending` and must not be selected here, however old it is.
     """
     owned = [
-        "routed", "executing", "verified", "done", "failed", "blocked",
-        "awaiting_approval", "awaiting_input", "declined", "superseded",
+        "routed",
+        "executing",
+        "verified",
+        "done",
+        "failed",
+        "blocked",
+        "awaiting_approval",
+        "awaiting_input",
+        "declined",
+        "superseded",
     ]
     rec = tr.TaskReconciler()
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        (f"ent_{s}", {"status": s, "title": s, "updated_at": tr._iso_ago(_OLD)})
-        for s in owned
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                (f"ent_{s}", {"status": s, "title": s, "updated_at": tr._iso_ago(_OLD)})
+                for s in owned
+            ]
+        ),
+    )
     calls, dispatch_fn = _recorder()
 
     counts = asyncio.run(rec.sweep(dispatch_fn))
@@ -113,10 +167,22 @@ def test_recently_touched_pending_task_is_left_to_the_sse_path(monkeypatch):
     `pending` until its ROUTED correction lands. The grace window means the sweep
     never races a live dispatch — the event path always wins."""
     rec = tr.TaskReconciler(grace_seconds=900)
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        ("ent_inflight", {"status": "pending", "title": "SSE is on it right now",
-                          "updated_at": tr._iso_ago(5)}),
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                (
+                    "ent_inflight",
+                    {
+                        "status": "pending",
+                        "title": "SSE is on it right now",
+                        "updated_at": tr._iso_ago(5),
+                    },
+                ),
+            ]
+        ),
+    )
     calls, dispatch_fn = _recorder()
 
     counts = asyncio.run(rec.sweep(dispatch_fn))
@@ -129,9 +195,15 @@ def test_unparseable_age_fails_safe_toward_not_dispatching(monkeypatch):
     """No usable timestamp → treat as within grace. A missed pass costs one
     interval; a wrong dispatch costs duplicated agent work."""
     rec = tr.TaskReconciler()
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        ("ent_nots", {"status": "pending", "title": "no timestamp"}),
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                ("ent_nots", {"status": "pending", "title": "no timestamp"}),
+            ]
+        ),
+    )
     calls, dispatch_fn = _recorder()
 
     counts = asyncio.run(rec.sweep(dispatch_fn))
@@ -146,10 +218,22 @@ def test_claimed_task_is_not_dispatched_twice_across_passes(monkeypatch):
     from re-selecting it."""
     rec = tr.TaskReconciler()
     # Same task, still `pending` on the second pass — the ROUTED write was lost.
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        ("ent_lostwrite", {"status": "pending", "title": "ROUTED write never landed",
-                           "updated_at": tr._iso_ago(_OLD)}),
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                (
+                    "ent_lostwrite",
+                    {
+                        "status": "pending",
+                        "title": "ROUTED write never landed",
+                        "updated_at": tr._iso_ago(_OLD),
+                    },
+                ),
+            ]
+        ),
+    )
     calls, dispatch_fn = _recorder()
 
     first = asyncio.run(rec.sweep(dispatch_fn))
@@ -165,10 +249,22 @@ def test_claim_is_held_even_when_dispatch_raises(monkeypatch):
     """A task that crashed the dispatcher must not be re-thrown at it every
     pass. Recovery from there is the watchdog's and the operator's."""
     rec = tr.TaskReconciler()
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        ("ent_boom", {"status": "pending", "title": "explodes",
-                      "updated_at": tr._iso_ago(_OLD)}),
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                (
+                    "ent_boom",
+                    {
+                        "status": "pending",
+                        "title": "explodes",
+                        "updated_at": tr._iso_ago(_OLD),
+                    },
+                ),
+            ]
+        ),
+    )
     attempts = []
 
     async def dispatch_fn(task_id, snapshot, trigger):
@@ -191,11 +287,23 @@ def test_cap_bounds_dispatches_per_pass_and_defers_the_rest(monkeypatch):
     be its own incident, so the cap bounds each pass and the remainder are
     deferred (not dropped) to the next one."""
     rec = tr.TaskReconciler(max_per_sweep=3)
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        (f"ent_{i}", {"status": "pending", "title": f"backlog {i}",
-                      "updated_at": tr._iso_ago(_OLD)})
-        for i in range(10)
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                (
+                    f"ent_{i}",
+                    {
+                        "status": "pending",
+                        "title": f"backlog {i}",
+                        "updated_at": tr._iso_ago(_OLD),
+                    },
+                )
+                for i in range(10)
+            ]
+        ),
+    )
     calls, dispatch_fn = _recorder()
 
     counts = asyncio.run(rec.sweep(dispatch_fn))
@@ -211,11 +319,23 @@ def test_deferred_backlog_depth_is_reported_at_info(monkeypatch, caplog):
     it is what says whether the cap is set sensibly — so it is stated at INFO,
     not left to be counted out of per-task DEBUG lines."""
     rec = tr.TaskReconciler(max_per_sweep=2)
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        (f"ent_{i}", {"status": "pending", "title": f"backlog {i}",
-                      "updated_at": tr._iso_ago(_OLD)})
-        for i in range(9)
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                (
+                    f"ent_{i}",
+                    {
+                        "status": "pending",
+                        "title": f"backlog {i}",
+                        "updated_at": tr._iso_ago(_OLD),
+                    },
+                )
+                for i in range(9)
+            ]
+        ),
+    )
     _, dispatch_fn = _recorder()
 
     with caplog.at_level(logging.INFO, logger="apis.reconciler"):
@@ -229,11 +349,17 @@ def test_backlog_drains_across_passes_without_repeating(monkeypatch):
     stops the already-dispatched ones from consuming the next pass's budget."""
     rec = tr.TaskReconciler(max_per_sweep=2)
     backlog = [
-        (f"ent_{i}", {"status": "pending", "title": f"backlog {i}",
-                      "updated_at": tr._iso_ago(_OLD)})
+        (
+            f"ent_{i}",
+            {
+                "status": "pending",
+                "title": f"backlog {i}",
+                "updated_at": tr._iso_ago(_OLD),
+            },
+        )
         for i in range(5)
     ]
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: backlog)
+    monkeypatch.setattr(tr, "_query_tasks", _one_page(backlog))
     calls, dispatch_fn = _recorder()
 
     for _ in range(3):
@@ -246,18 +372,101 @@ def test_backlog_drains_across_passes_without_repeating(monkeypatch):
 # ── 4. skips are logged, with reasons ────────────────────────────────────────
 
 
+# ── 3b. complete, bounded table traversal ─────────────────────────────────────
+
+
+def test_scan_is_bounded_to_pages_per_sweep(monkeypatch):
+    """Completeness must not turn one pass into an unbounded table scan."""
+    rec = tr.TaskReconciler(pages_per_sweep=3)
+    requested, serve = _pages(*([[]] * 43))
+    monkeypatch.setattr(tr, "_query_tasks", serve)
+    _, dispatch_fn = _recorder()
+
+    counts = asyncio.run(rec.sweep(dispatch_fn))
+
+    assert counts["pages_read"] == 3
+    assert requested == [None, "page-1", "page-2"]
+    assert rec._cursor == "page-3"
+
+
+def test_scan_wraps_to_head_after_last_page(monkeypatch):
+    """A completed traversal restarts so rows added behind the cursor are seen."""
+    rec = tr.TaskReconciler(pages_per_sweep=2)
+    requested, serve = _pages([], [], [])
+    monkeypatch.setattr(tr, "_query_tasks", serve)
+    _, dispatch_fn = _recorder()
+
+    for _ in range(3):
+        asyncio.run(rec.sweep(dispatch_fn))
+
+    assert requested == [None, "page-1", "page-2", None, "page-1"]
+
+
+def test_cap_holds_scan_on_undrained_page(monkeypatch):
+    """Rows deferred by the cap are retried before the cursor advances."""
+    rec = tr.TaskReconciler(max_per_sweep=2, pages_per_sweep=5)
+    requested, serve = _pages(
+        [
+            (
+                f"ent_p1_{index}",
+                {
+                    "status": "pending",
+                    "title": f"page one {index}",
+                    "updated_at": tr._iso_ago(_OLD),
+                },
+            )
+            for index in range(3)
+        ],
+        [
+            (
+                "ent_p2",
+                {
+                    "status": "pending",
+                    "title": "page two",
+                    "updated_at": tr._iso_ago(_OLD),
+                },
+            )
+        ],
+    )
+    monkeypatch.setattr(tr, "_query_tasks", serve)
+    calls, dispatch_fn = _recorder()
+
+    first = asyncio.run(rec.sweep(dispatch_fn))
+    assert first["cap_reached"] == 1
+    assert requested == [None]
+
+    asyncio.run(rec.sweep(dispatch_fn))
+
+    assert [call[0] for call in calls] == [
+        "ent_p1_0",
+        "ent_p1_1",
+        "ent_p1_2",
+        "ent_p2",
+    ]
+    assert requested[1] is None
+
+
+# ── 4. skips are logged, with reasons ───────────────────────────────
+
+
 def test_every_skip_is_logged_with_its_reason(monkeypatch, caplog):
     """A silent sweep reproduces the invisibility this fixes. Each skipped task
     must name itself and its reason in the log."""
     rec = tr.TaskReconciler(max_per_sweep=1, grace_seconds=900)
     rec.claim("ent_claimed")
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [
-        ("ent_owned", {"status": "executing", "updated_at": tr._iso_ago(_OLD)}),
-        ("ent_young", {"status": "pending", "updated_at": tr._iso_ago(5)}),
-        ("ent_claimed", {"status": "pending", "updated_at": tr._iso_ago(_OLD)}),
-        ("ent_ok", {"status": "pending", "updated_at": tr._iso_ago(_OLD)}),
-        ("ent_capped", {"status": "pending", "updated_at": tr._iso_ago(_OLD)}),
-    ])
+    monkeypatch.setattr(
+        tr,
+        "_query_tasks",
+        _one_page(
+            [
+                ("ent_owned", {"status": "executing", "updated_at": tr._iso_ago(_OLD)}),
+                ("ent_young", {"status": "pending", "updated_at": tr._iso_ago(5)}),
+                ("ent_claimed", {"status": "pending", "updated_at": tr._iso_ago(_OLD)}),
+                ("ent_ok", {"status": "pending", "updated_at": tr._iso_ago(_OLD)}),
+                ("ent_capped", {"status": "pending", "updated_at": tr._iso_ago(_OLD)}),
+            ]
+        ),
+    )
     _, dispatch_fn = _recorder()
 
     with caplog.at_level(logging.DEBUG, logger="apis.reconciler"):
@@ -284,7 +493,7 @@ def test_empty_sweep_still_logs(monkeypatch, caplog):
     """'Found nothing' and 'did not run' must not look the same in the log —
     that indistinguishability is what hid 67,450 skipped events for 88 days."""
     rec = tr.TaskReconciler()
-    monkeypatch.setattr(tr, "_query_tasks", lambda limit: [])
+    monkeypatch.setattr(tr, "_query_tasks", _one_page([]))
     _, dispatch_fn = _recorder()
 
     with caplog.at_level(logging.INFO, logger="apis.reconciler"):
@@ -310,6 +519,7 @@ def test_sweep_routes_through_apis_dispatch_task_so_the_gate_applies():
 
     # The sweep's only outward action is `await dispatch_fn(...)`.
     src = inspect.getsource(tr.TaskReconciler.sweep)
+    src += inspect.getsource(tr.TaskReconciler._process_page)
     assert "dispatch_fn(" in src
     assert "gate_override" not in src, "the sweep must not bypass the gate"
 
@@ -331,7 +541,7 @@ def test_query_failure_is_swallowed(monkeypatch):
     """A Neotoma blip must never kill the sweep loop."""
     rec = tr.TaskReconciler()
 
-    def boom(limit):
+    def boom(limit, cursor=None):
         raise RuntimeError("neotoma down")
 
     monkeypatch.setattr(tr, "_query_tasks", boom)
@@ -342,6 +552,49 @@ def test_query_failure_is_swallowed(monkeypatch):
     counts = asyncio.run(rec.sweep(dispatch_fn))
     assert counts["scanned"] == 0
     assert counts["dispatched"] == 0
+    assert counts["query_errors"] == 1
+
+
+def test_failed_page_is_retried_and_query_error_is_logged(monkeypatch, caplog):
+    """A query blip holds the cursor; fail-open must not become fail-past."""
+    rec = tr.TaskReconciler(pages_per_sweep=2)
+    _, serve = _pages(
+        [],
+        [
+            (
+                "ent_late",
+                {
+                    "status": "pending",
+                    "title": "behind the blip",
+                    "updated_at": tr._iso_ago(_OLD),
+                },
+            )
+        ],
+        [],
+    )
+    requested: list[str | None] = []
+    blip = {"page-1"}
+
+    def flaky(limit, cursor=None):
+        requested.append(cursor)
+        if cursor in blip:
+            blip.clear()
+            raise RuntimeError("neotoma blipped")
+        return serve(limit, cursor)
+
+    monkeypatch.setattr(tr, "_query_tasks", flaky)
+    calls, dispatch_fn = _recorder()
+
+    with caplog.at_level(logging.INFO, logger="apis.reconciler"):
+        first = asyncio.run(rec.sweep(dispatch_fn))
+        second = asyncio.run(rec.sweep(dispatch_fn))
+
+    assert first["pages_read"] == 1
+    assert first["query_errors"] == 1
+    assert requested[2] == "page-1"
+    assert second["dispatched"] == 1
+    assert calls == [("ent_late", "reconcile")]
+    assert "query-error cursor='page-1'" in caplog.text
 
 
 def test_run_is_a_noop_when_disabled(monkeypatch):
@@ -353,7 +606,9 @@ def test_run_is_a_noop_when_disabled(monkeypatch):
         raise AssertionError("should not dispatch while disabled")
 
     monkeypatch.setattr(
-        rec, "sweep", lambda *a: (_ for _ in ()).throw(AssertionError("swept while off"))
+        rec,
+        "sweep",
+        lambda *a: (_ for _ in ()).throw(AssertionError("swept while off")),
     )
     asyncio.run(rec.run(dispatch_fn))  # returns without sweeping
 
@@ -374,7 +629,12 @@ def test_run_is_a_noop_when_disabled(monkeypatch):
 
 def _row(snapshot: dict, **row_level) -> dict:
     """A row shaped like the real /entities/query EntitySnapshot response."""
-    return {"entity_id": "ent_task", "entity_type": "task", "snapshot": snapshot, **row_level}
+    return {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "snapshot": snapshot,
+        **row_level,
+    }
 
 
 def test_unwrap_carries_row_level_stamps_into_the_snapshot():
@@ -434,7 +694,9 @@ def test_done_task_is_not_swept_through_the_real_parse_path():
     completed task is re-dispatched. This asserts through the parse rather than
     handing should_dispatch a hand-built dict.
     """
-    snap = tr._unwrap_snapshot(_row({"status": "done"}, last_observation_at=tr._iso_ago(99999)))
+    snap = tr._unwrap_snapshot(
+        _row({"status": "done"}, last_observation_at=tr._iso_ago(99999))
+    )
 
     assert snap["status"] == "done"
     skip = tr.TaskReconciler().should_dispatch(
@@ -445,5 +707,116 @@ def test_done_task_is_not_swept_through_the_real_parse_path():
 
 def test_unwrap_tolerates_the_doubly_nested_and_bare_shapes():
     """The nesting tolerance the docstring promises, pinned."""
-    assert tr._unwrap_snapshot(_row({"snapshot": {"status": "pending"}}))["status"] == "pending"
+    assert (
+        tr._unwrap_snapshot(_row({"snapshot": {"status": "pending"}}))["status"]
+        == "pending"
+    )
     assert tr._unwrap_snapshot({"status": "pending"})["status"] == "pending"
+
+
+def test_pending_task_beyond_the_first_query_page_reaches_dispatch(monkeypatch):
+    """A valid pending task beyond Neotoma's 500-row cap must be dispatched.
+
+    This drives the HTTP response shape through ``sweep`` so the regression
+    proves the observable effect, not merely that a page helper returns the
+    target row. The first page is deliberately full and contains no eligible
+    task; the stranded task exists only on the page named by ``next_cursor``.
+    """
+
+    class Response:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    old = tr._iso_ago(_OLD)
+    first_page = [
+        _row(
+            {"status": "done", "title": f"completed {index}"},
+            entity_id=f"ent_{index:03d}",
+            last_observation_at=old,
+        )
+        for index in range(500)
+    ]
+    second_page = [
+        _row(
+            {
+                "status": "pending",
+                "title": "stranded beyond page one",
+                "assigned_to": "cicada",
+                "action_type": "local_edit",
+                "confidence": 0.99,
+            },
+            entity_id="ent_stranded_after_500",
+            last_observation_at=old,
+        )
+    ]
+    requests = []
+
+    def post(url, *, headers, json, timeout):
+        requests.append(json)
+        if json.get("cursor") == "page-2":
+            return Response({"entities": second_page})
+        return Response({"entities": first_page, "next_cursor": "page-2"})
+
+    monkeypatch.setattr(tr, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tr.httpx, "post", post)
+
+    # Drive the candidate into the existing dispatch_task boundary and assert
+    # its observable lifecycle effect. Merely returning it from the selector
+    # would not prove the task actually leaves pending.
+    import apis
+
+    class Job:
+        def finished(self, message):
+            return None
+
+    class Activity:
+        def started(self, message):
+            return Job()
+
+    class Notifier:
+        def send(self, *args, **kwargs):
+            raise AssertionError("the high-confidence local edit should not be held")
+
+    class BlastRadius:
+        value = "low"
+
+    class Decision:
+        action = apis.GateAction.AUTO_EXECUTE
+        blast_radius = BlastRadius()
+        threshold = 0.85
+        reason = "test auto-execute"
+
+    class Policy:
+        low_blast_action_types = frozenset({"local_edit"})
+        high_blast_action_types = frozenset()
+
+    writes = []
+
+    def record_status(entity_id, status, **kwargs):
+        writes.append((entity_id, status))
+        return True
+
+    monkeypatch.setattr(apis, "_activity", Activity())
+    monkeypatch.setattr(apis, "set_task_status", record_status)
+    monkeypatch.setattr(apis, "READINESS_GATE", False)
+    monkeypatch.setattr(apis, "DRY_RUN", True)
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: Policy())
+    monkeypatch.setattr(apis, "evaluate_gate", lambda **kwargs: Decision())
+
+    async def dispatch_fn(task_id, snapshot, trigger):
+        await apis.dispatch_task(task_id, snapshot, trigger, Notifier())
+
+    counts = asyncio.run(tr.TaskReconciler(max_per_sweep=1).sweep(dispatch_fn))
+
+    assert requests == [
+        {"entity_type": "task", "limit": tr.QUERY_LIMIT},
+        {"entity_type": "task", "limit": tr.QUERY_LIMIT, "cursor": "page-2"},
+    ]
+    assert writes[0] == ("ent_stranded_after_500", apis.TaskStatus.ROUTED)
+    assert counts["dispatched"] == 1
