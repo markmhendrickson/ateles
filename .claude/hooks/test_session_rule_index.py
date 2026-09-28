@@ -245,6 +245,73 @@ class TestDecisionCadenceComesFromLivePolicy:
         assert combined.count(DECISION_POLICY_ACTION) == 1
         assert "omit every open decision in full" not in combined.lower()
 
+    def test_at_real_corpus_size_tier_b_drops_the_cadence_imperative(
+        self, fake_neotoma
+    ):
+        """Pins a real gap, does not claim to close it (QA finding on PR
+        #1307, head 2c109d76): the three tests above all monkeypatch
+        `_render` with a synthetic single-row fixture, so none of them ever
+        exercise tier selection against a corpus the size the live Neotoma
+        instance actually has (69 conditional rows measured 2026-09-28,
+        forcing tier B). At tier B every conditional line drops to trigger +
+        id only (`_conditional_line_trigger_only`) — this decision-cadence
+        row's imperative (the (a)/(b) triggers, the notification exemption,
+        "nothing is dropped") is NOT delivered by the live-render path once
+        the corpus is realistically sized, contrary to this PR's own
+        commit-message and task-result claim that removing the static
+        mirror was safe because `session_rule_index.py` "already" delivers
+        the same content live. It does not, at tier B or C.
+
+        This is run over the REAL subprocess path (not an in-process
+        `_render` monkeypatch) specifically so it cannot be satisfied by a
+        fixture immune to tiering, matching this class's other three tests'
+        own standard for what counts as live coverage.
+
+        Sizing: 61 conditional rows, each given a realistic-length `title`
+        (`_row`'s own default is `title=""`, which renders a short "When
+        trigger:" line at EVERY tier and never forces tier B no matter the
+        row count — verified while writing this test: 120 empty-title rows
+        still fit tier A at 9,453 chars). Real `agent_policy` rows carry
+        real imperative sentences, which is what actually exhausts the
+        budget on the live instance (69 conditional rows measured
+        2026-09-28, tier B). Reliably forces tier B here too — verified
+        locally before landing this test; if `BUDGET_CHARS` or the per-row
+        rule shapes ever change enough to drop this back to tier A/A2, the
+        assertion on the *absence* of the imperative would start failing
+        loudly (a real regression signal), not silently pass.
+        """
+        base_url, handler = fake_neotoma
+        handler.rows = [
+            _decision_policy(),
+        ] + [
+            _row(
+                f"ent_cond{i:03d}",
+                rule="Rule body text here, long enough to resemble a real row.",
+                applies_when=(
+                    f"a realistic-length trigger condition number {i} fires "
+                    "in the swarm workflow"
+                ),
+                title=(
+                    f"Do a realistic-length imperative action for row {i}, "
+                    "following the documented procedure exactly"
+                ),
+            )
+            for i in range(61)
+        ]
+        result = _run(REPO_ROOT, base_url=base_url)
+
+        assert result.returncode == 0
+        assert "could not be loaded" not in result.stdout
+        assert "<!-- tier: B -->" in result.stdout or "<!-- tier: C -->" in result.stdout
+        # The row is still cited (trigger + id survive at both tiers) —
+        # a session can still fetch the full rule by id.
+        assert DECISION_POLICY_ID in result.stdout
+        assert "replying to the operator" in result.stdout.lower()
+        # But the imperative itself — what QA's finding says is silently
+        # dropped — is NOT in the live-rendered index at this corpus size.
+        assert DECISION_POLICY_ACTION not in result.stdout
+        assert "restate every open decision in full" not in result.stdout.lower()
+
 
 # ---------------------------------------------------------------------------
 # 1 & 2. cwd independence
