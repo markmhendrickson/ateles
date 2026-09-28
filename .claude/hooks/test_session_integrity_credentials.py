@@ -32,6 +32,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _session_integrity as si  # noqa: E402
+import stop_finalizer as sf  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -154,15 +155,13 @@ class TestNeotomaCredentials:
         p = tmp_path / ".env"
         p.write_text("not-a-kv-line\nNEOTOMA_BEARER_TOKEN=quoted-token\n# comment\n")
         monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", p)
-        base_url, token = si.neotoma_credentials()
-        assert token == "quoted-token"
+        assert si._read_neotoma_env_file()["NEOTOMA_BEARER_TOKEN"] == "quoted-token"
 
     def test_quoted_values_are_unquoted(self, monkeypatch, tmp_path):
         p = tmp_path / ".env"
         p.write_text('NEOTOMA_BEARER_TOKEN="quoted-token"\n')
         monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", p)
-        _, token = si.neotoma_credentials()
-        assert token == "quoted-token"
+        assert si._read_neotoma_env_file()["NEOTOMA_BEARER_TOKEN"] == "quoted-token"
 
     def test_missing_file_does_not_raise(self, monkeypatch):
         monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", Path("/really/does/not/exist/.env"))
@@ -182,8 +181,7 @@ class TestNeotomaCredentials:
         p = tmp_path / ".env"
         p.write_bytes(b"NEOTOMA_BEARER_TOKEN=good-token\n\xff\xfe\x00garbage\n")
         monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", p)
-        base_url, token = si.neotoma_credentials()
-        assert token == "good-token"
+        assert si._read_neotoma_env_file()["NEOTOMA_BEARER_TOKEN"] == "good-token"
 
     def test_non_utf8_only_content_yields_empty_not_raise(self, monkeypatch, tmp_path):
         """Same defect, no readable line at all — must still return empty
@@ -389,3 +387,38 @@ class TestEmitHarnessEventRawCredentialFallback:
         si.emit_harness_event_raw("slug2", {}, log_tag="tag", session_id="")
         captured = capsys.readouterr()
         assert captured.err.count("WARNING") == 2
+
+
+def test_missing_audit_credentials_do_not_disable_stop_enforcement(monkeypatch, capsys):
+    """Audit transport and the local enforcement decision are independent.
+
+    With no complete Neotoma pair, a positively identified violation must
+    still block in enforcement mode even though harness_event emission cannot
+    run. This is the observable effect the warning now describes.
+    """
+    monkeypatch.setattr(sf, "ENFORCE", True)
+    monkeypatch.setattr(
+        sf,
+        "read_hook_input",
+        lambda: {"session_id": "sess-enforced", "transcript_path": "unused"},
+    )
+    monkeypatch.setattr(
+        sf,
+        "scan_transcript",
+        lambda _: {
+            "turns": 1,
+            "wrote_domain": True,
+            "bound_plan": False,
+            "bound_task": False,
+            "captured_learning": False,
+            "write_types": {"task"},
+        },
+    )
+    monkeypatch.setattr(sf, "load_state", lambda _: {})
+
+    assert sf.main() == 2
+
+    captured = capsys.readouterr()
+    assert '"decision": "block"' in captured.out
+    assert "harness_event audit emission is being skipped" in captured.err
+    assert "Session integrity violation" in captured.err

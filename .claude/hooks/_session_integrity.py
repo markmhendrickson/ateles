@@ -41,8 +41,6 @@ LEARNING_TYPES = {
     "learning", "note", "standing_rule", "architectural_decision",
     "strategy_drift_signal", "lesson", "recap_message",
 }
-_DEFAULT_BASE_URL = "https://neotoma.markmhendrickson.com"
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", _DEFAULT_BASE_URL)
 BEARER_ENV = "NEOTOMA_BEARER_TOKEN"  # gitleaks:allow
 _NEOTOMA_ENV_PATH = Path.home() / ".config" / "neotoma" / ".env"
 
@@ -62,12 +60,15 @@ def log(msg: str) -> None:
 # that session's whole lifetime. `emit_harness_event_raw` used to read only
 # `os.environ.get(BEARER_ENV)` and silently return when it was empty.
 #
-# `_neotoma_credentials()` is the ONE place that changes: env first, then a
-# fallback read of `~/.config/neotoma/.env` (same file, same two keys,
+# `neotoma_credentials()` is the ONE place that changes: a complete env pair
+# first, then a complete pair from `~/.config/neotoma/.env` (same file, same two keys,
 # `execution/scripts/sync_skills.py`'s `_load_env` and
 # `execution/scripts/session_language.py`'s `_bearer_token` already read this
-# way — reusing that shape rather than inventing a third). Parses only
-# NEOTOMA_BASE_URL / NEOTOMA_BEARER_TOKEN; never logs either value.
+# way — reusing that shape rather than inventing a third). A partial source is
+# never completed from another source: without an explicit verified binding,
+# an endpoint and bearer are safe to use only as the pair they were configured
+# as. Parses only NEOTOMA_BASE_URL / NEOTOMA_BEARER_TOKEN; never logs either
+# value.
 #
 # Read at CALL time, not import time — a test (or a long-lived process) that
 # changes the environment or the file between calls must see the change.
@@ -126,27 +127,36 @@ def _read_neotoma_env_file() -> dict[str, str]:
 
 
 def neotoma_credentials() -> tuple[str, str]:
-    """(base_url, token) — environment first, then
-    ~/.config/neotoma/.env for whichever of the two is still missing.
-    Either or both may come back empty; the caller decides what that means
-    (emit_harness_event_raw treats an empty token as "still missing" and
-    warns once per session rather than skipping silently, per audit
-    ent_b66293f0dcc8c887d4fdbeae).
+    """Return one complete, provenance-bound ``(base_url, token)`` pair.
+
+    A complete environment pair wins. Otherwise a complete dotenv pair is
+    used. Partial pairs are ignored rather than combined across sources; this
+    module has no verified binding that proves an endpoint from one source and
+    a bearer from another belong to the same Neotoma instance. When neither
+    source is complete, return two empty strings so callers cannot accidentally
+    issue a cross-source request.
     """
-    base_url = os.environ.get("NEOTOMA_BASE_URL", "")
-    token = os.environ.get(BEARER_ENV, "")
-    if not base_url or not token:
-        from_file = _read_neotoma_env_file()
-        if not base_url:
-            base_url = from_file.get("NEOTOMA_BASE_URL", "")
-        if not token:
-            token = from_file.get(BEARER_ENV, "")
-    return (base_url or _DEFAULT_BASE_URL), token
+    env_pair = (
+        os.environ.get("NEOTOMA_BASE_URL", "").strip(),
+        os.environ.get(BEARER_ENV, "").strip(),
+    )
+    if all(env_pair):
+        return env_pair
+
+    from_file = _read_neotoma_env_file()
+    file_pair = (
+        from_file.get("NEOTOMA_BASE_URL", "").strip(),
+        from_file.get(BEARER_ENV, "").strip(),
+    )
+    if all(file_pair):
+        return file_pair
+
+    return "", ""
 
 
 def _warn_missing_credentials_once(session_id: str, log_tag: str) -> None:
-    """One VISIBLE stderr warning per session when credentials are still
-    missing after checking both the environment and the dotenv fallback —
+    """One VISIBLE stderr warning per session when no complete pair exists
+    after checking both the environment and the dotenv fallback —
     replacing the silent per-invocation skip audit ent_b66293f0dcc8c887d4fdbeae
     found (45 skips, zero visible warnings, nothing stored or checked for the
     whole session). Tracked in this session's state file so a Stop hook that
@@ -157,12 +167,13 @@ def _warn_missing_credentials_once(session_id: str, log_tag: str) -> None:
     if state.get("warned_missing_neotoma_credentials"):
         return
     sys.stderr.write(
-        f"[{log_tag}] WARNING: NEOTOMA_BEARER_TOKEN is not set in the "
-        "environment and could not be found in ~/.config/neotoma/.env — "
-        "this session's session-integrity checks (harness_event emission, "
-        "Stop-hook enforcement) are being SKIPPED, not silently passed. Set "
-        "NEOTOMA_BEARER_TOKEN in the environment or in "
-        "~/.config/neotoma/.env to restore them.\n"
+        f"[{log_tag}] WARNING: no complete NEOTOMA_BASE_URL / "
+        "NEOTOMA_BEARER_TOKEN pair was found in either the environment or "
+        "~/.config/neotoma/.env — harness_event audit emission is being "
+        "skipped. Stop-hook enforcement still runs from local session "
+        "evidence and may warn or block according to "
+        "ATELES_SESSION_INTEGRITY_ENFORCE. Set both values in the same "
+        "source to restore audit emission.\n"
     )
     if session_id:
         state["warned_missing_neotoma_credentials"] = True
@@ -230,7 +241,6 @@ def save_state(session_id: str, state: dict) -> None:
 # ---------------------------------------------------------------------------
 # Transcript inspection — the source of truth for "did this session write?"
 # ---------------------------------------------------------------------------
-
 def scan_transcript(transcript_path: str | None) -> dict:
     """Walk the JSONL transcript and summarize integrity-relevant signals.
 
@@ -346,7 +356,6 @@ def _mentions_task_binding(payload: dict) -> bool:
 # ---------------------------------------------------------------------------
 # harness_event audit emission (best-effort, fail-open)
 # ---------------------------------------------------------------------------
-
 def emit_harness_event_raw(
     idempotency_slug: str, entity_fields: dict, log_tag: str = "harness-event",
     session_id: str = "",
@@ -369,19 +378,18 @@ def emit_harness_event_raw(
     still printed but not deduplicated across calls.
 
     CREDENTIALS (ateles#1261 follow-up, audit ent_b66293f0dcc8c887d4fdbeae):
-    `neotoma_credentials()` checks the environment first, then falls back to
-    ~/.config/neotoma/.env — the same fallback `sync_skills.py` /
-    `session_language.py` already use — so a Stop hook whose environment
-    simply lacks NEOTOMA_BEARER_TOKEN (the exact condition that skipped ALL
-    45 runs in the audited session) still gets credentials when the dotenv
-    file has them. When BOTH are still empty after the fallback, this emits
-    one VISIBLE warning per session (not a silent skip) and returns.
+    `neotoma_credentials()` checks for a complete environment pair first,
+    then a complete ~/.config/neotoma/.env pair — the same fallback file
+    `sync_skills.py` / `session_language.py` already use. It never combines
+    an endpoint and bearer from different sources without an explicit verified
+    binding. When neither source is complete, this emits one VISIBLE warning
+    per session (not a silent skip) and returns without making a request.
 
     Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort otherwise: a
     network error is logged and swallowed — never blocks the hook.
     """
     base_url, token = neotoma_credentials()
-    if not token:
+    if not base_url or not token:
         _warn_missing_credentials_once(session_id, log_tag)
         return
     body = {
