@@ -1018,6 +1018,69 @@ def test_fails_when_superseded_claim_denied_as_in_name_only(
     assert any("decision-114-data-model" in p and "superseded" in p for p in problems)
 
 
+# --- Red: current-head UX review finding — the live no-edge fallback carve-out
+# exempted every weak-negation clause beginning with ``when scope is``. That
+# prefix is not enough to prove the clause describes the legitimate fallback:
+# it can just as easily introduce a contradiction of the edge or field claim.
+# Exercise both bypasses through the full checker, not the hedge helper alone.
+
+DATA_MODEL_GOVERNS_SCOPE_PREFIXED_DENIAL = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (legacy; superseded for an agent-specific rule); `agent_sub` (superseded; read nowhere once the edge resolves) | `GOVERNS` -> `agent` (resolved by traversal; when scope is agent, this row has no such edge); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+DATA_MODEL_SUPERSEDED_SCOPE_PREFIXED_DENIAL = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (superseded by the GOVERNS edge; when scope is agent, this field is not superseded and remains the target selector); `agent_sub` | `GOVERNS` -> `agent` (the agent this row binds, resolved by traversal); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+
+def test_fails_when_governs_denial_spoofs_scope_fallback_prefix(
+    tmp_path: Path,
+) -> None:
+    write_corpus(tmp_path, data_model=DATA_MODEL_GOVERNS_SCOPE_PREFIXED_DENIAL)
+
+    problems = decision_114.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "edges column is missing a `GOVERNS`" in problems[0]
+    assert "must carry it as a `;`-separated edge-list entry" in problems[0]
+
+
+def test_fails_when_superseded_denial_spoofs_scope_fallback_prefix(
+    tmp_path: Path,
+) -> None:
+    write_corpus(tmp_path, data_model=DATA_MODEL_SUPERSEDED_SCOPE_PREFIXED_DENIAL)
+
+    problems = decision_114.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "does not affirmatively state that it is superseded" in problems[0]
+    assert "with no hedge or denial word in it" in problems[0]
+
+
 def test_raises_when_conformance_file_is_absent(tmp_path: Path) -> None:
     write_corpus(tmp_path)
     (tmp_path / "docs" / "foundation" / "conformance.md").unlink()

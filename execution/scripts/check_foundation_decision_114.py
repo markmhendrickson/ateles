@@ -198,13 +198,10 @@ _FIELD_OWN_PAREN_RE = re.compile(r"`(?:scope|agent_sub)`\s*(\()", re.I)
 #   "this is only a hypothetical illustration of what the edge would look
 #   like if it existed" — without using any word this list already had.
 # - _WEAK_HEDGE_RE: "not"/"no"/"without"/"lacking" — ordinary negation words
-#   that also appear in legitimate third-person conditional prose about
-#   other rows/cases. Scanned over every ``;``-delimited clause EXCEPT one
-#   that opens with a generic/conditional subject ("a row...", "any row...",
-#   "when `scope` is..."), which is what the live corpus's legitimate
-#   fallback-case prose looks like grammatically — a clause switching to
-#   describe a different, general case rather than continuing to describe
-#   *this* entry. A code-review pass on an earlier revision of this fix
+#   that also appear in the edge entry's legitimate no-edge fallback. Scanned
+#   over every ``;``-delimited clause except the one exact fallback contract
+#   admitted by _LEGITIMATE_NO_EDGE_FALLBACK_RE. A code-review pass on an
+#   earlier revision of this fix
 #   (which scanned only the first `;`-clause) found that scoping too narrow:
 #   a denial using only weak vocabulary, placed after the first `;` without
 #   a generic/conditional opener ("...resolved by traversal; there is no
@@ -225,20 +222,12 @@ _FIELD_OWN_PAREN_RE = re.compile(r"`(?:scope|agent_sub)`\s*(\()", re.I)
 #   entry, not a description of a different row's fallback behaviour, and
 #   still slipped the weak-hedge scan.
 #
-#   Rather than add a fourth, still-guessable phrasing to what is
-#   structurally a denylist one level down (the same shape of gap Falco's
-#   root-cause finding already named for `_STRONG_HEDGE_RE`), the carve-out
-#   is narrowed to the one shape the live corpus's legitimate prose actually
-#   has and no spoofed denial has yet reproduced: an explicit comparison
-#   against the literal `` `scope` `` field's value (`` when `scope` is
-#   `agent` ``, `` when `scope` is `global` or `swarm` ``). "A row..."/"any
-#   row..." openers are no longer exempted on their own — a clause opening
-#   that way is scanned for weak hedge words like any other, which is
-#   deliberately fail-closed toward flagging a genuinely-conditional "a
-#   row..." clause that doesn't happen to also compare `` `scope` ``'s
-#   value; the live corpus's own legitimate clause already satisfies the
-#   narrower test (see the regression-guard test), so this costs nothing
-#   against real content while closing the spoof.
+#   The current-head UX review then demonstrated that even ``when scope is``
+#   is only a prefix, not proof of the fallback: both "this row has no such
+#   edge" and "this field is not superseded" can follow it. The exception is
+#   now available only while checking an edge entry, never a field claim, and
+#   only when the complete clause states the live restrictive fallback:
+#   agent scope + no edge means no target and therefore no bound agent.
 _STRONG_HEDGE_RE = re.compile(
     r"\b(?:never|isn't|aren't|doesn't|don't|n't|fail(?:s|ed)?\s+to|absent|"
     r"nor|neither|unimplement\w*|(?:in\s+practice|only\s+in\s+theory)|"
@@ -250,10 +239,21 @@ _STRONG_HEDGE_RE = re.compile(
     re.I,
 )
 _WEAK_HEDGE_RE = re.compile(r"\b(?:not|no|without|lack(?:s|ing)?)\b", re.I)
-_GENERIC_CLAUSE_OPENER_RE = re.compile(r"^\s*when\s+`?scope`?`?\s+is\b", re.I)
+_LEGITIMATE_NO_EDGE_FALLBACK_RE = re.compile(
+    r"^\s*when\s+`?scope`?\s+is\s+`?agent`?\s+and\s+the\s+row\s+carries\s+"
+    r"no\s+`?GOVERNS`?\s+edge,\s+it\s+names\s+no\s+target\s+and\s+so\s+"
+    r"binds\s+no\s+agent\s+—\s+the\s+restrictive\s+branch"
+    r"(?:,\s+matching\s+what\s+`agent_loader\.py`\s+and\s+"
+    r"`policy_skill_renderer\.py`\s+already\s+enforce,\s+since\s+a\s+rule\s+"
+    r"whose\s+reach\s+is\s+unstated\s+is\s+one\s+no\s+reader\s+may\s+widen,\s+"
+    r"principle\s+5)?\s*$",
+    re.I,
+)
 
 
-def _is_hedged(parenthetical: str) -> bool:
+def _is_hedged(
+    parenthetical: str, *, allow_legitimate_no_edge_fallback: bool = False
+) -> bool:
     """True when ``parenthetical`` denies the claim it appears to make.
 
     See the tier comment above for why this is two regexes over two scopes
@@ -262,7 +262,9 @@ def _is_hedged(parenthetical: str) -> bool:
     if _STRONG_HEDGE_RE.search(parenthetical):
         return True
     for clause in parenthetical.split(";"):
-        if _GENERIC_CLAUSE_OPENER_RE.match(clause):
+        if allow_legitimate_no_edge_fallback and (
+            _LEGITIMATE_NO_EDGE_FALLBACK_RE.fullmatch(clause)
+        ):
             continue
         if _WEAK_HEDGE_RE.search(clause):
             return True
@@ -296,7 +298,9 @@ def _has_governs_edge_entry(edges_cell: str) -> bool:
             i += 1
         if i < len(edges_cell) and edges_cell[i] == "(":
             own_paren = _extract_balanced_paren(edges_cell, i)
-            if own_paren is None or _is_hedged(own_paren):
+            if own_paren is None or _is_hedged(
+                own_paren, allow_legitimate_no_edge_fallback=True
+            ):
                 continue
         return True
     return False
