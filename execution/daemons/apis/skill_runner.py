@@ -1665,10 +1665,33 @@ async def _run_skill_once(
         )
         guards_path = ""
         if refusal is None:
-            try:
-                guards_path = local_provider.write_guards_file(ATELES_REPO)
-            except (local_provider.LocalProviderError, OSError) as exc:
-                refusal = f"{local_provider.FAILURE_GUARDS}: {exc}"
+            # ATELES_REPO_PATH unset means ATELES_REPO (module-level,
+            # resolved once at import) silently fell back to ~/repos/ateles —
+            # the shared interactive clone, not the deployment checkout the
+            # daemon actually runs from. Reading guards from ATELES_REPO in
+            # that case would bind the launch to whatever state that clone
+            # happens to be in and proceed on unverified guards rather than
+            # refuse. Building guards_repo from the env var read here (not
+            # from the separately-resolved ATELES_REPO) keeps the refuse/
+            # proceed decision and the path guards are actually read from as
+            # one value instead of two independent reads of the same var.
+            repo_path_env = os.environ.get("ATELES_REPO_PATH", "").strip()
+            if not repo_path_env:
+                refusal = (
+                    f"{local_provider.FAILURE_GUARDS}: ATELES_REPO_PATH is not "
+                    "set — refusing to read guards from the ATELES_REPO "
+                    f"fallback ({ATELES_REPO}); set ATELES_REPO_PATH to the "
+                    "checkout whose guards this dispatch must bind"
+                )
+            else:
+                log.info(
+                    f"[apis] {skill} claude-local guards read from "
+                    f"ATELES_REPO_PATH={repo_path_env}"
+                )
+                try:
+                    guards_path = local_provider.write_guards_file(Path(repo_path_env))
+                except (local_provider.LocalProviderError, OSError) as exc:
+                    refusal = f"{local_provider.FAILURE_GUARDS}: {exc}"
         if refusal is not None:
             msg = f"{provider} launch failed: {refusal}"
             log.warning(f"[apis] {skill} dispatch skipped — {msg}")

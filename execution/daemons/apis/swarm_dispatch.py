@@ -8199,6 +8199,10 @@ class SwarmDispatcher:
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            # Reading failing-check logs and fixing the reported cause is
+            # mechanical triage, not review judgement — eligible for
+            # claude-local per local_provider.MECHANICAL_WORK_CLASSES.
+            work_class="ci_log_triage",
         )
         if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
             await self._handle_panel_auth_failure(trigger, "cicada")
