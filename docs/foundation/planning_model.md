@@ -336,9 +336,16 @@ rather than entering delivery by default.
 daemon, or host interruption, the engine reads the latest control decision, descendant verdicts and
 actions, open dependencies, held or lapsed leases, action confirmations, and idempotency keys, then
 **re-derives** the frontier. Resume does the same after a pause and never replays a confirmed effect or
-continues from a local cursor. A pause admits no new descendant claim, step opening, or action; holders
-reach a declared safe interruption boundary and return their leases, or the leases lapse, and pause is
-confirmed only by read-back that no descendant lease or action remains live. A cancellation uses the same
+continues from a local cursor. A pause admits no new **delivery** descendant claim, delivery step opening,
+or delivery action; holders reach a declared safe interruption boundary and return their leases, or the
+leases lapse, and pause is confirmed only by read-back that no delivery descendant lease or action remains
+live. The record's one live `planning` task is control work, not delivery work: while paused it remains
+reachable only to evaluate and take `resume_<level>` or `cancel_<level>` through the same proposer grant,
+`action_policy`, `ownership_grant` checkpoint seat, action gate, and confirmed effect read-back required
+before the pause. It cannot admit or execute delivery work while the pause stands. After an interruption
+in the paused state, the engine rehydrates that control path from the record and the action's idempotency
+key; a confirmed `resume_plan` writes and reads back its superseding control decision before the delivery
+frontier is re-derived, without replaying the pause or any earlier effect. A cancellation uses the same
 quiescence rule and leaves descendants and their evidence intact. The **stop condition** is either proved
 completion or confirmed cancellation; pause is suspension. If the frontier is empty while criteria remain
 unmet, the planning loop must admit in-scope work or hold on the existing checkpoint protocol — it may not
