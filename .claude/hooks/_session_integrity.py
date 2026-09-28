@@ -154,6 +154,47 @@ def neotoma_credentials() -> tuple[str, str]:
     return "", ""
 
 
+def missing_credentials_warning_text(log_tag: str) -> str:
+    """Pure text builder for the missing-credentials notice — no I/O, no
+    dedup state. Shared by the stderr path (`_warn_missing_credentials_once`)
+    and any caller that presents the notice on a different surface (e.g.
+    `stop_finalizer.py`'s `systemMessage`, round-4 UX finding: the prior
+    design marked the notice "delivered" the instant stderr was written,
+    even though a normal successful Stop has no visible stderr and the
+    harness never feeds stderr back into the session)."""
+    return (
+        f"[{log_tag}] WARNING: no complete NEOTOMA_BASE_URL / "
+        "NEOTOMA_BEARER_TOKEN pair was found in either the environment or "
+        "~/.config/neotoma/.env — harness_event audit emission is being "
+        "skipped. Stop-hook enforcement still runs from local session "
+        "evidence and may warn or block according to "
+        "ATELES_SESSION_INTEGRITY_ENFORCE. Set both values in the same "
+        "source to restore audit emission."
+    )
+
+
+def credentials_warning_already_delivered(session_id: str) -> bool:
+    """True once this session's missing-credentials notice has been
+    delivered on ANY surface (stderr or a caller-owned presentation such as
+    `systemMessage`). Read-only — does not mark anything delivered."""
+    state = load_state(session_id) if session_id else {}
+    return bool(state.get("warned_missing_neotoma_credentials"))
+
+
+def mark_credentials_warning_delivered(session_id: str) -> None:
+    """Record that this session's missing-credentials notice has been
+    delivered. Callers must invoke this ONLY after the delivery itself
+    succeeded (e.g. after `print()` for a `systemMessage` returns without
+    raising) — marking it before a presentation attempt can fail is exactly
+    the round-4 UX defect this split exists to close: a failed stdout write
+    must not consume the one-shot notice, or the operator never sees it."""
+    if not session_id:
+        return
+    state = load_state(session_id)
+    state["warned_missing_neotoma_credentials"] = True
+    save_state(session_id, state)
+
+
 def _warn_missing_credentials_once(session_id: str, log_tag: str) -> None:
     """One VISIBLE stderr warning per session when no complete pair exists
     after checking both the environment and the dotenv fallback —
@@ -162,22 +203,19 @@ def _warn_missing_credentials_once(session_id: str, log_tag: str) -> None:
     whole session). Tracked in this session's state file so a Stop hook that
     fires more than once (multiple sibling hooks, or a retried Stop) warns
     exactly once rather than once per hook per stop.
+
+    This is the DEFAULT stderr presentation, used directly by
+    `emit_harness_event_raw` (and so by `decision_shape_gate.py`, which has
+    no `systemMessage`-capable surface). `stop_finalizer.py`'s successful-Stop
+    path presents the SAME text via `systemMessage` instead — see
+    `missing_credentials_warning_text` / `mark_credentials_warning_delivered`
+    — and marks delivery itself rather than going through this function, so
+    the notice is never written to both surfaces for the same session.
     """
-    state = load_state(session_id) if session_id else {}
-    if state.get("warned_missing_neotoma_credentials"):
+    if credentials_warning_already_delivered(session_id):
         return
-    sys.stderr.write(
-        f"[{log_tag}] WARNING: no complete NEOTOMA_BASE_URL / "
-        "NEOTOMA_BEARER_TOKEN pair was found in either the environment or "
-        "~/.config/neotoma/.env — harness_event audit emission is being "
-        "skipped. Stop-hook enforcement still runs from local session "
-        "evidence and may warn or block according to "
-        "ATELES_SESSION_INTEGRITY_ENFORCE. Set both values in the same "
-        "source to restore audit emission.\n"
-    )
-    if session_id:
-        state["warned_missing_neotoma_credentials"] = True
-        save_state(session_id, state)
+    sys.stderr.write(missing_credentials_warning_text(log_tag) + "\n")
+    mark_credentials_warning_delivered(session_id)
 
 
 def read_hook_input() -> dict:
@@ -353,6 +391,45 @@ def _mentions_task_binding(payload: dict) -> bool:
     return has_part_of and "task" in _entity_types_in(payload)
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect rather than following it.
+
+    Security/arch/QA finding on PR #1298 (round 4, confirmed with a live
+    two-loopback-server reproduction): stdlib's default
+    `HTTPRedirectHandler` follows 301/302/303 for a POST and forwards the
+    original request's headers verbatim — including `Authorization` — to
+    whatever origin the `Location` header names, with no same-origin check.
+    `base_url` is trusted local config (env or ~/.config/neotoma/.env), but
+    nothing upstream constrains where a *response* from that configured
+    endpoint can redirect to: a compromised/misconfigured endpoint, an
+    on-path proxy, or a hijacked DNS resolution is enough to exfiltrate the
+    bearer token to an arbitrary third-party origin, silently.
+
+    The `/store` endpoint this hook calls has no legitimate reason to
+    redirect at all, so the fix is to refuse redirects outright rather than
+    attempt a same-origin allowance (which would still need to get the
+    origin comparison exactly right to avoid the same class of bug). Raising
+    from every `redirect_request` override makes `urlopen` propagate the
+    redirect as a normal `HTTPError`, caught by the existing best-effort
+    `except Exception` below — so a redirecting endpoint degrades to "audit
+    emission failed, non-fatal" exactly like any other transport failure,
+    never a followed cross-origin request.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802 - stdlib API
+        raise urllib.error.HTTPError(
+            newurl, code, f"refusing to follow redirect ({msg})", headers, fp,
+        )
+
+
+# Installed as the module-level default opener so the existing
+# `urllib.request.urlopen(req, timeout=...)` call site — and every test that
+# monkeypatches `si.urllib.request.urlopen` directly, the pre-existing
+# convention throughout this suite — keeps working unchanged, while the
+# redirect refusal applies whenever the REAL opener is used.
+urllib.request.install_opener(urllib.request.build_opener(_NoRedirectHandler))
+
+
 # ---------------------------------------------------------------------------
 # harness_event audit emission (best-effort, fail-open)
 # ---------------------------------------------------------------------------
@@ -408,8 +485,20 @@ def emit_harness_event_raw(
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
             method="POST",
         )
+        # The module-level opener installed above refuses redirects rather
+        # than following them with the Authorization header attached — see
+        # _NoRedirectHandler.
         with urllib.request.urlopen(req, timeout=8) as resp:
             resp.read()
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            sys.stderr.write(
+                f"[{log_tag}] harness_event emission failed (non-fatal): refused "
+                f"a redirect ({exc.code}) rather than forwarding credentials "
+                "cross-origin\n"
+            )
+        else:
+            sys.stderr.write(f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n")
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n")
 

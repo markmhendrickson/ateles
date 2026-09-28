@@ -23,8 +23,13 @@ process environment happen to hold when pytest runs.
 """
 from __future__ import annotations
 
+import builtins
+import json
 import os
 import sys
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -62,6 +67,20 @@ def _write_env_file(tmp_path: Path, **pairs: str) -> Path:
     # the parser skips both rather than tripping on them.
     p.write_text("# a comment\n\n" + "\n".join(lines) + "\n")
     return p
+
+
+@contextmanager
+def _http_server(handler: type[BaseHTTPRequestHandler]):
+    """Run a loopback-only HTTP server for one transport integration test."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +246,55 @@ class TestNeotomaCredentials:
 # and the POST is attempted; both missing means the warning fires.
 # ---------------------------------------------------------------------------
 class TestEmitHarnessEventRawCredentialFallback:
+    def test_authenticated_post_refuses_cross_origin_redirect_without_forwarding_token(
+        self, monkeypatch, capsys
+    ):
+        """Security planted-red: urllib's default redirect handler forwards the
+        synthetic bearer to a different origin (a second loopback port).
+
+        The fixed transport must stop at the redirect response. Both servers
+        are process-local and the credential is a synthetic sentinel.
+        """
+        received_authorization: list[str | None] = []
+
+        class SinkHandler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib handler API
+                received_authorization.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                return
+
+        with _http_server(SinkHandler) as sink_url:
+            class RedirectHandler(BaseHTTPRequestHandler):
+                calls = 0
+
+                def do_POST(self):  # noqa: N802 - stdlib handler API
+                    type(self).calls += 1
+                    self.send_response(302)
+                    self.send_header("Location", f"{sink_url}/captured")
+                    self.end_headers()
+
+                def log_message(self, *args):
+                    return
+
+            with _http_server(RedirectHandler) as source_url:
+                monkeypatch.setenv("NEOTOMA_BASE_URL", source_url)
+                monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-redirect-token")
+
+                si.emit_harness_event_raw(
+                    "redirect-test",
+                    {"event_type": "synthetic"},
+                    log_tag="redirect-test",
+                    session_id="sess-redirect",
+                )
+
+        assert RedirectHandler.calls == 1
+        assert received_authorization == []
+        assert "redirect" in capsys.readouterr().err.lower()
+
     def test_missing_env_file_present_loads_credentials_and_attempts_post(
         self, monkeypatch, tmp_path, capsys
     ):
@@ -387,6 +455,65 @@ class TestEmitHarnessEventRawCredentialFallback:
         si.emit_harness_event_raw("slug2", {}, log_tag="tag", session_id="")
         captured = capsys.readouterr()
         assert captured.err.count("WARNING") == 2
+
+
+class TestMissingCredentialOperatorPresentation:
+    @staticmethod
+    def _exempt_summary():
+        return {
+            "turns": 1,
+            "wrote_domain": False,
+            "bound_plan": False,
+            "bound_task": False,
+            "captured_learning": False,
+            "write_types": set(),
+        }
+
+    def _run_stop(self, monkeypatch, session_id: str) -> int:
+        monkeypatch.setattr(
+            sf,
+            "read_hook_input",
+            lambda: {"session_id": session_id, "transcript_path": "unused"},
+        )
+        monkeypatch.setattr(sf, "scan_transcript", lambda _: self._exempt_summary())
+        monkeypatch.setattr(sf, "ENFORCE", False)
+        return sf.main()
+
+    def test_successful_stop_presents_missing_credentials_via_system_message_once(
+        self, monkeypatch, capsys
+    ):
+        """UX planted-red: a successful Stop must use the harness-supported
+        user-visible field, not stderr, and deduplicate only after delivery.
+        """
+        assert self._run_stop(monkeypatch, "sess-visible") == 0
+        first = capsys.readouterr()
+        payload = json.loads(first.out)
+        assert "systemMessage" in payload
+        assert "audit emission is being skipped" in payload["systemMessage"]
+        assert first.err == ""
+
+        assert self._run_stop(monkeypatch, "sess-visible") == 0
+        second = capsys.readouterr()
+        assert second.out == ""
+        assert second.err == ""
+
+    def test_failed_stdout_does_not_mark_notice_delivered_and_next_stop_recovers(
+        self, monkeypatch, capsys
+    ):
+        """A failed presentation attempt must not consume the one-shot notice."""
+        original_print = builtins.print
+
+        def _broken_print(*args, **kwargs):
+            raise OSError("synthetic stdout failure")
+
+        monkeypatch.setattr(builtins, "print", _broken_print)
+        with pytest.raises(OSError, match="synthetic stdout failure"):
+            self._run_stop(monkeypatch, "sess-recovery")
+
+        monkeypatch.setattr(builtins, "print", original_print)
+        assert self._run_stop(monkeypatch, "sess-recovery") == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "audit emission is being skipped" in payload["systemMessage"]
 
 
 def test_missing_audit_credentials_do_not_disable_stop_enforcement(monkeypatch, capsys):

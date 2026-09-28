@@ -31,6 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import (  # noqa: E402
     read_hook_input, load_state, scan_transcript, emit_harness_event, log,
+    neotoma_credentials, missing_credentials_warning_text,
+    credentials_warning_already_delivered, mark_credentials_warning_delivered,
 )
 
 ENFORCE = os.environ.get("ATELES_SESSION_INTEGRITY_ENFORCE", "") in ("1", "true", "yes")
@@ -68,6 +70,26 @@ def main() -> int:
         status = "integral"
     else:
         status = "violated"
+
+    # UX finding (PR #1298 round 4): a missing-credentials warning written
+    # only to stderr is invisible on a successful Stop — the harness does
+    # not feed stderr back into the session, and a normal integral/exempt
+    # Stop otherwise prints nothing at all, so the operator never sees it.
+    # On this (non-blocking) path, present the SAME notice via the harness's
+    # `systemMessage` JSON field BEFORE calling emit_harness_event, and mark
+    # delivery only after the stdout print itself succeeds — so a failed
+    # presentation attempt does not consume the one-shot per-session notice
+    # (the next Stop gets another chance), and emit_harness_event's own
+    # stderr warning (checked first, same dedup state) is skipped once this
+    # print has actually landed, rather than the notice reaching both
+    # surfaces for the same session.
+    if status != "violated" and not credentials_warning_already_delivered(session_id):
+        base_url, token = neotoma_credentials()
+        if not base_url or not token:
+            print(json.dumps({
+                "systemMessage": missing_credentials_warning_text("session-integrity"),
+            }))
+            mark_credentials_warning_delivered(session_id)
 
     emit_harness_event(session_id, summary, status)
 
