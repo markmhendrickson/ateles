@@ -23,6 +23,7 @@ execution/daemons/apis/test_gate_store_lookup.py	gate_status
 execution/daemons/apis/test_github_gateway.py	workflow_run
 execution/daemons/apis/test_swarm_dispatch.py	checkpoint_brief
 execution/daemons/apis/test_swarm_dispatch.py	sign_off
+execution/daemons/apis/test_task_dispatch_kill_switch.py	checkpoint_brief
 execution/daemons/apis/test_workflow_owner_drift.py	workflow_definition
 execution/scripts/check_foundation_vocabulary.py	sign_off
 execution/scripts/render_agent_docs.py	calendar_routing_config

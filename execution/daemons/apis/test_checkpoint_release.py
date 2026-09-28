@@ -75,6 +75,17 @@ REAL_READ_AUTHENTICATED_RESOLUTION = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _task_dispatch_enabled_for_release_tests(monkeypatch):
+    """This whole module exercises the operator-approval release path through
+    apis.handle_checkpoint_brief — the exact consumer APIS_TASK_DISPATCH_ENABLED
+    (default off) gates. These tests predate that flag and assert the release
+    behavior it would otherwise short-circuit, so flip it on for this module;
+    the flag's own off/on behavior is covered separately in
+    test_task_dispatch_kill_switch.py."""
+    monkeypatch.setattr(apis, "TASK_DISPATCH_ENABLED", True)
+
+
 class _Notifier:
     def __init__(self):
         self.sent: list[str] = []

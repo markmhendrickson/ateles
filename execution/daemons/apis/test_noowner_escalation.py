@@ -245,6 +245,11 @@ def test_handle_event_idempotency_only_claims_hydrated_events(monkeypatch):
     async def _fake_dispatch(entity_id, snapshot, trigger, notifier, **kw):
         seen.append((entity_id, kw.get("snapshot_hydrated")))
 
+    # The idempotency guard being tested here sits ahead of the (separate)
+    # APIS_TASK_DISPATCH_ENABLED kill switch — flip that flag on so this test
+    # still exercises dispatch_task itself, not the kill switch's own skip path
+    # (covered by test_task_dispatch_kill_switch.py).
+    monkeypatch.setattr(apis, "TASK_DISPATCH_ENABLED", True)
     monkeypatch.setattr(apis, "dispatch_task", _fake_dispatch)
     # hydrate_snapshot would hit the network; the events below carry their own state.
     async def _noop_hydrate(ev):
