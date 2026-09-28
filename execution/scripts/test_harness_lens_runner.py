@@ -115,7 +115,7 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
     unauthenticated Linux host turn those tests into authentication tests.
     """
 
-    def _build(cls, provider, tmp_root):
+    def _build(cls, provider, tmp_root, **kwargs):
         root = tmp_path / f"{provider}-unit-home"
         root.mkdir(parents=True, exist_ok=True)
         return hlr.HarnessSandbox(
@@ -141,6 +141,7 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
             git_stash_denied=True,
             authentication_ready=True,
             unavailable_guards=(),
+            filesystem_write_confined=True,
         )
 
     monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(_build))
@@ -442,6 +443,82 @@ def test_profile_denies_synthetic_helper_and_keychain_service(tmp_path):
     text = profile.read_text(encoding="utf-8")
     assert str(synthetic_helper) in text
     assert 'global-name "com.apple.securityd"' in text
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_profile_confines_writes_to_runtime_and_exact_verdict(tmp_path):
+    """A review child may write runtime state and its verdict, nothing else."""
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    verdict = tmp_path / "target-worktree" / "security1308_verdict.md"
+    verdict.parent.mkdir()
+    sibling = tmp_path / "sibling-checkout" / "probe-write"
+    sibling.parent.mkdir()
+    source = verdict.parent / "source-probe"
+    profile = tmp_path / "profile.sb"
+
+    hlr.build_sandbox_exec_profile(
+        profile,
+        writable_subpaths=(runtime_root,),
+        writable_literals=(verdict,),
+    )
+
+    for denied in (source, sibling):
+        attempt = subprocess.run(
+            ["/usr/bin/sandbox-exec", "-f", str(profile), "touch", str(denied)],
+            capture_output=True,
+            text=True,
+        )
+        assert attempt.returncode != 0
+        assert not denied.exists()
+
+    runtime_probe = runtime_root / "probe-write"
+    for allowed in (runtime_probe, verdict):
+        attempt = subprocess.run(
+            ["/usr/bin/sandbox-exec", "-f", str(profile), "touch", str(allowed)],
+            capture_output=True,
+            text=True,
+        )
+        assert attempt.returncode == 0, attempt.stderr
+        assert allowed.exists()
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_profile_denies_aauth_keys_and_bearer_mcp_temp_files(tmp_path):
+    """Use disposable fixtures shaped like both supported credential stores."""
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    key_root = tmp_path / "canonical-aauth-keys"
+    key_root.mkdir()
+    temp_root = tmp_path / "system-temp"
+    temp_root.mkdir()
+    profile = tmp_path / "profile.sb"
+
+    hlr.build_sandbox_exec_profile(
+        profile,
+        credential_key_roots=(key_root,),
+        credential_temp_roots=(temp_root,),
+        writable_subpaths=(runtime_root,),
+    )
+
+    fixtures = (
+        key_root / "fixture.jwk.json",
+        key_root / "fixture.json",
+        temp_root / "apis_mcp_fixture.json",
+    )
+    control = tmp_path / "ordinary-control-read.txt"
+    control.write_text("control\n", encoding="utf-8")
+    for fixture in fixtures:
+        fixture.write_text("fixture-not-a-real-credential\n", encoding="utf-8")
+        assert hlr.probe_sandbox_exec_denies_read(
+            profile, fixture, control_path=control
+        ), fixture.name
 
 
 @pytest.mark.skipif(
@@ -1078,6 +1155,7 @@ def test_refuse_if_guard_required_allows_claude_only_when_fully_proved(tmp_path)
         git_stash_denied=True,
         authentication_ready=True,
         unavailable_guards=(),
+        filesystem_write_confined=True,
     )
     assert hlr.refuse_if_guard_required(sandbox) is None
 
@@ -1216,6 +1294,7 @@ def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_
         git_stash_denied=True,
         authentication_ready=True,
         unavailable_guards=(),
+        filesystem_write_confined=True,
     )
     unguarded = hlr.HarnessSandbox(
         provider="codex",
@@ -2310,7 +2389,7 @@ def test_run_one_real_repository_without_stash_ref_reaches_dispatch(
 ):
     dispatched = False
 
-    def _ready_build(cls, provider, tmp_root):
+    def _ready_build(cls, provider, tmp_root, **kwargs):
         root = tmp_root / f"{provider}-unit-home"
         root.mkdir(parents=True, exist_ok=True)
         return hlr.HarnessSandbox(
@@ -2324,6 +2403,7 @@ def test_run_one_real_repository_without_stash_ref_reaches_dispatch(
             git_stash_denied=True,
             authentication_ready=True,
             unavailable_guards=(),
+            filesystem_write_confined=True,
         )
 
     monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(_ready_build))
@@ -2969,11 +3049,12 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         git_stash_denied=True,
         authentication_ready=True,
         unavailable_guards=(),
+        filesystem_write_confined=True,
     )
     monkeypatch.setattr(
         hlr.HarnessSandbox,
         "build",
-        classmethod(lambda cls, provider, tmp_root: guarded),
+        classmethod(lambda cls, provider, tmp_root, **kwargs: guarded),
     )
 
     async def _dispatch(role, task, **kwargs):
@@ -3052,11 +3133,12 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
         git_stash_denied=True,
         authentication_ready=True,
         unavailable_guards=(),
+        filesystem_write_confined=True,
     )
     monkeypatch.setattr(
         hlr.HarnessSandbox,
         "build",
-        classmethod(lambda cls, provider, tmp_root: guarded),
+        classmethod(lambda cls, provider, tmp_root, **kwargs: guarded),
     )
 
     seen = {}
