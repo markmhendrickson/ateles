@@ -419,6 +419,11 @@ def check(root: Path) -> list[str]:
                 "pm-14-setup",
             ),
             (
+                3,
+                r"read\s+the\s+frontier.*no\s+shared\s+resource.*impose\s+one\s+metered-resource\s+slot.*cancel\s+`PL3`\s+without\s+completing\s+it",
+                "pm-14-action",
+            ),
+            (
                 4,
                 r"blocked\s+dependency\s+enters\s+the\s+frontier",
                 "pm-14-blocked-dependency",
@@ -454,6 +459,11 @@ def check(root: Path) -> list[str]:
                 2,
                 r"live\s+planning\s+task.*forever-recurring\s+delivery\s+task",
                 "pm-15-setup",
+            ),
+            (
+                3,
+                r"close\s+every\s+finite\s+descendant.*one\s+delivery\s+occurrence.*give\s+the\s+recurrence\s+an\s+end.*land\s+its\s+final\s+occurrence",
+                "pm-15-action",
             ),
             (
                 4,

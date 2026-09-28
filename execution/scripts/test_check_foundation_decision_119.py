@@ -229,6 +229,35 @@ def test_actual_corpus_mutation_breaks_normative_clause(
 
 
 @pytest.mark.parametrize(
+    ("row_id", "action", "label"),
+    (
+        (
+            "PM-14",
+            "read the frontier with no shared resource, then impose one metered-resource slot; cancel `PL3` without completing it",
+            "pm-14-action",
+        ),
+        (
+            "PM-15",
+            "close every finite descendant and one delivery occurrence; then give the recurrence an end and land its final occurrence",
+            "pm-15-action",
+        ),
+    ),
+)
+def test_actual_corpus_mutation_breaks_required_action_cell(
+    tmp_path: Path, row_id: str, action: str, label: str
+) -> None:
+    copy_actual_corpus(tmp_path)
+    mutate_actual_corpus(tmp_path, "conformance_suite.md", action, "—")
+
+    problems = decision_119.check(tmp_path)
+
+    assert any(f"decision-119-{label}" in problem for problem in problems), (
+        row_id,
+        problems,
+    )
+
+
+@pytest.mark.parametrize(
     ("row_id", "old", "new", "label"),
     (
         (
