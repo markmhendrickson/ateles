@@ -1,0 +1,118 @@
+{
+  "_about": {
+    "fixture_kind": "synthetic_public_safe_behavior_fixture",
+    "canonical": false,
+    "purpose": "Exercise master-plan-first reporting without copying operator data into the public repository.",
+    "attribution": {
+      "review_task": "ent_80c15446a22b2283d13aaabe",
+      "pull_request": "markmhendrickson/ateles#1313",
+      "reviewed_head": "1f3070364a84659b43b95a83133f26aad17815c0",
+      "master_plan_locator": "ent_81aadb43caf2fa493361e8ed"
+    }
+  },
+  "master_plan_id": "ent_fixture_master_plan",
+  "entities": {
+    "ent_fixture_master_plan": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Foundation rollout",
+        "status": "active",
+        "phases": [
+          {"id": "ent_fixture_phase_a", "name": "A", "exit_gate_state": "signed_off"},
+          {"id": "ent_fixture_phase_a2", "name": "A2", "exit_gate_state": "signed_off"},
+          {"id": "ent_fixture_phase_b", "name": "B", "exit_gate_state": "signed_off"},
+          {"id": "ent_fixture_phase_b2", "name": "B2", "exit_gate_state": "active"},
+          {"id": "ent_fixture_phase_b2_prime", "name": "B2-prime", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_c", "name": "C", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_d", "name": "D", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_d2", "name": "D2", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_e", "name": "E", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_f", "name": "F", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_g", "name": "G", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_h", "name": "H", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_i", "name": "I", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_j", "name": "J", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_k", "name": "K", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_l", "name": "L", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_m", "name": "M", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_n", "name": "N", "exit_gate_state": "pending"},
+          {"id": "ent_fixture_phase_o", "name": "O", "exit_gate_state": "pending"}
+        ],
+        "decisions": {
+          "master_plan_first_reporting": "Report the selected master plan and its canonical phase exit gates before task mechanics; place work only through structural phase bindings and label unbound work cross-phase."
+        }
+      }
+    },
+    "ent_fixture_phase_b2": {
+      "entity_type": "plan_phase",
+      "snapshot": {"name": "B2", "exit_gate_state": "active", "order": 4}
+    },
+    "ent_fixture_phase_e": {
+      "entity_type": "plan_phase",
+      "snapshot": {"name": "E", "exit_gate_state": "pending", "order": 9}
+    },
+    "ent_fixture_bound_plan": {
+      "entity_type": "plan",
+      "snapshot": {"title": "Rules delivery hardening", "status": "active"}
+    },
+    "ent_fixture_bound_task": {
+      "entity_type": "task",
+      "snapshot": {"title": "Phase A emergency repair", "status": "in_progress"}
+    },
+    "ent_fixture_e2_plan": {
+      "entity_type": "plan",
+      "snapshot": {"title": "E2 bootstrap repair", "status": "active"}
+    },
+    "ent_fixture_duplicate_plan": {
+      "entity_type": "plan",
+      "snapshot": {"title": "Split-phase validation", "status": "active"}
+    },
+    "ent_fixture_repair": {
+      "entity_type": "task",
+      "snapshot": {"title": "Repair", "status": "in_progress"}
+    },
+    "ent_fixture_review": {
+      "entity_type": "task",
+      "snapshot": {"title": "Review", "status": "queued"}
+    },
+    "ent_fixture_merge": {
+      "entity_type": "task",
+      "snapshot": {"title": "Merge", "status": "queued"}
+    },
+    "ent_fixture_deploy": {
+      "entity_type": "task",
+      "snapshot": {"title": "Deploy checks", "status": "queued"}
+    },
+    "ent_fixture_missing_task": {
+      "entity_type": "task",
+      "snapshot": {"title": "Unplanned audit", "status": "queued"}
+    },
+    "ent_fixture_duplicate_task": {
+      "entity_type": "task",
+      "snapshot": {"title": "Split-parent verification", "status": "queued"}
+    }
+  },
+  "relationships": [
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_bound_task", "target_entity_id": "ent_fixture_bound_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_bound_plan", "target_entity_id": "ent_fixture_phase_b2"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_phase_b2", "target_entity_id": "ent_fixture_master_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_phase_e", "target_entity_id": "ent_fixture_master_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_repair", "target_entity_id": "ent_fixture_e2_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_review", "target_entity_id": "ent_fixture_e2_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_merge", "target_entity_id": "ent_fixture_e2_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_deploy", "target_entity_id": "ent_fixture_e2_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_e2_plan", "target_entity_id": "ent_fixture_master_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_plan", "target_entity_id": "ent_fixture_phase_b2"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_plan", "target_entity_id": "ent_fixture_phase_e"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_bound_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_e2_plan"}
+  ],
+  "scenarios": {
+    "continue-session": {
+      "prompt": "/continue-session Foundation rollout. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
+    },
+    "digest": {
+      "prompt": "/digest --report-only project. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
+    }
+  }
+}

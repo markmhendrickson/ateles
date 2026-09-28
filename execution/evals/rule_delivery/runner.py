@@ -3,12 +3,12 @@
 
 Every scenario is one real failure from the 2026-09-26 rule-delivery audit
 (Neotoma analysis ent_b66293f0dcc8c887d4fdbeae), rebuilt in a sandbox. The
-SAME rule set (three scenario targets plus twelve distractors, from
+SAME rule set (four scenario targets plus twelve distractors, from
 ``fixtures/rules.json``) is delivered through each channel, so a difference
 in compliance between channels is an effect of the channel, not of the rule
 text. Each target rule has a different type (checkable prohibition, stance or
-conduct, judgement or verification), so comparing scenarios within one
-channel is the rule-type axis.
+conduct, judgement or verification, ownership authority), so comparing
+scenarios within one channel is the rule-type axis.
 
 Channels (``--channels``):
 
@@ -94,6 +94,13 @@ FILLER_CHARS = 9000
 _FILLER_EXCLUDE = ("ent_", "cursor", "grant", "mcp.json", "neotoma", "claude.md")
 DISALLOWED = "Bash,Agent,Task,WebFetch,WebSearch,NotebookEdit,AskUserQuestion"
 ALLOWED = "Read,Edit,Write,MultiEdit,Glob,Grep,mcp__neotoma"
+HARNESS_UNAVAILABLE_MARKERS = (
+    "not logged in",
+    "please run /login",
+    "authentication required",
+    "usage limit",
+    "quota exceeded",
+)
 # Every file tool the guard must see. Pinned to ALLOWED and to
 # sandbox_guard.TOOL_PATH_ARGS by test_guard_covers_every_file_tool_the_sandbox_allows.
 GUARD_MATCHER = "Read|Edit|Write|MultiEdit|Glob|Grep|NotebookEdit"
@@ -142,8 +149,15 @@ def render_index(rules: list[dict], with_title: bool) -> str:
         render_skills,
     )  # noqa: PLC0415
 
+    # Every eval row is fixture-global. Supplying the already-known empty edge
+    # map and synthetic definition id keeps the real renderer's scope predicate
+    # while preventing its optional live Neotoma resolution from crossing the
+    # sandbox boundary during dry runs or CI.
     skills = render_skills(
-        [policy_row(r, with_title) for r in rules], principal="eval@ateles-swarm"
+        [policy_row(r, with_title) for r in rules],
+        principal="eval@ateles-swarm",
+        agent_definition_id="eval-agent-definition",
+        governs={},
     )
     return INDEX_HEADER + "\n" + render_index_text(skills, 9800) + "\n"
 
@@ -602,6 +616,11 @@ def score_run(
     ws = run_dir / "ws"
     if not trigger or not res:
         outcome = {"outcome": "error", "why": meta.get("error") or "no result"}
+    elif any(marker in final_text.lower() for marker in HARNESS_UNAVAILABLE_MARKERS):
+        outcome = {
+            "outcome": "error",
+            "why": "harness unavailable before the scenario ran",
+        }
     elif scenario["id"] == "cursor_stdio":
         outcome = checks.check_cursor_stdio(ws, calls, final_text, scenario)
     elif scenario["id"] == "link_ids":
@@ -618,6 +637,13 @@ def score_run(
             scenario,
             grant_id,
             entities[grant_id]["snapshot"]["agent_sub"],
+        )
+    elif scenario["id"] == "pr_closure_ownership":
+        pull_requests = {
+            k: v for k, v in entities.items() if v["entity_type"] == "pull_request"
+        }
+        outcome = checks.check_pr_closure_ownership(
+            ws, calls, final_text, scenario, pull_requests
         )
     else:
         raise ValueError(scenario["id"])
