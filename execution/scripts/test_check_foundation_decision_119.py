@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -10,6 +11,14 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import check_foundation_decision_119 as decision_119  # noqa: E402
+
+REPO_ROOT = SCRIPT_DIR.parents[1]
+CORPUS_FILES = (
+    "conformance.md",
+    "planning_model.md",
+    "data_model.md",
+    "conformance_suite.md",
+)
 
 
 CONFORMANCE = """\
@@ -68,8 +77,23 @@ def write_corpus(
     (fdir / "conformance_suite.md").write_text(suite, encoding="utf-8")
 
 
+def copy_actual_corpus(root: Path) -> None:
+    source = REPO_ROOT / "docs" / "foundation"
+    target = root / "docs" / "foundation"
+    target.mkdir(parents=True)
+    for name in CORPUS_FILES:
+        shutil.copy2(source / name, target / name)
+
+
+def mutate_actual_corpus(root: Path, filename: str, old: str, new: str) -> None:
+    path = root / "docs" / "foundation" / filename
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"mutation target drifted in {filename}: {old!r}"
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
 def test_passes_when_ruled_shape_is_complete(tmp_path: Path) -> None:
-    write_corpus(tmp_path)
+    copy_actual_corpus(tmp_path)
 
     assert decision_119.check(tmp_path) == []
 
@@ -110,15 +134,19 @@ def test_planted_red_fails_when_planning_dependency_target_is_removed(
 
 
 def test_fails_when_checkpoint_is_allowed_to_prove_completion(tmp_path: Path) -> None:
-    planning = PLANNING.replace(
-        "A checkpoint is never completion evidence.",
-        "A checkpoint can be completion evidence.",
+    copy_actual_corpus(tmp_path)
+    mutate_actual_corpus(
+        tmp_path,
+        "planning_model.md",
+        "it is never completion evidence and cannot\nsubstitute for the effect it allowed",
+        "it may be completion evidence and may\nsubstitute for the effect it allowed",
     )
-    write_corpus(tmp_path, planning=planning)
 
     problems = decision_119.check(tmp_path)
 
-    assert any("decision-119-checkpoint-negative" in problem for problem in problems)
+    assert any(
+        "decision-119-completion-checkpoint-negative" in problem for problem in problems
+    )
 
 
 def test_fails_when_a_required_conformance_row_is_missing(tmp_path: Path) -> None:
@@ -137,3 +165,103 @@ def test_raises_when_a_corpus_file_is_missing(tmp_path: Path) -> None:
 
     with pytest.raises(decision_119.CorpusProblem, match="planning_model.md"):
         decision_119.check(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "label"),
+    (
+        (
+            "The proposer needs\na grant that admits the action and the engine's write",
+            "The proposer needs\na role that names the action and the engine's write",
+            "control-grant",
+        ),
+        (
+            "`ownership_grant` on the record supplies the required checkpoint seat",
+            "`ownership_grant` on the record is consulted",
+            "control-owner-seat",
+        ),
+        (
+            "existing action gate permits the action and its read-back confirms the effect",
+            "engine accepts the action and its read-back confirms the effect",
+            "control-action-gate",
+        ),
+        (
+            "existing `amend_<level>` action and a confirmed planning decision",
+            "existing `amend_<level>` action and a planning decision",
+            "scope-confirmed-amendment",
+        ),
+        (
+            "satisfied\nonly by that record's proved completion, never by its cancellation",
+            "satisfied\nby that record's completion or cancellation",
+            "frontier-dependency-satisfaction",
+        ),
+        (
+            "it is never completion evidence and cannot\nsubstitute for the effect it allowed",
+            "it may be completion evidence and may\nsubstitute for the effect it allowed",
+            "completion-checkpoint-negative",
+        ),
+        (
+            "while paused it remains\nreachable only to evaluate and take `resume_<level>` or `cancel_<level>`",
+            "while paused it remains\ninert until delivery work is restarted elsewhere",
+            "recovery-control-reachability",
+        ),
+    ),
+)
+def test_actual_corpus_mutation_breaks_normative_clause(
+    tmp_path: Path, old: str, new: str, label: str
+) -> None:
+    copy_actual_corpus(tmp_path)
+    mutate_actual_corpus(tmp_path, "planning_model.md", old, new)
+
+    problems = decision_119.check(tmp_path)
+
+    assert any(f"decision-119-{label}" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    ("row_id", "old", "new", "label"),
+    (
+        (
+            "PM-13",
+            "any effect without the action gate and owner seat",
+            "an effect is observed",
+            "pm-13-action-gate-owner-seat",
+        ),
+        (
+            "PM-14",
+            "a blocked dependency enters the frontier",
+            "a dependency is inspected",
+            "pm-14-blocked-dependency",
+        ),
+        (
+            "PM-15",
+            "`PL1` completes while the delivery recurrence is unbounded",
+            "`PL1` observes the delivery recurrence",
+            "pm-15-unbounded-recurrence",
+        ),
+        (
+            "PM-16",
+            "refuse parent completion does not fire with an unmet criterion",
+            "parent completion is inspected",
+            "pm-16-refuse-parent-completion",
+        ),
+        (
+            "PM-17",
+            "`resume_plan` is unreachable while delivery is quiesced or bypasses authorization or confirmed read-back",
+            "`resume_plan` is inspected after restart",
+            "pm-17-resume-control-path",
+        ),
+    ),
+)
+def test_actual_corpus_mutation_breaks_row_specific_refusal_contract(
+    tmp_path: Path, row_id: str, old: str, new: str, label: str
+) -> None:
+    copy_actual_corpus(tmp_path)
+    mutate_actual_corpus(tmp_path, "conformance_suite.md", old, new)
+
+    problems = decision_119.check(tmp_path)
+
+    assert any(f"decision-119-{label}" in problem for problem in problems), (
+        row_id,
+        problems,
+    )
