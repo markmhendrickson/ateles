@@ -235,22 +235,28 @@ class TestIndexLineCorrectionsAreRedelivered:
         assert module.row_signature([absent]) != module.row_signature([corrected])
 
     @pytest.mark.parametrize(
-        ("index_line", "expected", "unexpected"),
+        ("case_id", "index_line", "expected", "unexpected"),
         [
             (
+                "nonblank-summary",
                 "Corrected operative summary.",
                 "Corrected operative summary.",
                 "Legacy display title",
             ),
-            ("", "When doing policy work:", "Legacy display title"),
+            (
+                "absent-to-explicit-blank",
+                "",
+                "When doing policy work:",
+                "Legacy display title",
+            ),
         ],
         ids=("nonblank-summary", "absent-to-explicit-blank"),
     )
     def test_session_start_redelivers_index_line_correction_and_records_it(
-        self, fake_neotoma, project_dir, index_line, expected, unexpected
+        self, fake_neotoma, project_dir, case_id, index_line, expected, unexpected
     ):
         base_url, handler = fake_neotoma
-        session_id = f"sess-index-start-{index_line or 'blank'}"
+        session_id = f"sess-index-start-{case_id}"
         handler.rows = [
             _row(
                 "ent_index_line",
@@ -282,22 +288,28 @@ class TestIndexLineCorrectionsAreRedelivered:
         assert _delivered_hash(project_dir, session_id) != baseline_hash
 
     @pytest.mark.parametrize(
-        ("index_line", "expected", "unexpected"),
+        ("case_id", "index_line", "expected", "unexpected"),
         [
             (
+                "nonblank-summary",
                 "Corrected operative summary.",
                 "Corrected operative summary.",
                 "Legacy display title",
             ),
-            ("", "When doing policy work:", "Legacy display title"),
+            (
+                "absent-to-explicit-blank",
+                "",
+                "When doing policy work:",
+                "Legacy display title",
+            ),
         ],
         ids=("nonblank-summary", "absent-to-explicit-blank"),
     )
     def test_user_prompt_submit_redelivers_index_line_correction(
-        self, fake_neotoma, project_dir, index_line, expected, unexpected
+        self, fake_neotoma, project_dir, case_id, index_line, expected, unexpected
     ):
         base_url, handler = fake_neotoma
-        session_id = f"sess-index-prompt-{index_line or 'blank'}"
+        session_id = f"sess-index-prompt-{case_id}"
         handler.rows = [
             _row(
                 "ent_index_line",
