@@ -6,7 +6,14 @@ Transcribes audio with LOCAL whisper-cli by default (free, on-device, no API
 key). ElevenLabs is used when diarization is requested — speaker separation is
 the one thing the local model cannot do — and the METERED OpenAI Whisper API
 only on an explicit opt-in (``--backend openai`` / ``TRANSCRIBE_BACKEND``); it
-is never a silent fallback. Persists each result as a Neotoma ``transcription`` entity with the WAV
+is never a silent fallback TO. The reverse direction is deliberately
+different: if OpenAI was explicitly chosen and then fails with a
+provider-level error (quota/spend-limit exhausted, bad credential, OpenAI's
+own 5xx/connection/timeout — see ``OpenAIProviderUnavailable``), this module
+falls through ONCE to ElevenLabs (if keyed) or local whisper-cli rather than
+failing the run; a malformed-input error never triggers this. The result is
+marked (``transcription_engine`` gets a ``_fallback_from_openai`` suffix, plus
+a ``provider_fallback`` dict) so a later reader can tell. Persists each result as a Neotoma ``transcription`` entity with the WAV
 attached (``neotoma store`` combined file + entities). Optional: after store,
 creates ``REFERS_TO`` edges from the new ``transcription`` to ``contact`` and/or
 ``feedback_analysis`` entities (CLI flags, env vars, or ``<stem>_neotoma_relations.json``
@@ -41,7 +48,15 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    InternalServerError,
+    OpenAI,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
 # Add project root to path
 PROJECT_ROOT = Path(
@@ -126,6 +141,52 @@ MAX_RETRY_DELAY = float(
 )  # Max retry delay (5 minutes)
 
 
+class OpenAIProviderUnavailable(RuntimeError):
+    """Raised when OpenAI itself is the problem, not the request.
+
+    A ``RuntimeError`` subclass (so existing ``except RuntimeError`` callers are
+    unaffected) that marks failures a DIFFERENT provider could plausibly survive:
+    quota/billing exhaustion, an invalid/revoked key, an org permission gate, or
+    OpenAI's own infrastructure (5xx, connection, timeout). ``transcribe_audio_file``
+    catches specifically this type to decide whether to fall through to
+    ElevenLabs/local — never a bare ``RuntimeError`` or ``ValueError``, which also
+    cover malformed input that every provider would reject identically (see
+    ``split_audio_file`` / "invalid file" / "SKIP:" duration errors below, which
+    intentionally do NOT raise this type).
+    """
+
+
+# Substrings identifying OpenAI's 2026-09 organization spend-cap error, which
+# is DISTINCT from insufficient_quota (per-key usage quota): it fires even
+# though models.list() and the key itself are fine. Not previously detected —
+# only insufficient_quota was, so a spend-cap error fell through to the
+# generic "max retries exceeded" path and was retried uselessly before this.
+_ORG_SPEND_LIMIT_MARKERS = (
+    "organization_spend_limit_exceeded",
+    "spend limit",
+)
+
+
+def _is_permanent_quota_error(error_code: str, error_type: str, error_message: str) -> bool:
+    """True for a billing/quota condition retrying cannot fix.
+
+    Covers both ``insufficient_quota`` (the per-key usage cap) and the
+    organization-level spend-limit cap (billing exhausted org-wide; the key
+    itself is valid and ``models.list`` still succeeds). Both are permanent
+    until the operator acts on billing, so retrying wastes the retry budget.
+    """
+    if (
+        error_code == "insufficient_quota"
+        or error_type == "insufficient_quota"
+        or "insufficient_quota" in error_message
+    ):
+        return True
+    return any(marker in error_message for marker in _ORG_SPEND_LIMIT_MARKERS) or (
+        error_code == "organization_spend_limit_exceeded"
+        or error_type == "organization_spend_limit_exceeded"
+    )
+
+
 def transcribe_with_retry(
     client: OpenAI,
     audio_file,
@@ -147,7 +208,14 @@ def transcribe_with_retry(
         Transcription result
 
     Raises:
-        RuntimeError: If quota is permanently exceeded (insufficient_quota) or max retries exceeded
+        OpenAIProviderUnavailable: Quota/billing exhausted (insufficient_quota or
+            organization_spend_limit_exceeded), auth failure, permission denial,
+            OpenAI-side 5xx/connection/timeout, or max retries exceeded on
+            transient rate limiting. A caller may treat this as fall-through-worthy.
+        ValueError: Malformed input (e.g. SKIP: too-short/corrupt audio) — NOT
+            raised here, but sibling code paths use it for input the request
+            itself is wrong about; never fall through on that, every provider
+            would reject the same bytes.
     """
     last_exception = None
     file_opened_here = False
@@ -239,20 +307,17 @@ def transcribe_with_retry(
             error_type = error_data.get("type", "")
             error_message = str(e).lower()
 
-            # Check if it's a permanent quota issue (insufficient_quota)
-            if (
-                error_code == "insufficient_quota"
-                or error_type == "insufficient_quota"
-                or "insufficient_quota" in error_message
-            ):
+            # Check if it's a permanent quota/billing issue (insufficient_quota
+            # or organization_spend_limit_exceeded — see _is_permanent_quota_error).
+            if _is_permanent_quota_error(error_code, error_type, error_message):
                 if verbose:
                     print(
-                        "    ⚠️  Quota exceeded (insufficient_quota). This requires account quota increase."
+                        "    ⚠️  Quota/spend limit exceeded. This requires account billing action."
                     )
-                raise RuntimeError(
-                    f"OpenAI API quota exceeded (insufficient_quota). "
-                    f"Please check your billing and increase your quota at https://platform.openai.com/account/limits. "
-                    f"Error: {e}"
+                raise OpenAIProviderUnavailable(
+                    f"OpenAI API quota exceeded ({error_code or error_type or 'insufficient_quota'}). "
+                    f"Please check your billing and increase your quota/spend limit at "
+                    f"https://platform.openai.com/account/limits. Error: {e}"
                 ) from e
 
             # For transient rate limits, retry with exponential backoff
@@ -269,18 +334,48 @@ def transcribe_with_retry(
                     ) from e
                 continue
             else:
-                # Max retries exceeded
-                raise RuntimeError(
+                # Max retries exceeded on a TRANSIENT rate limit (not a permanent
+                # quota condition, handled above). Another provider is not sharing
+                # OpenAI's rate-limit bucket, so this is still fall-through-worthy.
+                raise OpenAIProviderUnavailable(
                     f"OpenAI API rate limit exceeded after {MAX_RETRIES} retries. "
                     f"Please wait and try again later, or increase rate limits. Error: {e}"
                 ) from e
+
+        except (AuthenticationError, PermissionDeniedError) as e:
+            # Close file if we opened it
+            if file_opened_here and file_obj:
+                file_obj.close()
+                file_opened_here = False
+            # Invalid/revoked key, or the org lacks access to this endpoint/model.
+            # A different provider's own credential is unaffected, so this is
+            # fall-through-worthy — unlike a malformed request, which every
+            # provider would reject identically.
+            raise OpenAIProviderUnavailable(
+                f"OpenAI API rejected the credential ({type(e).__name__}): {e}"
+            ) from e
+
+        except (InternalServerError, APIConnectionError, APITimeoutError) as e:
+            # Close file if we opened it
+            if file_opened_here and file_obj:
+                file_obj.close()
+                file_opened_here = False
+            # OpenAI's own infrastructure (5xx) or the network path to it
+            # (connect/timeout) — not a property of this specific request, so
+            # another provider is not presumed to share the failure.
+            raise OpenAIProviderUnavailable(
+                f"OpenAI API is unavailable ({type(e).__name__}): {e}"
+            ) from e
 
         except Exception:
             # Close file if we opened it
             if file_opened_here and file_obj:
                 file_obj.close()
                 file_opened_here = False
-            # For non-rate-limit errors, don't retry
+            # Everything else (BadRequestError/malformed file, NotFoundError,
+            # UnprocessableEntityError, ...) is a property of THIS request, which
+            # every provider would reject the same way. Don't retry, and don't
+            # mark it fall-through-worthy.
             raise
 
     # Should never reach here, but just in case
@@ -1690,6 +1785,20 @@ def transcribe_audio_file(
     fallback: if the local backend is misconfigured, that raises rather than
     quietly starting to bill.
 
+    If OpenAI WAS explicitly selected (via 1 or 2) and then fails with a
+    provider-level error — quota/spend-limit exhausted, bad/revoked credential,
+    org permission denial, or OpenAI's own 5xx/connection/timeout — this
+    degrades ONCE to ElevenLabs (if ``ELEVENLABS_API_KEY`` is set) or else local
+    whisper-cli, instead of failing the run. It never retries OpenAI itself and
+    never tries more than one alternate backend. A malformed/corrupt-input
+    error (every backend would reject the same bytes) does NOT trigger this.
+    See ``OpenAIProviderUnavailable`` and ``_fall_through_from_openai`` for the
+    exact classification. A fallback result is marked so it is never mistaken
+    for an ordinary run: ``transcription_engine`` gets a
+    ``_fallback_from_openai`` suffix and the result carries a
+    ``provider_fallback`` dict (``preferred_backend``, ``actual_backend``,
+    ``reason``).
+
     Args:
         audio_path: Path to audio file
         language: Optional language code (e.g., 'en', 'es'). If None, auto-detect.
@@ -1697,7 +1806,8 @@ def transcribe_audio_file(
         backend: Explicit backend name ('local', 'elevenlabs', 'openai').
 
     Returns:
-        Dictionary with transcription results including text and metadata
+        Dictionary with transcription results including text and metadata.
+        On a fallback from OpenAI, also includes ``provider_fallback``.
     """
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -1716,31 +1826,152 @@ def transcribe_audio_file(
         print(f"TRANSCRIPTION_BACKEND_SELECTED={resolved_backend}", flush=True)
 
     if resolved_backend == BACKEND_LOCAL:
-        if verbose:
-            print("    Transcribing locally with whisper-cli (free, on-device)...")
-        local = transcribe_local(
-            audio_path, language=language, verbose=verbose
-        )
-        return {
-            "transcription_text": _postprocess_transcript(
-                local["transcription_text"]
-            )
-            if not local.get("silence")
-            else local["transcription_text"],
-            "language": local["language"],
-            "audio_duration_seconds": get_audio_duration(audio_path),
-            "file_size_bytes": audio_path.stat().st_size,
-            "backend": BACKEND_LOCAL,
-            "transcription_engine": local.get(
-                "transcription_engine", TRANSCRIPTION_ENGINE_LOCAL
-            ),
-            "transcription_model": local.get(
-                "transcription_model", DEFAULT_MODEL_NAME
-            ),
-            "rms_db": local.get("rms_db"),
-            "silence": bool(local.get("silence")),
-        }
+        return _transcribe_locally(audio_path, language=language, verbose=verbose)
 
+    try:
+        return _transcribe_via_elevenlabs_or_openai(
+            audio_path,
+            resolved_backend,
+            language=language,
+            verbose=verbose,
+        )
+    except OpenAIProviderUnavailable as e:
+        return _fall_through_from_openai(
+            audio_path, language=language, verbose=verbose, cause=e
+        )
+
+
+def _transcribe_locally(
+    audio_path: Path, *, language: str | None, verbose: bool
+) -> dict:
+    """The local whisper-cli path, factored out so both the primary dispatch
+    and the OpenAI fallback (``_fall_through_from_openai``) share one copy."""
+    if verbose:
+        print("    Transcribing locally with whisper-cli (free, on-device)...")
+    local = transcribe_local(audio_path, language=language, verbose=verbose)
+    return {
+        "transcription_text": _postprocess_transcript(local["transcription_text"])
+        if not local.get("silence")
+        else local["transcription_text"],
+        "language": local["language"],
+        "audio_duration_seconds": get_audio_duration(audio_path),
+        "file_size_bytes": audio_path.stat().st_size,
+        "backend": BACKEND_LOCAL,
+        "transcription_engine": local.get(
+            "transcription_engine", TRANSCRIPTION_ENGINE_LOCAL
+        ),
+        "transcription_model": local.get(
+            "transcription_model", DEFAULT_MODEL_NAME
+        ),
+        "rms_db": local.get("rms_db"),
+        "silence": bool(local.get("silence")),
+    }
+
+
+def _fall_through_from_openai(
+    audio_path: Path, *, language: str | None, verbose: bool, cause: Exception
+) -> dict:
+    """OpenAI failed with a provider-level error (quota/spend-limit/auth/5xx —
+    see ``OpenAIProviderUnavailable``). Fall through ONCE, in the order the rest
+    of this module already prefers when OpenAI is not explicitly requested:
+    ElevenLabs (if a key is configured — the more capable paid alternative,
+    still able to diarize) then local whisper-cli (always available, free,
+    the documented default backend). Never retries OpenAI itself and never
+    tries more than one alternate backend, so one outage costs at most one
+    extra attempt, not a cascade.
+
+    The returned result is marked so a later reader can tell the preferred
+    backend was unavailable: ``transcription_engine`` gets a
+    ``_fallback_from_openai`` suffix, and ``provider_fallback`` carries the
+    reason and the backend actually used. This matters because backend
+    quality genuinely differs — the local backend does not produce
+    ``no_speech_prob`` / ``avg_logprob`` (OpenAI-API-only fields; see
+    ``hallucination_filter.py`` and PR #782, superseded because those signals
+    do not exist on the local path), so a consumer reading those fields needs
+    to know they may legitimately be absent here.
+    """
+    reason = str(cause)
+    if verbose:
+        print(
+            f"    ⚠️  OpenAI unavailable ({reason[:200]}) — falling through to "
+            "another backend (not retrying OpenAI itself).",
+            file=sys.stderr,
+        )
+    print(
+        f"TRANSCRIPTION_PROVIDER_FALLBACK=openai_unavailable reason={reason[:300]!r}",
+        flush=True,
+    )
+
+    has_elevenlabs_key = bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
+    if has_elevenlabs_key:
+        if verbose:
+            print(
+                "    Falling through to ElevenLabs (key present)...",
+                file=sys.stderr,
+            )
+        try:
+            el = transcribe_with_elevenlabs_speech_to_text(
+                audio_path, language=language, verbose=verbose
+            )
+        except Exception as el_exc:  # noqa: BLE001 — this IS the last resort before local
+            if verbose:
+                print(
+                    f"    ElevenLabs fallback also failed ({el_exc}); "
+                    "falling through to local whisper-cli.",
+                    file=sys.stderr,
+                )
+        else:
+            engine = el.get("transcription_engine", "elevenlabs_stt")
+            return {
+                "transcription_text": el["transcription_text"],
+                "language": el["language"],
+                "audio_duration_seconds": get_audio_duration(audio_path),
+                "file_size_bytes": audio_path.stat().st_size,
+                "raw_response": el.get("raw_response"),
+                "backend": el.get("backend", BACKEND_ELEVENLABS),
+                "transcription_engine": f"{engine}_fallback_from_openai",
+                "transcription_model": el.get("transcription_model", "scribe_v2"),
+                "provider_fallback": {
+                    "preferred_backend": BACKEND_OPENAI,
+                    "actual_backend": BACKEND_ELEVENLABS,
+                    "reason": reason,
+                },
+            }
+
+    # Local is always the last resort: no key required, no network, and it is
+    # the module's own documented default — see the module docstring and
+    # ``local_whisper.py``'s header ("This is the DEFAULT transcription
+    # backend... for the operator's actual workload... equally effective").
+    if verbose:
+        print(
+            "    Falling through to local whisper-cli (free, on-device, no key "
+            "required)...",
+            file=sys.stderr,
+        )
+    result = _transcribe_locally(audio_path, language=language, verbose=verbose)
+    result["transcription_engine"] = (
+        f"{result.get('transcription_engine', TRANSCRIPTION_ENGINE_LOCAL)}"
+        "_fallback_from_openai"
+    )
+    result["provider_fallback"] = {
+        "preferred_backend": BACKEND_OPENAI,
+        "actual_backend": BACKEND_LOCAL,
+        "reason": reason,
+    }
+    return result
+
+
+def _transcribe_via_elevenlabs_or_openai(
+    audio_path: Path,
+    resolved_backend: str,
+    *,
+    language: str | None,
+    verbose: bool,
+) -> dict:
+    """The ElevenLabs / OpenAI dispatch, factored out of ``transcribe_audio_file``
+    so the OpenAI branch's ``OpenAIProviderUnavailable`` can be caught by the
+    caller and routed to ``_fall_through_from_openai`` without duplicating the
+    qta-conversion / chunking setup shared by both backends."""
     use_diarization = resolved_backend == BACKEND_ELEVENLABS
 
     # Convert .qta files to .m4a for OpenAI compatibility
@@ -1881,6 +2112,14 @@ def transcribe_audio_file(
                             f"      Chunk {i + 1} transcribed: {len(chunk_transcript.text)} characters"
                         )
 
+                except OpenAIProviderUnavailable:
+                    # A provider-level failure (quota/spend-limit/auth/5xx) —
+                    # propagate the precise type unchanged so the caller can
+                    # decide whether to fall through to another backend. Do NOT
+                    # re-wrap this into a plain RuntimeError, which would erase
+                    # the signal the fallback logic keys on.
+                    raise
+
                 except Exception as e:
                     error_str = str(e).lower()
                     error_type = type(e).__name__
@@ -1942,6 +2181,11 @@ def transcribe_audio_file(
                         else language or "auto"
                     )
 
+                except OpenAIProviderUnavailable:
+                    # See the matching comment in the chunked path above: keep
+                    # the precise type so the caller can fall through.
+                    raise
+
                 except Exception as e:
                     error_str = str(e).lower()
                     error_type = type(e).__name__
@@ -1973,6 +2217,8 @@ def transcribe_audio_file(
                 raise PermissionError(
                     f"Cannot read audio file {audio_path.name}: {e}"
                 ) from e
+            except OpenAIProviderUnavailable:
+                raise
             except ValueError:
                 # Re-raise ValueError (for SKIP cases)
                 raise
