@@ -158,6 +158,7 @@ def build_run_conversation_payload(
     native_session_id = f"{task_id}:{run_key}"
     entities = [{
         "entity_type": "conversation",
+        "conversation_id": native_session_id,
         "session_id": native_session_id,
         "name": title or f"{agent} run · task {task_id}",
         "summary": summary
@@ -287,7 +288,10 @@ def create_run_conversation(
             if entity_id and _entity_readback_matches(
                 entity_id,
                 entity_type="conversation",
-                required_fields={"session_id": native_session_id},
+                required_fields={
+                    "conversation_id": native_session_id,
+                    "session_id": native_session_id,
+                },
             ):
                 return entity_id
     return None
@@ -377,7 +381,10 @@ def create_run_session(
     if not _entity_readback_matches(
         conversation_id,
         entity_type="conversation",
-        required_fields={"session_id": native_session_id},
+        required_fields={
+            "conversation_id": native_session_id,
+            "session_id": native_session_id,
+        },
     ):
         return None
     if not _entity_readback_matches(

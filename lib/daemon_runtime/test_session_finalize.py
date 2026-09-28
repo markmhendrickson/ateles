@@ -146,6 +146,7 @@ def test_build_run_session_persists_runtime_identity_and_provenance():
     )
     assert [e["entity_type"] for e in b["entities"]] == ["conversation", "agent_session"]
     conversation, session = b["entities"]
+    assert conversation["conversation_id"] == session["native_session_id"]
     assert conversation["session_id"] == session["native_session_id"]
     assert session["harness"] == "ateles-swarm"
     assert session["kind"] == "autonomous"
@@ -181,7 +182,8 @@ def test_create_run_conversation_returns_id(monkeypatch):
         def raise_for_status(self): pass
         def json(self):
             return {"entity_id": "ent_conv99", "entity_type": "conversation",
-                    "snapshot": {"session_id": "ent_task:created-0"}}
+                    "snapshot": {"conversation_id": "ent_task:created-0",
+                                 "session_id": "ent_task:created-0"}}
 
     monkeypatch.setattr(sf.httpx, "post", lambda *a, **k: _R())
     monkeypatch.setattr(sf.httpx, "get", lambda *a, **k: _Get())
@@ -208,7 +210,8 @@ def test_create_run_session_reads_back_both_records_and_task_link(monkeypatch):
     def fake_get(url, **_kwargs):
         if url.endswith("/entities/ent_conv99"):
             return _Response({"entity_id": "ent_conv99", "entity_type": "conversation",
-                              "snapshot": {"session_id": "ent_task:created-0"}})
+                              "snapshot": {"conversation_id": "ent_task:created-0",
+                                           "session_id": "ent_task:created-0"}})
         if url.endswith("/entities/ent_session99"):
             return _Response({"entity_id": "ent_session99", "entity_type": "agent_session",
                               "snapshot": {"harness": "ateles-swarm",
