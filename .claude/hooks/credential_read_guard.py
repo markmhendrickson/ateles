@@ -317,10 +317,13 @@ def _split_segments(command: str):
 # security review (arch/security lens, ateles#1302 round 1). `dd` copies
 # raw bytes to stdout by default (`dd if=<path>` with no `of=`) — the same
 # class of hazard, added cheaply alongside the other three findings from
-# that review even though it was flagged non-blocking.
+# that review even though it was flagged non-blocking. `column` reformats
+# and prints a file's content unconditionally with no safe flag-free
+# invocation — a plain unrecognized-reader-binary gap found in security
+# review (ateles#1302 round 5/Falco, non-blocking).
 _CONTENT_DUMP_CMDS = re.compile(
     r"\b(cat|head|tail|less|more|bat|nl|tac|od|hexdump|xxd|strings|"
-    r"base64|cut|dd)\b"
+    r"base64|cut|dd|column)\b"
 )
 
 # `while read ...; done < <path>` (and similarly `read line < <path>`) feeds
@@ -819,23 +822,54 @@ def _grep_is_safe_mode(segment: str) -> bool:
     )
 
 
+_WRAPPER_PUNCTUATION = "'\"()`$<>;,"
+
+
+def _strip_wrapper_punctuation(cand: str) -> str:
+    """Strip quote/bracket/backtick/dollar/redirect wrapper punctuation to a
+    FIXED POINT over the combined charset, not as separate single-charset
+    passes.
+
+    An earlier revision stripped quotes then brackets as two sequential
+    `str.strip()` calls, each over its own narrow charset. A token whose
+    trailing characters INTERLEAVE both charsets survives only partially
+    cleaned: `echo "$(cat "<cred>")"` whitespace-splits to a trailing token
+    ending in `)"` — a quote-only pass removes the `"` and stops at `)` (not
+    in that charset); a bracket-only pass then removes the `)` and stops at
+    the now-exposed `"` (not in that charset) — leaving `<cred>"` glued to
+    the path, which fails every `fnmatch` in CREDENTIAL_PATH_GLOBS and
+    silently disables every downstream content-dump check for that segment
+    (CONFIRMED, security review, ateles#1302 round 5/Falco).
+
+    Looping a single combined-charset `strip()` to a fixed point closes this
+    regardless of how the wrapper punctuation interleaves — `)"`, `")`,
+    backtick-quote combinations, and `<(...)` process-substitution's
+    trailing `)` are all in the one charset stripped every iteration."""
+    while True:
+        stripped = cand.strip(_WRAPPER_PUNCTUATION)
+        if stripped == cand:
+            return stripped
+        cand = stripped
+
+
 def _extract_paths(segment: str):
     """Cheap tokenization: return every whitespace-delimited token that
     looks like a path (contains '/' or a dot-extension), stripped of shell
-    quoting AND of wrapper punctuation ($(...), backticks, subshell parens)
-    that a wrapped invocation leaves stuck to the path text — without this,
-    `$(cat f.env)`, `` `cat f.env` ``, and `(cat f.env)` all mangle the
-    trailing token into "f.env)" / "f.env`", which then fails the credential
-    match and lets the wrapper through. This was a live bypass found while
-    testing this hook against gmail_send_gate.py's own evasion-vector list.
+    quoting AND of wrapper punctuation ($(...), backticks, subshell parens,
+    process substitution) that a wrapped invocation leaves stuck to the path
+    text — without this, `$(cat f.env)`, `` `cat f.env` ``, `(cat f.env)`,
+    and `<(cat f.env)` all mangle the trailing token into "f.env)" /
+    "f.env`", which then fails the credential match and lets the wrapper
+    through. This was a live bypass found while testing this hook against
+    gmail_send_gate.py's own evasion-vector list, and a second-generation
+    bypass (interleaved quote+bracket wrapper punctuation) found in security
+    review (ateles#1302 round 5/Falco) — see `_strip_wrapper_punctuation`.
     Good enough for a fail-open guard — false negatives here are tolerable
     (defense in depth, not a hermetic seal, exactly like
     sibling_repo_worktree_guard.py's own stated limitation)."""
     out = []
     for tok in segment.split():
-        cand = tok.strip("'\"")
-        cand = cand.strip("()`$")
-        cand = cand.rstrip(";,")
+        cand = _strip_wrapper_punctuation(tok)
         if not cand or cand.startswith("-"):
             continue
         # A `key=value` token (`dd if=<path>`, `--file=<path>`) carries the

@@ -262,6 +262,71 @@ BASH_BLOCK = [
         "docker exec container pgrep -fl example-agent",
     ),
     ("remote service dump", 'ssh host "launchctl print system/example.agent"'),
+    # Security-review round-5 finding (ateles#1302, Falco, BLOCKING):
+    # _extract_paths()'s wrapper-punctuation strip previously ran as two
+    # sequential single-charset passes (quotes, then brackets/backticks/
+    # dollar), so a token whose trailing characters INTERLEAVE both
+    # charsets survived only partially cleaned — `echo "$(cat "<cred>")"`
+    # whitespace-splits to a trailing token ending in `)"`, which a
+    # quote-only pass then a bracket-only pass each strip one character of
+    # and stop, leaving a dangling quote glued to the path. That defeated
+    # the credential-glob match entirely, silently disabling every
+    # downstream content-dump check for the whole command. Fixed by
+    # stripping the combined charset to a fixed point
+    # (`_strip_wrapper_punctuation`). Covers the exact reported shapes
+    # (cat, head, grep) plus the sibling shapes the fix must also close:
+    # backticks and process substitution.
+    (
+        "double-quoted command substitution wrapping a double-quoted path (cat)",
+        f'echo "$(cat "{ENV}")"',
+    ),
+    (
+        "captured-variable double-quoted substitution then echoed (cat)",
+        f'result=$(cat "{ENV}"); echo "$result"',
+    ),
+    (
+        "double-quoted command substitution wrapping a double-quoted path (head)",
+        f'echo "$(head -3 "{ENV}")"',
+    ),
+    (
+        "double-quoted command substitution wrapping a double-quoted path (grep)",
+        f'echo "$(grep NEOTOMA "{ENV}")"',
+    ),
+    (
+        "printf wrapping a double-quoted command substitution (cat)",
+        f'printf "%s" "$(cat "{ENV}")"',
+    ),
+    (
+        "double-quoted command substitution wrapping a single-quoted path (cat)",
+        f"echo \"$(cat '{ENV}')\"",
+    ),
+    (
+        "backtick substitution wrapping a double-quoted path (cat)",
+        f'echo `cat "{ENV}"`',
+    ),
+    (
+        "process substitution wrapped in command substitution (cat)",
+        f'echo "$(cat <({ENV}))"',
+    ),
+    (
+        "nested process substitution (cat)",
+        f'cat <(cat "{ENV}")',
+    ),
+    # Security-review round-5 finding (ateles#1302, Falco, NON-BLOCKING):
+    # `column` is a plain unrecognized-reader-binary gap — it reformats and
+    # prints a credential file's content unconditionally, with no safe
+    # flag-free invocation, and was simply absent from _CONTENT_DUMP_CMDS.
+    ("column reformats and prints file content", f"column {ENV}"),
+    # `awk ... getline < <path>` reaches the same sink as the tokenizer
+    # defect above (the path lives inside the awk program string, corrupted
+    # by the same interleaved quote/paren stripping) — already caught by
+    # _SED_AWK_RE matching bare `awk`, but only once _extract_paths can
+    # actually recognize the path; regression-covered here so a future
+    # tokenizer change can't silently reopen it.
+    (
+        "awk getline reads the file via its program string",
+        f'awk \'BEGIN{{while((getline line < "{ENV}") > 0) print line}}\'',
+    ),
 ]
 
 BASH_ALLOW = [
@@ -657,6 +722,84 @@ def test_value_matching_grep_bypass_has_a_real_canary_effect_then_is_blocked():
     "command,canary",
     [
         (
+            f'echo "$(cat "{ENV}")"',
+            "fake_test_token_not_real_0000",
+        ),
+        (
+            f'echo "$(head -3 "{ENV}")"',
+            "fake_test_token_not_real_0000",
+        ),
+        (
+            f'echo "$(grep NEOTOMA "{ENV}")"',
+            "fake_test_token_not_real_0000",
+        ),
+    ],
+    ids=["nested-quote-cat", "nested-quote-head", "nested-quote-grep"],
+)
+def test_interleaved_wrapper_punctuation_bypass_has_real_effect_then_is_blocked(
+    command, canary
+):
+    """Round-5 finding (ateles#1302, Falco, BLOCKING): prove the ordinary
+    `echo "$(<reader> "<cred>")"` shape actually printed fixture content
+    before the tokenizer fix, then prove it is refused now.
+
+    This is the live-demonstrated regression for `_extract_paths()`'s
+    two-pass, single-charset punctuation strip: the trailing `)"` on the
+    whitespace-split path token survived only partially cleaned, which
+    silently disabled the credential-glob match — and therefore every
+    downstream content-dump check — for this entirely ordinary command
+    shape, across cat, head, and grep alike.
+    """
+    unguarded = subprocess.run(
+        ["bash", "-c", command], capture_output=True, text=True, check=True
+    )
+    assert canary in unguarded.stdout
+
+    guarded = run_result("Bash", {"command": command})
+    assert guarded.returncode == 2
+    assert canary not in guarded.stdout + guarded.stderr
+
+
+def test_column_bypass_has_a_real_canary_effect_then_is_blocked():
+    """Round-5 finding (ateles#1302, Falco, NON-BLOCKING): `column` was a
+    plain unrecognized-reader-binary gap, absent from _CONTENT_DUMP_CMDS."""
+    canary = "fake_test_token_not_real_0000"
+    command = f"column {ENV}"
+
+    if shutil.which("column"):
+        unguarded = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True, check=True
+        )
+        assert canary in unguarded.stdout
+
+    guarded = run_result("Bash", {"command": command})
+    assert guarded.returncode == 2
+    assert canary not in guarded.stdout + guarded.stderr
+
+
+def test_awk_getline_bypass_has_a_real_canary_effect_then_is_blocked():
+    """Round-5 finding (ateles#1302, Falco, NON-BLOCKING): the path inside
+    an awk program string was corrupted by the same tokenizer defect as the
+    main finding above; regression-covered separately so a future tokenizer
+    change can't silently reopen this call shape even though _SED_AWK_RE
+    already matches bare `awk`."""
+    canary = "fake_test_token_not_real_0000"
+    command = f'awk \'BEGIN{{while((getline line < "{ENV}") > 0) print line}}\''
+
+    unguarded = subprocess.run(
+        ["bash", "-c", command], capture_output=True, text=True, check=True
+    )
+    assert canary in unguarded.stdout
+
+    guarded = run_result("Bash", {"command": command})
+    assert guarded.returncode == 2
+    assert canary not in guarded.stdout + guarded.stderr
+
+
+@pytest.mark.parametrize(
+    "command,canary",
+    [
+        (
             f"rg -L TOKEN {ENV}",
             "fake_test_token_not_real_0000",
         ),
@@ -714,7 +857,14 @@ def test_nested_environment_dump_has_a_real_canary_effect_then_is_blocked():
 
 
 def test_exact_names_only_and_count_modes_never_emit_fixture_canary():
-    """Every permitted grep/rg output mode stays useful and value-free."""
+    """Every permitted grep/rg output mode stays useful and value-free.
+
+    The guard-permits-it assertion (`run_bash(command) == 0`) needs no real
+    binary — it only exercises the hook's own text-based classifier. The
+    effect half below it (actually running the command to prove it stays
+    value-free) needs the real binary on PATH, which `rg` is not guaranteed
+    to be on every CI runner; that half is skipped, per binary, exactly like
+    `test_command_specific_grep_bypasses_have_real_effect_then_are_blocked`."""
     canaries = (
         "fake_test_token_not_real_0000",
         "synthetic_attached_pattern_canary_not_real",
@@ -737,6 +887,8 @@ def test_exact_names_only_and_count_modes_never_emit_fixture_canary():
     )
     for command in commands:
         assert run_bash(command) == 0, command
+        if not shutil.which(command.split()[0]):
+            continue
         actual = subprocess.run(
             ["bash", "-c", command], capture_output=True, text=True, check=False
         )
