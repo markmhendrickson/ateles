@@ -44,6 +44,12 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
     monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer")
     monkeypatch.setenv("NEOTOMA_BASE_URL", "http://neotoma.test")
+    # Deterministic default: pin ATELES_REPO_PATH to the real repo root
+    # rather than leaving the host shell's ambient value (or lack of one) to
+    # leak in. Most tests here need it set to exercise a successful
+    # claude-local launch; the one test that needs it unset explicitly
+    # `monkeypatch.delenv`s it to override this default.
+    monkeypatch.setenv("ATELES_REPO_PATH", str(_REPO_ROOT))
     harness_router.reset_state()
     skill_runner._agent_def_cache.clear()
     yield
@@ -339,6 +345,106 @@ def test_over_ceiling_prompt_is_refused_before_launch_and_falls_over(tmp_path):
     assert "failover_reason=context_ceiling" in failover["output_summary"]
     # A prompt that is too long says nothing about the endpoint's health.
     assert LOCAL not in harness_router.cooling_providers()
+
+
+def test_missing_repo_path_env_refuses_local_launch_and_falls_over(tmp_path, monkeypatch):
+    """ATELES_REPO_PATH unset must refuse the claude-local launch rather than
+    silently reading guards from the ATELES_REPO fallback (~/repos/ateles, a
+    possibly-stale shared clone) — the launch stays safe (falls over to
+    frontier) but must not do so silently. Before this check existed,
+    `_run`'s `patch("skill_runner.ATELES_REPO", _REPO_ROOT)` alone was enough
+    to bind real guards regardless of the env var, so this assertion fails
+    red against the pre-change code (attempted_providers includes LOCAL)."""
+    _write_config(tmp_path)
+    monkeypatch.delenv("ATELES_REPO_PATH", raising=False)
+    spawns, events = _Spawns(local_reply=(0, b"should not run", b"")), []
+    result = _run(spawns, events, work_class="rebase")
+
+    # The local attempt is refused before any subprocess launches (no local
+    # command ever reaches _Spawns), and the run falls over to frontier —
+    # same shape as any other guards_unavailable refusal.
+    assert result.ok and result.provider == "claude"
+    assert result.attempted_providers == (LOCAL, "claude")
+    assert all("--settings" not in cmd for cmd, _ in spawns.calls)
+    failover, = [e for e in events if e["event_type"] == "provider_failover"]
+    assert "failover_reason=guards_unavailable" in failover["output_summary"]
+    assert LOCAL in harness_router.cooling_providers()
+
+
+def test_repo_path_env_present_logs_which_path_was_read(tmp_path, monkeypatch, caplog):
+    """The success path names the exact ATELES_REPO_PATH it bound guards
+    from, so a stale-checkout diagnosis does not require re-deriving it from
+    the daemon's ambient environment after the fact."""
+    _write_config(tmp_path)
+    monkeypatch.setenv("ATELES_REPO_PATH", str(_REPO_ROOT))
+    spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
+    with caplog.at_level("INFO"):
+        result = _run(spawns, events, work_class="rebase")
+
+    assert result.ok and result.provider == LOCAL
+    assert any(
+        "claude-local guards read from ATELES_REPO_PATH=" in rec.message
+        and str(_REPO_ROOT) in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_guards_are_bound_from_the_env_var_not_the_frozen_module_constant(
+    tmp_path, monkeypatch
+):
+    """The guards path passed to `write_guards_file` must trace to
+    ATELES_REPO_PATH itself, not to `skill_runner.ATELES_REPO` (resolved
+    once at import time from whatever the env var held THEN — a separate
+    concern from SKILL.md resolution, which legitimately still uses
+    `ATELES_REPO`). `_run` unconditionally patches `ATELES_REPO` to the real
+    repo root for every other test in this file; here it is patched to a
+    distinct bogus path instead, while ATELES_REPO_PATH (env, read fresh at
+    call time) points at the real repo. Before this fix, `write_guards_file`
+    was called with `ATELES_REPO` directly — this spy would have observed
+    the bogus path, not the real one."""
+    _write_config(tmp_path)
+    monkeypatch.setenv("ATELES_REPO_PATH", str(_REPO_ROOT))
+    # ATELES_REPO also resolves the SKILL.md path (skill_runner.py:1452),
+    # unconditionally, before provider selection — a distinct concern from
+    # guard binding that this fix does not touch. So `bogus_repo` needs a
+    # real SKILL.md (skill loading must succeed) but NO .claude/settings.json
+    # (so write_guards_file would fail if it were ever called against this
+    # path instead of the env var).
+    bogus_repo = tmp_path / "not-a-real-checkout"
+    bogus_skill_dir = bogus_repo / ".claude" / "skills" / "cicada"
+    bogus_skill_dir.mkdir(parents=True)
+    (bogus_skill_dir / "SKILL.md").write_text("# cicada\n", encoding="utf-8")
+    spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
+
+    loader = MagicMock()
+    loader.return_value.load.return_value = _agent_def()
+    real_write_guards_file = local_provider.write_guards_file
+    seen_repo_roots: list = []
+
+    def spy_write_guards_file(repo_root):
+        seen_repo_roots.append(repo_root)
+        return real_write_guards_file(repo_root)
+
+    with (
+        patch("skill_runner.AgentLoader", loader),
+        patch("skill_runner.CLAUDE_BIN", "/bin/claude"),
+        patch("skill_runner.ATELES_REPO", bogus_repo),  # deliberately wrong
+        patch("skill_runner.CODEX_BIN", None),
+        patch("skill_runner.CURSOR_BIN", None),
+        patch("skill_runner._write_harness_event", side_effect=lambda **kw: events.append(kw)),
+        patch("local_provider.write_guards_file", side_effect=spy_write_guards_file),
+        patch("asyncio.create_subprocess_exec", side_effect=spawns.spawn),
+    ):
+        result = asyncio.run(
+            skill_runner.run_skill(
+                "cicada", "rebase onto main", role="cicada",
+                task_entity_id="ent_task", work_class="rebase",
+            )
+        )
+
+    assert result.ok and result.provider == LOCAL
+    assert seen_repo_roots == [Path(str(_REPO_ROOT))]
+    assert bogus_repo not in seen_repo_roots
 
 
 @pytest.mark.parametrize("kwargs", [
