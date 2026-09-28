@@ -54,14 +54,19 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
 ``probe_sandbox_exec_denies_read/write``,
 ``probe_stash_effect_denied_across_git_binaries``):
 
-  * **Credential-file reads and user-config writes** — a macOS
+  * **Credential-file reads, binding integrity, and user-config writes** — a macOS
     ``sandbox-exec`` profile (``build_sandbox_exec_profile``) denies
     ``file-read*`` on the credential-file globs named in this task
     (``~/.config/neotoma/.env*``, ``~/.neotoma/aauth*/*private*``,
     ``~/.claude.json``, ``~/.netrc``, ``~/.config/sops/age/*``) and
-    ``file-write*`` on ``~/.claude``, ``~/.cursor``, ``~/.codex``. The
+    ``file-write*`` on the credential names and their narrow security-relevant
+    config ancestors, plus ``~/.claude``, ``~/.cursor``, ``~/.codex``. This
+    prevents a child from changing what a denied credential pathname binds to
+    while leaving ordinary worktree mutation outside those rooted paths alone.
+    A disposable adversarial fixture and an ordinary-filesystem positive
+    control probe this boundary before dispatch. The
     profile is prepended to the dispatched child's REAL argv via
-    ``command_wrapper=["sandbox-exec", "-f", <profile>]`` — see
+    ``command_wrapper=["/usr/bin/sandbox-exec", "-f", <profile>]`` — see
     ``skill_runner._run_skill_once``'s ``command_wrapper`` parameter, added
     specifically so this could bind onto the actual subprocess rather than
     describe an intended mitigation beside code that runs unwrapped.
@@ -141,7 +146,8 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     This is a real, explicit limitation rather than a claim of exhaustive
     containment.
 
-  All THREE denies (credential-read, user-config-write, stash-ref) live in
+  The credential-read, credential-binding, user-config-write, and stash-ref
+  denies live in
   the ONE sandbox-exec profile ``build_sandbox_exec_profile`` writes, and
   each is ACTUALLY RUN against a throwaway fixture in
   ``HarnessSandbox.build()`` before any real dispatch: the credential/
@@ -150,7 +156,8 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
   stash-ref deny is tested with a real ``git stash push`` — via several real
   git invocations this host offers — inside a scratch repo this script
   ``git init``s for the probe (never the shared clone or its stash ref). The
-  resulting booleans (``credential_read_denied``, ``user_config_write_denied``,
+  resulting booleans (``credential_read_denied``,
+  ``credential_binding_protected``, ``user_config_write_denied``, and
   ``git_stash_denied``) are what ``HarnessSandbox.fully_guarded`` and
   ``refuse_if_guard_required`` actually read — nothing here is asserted
   without having just been exercised. If ``sandbox-exec`` is unavailable (a
@@ -235,6 +242,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -271,6 +279,7 @@ except Exception:  # pragma: no cover — degraded import path, handled at call 
 LENS_BRIEF_PATH = None
 
 HARNESSES = ("claude", "codex", "cursor")
+TRUSTED_MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 
 
 # ── Headroom -------------------------------------------------------------------
@@ -446,9 +455,7 @@ class Worktree:
         if not self._created:
             return
         repo_path = Path.home() / "repos" / self.repo_name
-        subprocess.run(
-            ["git", "clean", "-fdxq"], cwd=str(self.path), check=False
-        )
+        subprocess.run(["git", "clean", "-fdxq"], cwd=str(self.path), check=False)
         subprocess.run(
             ["git", "-C", str(repo_path), "worktree", "remove", str(self.path)],
             check=False,
@@ -486,6 +493,46 @@ _USER_CONFIG_WRITE_DENY_REGEXES: tuple[str, ...] = (
     r"/\.cursor(/.*)?$",
     r"/\.codex(/.*)?$",
 )
+
+
+def trusted_sandbox_exec_path() -> str | None:
+    """Return the pinned macOS Seatbelt launcher, never a PATH resolution.
+
+    The runner's probes and dispatched child must use one platform identity.
+    Resolving by name would let a PATH-preferred look-alike validate itself and
+    would make the parent probe and child launch sensitive to different PATHs.
+    """
+    path = TRUSTED_MACOS_SANDBOX_EXEC
+    if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+        return None
+    return str(path)
+
+
+def _credential_binding_write_deny_regexes(
+    home_roots: tuple[Path, ...],
+) -> tuple[str, ...]:
+    """Protect credential bindings and only their security-relevant ancestors.
+
+    Reads are denied by the credential globs above. These rooted write denies
+    prevent moving/replacing those files or the narrow config directories that
+    bind their names, without denying ordinary writes elsewhere in a worktree.
+    """
+    patterns: list[str] = []
+    for home_root in home_roots:
+        root = re.escape(os.path.abspath(home_root))
+        patterns.extend(
+            (
+                rf"{root}/\.config$",
+                rf"{root}/\.config/neotoma(/.*)?$",
+                rf"{root}/\.config/sops$",
+                rf"{root}/\.config/sops/age(/.*)?$",
+                rf"{root}/\.neotoma(/.*)?$",
+                rf"{root}/\.claude\.json$",
+                rf"{root}/\.netrc$",
+            )
+        )
+    return tuple(patterns)
+
 
 # The git-stash EFFECT, denied at both read and write (PR #1308 round 4,
 # ent_9e88db1882c668e6c5c32be9's own round-4 follow-up): matches the stash
@@ -543,7 +590,9 @@ exec "REAL_GIT_PLACEHOLDER" "$@"
 def _real_git_path() -> str:
     real = shutil.which("git")
     if not real:
-        raise RuntimeError("git not found on PATH — cannot build the stash-refusing shim")
+        raise RuntimeError(
+            "git not found on PATH — cannot build the stash-refusing shim"
+        )
     return real
 
 
@@ -571,10 +620,16 @@ def link_codex_auth(sandbox_home: Path) -> bool:
     return target.is_symlink()
 
 
-def build_sandbox_exec_profile(profile_path: Path) -> None:
+def build_sandbox_exec_profile(
+    profile_path: Path,
+    *,
+    credential_home_roots: tuple[Path, ...] | None = None,
+) -> None:
     """Write a macOS sandbox-exec profile denying:
 
     * reads of the credential-file globs (``_CREDENTIAL_READ_DENY_REGEXES``),
+    * writes that could replace those credential bindings or their narrow
+      security-relevant config ancestors,
     * writes to the user-level harness config directories
       (``_USER_CONFIG_WRITE_DENY_REGEXES``),
     * reads AND writes of the git-stash ref and its reflog
@@ -672,9 +727,16 @@ def build_sandbox_exec_profile(profile_path: Path) -> None:
         f'  (regex #"{p}")'
         for p in (*_CREDENTIAL_READ_DENY_REGEXES, *_STASH_REF_DENY_REGEXES)
     )
+    binding_write_denies = _credential_binding_write_deny_regexes(
+        credential_home_roots or (Path.home(),)
+    )
     write_denies = "\n".join(
         f'  (regex #"{p}")'
-        for p in (*_USER_CONFIG_WRITE_DENY_REGEXES, *_STASH_REF_DENY_REGEXES)
+        for p in (
+            *_USER_CONFIG_WRITE_DENY_REGEXES,
+            *_STASH_REF_DENY_REGEXES,
+            *binding_write_denies,
+        )
     )
     profile = (
         "(version 1)\n"
@@ -707,17 +769,18 @@ def probe_sandbox_exec_denies_read(
     what tells a real, working deny apart from a broken profile that denies
     everything (including itself).
     """
-    if shutil.which("sandbox-exec") is None:
+    sandbox_exec = trusted_sandbox_exec_path()
+    if sandbox_exec is None:
         return False
     denied = subprocess.run(
-        ["sandbox-exec", "-f", str(profile_path), "cat", str(fixture_path)],
+        [sandbox_exec, "-f", str(profile_path), "cat", str(fixture_path)],
         capture_output=True,
         text=True,
     )
     if denied.returncode == 0:
         return False
     control = subprocess.run(
-        ["sandbox-exec", "-f", str(profile_path), "cat", str(control_path)],
+        [sandbox_exec, "-f", str(profile_path), "cat", str(control_path)],
         capture_output=True,
         text=True,
     )
@@ -736,11 +799,12 @@ def probe_sandbox_exec_denies_write(
     docstring for why: a crashing profile denies everything, including a
     write it was never asked to deny).
     """
-    if shutil.which("sandbox-exec") is None:
+    sandbox_exec = trusted_sandbox_exec_path()
+    if sandbox_exec is None:
         return False
     fixture_path.parent.mkdir(parents=True, exist_ok=True)
     denied = subprocess.run(
-        ["sandbox-exec", "-f", str(profile_path), "touch", str(fixture_path)],
+        [sandbox_exec, "-f", str(profile_path), "touch", str(fixture_path)],
         capture_output=True,
         text=True,
     )
@@ -748,11 +812,92 @@ def probe_sandbox_exec_denies_write(
         return False
     control_path.parent.mkdir(parents=True, exist_ok=True)
     control = subprocess.run(
-        ["sandbox-exec", "-f", str(profile_path), "touch", str(control_path)],
+        [sandbox_exec, "-f", str(profile_path), "touch", str(control_path)],
         capture_output=True,
         text=True,
     )
     return control.returncode == 0 and control_path.exists()
+
+
+def probe_sandbox_exec_preserves_credential_binding(
+    profile_path: Path,
+    *,
+    protected_dir: Path,
+    protected_file: Path,
+    control_root: Path,
+) -> bool:
+    """Prove a protected credential name cannot be rebound by mutation.
+
+    The negative fixture covers the protected directory and its relevant
+    ancestor. The positive control performs the same ordinary filesystem
+    operation outside that boundary, so a broken profile that rejects all
+    mutations cannot be mistaken for a working, discriminating guard.
+    """
+    sandbox_exec = trusted_sandbox_exec_path()
+    if sandbox_exec is None:
+        return False
+    protected_ancestor = protected_dir.parent
+    try:
+        relative_file = protected_file.relative_to(protected_ancestor)
+    except ValueError:
+        return False
+    control_root.mkdir(parents=True, exist_ok=True)
+    denied_target = control_root / "denied-binding-target"
+    command = '/bin/mv "$1" "$2" && /bin/cat "$2/$3"'
+    denied = subprocess.run(
+        [
+            sandbox_exec,
+            "-f",
+            str(profile_path),
+            "/bin/sh",
+            "-c",
+            command,
+            "binding-probe",
+            str(protected_ancestor),
+            str(denied_target),
+            str(relative_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    original = protected_file.read_text(encoding="utf-8")
+    denied_cleanly = (
+        denied.returncode != 0
+        and protected_ancestor.is_dir()
+        and protected_file.is_file()
+        and not denied_target.exists()
+    )
+    if not denied_cleanly:
+        return False
+
+    control_source = control_root / "control-source"
+    control_relative_file = Path("ordinary.txt")
+    control_file = control_source / control_relative_file
+    control_file.parent.mkdir(parents=True, exist_ok=True)
+    control_file.write_text(original, encoding="utf-8")
+    control_target = control_root / "control-target"
+    control = subprocess.run(
+        [
+            sandbox_exec,
+            "-f",
+            str(profile_path),
+            "/bin/sh",
+            "-c",
+            command,
+            "binding-control",
+            str(control_source),
+            str(control_target),
+            str(control_relative_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return (
+        control.returncode == 0
+        and control.stdout == original
+        and not control_source.exists()
+        and (control_target / control_relative_file).is_file()
+    )
 
 
 def _real_stash_list(scratch_git_dir: Path) -> str:
@@ -766,7 +911,8 @@ def _real_stash_list(scratch_git_dir: Path) -> str:
     real_git = shutil.which("git") or "git"
     listing = subprocess.run(
         [real_git, "-C", str(scratch_git_dir), "stash", "list"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return listing.stdout if listing.returncode == 0 else "<unreadable>"
 
@@ -796,7 +942,9 @@ def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> 
     before = _real_stash_list(scratch_git_dir)
     push = subprocess.run(
         ["git", "-C", str(scratch_git_dir), "stash", "push"],
-        capture_output=True, text=True, env=env,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     if push.returncode == 0:
         return False
@@ -862,7 +1010,8 @@ def probe_stash_effect_denied_across_git_binaries(
     for prefix in invocations:
         attempt = subprocess.run(
             [*command_wrapper, *prefix, "-C", str(scratch_git_dir), "stash", "push"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         # Seatbelt's read/write deny on refs/stash makes the WRITE attempt
         # fail outright (nonzero exit) in every case observed — but the
@@ -889,6 +1038,7 @@ class HarnessSandbox:
     env_extra: dict[str, str]
     command_wrapper: list[str]
     credential_read_denied: bool
+    credential_binding_protected: bool
     user_config_write_denied: bool
     git_stash_denied: bool
     authentication_ready: bool
@@ -900,8 +1050,21 @@ class HarnessSandbox:
         bound. `refuse_if_guard_required` is the only reader that matters."""
         return (
             self.credential_read_denied
+            and self.credential_binding_protected
             and self.user_config_write_denied
             and self.git_stash_denied
+        )
+
+    @property
+    def codex_outer_sandbox_probed(self) -> bool:
+        """Whether the exact trusted wrapper/profile pair passed all probes."""
+        return (
+            self.provider == "codex"
+            and self.fully_guarded
+            and len(self.command_wrapper) == 3
+            and self.command_wrapper[0] == str(TRUSTED_MACOS_SANDBOX_EXEC)
+            and self.command_wrapper[1] == "-f"
+            and Path(self.command_wrapper[2]).is_absolute()
         )
 
     @property
@@ -920,9 +1083,14 @@ class HarnessSandbox:
             # its own settings.json wires) — unaffected by this script, and
             # every guard is already bound by that mechanism.
             return cls(
-                provider=provider, root=sandbox_home, env_extra={},
-                command_wrapper=[], credential_read_denied=True,
-                user_config_write_denied=True, git_stash_denied=True,
+                provider=provider,
+                root=sandbox_home,
+                env_extra={},
+                command_wrapper=[],
+                credential_read_denied=True,
+                credential_binding_protected=True,
+                user_config_write_denied=True,
+                git_stash_denied=True,
                 authentication_ready=True,
                 unavailable_guards=(),
             )
@@ -939,11 +1107,16 @@ class HarnessSandbox:
         # against fixtures.
         profile_path = sandbox_home / "profile.sb"
         credential_read_denied = False
+        credential_binding_protected = False
         user_config_write_denied = False
         command_wrapper: list[str] = []
         try:
-            build_sandbox_exec_profile(profile_path)
-            read_fixture_dir = sandbox_home / "probe-fixtures" / ".config" / "neotoma"
+            fixture_home = sandbox_home / "probe-fixtures" / "fixture-user"
+            build_sandbox_exec_profile(
+                profile_path,
+                credential_home_roots=(Path.home(), fixture_home),
+            )
+            read_fixture_dir = fixture_home / ".config" / "neotoma"
             read_fixture_dir.mkdir(parents=True, exist_ok=True)
             read_fixture = read_fixture_dir / ".env"
             read_fixture.write_text("PROBE_NOT_A_REAL_CREDENTIAL=1\n", encoding="utf-8")
@@ -952,16 +1125,28 @@ class HarnessSandbox:
             credential_read_denied = probe_sandbox_exec_denies_read(
                 profile_path, read_fixture, control_path=read_control
             )
+            credential_binding_protected = (
+                probe_sandbox_exec_preserves_credential_binding(
+                    profile_path,
+                    protected_dir=read_fixture_dir,
+                    protected_file=read_fixture,
+                    control_root=sandbox_home / "probe-fixtures" / "binding-control",
+                )
+            )
 
             write_fixture = sandbox_home / "probe-fixtures" / ".claude" / "probe-write"
-            write_control = sandbox_home / "probe-fixtures" / "control-write-dir" / "probe"
+            write_control = (
+                sandbox_home / "probe-fixtures" / "control-write-dir" / "probe"
+            )
             user_config_write_denied = probe_sandbox_exec_denies_write(
                 profile_path, write_fixture, control_path=write_control
             )
-            if shutil.which("sandbox-exec") is not None:
-                command_wrapper = ["sandbox-exec", "-f", str(profile_path)]
+            sandbox_exec = trusted_sandbox_exec_path()
+            if sandbox_exec is not None:
+                command_wrapper = [sandbox_exec, "-f", str(profile_path)]
         except OSError:
             credential_read_denied = False
+            credential_binding_protected = False
             user_config_write_denied = False
 
         # ── git-stash: the shim is advisory-only (a friendly early message
@@ -987,20 +1172,32 @@ class HarnessSandbox:
             scratch_repo = sandbox_home / "stash-probe-repo"
             scratch_repo.mkdir(parents=True, exist_ok=True)
             subprocess.run(
-                ["git", "init", "-q", str(scratch_repo)], check=True, capture_output=True
+                ["git", "init", "-q", str(scratch_repo)],
+                check=True,
+                capture_output=True,
             )
             subprocess.run(
-                ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
-                check=True, capture_output=True,
+                [
+                    "git",
+                    "-C",
+                    str(scratch_repo),
+                    "config",
+                    "user.email",
+                    "probe@example.com",
+                ],
+                check=True,
+                capture_output=True,
             )
             subprocess.run(
                 ["git", "-C", str(scratch_repo), "config", "user.name", "probe"],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
             (scratch_repo / "probe.txt").write_text("probe\n", encoding="utf-8")
             subprocess.run(
                 ["git", "-C", str(scratch_repo), "add", "-A"],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
             # A REAL commit — required so a real, unsandboxed `git stash
             # push` would actually succeed, which is what makes the probe
@@ -1011,7 +1208,8 @@ class HarnessSandbox:
             # binaries's docstring.
             subprocess.run(
                 ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
             (scratch_repo / "probe.txt").write_text("probe changed\n", encoding="utf-8")
             git_stash_denied = probe_stash_effect_denied_across_git_binaries(
@@ -1034,6 +1232,13 @@ class HarnessSandbox:
                 "credential_read_guard (sandbox-exec unavailable, or its "
                 "profile did not probe as denying a read of the fixture path "
                 "— see the sandbox's own probe result, not asserted)"
+            )
+        if not credential_binding_protected:
+            unavailable.append(
+                "credential_binding_guard (the profile did not probe as "
+                "preventing mutation of a protected credential binding and "
+                "its relevant config ancestor while allowing the same "
+                "ordinary operation outside that boundary)"
             )
         if not user_config_write_denied:
             unavailable.append(
@@ -1059,6 +1264,7 @@ class HarnessSandbox:
             env_extra=env_extra,
             command_wrapper=command_wrapper,
             credential_read_denied=credential_read_denied,
+            credential_binding_protected=credential_binding_protected,
             user_config_write_denied=user_config_write_denied,
             git_stash_denied=git_stash_denied,
             authentication_ready=authentication_ready,
@@ -1093,6 +1299,8 @@ def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
         return (
             f"provider {sandbox.provider!r} failed to probe as fully guarded "
             f"(credential_read_denied={sandbox.credential_read_denied}, "
+            "credential_binding_protected="
+            f"{sandbox.credential_binding_protected}, "
             f"user_config_write_denied={sandbox.user_config_write_denied}, "
             f"git_stash_denied={sandbox.git_stash_denied}) — refusing rather "
             f"than running unguarded. Unbound: {missing}"
@@ -1122,23 +1330,38 @@ def dry_run_report(
     if provider == "codex":
         sandbox_mode = (
             "danger-full-access"
-            if sandbox.fully_guarded and sandbox.command_wrapper
+            if sandbox.codex_outer_sandbox_probed
             else "workspace-write"
         )
         example_cmd = [
-            "codex", "exec", "--sandbox", sandbox_mode,
+            "codex",
+            "exec",
+            "--sandbox",
+            sandbox_mode,
             *(
                 []
                 if sandbox_mode == "danger-full-access"
                 else ["--add-dir", str(worktree_path)]
             ),
-            "--ephemeral", "--skip-git-repo-check", "--color", "never",
-            "--cd", str(worktree_path), "-",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--color",
+            "never",
+            "--cd",
+            str(worktree_path),
+            "-",
         ]
     elif provider == "cursor":
         example_cmd = [
-            "cursor-agent", "--print", "--force", "--trust", "--approve-mcps",
-            "--output-format", "text", "--workspace", str(worktree_path),
+            "cursor-agent",
+            "--print",
+            "--force",
+            "--trust",
+            "--approve-mcps",
+            "--output-format",
+            "text",
+            "--workspace",
+            str(worktree_path),
             "<prompt omitted — see prompt_chars>",
         ]
     else:
@@ -1159,13 +1382,16 @@ def dry_run_report(
         "lens": target.lens,
         "agent": target.agent,
         "worktree": str(worktree_path),
-        "sandbox_env_extra": {k: v for k, v in sandbox.env_extra.items() if k != "PATH"},
+        "sandbox_env_extra": {
+            k: v for k, v in sandbox.env_extra.items() if k != "PATH"
+        },
         "sandbox_path_prefix": sandbox.env_extra.get("PATH", "").split(os.pathsep)[0]
         if "PATH" in sandbox.env_extra
         else "",
         "command_wrapper": list(sandbox.command_wrapper),
         "fully_guarded": sandbox.fully_guarded,
         "credential_read_denied": sandbox.credential_read_denied,
+        "credential_binding_protected": sandbox.credential_binding_protected,
         "user_config_write_denied": sandbox.user_config_write_denied,
         "git_stash_denied": sandbox.git_stash_denied,
         "authentication_ready": sandbox.authentication_ready,
@@ -1213,7 +1439,9 @@ def validate_verdict(verdict_text: str, *, lens_agent: str) -> VerdictCheck:
             pre_post=pre_post,
         )
     verdict = swarm_dispatch.lens_own_verdict(verdict_text, lens_agent=lens_agent)
-    warranted = swarm_dispatch.sign_off_is_warranted(verdict_text, lens_agent=lens_agent)
+    warranted = swarm_dispatch.sign_off_is_warranted(
+        verdict_text, lens_agent=lens_agent
+    )
     if verdict is None:
         return VerdictCheck(
             ok=False,
@@ -1256,7 +1484,9 @@ def current_pr_head(*, repo: str, pr: int) -> str:
     """
     result = subprocess.run(
         ["gh", "pr", "view", str(pr), "-R", repo, "--json", "headRefOid"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     try:
         return json.loads(result.stdout or "{}").get("headRefOid", "")
@@ -1271,9 +1501,24 @@ def read_stash_ref_oid(worktree: Path) -> str | None:
     unsafe to interpret as absence: a malformed or unreadable packed-refs file
     must fail the dispatch closed instead of making a changed ref look empty.
     """
+    git = _real_git_path()
+    existence = subprocess.run(
+        [git, "-C", str(worktree), "show-ref", "--exists", "refs/stash"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if existence.returncode == 2 and not existence.stdout.strip():
+        return None
+    if existence.returncode != 0:
+        detail = (existence.stderr or "").strip() or (
+            f"git exit {existence.returncode}"
+        )
+        raise RuntimeError(f"cannot test refs/stash existence: {detail}")
+
     result = subprocess.run(
         [
-            _real_git_path(),
+            git,
             "-C",
             str(worktree),
             "show-ref",
@@ -1286,8 +1531,6 @@ def read_stash_ref_oid(worktree: Path) -> str | None:
         check=False,
     )
     output = result.stdout.strip()
-    if result.returncode == 1 and not output:
-        return None
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or f"git exit {result.returncode}"
         raise RuntimeError(f"cannot resolve refs/stash: {detail}")
@@ -1407,8 +1650,14 @@ def post_verdict(*, repo: str, pr: int, verdict_path: Path) -> str:
     """
     result = subprocess.run(
         [
-            "gh", "pr", "comment", str(pr), "-R", repo,
-            "--body-file", str(verdict_path),
+            "gh",
+            "pr",
+            "comment",
+            str(pr),
+            "-R",
+            repo,
+            "--body-file",
+            str(verdict_path),
         ],
         capture_output=True,
         text=True,
@@ -1445,7 +1694,9 @@ async def run_one(
     sandbox = HarnessSandbox.build(provider, scratch_root)
     refusal = refuse_if_guard_required(sandbox)
 
-    worktree_path = scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
+    worktree_path = (
+        scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
+    )
     worktree = Worktree(repo_name=repo_worktree_name, path=worktree_path)
 
     if dry_run:
@@ -1461,10 +1712,15 @@ async def run_one(
         worktree.create(head=target.head)
         try:
             agent_prompt = read_agent_prompt(worktree.path, target.agent)
-            task_text = render_lens_task(target, brief_path) + "\n\n---\n\n" + agent_prompt
+            task_text = (
+                render_lens_task(target, brief_path) + "\n\n---\n\n" + agent_prompt
+            )
             report = dry_run_report(
-                target, provider=provider, sandbox=sandbox,
-                task_text=task_text, worktree_path=worktree.path,
+                target,
+                provider=provider,
+                sandbox=sandbox,
+                task_text=task_text,
+                worktree_path=worktree.path,
             )
             report["would_refuse"] = refusal
         finally:
@@ -1511,9 +1767,7 @@ async def run_one(
                 env_extra=sandbox.env_extra,
                 seated_reviewer=False,  # see module docstring: no MCP grant requested
                 command_wrapper=sandbox.command_wrapper,
-                codex_outer_sandboxed=(
-                    provider == "codex" and bool(sandbox.command_wrapper)
-                ),
+                codex_outer_sandboxed=sandbox.codex_outer_sandbox_probed,
             )
         except Exception as dispatch_error:
             stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
@@ -1601,7 +1855,9 @@ async def run_one(
             return report
 
         if not post:
-            report["refusal_reason"] = "--post not set; verdict validated but not posted"
+            report["refusal_reason"] = (
+                "--post not set; verdict validated but not posted"
+            )
             return report
 
         login = gh_login()
@@ -1782,18 +2038,26 @@ def main(argv: list[str] | None = None) -> int:
                 # rather than a surprising post.
                 report = asyncio.run(
                     run_compare(
-                        target, providers=providers, dry_run=args.dry_run,
-                        post=False, repo_worktree_name=repo_worktree_name,
-                        scratch_root=scratch_root, brief_path=brief_path,
+                        target,
+                        providers=providers,
+                        dry_run=args.dry_run,
+                        post=False,
+                        repo_worktree_name=repo_worktree_name,
+                        scratch_root=scratch_root,
+                        brief_path=brief_path,
                         timeout=args.timeout,
                     )
                 )
             else:
                 report = asyncio.run(
                     run_one(
-                        target, provider=args.provider, post=args.post,
-                        dry_run=args.dry_run, repo_worktree_name=repo_worktree_name,
-                        scratch_root=scratch_root, brief_path=brief_path,
+                        target,
+                        provider=args.provider,
+                        post=args.post,
+                        dry_run=args.dry_run,
+                        repo_worktree_name=repo_worktree_name,
+                        scratch_root=scratch_root,
+                        brief_path=brief_path,
                         timeout=args.timeout,
                     )
                 )
@@ -1807,8 +2071,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(report)
 
-    ok = report.get("ok", False) if "compare" not in report else all(
-        r.get("ok", False) for r in report["results"].values()
+    ok = (
+        report.get("ok", False)
+        if "compare" not in report
+        else all(r.get("ok", False) for r in report["results"].values())
     )
     return 0 if ok or args.dry_run else 1
 

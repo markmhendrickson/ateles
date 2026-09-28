@@ -84,6 +84,7 @@ CODEX_BIN = (
     or shutil.which("codex")
 )
 CURSOR_BIN = os.environ.get("APIS_CURSOR_BIN") or shutil.which("cursor-agent")
+TRUSTED_MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
@@ -281,7 +282,7 @@ def _require_neotoma_base_url() -> str:
     v = os.environ.get("NEOTOMA_BASE_URL", "").strip()
     if not v:
         raise RuntimeError(
-            'NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance (e.g. https://neotoma.markmhendrickson.com). Local hosting was retired 2026-08-04 and http://localhost:9180 no longer serves anything, so there is deliberately no default: a silent fallback would send writes at a dead port. Under launchd the plist supplies this; for an ad-hoc run, export it or source ~/.config/neotoma/.env first.'
+            "NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance (e.g. https://neotoma.markmhendrickson.com). Local hosting was retired 2026-08-04 and http://localhost:9180 no longer serves anything, so there is deliberately no default: a silent fallback would send writes at a dead port. Under launchd the plist supplies this; for an ad-hoc run, export it or source ~/.config/neotoma/.env first."
         )
     return v.rstrip("/")
 
@@ -394,8 +395,7 @@ GATE_VERDICT_POSITION_RULE = (
 
 _VERDICT_VOCABULARY_LINES = {
     "APPROVE": "all checks pass, no blockers.",
-    "REQUEST_CHANGES": "one or more [BLOCKING] findings; the author must "
-    "address them.",
+    "REQUEST_CHANGES": "one or more [BLOCKING] findings; the author must address them.",
     "COMMENT": "observations only; nothing blocks merge.",
     "BLOCKED": "cannot proceed (missing information, open pre-impl gate, etc.).",
     "SIGNED_OFF": "your gate/phase is signed off.",
@@ -671,11 +671,7 @@ def build_system_prompt(
     if definition_prompt:
         if include_github_contract:
             return (
-                f"{definition_prompt}\n\n"
-                "---\n\n"
-                f"{contracts}\n\n"
-                "---\n\n"
-                f"{skill_md}",
+                f"{definition_prompt}\n\n---\n\n{contracts}\n\n---\n\n{skill_md}",
                 False,
             )
         return (
@@ -1087,7 +1083,6 @@ def _provider_failure_kind(*texts: str) -> str | None:
     return None
 
 
-
 # ── Codex sandbox: writable git roots + network (ateles#590) ──────────────────
 # `codex exec --sandbox workspace-write` grants write access to the working
 # directory, /tmp, and $TMPDIR — and nothing else. That is fine for a plain
@@ -1251,12 +1246,7 @@ def _provider_command(
     if provider == "claude":
         return [binary, "--print", "--append-system-prompt", system_prompt], None
 
-    composite_prompt = (
-        f"{system_prompt}\n\n"
-        "---\n\n"
-        "## Dispatched task\n\n"
-        f"{work_prompt}"
-    )
+    composite_prompt = f"{system_prompt}\n\n---\n\n## Dispatched task\n\n{work_prompt}"
     if provider == "codex":
         # See the ateles#590 note above _git_roots_for_sandbox: without these
         # two additions a codex child in a linked worktree writes correct code
@@ -1341,7 +1331,7 @@ def _requested_model(provider: str, cmd: list[str]) -> str | None:
         # Support the `--model=x` spelling too.
         for flag in ("--model=",):
             if arg.startswith(flag):
-                value = arg[len(flag):].strip()
+                value = arg[len(flag) :].strip()
                 return value or None
     return None
 
@@ -1421,8 +1411,10 @@ async def _run_skill_once(
     ``command_wrapper`` (harness_lens_runner, ent_89a4d44b063cb0902106da49):
     when supplied, its elements are PREPENDED to the provider's own argv
     before ``asyncio.create_subprocess_exec`` runs it below — e.g.
-    ``["sandbox-exec", "-f", "/path/to/profile.sb"]`` to run codex/cursor's
-    real binary under a macOS sandbox that denies specific file reads/writes.
+    ``["/usr/bin/sandbox-exec", "-f", "/path/to/profile.sb"]`` to run
+    codex/cursor's real binary under a macOS sandbox that denies specific file
+    reads/writes. The absolute executable and profile shape are validated here;
+    PATH resolution is never accepted for the no-inner-sandbox transition.
     This is the only point in the dispatch path where the process that will
     actually execute is assembled, so it is the only point a caller can make
     a guard bind onto the REAL subprocess rather than merely describe an
@@ -1440,23 +1432,25 @@ async def _run_skill_once(
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
 
     if codex_outer_sandboxed:
-        requested_wrapper = command_wrapper[0] if command_wrapper else ""
-        resolved_wrapper = shutil.which(requested_wrapper) if requested_wrapper else None
-        system_sandbox_exec = shutil.which("sandbox-exec")
-        real_wrapper = bool(
-            resolved_wrapper
-            and system_sandbox_exec
-            and Path(resolved_wrapper).resolve() == Path(system_sandbox_exec).resolve()
+        trusted_wrapper_profile_pair = bool(
+            provider == "codex"
+            and command_wrapper
+            and len(command_wrapper) == 3
+            and command_wrapper[0] == str(TRUSTED_MACOS_SANDBOX_EXEC)
+            and command_wrapper[1] == "-f"
+            and Path(command_wrapper[2]).is_absolute()
+            and TRUSTED_MACOS_SANDBOX_EXEC.is_file()
+            and os.access(TRUSTED_MACOS_SANDBOX_EXEC, os.X_OK)
         )
-        if provider != "codex" or not real_wrapper:
+        if not trusted_wrapper_profile_pair:
             msg = (
-                "codex_outer_sandboxed requires provider='codex' and a real "
-                "sandbox-exec command wrapper; refusing to disable the inner "
-                "Codex sandbox without the outer enforcement boundary"
+                "codex_outer_sandboxed requires provider='codex' and the exact "
+                "trusted wrapper/profile pair rooted at "
+                f"{TRUSTED_MACOS_SANDBOX_EXEC}; refusing to disable the inner "
+                "Codex sandbox for a PATH-resolved, relative, malformed, or "
+                "look-alike wrapper"
             )
-            return SkillResult(
-                skill, False, None, "", "", error=msg, provider=provider
-            )
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
     agent_def = await asyncio.to_thread(_load_agent_def, _role)
@@ -1657,9 +1651,7 @@ async def _run_skill_once(
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
     if provider == "claude":
-        _neotoma_base = os.environ.get(
-            "NEOTOMA_BASE_URL", ""
-        ).rstrip("/")
+        _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
         # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
         # shared daemon bearer, so every agent without its own credential behaves
         # exactly as before. A gate owner is NOT refused here for lacking one
@@ -1709,9 +1701,7 @@ async def _run_skill_once(
 
         # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
         try:
-            fd, _mcp_tmp_path = tempfile.mkstemp(
-                suffix=".json", prefix="apis_mcp_"
-            )
+            fd, _mcp_tmp_path = tempfile.mkstemp(suffix=".json", prefix="apis_mcp_")
             os.chmod(_mcp_tmp_path, 0o600)
             with os.fdopen(fd, "w") as _f:
                 json.dump(_mcp_cfg, _f)
@@ -1921,7 +1911,9 @@ async def _run_skill_once(
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(
-                    input=stdin_payload if stdin_payload is not None else prompt.encode()
+                    input=stdin_payload
+                    if stdin_payload is not None
+                    else prompt.encode()
                 ),
                 timeout=timeout,
             )
@@ -2024,9 +2016,7 @@ async def _run_skill_once(
             stderr=_stderr_text,
             provider=provider,
             error=(
-                _delivery_denial
-                if (_delivery_denial and proc.returncode == 0)
-                else ""
+                _delivery_denial if (_delivery_denial and proc.returncode == 0) else ""
             ),
             usage=_usage,
         )
@@ -2225,24 +2215,46 @@ async def run_skill(
 
     async def attempt(selected: str) -> SkillResult:
         return await _run_skill_once(
-            skill, prompt, provider=selected, role=role,
-            task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
-            notifier=notifier, github_token=github_token,
-            include_github_contract=include_github_contract, cwd=cwd,
-            owns_pending_gate=deny_correct, command_wrapper=command_wrapper,
+            skill,
+            prompt,
+            provider=selected,
+            role=role,
+            task_entity_id=task_entity_id,
+            timeout=timeout,
+            env_extra=env_extra,
+            notifier=notifier,
+            github_token=github_token,
+            include_github_contract=include_github_contract,
+            cwd=cwd,
+            owns_pending_gate=deny_correct,
+            command_wrapper=command_wrapper,
             codex_outer_sandboxed=codex_outer_sandboxed,
         )
 
     return await _run_provider_attempts(
-        skill, attempt, binaries=_provider_binaries(), provider=provider,
-        role=role, task_entity_id=task_entity_id, notifier=notifier,
-        preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
+        skill,
+        attempt,
+        binaries=_provider_binaries(),
+        provider=provider,
+        role=role,
+        task_entity_id=task_entity_id,
+        notifier=notifier,
+        preferred_provider=preferred_provider,
+        owns_pending_gate=deny_correct,
     )
 
 
 async def _run_provider_attempts(
-    skill, attempt, *, binaries, provider=None, role=None, task_entity_id="",
-    notifier=None, retry_safe=False, preferred_provider=None,
+    skill,
+    attempt,
+    *,
+    binaries,
+    provider=None,
+    role=None,
+    task_entity_id="",
+    notifier=None,
+    retry_safe=False,
+    preferred_provider=None,
     owns_pending_gate: bool = False,
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
@@ -2287,7 +2299,10 @@ async def _run_provider_attempts(
 
     candidates = provider_candidates(binaries, preferred=provider)
     if preferred_provider in candidates and provider is None:
-        candidates = [preferred_provider, *[p for p in candidates if p != preferred_provider]]
+        candidates = [
+            preferred_provider,
+            *[p for p in candidates if p != preferred_provider],
+        ]
     if not candidates:
         if owns_pending_gate and provider is None:
             reason = provider_exclusion_reason("claude", binaries) or "not eligible"
@@ -2309,9 +2324,7 @@ async def _run_provider_attempts(
                 f"ineligible: {reason or 'not selected'}"
             )
             return SkillResult(skill, False, None, "", "", error=msg)
-        configured = os.environ.get(
-            "APIS_HARNESS_PROVIDERS", "claude,codex,cursor"
-        )
+        configured = os.environ.get("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
         cooling = ",".join(sorted(cooling_providers())) or "none"
         msg = (
             "no subscription-backed harness provider has usable headroom "
@@ -2368,7 +2381,9 @@ async def _run_provider_attempts(
     return last_result
 
 
-async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> SkillResult:
+async def run_review_prompt(
+    *, role: str, prompt: str, timeout: int = 180
+) -> SkillResult:
     """Route an inference-only review without granting any publisher authority.
 
     The caller owns the role prompt and GitHub signature. Models must be
@@ -2393,11 +2408,22 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
     # Inference gets only its subscription authentication and runtime settings.
     # GitHub/Neotoma credentials remain exclusively with the publisher process.
     env = {
-        key: value for key, value in inherited.items()
-        if key in {
-            "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CODEX_HOME",
-            "CLAUDE_CODE_OAUTH_TOKEN", "SSL_CERT_FILE", "SSL_CERT_DIR",
-            "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+        key: value
+        for key, value in inherited.items()
+        if key
+        in {
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "CODEX_HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "NO_PROXY",
         }
     }
 
@@ -2406,28 +2432,69 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
         model = models[provider].strip()
         with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
             if provider == "claude":
-                cmd = [binary, "--print", "--model", model, "--tools", "",
-                       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                       "--setting-sources", ""]
+                cmd = [
+                    binary,
+                    "--print",
+                    "--model",
+                    model,
+                    "--tools",
+                    "",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    '{"mcpServers":{}}',
+                    "--setting-sources",
+                    "",
+                ]
             else:
-                cmd = [binary, "exec", "--model", model, "--ignore-user-config",
-                       "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
-                       "-c", "features.shell_tool=false", "-c", "features.unified_exec=false",
-                       "-c", "web_search=\"disabled\"", "-c", "forced_login_method=\"chatgpt\"",
-                       "--color", "never", "-"]
+                cmd = [
+                    binary,
+                    "exec",
+                    "--model",
+                    model,
+                    "--ignore-user-config",
+                    "--sandbox",
+                    "read-only",
+                    "--ephemeral",
+                    "--skip-git-repo-check",
+                    "-c",
+                    "features.shell_tool=false",
+                    "-c",
+                    "features.unified_exec=false",
+                    "-c",
+                    'web_search="disabled"',
+                    "-c",
+                    'forced_login_method="chatgpt"',
+                    "--color",
+                    "never",
+                    "-",
+                ]
             started = time.monotonic()
             process = None
             try:
                 process = await asyncio.create_subprocess_exec(
-                    *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE, cwd=workdir, env=env,
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=workdir,
+                    env=env,
                 )
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=prompt.encode()), timeout=timeout,
+                    process.communicate(input=prompt.encode()),
+                    timeout=timeout,
                 )
-                out, err = stdout.decode(errors="replace"), stderr.decode(errors="replace")
-                result = SkillResult(role, process.returncode == 0 and bool(out.strip()),
-                                     process.returncode, out, err, provider=provider)
+                out, err = (
+                    stdout.decode(errors="replace"),
+                    stderr.decode(errors="replace"),
+                )
+                result = SkillResult(
+                    role,
+                    process.returncode == 0 and bool(out.strip()),
+                    process.returncode,
+                    out,
+                    err,
+                    provider=provider,
+                )
                 if result.ok:
                     verdicts = re.findall(
                         r"(?im)^\s*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
@@ -2435,22 +2502,42 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
                     )
                     if len(verdicts) != 1:
                         result.ok = False
-                        result.error = "review response must contain exactly one explicit verdict"
+                        result.error = (
+                            "review response must contain exactly one explicit verdict"
+                        )
                 elif not out.strip() and process.returncode == 0:
                     result.error = "empty review response"
             except asyncio.TimeoutError:
                 if process is not None:
                     process.kill()
                     await process.communicate()
-                result = SkillResult(role, False, None, "", "",
-                                     error=f"review timed out after {timeout}s", provider=provider)
+                result = SkillResult(
+                    role,
+                    False,
+                    None,
+                    "",
+                    "",
+                    error=f"review timed out after {timeout}s",
+                    provider=provider,
+                )
             except OSError as exc:
-                result = SkillResult(role, False, None, "", "",
-                                     error=f"{provider} launch failed: {exc}", provider=provider)
+                result = SkillResult(
+                    role,
+                    False,
+                    None,
+                    "",
+                    "",
+                    error=f"{provider} launch failed: {exc}",
+                    provider=provider,
+                )
             try:
                 await asyncio.to_thread(
-                    _write_harness_event, task_entity_id="", role=role, agent_sub="",
-                    event_type="subprocess", tool_name=f"{provider}:{role}",
+                    _write_harness_event,
+                    task_entity_id="",
+                    role=role,
+                    agent_sub="",
+                    event_type="subprocess",
+                    tool_name=f"{provider}:{role}",
                     success="true" if result.ok else "false",
                     input_summary=f"tool-restricted review; requested model={model}",
                     output_summary=f"provider={provider}; role={role}; {result.error or result.returncode}",
@@ -2461,5 +2548,9 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
             return result
 
     return await _run_provider_attempts(
-        role, attempt, binaries=binaries, role=role, retry_safe=True,
+        role,
+        attempt,
+        binaries=binaries,
+        role=role,
+        retry_safe=True,
     )

@@ -1202,7 +1202,9 @@ class TestHarnessEventEmptyToken:
         cm.__exit__ = MagicMock(return_value=False)
 
         with (
-            patch("skill_runner.urllib.request.urlopen", return_value=cm) as mock_urlopen,
+            patch(
+                "skill_runner.urllib.request.urlopen", return_value=cm
+            ) as mock_urlopen,
             caplog.at_level(_logging.WARNING, logger="apis.skill_runner"),
         ):
             self._call()
@@ -2465,9 +2467,7 @@ class TestCrossHarnessRouting:
         assert "requires provider='codex'" in (result.error or "")
         assert "refusing to disable" in (result.error or "")
 
-    def test_codex_outer_sandbox_flag_refuses_lookalike_wrapper(
-        self, tmp_path
-    ) -> None:
+    def test_codex_outer_sandbox_flag_refuses_lookalike_wrapper(self, tmp_path) -> None:
         lookalike = tmp_path / "sandbox-exec"
         lookalike.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         lookalike.chmod(0o755)
@@ -2481,7 +2481,33 @@ class TestCrossHarnessRouting:
             )
         )
         assert result.ok is False
-        assert "real sandbox-exec" in (result.error or "")
+        assert "trusted wrapper/profile pair" in (result.error or "")
+
+    def test_codex_outer_sandbox_flag_rejects_path_shadowing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A PATH-preferred look-alike must not validate against itself."""
+        shadow_bin = tmp_path / "shadow-bin"
+        shadow_bin.mkdir()
+        lookalike = shadow_bin / "sandbox-exec"
+        lookalike.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        lookalike.chmod(0o755)
+        profile = tmp_path / "profile.sb"
+        profile.write_text("(version 1)\n(allow default)\n", encoding="utf-8")
+        monkeypatch.setenv("PATH", str(shadow_bin))
+
+        result = asyncio.run(
+            skill_runner._run_skill_once(
+                "cicada",
+                "work",
+                provider="codex",
+                command_wrapper=["sandbox-exec", "-f", str(profile)],
+                codex_outer_sandboxed=True,
+            )
+        )
+
+        assert result.ok is False
+        assert "/usr/bin/sandbox-exec" in (result.error or "")
 
     def test_cursor_adapter_uses_headless_agent(self) -> None:
         cmd, stdin = skill_runner._provider_command(
@@ -2505,9 +2531,7 @@ class TestCrossHarnessRouting:
         assert "WORK" in cmd[-1]
         assert stdin is None
 
-    def test_all_metered_credentials_are_removed_by_default(
-        self, monkeypatch
-    ) -> None:
+    def test_all_metered_credentials_are_removed_by_default(self, monkeypatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-metered")
         monkeypatch.setenv("OPENAI_API_KEY", "openai-metered")
         monkeypatch.setenv("CURSOR_API_KEY", "cursor-metered")
@@ -2524,9 +2548,7 @@ class TestCrossHarnessRouting:
             == "auth"
         )
 
-    def test_capacity_failure_fails_over_to_next_provider(
-        self, monkeypatch
-    ) -> None:
+    def test_capacity_failure_fails_over_to_next_provider(self, monkeypatch) -> None:
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
         monkeypatch.setenv(
             "APIS_HARNESS_HEADROOM",
@@ -2659,9 +2681,7 @@ class TestCodexSandboxGitRoots:
             ["git", "-C", str(main), "config", "user.email", "t@example.com"],
             check=True,
         )
-        subprocess.run(
-            ["git", "-C", str(main), "config", "user.name", "T"], check=True
-        )
+        subprocess.run(["git", "-C", str(main), "config", "user.name", "T"], check=True)
         (main / "seed.txt").write_text("seed\n")
         subprocess.run(["git", "-C", str(main), "add", "seed.txt"], check=True)
         subprocess.run(
@@ -3033,7 +3053,9 @@ class TestRequestedModelFromArgv:
 
     def test_reads_equals_spelling(self) -> None:
         assert (
-            skill_runner._requested_model("cursor", ["cursor-agent", "--model=composer-2.5"])
+            skill_runner._requested_model(
+                "cursor", ["cursor-agent", "--model=composer-2.5"]
+            )
             == "composer-2.5"
         )
 
@@ -3042,7 +3064,11 @@ class TestRequestedModelFromArgv:
         assert skill_runner._requested_model("claude", ["claude", "--print"]) is None
 
     def test_handles_trailing_flag_without_value(self) -> None:
-        assert skill_runner._requested_model("cursor", ["cursor-agent", "--model"]) is None
+        assert (
+            skill_runner._requested_model("cursor", ["cursor-agent", "--model"]) is None
+        )
+
+
 # ── Prior-art contract (check existing context before building) ───────────────
 #
 # The contract exists because dispatched agents rebuilt work that already
@@ -3196,7 +3222,9 @@ class TestFoundationContract:
             "Do the task.",
             include_github_contract=True,
         )
-        assert "`docs/foundation/principles.md` — SENTINEL-PRINCIPLES-PURPOSE." in prompt
+        assert (
+            "`docs/foundation/principles.md` — SENTINEL-PRINCIPLES-PURPOSE." in prompt
+        )
         assert "`docs/foundation/work_model.md` — not yet written" in prompt
 
     def test_present_when_degraded(self, foundation_root) -> None:
@@ -3206,7 +3234,9 @@ class TestFoundationContract:
         assert degraded
         assert skill_runner.SWARM_FOUNDATION_CONTRACT in prompt
 
-    def test_absent_on_a_checkout_with_no_reading_list(self, tmp_path, monkeypatch) -> None:
+    def test_absent_on_a_checkout_with_no_reading_list(
+        self, tmp_path, monkeypatch
+    ) -> None:
         """No conformance.md → nothing to bind to → the contract is not
         injected, and the prior-art contract is unaffected."""
         monkeypatch.setenv("ATELES_FOUNDATION_ROOT", str(tmp_path))
@@ -3238,32 +3268,47 @@ class TestFoundationContract:
         assert "docs/foundation/conformance.md" in text
 
 
-def test_prompt_review_quota_failover_preserves_role_prompt_and_cost_policy(monkeypatch, tmp_path):
+def test_prompt_review_quota_failover_preserves_role_prompt_and_cost_policy(
+    monkeypatch, tmp_path
+):
     harness_router.reset_state()
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
-    monkeypatch.setenv("APIS_REVIEW_MODELS", '{"claude":"qualified-a","codex":"qualified-b"}')
+    monkeypatch.setenv(
+        "APIS_REVIEW_MODELS", '{"claude":"qualified-a","codex":"qualified-b"}'
+    )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "metered-must-not-reach-child")
     monkeypatch.setenv("GITHUB_TOKEN", "publisher-must-not-reach-child")
-    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"claude", "codex":"codex"})
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": "claude", "codex": "codex"},
+    )
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
     attempts = []
 
     async def spawn(*cmd, **kwargs):
         attempts.append((cmd, kwargs))
+
         class Process:
             returncode = 1 if cmd[0] == "claude" else 0
+
             async def communicate(self, input=None):
                 attempts[-1][1]["input"] = input
                 if self.returncode:
                     return b"", b"quota exceeded"
                 return b"Verdict: APPROVE", b""
+
         return Process()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    result = asyncio.run(skill_runner.run_review_prompt(
-        role="loxia", prompt="EXACT ROLE AND HEAD REVIEW INPUT", timeout=1,
-    ))
+    result = asyncio.run(
+        skill_runner.run_review_prompt(
+            role="loxia",
+            prompt="EXACT ROLE AND HEAD REVIEW INPUT",
+            timeout=1,
+        )
+    )
     assert result.ok and result.provider == "codex"
     assert result.attempted_providers == ("claude", "codex")
     assert len(attempts) == 2
@@ -3276,38 +3321,74 @@ def test_prompt_review_quota_failover_preserves_role_prompt_and_cost_policy(monk
     assert "--ignore-user-config" in attempts[1][0]
 
 
-@pytest.mark.parametrize("failure", ["quota exceeded", "request timed out", "upstream unavailable"])
-def test_prompt_only_failover_retries_without_repeating_external_effects(monkeypatch, tmp_path, failure):
+@pytest.mark.parametrize(
+    "failure", ["quota exceeded", "request timed out", "upstream unavailable"]
+)
+def test_prompt_only_failover_retries_without_repeating_external_effects(
+    monkeypatch, tmp_path, failure
+):
     harness_router.reset_state()
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
     attempts = []
+
     async def attempt(provider):
         attempts.append(provider)
-        return skill_runner.SkillResult("loxia", provider == "codex", 1 if provider == "claude" else 0,
-                                        "" if provider == "claude" else "Verdict: APPROVE", "",
-                                        error=failure if provider == "claude" else "", provider=provider)
-    result = asyncio.run(skill_runner._run_provider_attempts(
-        "loxia", attempt, binaries={"claude":"a", "codex":"b"}, retry_safe=True,
-    ))
+        return skill_runner.SkillResult(
+            "loxia",
+            provider == "codex",
+            1 if provider == "claude" else 0,
+            "" if provider == "claude" else "Verdict: APPROVE",
+            "",
+            error=failure if provider == "claude" else "",
+            provider=provider,
+        )
+
+    result = asyncio.run(
+        skill_runner._run_provider_attempts(
+            "loxia",
+            attempt,
+            binaries={"claude": "a", "codex": "b"},
+            retry_safe=True,
+        )
+    )
     assert result.ok and attempts == ["claude", "codex"]
 
 
-def test_role_provider_preference_does_not_disable_capacity_failover(monkeypatch, tmp_path):
+def test_role_provider_preference_does_not_disable_capacity_failover(
+    monkeypatch, tmp_path
+):
     harness_router.reset_state()
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
-    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"a", "codex":"b"})
+    monkeypatch.setattr(
+        skill_runner, "_provider_binaries", lambda: {"claude": "a", "codex": "b"}
+    )
     attempts = []
+
     async def once(skill, prompt, **kwargs):
         attempts.append((kwargs["provider"], kwargs["role"], prompt))
         p = kwargs["provider"]
-        return skill_runner.SkillResult(skill, p == "claude", 0 if p == "claude" else 1,
-                                        "review" if p == "claude" else "", "quota exceeded" if p == "codex" else "", provider=p)
+        return skill_runner.SkillResult(
+            skill,
+            p == "claude",
+            0 if p == "claude" else 1,
+            "review" if p == "claude" else "",
+            "quota exceeded" if p == "codex" else "",
+            provider=p,
+        )
+
     monkeypatch.setattr(skill_runner, "_run_skill_once", once)
-    result = asyncio.run(skill_runner.run_skill("falco", "exact input", role="falco", preferred_provider="codex"))
+    result = asyncio.run(
+        skill_runner.run_skill(
+            "falco", "exact input", role="falco", preferred_provider="codex"
+        )
+    )
     assert result.ok
-    assert attempts == [("codex", "falco", "exact input"), ("claude", "falco", "exact input")]
+    assert attempts == [
+        ("codex", "falco", "exact input"),
+        ("claude", "falco", "exact input"),
+    ]
 
 
 def test_usable_providers_excludes_zero_headroom_preference(monkeypatch, tmp_path):
@@ -3357,10 +3438,16 @@ def test_zero_headroom_hard_pin_reports_provider_exclusion(monkeypatch, tmp_path
     assert "minimum=0.050" in result.error
 
 
-@pytest.mark.parametrize("models", ["", "[]", "broken", '{"claude":null}', '{"cursor":"qualified"}'])
+@pytest.mark.parametrize(
+    "models", ["", "[]", "broken", '{"claude":null}', '{"cursor":"qualified"}']
+)
 def test_prompt_review_requires_qualified_supported_adapter(monkeypatch, models):
     monkeypatch.setenv("APIS_REVIEW_MODELS", models)
-    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"a", "codex":"b", "cursor":"c"})
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": "a", "codex": "b", "cursor": "c"},
+    )
     result = asyncio.run(skill_runner.run_review_prompt(role="loxia", prompt="input"))
     assert not result.ok and result.attempted_providers == ()
 
@@ -4007,7 +4094,11 @@ class TestGateOwnerFailoverToClaude:
                 # an error that is neither a classified failure_kind nor a
                 # "launch failed:"-prefixed string.
                 return skill_runner.SkillResult(
-                    "waxwing", False, None, "", "",
+                    "waxwing",
+                    False,
+                    None,
+                    "",
+                    "",
                     error=(
                         f"{skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
                         f"provider {selected!r} has no mechanism..."
@@ -4015,7 +4106,12 @@ class TestGateOwnerFailoverToClaude:
                     provider=selected,
                 )
             return skill_runner.SkillResult(
-                "waxwing", True, 0, "**SIGNED_OFF**", "", provider=selected,
+                "waxwing",
+                True,
+                0,
+                "**SIGNED_OFF**",
+                "",
+                provider=selected,
             )
 
         result = self._run(
@@ -4087,7 +4183,12 @@ class TestGateOwnerFailoverToClaude:
         async def attempt(selected: str) -> skill_runner.SkillResult:
             attempted.append(selected)
             return skill_runner.SkillResult(
-                "falco", True, 0, "**COMMENT**", "", provider=selected,
+                "falco",
+                True,
+                0,
+                "**COMMENT**",
+                "",
+                provider=selected,
             )
 
         result = self._run(

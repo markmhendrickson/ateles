@@ -75,9 +75,12 @@ def _default_full_headroom(monkeypatch):
     exactly as this fixture does.
     """
     monkeypatch.setenv(
-        "APIS_HARNESS_HEADROOM", json.dumps({"claude": 1.0, "codex": 1.0, "cursor": 1.0})
+        "APIS_HARNESS_HEADROOM",
+        json.dumps({"claude": 1.0, "codex": 1.0, "cursor": 1.0}),
     )
-    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", "/nonexistent/harness-headroom.json")
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM_FILE", "/nonexistent/harness-headroom.json"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -109,10 +112,11 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
             provider=provider,
             root=root,
             env_extra={"CODEX_HOME": str(root)} if provider == "codex" else {},
-            command_wrapper=["sandbox-exec", "-f", str(root / "profile.sb")]
+            command_wrapper=["/usr/bin/sandbox-exec", "-f", str(root / "profile.sb")]
             if provider != "claude"
             else [],
             credential_read_denied=True,
+            credential_binding_protected=True,
             user_config_write_denied=True,
             git_stash_denied=True,
             authentication_ready=True,
@@ -181,7 +185,9 @@ def test_parallel_prepare_serializes_only_shared_fetch(monkeypatch, tmp_path):
     for thread in threads:
         thread.join()
     assert unprotected_errors
-    assert "cannot lock ref 'refs/remotes/origin-pr/1308'" in unprotected_errors[0].stderr
+    assert (
+        "cannot lock ref 'refs/remotes/origin-pr/1308'" in unprotected_errors[0].stderr
+    )
     assert max_active_fetches == 2
 
     # The same concurrent callers stay single-flight through production code.
@@ -254,9 +260,14 @@ def test_run_one_refuses_before_any_worktree_when_headroom_zero(
     with pytest.raises(hlr.HeadroomExhausted):
         asyncio.run(
             hlr.run_one(
-                target, provider="codex", post=False, dry_run=False,
-                repo_worktree_name="ateles", scratch_root=tmp_path,
-                brief_path=brief_file, timeout=None,
+                target,
+                provider="codex",
+                post=False,
+                dry_run=False,
+                repo_worktree_name="ateles",
+                scratch_root=tmp_path,
+                brief_path=brief_file,
+                timeout=None,
             )
         )
     assert called is False
@@ -271,7 +282,7 @@ def test_run_one_refuses_before_any_worktree_when_headroom_zero(
 import platform  # noqa: E402
 import shutil  # noqa: E402
 
-_HAS_SANDBOX_EXEC = shutil.which("sandbox-exec") is not None
+_HAS_SANDBOX_EXEC = hlr.trusted_sandbox_exec_path() is not None
 _IS_DARWIN = platform.system() == "Darwin"
 
 
@@ -279,6 +290,29 @@ def test_sandbox_build_codex_uses_codex_home_isolation(tmp_path):
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
     assert sandbox.env_extra["CODEX_HOME"] == str(sandbox.root)
     assert sandbox.root.is_dir()
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_sandbox_build_uses_trusted_wrapper_despite_path_shadowing(
+    tmp_path, monkeypatch
+):
+    shadow_bin = tmp_path / "shadow-bin"
+    shadow_bin.mkdir()
+    lookalike = shadow_bin / "sandbox-exec"
+    lookalike.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    lookalike.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shadow_bin}:{os.environ['PATH']}")
+    monkeypatch.setattr(
+        hlr, "probe_stash_effect_denied_across_git_binaries", lambda *args: True
+    )
+
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path / "sandbox")
+
+    assert sandbox.command_wrapper[0] == "/usr/bin/sandbox-exec"
+    assert Path(sandbox.command_wrapper[0]).samefile("/usr/bin/sandbox-exec")
 
 
 def test_sandbox_build_codex_links_auth_without_copying_it(tmp_path, monkeypatch):
@@ -316,8 +350,14 @@ def test_sandbox_profile_denies_write_through_codex_auth_symlink(tmp_path):
     subprocess = __import__("subprocess")
     attempt = subprocess.run(
         [
-            "sandbox-exec", "-f", str(profile),
-            "sh", "-c", 'printf changed > "$1"', "probe", str(linked),
+            "/usr/bin/sandbox-exec",
+            "-f",
+            str(profile),
+            "sh",
+            "-c",
+            'printf changed > "$1"',
+            "probe",
+            str(linked),
         ],
         capture_output=True,
         text=True,
@@ -383,7 +423,9 @@ def test_git_shim_is_advisory_only_not_the_control(tmp_path):
 
     push = subprocess.run(
         ["git", "-C", str(scratch_repo), "stash", "push"],
-        capture_output=True, text=True, env=env,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     assert push.returncode != 0, "the shim let a real stash push through"
     assert "courtesy" in push.stderr.lower()
@@ -391,7 +433,9 @@ def test_git_shim_is_advisory_only_not_the_control(tmp_path):
     # And a completely unrelated git command must still work through the shim.
     status = subprocess.run(
         ["git", "-C", str(scratch_repo), "status"],
-        capture_output=True, text=True, env=env,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     assert status.returncode == 0
 
@@ -426,7 +470,9 @@ def test_discover_probe_git_invocations_finds_more_than_one_real_binary():
     not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
     reason="sandbox-exec is macOS-only; see test_sandbox_probe_reports_unbound_without_sandbox_exec",
 )
-def test_stash_ref_is_really_denied_across_every_real_git_binary_this_host_has(tmp_path):
+def test_stash_ref_is_really_denied_across_every_real_git_binary_this_host_has(
+    tmp_path,
+):
     """The load-bearing regression test for the round-4 finding: invoke `git
     stash push` via EVERY real git invocation this host offers — PATH-resolved
     `git`, `/usr/bin/git` by absolute path, `xcrun git`, and (if distinct)
@@ -451,20 +497,25 @@ def test_stash_ref_is_really_denied_across_every_real_git_binary_this_host_has(t
         ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
         check=True,
     )
-    subprocess.run(["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True)
+    subprocess.run(
+        ["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True
+    )
     (scratch_repo / "f.txt").write_text("x", encoding="utf-8")
     subprocess.run(["git", "-C", str(scratch_repo), "add", "-A"], check=True)
     # A REAL commit first: without one, even a fully bypassed guard fails on
     # its own with "no initial commit", which would make this test pass for
     # the wrong reason.
-    subprocess.run(["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True)
+    subprocess.run(
+        ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True
+    )
     (scratch_repo / "f.txt").write_text("changed", encoding="utf-8")
 
     invocations = hlr.discover_probe_git_invocations(scratch_repo)
     assert invocations, "expected at least one real git invocation to test against"
-    if shutil.which("xcrun") and Path(
-        "/Applications/Xcode.app/Contents/Developer/usr/bin/git"
-    ).is_file():
+    if (
+        shutil.which("xcrun")
+        and Path("/Applications/Xcode.app/Contents/Developer/usr/bin/git").is_file()
+    ):
         assert any(
             prefix == ["xcrun", "git"]
             or prefix == ["/Applications/Xcode.app/Contents/Developer/usr/bin/git"]
@@ -473,8 +524,16 @@ def test_stash_ref_is_really_denied_across_every_real_git_binary_this_host_has(t
 
     for prefix in invocations:
         attempt = subprocess.run(
-            [*sandbox.command_wrapper, *prefix, "-C", str(scratch_repo), "stash", "push"],
-            capture_output=True, text=True,
+            [
+                *sandbox.command_wrapper,
+                *prefix,
+                "-C",
+                str(scratch_repo),
+                "stash",
+                "push",
+            ],
+            capture_output=True,
+            text=True,
         )
         assert attempt.returncode != 0, (
             f"invocation {prefix} was NOT denied by the sandbox-exec "
@@ -486,7 +545,8 @@ def test_stash_ref_is_really_denied_across_every_real_git_binary_this_host_has(t
     real_system_git = shutil.which("git")
     listing = subprocess.run(
         [real_system_git, "-C", str(scratch_repo), "stash", "list"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert listing.stdout.strip() == "", (
         "a stash entry landed despite every invocation reporting denied — "
@@ -518,26 +578,34 @@ def test_stash_ref_deny_also_denies_reading_an_existing_entry(tmp_path):
         ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
         check=True,
     )
-    subprocess.run(["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True)
+    subprocess.run(
+        ["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True
+    )
     (scratch_repo / "f.txt").write_text("x", encoding="utf-8")
     subprocess.run(["git", "-C", str(scratch_repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True)
+    subprocess.run(
+        ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True
+    )
     (scratch_repo / "f.txt").write_text("changed", encoding="utf-8")
     # A REAL, unsandboxed push — this is the "existing entry left by another
     # session" the read-deny must hide from a later sandboxed attempt.
     subprocess.run(["git", "-C", str(scratch_repo), "stash", "push"], check=True)
     real_listing_before = subprocess.run(
-        ["git", "-C", str(scratch_repo), "stash", "list"], capture_output=True, text=True
+        ["git", "-C", str(scratch_repo), "stash", "list"],
+        capture_output=True,
+        text=True,
     )
-    assert real_listing_before.stdout.strip() != "", "setup failed: no real entry to hide"
+    assert real_listing_before.stdout.strip() != "", (
+        "setup failed: no real entry to hide"
+    )
 
     sandboxed_listing = subprocess.run(
         [*sandbox.command_wrapper, "git", "-C", str(scratch_repo), "stash", "list"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert sandboxed_listing.stdout.strip() == "", (
-        "the sandboxed list saw an existing stash entry it should not be "
-        "able to read"
+        "the sandboxed list saw an existing stash entry it should not be able to read"
     )
 
 
@@ -682,20 +750,75 @@ def test_sandbox_build_really_denies_reading_a_credential_fixture(tmp_path):
     import subprocess as _subprocess
 
     result = _subprocess.run(
-        ["sandbox-exec", "-f", str(profile_path), "cat", str(fixture)],
-        capture_output=True, text=True,
+        ["/usr/bin/sandbox-exec", "-f", str(profile_path), "cat", str(fixture)],
+        capture_output=True,
+        text=True,
     )
-    assert result.returncode != 0, "the real sandbox-exec profile let a real read through"
+    assert result.returncode != 0, (
+        "the real sandbox-exec profile let a real read through"
+    )
 
     # An unrelated file outside the deny globs must still be readable.
     unrelated = tmp_path / "unrelated.txt"
     unrelated.write_text("hi", encoding="utf-8")
     ok = _subprocess.run(
-        ["sandbox-exec", "-f", str(profile_path), "cat", str(unrelated)],
-        capture_output=True, text=True,
+        ["/usr/bin/sandbox-exec", "-f", str(profile_path), "cat", str(unrelated)],
+        capture_output=True,
+        text=True,
     )
     assert ok.returncode == 0
     assert ok.stdout.strip() == "hi"
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="sandbox-exec is macOS-only; non-macOS dispatches fail closed",
+)
+def test_sandbox_profile_preserves_credential_binding_with_positive_control(tmp_path):
+    fixture_home = tmp_path / "fixture-user"
+    protected_dir = fixture_home / ".config" / "neotoma"
+    protected_dir.mkdir(parents=True)
+    protected_file = protected_dir / ".env-test"
+    protected_file.write_text("fixture-not-a-secret\n", encoding="utf-8")
+    profile = tmp_path / "profile.sb"
+    hlr.build_sandbox_exec_profile(profile, credential_home_roots=(fixture_home,))
+
+    probe_passed = hlr.probe_sandbox_exec_preserves_credential_binding(
+        profile,
+        protected_dir=protected_dir,
+        protected_file=protected_file,
+        control_root=tmp_path / "ordinary-worktree-fixture",
+    )
+    if not probe_passed:
+        operational = subprocess.run(
+            ["/usr/bin/sandbox-exec", "-f", str(profile), "/usr/bin/true"],
+            capture_output=True,
+            text=True,
+        )
+        if operational.returncode != 0:
+            pytest.skip(
+                "this process is already sandboxed and cannot apply a nested "
+                "Seatbelt profile; production fails closed on the same probe"
+            )
+    assert probe_passed
+
+
+def test_fully_guarded_requires_credential_binding_probe(tmp_path):
+    sandbox = hlr.HarnessSandbox(
+        provider="codex",
+        root=tmp_path,
+        env_extra={},
+        command_wrapper=[],
+        credential_read_denied=True,
+        credential_binding_protected=False,
+        user_config_write_denied=True,
+        git_stash_denied=True,
+        authentication_ready=True,
+        unavailable_guards=("credential_binding_guard",),
+    )
+
+    assert sandbox.fully_guarded is False
+    assert hlr.refuse_if_guard_required(sandbox) is not None
 
 
 @pytest.mark.skipif(
@@ -719,10 +842,13 @@ def test_sandbox_build_really_denies_writing_to_user_config_fixture(tmp_path):
 
     fixture.parent.mkdir(parents=True)
     result = _subprocess.run(
-        ["sandbox-exec", "-f", str(profile_path), "touch", str(fixture)],
-        capture_output=True, text=True,
+        ["/usr/bin/sandbox-exec", "-f", str(profile_path), "touch", str(fixture)],
+        capture_output=True,
+        text=True,
     )
-    assert result.returncode != 0, "the real sandbox-exec profile let a real write through"
+    assert result.returncode != 0, (
+        "the real sandbox-exec profile let a real write through"
+    )
     assert not fixture.exists()
 
 
@@ -731,11 +857,7 @@ def test_sandbox_probe_reports_unbound_without_sandbox_exec(tmp_path, monkeypatc
     unavailable (this host, or a simulated absence), the probe must report
     False — never assume True because the profile file was written.
     """
-    real_which = shutil.which
-    monkeypatch.setattr(
-        hlr.shutil, "which",
-        lambda name: None if name == "sandbox-exec" else real_which(name),
-    )
+    monkeypatch.setattr(hlr, "trusted_sandbox_exec_path", lambda: None)
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
     assert sandbox.credential_read_denied is False
     assert sandbox.user_config_write_denied is False
@@ -761,11 +883,7 @@ def test_refuse_if_guard_required_refuses_codex_when_sandbox_exec_is_unavailable
     """The exact defect PR #1308 shipped with: this must fire for real,
     driven by the sandbox's own probed state, not a hardcoded constant.
     """
-    real_which = shutil.which
-    monkeypatch.setattr(
-        hlr.shutil, "which",
-        lambda name: None if name == "sandbox-exec" else real_which(name),
-    )
+    monkeypatch.setattr(hlr, "trusted_sandbox_exec_path", lambda: None)
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
     reason = hlr.refuse_if_guard_required(sandbox)
     assert reason is not None
@@ -883,14 +1001,27 @@ def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_
     regardless of what is passed in.
     """
     guarded = hlr.HarnessSandbox(
-        provider="codex", root=tmp_path, env_extra={}, command_wrapper=[],
-        credential_read_denied=True, user_config_write_denied=True,
-        git_stash_denied=True, authentication_ready=True, unavailable_guards=(),
+        provider="codex",
+        root=tmp_path,
+        env_extra={},
+        command_wrapper=[],
+        credential_read_denied=True,
+        credential_binding_protected=True,
+        user_config_write_denied=True,
+        git_stash_denied=True,
+        authentication_ready=True,
+        unavailable_guards=(),
     )
     unguarded = hlr.HarnessSandbox(
-        provider="codex", root=tmp_path, env_extra={}, command_wrapper=[],
-        credential_read_denied=False, user_config_write_denied=True,
-        git_stash_denied=True, authentication_ready=True,
+        provider="codex",
+        root=tmp_path,
+        env_extra={},
+        command_wrapper=[],
+        credential_read_denied=False,
+        credential_binding_protected=True,
+        user_config_write_denied=True,
+        git_stash_denied=True,
+        authentication_ready=True,
         unavailable_guards=("credential_read_guard (…)",),
     )
     assert hlr.refuse_if_guard_required(guarded) is None
@@ -929,9 +1060,14 @@ def test_dry_run_makes_no_model_call_and_reports_command(
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=False, dry_run=True,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=False,
+            dry_run=True,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -947,8 +1083,9 @@ def test_dry_run_makes_no_model_call_and_reports_command(
     # shows exactly what the real dispatch will run.
     if report["fully_guarded"]:
         assert report["command_wrapper"]
-        assert report["example_command"][: len(report["command_wrapper"])] == (
-            report["command_wrapper"]
+        assert (
+            report["example_command"][: len(report["command_wrapper"])]
+            == (report["command_wrapper"])
         )
         assert "danger-full-access" in report["example_command"]
     else:
@@ -996,9 +1133,14 @@ def test_dry_run_claude_provider_needs_no_sandbox_and_pins_cwd_to_the_worktree(
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="claude", post=False, dry_run=True,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="claude",
+            post=False,
+            dry_run=True,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1012,7 +1154,10 @@ def test_dry_run_claude_provider_needs_no_sandbox_and_pins_cwd_to_the_worktree(
     assert report["fully_guarded"] is True
     assert report["sandbox_env_extra"] == {}
     assert report["example_command"] == [
-        "claude", "--print", "--append-system-prompt", "<system prompt>",
+        "claude",
+        "--print",
+        "--append-system-prompt",
+        "<system prompt>",
     ]
     assert report["would_refuse"] is None
     # The worktree path IS the real repo's own dedicated throwaway checkout
@@ -1086,9 +1231,14 @@ def test_run_one_does_not_post_when_verdict_unreadable(
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=True, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1133,9 +1283,14 @@ def test_run_one_does_not_post_without_post_flag(
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=False, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1191,6 +1346,91 @@ def test_run_one_refuses_before_dispatch_when_stash_baseline_is_unreadable(
     assert report["ok"] is False
     assert report["posted"] is False
     assert "baseline could not be established" in report["refusal_reason"]
+
+
+def test_read_stash_ref_oid_accepts_real_repository_without_stash_ref(tmp_path):
+    repo = tmp_path / "fresh-repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+    assert hlr.read_stash_ref_oid(repo) is None
+    assert hlr.capture_stash_ref_state(repo) == hlr.StashRefState(
+        resolved_oid=None,
+        packed_oid=None,
+    )
+
+
+def test_read_stash_ref_oid_refuses_malformed_real_ref_storage(tmp_path):
+    repo = tmp_path / "malformed-repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".git" / "packed-refs").write_text(
+        "not-an-object-id refs/stash\n", encoding="utf-8"
+    )
+
+    with pytest.raises(RuntimeError, match="cannot test refs/stash existence"):
+        hlr.read_stash_ref_oid(repo)
+
+
+def test_run_one_real_repository_without_stash_ref_reaches_dispatch(
+    monkeypatch, tmp_path, target, brief_file
+):
+    dispatched = False
+
+    def _ready_build(cls, provider, tmp_root):
+        root = tmp_root / f"{provider}-unit-home"
+        root.mkdir(parents=True, exist_ok=True)
+        return hlr.HarnessSandbox(
+            provider=provider,
+            root=root,
+            env_extra={"CODEX_HOME": str(root)},
+            command_wrapper=["/usr/bin/sandbox-exec", "-f", str(root / "profile.sb")],
+            credential_read_denied=True,
+            credential_binding_protected=True,
+            user_config_write_denied=True,
+            git_stash_denied=True,
+            authentication_ready=True,
+            unavailable_guards=(),
+        )
+
+    monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(_ready_build))
+
+    def _fake_create(self, *, head):
+        self._created = True
+        subprocess.run(["git", "init", "-q", str(self.path)], check=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+
+    async def _dispatch(role, task, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert dispatched is True
+    assert report["ok"] is True
+    assert report["posted"] is False
 
 
 def test_run_one_refuses_verdict_after_direct_packed_stash_rewrite(
@@ -1277,17 +1517,26 @@ def test_run_one_refuses_to_post_when_head_moved(
     monkeypatch.setattr(hlr, "current_pr_head", lambda **k: "b" * 40)  # moved!
 
     posted = False
-    monkeypatch.setattr(hlr, "post_verdict", lambda **k: (_ for _ in ()).throw(
-        AssertionError("must not post against a stale head")
-    ))
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **k: (_ for _ in ()).throw(
+            AssertionError("must not post against a stale head")
+        ),
+    )
 
     import asyncio
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=True, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1331,9 +1580,14 @@ def test_run_one_refuses_to_post_when_head_verification_is_unreadable(
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=True, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1381,9 +1635,14 @@ def test_run_one_reports_thrown_head_lookup_as_retryable(
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=True, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1419,17 +1678,26 @@ def test_run_one_refuses_to_post_under_wrong_gh_identity(
     monkeypatch.setattr(hlr, "current_pr_head", lambda **k: SAMPLE_HEAD)
     monkeypatch.setattr(hlr, "gh_login", lambda: "markmhendrickson")
 
-    monkeypatch.setattr(hlr, "post_verdict", lambda **k: (_ for _ in ()).throw(
-        AssertionError("must not post under the wrong gh identity")
-    ))
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **k: (_ for _ in ()).throw(
+            AssertionError("must not post under the wrong gh identity")
+        ),
+    )
 
     import asyncio
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=True, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1467,9 +1735,14 @@ def test_run_one_posts_when_everything_checks_out(
 
     report = asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=True, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1489,7 +1762,9 @@ def test_compare_mode_never_posts_even_with_post_flag(
     async def _dispatch(role, task, **kwargs):
         verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
         verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
-        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider=kwargs.get("provider"))
+        return SkillResult(
+            role, True, 0, SIGNED_OFF_VERDICT, "", provider=kwargs.get("provider")
+        )
 
     monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
 
@@ -1505,17 +1780,20 @@ def test_compare_mode_never_posts_even_with_post_flag(
 
     monkeypatch.setattr(hlr, "current_pr_head", lambda **k: SAMPLE_HEAD)
     monkeypatch.setattr(hlr, "gh_login", lambda: "ateles-agent")
-    monkeypatch.setattr(
-        hlr, "post_verdict", lambda **k: seen_posts.append(k) or "url"
-    )
+    monkeypatch.setattr(hlr, "post_verdict", lambda **k: seen_posts.append(k) or "url")
 
     import asyncio
 
     report = asyncio.run(
         hlr.run_compare(
-            target, providers=["claude", "codex"], dry_run=False, post=True,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            providers=["claude", "codex"],
+            dry_run=False,
+            post=True,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1533,8 +1811,18 @@ def test_main_requires_provider_or_compare(brief_file):
     with pytest.raises(SystemExit):
         hlr.main(
             [
-                "--repo", "o/r", "--pr", "1", "--head", SAMPLE_HEAD,
-                "--lens", "pm", "--agent", "pavo", "--brief", str(brief_file),
+                "--repo",
+                "o/r",
+                "--pr",
+                "1",
+                "--head",
+                SAMPLE_HEAD,
+                "--lens",
+                "pm",
+                "--agent",
+                "pavo",
+                "--brief",
+                str(brief_file),
             ]
         )
 
@@ -1543,9 +1831,22 @@ def test_main_rejects_both_provider_and_compare(brief_file):
     with pytest.raises(SystemExit):
         hlr.main(
             [
-                "--repo", "o/r", "--pr", "1", "--head", SAMPLE_HEAD,
-                "--lens", "pm", "--agent", "pavo", "--brief", str(brief_file),
-                "--provider", "codex", "--compare", "claude,codex",
+                "--repo",
+                "o/r",
+                "--pr",
+                "1",
+                "--head",
+                SAMPLE_HEAD,
+                "--lens",
+                "pm",
+                "--agent",
+                "pavo",
+                "--brief",
+                str(brief_file),
+                "--provider",
+                "codex",
+                "--compare",
+                "claude,codex",
             ]
         )
 
@@ -1554,8 +1855,18 @@ def test_main_requires_brief_flag():
     with pytest.raises(SystemExit):
         hlr.main(
             [
-                "--repo", "o/r", "--pr", "1", "--head", SAMPLE_HEAD,
-                "--lens", "pm", "--agent", "pavo", "--provider", "codex",
+                "--repo",
+                "o/r",
+                "--pr",
+                "1",
+                "--head",
+                SAMPLE_HEAD,
+                "--lens",
+                "pm",
+                "--agent",
+                "pavo",
+                "--provider",
+                "codex",
             ]
         )
 
@@ -1602,8 +1913,18 @@ def test_main_resolves_agent_from_lens_when_agent_omitted(
 
     rc = hlr.main(
         [
-            "--repo", "markmhendrickson/ateles", "--pr", "1", "--head", SAMPLE_HEAD,
-            "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
+            "--repo",
+            "markmhendrickson/ateles",
+            "--pr",
+            "1",
+            "--head",
+            SAMPLE_HEAD,
+            "--lens",
+            "pm",
+            "--provider",
+            "codex",
+            "--brief",
+            str(brief_file),
         ]
     )
 
@@ -1617,9 +1938,18 @@ def test_main_refuses_when_agent_omitted_for_an_unknown_lens(brief_file):
     with pytest.raises(SystemExit):
         hlr.main(
             [
-                "--repo", "o/r", "--pr", "1", "--head", SAMPLE_HEAD,
-                "--lens", "not-a-real-lens", "--provider", "codex",
-                "--brief", str(brief_file),
+                "--repo",
+                "o/r",
+                "--pr",
+                "1",
+                "--head",
+                SAMPLE_HEAD,
+                "--lens",
+                "not-a-real-lens",
+                "--provider",
+                "codex",
+                "--brief",
+                str(brief_file),
             ]
         )
 
@@ -1648,8 +1978,9 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         provider="codex",
         root=tmp_path / "codex-home",
         env_extra={"CODEX_HOME": str(tmp_path / "codex-home")},
-        command_wrapper=["sandbox-exec", "-f", str(tmp_path / "profile.sb")],
+        command_wrapper=["/usr/bin/sandbox-exec", "-f", str(tmp_path / "profile.sb")],
         credential_read_denied=True,
+        credential_binding_protected=True,
         user_config_write_denied=True,
         git_stash_denied=True,
         authentication_ready=True,
@@ -1688,15 +2019,20 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
 
     asyncio.run(
         hlr.run_one(
-            target, provider="codex", post=False, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
     assert "CODEX_HOME" in seen["env_extra"]
     assert seen["command_wrapper"]
-    assert seen["command_wrapper"][0] == "sandbox-exec"
+    assert seen["command_wrapper"][0] == "/usr/bin/sandbox-exec"
     assert seen["codex_outer_sandboxed"] is True
     assert seen["seated_reviewer"] is False
     assert seen["provider"] == "codex"
@@ -1712,19 +2048,30 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
     when the caller names a task, rather than always leaving it empty.
     """
     target_with_task = hlr.LensTarget(
-        repo="markmhendrickson/ateles", pr=1234, head=SAMPLE_HEAD,
-        lens="pm", agent="pavo", task_entity_id="ent_898998f41372ce24369fb365",
+        repo="markmhendrickson/ateles",
+        pr=1234,
+        head=SAMPLE_HEAD,
+        lens="pm",
+        agent="pavo",
+        task_entity_id="ent_898998f41372ce24369fb365",
     )
 
     guarded = hlr.HarnessSandbox(
-        provider="codex", root=tmp_path / "codex-home",
+        provider="codex",
+        root=tmp_path / "codex-home",
         env_extra={"CODEX_HOME": str(tmp_path / "codex-home")},
-        command_wrapper=["sandbox-exec", "-f", str(tmp_path / "profile.sb")],
-        credential_read_denied=True, user_config_write_denied=True,
-        git_stash_denied=True, authentication_ready=True, unavailable_guards=(),
+        command_wrapper=["/usr/bin/sandbox-exec", "-f", str(tmp_path / "profile.sb")],
+        credential_read_denied=True,
+        credential_binding_protected=True,
+        user_config_write_denied=True,
+        git_stash_denied=True,
+        authentication_ready=True,
+        unavailable_guards=(),
     )
     monkeypatch.setattr(
-        hlr.HarnessSandbox, "build", classmethod(lambda cls, provider, tmp_root: guarded)
+        hlr.HarnessSandbox,
+        "build",
+        classmethod(lambda cls, provider, tmp_root: guarded),
     )
 
     seen = {}
@@ -1756,9 +2103,14 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
 
     asyncio.run(
         hlr.run_one(
-            target_with_task, provider="codex", post=False, dry_run=False,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
+            target_with_task,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
         )
     )
 
@@ -1769,7 +2121,5 @@ def test_lens_target_task_entity_id_defaults_to_empty_string():
     """A one-off comparison run need not name a task — the default must stay
     an empty string (not None), matching dispatch_role.dispatch's own default
     and skill_runner's idempotency-key string formatting."""
-    target = hlr.LensTarget(
-        repo="o/r", pr=1, head=SAMPLE_HEAD, lens="pm", agent="pavo"
-    )
+    target = hlr.LensTarget(repo="o/r", pr=1, head=SAMPLE_HEAD, lens="pm", agent="pavo")
     assert target.task_entity_id == ""
