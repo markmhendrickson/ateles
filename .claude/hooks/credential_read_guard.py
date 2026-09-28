@@ -93,6 +93,7 @@ hook must never itself become the reason a session breaks; the credential
 exposure it prevents is worse than a rare missed catch, but a hook that
 crashes the harness is worse than either.
 """
+
 import json
 import os
 import re
@@ -181,32 +182,32 @@ def _safe_alternative(path_desc: str, tool: str = "Bash") -> str:
     )
     if tool == "Read":
         body = (
-            f"Read has no safe mode for a credential file — it always returns the "
-            f"whole file, values included, and there is no Read-tool option that "
-            f"limits this to a name, a count, or an in-place use.\n\n"
-            f"If you need to USE a variable's value, or check that one EXISTS or "
-            f"which names a file defines, do that through the Bash tool instead — "
-            f"never through Read on this path.\n\n"
+            "Read has no safe mode for a credential file — it always returns the "
+            "whole file, values included, and there is no Read-tool option that "
+            "limits this to a name, a count, or an in-place use.\n\n"
+            "If you need to USE a variable's value, or check that one EXISTS or "
+            "which names a file defines, do that through the Bash tool instead — "
+            "never through Read on this path.\n\n"
         )
     elif tool == "Grep":
         body = (
-            f"Safe alternatives (use the Grep tool's own safe output modes):\n"
-            f"  - To check whether a pattern EXISTS: output_mode: \"count\"\n"
-            f"  - To list which FILES match, not their content: output_mode: "
-            f"\"files_with_matches\" (the default)\n"
-            f"Grep's \"content\" mode prints matched lines verbatim, which is the "
-            f"one thing refused here.\n\n"
+            "Safe alternatives (use the Grep tool's own safe output modes):\n"
+            '  - To check whether a pattern EXISTS: output_mode: "count"\n'
+            "  - To list which FILES match, not their content: output_mode: "
+            '"files_with_matches" (the default)\n'
+            'Grep\'s "content" mode prints matched lines verbatim, which is the '
+            "one thing refused here.\n\n"
         )
     else:  # Bash (and anything else — the general shell remedy is the safest default)
         body = (
-            f"Safe alternatives:\n"
-            f"  - To USE a variable's value in a command, source it without echoing:\n"
-            f"      set -a; source <file>; set +a\n"
-            f"    then reference it as $VAR_NAME — never print $VAR_NAME itself.\n"
-            f"  - To check whether a variable EXISTS, count it rather than reading it:\n"
-            f"      grep -c '^VAR_NAME=' <file>\n"
-            f"  - To list which variable NAMES a file defines (no values):\n"
-            f"      grep -o '^[A-Z_]*=' <file>\n\n"
+            "Safe alternatives:\n"
+            "  - To USE a variable's value in a command, source it without echoing:\n"
+            "      set -a; source <file>; set +a\n"
+            "    then reference it as $VAR_NAME — never print $VAR_NAME itself.\n"
+            "  - To check whether a variable EXISTS, count it rather than reading it:\n"
+            "      grep -c '^VAR_NAME=' <file>\n"
+            "  - To list which variable NAMES a file defines (no values):\n"
+            "      grep -o '^[A-Z_]*=' <file>\n\n"
         )
     return header + body + _PROVENANCE_NOTE
 
@@ -297,7 +298,11 @@ def _join_line_continuations(command: str) -> str:
 
 def _split_segments(command: str):
     return [
-        s for s in (seg.strip() for seg in SEGMENT_SPLIT.split(_join_line_continuations(command)))
+        s
+        for s in (
+            seg.strip()
+            for seg in SEGMENT_SPLIT.split(_join_line_continuations(command))
+        )
         if s
     ]
 
@@ -369,7 +374,9 @@ _BARE_SET_DUMP_RE = re.compile(r"(?:^|;|&&|\n)\s*set\s*(?:$|;|&&|\n)")
 # (ateles#1302 round 1). `-p` may appear with other flags attached
 # (`declare -px`) or as a separate token; matched loosely on the builtin
 # name plus a `-p` flag anywhere on the same invocation.
-_DECLARE_DUMP_RE = re.compile(r"\b(declare|export|typeset)\b[^;&|\n]*(?:^|\s)-\w*p\w*\b")
+_DECLARE_DUMP_RE = re.compile(
+    r"\b(declare|export|typeset)\b[^;&|\n]*(?:^|\s)-\w*p\w*\b"
+)
 
 # `echo $VAR`, `printf '%s' $VAR`, and `cat <<< $VAR` (a here-string) each
 # print ONE sourced variable's value directly — the exact hazard `env`/
@@ -421,22 +428,25 @@ _PROC_ENVIRON_RE = re.compile(r"/proc/[^\s'\"]*?/environ\b")
 # manager's stored environment, or a child's argv. A PreToolUse hook cannot
 # redact the command's stdout, so it refuses output-bearing entrances and
 # preserves only narrow fixed-field presence/identity checks.
-_COMMAND_BOUNDARY = r'(?:^|[\s"\'])'
+# Match a command token at shell syntax boundaries, including compact forms
+# such as `$(env)`, `(env)`, `{env;}`, and quoted/wrapped command strings.
+# Excluding path/name characters on both sides keeps `my-env`, `.env`, and
+# `envsubst` from being mistaken for the `env` executable.
+_COMMAND_START = r"(?<![A-Za-z0-9_./-])"
+_COMMAND_END = r"(?![A-Za-z0-9_./-])"
 _BIN_PATH = r"(?:/(?:usr/)?bin/)?"
-_PRINTENV_RE = re.compile(
-    rf"{_COMMAND_BOUNDARY}{_BIN_PATH}printenv(?:\s|$)"
-)
-_ENV_RE = re.compile(rf"{_COMMAND_BOUNDARY}{_BIN_PATH}env(?:\s|$)")
+_PRINTENV_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}printenv{_COMMAND_END}")
+_ENV_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}env{_COMMAND_END}")
 _SERVICE_ENV_RE = re.compile(
-    rf"{_COMMAND_BOUNDARY}{_BIN_PATH}launchctl\s+(?:print|getenv)(?:\s|$)"
-    rf"|{_COMMAND_BOUNDARY}{_BIN_PATH}systemctl\s+"
-    r"(?:show|show-environment)(?:\s|$)"
+    rf"{_COMMAND_START}{_BIN_PATH}launchctl\s+(?:print|getenv){_COMMAND_END}"
+    rf"|{_COMMAND_START}{_BIN_PATH}systemctl\s+"
+    rf"(?:show|show-environment){_COMMAND_END}"
 )
-_PGREP_RE = re.compile(rf"{_COMMAND_BOUNDARY}{_BIN_PATH}pgrep(?:\s|$)")
+_PGREP_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}pgrep{_COMMAND_END}")
 _PROCESS_TREE_RE = re.compile(
-    rf"{_COMMAND_BOUNDARY}{_BIN_PATH}(?:pstree|ptree|proctree)(?:\s|$)"
+    rf"{_COMMAND_START}{_BIN_PATH}(?:pstree|ptree|proctree){_COMMAND_END}"
 )
-_PS_RE = re.compile(rf"{_COMMAND_BOUNDARY}{_BIN_PATH}ps(?:\s|$)")
+_PS_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}ps{_COMMAND_END}")
 _SAFE_PS_FIELDS = frozenset(
     {"pid", "ppid", "comm", "state", "stat", "etime", "etimes", "uid", "user"}
 )
@@ -480,9 +490,7 @@ def _ps_is_identity_only(segment: str) -> bool:
         field.split("=", 1)[0].strip().lower() for field in fields if field.strip()
     }
     return bool(
-        saw_pid
-        and normalized_fields
-        and normalized_fields.issubset(_SAFE_PS_FIELDS)
+        saw_pid and normalized_fields and normalized_fields.issubset(_SAFE_PS_FIELDS)
     )
 
 
@@ -515,7 +523,16 @@ def _env_dumps_ambient(segment: str) -> bool:
     match = _ENV_RE.search(segment)
     if not match:
         return False
-    tail = segment[match.end() :].strip().strip("'\"")
+    tail = segment[match.end() :].lstrip()
+    if not tail:
+        return True
+    # A closing shell delimiter ends the nested invocation; anything after
+    # it belongs to the outer command, not to `env` as a program operand.
+    # This is the distinction missed by parsing `echo "$(env)" trailing` as
+    # though `trailing` were the program run by env.
+    if tail[0] in ")]}'\"`":
+        return True
+    tail = tail.strip().strip("'\"")
     try:
         words = shlex.split(tail)
     except ValueError:
@@ -584,24 +601,96 @@ _SOURCE_RE = re.compile(r"(?:^|\s)(?:source|\.)\s+(\S+)")
 
 def _grep_is_safe_mode(segment: str) -> bool:
     """True when a grep/rg invocation cannot print matched line CONTENT."""
-    tokens = segment.split()
-    has_count = any(t in ("-c", "--count") for t in tokens) or bool(
-        re.search(r"\B-\w*c\w*\b", segment)
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return False
+
+    command_index = next(
+        (
+            index
+            for index, token in enumerate(tokens)
+            if token.strip("(){}$`").rsplit("/", 1)[-1]
+            in {"grep", "egrep", "fgrep", "rg"}
+        ),
+        None,
     )
-    has_files_only = any(
-        t in ("-l", "--files-with-matches", "-L", "--files-without-match") for t in tokens
-    )
-    has_only_matching = any(t in ("-o", "--only-matching") for t in tokens)
+    if command_index is None:
+        return False
+
+    # Parse only the option prefix. A token after `--` is a pattern even when
+    # it happens to be spelled `-c` or `-l`; scanning all argv for those
+    # strings would incorrectly grant a safe-output exemption.
+    options_with_value = {
+        "-A",
+        "-B",
+        "-C",
+        "-D",
+        "-d",
+        "-m",
+        "--after-context",
+        "--before-context",
+        "--context",
+        "--max-count",
+        "--binary-files",
+        "--color",
+        "--colour",
+        "--label",
+    }
+    has_count = False
+    has_files_only = False
+    has_only_matching = False
+    has_pattern_source_option = False
+    pattern = None
+    index = command_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            pattern = tokens[index] if index < len(tokens) else None
+            break
+        if token.startswith("--"):
+            option = token.split("=", 1)[0]
+            has_count = has_count or option == "--count"
+            has_files_only = has_files_only or option in {
+                "--files-with-matches",
+                "--files-without-match",
+            }
+            has_only_matching = has_only_matching or option == "--only-matching"
+            has_pattern_source_option = has_pattern_source_option or option in {
+                "--regexp",
+                "--file",
+            }
+            if option in options_with_value and "=" not in token:
+                index += 2
+            else:
+                index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            flags = token[1:]
+            has_count = has_count or "c" in flags
+            has_files_only = has_files_only or "l" in flags or "L" in flags
+            has_only_matching = has_only_matching or "o" in flags
+            has_pattern_source_option = (
+                has_pattern_source_option or "e" in flags or "f" in flags
+            )
+            index += 2 if token in options_with_value else 1
+            continue
+        pattern = token
+        break
+
     if has_count or has_files_only:
         return True
-    if has_only_matching:
-        # Safe ONLY for the documented names-only form: a pattern that
-        # matches a variable NAME up through "=" and nothing past it, e.g.
-        # '^[A-Z_]*=' or '^[A-Za-z_][A-Za-z0-9_]*='. Anything else with -o
-        # could still print a captured secret substring, so it is refused.
-        names_only_pattern = re.compile(r"""\^\[[A-Za-z_][^"'\s]*\]\*=""")
-        return bool(names_only_pattern.search(segment))
-    return False
+    if not has_only_matching or has_pattern_source_option:
+        return False
+
+    # Safe ONLY for the two complete documented names-only patterns.
+    # Substring matching is unsafe: `^[A-Z_]*=.*` contains the old accepted
+    # prefix but continues through the value and prints it.
+    return pattern in {
+        "^[A-Z_]*=",
+        "^[A-Za-z_][A-Za-z0-9_]*=",
+    }
 
 
 def _extract_paths(segment: str):
@@ -632,7 +721,7 @@ def _extract_paths(segment: str):
         # path-shaped.
         eq_idx = cand.find("=")
         if 0 < eq_idx < len(cand) - 1 and re.match(r"^[\w-]+$", cand[:eq_idx]):
-            after = cand[eq_idx + 1:]
+            after = cand[eq_idx + 1 :]
             if "/" in after or "." in after:
                 cand = after
         if "/" in cand or "." in cand:
@@ -876,6 +965,7 @@ def check_bash(command: str):
 # Read tool
 # ---------------------------------------------------------------------------
 
+
 def check_read(tool_input: dict):
     path = tool_input.get("file_path") or tool_input.get("path")
     if isinstance(path, str) and is_credential_path(path):
@@ -886,6 +976,7 @@ def check_read(tool_input: dict):
 # ---------------------------------------------------------------------------
 # Grep tool — refuse only the modes that print matched TEXT.
 # ---------------------------------------------------------------------------
+
 
 def check_grep(tool_input: dict):
     path = tool_input.get("path")
@@ -915,6 +1006,7 @@ def check_grep(tool_input: dict):
 # PreToolUse matcher can legitimately include Glob without this file lying
 # about what it checks.
 # ---------------------------------------------------------------------------
+
 
 def check_glob(tool_input: dict):  # noqa: ARG001 — intentionally unused
     return None

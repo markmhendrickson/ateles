@@ -17,6 +17,7 @@ disabled (ateles#1302 round 1, qa/Phoenicurus). `test_guard_can_actually_fail`
 below is the regression test for that exact failure mode: it disables the
 guard's own credential-path check and asserts the suite would then go red.
 """
+
 import json
 import os
 import subprocess
@@ -43,7 +44,9 @@ ENV_EXAMPLE_FILE.write_text(
 )
 PLAIN_FILE = FIXTURE_ROOT / "notes.txt"
 PLAIN_FILE.write_text("nothing sensitive here\n")
-PLAIN_ENV_FILE = FIXTURE_ROOT / "plain.env"  # deliberately NOT under NEOTOMA_DIR, still *.env
+PLAIN_ENV_FILE = (
+    FIXTURE_ROOT / "plain.env"
+)  # deliberately NOT under NEOTOMA_DIR, still *.env
 PLAIN_ENV_FILE.write_text("UNRELATED=1\n")
 
 ENV = str(ENV_FILE)
@@ -98,6 +101,12 @@ BASH_BLOCK = [
         "rg only-matching names prefix plus values",
         f"rg --only-matching '^[A-Za-z_][A-Za-z0-9_]*=.+' {ENV}",
     ),
+    (
+        "grep unsafe pattern plus safe-looking filename token",
+        f"grep -o '.*' '^[A-Z_]*=' {ENV}",
+    ),
+    ("grep count-shaped pattern after option terminator", f"grep -- -c {ENV}"),
+    ("grep files-shaped pattern after option terminator", f"grep -- -l {ENV}"),
     ("base64", f"base64 {ENV}"),
     ("xxd", f"xxd {ENV}"),
     ("od", f"od -c {ENV}"),
@@ -129,11 +138,20 @@ BASH_BLOCK = [
     ("tee to stdout", f"cat {ENV} | tee /dev/stdout"),
     ("input redirection", f"cat < {ENV}"),
     # Security-review round-1 findings (arch/security lens, ateles#1302).
-    ("python3 -c with double-quoted program", f"python3 -c \"print(open('{ENV}').read())\""),
-    ("python3 -c with single-quoted program", f'python3 -c \'print(open("{ENV}").read())\''),
+    (
+        "python3 -c with double-quoted program",
+        f"python3 -c \"print(open('{ENV}').read())\"",
+    ),
+    (
+        "python3 -c with single-quoted program",
+        f"python3 -c 'print(open(\"{ENV}\").read())'",
+    ),
     ("perl -e reading the file", f"perl -e \"open(F,'{ENV}'); print <F>;\""),
     ("ruby -e reading the file", f"ruby -e \"puts File.read('{ENV}')\""),
-    ("node -e reading the file", f"node -e \"console.log(require('fs').readFileSync('{ENV}'))\""),
+    (
+        "node -e reading the file",
+        f"node -e \"console.log(require('fs').readFileSync('{ENV}'))\"",
+    ),
     ("declare -p after source", f"set -a; source {ENV}; set +a; declare -p"),
     ("export -p after source", f"source {ENV}; export -p"),
     ("typeset -p after source", f"source {ENV}; typeset -p"),
@@ -142,21 +160,33 @@ BASH_BLOCK = [
     ("awk -F= field extraction", f"awk -F= '{{print $2}}' {ENV}"),
     # Cheap additions volunteered alongside the round-1 findings.
     ("dd if= a credential path", f"dd if={ENV}"),
-    ("while-read loop redirected from the file", f"while read -r line; do echo $line; done < {ENV}"),
+    (
+        "while-read loop redirected from the file",
+        f"while read -r line; do echo $line; done < {ENV}",
+    ),
     ("read var redirected from the file", f"read -r line < {ENV}"),
     # Security-review round-2 findings (ateles#1302): sourcing a credential
     # file and then printing a SPECIFIC variable — narrower than a bulk
     # env/set dump, and easy to miss because nothing here is a "dump
     # everything" command.
     ("source then echo a variable", f"source {ENV}; echo $VAR"),
-    ("source then echo the named token var", f"source {ENV}; echo $NEOTOMA_BEARER_TOKEN"),
-    ("set -a source set +a then echo a variable", f"set -a; source {ENV}; set +a; echo $X"),
+    (
+        "source then echo the named token var",
+        f"source {ENV}; echo $NEOTOMA_BEARER_TOKEN",
+    ),
+    (
+        "set -a source set +a then echo a variable",
+        f"set -a; source {ENV}; set +a; echo $X",
+    ),
     ("source then printf with format + variable", f'source {ENV}; printf "%s" $VAR'),
     ("source then bare printf of a variable", f"source {ENV}; printf $VAR"),
     ("source then cat here-string of a variable", f"source {ENV}; cat <<< $VAR"),
     ("dot-source then echo a variable", f". {ENV}; echo $VAR"),
     # Cheap, non-blocking addition from the same round-2 review.
-    ("git diff --no-index against a credential path", f"git diff --no-index /dev/null {ENV}"),
+    (
+        "git diff --no-index against a credential path",
+        f"git diff --no-index /dev/null {ENV}",
+    ),
     # Security-review round-3 finding (ateles#1302): an agent printed a
     # hosted instance's bearer token by running `env` over a REMOTE shell
     # (`fly ssh console -C "env"`) — the local shell never sourced anything,
@@ -165,11 +195,17 @@ BASH_BLOCK = [
     # to a quote character (`-C "env"`) rather than whitespace was itself a
     # sub-bypass, fixed by widening `_ENV_DUMP_RE` to a `\b` boundary.
     ("fly ssh console running env", 'fly ssh console -C "env"'),
-    ("flyctl ssh console running printenv", 'flyctl ssh console -a myapp -C "printenv"'),
+    (
+        "flyctl ssh console running printenv",
+        'flyctl ssh console -a myapp -C "printenv"',
+    ),
     ("bare ssh running env", 'ssh host "env"'),
     ("kubectl exec running env", "kubectl exec pod -- env"),
     ("docker exec running env", "docker exec container env"),
-    ("docker exec wrapped in bash -c running printenv", 'docker exec -it container bash -c "printenv"'),
+    (
+        "docker exec wrapped in bash -c running printenv",
+        'docker exec -it container bash -c "printenv"',
+    ),
     ("ssh reading /proc/*/environ directly", 'ssh host "cat /proc/1/environ"'),
     ("fly ssh console running export -p", 'fly ssh console -C "export -p"'),
     ("ssh running declare -p", 'ssh host "declare -p"'),
@@ -183,14 +219,18 @@ BASH_BLOCK = [
     ("sudo-wrapped local env dump", "sudo env"),
     ("bare local printenv dump", "printenv"),
     ("targeted printenv still prints a value", "printenv NEOTOMA_BEARER_TOKEN"),
-    ("environment dump in command substitution", "echo \"$(env)\""),
-    ("printenv dump in backtick substitution", "echo \"`printenv`\""),
+    ("environment dump in command substitution", 'echo "$(env)"'),
+    ("printenv dump in backtick substitution", 'echo "`printenv`"'),
     ("environment dump in compact subshell", "(env)"),
     ("environment dump in compact command group", "{env;}"),
     ("environment dump nested in shell wrapper", "bash -c '(env)'"),
     (
         "printenv dump nested in quoted shell wrapper",
         "sh -c 'echo \"$(printenv)\"'",
+    ),
+    (
+        "service dump nested in command substitution",
+        'echo "$(systemctl show-environment)"',
     ),
     ("launchctl service dump", "launchctl print gui/501/example.agent"),
     ("launchctl getenv prints a value", "launchctl getenv NEOTOMA_BEARER_TOKEN"),
@@ -208,7 +248,10 @@ BASH_BLOCK = [
     ("ps explicit args column", "ps -p 123 -o args="),
     ("process tree", "pstree -p 123"),
     ("remote ps environment dump", 'ssh host "ps eww -p 1"'),
-    ("container full-command discovery", "docker exec container pgrep -fl example-agent"),
+    (
+        "container full-command discovery",
+        "docker exec container pgrep -fl example-agent",
+    ),
     ("remote service dump", 'ssh host "launchctl print system/example.agent"'),
 ]
 
@@ -222,7 +265,10 @@ BASH_ALLOW = [
     ("grep -l files only", f"grep -l TOKEN {ENV}"),
     ("grep -L files without match", f"grep -L TOKEN {ENV}"),
     ("source without dump", f"set -a; source {ENV}; set +a; echo done"),
-    ("source then use var, no echo of var", f"set -a; source {ENV}; set +a; curl -s https://example.test"),
+    (
+        "source then use var, no echo of var",
+        f"set -a; source {ENV}; set +a; curl -s https://example.test",
+    ),
     ("wc -l line count", f"wc -l {ENV}"),
     ("reading .env.example", f"cat {ENV_EXAMPLE}"),
     ("grep on .env.example", f"grep TOKEN {ENV_EXAMPLE}"),
@@ -236,20 +282,38 @@ BASH_ALLOW = [
     ("node -e with no path in the program", 'node -e "console.log(1)"'),
     ("declare -p with no prior source", "declare -p SOME_VAR"),
     ("export -p with no prior source", "export -p"),
-    ("while-read loop over a plain file", "while read -r line; do echo $line; done < " + PLAIN),
-    ("xargs over a plain file list", f"find . -name x.txt | xargs cat"),
+    (
+        "while-read loop over a plain file",
+        "while read -r line; do echo $line; done < " + PLAIN,
+    ),
+    ("xargs over a plain file list", "find . -name x.txt | xargs cat"),
     ("dd of a plain file", f"dd if={PLAIN}"),
     # The SANCTIONED idiom (round-2 review, explicitly required as a test):
     # source, then run a PROGRAM that consumes the variables — never echo,
     # printf, or cat<<< them directly.
-    ("set -a source set +a THEN run a program (sanctioned idiom)", f"set -a; source {ENV}; set +a && python3 script.py"),
+    (
+        "set -a source set +a THEN run a program (sanctioned idiom)",
+        f"set -a; source {ENV}; set +a && python3 script.py",
+    ),
     ("source then run a program directly", f"source {ENV}; python3 script.py"),
-    ("source then use a variable inside a program's own argument", f'source {ENV}; curl -s https://example.test -H "Authorization: Bearer $TOKEN"'),
+    (
+        "source then use a variable inside a program's own argument",
+        f'source {ENV}; curl -s https://example.test -H "Authorization: Bearer $TOKEN"',
+    ),
     ("echo a variable with no prior credential source", "echo $HOME"),
     ("printf a variable with no prior credential source", 'printf "%s" $HOME'),
-    ("echo literal text, no variable, after source", f"set -a; source {ENV}; set +a; echo done"),
-    ("git commit documenting the round-2 fix", f'git commit -m "fix: block source; echo $VAR"'),
-    ("git diff --no-index between two plain files", "git diff --no-index /tmp/a.txt /tmp/b.txt"),
+    (
+        "echo literal text, no variable, after source",
+        f"set -a; source {ENV}; set +a; echo done",
+    ),
+    (
+        "git commit documenting the round-2 fix",
+        'git commit -m "fix: block source; echo $VAR"',
+    ),
+    (
+        "git diff --no-index between two plain files",
+        "git diff --no-index /tmp/a.txt /tmp/b.txt",
+    ),
     # Round-3 allow-list: boolean checks and label-only output over a remote
     # shell must NOT be refused — none of them dump an environment, and the
     # operator explicitly required these as tests.
@@ -264,8 +328,14 @@ BASH_ALLOW = [
     ("local env assignment running a program", "env SAFE_MODE=1 python3 script.py"),
     ("absolute env running a program", "/usr/bin/env SAFE_MODE=1 python3 script.py"),
     ("launchctl list is identity/status only", "launchctl list"),
-    ("launchctl print-disabled is not a service dump", "launchctl print-disabled system"),
-    ("systemctl fixed-label liveness check", "systemctl is-active example-agent.service"),
+    (
+        "launchctl print-disabled is not a service dump",
+        "launchctl print-disabled system",
+    ),
+    (
+        "systemctl fixed-label liveness check",
+        "systemctl is-active example-agent.service",
+    ),
     ("pgrep exact process name", "pgrep -x example-agent"),
     ("pgrep process names only", "pgrep -l example-agent"),
     ("ps explicit pid and executable identity", "ps -p 123 -o pid=,comm="),
@@ -290,12 +360,16 @@ BASH_ALLOW = [
 ]
 
 
-@pytest.mark.parametrize("label,cmd", BASH_BLOCK, ids=[label for label, _ in BASH_BLOCK])
+@pytest.mark.parametrize(
+    "label,cmd", BASH_BLOCK, ids=[label for label, _ in BASH_BLOCK]
+)
 def test_bash_block(label, cmd):
     assert run_bash(cmd) == 2, label
 
 
-@pytest.mark.parametrize("label,cmd", BASH_ALLOW, ids=[label for label, _ in BASH_ALLOW])
+@pytest.mark.parametrize(
+    "label,cmd", BASH_ALLOW, ids=[label for label, _ in BASH_ALLOW]
+)
 def test_bash_allow(label, cmd):
     assert run_bash(cmd) == 0, label
 
@@ -329,7 +403,10 @@ def test_read_allow(label, ti):
 # ---------------------------------------------------------------------------
 
 GREP_BLOCK = [
-    ("content mode on .env", {"path": ENV, "output_mode": "content", "pattern": "TOKEN"}),
+    (
+        "content mode on .env",
+        {"path": ENV, "output_mode": "content", "pattern": "TOKEN"},
+    ),
     (
         "content mode with context flags",
         {"path": ENV, "output_mode": "content", "pattern": "TOKEN", "-A": 2},
@@ -337,10 +414,19 @@ GREP_BLOCK = [
 ]
 GREP_ALLOW = [
     ("files_with_matches default", {"path": ENV, "pattern": "TOKEN"}),
-    ("files_with_matches explicit", {"path": ENV, "pattern": "TOKEN", "output_mode": "files_with_matches"}),
+    (
+        "files_with_matches explicit",
+        {"path": ENV, "pattern": "TOKEN", "output_mode": "files_with_matches"},
+    ),
     ("count mode", {"path": ENV, "pattern": "TOKEN", "output_mode": "count"}),
-    ("content mode on plain file", {"path": PLAIN, "output_mode": "content", "pattern": "x"}),
-    ("content mode on .env.example", {"path": ENV_EXAMPLE, "output_mode": "content", "pattern": "TOKEN"}),
+    (
+        "content mode on plain file",
+        {"path": PLAIN, "output_mode": "content", "pattern": "x"},
+    ),
+    (
+        "content mode on .env.example",
+        {"path": ENV_EXAMPLE, "output_mode": "content", "pattern": "TOKEN"},
+    ),
 ]
 
 
@@ -373,8 +459,11 @@ def test_glob_allow(label, ti):
 # Malformed / edge-case input must fail OPEN (exit 0), never raise or hang
 # ---------------------------------------------------------------------------
 
+
 def test_malformed_json_fail_open():
-    p = subprocess.run([sys.executable, HOOK], input="not json", capture_output=True, text=True)
+    p = subprocess.run(
+        [sys.executable, HOOK], input="not json", capture_output=True, text=True
+    )
     assert p.returncode == 0
 
 
@@ -428,7 +517,9 @@ def test_command_not_a_string_fail_open():
 
 
 def test_top_level_json_is_a_list_fail_open():
-    p = subprocess.run([sys.executable, HOOK], input="[1,2,3]", capture_output=True, text=True)
+    p = subprocess.run(
+        [sys.executable, HOOK], input="[1,2,3]", capture_output=True, text=True
+    )
     assert p.returncode == 0
 
 
@@ -438,9 +529,12 @@ def test_top_level_json_is_a_list_fail_open():
 # the agent to run a Bash command it wasn't using.
 # ---------------------------------------------------------------------------
 
+
 def _deny_reason(tool_name, tool_input):
     payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
-    p = subprocess.run([sys.executable, HOOK], input=payload, capture_output=True, text=True)
+    p = subprocess.run(
+        [sys.executable, HOOK], input=payload, capture_output=True, text=True
+    )
     assert p.returncode == 2
     out = json.loads(p.stdout)
     return out["hookSpecificOutput"]["permissionDecisionReason"]
@@ -454,7 +548,9 @@ def test_read_denial_does_not_suggest_a_bash_command():
 
 
 def test_grep_denial_does_not_suggest_a_bash_command():
-    reason = _deny_reason("Grep", {"path": ENV, "output_mode": "content", "pattern": "TOKEN"})
+    reason = _deny_reason(
+        "Grep", {"path": ENV, "output_mode": "content", "pattern": "TOKEN"}
+    )
     assert "set -a; source" not in reason
     assert "cat " not in reason
     assert "output_mode" in reason  # steers back to Grep's own safe modes
@@ -472,6 +568,7 @@ def test_bash_denial_does_suggest_the_shell_remedy():
 # suite goes red — proving these tests actually exercise the hook rather
 # than always returning 0/2 regardless of its logic.
 # ---------------------------------------------------------------------------
+
 
 def test_guard_can_actually_fail_when_disabled():
     """Monkeypatch is_credential_path to always return False (simulating the
@@ -520,6 +617,11 @@ def test_process_discovery_never_emits_synthetic_argv_canary():
             combined = result.stdout + result.stderr
             assert result.returncode == 2, command
             assert canary not in combined, command
+
+        identity_command = f"ps -p {child.pid} -o pid=,comm="
+        guarded_identity = run_result("Bash", {"command": identity_command})
+        assert guarded_identity.returncode == 0
+        assert canary not in guarded_identity.stdout + guarded_identity.stderr
     finally:
         child.terminate()
         child.wait(timeout=5)
@@ -560,6 +662,22 @@ def test_nested_environment_dump_has_a_real_canary_effect_then_is_blocked():
     guarded = run_result("Bash", {"command": command}, env={variable: canary})
     assert guarded.returncode == 2
     assert canary not in guarded.stdout + guarded.stderr
+
+
+def test_exact_names_only_and_count_modes_never_emit_fixture_canary():
+    """The two permitted grep modes remain useful and value-free end to end."""
+    canary = "fake_test_token_not_real_0000"
+    commands = (
+        f"grep -o '^[A-Z_]*=' {ENV}",
+        f"grep --only-matching '^[A-Za-z_][A-Za-z0-9_]*=' {ENV}",
+        f"grep -c '^NEOTOMA_BEARER_TOKEN=' {ENV}",
+    )
+    for command in commands:
+        assert run_bash(command) == 0, command
+        actual = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True, check=True
+        )
+        assert canary not in actual.stdout + actual.stderr, command
 
 
 if __name__ == "__main__":
