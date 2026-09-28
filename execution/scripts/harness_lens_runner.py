@@ -730,9 +730,9 @@ def build_sandbox_exec_profile(
       (``_STASH_REF_DENY_REGEXES`` — ent_9e88db1882c668e6c5c32be9, PR #1308
       round 4),
 
-    while default-denying everything else, then allowing execution, reads,
-    network/runtime services, and writes only beneath the isolated runtime
-    root plus the exact verdict pathname.
+    while leaving reads and non-filesystem operations available to the
+    provider runtime. Filesystem writes are denied globally and reopened only
+    beneath the isolated runtime root plus the exact verdict pathname.
 
     THE STASH DENY IS BY EFFECT, NOT BY BINARY (round 4's own fix, replacing
     round 3's ``process-exec`` enumeration). Round 3 denied ``process-exec``
@@ -858,16 +858,8 @@ def build_sandbox_exec_profile(
     verdict = str(verdict_path.resolve()).replace('"', '\\"')
     profile = (
         "(version 1)\n"
-        "(deny default)\n"
-        "(allow process*)\n"
-        "(allow file-read*)\n"
-        "(allow network*)\n"
-        "(allow sysctl-read)\n"
-        "(allow signal)\n"
-        "(allow system-socket)\n"
-        "(allow ipc-posix*)\n"
-        "(allow mach-lookup)\n"
-        "(allow iokit-open)\n"
+        "(allow default)\n"
+        "(deny file-write*)\n"
         "(allow file-write*\n"
         f'  (literal "{runtime_root}")\n'
         f'  (subpath "{runtime_root}")\n'
@@ -1342,6 +1334,8 @@ class HarnessSandbox:
                 "CODEX_HOME": str(sandbox_home),
                 "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
                 "TMPDIR": str(sandbox_home / "tmp"),
+                "TMP": str(sandbox_home / "tmp"),
+                "TEMP": str(sandbox_home / "tmp"),
             }
             authentication_ready = link_codex_auth(sandbox_home)
         elif provider == "cursor":
@@ -1349,6 +1343,8 @@ class HarnessSandbox:
                 "HOME": str(sandbox_home),
                 "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
                 "TMPDIR": str(sandbox_home / "tmp"),
+                "TMP": str(sandbox_home / "tmp"),
+                "TEMP": str(sandbox_home / "tmp"),
             }
             # Cursor subscription state is stored outside the isolated home
             # and has no narrowly exposable capability equivalent to Codex's
@@ -1358,6 +1354,8 @@ class HarnessSandbox:
             env_extra = {
                 "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
                 "TMPDIR": str(sandbox_home / "tmp"),
+                "TMP": str(sandbox_home / "tmp"),
+                "TEMP": str(sandbox_home / "tmp"),
             }
             authentication_ready = bool(
                 (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
