@@ -444,6 +444,50 @@ def test_profile_denies_synthetic_helper_and_keychain_service(tmp_path):
     assert 'global-name "com.apple.securityd"' in text
 
 
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_real_profile_binds_live_tempfile_spelling_with_synthetic_fixtures(tmp_path):
+    """Reproduce live /var paths using only disposable files and helpers."""
+    aliased_root = Path(str(tmp_path).removeprefix("/private"))
+    assert aliased_root.resolve() == tmp_path.resolve()
+    fixture_home = aliased_root / "fixture-user"
+    denied_helper = aliased_root / "fixture-git-credential-helper"
+    control_helper = aliased_root / "ordinary-control-helper"
+    for helper, output in (
+        (denied_helper, "denied-helper\n"),
+        (control_helper, "control-helper\n"),
+    ):
+        helper.write_text(f"#!/bin/sh\nprintf '{output}'\n", encoding="utf-8")
+        helper.chmod(0o755)
+
+    profile = aliased_root / "profile.sb"
+    hlr.build_sandbox_exec_profile(
+        profile,
+        credential_home_roots=(fixture_home,),
+        credential_helper_exec_paths=(
+            *hlr._CREDENTIAL_HELPER_EXEC_PATHS,
+            denied_helper,
+        ),
+    )
+    control_read = aliased_root / "ordinary-control-read.txt"
+    control_read.write_text("control\n", encoding="utf-8")
+    for relative in hlr._SYNTHETIC_PUBLICATION_CREDENTIAL_PATHS:
+        fixture = fixture_home / relative
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text("fixture-not-a-real-credential\n", encoding="utf-8")
+        assert hlr.probe_sandbox_exec_denies_read(
+            profile, fixture, control_path=control_read
+        ), relative
+
+    assert hlr.probe_credential_helper_isolation(
+        profile,
+        denied_helper=denied_helper,
+        control_helper=control_helper,
+    )
+
+
 def test_claude_with_unproved_outer_guards_refuses_before_launch(tmp_path):
     sandbox = hlr.HarnessSandbox(
         provider="claude",

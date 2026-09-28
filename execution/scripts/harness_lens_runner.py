@@ -523,7 +523,10 @@ class Worktree:
 _CREDENTIAL_READ_DENY_REGEXES: tuple[str, ...] = (
     r"/\.config/neotoma/\.env[^/]*$",
     r"/\.neotoma/aauth[^/]*/.*private.*",
-    r"/\.config/gh/(?:hosts|state)\.yml$",
+    # Seatbelt's regex dialect does not honor the PCRE non-capturing-group
+    # spelling ``(?:...)``; keep these as separate, simple expressions.
+    r"/\.config/gh/hosts\.yml$",
+    r"/\.config/gh/state\.yml$",
     r"/\.git-credentials$",
     r"/\.config/git/credentials$",
     r"/\.ssh/.*$",
@@ -591,7 +594,10 @@ def _credential_binding_write_deny_regexes(
     """
     patterns: list[str] = []
     for home_root in home_roots:
-        root = re.escape(os.path.abspath(home_root))
+        # Seatbelt matches canonical vnode paths. macOS TemporaryDirectory
+        # returns /var/... while the kernel reports /private/var/...; resolve
+        # before embedding a rooted deny or the live probe cannot bind.
+        root = re.escape(str(home_root.resolve()))
         patterns.extend(
             (
                 rf"{root}/\.config$",
@@ -816,7 +822,7 @@ def build_sandbox_exec_profile(
         )
     )
     helper_denies = "\n".join(
-        f'  (literal "{str(path).replace(chr(34), chr(92) + chr(34))}")'
+        f'  (literal "{str(path.resolve()).replace(chr(34), chr(92) + chr(34))}")'
         for path in credential_helper_exec_paths
     )
     keychain_service_denies = "\n".join(
