@@ -1245,12 +1245,42 @@ def _delivery_failure_conflicts(
     conflicts: list[str] = []
     if len(reasons) > 1:
         conflicts.append("multiple_delivery_failures")
-    provider_failure = _provider_failure_kind(*texts)
-    if provider_failure is not None:
-        conflicts.append(provider_failure)
-    blob = " ".join(text for text in texts if text).lower()
-    if "launch failed:" in blob:
-        conflicts.append("launch")
+    diagnostic_kinds: set[str] = set()
+    for text in texts:
+        for raw_line in text.splitlines():
+            line = raw_line.strip().lower()
+            if not line or len(line) > 500:
+                continue
+            if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", line):
+                diagnostic_kinds.add("launch")
+                continue
+            if "permission denied (publickey)" in line or any(
+                line.startswith(prefix)
+                for prefix in (
+                    "authentication required",
+                    "authentication failed",
+                    "invalid authentication credentials",
+                    "invalid api key",
+                    "not logged in",
+                    "login required",
+                    "oauth token has expired",
+                    "please run /login",
+                    "please run `claude auth login`",
+                    "please run 'agent login'",
+                )
+            ):
+                diagnostic_kinds.add("auth")
+                continue
+            if any(
+                line == signature
+                or line.startswith(f"error: {signature}")
+                or line.startswith(f"fatal: {signature}")
+                for signature in _CAPACITY_FAILURE_SIGNATURES
+            ):
+                diagnostic_kinds.add("capacity")
+    conflicts.extend(
+        kind for kind in ("auth", "capacity", "launch") if kind in diagnostic_kinds
+    )
     if len(reasons) == 1 and reasons[0] not in _RECOVERABLE_DELIVERY_DENIAL_REASONS:
         conflicts.append("nonrecoverable_delivery_failure")
     return tuple(conflicts)
@@ -2541,8 +2571,6 @@ async def _run_provider_attempts(
             and result.error == result.delivery_failure_reason
             and result.delivery_failure_reasons == (result.delivery_failure_reason,)
             and not result.delivery_failure_conflicts
-            and _provider_failure_kind(result.error, result.stderr) is None
-            and not result.error.startswith(f"{selected} launch failed:")
         )
         if delivery_only:
             return result

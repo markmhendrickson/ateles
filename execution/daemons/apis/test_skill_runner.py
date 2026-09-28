@@ -3047,6 +3047,24 @@ class TestDeliveryFailureIsReportedAsFailure:
         assert result.delivery_failure_reason == result.error
         assert "network access" in result.error
 
+    def test_successful_model_transcript_words_do_not_cancel_delivery_signal(
+        self,
+    ) -> None:
+        """The provider stderr may include the prompt and completed verdict."""
+        transcript = (
+            "role prompt: compare the phrases quota exceeded and launch failed: in prose\n"
+            "<!-- review:pm commit=" + "a" * 40 + " -->\n"
+            "**SIGNED_OFF**\n"
+            "The launch capacity discussion is complete.\n"
+        )
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n",
+            stderr=(transcript + self.NO_NETWORK).encode(),
+        )
+        assert result.ok is False
+        assert result.delivery_failure_reason == result.error
+        assert result.delivery_failure_conflicts == ()
+
     def test_quoted_denial_on_stdout_is_not_a_denial(self) -> None:
         """An agent that READS about a denial has not suffered one.
 

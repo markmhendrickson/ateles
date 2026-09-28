@@ -115,7 +115,7 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
     unauthenticated Linux host turn those tests into authentication tests.
     """
 
-    def _build(cls, provider, tmp_root):
+    def _build(cls, provider, tmp_root, **kwargs):
         root = tmp_path / f"{provider}-unit-home"
         root.mkdir(parents=True, exist_ok=True)
         return hlr.HarnessSandbox(
@@ -141,6 +141,7 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
             git_stash_denied=True,
             authentication_ready=True,
             unavailable_guards=(),
+            review_write_confined=True,
         )
 
     monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(_build))
@@ -403,6 +404,7 @@ def test_sandbox_build_claude_has_only_local_review_home_marker(tmp_path, monkey
         hlr, "probe_sandbox_exec_preserves_credential_binding", lambda *a, **k: True
     )
     monkeypatch.setattr(hlr, "probe_credential_helper_isolation", lambda *a, **k: True)
+    monkeypatch.setattr(hlr, "probe_review_write_confinement", lambda *a, **k: True)
     monkeypatch.setattr(
         hlr, "probe_stash_effect_denied_across_git_binaries", lambda *a, **k: True
     )
@@ -484,6 +486,41 @@ def test_real_profile_binds_complete_synthetic_publication_boundary(tmp_path):
         denied_helper=denied_helper,
         control_helper=control_helper,
     )
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_real_profile_confines_review_writes_and_aauth_mcp_reads(tmp_path):
+    runtime = tmp_path / "runtime"
+    review_worktree = tmp_path / "review-worktree"
+    verdict = review_worktree / "pm1_verdict.md"
+    keys = tmp_path / "fixture-aauth-keys"
+    for directory in (runtime, review_worktree, keys):
+        directory.mkdir(parents=True)
+    key = keys / "agent.jwk.json"
+    key.write_text("fixture-not-a-key\n", encoding="utf-8")
+    mcp = tmp_path / "apis_mcp_fixture.json"
+    mcp.write_text("fixture-not-a-token\n", encoding="utf-8")
+    profile = runtime / "profile.sb"
+    hlr.build_sandbox_exec_profile(
+        profile,
+        credential_extra_roots=(keys,),
+        runtime_write_root=runtime,
+        verdict_path=verdict,
+    )
+
+    assert hlr.probe_review_write_confinement(
+        profile,
+        runtime_root=runtime,
+        verdict_path=verdict,
+        review_worktree=review_worktree,
+    )
+    control = runtime / "ordinary-read"
+    control.write_text("control\n", encoding="utf-8")
+    assert hlr.probe_sandbox_exec_denies_read(profile, key, control_path=control)
+    assert hlr.probe_sandbox_exec_denies_read(profile, mcp, control_path=control)
 
 
 def test_claude_with_unproved_outer_guards_refuses_before_launch(tmp_path):
@@ -1078,6 +1115,7 @@ def test_refuse_if_guard_required_allows_claude_only_when_fully_proved(tmp_path)
         git_stash_denied=True,
         authentication_ready=True,
         unavailable_guards=(),
+        review_write_confined=True,
     )
     assert hlr.refuse_if_guard_required(sandbox) is None
 
@@ -1447,6 +1485,23 @@ def test_validate_verdict_pre_post_lines_captured():
     assert check.pre_post["blocking_count"] == 0
 
 
+@pytest.mark.parametrize("second_lens", ["pm", "qa"])
+def test_validate_verdict_rejects_duplicate_or_conflicting_marker(second_lens):
+    duplicate = SIGNED_OFF_VERDICT + (
+        f"\n<!-- review:{second_lens} commit={'b' * 40} -->\n"
+    )
+    check = hlr.validate_verdict(
+        duplicate,
+        lens_agent="pavo",
+        expected_lens="pm",
+        expected_head=SAMPLE_HEAD,
+    )
+
+    assert check.ok is False
+    assert "exactly one strict review marker" in check.reason
+    assert check.artifact_binding["observed"]["marker_count"] == 2
+
+
 def test_validate_verdict_refuses_rather_than_invent_a_check_if_reader_missing(
     monkeypatch,
 ):
@@ -1776,6 +1831,49 @@ def test_run_one_rejects_wrong_artifact_marker_before_parent_gates(
         },
     }
     assert seen_kwargs[0]["local_review"] is True
+
+
+@pytest.mark.parametrize("recovered", [False, True], ids=["normal", "recovered"])
+def test_run_one_rejects_second_review_marker(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox, recovered
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    body = SIGNED_OFF_VERDICT + f"\n<!-- review:qa commit={'b' * 40} -->\n"
+    if recovered:
+        dispatch = _delivery_denied_dispatch(target, verdict_text=body)
+    else:
+
+        async def dispatch(role, task, **kwargs):
+            path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+            path.write_text(body, encoding="utf-8")
+            return SkillResult(role, True, 0, body, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", dispatch)
+    monkeypatch.setattr(
+        hlr,
+        "current_pr_head",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("parent gates must not run for a duplicate marker")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert "exactly one strict review marker" in report["refusal_reason"]
 
 
 @pytest.mark.parametrize(
@@ -2233,6 +2331,64 @@ def test_run_one_does_not_post_without_post_flag(
     assert report["ok"] is True
     assert report["posted"] is False
     assert "not set" in report["refusal_reason"]
+
+
+@pytest.mark.parametrize("failure", ["identity", "publication"])
+def test_validated_verdict_survives_parent_delivery_failure(
+    monkeypatch,
+    tmp_path,
+    target,
+    brief_file,
+    mock_ready_sandbox,
+    failure,
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+
+    async def _dispatch(role, task, **kwargs):
+        path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+    if failure == "identity":
+        monkeypatch.setattr(
+            hlr, "gh_login", lambda: (_ for _ in ()).throw(OSError("offline"))
+        )
+    else:
+        monkeypatch.setattr(hlr, "gh_login", lambda: "ateles-agent")
+        monkeypatch.setattr(
+            hlr,
+            "post_verdict",
+            lambda **kwargs: (_ for _ in ()).throw(OSError("read-back unavailable")),
+        )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+    assert report["ok"] is False
+    assert report["verdict_text"] == SIGNED_OFF_VERDICT
+    assert report["artifact_binding"]["expected"]["head"] == SAMPLE_HEAD
+    assert report["lens_verdict"] == "signed_off"
+    assert report["delivery_status"] == (
+        "not_attempted" if failure == "identity" else "unconfirmed"
+    )
+    assert report["error_kind"] == (
+        "identity_verification_failed"
+        if failure == "identity"
+        else "publication_unconfirmed"
+    )
 
 
 def test_run_one_refuses_before_dispatch_when_stash_baseline_is_unreadable(
@@ -2969,11 +3125,12 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         git_stash_denied=True,
         authentication_ready=True,
         unavailable_guards=(),
+        review_write_confined=True,
     )
     monkeypatch.setattr(
         hlr.HarnessSandbox,
         "build",
-        classmethod(lambda cls, provider, tmp_root: guarded),
+        classmethod(lambda cls, provider, tmp_root, **kwargs: guarded),
     )
 
     async def _dispatch(role, task, **kwargs):
@@ -3052,11 +3209,12 @@ def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
         git_stash_denied=True,
         authentication_ready=True,
         unavailable_guards=(),
+        review_write_confined=True,
     )
     monkeypatch.setattr(
         hlr.HarnessSandbox,
         "build",
-        classmethod(lambda cls, provider, tmp_root: guarded),
+        classmethod(lambda cls, provider, tmp_root, **kwargs: guarded),
     )
 
     seen = {}

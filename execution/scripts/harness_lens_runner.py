@@ -64,9 +64,9 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     ordinary keychain/credential helpers, blocks the keychain service lookup,
     and
     ``file-write*`` on the credential names and their narrow security-relevant
-    config ancestors, plus ``~/.claude``, ``~/.cursor``, ``~/.codex``. This
-    prevents a child from changing what a denied credential pathname binds to
-    while leaving ordinary worktree mutation outside those rooted paths alone.
+    config ancestors, plus ``~/.claude``, ``~/.cursor``, ``~/.codex``. The
+    profile separately confines writes to isolated runtime scratch and the
+    exact verdict path, leaving the rest of the review checkout read-only.
     A disposable adversarial fixture and an ordinary-filesystem positive
     control probe this boundary before dispatch. The
     profile is prepended to the dispatched child's REAL argv via
@@ -714,6 +714,9 @@ def build_sandbox_exec_profile(
     profile_path: Path,
     *,
     credential_home_roots: tuple[Path, ...] | None = None,
+    credential_extra_roots: tuple[Path, ...] = (),
+    runtime_write_root: Path | None = None,
+    verdict_path: Path | None = None,
     credential_helper_exec_paths: tuple[Path, ...] = _CREDENTIAL_HELPER_EXEC_PATHS,
 ) -> None:
     """Write a macOS sandbox-exec profile denying:
@@ -727,9 +730,9 @@ def build_sandbox_exec_profile(
       (``_STASH_REF_DENY_REGEXES`` — ent_9e88db1882c668e6c5c32be9, PR #1308
       round 4),
 
-    and allowing everything else by default (the dispatched child still
-    needs to read/write its own worktree, the isolated CODEX_HOME/HOME, and
-    run its own binaries).
+    while default-denying everything else, then allowing execution, reads,
+    network/runtime services, and writes only beneath the isolated runtime
+    root plus the exact verdict pathname.
 
     THE STASH DENY IS BY EFFECT, NOT BY BINARY (round 4's own fix, replacing
     round 3's ``process-exec`` enumeration). Round 3 denied ``process-exec``
@@ -794,14 +797,11 @@ def build_sandbox_exec_profile(
     rounds 3 and 4 closed were exactly that shape (a normal `git stash`
     invocation reaching a normal git binary through an unguarded path). A
     hand-crafted rewrite of a ref-storage file is a DIFFERENT threat model —
-    a deliberately adversarial agent constructing filesystem content rather
-    than calling git — and an agent operating at that level has many
-    easier avenues to cause harm than forging one ref (arbitrary file
-    writes inside the worktree, for one, which this sandbox does not and
-    cannot fully prevent either); closing that broader threat model is the
-    job of the sandbox's OTHER layers (credential-read/user-config-write
-    denies, the throwaway-worktree scoping, dispatch review) and of the
-    swarm's review process, not of this one guard.
+    a deliberately adversarial agent constructing shared Git metadata rather
+    than calling git. Verdict-only write confinement closes ordinary checkout
+    writes, but the common Git directory remains outside that checkout; this
+    stash-specific residual is detected by the comparison below rather than
+    claimed as prevented.
 
     WHAT DETECTS IT INSTEAD: ``verify_stash_ref_unchanged_after_dispatch``
     (called by ``run_one`` after the dispatched child exits, before the
@@ -814,12 +814,28 @@ def build_sandbox_exec_profile(
     which is the property this residual can actually be given without
     breaking the runner's own legitimate git use.
     """
+    extra_read_denies = tuple(
+        rf"{re.escape(str(path.resolve()))}(/.*)?$" for path in credential_extra_roots
+    ) + (
+        rf"{re.escape(str(Path(tempfile.gettempdir()).resolve()))}/.*apis_mcp_[^/]*\.json$",
+    )
     read_denies = "\n".join(
         f'  (regex #"{p}")'
-        for p in (*_CREDENTIAL_READ_DENY_REGEXES, *_STASH_REF_DENY_REGEXES)
+        for p in (
+            *_CREDENTIAL_READ_DENY_REGEXES,
+            *extra_read_denies,
+            *_STASH_REF_DENY_REGEXES,
+        )
     )
-    binding_write_denies = _credential_binding_write_deny_regexes(
-        credential_home_roots or (Path.home(),)
+    binding_write_denies = (
+        _credential_binding_write_deny_regexes(credential_home_roots or (Path.home(),))
+        + tuple(
+            rf"{re.escape(str(path.resolve()))}(/.*)?$"
+            for path in credential_extra_roots
+        )
+        + (
+            rf"{re.escape(str(Path(tempfile.gettempdir()).resolve()))}/.*apis_mcp_[^/]*\.json$",
+        )
     )
     write_denies = "\n".join(
         f'  (regex #"{p}")'
@@ -836,9 +852,27 @@ def build_sandbox_exec_profile(
     keychain_service_denies = "\n".join(
         f'  (global-name "{service}")' for service in _KEYCHAIN_MACH_SERVICES
     )
+    runtime_write_root = runtime_write_root or profile_path.parent
+    verdict_path = verdict_path or (profile_path.parent / "verdict.md")
+    runtime_root = str(runtime_write_root.resolve()).replace('"', '\\"')
+    verdict = str(verdict_path.resolve()).replace('"', '\\"')
     profile = (
         "(version 1)\n"
-        "(allow default)\n"
+        "(deny default)\n"
+        "(allow process*)\n"
+        "(allow file-read*)\n"
+        "(allow network*)\n"
+        "(allow sysctl-read)\n"
+        "(allow signal)\n"
+        "(allow system-socket)\n"
+        "(allow ipc-posix*)\n"
+        "(allow mach-lookup)\n"
+        "(allow iokit-open)\n"
+        "(allow file-write*\n"
+        f'  (literal "{runtime_root}")\n'
+        f'  (subpath "{runtime_root}")\n'
+        f'  (literal "{verdict}")\n'
+        ")\n"
         "(deny file-read*\n"
         f"{read_denies}\n"
         ")\n"
@@ -956,6 +990,68 @@ def probe_sandbox_exec_denies_write(
         text=True,
     )
     return control.returncode == 0 and control_path.exists()
+
+
+def probe_review_write_confinement(
+    profile_path: Path,
+    *,
+    runtime_root: Path,
+    verdict_path: Path,
+    review_worktree: Path,
+) -> bool:
+    """Exercise the exact local-review write boundary with disposable files.
+
+    The parent creates every negative fixture.  The sandboxed process must be
+    able to write the one verdict and its isolated runtime root, while writes
+    inside the review checkout, a sibling checkout-shaped directory, and an
+    ordinary outside directory all fail without changing their sentinels.
+    """
+    sandbox_exec = trusted_sandbox_exec_path()
+    if sandbox_exec is None:
+        return False
+    fixture_root = runtime_root.parent / f"{runtime_root.name}-write-boundary"
+    sibling = fixture_root / "sibling-checkout" / "sentinel"
+    outside = fixture_root / "ordinary-outside" / "sentinel"
+    tracked = review_worktree / ".ateles-review-write-probe"
+    runtime = runtime_root / "write-probe" / "allowed"
+    paths = (sibling, outside, tracked)
+    try:
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("unchanged\n", encoding="utf-8")
+        verdict_path.parent.mkdir(parents=True, exist_ok=True)
+        command = [sandbox_exec, "-f", str(profile_path), "/bin/sh", "-c"]
+        allowed = []
+        for path in (verdict_path, runtime):
+            attempt = subprocess.run(
+                [
+                    *command,
+                    'mkdir -p "$(dirname "$1")" && printf allowed > "$1"',
+                    "probe",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            allowed.append(attempt.returncode == 0 and path.read_text() == "allowed")
+        denied = []
+        for path in paths:
+            attempt = subprocess.run(
+                [*command, 'printf changed > "$1"', "probe", str(path)],
+                capture_output=True,
+                text=True,
+            )
+            denied.append(
+                attempt.returncode != 0
+                and path.read_text(encoding="utf-8") == "unchanged\n"
+            )
+        return all(allowed) and all(denied)
+    except (OSError, UnicodeError):
+        return False
+    finally:
+        verdict_path.unlink(missing_ok=True)
+        tracked.unlink(missing_ok=True)
+        shutil.rmtree(fixture_root, ignore_errors=True)
 
 
 def probe_sandbox_exec_preserves_credential_binding(
@@ -1198,6 +1294,7 @@ class HarnessSandbox:
     git_stash_denied: bool
     authentication_ready: bool
     unavailable_guards: tuple[str, ...]
+    review_write_confined: bool = False
 
     @property
     def fully_guarded(self) -> bool:
@@ -1207,6 +1304,7 @@ class HarnessSandbox:
             self.credential_read_denied
             and self.credential_binding_protected
             and self.user_config_write_denied
+            and self.review_write_confined
             and self.git_stash_denied
             and len(self.command_wrapper) == 3
             and self.command_wrapper[0] == str(TRUSTED_MACOS_SANDBOX_EXEC)
@@ -1225,27 +1323,42 @@ class HarnessSandbox:
         return self.fully_guarded and self.authentication_ready
 
     @classmethod
-    def build(cls, provider: str, tmp_root: Path) -> "HarnessSandbox":
+    def build(
+        cls,
+        provider: str,
+        tmp_root: Path,
+        *,
+        review_worktree: Path | None = None,
+        verdict_path: Path | None = None,
+    ) -> "HarnessSandbox":
         sandbox_home = tmp_root / f"{provider}-home"
         sandbox_home.mkdir(parents=True, exist_ok=True)
+        review_worktree = review_worktree or (tmp_root / "probe-review-worktree")
+        review_worktree.mkdir(parents=True, exist_ok=True)
+        verdict_path = verdict_path or (review_worktree / "verdict.md")
 
         if provider == "codex":
             env_extra = {
                 "CODEX_HOME": str(sandbox_home),
                 "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
+                "TMPDIR": str(sandbox_home / "tmp"),
             }
             authentication_ready = link_codex_auth(sandbox_home)
         elif provider == "cursor":
             env_extra = {
                 "HOME": str(sandbox_home),
                 "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
+                "TMPDIR": str(sandbox_home / "tmp"),
             }
             # Cursor subscription state is stored outside the isolated home
             # and has no narrowly exposable capability equivalent to Codex's
             # auth.json or Claude's dedicated OAuth environment variable.
             authentication_ready = False
         elif provider == "claude":
-            env_extra = {"ATELES_LOCAL_REVIEW_HOME": str(sandbox_home)}
+            env_extra = {
+                "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
+                "TMPDIR": str(sandbox_home / "tmp"),
+            }
             authentication_ready = bool(
                 (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
             )
@@ -1260,6 +1373,7 @@ class HarnessSandbox:
         credential_binding_protected = False
         user_config_write_denied = False
         credential_helper_isolated = False
+        review_write_confined = False
         command_wrapper: list[str] = []
         try:
             fixture_home = sandbox_home / "probe-fixtures" / "fixture-user"
@@ -1267,9 +1381,19 @@ class HarnessSandbox:
             control_helper = _CREDENTIAL_HELPER_PROBE_CONTROL
             if not denied_helper.is_file() or not control_helper.is_file():
                 raise OSError("credential-helper probe executables unavailable")
+            (sandbox_home / "tmp").mkdir(parents=True, exist_ok=True)
+            configured_keys = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "").strip()
+            key_roots = [REPO_ROOT.parent / "ateles-private" / "keys"]
+            if configured_keys:
+                key_roots.append(Path(configured_keys))
+            fixture_keys = sandbox_home / "probe-fixtures" / "aauth-keys"
+            key_roots.append(fixture_keys)
             build_sandbox_exec_profile(
                 profile_path,
                 credential_home_roots=(Path.home(), fixture_home),
+                credential_extra_roots=tuple(key_roots),
+                runtime_write_root=sandbox_home,
+                verdict_path=verdict_path,
                 credential_helper_exec_paths=(
                     *_CREDENTIAL_HELPER_EXEC_PATHS,
                     denied_helper,
@@ -1281,7 +1405,13 @@ class HarnessSandbox:
             read_fixtures = tuple(
                 fixture_home / relative
                 for relative in _SYNTHETIC_PUBLICATION_CREDENTIAL_PATHS
+            ) + (fixture_keys / "probe.jwk.json",)
+            mcp_fd, mcp_fixture_raw = tempfile.mkstemp(
+                prefix="apis_mcp_probe_", suffix=".json"
             )
+            os.close(mcp_fd)
+            mcp_fixture = Path(mcp_fixture_raw)
+            read_fixtures = (*read_fixtures, mcp_fixture)
             for read_fixture in read_fixtures:
                 read_fixture.parent.mkdir(parents=True, exist_ok=True)
                 read_fixture.write_text(
@@ -1302,6 +1432,16 @@ class HarnessSandbox:
                     protected_file=read_fixture,
                     control_root=sandbox_home / "probe-fixtures" / "binding-control",
                 )
+                and probe_sandbox_exec_denies_write(
+                    profile_path,
+                    fixture_keys / "replacement.jwk.json",
+                    control_path=sandbox_home / "probe-fixtures" / "key-control",
+                )
+                and probe_sandbox_exec_denies_write(
+                    profile_path,
+                    mcp_fixture.with_name(f"apis_mcp_write_{mcp_fixture.name}"),
+                    control_path=sandbox_home / "probe-fixtures" / "mcp-control",
+                )
             )
             credential_helper_isolated = probe_credential_helper_isolation(
                 profile_path,
@@ -1316,6 +1456,12 @@ class HarnessSandbox:
             user_config_write_denied = probe_sandbox_exec_denies_write(
                 profile_path, write_fixture, control_path=write_control
             )
+            review_write_confined = probe_review_write_confinement(
+                profile_path,
+                runtime_root=sandbox_home,
+                verdict_path=verdict_path,
+                review_worktree=review_worktree,
+            )
             sandbox_exec = trusted_sandbox_exec_path()
             if sandbox_exec is not None:
                 command_wrapper = [sandbox_exec, "-f", str(profile_path)]
@@ -1324,6 +1470,10 @@ class HarnessSandbox:
             credential_binding_protected = False
             user_config_write_denied = False
             credential_helper_isolated = False
+            review_write_confined = False
+        finally:
+            if "mcp_fixture" in locals():
+                mcp_fixture.unlink(missing_ok=True)
 
         # ── git-stash: the shim is advisory-only (a friendly early message
         # for the common PATH-resolved case); the REAL control is the
@@ -1429,6 +1579,11 @@ class HarnessSandbox:
                 "profile did not probe as denying a write to the fixture "
                 "path)"
             )
+        if not review_write_confined:
+            unavailable.append(
+                "review_write_guard (the outer profile did not prove that only "
+                "the exact verdict and isolated runtime scratch are writable)"
+            )
         unavailable.append(
             "sibling_repo_worktree_guard (no hook mechanism in "
             f"{provider}; mitigated only by this script always dispatching "
@@ -1451,6 +1606,7 @@ class HarnessSandbox:
             ),
             credential_binding_protected=credential_binding_protected,
             user_config_write_denied=user_config_write_denied,
+            review_write_confined=review_write_confined,
             git_stash_denied=git_stash_denied,
             authentication_ready=authentication_ready,
             unavailable_guards=tuple(unavailable),
@@ -1631,6 +1787,7 @@ def validate_verdict(
         "lens": marker.group("lens") if marker else None,
         "head": marker.group("head") if marker else None,
     }
+    marker_count = sum(1 for line in lines if _REVIEW_MARKER_RE.fullmatch(line))
     expected = {"lens": expected_lens, "head": expected_head}
     artifact_binding = {"expected": expected, "observed": observed}
     if marker is None:
@@ -1638,6 +1795,17 @@ def validate_verdict(
             ok=False,
             reason=(
                 "strict verdict marker missing or malformed — "
+                f"expected={expected!r} observed={observed!r}"
+            ),
+            pre_post=pre_post,
+            artifact_binding=artifact_binding,
+        )
+    if marker_count != 1:
+        observed["marker_count"] = marker_count
+        return VerdictCheck(
+            ok=False,
+            reason=(
+                "verdict artifact must contain exactly one strict review marker — "
                 f"expected={expected!r} observed={observed!r}"
             ),
             pre_post=pre_post,
@@ -2057,16 +2225,11 @@ async def run_one(
     """
     check_headroom(provider)
 
-    # HarnessSandbox.build() PROBES the real sandbox-exec profile and git
-    # shim against fixtures — refusal below is driven by that probe's actual
-    # result (sandbox.fully_guarded), never by a caller-supplied constant.
-    sandbox = HarnessSandbox.build(provider, scratch_root)
-    refusal = refuse_if_guard_required(sandbox)
-
     worktree_path = (
         scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
     )
     worktree = Worktree(repo_name=repo_worktree_name, path=worktree_path)
+    verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
 
     if dry_run:
         # A dry run still creates nothing model-facing, but it DOES need the
@@ -2080,8 +2243,14 @@ async def run_one(
         # until the real dispatch attempt.
         worktree.create(head=target.head)
         try:
+            sandbox = HarnessSandbox.build(
+                provider,
+                scratch_root,
+                review_worktree=worktree.path,
+                verdict_path=verdict_path,
+            )
+            refusal = refuse_if_guard_required(sandbox)
             agent_prompt = read_agent_prompt(worktree.path, target.agent)
-            verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
             task_text = (
                 render_lens_task(target, brief_path)
                 + "\n\n---\n\n"
@@ -2101,13 +2270,18 @@ async def run_one(
             worktree.remove()
         return report
 
-    if refusal:
-        return {"ok": False, "provider": provider, "reason": refusal}
-
     worktree.create(head=target.head)
     try:
+        sandbox = HarnessSandbox.build(
+            provider,
+            scratch_root,
+            review_worktree=worktree.path,
+            verdict_path=verdict_path,
+        )
+        refusal = refuse_if_guard_required(sandbox)
+        if refusal:
+            return {"ok": False, "provider": provider, "reason": refusal}
         agent_prompt = read_agent_prompt(worktree.path, target.agent)
-        verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
         task_text = (
             render_lens_task(target, brief_path)
             + "\n\n---\n\n"
@@ -2239,6 +2413,7 @@ async def run_one(
             "verdict_text": verdict_text,
             "posted": False,
             "comment_url": "",
+            "delivery_status": "not_attempted",
             "delivery_denial_recovered": delivery_denial_recovered,
             "dispatch_diagnostics": _dispatch_diagnostics(result),
         }
@@ -2280,12 +2455,23 @@ async def run_one(
             return report
 
         if not post:
+            report["delivery_status"] = "not_requested"
             report["refusal_reason"] = (
                 "--post not set; verdict validated but not posted"
             )
             return report
 
-        login = gh_login()
+        try:
+            login = gh_login()
+        except Exception as exc:
+            report["ok"] = False
+            report["retryable"] = True
+            report["error_kind"] = "identity_verification_failed"
+            report["refusal_reason"] = (
+                "publication identity could not be verified after verdict "
+                f"validation ({type(exc).__name__}: {exc})"
+            )
+            return report
         if login != "ateles-agent":
             report["ok"] = False
             report["refusal_reason"] = (
@@ -2294,12 +2480,24 @@ async def run_one(
             )
             return report
 
-        report["comment_url"] = post_verdict(
-            repo=target.repo,
-            pr=target.pr,
-            verdict_text=verdict_text,
-        )
+        try:
+            report["comment_url"] = post_verdict(
+                repo=target.repo,
+                pr=target.pr,
+                verdict_text=verdict_text,
+            )
+        except Exception as exc:
+            report["ok"] = False
+            report["retryable"] = True
+            report["error_kind"] = "publication_unconfirmed"
+            report["delivery_status"] = "unconfirmed"
+            report["refusal_reason"] = (
+                "validated verdict publication could not be confirmed after "
+                f"reconciliation ({type(exc).__name__}: {exc})"
+            )
+            return report
         report["posted"] = True
+        report["delivery_status"] = "confirmed"
         return report
     finally:
         worktree.remove()
