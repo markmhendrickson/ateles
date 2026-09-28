@@ -281,6 +281,20 @@ LENS_BRIEF_PATH = None
 HARNESSES = ("claude", "codex", "cursor")
 TRUSTED_MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 
+# These are the two network-only delivery denials emitted by skill_runner.
+# They are intentionally copied as exact values rather than matched loosely:
+# the lens runner may recover a local verdict only when the child process
+# itself exited cleanly and the sole reported failure was GitHub/git-remote
+# delivery. Index, object-store, ref, stash, and arbitrary failures remain
+# unrecoverable even when a plausible verdict file happens to exist.
+_RECOVERABLE_LOCAL_VERDICT_DELIVERY_DENIALS = frozenset(
+    {
+        "sandbox denied network access — the child could not push or reach the GitHub API",
+        "the child could not reach the git remote — nothing was pushed",
+    }
+)
+_POST_VERDICT_ATTEMPTS = 3
+
 
 # ── Headroom -------------------------------------------------------------------
 
@@ -373,6 +387,31 @@ def read_agent_prompt(worktree: Path, agent: str) -> str:
     if not path.is_file():
         raise FileNotFoundError(f"{path} does not exist — unknown lens agent {agent!r}")
     return path.read_text(encoding="utf-8")
+
+
+def final_child_instruction(verdict_path: Path) -> str:
+    """Return the final, authoritative boundary for the review child.
+
+    This text is appended after the canonical agent definition. That ordering
+    matters: lens definitions carry the general GitHub publication contract,
+    while this runner deliberately splits inference from publication. The
+    child produces one local artifact; the trusted parent owns every external
+    and identity-sensitive gate.
+    """
+    return textwrap.dedent(
+        f"""\
+        AUTHORITATIVE FINAL CHILD INSTRUCTION
+        This review child is read-only except for its one local verdict artifact.
+        It must not call GitHub and must not attempt publication; do not use gh,
+        push, comment, review, or invoke any other external delivery path.
+        It must only write the verdict to {verdict_path} using the exact strict format
+        from the brief, then print that same verdict to stdout and stop.
+        The trusted parent exclusively owns local-verdict parsing, live-head verification,
+        expected-identity verification, the explicit --post gate, and GitHub publication.
+        This final instruction overrides any publication instruction in the appended
+        canonical agent definition above.
+        """
+    )
 
 
 # ── Throwaway worktree -----------------------------------------------------------
@@ -1657,6 +1696,44 @@ def verify_stash_ref_unchanged_after_dispatch(
     )
 
 
+def _posted_verdict_url(*, repo: str, pr: int, verdict_text: str) -> str:
+    """Return the existing matching verdict comment URL, if readable.
+
+    A failed comment POST can still have landed server-side. The existing
+    swarm fallback pattern lists comments and posts only when the lens marker
+    is missing; this synchronous runner applies the same postcondition before
+    retrying so a lost response does not create duplicate verdict comments.
+    Lookup failure is inconclusive and returns an empty string.
+    """
+    marker = next(
+        (line for line in verdict_text.splitlines() if line.startswith("<!-- review:")),
+        "",
+    )
+    if not marker:
+        return ""
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/issues/{pr}/comments?per_page=100",
+                "--paginate",
+                "--slurp",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        pages = json.loads(result.stdout or "[]")
+    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError):
+        return ""
+    for page in pages if isinstance(pages, list) else []:
+        for comment in page if isinstance(page, list) else []:
+            if isinstance(comment, dict) and marker in (comment.get("body") or ""):
+                return str(comment.get("html_url") or "")
+    return ""
+
+
 def post_verdict(*, repo: str, pr: int, verdict_path: Path) -> str:
     """Post the verdict file as a PR comment and return the comment URL.
 
@@ -1664,22 +1741,39 @@ def post_verdict(*, repo: str, pr: int, verdict_path: Path) -> str:
     ``--post`` — the caller (main()) enforces both; this function trusts its
     caller rather than re-checking, so its own tests can drive it directly.
     """
-    result = subprocess.run(
-        [
-            "gh",
-            "pr",
-            "comment",
-            str(pr),
-            "-R",
-            repo,
-            "--body-file",
-            str(verdict_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
+    command = [
+        "gh",
+        "pr",
+        "comment",
+        str(pr),
+        "-R",
+        repo,
+        "--body-file",
+        str(verdict_path),
+    ]
+    verdict_text = verdict_path.read_text(encoding="utf-8")
+    last_error: subprocess.CalledProcessError | None = None
+    for _attempt in range(1, _POST_VERDICT_ATTEMPTS + 1):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            landed_url = _posted_verdict_url(
+                repo=repo,
+                pr=pr,
+                verdict_text=verdict_text,
+            )
+            if landed_url:
+                return landed_url
+    if last_error is None:  # pragma: no cover - loop always attempts at least once
+        raise AssertionError("posting retry loop made no attempt")
+    raise last_error
 
 
 # ── Single-provider run -----------------------------------------------------------
@@ -1728,8 +1822,13 @@ async def run_one(
         worktree.create(head=target.head)
         try:
             agent_prompt = read_agent_prompt(worktree.path, target.agent)
+            verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
             task_text = (
-                render_lens_task(target, brief_path) + "\n\n---\n\n" + agent_prompt
+                render_lens_task(target, brief_path)
+                + "\n\n---\n\n"
+                + agent_prompt
+                + "\n\n---\n\n"
+                + final_child_instruction(verdict_path)
             )
             report = dry_run_report(
                 target,
@@ -1749,8 +1848,14 @@ async def run_one(
     worktree.create(head=target.head)
     try:
         agent_prompt = read_agent_prompt(worktree.path, target.agent)
-        task_text = render_lens_task(target, brief_path) + "\n\n---\n\n" + agent_prompt
         verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
+        task_text = (
+            render_lens_task(target, brief_path)
+            + "\n\n---\n\n"
+            + agent_prompt
+            + "\n\n---\n\n"
+            + final_child_instruction(verdict_path)
+        )
 
         try:
             stash_ref_before = capture_stash_ref_state(worktree.path)
@@ -1770,12 +1875,7 @@ async def run_one(
         try:
             result: SkillResult = await dispatch_role.dispatch(
                 target.agent,
-                (
-                    f"{task_text}\n\n---\n\nWrite your verdict to the file "
-                    f"{verdict_path} (create it yourself with the exact strict "
-                    "format the brief describes) and print its contents to "
-                    "stdout when done."
-                ),
+                task_text,
                 provider=provider,
                 cwd=str(worktree.path),
                 timeout=timeout,
@@ -1805,20 +1905,54 @@ async def run_one(
                 "posted": False,
             }
 
-        if not result.ok:
+        delivery_denial_recovered = False
+        if not result.ok and not (
+            result.returncode == 0
+            and result.error in _RECOVERABLE_LOCAL_VERDICT_DELIVERY_DENIALS
+        ):
             return {
                 "ok": False,
                 "provider": provider,
                 "reason": result.error or "dispatch failed",
                 "attempted_providers": list(result.attempted_providers),
                 "stderr": result.stderr,
+                "posted": False,
             }
 
-        verdict_text = (
-            verdict_path.read_text(encoding="utf-8")
-            if verdict_path.is_file()
-            else result.stdout
-        )
+        if not result.ok:
+            if not verdict_path.is_file():
+                reason = (
+                    f"{result.error}; expected local verdict file was not produced "
+                    f"at {verdict_path} — refusing network-delivery recovery"
+                )
+                return {
+                    "ok": False,
+                    "provider": provider,
+                    "reason": reason,
+                    "refusal_reason": reason,
+                    "attempted_providers": list(result.attempted_providers),
+                    "stderr": result.stderr,
+                    "posted": False,
+                }
+            delivery_denial_recovered = True
+
+        try:
+            verdict_text = (
+                verdict_path.read_text(encoding="utf-8")
+                if verdict_path.is_file()
+                else result.stdout
+            )
+        except (OSError, UnicodeError) as exc:
+            reason = f"local verdict file could not be read: {exc}"
+            return {
+                "ok": False,
+                "provider": provider,
+                "reason": reason,
+                "refusal_reason": reason,
+                "attempted_providers": list(result.attempted_providers),
+                "stderr": result.stderr,
+                "posted": False,
+            }
         check = validate_verdict(verdict_text, lens_agent=target.agent)
 
         report = {
@@ -1832,6 +1966,7 @@ async def run_one(
             "verdict_text": verdict_text,
             "posted": False,
             "comment_url": "",
+            "delivery_denial_recovered": delivery_denial_recovered,
         }
         if not check.ok:
             report["refusal_reason"] = check.reason

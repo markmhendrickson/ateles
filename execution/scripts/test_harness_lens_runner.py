@@ -54,6 +54,13 @@ SIGNED_OFF_VERDICT = (
 
 UNREADABLE_VERDICT = "I looked at the PR and it seems okay, ship it.\n"
 
+NETWORK_DELIVERY_DENIAL = (
+    "sandbox denied network access — the child could not push or reach the GitHub API"
+)
+OBJECT_STORE_DENIAL = (
+    "sandbox denied writes to the git object store — the child could not commit"
+)
+
 
 @pytest.fixture
 def brief_file(tmp_path) -> Path:
@@ -1266,6 +1273,391 @@ def test_validate_verdict_refuses_rather_than_invent_a_check_if_reader_missing(
 
 
 # ── Posting gate: never posts an unreadable verdict, never posts under --compare --
+
+
+def _install_minimal_lens_worktree(monkeypatch, target):
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / f"{target.agent}.md").write_text(
+            "# canonical lens prompt\nYou must publish your review on GitHub.\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+
+def _delivery_denied_dispatch(
+    target,
+    *,
+    verdict_text=SIGNED_OFF_VERDICT,
+    error=NETWORK_DELIVERY_DENIAL,
+    returncode=0,
+    task_sink=None,
+):
+    async def _dispatch(role, task, **kwargs):
+        if task_sink is not None:
+            task_sink.append(task)
+        if verdict_text is not None:
+            verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+            verdict_path.write_text(verdict_text, encoding="utf-8")
+        return SkillResult(
+            role,
+            False,
+            returncode,
+            SIGNED_OFF_VERDICT,
+            "",
+            error=error,
+            provider="codex",
+        )
+
+    return _dispatch
+
+
+def test_child_instruction_after_agent_prompt_forbids_github_publication(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    tasks = []
+    _install_minimal_lens_worktree(monkeypatch, target)
+    monkeypatch.setattr(
+        hlr.dispatch_role,
+        "dispatch",
+        _delivery_denied_dispatch(
+            target,
+            verdict_text=None,
+            error="unrelated failure",
+            returncode=1,
+            task_sink=tasks,
+        ),
+    )
+
+    import asyncio
+
+    asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert len(tasks) == 1
+    task = tasks[0]
+    prompt_index = task.index("You must publish your review on GitHub.")
+    instruction_index = task.index("AUTHORITATIVE FINAL CHILD INSTRUCTION")
+    assert instruction_index > prompt_index
+    final_instruction = task[instruction_index:]
+    assert "read-only" in final_instruction
+    assert "must not call GitHub" in final_instruction
+    assert "must not attempt publication" in final_instruction
+    assert "trusted parent" in final_instruction
+    assert "live-head verification" in final_instruction
+
+
+def test_network_delivery_denial_with_valid_local_verdict_reaches_parent_gate(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    monkeypatch.setattr(
+        hlr.dispatch_role,
+        "dispatch",
+        _delivery_denied_dispatch(target),
+    )
+    head_checks = []
+    monkeypatch.setattr(
+        hlr,
+        "current_pr_head",
+        lambda **kwargs: head_checks.append(kwargs) or SAMPLE_HEAD,
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is True
+    assert report["posted"] is False
+    assert report["delivery_denial_recovered"] is True
+    assert report["lens_verdict"] == "signed_off"
+    assert head_checks == [{"repo": target.repo, "pr": target.pr}]
+
+
+@pytest.mark.parametrize(
+    ("verdict_text", "expected_reason"),
+    [
+        (None, "expected local verdict file"),
+        (UNREADABLE_VERDICT, "not readable"),
+    ],
+    ids=["missing_file", "invalid_verdict"],
+)
+def test_network_delivery_denial_without_valid_local_verdict_refuses(
+    monkeypatch,
+    tmp_path,
+    target,
+    brief_file,
+    mock_ready_sandbox,
+    verdict_text,
+    expected_reason,
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    monkeypatch.setattr(
+        hlr.dispatch_role,
+        "dispatch",
+        _delivery_denied_dispatch(target, verdict_text=verdict_text),
+    )
+    monkeypatch.setattr(
+        hlr,
+        "current_pr_head",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("parent gates must not run without a valid local verdict")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert expected_reason in report["refusal_reason"]
+
+
+@pytest.mark.parametrize(
+    ("error", "returncode"),
+    [
+        (OBJECT_STORE_DENIAL, 0),
+        ("arbitrary dispatch failure", 0),
+        (NETWORK_DELIVERY_DENIAL, 1),
+    ],
+    ids=["object_store", "unrelated", "nonzero_network"],
+)
+def test_local_verdict_never_recovers_non_network_or_nonzero_failure(
+    monkeypatch,
+    tmp_path,
+    target,
+    brief_file,
+    mock_ready_sandbox,
+    error,
+    returncode,
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    monkeypatch.setattr(
+        hlr.dispatch_role,
+        "dispatch",
+        _delivery_denied_dispatch(
+            target,
+            error=error,
+            returncode=returncode,
+        ),
+    )
+    monkeypatch.setattr(
+        hlr,
+        "current_pr_head",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("parent gates must not run for unrecoverable failures")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report.get("posted", False) is False
+    assert report["reason"] == error
+
+
+def test_recovered_local_verdict_cannot_post_against_stale_head(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    monkeypatch.setattr(
+        hlr.dispatch_role,
+        "dispatch",
+        _delivery_denied_dispatch(target),
+    )
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: "b" * 40)
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not post a recovered verdict against a stale head")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert report["error_kind"] == "head_mismatch"
+
+
+def test_recovered_local_verdict_cannot_post_under_wrong_identity(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    monkeypatch.setattr(
+        hlr.dispatch_role,
+        "dispatch",
+        _delivery_denied_dispatch(target),
+    )
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+    monkeypatch.setattr(hlr, "gh_login", lambda: "wrong-account")
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not post a recovered verdict under wrong identity")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert "expected 'ateles-agent'" in report["refusal_reason"]
+
+
+def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
+    verdict_path = tmp_path / "verdict.md"
+    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+    post_calls = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api":
+            return subprocess.CompletedProcess(command, 0, stdout="[[]]\n", stderr="")
+        post_calls.append(command)
+        if len(post_calls) < 3:
+            raise subprocess.CalledProcessError(
+                1, command, stderr="temporary transport failure"
+            )
+        return subprocess.CompletedProcess(
+            command, 0, stdout="comment-url\n", stderr=""
+        )
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+
+    assert (
+        hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path) == "comment-url"
+    )
+    assert len(post_calls) == 3
+
+
+def test_post_verdict_does_not_duplicate_when_failed_call_already_landed(
+    monkeypatch, tmp_path
+):
+    verdict_path = tmp_path / "verdict.md"
+    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+    post_calls = []
+
+    def _run(command, **kwargs):
+        if command[1] == "api":
+            pages = [
+                [
+                    {
+                        "body": SIGNED_OFF_VERDICT,
+                        "html_url": "https://github.com/o/r/pull/1#issuecomment-1",
+                    }
+                ]
+            ]
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(pages), stderr=""
+            )
+        post_calls.append(command)
+        raise subprocess.CalledProcessError(1, command, stderr="response lost")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+
+    assert (
+        hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
+        == "https://github.com/o/r/pull/1#issuecomment-1"
+    )
+    assert len(post_calls) == 1
+
+
+def test_post_verdict_persistent_failure_stays_loud_after_three_attempts(
+    monkeypatch, tmp_path
+):
+    verdict_path = tmp_path / "verdict.md"
+    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+    post_calls = []
+
+    def _run(command, **kwargs):
+        if command[1] == "pr":
+            post_calls.append(command)
+        raise subprocess.CalledProcessError(1, command, stderr="permission denied")
+
+    monkeypatch.setattr(hlr.subprocess, "run", _run)
+
+    with pytest.raises(subprocess.CalledProcessError, match="gh.*pr.*comment"):
+        hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
+    assert len(post_calls) == 3
 
 
 def test_run_one_does_not_post_when_verdict_unreadable(
