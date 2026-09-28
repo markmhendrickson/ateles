@@ -6,7 +6,7 @@
     "attribution": {
       "review_task": "ent_80c15446a22b2283d13aaabe",
       "pull_request": "markmhendrickson/ateles#1313",
-      "reviewed_head": "7cb42953fb17692274522d752c54114e5d507468",
+      "reviewed_head": "1f3070364a84659b43b95a83133f26aad17815c0",
       "master_plan_locator": "ent_81aadb43caf2fa493361e8ed"
     }
   },
@@ -47,6 +47,10 @@
       "entity_type": "plan_phase",
       "snapshot": {"name": "B2", "exit_gate_state": "active", "order": 4}
     },
+    "ent_fixture_phase_e": {
+      "entity_type": "plan_phase",
+      "snapshot": {"name": "E", "exit_gate_state": "pending", "order": 9}
+    },
     "ent_fixture_bound_plan": {
       "entity_type": "plan",
       "snapshot": {"title": "Rules delivery hardening", "status": "active"}
@@ -58,6 +62,10 @@
     "ent_fixture_e2_plan": {
       "entity_type": "plan",
       "snapshot": {"title": "E2 bootstrap repair", "status": "active"}
+    },
+    "ent_fixture_duplicate_plan": {
+      "entity_type": "plan",
+      "snapshot": {"title": "Split-phase validation", "status": "active"}
     },
     "ent_fixture_repair": {
       "entity_type": "task",
@@ -74,24 +82,37 @@
     "ent_fixture_deploy": {
       "entity_type": "task",
       "snapshot": {"title": "Deploy checks", "status": "queued"}
+    },
+    "ent_fixture_missing_task": {
+      "entity_type": "task",
+      "snapshot": {"title": "Unplanned audit", "status": "queued"}
+    },
+    "ent_fixture_duplicate_task": {
+      "entity_type": "task",
+      "snapshot": {"title": "Split-parent verification", "status": "queued"}
     }
   },
   "relationships": [
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_bound_task", "target_entity_id": "ent_fixture_bound_plan"},
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_bound_plan", "target_entity_id": "ent_fixture_phase_b2"},
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_phase_b2", "target_entity_id": "ent_fixture_master_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_phase_e", "target_entity_id": "ent_fixture_master_plan"},
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_repair", "target_entity_id": "ent_fixture_e2_plan"},
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_review", "target_entity_id": "ent_fixture_e2_plan"},
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_merge", "target_entity_id": "ent_fixture_e2_plan"},
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_deploy", "target_entity_id": "ent_fixture_e2_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_e2_plan", "target_entity_id": "ent_fixture_master_plan"}
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_e2_plan", "target_entity_id": "ent_fixture_master_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_plan", "target_entity_id": "ent_fixture_phase_b2"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_plan", "target_entity_id": "ent_fixture_phase_e"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_bound_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_e2_plan"}
   ],
   "scenarios": {
     "continue-session": {
-      "prompt": "/continue-session Foundation rollout. Report the current planning view. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
+      "prompt": "/continue-session Foundation rollout. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
     },
     "digest": {
-      "prompt": "/digest --report-only project. Report the current planning view. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
+      "prompt": "/digest --report-only project. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
     }
   }
 }

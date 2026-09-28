@@ -43,7 +43,7 @@ ledger, with work captured, workboarded, and dispatched.
 """
 
 VALID_REPORT = """
-## Selected master plan: Foundation rollout
+## Selected master plan: Foundation rollout (`ent_fixture_master_plan`)
 
 | Canonical phase | Exit gate |
 | --- | --- |
@@ -69,13 +69,22 @@ VALID_REPORT = """
 
 ### Phase B2 workstreams
 
-- Rules delivery hardening — structurally bound to B2 through `PART_OF`.
+- `ent_fixture_bound_plan` Rules delivery hardening — structurally bound to B2 through `PART_OF`.
 
 ### Cross-phase prerequisites
 
-- E2 bootstrap repair — cross-phase prerequisite; canonical phase is not
-  structurally derivable. Its E2 label and task titles do not establish a
-  canonical phase.
+- `ent_fixture_e2_plan` E2 bootstrap repair — missing phase ancestry;
+  cross-phase prerequisite; canonical phase is not structurally derivable.
+- `ent_fixture_duplicate_plan` Split-phase validation — duplicate phase
+  ancestry (B2, E); cross-phase prerequisite; canonical phase is not uniquely
+  structurally derivable.
+
+### Planning resume ledger
+
+| Task | State | Ascent outcome |
+| --- | --- | --- |
+| `ent_fixture_missing_task` Unplanned audit | queued | missing ascent |
+| `ent_fixture_duplicate_task` Split-parent verification | queued | duplicate ascent |
 
 ### Task mechanics
 
@@ -109,21 +118,65 @@ def test_master_plan_first_report_passes_for_both_invoked_skills(skill: str) -> 
 
 def test_title_changes_cannot_move_a_structurally_bound_workstream() -> None:
     changed = copy.deepcopy(FIXTURE)
-    changed["entities"]["ent_fixture_bound_task"]["snapshot"]["title"] = (
+    changed["entities"]["ent_fixture_bound_plan"]["snapshot"]["title"] = (
         "Phase O deployment"
+    )
+    changed["entities"]["ent_fixture_master_plan"]["snapshot"]["title"] = (
+        "Renamed master"
+    )
+    changed["entities"]["ent_fixture_e2_plan"]["snapshot"]["title"] = (
+        "Renamed prerequisite"
+    )
+    changed["entities"]["ent_fixture_duplicate_plan"]["snapshot"]["title"] = (
+        "Renamed split plan"
+    )
+    title_variant = (
+        VALID_REPORT.replace(
+            "Rules delivery hardening", "Completely different workstream label"
+        )
+        .replace("E2 bootstrap repair", "Unlabelled prerequisite")
+        .replace("Split-phase validation", "Another split label")
+        .replace("Foundation rollout", "Arbitrary master label")
     )
 
     original = checks.score_report(VALID_REPORT, FIXTURE)
-    renamed = checks.score_report(VALID_REPORT, changed)
+    renamed = checks.score_report(title_variant, changed)
 
     assert original["structural_placements"] == renamed["structural_placements"]
     assert renamed["outcome"] == "pass", renamed
 
 
+def test_fixture_derives_unique_missing_and_duplicate_phase_ancestry() -> None:
+    outcomes = checks.phase_ancestry_outcomes(FIXTURE)
+
+    assert outcomes["ent_fixture_bound_plan"] == {
+        "outcome": "unique",
+        "phase_ids": ["ent_fixture_phase_b2"],
+        "phases": ["B2"],
+    }
+    assert outcomes["ent_fixture_e2_plan"] == {
+        "outcome": "missing",
+        "phase_ids": [],
+        "phases": [],
+    }
+    assert outcomes["ent_fixture_duplicate_plan"] == {
+        "outcome": "duplicate",
+        "phase_ids": ["ent_fixture_phase_b2", "ent_fixture_phase_e"],
+        "phases": ["B2", "E"],
+    }
+
+
+def test_fixture_derives_missing_and_duplicate_task_ascent() -> None:
+    assert checks.task_ascent_outcomes(FIXTURE) == {
+        "ent_fixture_missing_task": "missing",
+        "ent_fixture_duplicate_task": "duplicate",
+    }
+
+
 def test_title_based_phase_placement_goes_red() -> None:
     wrong = VALID_REPORT.replace(
-        "### Phase B2 workstreams\n\n- Rules delivery hardening",
-        "### Phase O workstreams\n\n- Rules delivery hardening",
+        "### Phase B2 workstreams\n\n- `ent_fixture_bound_plan` Rules delivery hardening",
+        "### Phase O workstreams\n\n- `ent_fixture_bound_plan` Rules delivery hardening",
     )
 
     result = checks.score_report(wrong, FIXTURE)
@@ -132,12 +185,74 @@ def test_title_based_phase_placement_goes_red() -> None:
     assert "structural_phase_binding" in result["failed"]
 
 
+@pytest.mark.parametrize("skill", ["continue-session", "digest"])
+def test_workstream_reported_under_correct_and_incorrect_phases_goes_red(
+    skill: str,
+) -> None:
+    wrong = VALID_REPORT.replace(
+        "### Cross-phase prerequisites",
+        "### Phase E workstreams\n\n"
+        "- `ent_fixture_bound_plan` Alternate copy — structurally bound through "
+        "`PART_OF`.\n\n### Cross-phase prerequisites",
+    )
+
+    result = checks.score_report(wrong, FIXTURE, invoked_skill=skill)
+
+    assert result["outcome"] == "fail"
+    assert "unique_graph_phase_placement" in result["failed"]
+
+
+@pytest.mark.parametrize("skill", ["continue-session", "digest"])
+@pytest.mark.parametrize(
+    ("entity_id", "outcome"),
+    [
+        ("ent_fixture_missing_task", "missing ascent"),
+        ("ent_fixture_duplicate_task", "duplicate ascent"),
+    ],
+)
+def test_each_ascent_defect_requires_its_own_explicit_outcome(
+    skill: str, entity_id: str, outcome: str
+) -> None:
+    wrong = VALID_REPORT.replace(outcome, "ascent unresolved", 1)
+
+    result = checks.score_report(wrong, FIXTURE, invoked_skill=skill)
+
+    assert result["outcome"] == "fail"
+    assert "explicit_task_ascent_outcomes" in result["failed"]
+
+
+@pytest.mark.parametrize("skill", ["continue-session", "digest"])
+@pytest.mark.parametrize(
+    ("entity_id", "outcome"),
+    [
+        ("ent_fixture_e2_plan", "missing phase ancestry"),
+        ("ent_fixture_duplicate_plan", "duplicate phase"),
+    ],
+)
+def test_each_non_unique_phase_ascent_requires_its_own_explicit_outcome(
+    skill: str, entity_id: str, outcome: str
+) -> None:
+    item_start = VALID_REPORT.index(f"- `{entity_id}`")
+    item_end = VALID_REPORT.find("\n- `", item_start + 1)
+    if item_end < 0:
+        item_end = VALID_REPORT.find("\n\n###", item_start)
+    item = VALID_REPORT[item_start:item_end]
+    wrong = VALID_REPORT.replace(item, item.replace(outcome, "ancestry unresolved"))
+
+    result = checks.score_report(wrong, FIXTURE, invoked_skill=skill)
+
+    assert result["outcome"] == "fail"
+    assert "explicit_phase_ancestry_outcomes" in result["failed"]
+
+
 def test_master_plan_heading_after_phase_table_goes_red() -> None:
     wrong = VALID_REPORT.replace(
-        "## Selected master plan: Foundation rollout\n\n", ""
+        "## Selected master plan: Foundation rollout (`ent_fixture_master_plan`)\n\n",
+        "",
     ).replace(
         "### Phase B2 workstreams",
-        "## Selected master plan: Foundation rollout\n\n### Phase B2 workstreams",
+        "## Selected master plan: Foundation rollout (`ent_fixture_master_plan`)\n\n"
+        "### Phase B2 workstreams",
     )
 
     result = checks.score_report(wrong, FIXTURE)
@@ -148,10 +263,9 @@ def test_master_plan_heading_after_phase_table_goes_red() -> None:
 
 def test_unbound_e2_cannot_be_presented_as_canonical_phase_e() -> None:
     wrong = VALID_REPORT.replace(
-        "### Cross-phase prerequisites\n\n- E2 bootstrap repair — cross-phase prerequisite; canonical phase is not\n"
-        "  structurally derivable. Its E2 label and task titles do not establish a\n"
-        "  canonical phase.",
-        "### Phase E workstreams\n\n- E2 bootstrap repair.",
+        "- `ent_fixture_e2_plan` E2 bootstrap repair — missing phase ancestry;\n"
+        "  cross-phase prerequisite; canonical phase is not structurally derivable.",
+        "- `ent_fixture_e2_plan` E2 bootstrap repair.",
     )
 
     result = checks.score_report(wrong, FIXTURE)

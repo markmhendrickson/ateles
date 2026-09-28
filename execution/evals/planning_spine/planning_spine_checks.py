@@ -15,6 +15,7 @@ _PHASE_ROW = re.compile(
     re.IGNORECASE,
 )
 _H3 = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
+_PHASE_HEADING = re.compile(r"^phase\s+(.+?)\s+workstreams$", re.IGNORECASE)
 
 
 def _fold(text: str) -> str:
@@ -37,10 +38,8 @@ def _sections(text: str) -> list[tuple[str, str]]:
     ]
 
 
-def structural_placements(fixture: dict) -> dict[str, str | None]:
-    """Derive workstream placement only from fixture ``PART_OF`` edges."""
-    entities = fixture["entities"]
-    master_id = fixture["master_plan_id"]
+def _part_of_parents(fixture: dict) -> dict[str, list[str]]:
+    """Return every direct outbound ``PART_OF`` target in fixture order."""
     outbound: dict[str, list[str]] = {}
     for edge in fixture["relationships"]:
         if edge["relationship_type"].upper() != "PART_OF":
@@ -48,22 +47,64 @@ def structural_placements(fixture: dict) -> dict[str, str | None]:
         outbound.setdefault(edge["source_entity_id"], []).append(
             edge["target_entity_id"]
         )
+    return outbound
 
-    placements: dict[str, str | None] = {}
+
+def phase_ancestry_outcomes(fixture: dict) -> dict[str, dict]:
+    """Classify each workstream's graph-derived canonical phase ancestry."""
+    entities = fixture["entities"]
+    master_id = fixture["master_plan_id"]
+    outbound = _part_of_parents(fixture)
+    phase_names = {
+        item["id"]: item["name"] for item in entities[master_id]["snapshot"]["phases"]
+    }
+    outcomes: dict[str, dict] = {}
     for entity_id, entity in entities.items():
         if entity_id == master_id or entity["entity_type"] != "plan":
             continue
-        parents = outbound.get(entity_id, [])
-        phase_parents = [
-            parent
-            for parent in parents
-            if entities.get(parent, {}).get("entity_type") == "plan_phase"
-        ]
-        if len(phase_parents) == 1:
-            placements[entity_id] = entities[phase_parents[0]]["snapshot"]["name"]
-        else:
-            placements[entity_id] = None
-    return placements
+        phases: set[str] = set()
+        seen = {entity_id}
+        pending = list(outbound.get(entity_id, []))
+        while pending:
+            ancestor = pending.pop()
+            if ancestor in seen:
+                continue
+            seen.add(ancestor)
+            if ancestor in phase_names:
+                phases.add(ancestor)
+            pending.extend(outbound.get(ancestor, []))
+        phase_ids = sorted(phases, key=lambda item: list(phase_names).index(item))
+        outcome = (
+            "unique"
+            if len(phase_ids) == 1
+            else "missing"
+            if not phase_ids
+            else "duplicate"
+        )
+        outcomes[entity_id] = {
+            "outcome": outcome,
+            "phase_ids": phase_ids,
+            "phases": [phase_names[item] for item in phase_ids],
+        }
+    return outcomes
+
+
+def structural_placements(fixture: dict) -> dict[str, str | None]:
+    """Return the unique graph-derived phase, or ``None`` when non-unique."""
+    return {
+        entity_id: outcome["phases"][0] if outcome["outcome"] == "unique" else None
+        for entity_id, outcome in phase_ancestry_outcomes(fixture).items()
+    }
+
+
+def task_ascent_outcomes(fixture: dict) -> dict[str, str]:
+    """Return explicit defects at the first task ``PART_OF`` ascent."""
+    outbound = _part_of_parents(fixture)
+    return {
+        entity_id: "missing" if not outbound.get(entity_id) else "duplicate"
+        for entity_id, entity in fixture["entities"].items()
+        if entity["entity_type"] == "task" and len(outbound.get(entity_id, [])) != 1
+    }
 
 
 def _phase_rows(text: str) -> list[tuple[str, str]]:
@@ -83,10 +124,50 @@ def _section_for_phase(text: str, phase: str) -> str:
     return ""
 
 
+def _phase_sections(text: str) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    for heading, body in _sections(text):
+        match = _PHASE_HEADING.fullmatch(heading.strip())
+        if match:
+            result.append((match.group(1).strip(), body))
+    return result
+
+
 def _cross_phase_section(text: str) -> str:
     for heading, body in _sections(text):
         if "cross-phase" in _fold(heading):
             return body
+    return ""
+
+
+def _heading_section(text: str, needle: str) -> str:
+    wanted = _fold(needle)
+    for heading, body in _sections(text):
+        if wanted in _fold(heading):
+            return body
+    return ""
+
+
+def _entity_pattern(entity_id: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![A-Za-z0-9_]){re.escape(entity_id)}(?![A-Za-z0-9_])")
+
+
+def _entity_item(section: str, entity_id: str) -> str:
+    """Return the bullet or table row that identifies one entity."""
+    pattern = _entity_pattern(entity_id)
+    lines = section.splitlines()
+    for index, line in enumerate(lines):
+        if not pattern.search(line):
+            continue
+        if line.lstrip().startswith("|"):
+            return line
+        start = index
+        while start > 0 and not lines[start].lstrip().startswith("- "):
+            start -= 1
+        end = index + 1
+        while end < len(lines) and not lines[end].lstrip().startswith(("- ", "|")):
+            end += 1
+        return "\n".join(lines[start:end])
     return ""
 
 
@@ -105,21 +186,19 @@ def score_report(
         (item["name"], item["exit_gate_state"]) for item in master["phases"]
     ]
     actual_rows = _phase_rows(text)
+    ancestry = phase_ancestry_outcomes(fixture)
     placements = structural_placements(fixture)
+    task_outcomes = task_ascent_outcomes(fixture)
     folded = _fold(text)
     failed: list[str] = []
 
-    master_pos = text.lower().find(master["title"].lower())
+    master_pos = text.find(fixture["master_plan_id"])
     mechanics_positions = [
-        pos
-        for needle in (
-            "rules delivery hardening",
-            "e2 bootstrap repair",
-            "### task mechanics",
-            "1. repair",
-        )
-        if (pos := text.lower().find(needle)) >= 0
+        pos for entity_id in ancestry if (pos := text.find(entity_id)) >= 0
     ]
+    task_mechanics_pos = text.lower().find("### task mechanics")
+    if task_mechanics_pos >= 0:
+        mechanics_positions.append(task_mechanics_pos)
     first_phase_row = next(
         (
             text.find(line)
@@ -151,35 +230,59 @@ def score_report(
     ):
         failed.append("exit_gates_before_task_mechanics")
 
-    for entity_id, phase in placements.items():
-        if phase is None:
+    phase_sections = _phase_sections(text)
+    for entity_id, outcome in ancestry.items():
+        if outcome["outcome"] != "unique":
             continue
-        title = entities[entity_id]["snapshot"]["title"]
-        block = _section_for_phase(text, phase)
-        if title.lower() not in block.lower() or "structurally bound" not in _fold(
-            block
+        expected_phase = outcome["phases"][0]
+        pattern = _entity_pattern(entity_id)
+        occurrences = [
+            phase for phase, body in phase_sections for _ in pattern.finditer(body)
+        ]
+        correct_block = _entity_item(
+            _section_for_phase(text, expected_phase), entity_id
+        )
+        if expected_phase.lower() not in {item.lower() for item in occurrences} or not (
+            "structurally bound" in _fold(correct_block)
+            and "part_of" in _fold(correct_block)
         ):
             failed.append("structural_phase_binding")
-            break
+        if len(occurrences) != 1 or occurrences[0].lower() != expected_phase.lower():
+            failed.append("unique_graph_phase_placement")
 
     cross_phase = _cross_phase_section(text)
-    for entity_id, phase in placements.items():
-        if phase is not None:
+    for entity_id, outcome in ancestry.items():
+        if outcome["outcome"] == "unique":
             continue
-        title = entities[entity_id]["snapshot"]["title"]
-        cross_folded = _fold(cross_phase)
+        item = _entity_item(cross_phase, entity_id)
+        item_folded = _fold(item)
         wrongly_phased = any(
-            title.lower() in body.lower()
-            for heading, body in _sections(text)
-            if re.fullmatch(r"phase\s+.+?\s+workstreams", heading, re.IGNORECASE)
+            _entity_pattern(entity_id).search(body) for _, body in phase_sections
+        )
+        if not item or "cross-phase prerequisite" not in item_folded or wrongly_phased:
+            failed.append("unbound_work_is_cross_phase")
+        ancestry_marker = f"{outcome['outcome']} phase ancestry"
+        derivation_marker = (
+            "not structurally derivable"
+            if outcome["outcome"] == "missing"
+            else "not uniquely structurally derivable"
+        )
+        phase_names_present = all(
+            re.search(rf"\b{re.escape(phase)}\b", item, re.IGNORECASE)
+            for phase in outcome["phases"]
         )
         if (
-            title.lower() not in cross_phase.lower()
-            or "cross-phase prerequisite" not in cross_folded
-            or "not structurally derivable" not in cross_folded
-            or wrongly_phased
+            ancestry_marker not in item_folded
+            or derivation_marker not in item_folded
+            or not phase_names_present
         ):
-            failed.append("unbound_work_is_cross_phase")
+            failed.append("explicit_phase_ancestry_outcomes")
+
+    ledger = _heading_section(text, "planning resume ledger")
+    for entity_id, outcome in task_outcomes.items():
+        row = _entity_item(ledger, entity_id)
+        if f"{outcome} ascent" not in _fold(row):
+            failed.append("explicit_task_ascent_outcomes")
             break
 
     if not (
@@ -191,8 +294,10 @@ def score_report(
 
     return {
         "outcome": "pass" if not failed else "fail",
-        "failed": failed,
+        "failed": list(dict.fromkeys(failed)),
         "structural_placements": placements,
+        "phase_ancestry_outcomes": ancestry,
+        "task_ascent_outcomes": task_outcomes,
         "expected_phase_rows": expected_rows,
         "actual_phase_rows": actual_rows,
     }

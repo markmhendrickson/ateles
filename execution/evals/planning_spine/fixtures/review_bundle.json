@@ -3,7 +3,7 @@
   "canonical_source": "Neotoma prod skill entities",
   "captured_at": "2026-09-28",
   "context_fixture": "execution/evals/planning_spine/fixtures/context.json",
-  "context_sha256": "ecbea246e631434dec3521b8f2de03e08056f736fbaa2a1c19be2e71b3806e90",
+  "context_sha256": "3d3d028273e43d0e153693d173c11b111610c01c5dc4b64911ad2ad6767d8a55",
   "generated_by": "execution/scripts/render_planning_spine_review_bundle.py",
   "public_safe": true,
   "skills": [

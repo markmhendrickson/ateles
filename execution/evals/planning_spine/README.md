@@ -11,15 +11,20 @@ behavior under review:
 - one workstream structurally bound to phase B2 even though its task title says
   "Phase A";
 - one E2-labelled workstream attached directly to the master plan, with no phase
-  binding; and
+  binding;
+- one workstream with two distinct canonical phase ancestors, B2 and E;
+- one task with no direct `PART_OF` parent and one with two direct parents; and
 - task mechanics named Repair, Review, Merge, and Deploy.
 
 The evaluator fails the original task-stage-only report even when that report
 contains every policy phrase the old checker searched for. A passing report must
 show the selected master plan first, render its canonical phases and gate states
-before task mechanics, place the bound workstream through the graph edge, label
-E2 as cross-phase and not structurally derivable, and keep
-`reconcile-planning` retrospective.
+before task mechanics, place each uniquely bound workstream exactly once through
+the graph edge, keep non-unique workstreams out of canonical phase sections,
+report missing and duplicate phase ancestry per workstream, report missing and
+duplicate task ascent per affected task, and keep `reconcile-planning`
+retrospective. Stable fixture entity IDs bind these effects, so changing a human
+title cannot change placement or make an equivalent report fail.
 
 The three `fixtures/skills/*/SKILL.md` files are generated review evidence, not
 sources. Neotoma prod remains canonical. `fixtures/review_bundle.json` records
