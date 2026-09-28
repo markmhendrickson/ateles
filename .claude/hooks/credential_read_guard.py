@@ -53,8 +53,15 @@ WHAT IS REFUSED (would put file content into context):
     whose carried command runs `env`, `printenv`, a bare `set`,
     `declare -p`/`export -p`/`typeset -p`, or reads `/proc/*/environ`
     directly — since the exposure there is the REMOTE process's own
-    environment, independent of anything sourced locally. A boolean check
-    (`[ -n "$VAR" ]`, `test -n`) or a `case` statement printing only a
+    environment, independent of anything sourced locally. Also local or
+    remote process/service inspection that can expose environment values or
+    full command lines: bare `env`/`printenv`, `launchctl print`/`getenv`,
+    `systemctl show`/`show-environment`, `pgrep -f`/full-command output,
+    broad `ps`, and process tree tools. Since a PreToolUse hook cannot redact
+    output, these entrances are refused; identity-only `pgrep -x`/`pgrep -l`
+    and an explicit
+    `ps -p PID -o pid=,comm=` field allowlist remain available. A boolean
+    check (`[ -n "$VAR" ]`, `test -n`) or a `case` statement printing only a
     fixed label is NOT refused.
 
 WHAT IS ALLOWED (mirrors the task spec — none of these print a value):
@@ -66,6 +73,9 @@ WHAT IS ALLOWED (mirrors the task spec — none of these print a value):
   - Reading a `*.example`/`*.sample`/`*.template` file — these are
     placeholders by convention, never real secrets.
   - `grep -l` (files matching, no content) and `wc -l <file>` (a line count).
+  - `pgrep -x <name>`, `pgrep -l <name>`, and
+    `ps -p <pid> -o pid=,comm=` — process presence/identity without argv or
+    environment values.
 
 Compound commands are split the way gmail_send_gate.py splits them — on
 `&&`, `;`, `|`, and newlines, with backslash-newline line continuations
@@ -86,6 +96,7 @@ crashes the harness is worse than either.
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -405,6 +416,148 @@ _REMOTE_EXEC_RE = re.compile(
 # environment, same hazard as `env` with no shell involved at all).
 _PROC_ENVIRON_RE = re.compile(r"/proc/[^\s'\"]*?/environ\b")
 
+# Ambient process/service inspection needs no credential-file path at all:
+# credentials may already be present in this process environment, a service
+# manager's stored environment, or a child's argv. A PreToolUse hook cannot
+# redact the command's stdout, so it refuses output-bearing entrances and
+# preserves only narrow fixed-field presence/identity checks.
+_COMMAND_BOUNDARY = r'(?:^|[\s"\'])'
+_BIN_PATH = r"(?:/(?:usr/)?bin/)?"
+_PRINTENV_RE = re.compile(
+    rf"{_COMMAND_BOUNDARY}{_BIN_PATH}printenv(?:\s|$)"
+)
+_ENV_RE = re.compile(rf"{_COMMAND_BOUNDARY}{_BIN_PATH}env(?:\s|$)")
+_SERVICE_ENV_RE = re.compile(
+    rf"{_COMMAND_BOUNDARY}{_BIN_PATH}launchctl\s+(?:print|getenv)(?:\s|$)"
+    rf"|{_COMMAND_BOUNDARY}{_BIN_PATH}systemctl\s+"
+    r"(?:show|show-environment)(?:\s|$)"
+)
+_PGREP_RE = re.compile(rf"{_COMMAND_BOUNDARY}{_BIN_PATH}pgrep(?:\s|$)")
+_PROCESS_TREE_RE = re.compile(
+    rf"{_COMMAND_BOUNDARY}{_BIN_PATH}(?:pstree|ptree|proctree)(?:\s|$)"
+)
+_PS_RE = re.compile(rf"{_COMMAND_BOUNDARY}{_BIN_PATH}ps(?:\s|$)")
+_SAFE_PS_FIELDS = frozenset(
+    {"pid", "ppid", "comm", "state", "stat", "etime", "etimes", "uid", "user"}
+)
+
+
+def _ps_is_identity_only(segment: str) -> bool:
+    """Recognize only `ps` calls pinned to pid(s) and safe fixed fields.
+
+    Everything else is refused because default/broad `ps` formats include a
+    command/args column, and `e`/`ww` variants may include the environment.
+    The parser deliberately accepts no free-standing flags beyond `-p` and
+    `-o`; an unrecognized shape fails closed for this high-risk entrance.
+    """
+    match = _PS_RE.search(segment)
+    if not match:
+        return True
+    tail = segment[match.end() :].strip().strip("'\"")
+    try:
+        words = shlex.split(tail)
+    except ValueError:
+        return False
+    saw_pid = False
+    fields: list[str] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in ("-p", "--pid"):
+            index += 1
+            if index >= len(words) or words[index].startswith("-"):
+                return False
+            saw_pid = True
+        elif word in ("-o", "--format"):
+            index += 1
+            if index >= len(words) or words[index].startswith("-"):
+                return False
+            fields.extend(words[index].split(","))
+        else:
+            return False
+        index += 1
+    normalized_fields = {
+        field.split("=", 1)[0].strip().lower() for field in fields if field.strip()
+    }
+    return bool(
+        saw_pid
+        and normalized_fields
+        and normalized_fields.issubset(_SAFE_PS_FIELDS)
+    )
+
+
+def _pgrep_reads_full_command(segment: str) -> bool:
+    """True only when pgrep's option prefix asks for full argv matching/output."""
+    match = _PGREP_RE.search(segment)
+    if not match:
+        return False
+    tail = segment[match.end() :].strip().strip("'\"")
+    try:
+        words = shlex.split(tail)
+    except ValueError:
+        return True
+    for word in words:
+        if word == "--":
+            break
+        if word in ("--full", "--list-full"):
+            return True
+        if (
+            word.startswith("-")
+            and not word.startswith("--")
+            and ({"f", "a"} & set(word[1:]))
+        ):
+            return True
+    return False
+
+
+def _env_dumps_ambient(segment: str) -> bool:
+    """True when `env` has no program operand and therefore prints values."""
+    match = _ENV_RE.search(segment)
+    if not match:
+        return False
+    tail = segment[match.end() :].strip().strip("'\"")
+    try:
+        words = shlex.split(tail)
+    except ValueError:
+        return True
+    index = 0
+    no_argument_options = {"-i", "--ignore-environment", "-0", "--null"}
+    argument_options = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            return index + 1 >= len(words)
+        if word in no_argument_options:
+            index += 1
+            continue
+        if word in argument_options:
+            index += 2
+            if index > len(words):
+                return True
+            continue
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+            index += 1
+            continue
+        if word.startswith("-"):
+            return True
+        return False
+    return True
+
+
+def _ambient_process_or_service_hit(segment: str) -> str | None:
+    """Return the ambient-output entrance that could expose credentials."""
+    if _PRINTENV_RE.search(segment) or _env_dumps_ambient(segment):
+        return "ambient environment dump"
+    if _SERVICE_ENV_RE.search(segment):
+        return "service environment dump"
+    if _pgrep_reads_full_command(segment):
+        return "full process command-line inspection"
+    if _PROCESS_TREE_RE.search(segment):
+        return "process tree inspection"
+    if _PS_RE.search(segment) and not _ps_is_identity_only(segment):
+        return "process command-line or environment inspection"
+    return None
+
 
 def _remote_shell_env_dump_hit(command: str) -> str | None:
     """Refuse a remote-execution wrapper whose carried command dumps an
@@ -677,6 +830,10 @@ def check_bash(command: str):
             continue
         if _is_text_bearing(normalized):
             continue
+
+        hit = _ambient_process_or_service_hit(normalized)
+        if hit:
+            return hit
 
         hit = _segment_touches_credential(normalized)
         if hit:

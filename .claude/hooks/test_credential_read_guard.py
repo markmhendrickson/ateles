@@ -18,6 +18,7 @@ below is the regression test for that exact failure mode: it disables the
 guard's own credential-path check and asserts the suite would then go red.
 """
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -51,22 +52,23 @@ PLAIN = str(PLAIN_FILE)
 PLAIN_ENV = str(PLAIN_ENV_FILE)
 
 
-def run(tool_name, tool_input, env=None):
-    import os
-
+def run_result(tool_name, tool_input, env=None):
     payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
     child_env = None
     if env:
         child_env = dict(os.environ)
         child_env.update(env)
-    p = subprocess.run(
+    return subprocess.run(
         [sys.executable, HOOK],
         input=payload,
         capture_output=True,
         text=True,
         env=child_env,
     )
-    return p.returncode
+
+
+def run(tool_name, tool_input, env=None):
+    return run_result(tool_name, tool_input, env=env).returncode
 
 
 def run_bash(cmd):
@@ -167,6 +169,33 @@ BASH_BLOCK = [
     ("fly ssh console running export -p", 'fly ssh console -C "export -p"'),
     ("ssh running declare -p", 'ssh host "declare -p"'),
     ("ssh running typeset -p", 'ssh host "typeset -p"'),
+    # 2026-09-28 recurrence: service and process inspection can expose live
+    # credentials without reading a credential file or explicitly requesting
+    # an environment dump. These are synthetic command shapes only.
+    ("bare local env dump", "env"),
+    ("absolute local env dump", "/usr/bin/env"),
+    ("command-wrapped local env dump", "command env"),
+    ("sudo-wrapped local env dump", "sudo env"),
+    ("bare local printenv dump", "printenv"),
+    ("targeted printenv still prints a value", "printenv NEOTOMA_BEARER_TOKEN"),
+    ("launchctl service dump", "launchctl print gui/501/example.agent"),
+    ("launchctl getenv prints a value", "launchctl getenv NEOTOMA_BEARER_TOKEN"),
+    ("systemctl service-property dump", "systemctl show example-agent.service"),
+    ("systemctl manager environment dump", "systemctl show-environment"),
+    ("pgrep full-command match", "pgrep -f example-agent"),
+    ("pgrep full-command output", "pgrep -fl example-agent"),
+    ("pgrep full-command options after pattern", "pgrep example-agent -fl"),
+    ("pgrep long full-command output", "pgrep --full --list-full example-agent"),
+    ("bare ps includes a command column", "ps"),
+    ("ps aux command lines", "ps aux"),
+    ("ps full-format command lines", "ps -ef"),
+    ("ps environment and wide command line", "ps eww -p 123"),
+    ("ps explicit command column", "ps -p 123 -o command="),
+    ("ps explicit args column", "ps -p 123 -o args="),
+    ("process tree", "pstree -p 123"),
+    ("remote ps environment dump", 'ssh host "ps eww -p 1"'),
+    ("container full-command discovery", "docker exec container pgrep -fl example-agent"),
+    ("remote service dump", 'ssh host "launchctl print system/example.agent"'),
 ]
 
 BASH_ALLOW = [
@@ -214,7 +243,26 @@ BASH_ALLOW = [
     ),
     ("ssh with a POSIX test -n check", 'ssh host "test -n \\"$VAR\\" && echo yes"'),
     ("kubectl exec running a harmless command", "kubectl exec pod -- ls /app"),
-    ("docker exec running ps", "docker exec container ps aux"),
+    ("local env assignment running a program", "env SAFE_MODE=1 python3 script.py"),
+    ("absolute env running a program", "/usr/bin/env SAFE_MODE=1 python3 script.py"),
+    ("launchctl list is identity/status only", "launchctl list"),
+    ("launchctl print-disabled is not a service dump", "launchctl print-disabled system"),
+    ("systemctl fixed-label liveness check", "systemctl is-active example-agent.service"),
+    ("pgrep exact process name", "pgrep -x example-agent"),
+    ("pgrep process names only", "pgrep -l example-agent"),
+    ("ps explicit pid and executable identity", "ps -p 123 -o pid=,comm="),
+    ("ps explicit pid and state", "ps -p 123 -o pid=,state=,etime="),
+    ("docker exec identity-only ps", "docker exec container ps -p 1 -o pid=,comm="),
+    (
+        "local variable presence check prints only a fixed label",
+        '[ -n "${NEOTOMA_BEARER_TOKEN:-}" ] && echo present || echo missing',
+    ),
+    ("echo process-inspection text", "echo 'ps aux is blocked'"),
+    ("commit message naming process inspection", 'git commit -m "block pgrep -fl"'),
+    ("unrelated hyphenated env command", "my-env --version"),
+    ("unrelated hyphenated printenv command", "my-printenv --version"),
+    ("unrelated hyphenated pgrep command", "my-pgrep -fl example-agent"),
+    ("unrelated hyphenated ps command", "my-ps aux"),
     ("ssh-keygen is not ssh", "ssh-keygen -t ed25519"),
     ("ssh-add is not ssh", "ssh-add ~/.ssh/id_ed25519"),
     (
@@ -429,6 +477,34 @@ def test_guard_can_actually_fail_when_disabled():
     finally:
         guard.is_credential_path = original
         importlib.reload(guard)
+
+
+def test_process_discovery_never_emits_synthetic_argv_canary():
+    """A real child carries a fake credential-shaped argv value, while every
+    supported broad discovery entrance is refused before the shell can return
+    that child's command line or environment to the caller."""
+    canary = "NEOTOMA_BEARER_TOKEN=synthetic_process_canary_not_real"
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", canary],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        commands = (
+            f"pgrep -fl {child.pid}",
+            f"ps eww -p {child.pid}",
+            f"ps -p {child.pid} -o command=",
+            f"ps -p {child.pid} -o args=",
+            "pstree",
+        )
+        for command in commands:
+            result = run_result("Bash", {"command": command})
+            combined = result.stdout + result.stderr
+            assert result.returncode == 2, command
+            assert canary not in combined, command
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 
 
 if __name__ == "__main__":
