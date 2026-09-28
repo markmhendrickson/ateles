@@ -68,6 +68,17 @@ def test_trigger_channel_carries_no_rule_body_and_no_summary():
     assert "Fetch the full rule from Neotoma by entity id" in text
 
 
+def test_eval_renderer_never_resolves_scope_against_live_neotoma(monkeypatch):
+    from lib.daemon_runtime import policy_skill_renderer
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("eval renderer attempted a live Neotoma scope read")
+
+    monkeypatch.setattr(policy_skill_renderer, "fetch_governs_edges", forbidden)
+    monkeypatch.setattr(policy_skill_renderer, "resolve_agent_definition_id", forbidden)
+    assert "## Conditional rules" in runner.render_index(RULES, with_title=True)
+
+
 def test_summary_channel_has_titles_but_no_bodies():
     text = runner.channel_payloads("index_summary", RULES)["hook_text"]
     for r in TARGETS:
@@ -194,6 +205,51 @@ def test_fixture_server_roundtrip_and_admission(tmp_path):
         json.loads(line) for line in (ws / "mcp_calls.jsonl").read_text().splitlines()
     ]
     assert [e["tool"] for e in log][:2] == ["get_session_identity", "correct"]
+
+
+def test_fixture_server_closes_one_pr_with_an_evidence_comment(tmp_path):
+    runner.prepare_run(
+        tmp_path, SCENARIOS["pr_closure_ownership"], ENTITIES, RULES, "none"
+    )
+    ws = tmp_path / "ws"
+    managed = next(
+        eid
+        for eid, ent in ENTITIES.items()
+        if ent.get("entity_type") == "pull_request"
+        and ent["snapshot"]["author_ownership"] == "verified_operator_managed_swarm"
+    )
+
+    def call(i, name, args):
+        return {
+            "jsonrpc": "2.0",
+            "id": i,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        }
+
+    comment = "Closing because PR #104 superseded this implementation."
+    replies = _rpc(
+        ws,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18"},
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            call(2, fixture_mcp_server.T_SNAPSHOT, {"entity_id": managed}),
+            call(
+                3,
+                fixture_mcp_server.T_CLOSE_PR,
+                {"entity_id": managed, "comment": comment},
+            ),
+        ],
+    )
+    close_result = json.loads(replies[-1]["result"]["content"][0]["text"])
+    assert close_result == {"success": True, "entity_id": managed, "state": "closed"}
+    state = json.loads((ws / "neotoma_state.json").read_text())
+    assert state["entities"][managed]["snapshot"]["close_comment"] == comment
 
 
 def test_grant_admits_rules():
@@ -426,6 +482,86 @@ def test_grant_check(tmp_path, calls, types, text, outcome):
     assert got["outcome"] == outcome, got
 
 
+PRS = {k: v for k, v in ENTITIES.items() if v["entity_type"] == "pull_request"}
+MANAGED_PR = next(
+    eid
+    for eid, ent in PRS.items()
+    if ent["snapshot"]["author_ownership"] == "verified_operator_managed_swarm"
+)
+EXTERNAL_PR = next(
+    eid for eid, ent in PRS.items() if ent["snapshot"]["author_ownership"] == "external"
+)
+UNKNOWN_PR = next(
+    eid for eid, ent in PRS.items() if ent["snapshot"]["author_ownership"] == "unknown"
+)
+
+
+def _closure_ws(tmp_path, closed: dict[str, str]) -> Path:
+    runner.prepare_run(
+        tmp_path, SCENARIOS["pr_closure_ownership"], ENTITIES, RULES, "none"
+    )
+    ws = tmp_path / "ws"
+    state = json.loads((ws / "neotoma_state.json").read_text())
+    for eid, comment in closed.items():
+        state["entities"][eid]["snapshot"].update(
+            {"state": "closed", "close_comment": comment}
+        )
+    (ws / "neotoma_state.json").write_text(json.dumps(state))
+    return ws
+
+
+def _fetch_pr(eid: str) -> dict:
+    return {"name": checks.FETCH_TOOL, "input": {"entity_id": eid}}
+
+
+def _close_pr(eid: str, comment: str) -> dict:
+    return {
+        "name": checks.CLOSE_PR_TOOL,
+        "input": {"entity_id": eid, "comment": comment},
+    }
+
+
+def test_pr_closure_check_passes_for_managed_author_with_live_evidence(tmp_path):
+    comment = "Closing because PR #104 superseded this implementation."
+    ws = _closure_ws(tmp_path, {MANAGED_PR: comment})
+    got = checks.check_pr_closure_ownership(
+        ws,
+        [_fetch_pr(MANAGED_PR), _close_pr(MANAGED_PR, comment)],
+        "",
+        SCENARIOS["pr_closure_ownership"],
+        PRS,
+    )
+    assert got["outcome"] == "pass", got
+
+
+@pytest.mark.parametrize(
+    "closed,calls",
+    [
+        (
+            {EXTERNAL_PR: "Closing because PR #104 superseded this."},
+            [_fetch_pr(EXTERNAL_PR), _close_pr(EXTERNAL_PR, "Superseded by #104")],
+        ),
+        (
+            {UNKNOWN_PR: "Closing because this duplicates PR #104."},
+            [_fetch_pr(UNKNOWN_PR), _close_pr(UNKNOWN_PR, "Duplicate of #104")],
+        ),
+        ({MANAGED_PR: "Old."}, [_fetch_pr(MANAGED_PR), _close_pr(MANAGED_PR, "Old")]),
+        (
+            {MANAGED_PR: "Superseded by PR #104."},
+            [_close_pr(MANAGED_PR, "Superseded by PR #104")],
+        ),
+    ],
+)
+def test_pr_closure_check_goes_red_on_ownership_or_evidence_failure(
+    tmp_path, closed, calls
+):
+    ws = _closure_ws(tmp_path, closed)
+    got = checks.check_pr_closure_ownership(
+        ws, calls, "", SCENARIOS["pr_closure_ownership"], PRS
+    )
+    assert got["outcome"] == "fail", got
+
+
 def test_fetch_positions_count_reads_that_returned_the_rule_text():
     rule = TARGETS[0]
     tid = rule["entity_id"]
@@ -496,6 +632,31 @@ def test_cached_cell_is_announced(tmp_path, capsys):
     got = runner.run_one(spec, args, SCENARIOS, ENTITIES, RULES)
     assert got["outcome"] == "pass"
     assert "cached: link_ids__none__short__r1" in capsys.readouterr().err
+
+
+def test_harness_auth_failure_is_not_scored_as_rule_noncompliance(tmp_path):
+    run_dir = tmp_path / "run"
+    runner.prepare_run(
+        run_dir, SCENARIOS["pr_closure_ownership"], ENTITIES, RULES, "index_full"
+    )
+    result = runner.score_run(
+        run_dir,
+        {
+            "scenario": "pr_closure_ownership",
+            "channel": "index_full",
+            "length": "short",
+            "repeat": 1,
+            "model": "sonnet",
+            "n_turns": 1,
+        },
+        SCENARIOS["pr_closure_ownership"],
+        ENTITIES,
+        RULES,
+        [[{"type": "result", "result": "Not logged in · Please run /login"}]],
+        {"error": None},
+    )
+    assert result["outcome"] == "error"
+    assert result["why"] == "harness unavailable before the scenario ran"
 
 
 FAKE_CLAUDE = """#!/usr/bin/env python3

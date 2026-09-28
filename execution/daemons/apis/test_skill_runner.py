@@ -126,6 +126,26 @@ class TestBuildSystemPrompt:
         assert degraded
         assert prompt == skill_md
 
+    def test_live_policy_follows_definition_and_skill(self) -> None:
+        agent_def = _make_def(prompt_markdown="Identity.")
+        prompt, degraded = skill_runner.build_system_prompt(
+            agent_def,
+            "Task instructions.",
+            policy_prompt="LIVE POLICY CANARY",
+        )
+        assert not degraded
+        assert prompt.index("Identity.") < prompt.index("Task instructions.")
+        assert prompt.index("Task instructions.") < prompt.index("LIVE POLICY CANARY")
+
+    def test_live_policy_is_delivered_in_degraded_definition_mode(self) -> None:
+        prompt, degraded = skill_runner.build_system_prompt(
+            _stub_def(),
+            "Fallback instructions.",
+            policy_prompt="LIVE POLICY CANARY",
+        )
+        assert degraded
+        assert prompt == "Fallback instructions.\n\n---\n\nLIVE POLICY CANARY"
+
 
 # ── _load_agent_def caching ────────────────────────────────────────────────────
 
@@ -159,6 +179,26 @@ class TestAgentDefCache:
             assert MockLoader.call_count == 1
 
 
+class TestActivePolicyCarrier:
+    def test_policy_is_rendered_fresh_for_every_dispatch(self) -> None:
+        with patch("skill_runner.AgentLoader") as MockLoader:
+            instance = MagicMock()
+            instance.render_policy_prompt.side_effect = ["first", "second"]
+            MockLoader.return_value = instance
+
+            assert skill_runner._load_active_policy_prompt("cicada") == "first"
+            assert skill_runner._load_active_policy_prompt("cicada") == "second"
+
+        assert MockLoader.call_count == 2
+
+    def test_policy_render_failure_degrades_to_empty_prompt(self) -> None:
+        with patch("skill_runner.AgentLoader") as MockLoader:
+            MockLoader.return_value.render_policy_prompt.side_effect = RuntimeError(
+                "unavailable"
+            )
+            assert skill_runner._load_active_policy_prompt("cicada") == ""
+
+
 # ── run_skill — full integration (mocked subprocess + Neotoma) ────────────────
 
 
@@ -189,6 +229,7 @@ class TestRunSkill:
         fake_def = _make_def(prompt_markdown="Role: Gryllus. You are an issue worker.")
         instance = MagicMock()
         instance.load.return_value = fake_def
+        instance.render_policy_prompt.return_value = "LIVE POLICY CANARY"
         MockLoader.return_value = instance
 
         captured_cmd: list = []
@@ -221,11 +262,12 @@ class TestRunSkill:
             )
 
         assert result.ok
-        # The --append-system-prompt argument should contain BOTH texts
+        # The --append-system-prompt argument should contain all three layers.
         sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
         system_prompt_arg = captured_cmd[sys_prompt_idx]
         assert "Role: Gryllus" in system_prompt_arg
         assert skill_md_content in system_prompt_arg
+        assert "LIVE POLICY CANARY" in system_prompt_arg
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -2732,6 +2774,23 @@ class TestCrossHarnessRouting:
         assert "SYSTEM" in cmd[-1]
         assert "WORK" in cmd[-1]
         assert stdin is None
+
+    @pytest.mark.parametrize("provider", ["claude", "codex", "cursor"])
+    def test_live_policy_uses_every_provider_prompt_carrier(self, provider) -> None:
+        system_prompt, _ = skill_runner.build_system_prompt(
+            _make_def(),
+            "SKILL",
+            policy_prompt="LIVE POLICY CANARY",
+        )
+        cmd, stdin = skill_runner._provider_command(
+            provider,
+            f"/bin/{provider}",
+            system_prompt,
+            "WORK",
+            cwd="/repo",
+        )
+        carrier = stdin.decode() if stdin is not None else " ".join(cmd)
+        assert "LIVE POLICY CANARY" in carrier
 
     def test_all_metered_credentials_are_removed_by_default(
         self, monkeypatch

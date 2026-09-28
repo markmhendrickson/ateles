@@ -30,6 +30,7 @@ PROTOCOL_VERSION = "2025-06-18"
 T_SNAPSHOT = "retrieve_entity_snapshot"  # neotoma-rest-path-ok: MCP tool name
 T_LIST = "retrieve_entities"  # neotoma-rest-path-ok: MCP tool name
 T_RELATED = "retrieve_related_entities"  # neotoma-rest-path-ok: MCP tool name
+T_CLOSE_PR = "close_pull_request"
 
 TOOLS = [
     {
@@ -131,6 +132,21 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"entity_type": {"type": "string"}},
+        },
+    },
+    {
+        "name": T_CLOSE_PR,
+        "description": (
+            "Close one pull request represented by its live Neotoma entity. "
+            "Requires a public close comment stating the evidence for closure."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "entity_id": {"type": "string"},
+                "comment": {"type": "string"},
+            },
+            "required": ["entity_id", "comment"],
         },
     },
 ]
@@ -243,6 +259,19 @@ def call_tool(store: Store, name: str, args: dict) -> dict:
         if reason:
             out["reason"] = reason
         return out
+    if name == T_CLOSE_PR:
+        eid = str(args.get("entity_id", ""))
+        ent = entities.get(eid)
+        if ent is None or ent.get("entity_type") != "pull_request":
+            return {"error": "pull request not found", "entity_id": eid}
+        comment = str(args.get("comment") or "").strip()
+        if not comment:
+            return {"error": "close comment is required", "entity_id": eid}
+        snap = ent.setdefault("snapshot", {})
+        snap["state"] = "closed"
+        snap["close_comment"] = comment
+        store.save(state)
+        return {"success": True, "entity_id": eid, "state": "closed"}
     if name in ("store", "create_relationship"):
         return {"error": "writes of this kind are disabled in the eval sandbox"}
     if name in (T_RELATED, "list_timeline_events", "list_observations"):
