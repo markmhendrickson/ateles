@@ -50,6 +50,22 @@ _SKILL_REQUIREMENTS = {
     },
 }
 
+_PHASE_REPORTING_REQUIREMENTS = {
+    "selected master plan first": "display the selected master plan before workstreams",
+    "canonical phase": "use the master plan's own phase names",
+    "exit-gate state": "show each canonical phase's exit-gate state",
+    "structural phase binding": "derive workstream-to-phase placement structurally",
+    "cross-phase prerequisite": "label work with no phase binding explicitly",
+    "serial/parallel task execution underneath": (
+        "place task mechanics below the phase-level view"
+    ),
+    "subordinate workstream label": (
+        "distinguish a local workstream label from a canonical master phase"
+    ),
+    "not structurally derivable": "state when no canonical phase can be derived",
+    "task title": "forbid phase inference from task titles",
+}
+
 
 def contract_errors(slug: str, content: str) -> list[str]:
     """Return human-readable violations for one canonical skill body."""
@@ -58,10 +74,14 @@ def contract_errors(slug: str, content: str) -> list[str]:
 
     folded = " ".join(content.lower().split())
     errors: list[str] = []
-    for marker, meaning in {
+    requirements = {
         **_SHARED_REQUIREMENTS,
         **_SKILL_REQUIREMENTS[slug],
-    }.items():
+    }
+    if slug in {"continue-session", "digest"}:
+        requirements.update(_PHASE_REPORTING_REQUIREMENTS)
+
+    for marker, meaning in requirements.items():
         present = (
             re.search(rf"\b{re.escape(marker)}\b", folded) is not None
             if marker in {"plan", "project", "strategy"}
