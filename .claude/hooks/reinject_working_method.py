@@ -34,9 +34,44 @@ its own failure mode; keep this to what compaction actually eats.
 
 Fail-open: stdlib only, any error exits 0. Never block a session resume.
 """
+
 import sys
 
-REMINDER = """\
+
+def should_restate_open_decisions(
+    *,
+    operator_message: bool,
+    decision_new_or_changed: bool,
+    open_decision_count: int,
+) -> bool:
+    """Return whether this turn must carry the full open-decision list."""
+    return open_decision_count > 0 and (operator_message or decision_new_or_changed)
+
+
+def decision_cadence_reminder() -> str:
+    """Render the compact rule from its observable turn-level outcomes."""
+    cases = (
+        ("operator reply", True, False, 1),
+        ("unchanged notification", False, False, 1),
+        ("notification with a new or changed decision", False, True, 1),
+        ("no open decisions", True, True, 0),
+    )
+    outcomes = []
+    for label, operator_message, decision_new_or_changed, open_decision_count in cases:
+        action = (
+            "restate every open decision in full"
+            if should_restate_open_decisions(
+                operator_message=operator_message,
+                decision_new_or_changed=decision_new_or_changed,
+                open_decision_count=open_decision_count,
+            )
+            else "omit the decision list and count line"
+        )
+        outcomes.append(f"{label}: {action}")
+    return "Decision-list cadence: " + "; ".join(outcomes) + "."
+
+
+REMINDER = f"""\
 [working-method] Context was just compacted. Standing instructions from the \
 operator that do not survive a summary — restated verbatim in effect:
 
@@ -60,10 +95,7 @@ in the issue, PR or commit message.
 and link each by id into the Ateles app, so the operator can open them.
 5. PROCEED ON YOUR RECOMMENDATION rather than stopping to ask. If you asked \
 something and it went unanswered, re-surface it in each reply to the operator \
-until answered. Restate every open decision in full in each reply to a message \
-the operator actually sent, and on any turn where a decision is new or changed. \
-Omit the decision list and count line only on a background-agent or PR \
-notification turn where no decision changed.
+until answered. {decision_cadence_reminder()}
 
 Full role definition: `.claude/skills/ateles/SKILL.md`. Repo-wide constraints \
 are in CLAUDE.md, which Claude Code re-injects from disk on its own."""

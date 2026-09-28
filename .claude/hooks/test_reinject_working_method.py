@@ -57,9 +57,43 @@ class TestHappyPath:
         out = capsys.readouterr().out
 
         assert code == 0
-        assert "each reply to a message the operator actually sent" in out
-        assert "any turn where a decision is new or changed" in out
-        assert "notification turn where no decision changed" in out
+        assert hook.decision_cadence_reminder() in out
+
+    @pytest.mark.parametrize(
+        (
+            "operator_message",
+            "decision_new_or_changed",
+            "open_decision_count",
+            "expected",
+        ),
+        [
+            (True, False, 2, True),
+            (False, False, 2, False),
+            (False, True, 2, True),
+            (True, True, 0, False),
+        ],
+        ids=[
+            "operator-reply",
+            "unchanged-notification",
+            "changed-decision-notification",
+            "no-open-decisions",
+        ],
+    )
+    def test_decision_list_requirement_matches_turn_effect(
+        self,
+        operator_message,
+        decision_new_or_changed,
+        open_decision_count,
+        expected,
+    ):
+        assert (
+            hook.should_restate_open_decisions(
+                operator_message=operator_message,
+                decision_new_or_changed=decision_new_or_changed,
+                open_decision_count=open_decision_count,
+            )
+            is expected
+        )
 
 
 # ---------------------------------------------------------------------------
