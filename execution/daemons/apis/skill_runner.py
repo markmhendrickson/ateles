@@ -1395,18 +1395,34 @@ async def _run_skill_once(
     sends a notifier alert (when a notifier is supplied), and records a
     degraded_generic_subagent harness_event. Dispatch still proceeds.
 
-    ``github_token`` (#109 — per-agent GitHub identity): when supplied, the token
-    is injected into subprocess_env as both ``GITHUB_TOKEN`` and ``GH_TOKEN`` so
-    the spawned agent's ``gh`` calls authenticate as the correct identity.  When
-    not supplied, the child inherits the daemon's ambient env unchanged (current
-    behaviour for all callers that predate #109).  Only GitHub-triggered pipeline
-    call sites pass this; SSE task-path dispatches leave it unset.
+    ``github_token`` (#109 — per-agent GitHub identity): when supplied and
+    non-empty, the token is injected into subprocess_env as both
+    ``GITHUB_TOKEN`` and ``GH_TOKEN`` so the spawned agent's ``gh`` calls
+    authenticate as the correct identity. When not supplied (``None``) on a
+    dispatch that does NOT set ``include_github_contract``, the child inherits
+    the daemon's ambient env unchanged (current behaviour for all callers that
+    predate #109). An explicitly empty string is a distinct, refused case —
+    see below.
 
     ``include_github_contract`` (Phase 1 / Layer A): when True, SWARM_GITHUB_CONTRACT
-    is injected into the system prompt between the agent_definition and the SKILL.md.
-    Pass True ONLY from GitHub-trigger call sites in swarm_dispatch.py; leave as
-    False (the default) for all SSE/non-GitHub task dispatches so the contract never
-    appears in payment, health, finance, or other non-GitHub work.
+    is injected into the system prompt between the agent_definition and the SKILL.md,
+    AND (ateles#590) this dispatch is network-enabled (see ``network=`` on the
+    ``_provider_command`` call below). Pass True from GitHub-trigger call sites in
+    swarm_dispatch.py, or from a manual/programmatic dispatch (dispatch_role.py)
+    whose task must commit, push, or open a pull request; leave as False (the
+    default) for all other dispatches so the contract never appears in payment,
+    health, finance, or other non-GitHub work.
+
+    Credential-boundary contract (ateles#590 security repair, PR #1334): a
+    network-enabled dispatch (``include_github_contract=True``) REQUIRES a
+    non-empty ``github_token`` — omitted or empty both return a failed
+    ``SkillResult`` before any child is spawned, rather than falling back to
+    the daemon's ambient GitHub identity. On any dispatch, an explicitly empty
+    ``github_token`` (requested but resolved to ``""``) is refused the same
+    way, since that shape means a caller tried to resolve a per-agent PAT and
+    failed — silently falling back to the ambient identity there is exactly
+    what let a PR land under the operator's own account instead of the
+    agent's (ateles#109's original incident).
 
     Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
     to the Claude adapter. Codex and Cursor receive the same system + skill
@@ -1470,6 +1486,64 @@ async def _run_skill_once(
             "reviewer or gate-owning lens on it rather than running "
             "unrestricted (ateles#795, "
             "Falco's security review on PR #1181)."
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ateles#590 security repair (PR #1334): a network-enabled dispatch must
+    # never silently keep the daemon's ambient GitHub identity. Before #109,
+    # `github_token=None` (the default for every call site) left
+    # GITHUB_TOKEN/GH_TOKEN exactly as `_subscription_only_env` copied them
+    # from `os.environ`. That was harmless while `include_github_contract`
+    # (which also opens Codex network — see `network=include_github_contract`
+    # below) was reachable ONLY from GitHub-triggered call sites in
+    # swarm_dispatch.py, and every one of those already resolves and passes a
+    # `github_token` string (possibly "") via `_token_for_agent_on_repo`. But
+    # `dispatch_role.py`'s manual/programmatic entrypoint (#590) can request
+    # `include_github_contract=True` on its own, and can omit `github_token`
+    # entirely — reaching exactly the silent-inherit path this refusal closes.
+    #
+    # This is a PREFLIGHT refusal — checked and returned here, BEFORE the
+    # Stage 2 "dispatch start" harness_event write and before any subprocess
+    # command is built — for the same reason the owns_pending_gate refusal
+    # above is: a refused dispatch must leave no audit trail suggesting work
+    # was attempted, and every caller of run_skill/`_run_skill_once` expects a
+    # `SkillResult` on failure, never an exception (see this module's own
+    # docstring on failures never raising, and `_run_provider_attempts`'s
+    # `await attempt(selected)` call, which has no try/except around it).
+    if include_github_contract and not github_token:
+        msg = (
+            "include_github_contract=True (network-enabled GitHub delivery) "
+            "requires an explicit GitHub credential binding via github_token, "
+            "and none was supplied "
+            f"({'omitted' if github_token is None else 'resolved to an EMPTY string'}). "
+            "Refusing to spawn a network-enabled child with no scoped "
+            "identity — that silent fallback to the daemon's ambient "
+            "GITHUB_TOKEN/GH_TOKEN is exactly what let a PR land under the "
+            "operator's own account instead of the agent's. Provision a "
+            "scoped PAT for this dispatch before retrying; never proceed "
+            "unauthenticated or on keyring fallback."
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ateles#109 — per-agent GitHub identity on a NON-network-enabled
+    # dispatch (e.g. a Neotoma-only task that still wants `gh` calls
+    # attributed correctly under the requesting agent). Same
+    # explicit-empty-fails-closed contract as above: a caller that passes
+    # github_token="" (requested but resolved EMPTY, distinct from not
+    # requested at all — see the subprocess_env block below) must not fall
+    # through to the daemon's ambient identity either.
+    if not include_github_contract and github_token == "":
+        msg = (
+            "github_token was explicitly requested for this dispatch but "
+            "resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
+            "ATELES_AGENT_PAT, NEOTOMA_AGENT_PAT, or GITHUB_TOKEN configured "
+            "for this agent/repo). Refusing to spawn the child with the "
+            "daemon's ambient GitHub identity — that silent fallback is "
+            "exactly what let a PR land under the operator's own account "
+            "instead of the agent's. Provision the missing PAT before "
+            "retrying; never proceed unauthenticated or on keyring fallback."
         )
         log.error(f"[apis] {skill} dispatch refused — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
@@ -1814,37 +1888,19 @@ async def _run_skill_once(
         # frontier OAuth credential so it cannot be sent there.
         local_provider.apply_env(subprocess_env, local_cfg)
 
-    # ateles#109 — per-agent GitHub identity: when the caller resolved a
-    # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),
-    # override both GITHUB_TOKEN and GH_TOKEN so the child's `gh` calls
-    # authenticate as that agent's own account.  When github_token is None
-    # (all SSE task-path and non-GitHub call sites), this block is skipped and
-    # the child inherits the daemon's ambient tokens unchanged — exact
-    # current behaviour, no regression.
-    #
-    # github_token == "" (requested but resolved EMPTY) is a distinct, more
-    # dangerous case and must NOT take the same silent-skip path as None.
-    # `_token_for_agent_on_repo`/`_token_for_repo` return "" (not None) when
-    # every configured PAT env var is unset — and a truthiness check here
-    # (`if github_token:`) previously treated "" identically to "not
-    # requested", so the child silently inherited the daemon's AMBIENT
-    # environment instead. On a host where `gh` has an active keyring
-    # session, that ambient identity is the operator's own personal GitHub
-    # account, not the agent's — this produced a PR opened as
-    # markmhendrickson instead of the intended agent identity, with no error
-    # anywhere in the path. Fail loudly instead of falling back.
-    if github_token is not None:
-        if not github_token:
-            raise RuntimeError(
-                "[apis] github_token was explicitly requested for this dispatch "
-                "but resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
-                "ATELES_AGENT_PAT, NEOTOMA_AGENT_PAT, or GITHUB_TOKEN configured "
-                "for this agent/repo). Refusing to spawn the child with the "
-                "daemon's ambient GitHub identity — that silent fallback is "
-                "exactly what let a PR land under the operator's own account "
-                "instead of the agent's. Provision the missing PAT before "
-                "retrying; never proceed unauthenticated or on keyring fallback."
-            )
+    # ateles#109 / ateles#590 (PR #1334): inject the resolved per-agent GitHub
+    # identity, if any. The fail-closed refusals for a network-enabled
+    # dispatch with no token, and for an explicitly-empty token on any
+    # dispatch, already returned a SkillResult in the preflight block above —
+    # by this point github_token is either None (not requested; ambient env
+    # passes through unchanged, exact pre-#109 behaviour) or a non-empty
+    # scoped string to inject. When include_github_contract is True, the
+    # ambient GITHUB_TOKEN/GH_TOKEN are stripped first so no path leaves the
+    # daemon's own identity in a network-enabled child's env.
+    if include_github_contract:
+        subprocess_env.pop("GITHUB_TOKEN", None)
+        subprocess_env.pop("GH_TOKEN", None)
+    if github_token:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 

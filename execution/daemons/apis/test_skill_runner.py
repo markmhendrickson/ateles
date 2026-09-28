@@ -1390,16 +1390,23 @@ class TestGithubTokenInjection:
             ),
             patch("os.path.exists", return_value=False),
         ):
-            with pytest.raises(RuntimeError, match="EMPTY string"):
-                self._run(
-                    skill_runner.run_skill(
-                        "gryllus",
-                        "work prompt",
-                        role="gryllus",
-                        task_entity_id="ent_abc",
-                        github_token="",
-                    )
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    github_token="",
                 )
+            )
+
+        # ateles#590 security repair (PR #1334): this refusal is a failed
+        # SkillResult, not a raised exception — every caller of run_skill
+        # (including _run_provider_attempts's unguarded `await attempt(...)`)
+        # expects failures to come back as a SkillResult it can classify,
+        # cool down, and fail over on.
+        assert result.ok is False
+        assert "EMPTY string" in (result.error or "")
 
         # The subprocess must never have been spawned under the ambient
         # identity — the failure happens before exec, not after.
@@ -1538,6 +1545,12 @@ class TestSwarmGithubContractInjection:
                     role="gryllus",
                     task_entity_id="ent_abc",
                     include_github_contract=True,
+                    # A network-enabled (include_github_contract=True) run
+                    # requires an explicit scoped credential — see
+                    # TestGithubDeliveryCredentialBoundary below. This test is
+                    # about prompt content, not the credential contract, so it
+                    # supplies one to stay on the success path.
+                    github_token="scoped-test-token",
                 )
             )
 
@@ -1638,6 +1651,9 @@ class TestSwarmGithubContractInjection:
                     role="gryllus",
                     task_entity_id="ent_abc",
                     include_github_contract=True,
+                    # See TestGithubDeliveryCredentialBoundary — a
+                    # network-enabled run requires an explicit token.
+                    github_token="scoped-test-token",
                 )
             )
 
@@ -1656,6 +1672,263 @@ class TestSwarmGithubContractInjection:
             if "degraded_generic_subagent" in (call.kwargs.get("output_summary") or "")
         ]
         assert len(degraded_calls) >= 1
+
+
+# ── ateles#590 security repair (PR #1334): GitHub delivery credential boundary ─
+
+
+class TestGithubDeliveryCredentialBoundary:
+    """A network-enabled dispatch (include_github_contract=True) must never
+    silently keep the daemon's ambient GITHUB_TOKEN/GH_TOKEN.
+
+    Before this fix, `github_token=None` (the default for every caller) left
+    the spawned child's env exactly as `_subscription_only_env` copied it from
+    `os.environ` — ambient GitHub identity intact. That was masked while
+    `include_github_contract=True` was reachable only from swarm_dispatch.py
+    call sites, which always resolve and pass a `github_token` string. Once
+    `dispatch_role.py` (#590) could request the contract on its own and omit
+    the token, the silent-inherit path became reachable. These tests exercise
+    the real `run_skill` -> `_run_skill_once` -> provider-command construction
+    path, mocking only the subprocess boundary (`asyncio.create_subprocess_exec`)
+    — not `_run_skill_once` itself — so they prove the actual env dict handed
+    to the child, not a stand-in for it.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _capture_env_fixture(self):
+        captured_env: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        return captured_env, fake_exec
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_network_enabled_omitted_token_refuses_before_spawn(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """github_token omitted (None) + include_github_contract=True must
+        return a failed SkillResult before any child is spawned, even with an
+        ambient GH identity set in the daemon's own environment. This is a
+        preflight refusal — a failed SkillResult, not a raised exception —
+        matching every other refusal in _run_skill_once, since
+        _run_provider_attempts's `await attempt(selected)` has no try/except
+        around it and would otherwise let this escape as an unhandled
+        exception with no failover/cooldown/notification."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env, fake_exec = self._capture_env_fixture()
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "commit, push, open the PR",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                )
+            )
+
+        assert result.ok is False
+        assert "explicit GitHub credential" in (result.error or "")
+        assert captured_env == {}, "no child process may be spawned on refusal"
+        # This is a PREFLIGHT refusal: it must return before the Stage 2
+        # "dispatch start" harness_event write, or a refused dispatch leaves
+        # an audit row claiming a subprocess started that never did — a
+        # phantom in-flight entry no later write ever corrects.
+        mock_write_harness.assert_not_called()
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_network_enabled_empty_token_refuses_before_spawn(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """github_token explicitly resolved to "" must refuse identically to
+        omission — a caller-side resolution failure must not read as opt-out."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env, fake_exec = self._capture_env_fixture()
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "commit, push, open the PR",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                    github_token="",
+                )
+            )
+
+        assert result.ok is False
+        assert "explicit GitHub credential" in (result.error or "")
+        assert captured_env == {}, "no child process may be spawned on refusal"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_network_enabled_explicit_token_reaches_child_env_and_strips_ambient(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """An explicitly supplied scoped token must be the ONLY GitHub identity
+        the child sees — the ambient daemon value must not survive alongside
+        it or leak through under a different key."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env, fake_exec = self._capture_env_fixture()
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "commit, push, open the PR",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                    github_token="scoped-delivery-token",
+                )
+            )
+
+        assert result.ok
+        assert captured_env["GITHUB_TOKEN"] == "scoped-delivery-token"
+        assert captured_env["GH_TOKEN"] == "scoped-delivery-token"
+        assert captured_env["GITHUB_TOKEN"] != "ambient-operator-token"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_non_network_default_dispatch_keeps_ambient_identity_unchanged(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """A dispatch that never requests the GitHub contract (the ordinary
+        SSE task-path default) must be byte-identical to pre-fix behaviour:
+        no refusal, ambient GH identity passes through unmolested, no
+        network flag on the provider command."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env, fake_exec = self._capture_env_fixture()
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "read-only status check",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        assert result.ok
+        assert captured_env["GITHUB_TOKEN"] == "ambient-operator-token"
+        assert captured_env["GH_TOKEN"] == "ambient-operator-token"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_network_dispatch_does_not_leak_scoped_token_into_next_ordinary_run(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """A scoped token supplied for one delivery dispatch must not persist
+        into a SUBSEQUENT, unrelated non-delivery dispatch in the same
+        process — `_subscription_only_env` must read fresh from `os.environ`
+        each call rather than caching or mutating it in place."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        first_env, first_exec = self._capture_env_fixture()
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=first_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "commit, push, open the PR",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                    github_token="scoped-delivery-token",
+                )
+            )
+        assert first_env["GITHUB_TOKEN"] == "scoped-delivery-token"
+
+        second_env, second_exec = self._capture_env_fixture()
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=second_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "ordinary follow-up task",
+                    role="gryllus",
+                    task_entity_id="ent_def",
+                )
+            )
+        assert second_env["GITHUB_TOKEN"] == "ambient-operator-token"
+        assert second_env["GITHUB_TOKEN"] != "scoped-delivery-token"
+        assert second_env["GH_TOKEN"] != "scoped-delivery-token"
 
 
 # ── Phase 1 / Layer A: tightened attribution spec (neotoma#1686 follow-up) ───
