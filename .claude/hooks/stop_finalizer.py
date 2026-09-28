@@ -71,27 +71,38 @@ def main() -> int:
     else:
         status = "violated"
 
-    # UX finding (PR #1298 round 4): a missing-credentials warning written
-    # only to stderr is invisible on a successful Stop — the harness does
-    # not feed stderr back into the session, and a normal integral/exempt
-    # Stop otherwise prints nothing at all, so the operator never sees it.
-    # On this (non-blocking) path, present the SAME notice via the harness's
-    # `systemMessage` JSON field BEFORE calling emit_harness_event, and mark
-    # delivery only after the stdout print itself succeeds — so a failed
-    # presentation attempt does not consume the one-shot per-session notice
-    # (the next Stop gets another chance), and emit_harness_event's own
-    # stderr warning (checked first, same dedup state) is skipped once this
-    # print has actually landed, rather than the notice reaching both
-    # surfaces for the same session.
-    if status != "violated" and not credentials_warning_already_delivered(session_id):
-        base_url, token = neotoma_credentials()
-        if not base_url or not token:
-            print(json.dumps({
-                "systemMessage": missing_credentials_warning_text("session-integrity"),
-            }))
-            mark_credentials_warning_delivered(session_id)
+    # UX finding (PR #1298 round 4, then round 5): a missing-credentials
+    # warning written only to stderr is invisible on a Stop — the harness
+    # does not feed stderr back into the session — so the operator never
+    # sees it. Round 4 fixed this for the non-blocking (exempt/integral)
+    # path only; round 5 found that gating on `status != "violated"` routed
+    # AROUND the exact highest-stakes case the original audit
+    # (ent_b66293f0dcc8c887d4fdbeae) was about: a write-bearing, non-integral
+    # session that also has no Neotoma credentials. On that path the
+    # operator saw only the BLOCK reason, never the credentials notice.
+    #
+    # Fix: compute the notice text unconditionally (regardless of status),
+    # call emit_harness_event() BEFORE any stdout write (round 5: a failed
+    # print() must never skip audit emission — that was the whole point of
+    # this PR), then merge the notice into whichever single JSON object this
+    # invocation prints — `systemMessage` alone on a clean stop, or
+    # `systemMessage` alongside `decision`/`reason` on a block — so exactly
+    # one JSON line reaches stdout per invocation either way. Delivery is
+    # marked only after that single print succeeds, so a failed presentation
+    # attempt does not consume the one-shot per-session notice.
+    base_url, token = neotoma_credentials()
+    credentials_missing = not base_url or not token
+    notice_pending = credentials_missing and not credentials_warning_already_delivered(session_id)
+    system_message = (
+        missing_credentials_warning_text("session-integrity") if notice_pending else None
+    )
 
-    emit_harness_event(session_id, summary, status)
+    # Suppress emit_harness_event's own stderr warning exactly when this
+    # function has decided to present the SAME notice itself via
+    # systemMessage below — otherwise both fire for one invocation (the
+    # stderr write happens synchronously inside emit_harness_event, before
+    # this function's own print further down).
+    emit_harness_event(session_id, summary, status, suppress_stderr_warning=notice_pending)
 
     # /end convergence (task-spine plan, task #3): a substantive session that
     # stored no learning artifact is nudged to run /end (which captures turns +
@@ -104,6 +115,9 @@ def main() -> int:
                 "reminder: this session captured no learning artifact — consider "
                 "running /end to record learnings and finalize the plan."
             )
+        if system_message is not None:
+            print(json.dumps({"systemMessage": system_message}))
+            mark_credentials_warning_delivered(session_id)
         return 0
 
     reasons = []
@@ -121,11 +135,22 @@ def main() -> int:
 
     if not ENFORCE:
         log(f"WARN (not enforcing): {detail}")
+        if system_message is not None:
+            print(json.dumps({"systemMessage": system_message}))
+            mark_credentials_warning_delivered(session_id)
         return 0
 
-    # BLOCK mode: prevent a clean stop.
-    print(json.dumps({"decision": "block", "reason": detail}))
+    # BLOCK mode: prevent a clean stop. Merge the credentials notice into
+    # the SAME JSON object as the block decision — this is the exact
+    # write-bearing + missing-credentials case round 5 found unreachable
+    # under the old `status != "violated"` gate.
+    payload = {"decision": "block", "reason": detail}
+    if system_message is not None:
+        payload["systemMessage"] = system_message
+    print(json.dumps(payload))
     sys.stderr.write(detail + "\n")
+    if system_message is not None:
+        mark_credentials_warning_delivered(session_id)
     return 2
 
 

@@ -515,6 +515,92 @@ class TestMissingCredentialOperatorPresentation:
         payload = json.loads(capsys.readouterr().out)
         assert "audit emission is being skipped" in payload["systemMessage"]
 
+    def test_failed_stdout_print_does_not_skip_audit_emission(self, monkeypatch, capsys):
+        """Round 5: emit_harness_event must run BEFORE the systemMessage print,
+        so a failed print (the case above) does not also silently skip the
+        harness_event audit row this whole PR exists to make reliable —
+        that would just move the original silent-skip bug rather than fix
+        it. Spies on emit_harness_event via si to prove it was actually
+        invoked even though the subsequent print raises.
+        """
+        calls = []
+        monkeypatch.setattr(
+            sf, "emit_harness_event",
+            lambda *a, **kw: calls.append((a, kw)),
+        )
+
+        def _broken_print(*args, **kwargs):
+            raise OSError("synthetic stdout failure")
+
+        monkeypatch.setattr(builtins, "print", _broken_print)
+        with pytest.raises(OSError, match="synthetic stdout failure"):
+            self._run_stop(monkeypatch, "sess-emit-before-print")
+
+        assert len(calls) == 1
+
+    def test_violated_and_enforced_merges_notice_into_block_payload_not_stderr(
+        self, monkeypatch, capsys
+    ):
+        """Round 5 planted-red: the round-4 fix gated systemMessage on
+        `status != "violated"`, so a write-bearing session with no bound
+        plan/task AND missing credentials — the exact scenario audit
+        ent_b66293f0dcc8c887d4fdbeae was filed over — never got the visible
+        notice; only the stderr-only fallback fired, which per this PR's own
+        stated rationale the harness does not surface. Fixed by merging
+        systemMessage into the SAME stdout JSON object as the block decision.
+        """
+        monkeypatch.setattr(sf, "ENFORCE", True)
+        monkeypatch.setattr(
+            sf, "read_hook_input",
+            lambda: {"session_id": "sess-violated-enforced", "transcript_path": "unused"},
+        )
+        monkeypatch.setattr(
+            sf, "scan_transcript",
+            lambda _: {
+                "turns": 1, "wrote_domain": True, "bound_plan": False,
+                "bound_task": False, "captured_learning": False,
+                "write_types": {"task"},
+            },
+        )
+        monkeypatch.setattr(sf, "load_state", lambda _: {})
+
+        assert sf.main() == 2
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert payload["decision"] == "block"
+        assert "audit emission is being skipped" in payload["systemMessage"]
+        # Not duplicated onto stderr by emit_harness_event_raw's own default
+        # warning path — stop_finalizer.py suppresses it and presents once.
+        assert "audit emission is being skipped" not in captured.err
+
+    def test_violated_warn_mode_also_merges_notice_into_system_message(
+        self, monkeypatch, capsys
+    ):
+        """Same gap, WARN (non-enforcing) mode: a violated session that is
+        not blocking (ATELES_SESSION_INTEGRITY_ENFORCE unset) still printed
+        nothing at all pre-round-5 other than a stderr WARN line — the
+        credentials notice must reach systemMessage here too, not only on
+        the ENFORCE=True block path.
+        """
+        monkeypatch.setattr(sf, "ENFORCE", False)
+        monkeypatch.setattr(
+            sf, "read_hook_input",
+            lambda: {"session_id": "sess-violated-warn", "transcript_path": "unused"},
+        )
+        monkeypatch.setattr(
+            sf, "scan_transcript",
+            lambda _: {
+                "turns": 1, "wrote_domain": True, "bound_plan": False,
+                "bound_task": False, "captured_learning": False,
+                "write_types": {"task"},
+            },
+        )
+        monkeypatch.setattr(sf, "load_state", lambda _: {})
+
+        assert sf.main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "audit emission is being skipped" in payload["systemMessage"]
+
 
 def test_missing_audit_credentials_do_not_disable_stop_enforcement(monkeypatch, capsys):
     """Audit transport and the local enforcement decision are independent.
@@ -522,6 +608,17 @@ def test_missing_audit_credentials_do_not_disable_stop_enforcement(monkeypatch, 
     With no complete Neotoma pair, a positively identified violation must
     still block in enforcement mode even though harness_event emission cannot
     run. This is the observable effect the warning now describes.
+
+    Round 5 (PR #1298): the missing-credentials notice is merged into the
+    SAME stdout JSON object as the block decision on this exact path —
+    write-bearing + non-integral + missing credentials — rather than only
+    reaching stderr. This is the highest-stakes case the original audit
+    (ent_b66293f0dcc8c887d4fdbeae) was about, and round 4's systemMessage
+    fix (gated on `status != "violated"`) never reached it; round 5 closes
+    that gap. The detail/reason text is still ALSO written to stderr
+    (unchanged, existing BLOCK-mode behavior), but the credentials notice
+    itself now lives in `systemMessage` on stdout, not stderr — so this test
+    was rewritten from asserting stderr to asserting the merged payload.
     """
     monkeypatch.setattr(sf, "ENFORCE", True)
     monkeypatch.setattr(
@@ -546,6 +643,12 @@ def test_missing_audit_credentials_do_not_disable_stop_enforcement(monkeypatch, 
     assert sf.main() == 2
 
     captured = capsys.readouterr()
-    assert '"decision": "block"' in captured.out
-    assert "harness_event audit emission is being skipped" in captured.err
+    payload = json.loads(captured.out)
+    assert payload["decision"] == "block"
+    assert "Session integrity violation" in payload["reason"]
+    assert "audit emission is being skipped" in payload["systemMessage"]
     assert "Session integrity violation" in captured.err
+    # The credentials notice itself must not ALSO be written to stderr by
+    # emit_harness_event_raw's own default warning path — stop_finalizer.py
+    # suppresses that and presents it exactly once, via systemMessage.
+    assert "audit emission is being skipped" not in captured.err

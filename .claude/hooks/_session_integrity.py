@@ -206,11 +206,22 @@ def _warn_missing_credentials_once(session_id: str, log_tag: str) -> None:
 
     This is the DEFAULT stderr presentation, used directly by
     `emit_harness_event_raw` (and so by `decision_shape_gate.py`, which has
-    no `systemMessage`-capable surface). `stop_finalizer.py`'s successful-Stop
-    path presents the SAME text via `systemMessage` instead — see
+    no `systemMessage`-capable surface). `stop_finalizer.py` presents the
+    SAME text via `systemMessage` instead — see
     `missing_credentials_warning_text` / `mark_credentials_warning_delivered`
-    — and marks delivery itself rather than going through this function, so
-    the notice is never written to both surfaces for the same session.
+    — and marks delivery itself before calling into this function, so within
+    ONE hook invocation the notice reaches only one surface.
+
+    NOT an atomic cross-process guarantee: `stop_finalizer.py` and
+    `decision_shape_gate.py` are two independent Stop-hook subprocesses
+    (`.claude/settings.json`, same `Stop` matcher) that each do their own
+    read-modify-write of the shared per-session state file with no lock. If
+    both happen to run concurrently on the same missing-credentials session,
+    both can read "not yet delivered" before either writes its mark, and the
+    notice reaches both surfaces for that one session. This degrades to a
+    harmless duplicate notice, never a lost one — the failure mode this
+    dedup exists to prevent is silence, not a double print — so it is left
+    unfixed rather than adding file locking for a cosmetic duplicate.
     """
     if credentials_warning_already_delivered(session_id):
         return
@@ -414,6 +425,16 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     `except Exception` below — so a redirecting endpoint degrades to "audit
     emission failed, non-fatal" exactly like any other transport failure,
     never a followed cross-origin request.
+
+    Same fix, same bug class, as `_RefuseRedirect` in
+    `lib/daemon_runtime/policy_skill_renderer.py` (ateles#1268 round 3,
+    Falco security) — that module's own docstring cites it as precedent.
+    Not imported from here: `.claude/hooks/*.py` is deliberately stdlib-only
+    with no imports from `lib/` (see this file's module docstring), so the
+    two Neotoma-bearer-token callers in this checkout each carry their own
+    ~10-line copy rather than share a module across that boundary. If a
+    third caller needs this, that is the trigger to extract a genuinely
+    shared, dependency-free helper both sides can import.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802 - stdlib API
@@ -435,7 +456,7 @@ urllib.request.install_opener(urllib.request.build_opener(_NoRedirectHandler))
 # ---------------------------------------------------------------------------
 def emit_harness_event_raw(
     idempotency_slug: str, entity_fields: dict, log_tag: str = "harness-event",
-    session_id: str = "",
+    session_id: str = "", suppress_stderr_warning: bool = False,
 ) -> None:
     """POST one `harness_event` entity to Neotoma. Shared by every Stop hook
     in this checkout that emits an audit row — `emit_harness_event` below
@@ -452,7 +473,13 @@ def emit_harness_event_raw(
     always reading "[session-integrity]" regardless of which hook called in.
     `session_id`, when given, scopes the once-per-session missing-credentials
     warning (see `_warn_missing_credentials_once`) — omitted, the warning is
-    still printed but not deduplicated across calls.
+    still printed but not deduplicated across calls. `suppress_stderr_warning`
+    lets a caller that will present the SAME notice itself on a different
+    surface (`stop_finalizer.py`'s `systemMessage`) skip this function's own
+    stderr write entirely, rather than racing to be the first to mark
+    delivery — the caller remains responsible for calling
+    `mark_credentials_warning_delivered` itself, only after its own
+    presentation actually succeeds.
 
     CREDENTIALS (ateles#1261 follow-up, audit ent_b66293f0dcc8c887d4fdbeae):
     `neotoma_credentials()` checks for a complete environment pair first,
@@ -467,7 +494,8 @@ def emit_harness_event_raw(
     """
     base_url, token = neotoma_credentials()
     if not base_url or not token:
-        _warn_missing_credentials_once(session_id, log_tag)
+        if not suppress_stderr_warning:
+            _warn_missing_credentials_once(session_id, log_tag)
         return
     body = {
         "idempotency_key": f"harness-event-{idempotency_slug}-{int(time.time())}",
@@ -491,7 +519,12 @@ def emit_harness_event_raw(
         with urllib.request.urlopen(req, timeout=8) as resp:
             resp.read()
     except urllib.error.HTTPError as exc:
-        if 300 <= exc.code < 400:
+        # _NoRedirectHandler.redirect_request is the ONLY raise site that
+        # uses this exact message — matching on it (rather than treating
+        # every 3xx as a refused redirect) avoids mislabeling a genuine 3xx
+        # response urllib never routes through redirect_request at all
+        # (e.g. 300, 304, 305, 306 go straight to HTTPErrorProcessor).
+        if "refusing to follow redirect" in str(exc):
             sys.stderr.write(
                 f"[{log_tag}] harness_event emission failed (non-fatal): refused "
                 f"a redirect ({exc.code}) rather than forwarding credentials "
@@ -503,12 +536,17 @@ def emit_harness_event_raw(
         sys.stderr.write(f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n")
 
 
-def emit_harness_event(session_id: str, summary: dict, integrity_status: str) -> None:
+def emit_harness_event(
+    session_id: str, summary: dict, integrity_status: str,
+    suppress_stderr_warning: bool = False,
+) -> None:
     """Write one harness_event recording the session integrity outcome.
 
     Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort: no token or a
     network error is logged and swallowed — never blocks the hook (enforced
-    by emit_harness_event_raw).
+    by emit_harness_event_raw). `suppress_stderr_warning` forwards to
+    `emit_harness_event_raw` — see its docstring; used by `stop_finalizer.py`,
+    which presents the missing-credentials notice itself via `systemMessage`.
     """
     emit_harness_event_raw(f"session-integrity-{session_id}", {
         "event_type": "session_integrity_check",
@@ -520,4 +558,5 @@ def emit_harness_event(session_id: str, summary: dict, integrity_status: str) ->
         "bound_task": summary.get("bound_task", False),
         "captured_learning": summary.get("captured_learning", False),
         "write_types": sorted(summary.get("write_types", []) or []),
-    }, log_tag="session-integrity", session_id=session_id)
+    }, log_tag="session-integrity", session_id=session_id,
+        suppress_stderr_warning=suppress_stderr_warning)
