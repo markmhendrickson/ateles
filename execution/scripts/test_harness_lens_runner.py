@@ -1839,12 +1839,20 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
         ("fatal: could not read Username for 'https://example.invalid/'", "auth"),
         ("authentication_error: invalid api key", "auth"),
         ("quota exceeded; resets in 2 hours", "capacity"),
+        ("codex launch failed: executable unavailable", "launch"),
     ],
-    ids=["https_auth", "username_auth", "authentication_error", "suffixed_capacity"],
+    ids=[
+        "https_auth",
+        "username_auth",
+        "authentication_error",
+        "suffixed_capacity",
+        "launch",
+    ],
 )
 @pytest.mark.parametrize(
     "diagnostic_first", [False, True], ids=["delivery_first", "diagnostic_first"]
 )
+@pytest.mark.parametrize("line_length", [None, 500, 501])
 def test_mixed_delivery_diagnostics_never_reach_parent_recovery_or_publication(
     monkeypatch,
     tmp_path,
@@ -1854,6 +1862,7 @@ def test_mixed_delivery_diagnostics_never_reach_parent_recovery_or_publication(
     diagnostic,
     expected_conflict,
     diagnostic_first,
+    line_length,
 ):
     _install_minimal_lens_worktree(monkeypatch, target)
     harness_router.reset_state()
@@ -1863,6 +1872,9 @@ def test_mixed_delivery_diagnostics_never_reach_parent_recovery_or_publication(
         "fatal: unable to access 'https://github.com/o/r/': "
         "Could not resolve host: github.com"
     )
+    if line_length is not None:
+        diagnostic += " " + "x" * (line_length - len(diagnostic) - 1)
+        assert len(diagnostic) == line_length
     stderr = "\n".join(
         (diagnostic, delivery) if diagnostic_first else (delivery, diagnostic)
     )

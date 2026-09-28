@@ -2751,9 +2751,13 @@ class TestCrossHarnessRouting:
             "Verdict: Authentication failed for is an example phrase.",
         ],
     )
+    @pytest.mark.parametrize("line_length", [None, 501])
     def test_delivery_conflict_classifier_excludes_transcript_prose(
-        self, prose
+        self, prose, line_length
     ) -> None:
+        if line_length is not None:
+            prose += " " + "x" * (line_length - len(prose) - 1)
+            assert len(prose) == line_length
         assert skill_runner._diagnostic_failure_kinds(prose) == set()
 
     def test_capacity_failure_fails_over_to_next_provider(self, monkeypatch) -> None:
@@ -3209,6 +3213,40 @@ class TestDeliveryFailureIsReportedAsFailure:
         assert result.ok is False
         assert result.delivery_failure_reason == ""
         assert result.delivery_failure_reasons
+        assert expected_conflict in result.delivery_failure_conflicts
+        assert "mixed delivery diagnostics" in result.error
+
+    @pytest.mark.parametrize(
+        ("diagnostic", "expected_conflict"),
+        [
+            ("fatal: Authentication failed for 'https://example.invalid/'", "auth"),
+            ("authentication_error: invalid api key", "auth"),
+            ("quota exceeded; resets in 2 hours", "capacity"),
+            ("codex launch failed: executable unavailable", "launch"),
+        ],
+        ids=["https_auth", "authentication_error", "capacity", "launch"],
+    )
+    @pytest.mark.parametrize("line_length", [500, 501])
+    @pytest.mark.parametrize("diagnostic_first", [False, True])
+    def test_long_diagnostic_preserves_delivery_conflict(
+        self, diagnostic, expected_conflict, line_length, diagnostic_first
+    ) -> None:
+        diagnostic += " " + "x" * (line_length - len(diagnostic) - 1)
+        assert len(diagnostic) == line_length
+        lines = (
+            (diagnostic, self.NO_NETWORK)
+            if diagnostic_first
+            else (
+                self.NO_NETWORK,
+                diagnostic,
+            )
+        )
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n", stderr="\n".join(lines).encode()
+        )
+
+        assert result.ok is False
+        assert result.delivery_failure_reason == ""
         assert expected_conflict in result.delivery_failure_conflicts
         assert "mixed delivery diagnostics" in result.error
 

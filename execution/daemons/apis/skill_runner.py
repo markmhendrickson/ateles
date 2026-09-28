@@ -1141,7 +1141,7 @@ def _diagnostic_line_kind(raw_line: str) -> str | None:
     completed verdict that merely discusses the same words is excluded.
     """
     line = raw_line.strip().lower()
-    if not line or len(line) > 500:
+    if not line:
         return None
     if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", line):
         return "launch"
