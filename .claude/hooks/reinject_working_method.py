@@ -61,7 +61,8 @@ and link each by id into the Ateles app, so the operator can open them.
 5. PROCEED ON YOUR RECOMMENDATION rather than stopping to ask. If you asked \
 something and it went unanswered, re-surface it in each reply to the operator \
 until answered. Restate open decisions in full in each reply to the operator, \
-and whenever one changes — never in a turn triggered only by a notification.
+and whenever one changes — never in a turn triggered only by a background-agent \
+or PR notification.
 
 Full role definition: `.claude/skills/ateles/SKILL.md`. Repo-wide constraints \
 are in CLAUDE.md, which Claude Code re-injects from disk on its own."""

@@ -1,6 +1,6 @@
 """Tests for the SessionStart(compact) working-method reinjection hook.
 
-Three assertions, each guarding a distinct failure mode:
+Four assertions, each guarding a distinct failure mode:
 
 1. Happy path — the hook prints the reminder, including the five numbered
    rules, and exits 0. Substrings from REMINDER, not full-string equality,
@@ -13,6 +13,8 @@ Three assertions, each guarding a distinct failure mode:
    registered against a SessionStart matcher that excluded `compact`. Pin
    both halves: the matcher covering `session_start.py` includes `compact`,
    and a dedicated `compact` entry wires `reinject_working_method.py`.
+4. Decision-restatement cadence — the observable reminder carries the settled
+   distinction between replies to the operator and notification-only turns.
 
 Self-review note (2026-09-02, PR #711 round 2): an earlier revision of
 TestFailOpen had two tests claiming to hit "distinct failure points" (patching
@@ -49,6 +51,15 @@ class TestHappyPath:
         assert "[working-method]" in out
         assert "1. DISPATCH" in out
         assert "5. PROCEED" in out
+
+    def test_main_reinjects_decision_restatement_cadence(self, capsys):
+        code = hook.main()
+        out = capsys.readouterr().out
+
+        assert code == 0
+        assert "each reply to the operator" in out
+        assert "whenever one changes" in out
+        assert "background-agent or PR notification" in out
 
 
 # ---------------------------------------------------------------------------
