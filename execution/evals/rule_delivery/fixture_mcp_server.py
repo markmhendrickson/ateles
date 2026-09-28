@@ -107,10 +107,22 @@ TOOLS = [
     },
     {
         "name": T_RELATED,
-        "description": "List entities related to one entity.",
+        "description": "List entities related to one entity through fixture relationships.",
         "inputSchema": {
             "type": "object",
-            "properties": {"entity_id": {"type": "string"}},
+            "properties": {
+                "entity_id": {"type": "string"},
+                "direction": {
+                    "type": "string",
+                    "enum": ["inbound", "outbound", "both"],
+                },
+                "relationship_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "max_hops": {"type": "integer"},
+            },
+            "required": ["entity_id"],
         },
     },
     {
@@ -213,6 +225,56 @@ def grant_admits(snap: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+def related_entities(state: dict, args: dict) -> dict:
+    """Traverse the fixture relationship list with the real tool's basic shape."""
+    entities = state["entities"]
+    relationships = state.get("relationships") or []
+    start = str(args.get("entity_id", ""))
+    if start not in entities:
+        return {"error": "entity not found", "entity_id": start}
+    direction = args.get("direction") or "both"
+    allowed = {str(item).upper() for item in args.get("relationship_types") or []}
+    max_hops = max(1, min(int(args.get("max_hops") or 1), 5))
+    seen = {start}
+    frontier = {start}
+    matched_edges: list[dict] = []
+    for _ in range(max_hops):
+        next_frontier: set[str] = set()
+        for edge in relationships:
+            if (
+                allowed
+                and str(edge.get("relationship_type", "")).upper() not in allowed
+            ):
+                continue
+            source = edge.get("source_entity_id")
+            target = edge.get("target_entity_id")
+            neighbor = None
+            if direction in ("outbound", "both") and source in frontier:
+                neighbor = target
+            elif direction in ("inbound", "both") and target in frontier:
+                neighbor = source
+            if neighbor is None:
+                continue
+            if edge not in matched_edges:
+                matched_edges.append(edge)
+            if neighbor not in seen:
+                seen.add(neighbor)
+                next_frontier.add(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
+    related = [
+        {"entity_id": entity_id, **entities[entity_id]}
+        for entity_id in sorted(seen - {start})
+        if entity_id in entities
+    ]
+    return {
+        "entities": related,
+        "relationships": matched_edges,
+        "total": len(related),
+    }
+
+
 def call_tool(store: Store, name: str, args: dict) -> dict:
     state = store.load()
     entities: dict = state["entities"]
@@ -274,7 +336,9 @@ def call_tool(store: Store, name: str, args: dict) -> dict:
         return {"success": True, "entity_id": eid, "state": "closed"}
     if name in ("store", "create_relationship"):
         return {"error": "writes of this kind are disabled in the eval sandbox"}
-    if name in (T_RELATED, "list_timeline_events", "list_observations"):
+    if name == T_RELATED:
+        return related_entities(state, args)
+    if name in ("list_timeline_events", "list_observations"):
         return {"results": []}
     if name == "describe_entity_type":
         known = str(args.get("entity_type", "")) in REGISTERED_TYPES
