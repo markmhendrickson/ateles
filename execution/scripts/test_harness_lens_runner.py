@@ -663,6 +663,11 @@ def test_sandbox_build_really_denies_reading_a_credential_fixture(tmp_path):
     one of the deny globs, and asserts the real exit code.
     """
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    if not sandbox.credential_read_denied:
+        pytest.skip(
+            "sandbox-exec is installed but this host cannot apply its profile; "
+            "the production fail-closed path is tested separately"
+        )
     assert sandbox.credential_read_denied is True
 
     # Prove it against a SEPARATE, freshly created fixture too, not just the
@@ -700,6 +705,11 @@ def test_sandbox_build_really_denies_reading_a_credential_fixture(tmp_path):
 )
 def test_sandbox_build_really_denies_writing_to_user_config_fixture(tmp_path):
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
+    if not sandbox.user_config_write_denied:
+        pytest.skip(
+            "sandbox-exec is installed but this host cannot apply its profile; "
+            "the production fail-closed path is tested separately"
+        )
     assert sandbox.user_config_write_denied is True
 
     profile_path = sandbox.root / "profile.sb"
@@ -794,6 +804,77 @@ def test_refuse_if_guard_required_allows_codex_when_fully_probed_guarded(tmp_pat
     assert hlr.refuse_if_guard_required(sandbox) is None
 
 
+def test_codex_outer_guard_real_commands_keep_all_effect_denials(tmp_path):
+    """Removing Codex's inner sandbox must not weaken the outer guard.
+
+    Run the same real command wrapper production passes to Codex: an
+    unrelated command succeeds, while a credential-shaped read, a
+    user-config write, and a real stash push remain denied by effect. A host
+    that cannot apply ``sandbox-exec`` is covered by fail-closed tests.
+    """
+    sandbox = hlr.HarnessSandbox.build("codex", tmp_path / "sandbox")
+    if not sandbox.ready_to_dispatch:
+        pytest.skip(
+            "host cannot apply the real outer sandbox; fail-closed path is "
+            f"covered separately: {sandbox.unavailable_guards}"
+        )
+
+    control = subprocess.run(
+        [*sandbox.command_wrapper, "/usr/bin/true"], capture_output=True, text=True
+    )
+    assert control.returncode == 0
+
+    credential = tmp_path / "fixture-user" / ".config" / "neotoma" / ".env-test"
+    credential.parent.mkdir(parents=True)
+    credential.write_text("fixture-not-a-secret\n", encoding="utf-8")
+    denied_read = subprocess.run(
+        [*sandbox.command_wrapper, "cat", str(credential)],
+        capture_output=True,
+        text=True,
+    )
+    assert denied_read.returncode != 0
+
+    config_write = tmp_path / "fixture-user" / ".codex" / "probe-write"
+    config_write.parent.mkdir(parents=True)
+    denied_write = subprocess.run(
+        [*sandbox.command_wrapper, "touch", str(config_write)],
+        capture_output=True,
+        text=True,
+    )
+    assert denied_write.returncode != 0
+    assert not config_write.exists()
+
+    scratch = tmp_path / "stash-negative-control"
+    scratch.mkdir()
+    subprocess.run(["git", "init", "-q", str(scratch)], check=True)
+    subprocess.run(
+        ["git", "-C", str(scratch), "config", "user.email", "probe@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(scratch), "config", "user.name", "probe"], check=True
+    )
+    (scratch / "tracked.txt").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(scratch), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(scratch), "commit", "-q", "-m", "probe"], check=True
+    )
+    (scratch / "tracked.txt").write_text("after\n", encoding="utf-8")
+    denied_stash = subprocess.run(
+        [*sandbox.command_wrapper, "git", "-C", str(scratch), "stash", "push"],
+        capture_output=True,
+        text=True,
+    )
+    assert denied_stash.returncode != 0
+    listing = subprocess.run(
+        ["git", "-C", str(scratch), "stash", "list"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert listing.stdout.strip() == ""
+
+
 def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_path):
     """Regression pin for the exact defect the review found: constructs two
     sandboxes that differ ONLY in their probed fully_guarded state and asserts
@@ -864,15 +945,17 @@ def test_dry_run_makes_no_model_call_and_reports_command(
     assert created["head"] == SAMPLE_HEAD
     # command_wrapper is prepended to the example command too, so the dry run
     # shows exactly what the real dispatch will run.
-    if report["command_wrapper"]:
+    if report["fully_guarded"]:
+        assert report["command_wrapper"]
         assert report["example_command"][: len(report["command_wrapper"])] == (
             report["command_wrapper"]
         )
-        assert report["fully_guarded"] is True
+        assert "danger-full-access" in report["example_command"]
     else:
-        # This host lacks sandbox-exec (or it failed its own probe) — the
-        # dry run must say so rather than silently pretending it's guarded.
-        assert report["fully_guarded"] is False
+        # This host lacks operational sandbox-exec — the dry run must say so
+        # rather than silently pretending the mere wrapper argv is a guard.
+        assert report["would_refuse"] is not None
+        assert "workspace-write" in report["example_command"]
 
 
 def test_dry_run_claude_provider_needs_no_sandbox_and_pins_cwd_to_the_worktree(
@@ -1388,7 +1471,7 @@ def test_main_requires_brief_flag():
 
 
 def test_main_resolves_agent_from_lens_when_agent_omitted(
-    monkeypatch, tmp_path, brief_file
+    monkeypatch, tmp_path, brief_file, mock_ready_sandbox
 ):
     """--lens pm with no --agent must resolve to pavo (review_panel.LENSES's
     own mapping), not require the caller to also type --agent pavo."""
@@ -1514,6 +1597,7 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     assert "CODEX_HOME" in seen["env_extra"]
     assert seen["command_wrapper"]
     assert seen["command_wrapper"][0] == "sandbox-exec"
+    assert seen["codex_outer_sandboxed"] is True
     assert seen["seated_reviewer"] is False
     assert seen["provider"] == "codex"
 

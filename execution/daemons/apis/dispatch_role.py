@@ -210,6 +210,7 @@ async def dispatch(
     env_extra: dict[str, str] | None = None,
     seated_reviewer: bool = False,
     command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -244,6 +245,11 @@ async def dispatch(
     a guard (e.g. a macOS ``sandbox-exec`` profile denying reads of specific
     credential paths) bind onto the real dispatched process rather than
     merely describe an intended mitigation next to code that runs unwrapped.
+
+    ``codex_outer_sandboxed`` accompanies harness_lens_runner's probed
+    ``sandbox-exec`` wrapper. It tells the Codex adapter not to attempt an
+    unsupported nested Seatbelt sandbox; ``run_skill`` fails closed if the
+    flag is supplied without that outer wrapper.
     """
     return await run_skill(
         role,
@@ -256,6 +262,7 @@ async def dispatch(
         env_extra=env_extra,
         seated_reviewer=seated_reviewer,
         command_wrapper=command_wrapper,
+        codex_outer_sandboxed=codex_outer_sandboxed,
     )
 
 

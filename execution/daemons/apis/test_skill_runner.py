@@ -2438,6 +2438,51 @@ class TestCrossHarnessRouting:
         assert b"SYSTEM" in stdin
         assert b"WORK" in stdin
 
+    def test_codex_adapter_avoids_nested_sandbox_only_under_outer_guard(self) -> None:
+        cmd, _ = skill_runner._provider_command(
+            "codex",
+            "/bin/codex",
+            "SYSTEM",
+            "WORK",
+            cwd="/repo",
+            codex_outer_sandboxed=True,
+        )
+        assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
+        assert "workspace-write" not in cmd
+        assert "--add-dir" not in cmd
+
+    def test_codex_outer_sandbox_flag_refuses_without_real_wrapper(self) -> None:
+        result = asyncio.run(
+            skill_runner._run_skill_once(
+                "cicada",
+                "work",
+                provider="codex",
+                command_wrapper=[],
+                codex_outer_sandboxed=True,
+            )
+        )
+        assert result.ok is False
+        assert "requires provider='codex'" in (result.error or "")
+        assert "refusing to disable" in (result.error or "")
+
+    def test_codex_outer_sandbox_flag_refuses_lookalike_wrapper(
+        self, tmp_path
+    ) -> None:
+        lookalike = tmp_path / "sandbox-exec"
+        lookalike.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        lookalike.chmod(0o755)
+        result = asyncio.run(
+            skill_runner._run_skill_once(
+                "cicada",
+                "work",
+                provider="codex",
+                command_wrapper=[str(lookalike), "-f", "profile.sb"],
+                codex_outer_sandboxed=True,
+            )
+        )
+        assert result.ok is False
+        assert "real sandbox-exec" in (result.error or "")
+
     def test_cursor_adapter_uses_headless_agent(self) -> None:
         cmd, stdin = skill_runner._provider_command(
             "cursor",

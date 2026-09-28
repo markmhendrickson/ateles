@@ -1230,6 +1230,7 @@ def _provider_command(
     *,
     cwd: str | None,
     network: bool = False,
+    codex_outer_sandboxed: bool = False,
 ) -> tuple[list[str], bytes | None]:
     """Build one provider's noninteractive command and initial stdin payload.
 
@@ -1237,6 +1238,15 @@ def _provider_command(
     #590 asks for it "without granting blanket network access to every
     dispatch", so it is off by default and the caller turns it on for the
     dispatches whose task actually involves GitHub delivery.
+
+    ``codex_outer_sandboxed`` is reserved for a caller that has already bound
+    a separately probed OS sandbox around the Codex process. In that one case
+    Codex must not install its own nested macOS Seatbelt profile:
+    ``sandbox-exec`` rejects the nested ``sandbox_apply`` operation before any
+    command can run. ``danger-full-access`` here means "no inner Codex
+    sandbox"; the caller's outer sandbox remains the enforcement boundary.
+    `_run_skill_once` refuses this flag unless the real command is wrapped by
+    ``sandbox-exec``.
     """
     if provider == "claude":
         return [binary, "--print", "--append-system-prompt", system_prompt], None
@@ -1251,7 +1261,7 @@ def _provider_command(
         # See the ateles#590 note above _git_roots_for_sandbox: without these
         # two additions a codex child in a linked worktree writes correct code
         # and then cannot commit, push, or open a PR.
-        git_roots = _git_roots_for_sandbox(cwd)
+        git_roots = [] if codex_outer_sandboxed else _git_roots_for_sandbox(cwd)
         add_dir_flags: list[str] = []
         for root in git_roots:
             add_dir_flags += ["--add-dir", root]
@@ -1264,16 +1274,23 @@ def _provider_command(
         # and to the dispatches that need it rather than to all of them (#590:
         # "without granting blanket network access to every dispatch").
         network_flags = (
-            ["-c", "sandbox_workspace_write.network_access=true"] if network else []
+            []
+            if codex_outer_sandboxed
+            else ["-c", "sandbox_workspace_write.network_access=true"]
+            if network
+            else []
         )
-        if network:
+        if network and not codex_outer_sandboxed:
             log.info("[apis] codex sandbox: network enabled for this dispatch")
+        sandbox_mode = (
+            "danger-full-access" if codex_outer_sandboxed else "workspace-write"
+        )
         return (
             [
                 binary,
                 "exec",
                 "--sandbox",
-                "workspace-write",
+                sandbox_mode,
                 *network_flags,
                 *add_dir_flags,
                 "--ephemeral",
@@ -1361,6 +1378,7 @@ async def _run_skill_once(
     cwd: str | None = None,
     owns_pending_gate: bool = False,
     command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -1412,9 +1430,33 @@ async def _run_skill_once(
     unconditionally when given — a caller that only wants it for codex/cursor
     passes ``None`` here for claude. The wrapper itself never needs and is
     never handed credential material; it wraps argv only.
+
+    ``codex_outer_sandboxed`` disables Codex's inner sandbox only after this
+    function verifies that the actual command is wrapped by ``sandbox-exec``.
+    It exists for harness_lens_runner's probed effect-level guard; ordinary
+    Codex dispatches retain ``workspace-write``.
     """
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
+
+    if codex_outer_sandboxed:
+        requested_wrapper = command_wrapper[0] if command_wrapper else ""
+        resolved_wrapper = shutil.which(requested_wrapper) if requested_wrapper else None
+        system_sandbox_exec = shutil.which("sandbox-exec")
+        real_wrapper = bool(
+            resolved_wrapper
+            and system_sandbox_exec
+            and Path(resolved_wrapper).resolve() == Path(system_sandbox_exec).resolve()
+        )
+        if provider != "codex" or not real_wrapper:
+            msg = (
+                "codex_outer_sandboxed requires provider='codex' and a real "
+                "sandbox-exec command wrapper; refusing to disable the inner "
+                "Codex sandbox without the outer enforcement boundary"
+            )
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider
+            )
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
     agent_def = await asyncio.to_thread(_load_agent_def, _role)
@@ -1579,6 +1621,7 @@ async def _run_skill_once(
         prompt,
         cwd=cwd,
         network=include_github_contract,
+        codex_outer_sandboxed=codex_outer_sandboxed,
     )
     if command_wrapper:
         # Prepended to the REAL argv that create_subprocess_exec below will
@@ -2129,12 +2172,17 @@ async def run_skill(
     owns_pending_gate: bool = False,
     seated_reviewer: bool = False,
     command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
     ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
     attempt — see that function's docstring. Unrelated to provider selection;
     it wraps whichever provider's binary ends up chosen.
+
+    ``codex_outer_sandboxed`` is the paired adapter signal for an already
+    probed outer ``sandbox-exec`` wrapper. `_run_skill_once` validates the pair
+    before choosing Codex's no-inner-sandbox mode.
 
     The first candidate is selected with smooth weighted round-robin using the
     operator-supplied headroom estimates. Capacity, authentication, and launch
@@ -2182,6 +2230,7 @@ async def run_skill(
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
             owns_pending_gate=deny_correct, command_wrapper=command_wrapper,
+            codex_outer_sandboxed=codex_outer_sandboxed,
         )
 
     return await _run_provider_attempts(

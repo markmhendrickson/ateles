@@ -65,21 +65,18 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     ``skill_runner._run_skill_once``'s ``command_wrapper`` parameter, added
     specifically so this could bind onto the actual subprocess rather than
     describe an intended mitigation beside code that runs unwrapped.
-    **What this does NOT claim**: ``codex exec --sandbox workspace-write``
-    and ``--add-dir`` (codex's own existing sandbox, already applied by
-    ``skill_runner`` before this script exists) are, per ``codex exec
-    --help`` / ``codex sandbox --help``, WRITE-permission scoping only —
-    they grant additional writable roots and restrict writes outside the
-    workspace; nothing in either ``--help`` output denies a READ of an
-    arbitrary absolute path. An earlier revision of this docstring claimed
-    codex's own sandbox "keeps it from reading arbitrary paths outside that
-    root," which security and content lens review on PR #1308 correctly
-    identified as unsupported by codex's documented semantics — corrected
-    here. The actual read-deny mechanism is the ``sandbox-exec`` profile
-    above, wrapped around the SAME process codex's own sandbox also wraps
-    (the two compose: codex's sandbox still governs writes as before,
-    ``sandbox-exec`` additionally denies the specific reads/writes named
-    above). ``CODEX_HOME``/``HOME`` overrides still relocate each CLI's OWN
+    **What this does NOT claim**: Codex's own ``workspace-write`` sandbox is
+    not the read-deny mechanism. More importantly, macOS does not permit
+    Codex to apply that inner Seatbelt profile while this outer
+    ``sandbox-exec`` profile is already active: the nested operation fails
+    with ``sandbox_apply: Operation not permitted`` before any agent command
+    can run. The runner therefore tells the existing Codex adapter to use
+    ``--sandbox danger-full-access`` for this dispatch only. That name means
+    Codex installs no second sandbox; it does NOT remove the already-bound
+    outer profile, which remains the effect-level enforcement boundary for
+    credential reads, user-config writes, and stash effects. Generic Codex
+    dispatches still use ``workspace-write``. ``CODEX_HOME``/``HOME``
+    overrides still relocate each CLI's OWN
     config store (so the child cannot read the operator's real
     ``~/.codex/config.toml``, whose ``approval_policy = "never"`` and
     per-project trust would be the opposite of safe for an unattended run).
@@ -1123,9 +1120,18 @@ def dry_run_report(
     against `_provider_command` in review, not a silent divergence.
     """
     if provider == "codex":
+        sandbox_mode = (
+            "danger-full-access"
+            if sandbox.fully_guarded and sandbox.command_wrapper
+            else "workspace-write"
+        )
         example_cmd = [
-            "codex", "exec", "--sandbox", "workspace-write",
-            "--add-dir", str(worktree_path),
+            "codex", "exec", "--sandbox", sandbox_mode,
+            *(
+                []
+                if sandbox_mode == "danger-full-access"
+                else ["--add-dir", str(worktree_path)]
+            ),
             "--ephemeral", "--skip-git-repo-check", "--color", "never",
             "--cd", str(worktree_path), "-",
         ]
@@ -1505,6 +1511,9 @@ async def run_one(
                 env_extra=sandbox.env_extra,
                 seated_reviewer=False,  # see module docstring: no MCP grant requested
                 command_wrapper=sandbox.command_wrapper,
+                codex_outer_sandboxed=(
+                    provider == "codex" and bool(sandbox.command_wrapper)
+                ),
             )
         except Exception as dispatch_error:
             stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
