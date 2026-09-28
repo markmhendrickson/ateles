@@ -565,7 +565,7 @@ class TestRequiredLensesAreDerivedNotHandTyped:
         )
         _install_client(monkeypatch, client)
 
-        lenses, required = await target.resolve_lenses(
+        lenses, required, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[]
         )
 
@@ -580,7 +580,7 @@ class TestRequiredLensesAreDerivedNotHandTyped:
         )
         _install_client(monkeypatch, client)
 
-        lenses, required = await target.resolve_lenses(
+        lenses, required, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[]
         )
 
@@ -597,7 +597,7 @@ class TestRequiredLensesAreDerivedNotHandTyped:
         )
         _install_client(monkeypatch, client)
 
-        lenses, _ = await target.resolve_lenses(
+        lenses, _, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=["legal"]
         )
 
@@ -640,7 +640,7 @@ class TestRequiredLensesAreDerivedNotHandTyped:
         )
         _install_client(monkeypatch, client)
 
-        lenses, required = await target.resolve_lenses(
+        lenses, required, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body=f"Closes #{PARENT_ISSUE}", extra_lenses=[]
         )
 
@@ -953,8 +953,10 @@ class TestEmptyRequiredLensSetAlwaysRefuses:
         _install_client(monkeypatch, client)
         _install_app_mint(monkeypatch)
 
-        async def _empty_resolve_lenses(client_, *, repo, pr, pr_body, extra_lenses):
-            return [], []
+        async def _empty_resolve_lenses(
+            client_, *, repo, pr, pr_body, extra_lenses, panel_all=False
+        ):
+            return [], [], []
 
         monkeypatch.setattr(target, "resolve_lenses", _empty_resolve_lenses)
 
@@ -981,8 +983,10 @@ class TestEmptyRequiredLensSetAlwaysRefuses:
 
         monkeypatch.setattr(target, "evaluate_lens", _tracking_evaluate_lens)
 
-        async def _empty_resolve_lenses(client_, *, repo, pr, pr_body, extra_lenses):
-            return [], []
+        async def _empty_resolve_lenses(
+            client_, *, repo, pr, pr_body, extra_lenses, panel_all=False
+        ):
+            return [], [], []
 
         monkeypatch.setattr(target, "resolve_lenses", _empty_resolve_lenses)
 
@@ -1008,7 +1012,7 @@ class TestOtherEmptyOrShrunkLensPaths:
         )
         _install_client(monkeypatch, client)
 
-        lenses, required = await target.resolve_lenses(
+        lenses, required, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[]
         )
 
@@ -1504,22 +1508,24 @@ class TestFindNonRequiredBlocksStaleHeadUnit:
 
 
 @pytest.mark.asyncio
-class TestPanelAllRequiresEverySixLenses:
+class TestPanelAllRequiresEveryBootstrapRosterLens:
     """PR #1303 round-1 incident (Waxwing arch / Pavo pm / Phoenicurus qa /
     Accipiter ux review comments): these fixtures used to be built from
     `_all_clear_comments(list(target.LENS_AGENTS))` — fabricating a clearing
     comment from EVERY registered lens, including `legal`/Buteo, which
-    bootstrap mode's own six-lens roster never dispatches for an ordinary
+    bootstrap mode's own five-lens roster never dispatches for an ordinary
     diff. That made every test in this class validate the code against its
     own (wrong) premise rather than against the actual bootstrap roster —
     "a test that cannot fail on the thing it watches is decoration"
     (CLAUDE.md verification discipline). Fixtures here are now built from
     `target.BOOTSTRAP_PANEL_LENSES` — the named constant the fix itself
     derives from — plus whatever `select_panel` additionally derives for
-    the diff, never from raw `LENS_AGENTS`.
+    the diff, never from raw `LENS_AGENTS`. Operator ruling 2026-09-26
+    (ateles#1317) additionally excludes `content`/Corvus from the roster
+    outright — see TestBootstrapExcludesContent for that behavior.
     """
 
-    async def test_panel_all_derives_the_bootstrap_six_not_all_seven_lens_agents(
+    async def test_panel_all_derives_the_bootstrap_five_not_all_seven_lens_agents(
         self, monkeypatch
     ):
         client = _FakeClient(
@@ -1529,7 +1535,7 @@ class TestPanelAllRequiresEverySixLenses:
         )
         _install_client(monkeypatch, client)
 
-        lenses, required = await target.resolve_lenses(
+        lenses, required, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
         )
 
@@ -1539,7 +1545,7 @@ class TestPanelAllRequiresEverySixLenses:
         # {pm, qa}) — panel_all is an ADDITION on top, exactly like --lenses.
         assert sorted(r.lens for r in required) == ["pm", "qa"]
 
-    async def test_panel_all_apply_approves_when_the_bootstrap_six_all_clear(
+    async def test_panel_all_apply_approves_when_the_bootstrap_five_all_clear(
         self, monkeypatch
     ):
         client = _FakeClient(
@@ -1575,7 +1581,7 @@ class TestPanelAllRequiresEverySixLenses:
         _install_client(monkeypatch, client)
         _install_app_mint(monkeypatch)
 
-        lenses, _ = await target.resolve_lenses(
+        lenses, _, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
         )
         assert "legal" not in lenses, (
@@ -1586,7 +1592,7 @@ class TestPanelAllRequiresEverySixLenses:
 
         code = await target.run(REPO, PR, [], apply=True, panel_all=True)
         assert code == 0, (
-            "a diff where only the bootstrap six are relevant must be "
+            "a diff where only the bootstrap five are relevant must be "
             "approvable under --panel all with NO legal comment at all"
         )
 
@@ -1606,7 +1612,7 @@ class TestPanelAllRequiresEverySixLenses:
         )
         _install_client(monkeypatch, client)
 
-        lenses, required = await target.resolve_lenses(
+        lenses, required, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body="Closes #7", extra_lenses=[], panel_all=True
         )
         assert "legal" in lenses
@@ -1615,10 +1621,10 @@ class TestPanelAllRequiresEverySixLenses:
             "package.json change, not merely as a panel_all addition"
         )
 
-    async def test_panel_all_refuses_when_one_of_the_bootstrap_six_never_commented(
+    async def test_panel_all_refuses_when_one_of_the_bootstrap_five_never_commented(
         self, monkeypatch
     ):
-        present = [lens for lens in target.BOOTSTRAP_PANEL_LENSES if lens != "content"]
+        present = [lens for lens in target.BOOTSTRAP_PANEL_LENSES if lens != "security"]
         client = _FakeClient(
             comments=_all_clear_comments(present),
             check_runs=_green_checks(),
@@ -1654,18 +1660,243 @@ class TestPanelAllRequiresEverySixLenses:
         assert client.posted == []
 
 
+# Files with no diff_patterns/issue_patterns match of their own (so the ONLY
+# reason `select_panel` would seat `content` here is its
+# `forward_looking=True`/`min_changed_files=5` opt-in path on file COUNT
+# alone, not file content) — five files, the exact threshold
+# `Lens.min_changed_files=5` on the `content` lens requires. Verified against
+# the live registry by
+# TestBootstrapExcludesContent.test_five_file_neutral_diff_fixture_actually_derives_content_outside_bootstrap,
+# mirroring how NEUTRAL_FILES is verified above.
+NON_TRIVIAL_NEUTRAL_FILES = [
+    "lib/some_util_a.py",
+    "lib/some_util_b.py",
+    "lib/some_util_c.py",
+    "lib/some_util_d.py",
+    "lib/some_util_e.py",
+]
+
+
+@pytest.mark.asyncio
+class TestBootstrapExcludesContent:
+    """Operator ruling 2026-09-26 (ateles#1317, agent_policy
+    `ent_d0f1a840e549b3b299f62397` amendment): while bootstrap mode is
+    active, Corvus/content must never be dispatched or required by the App
+    approval gate — including when `review_panel.select_panel` would
+    otherwise add it for a non-trivial (>=5 changed files) diff, since
+    `content` is `forward_looking=True` with `min_changed_files=5`. This is a
+    BOOTSTRAP-ONLY exclusion: `content` must still appear in the plain
+    diff-derived floor (`--panel required`, i.e. no `panel_all`), which is
+    exactly what the normal non-bootstrap swarm pipeline
+    (`swarm_dispatch.py`'s canary-lane dispatch) uses via
+    `review_panel.select_panel` directly.
+
+    Red-before-green: before this fix, `resolve_lenses(panel_all=True)` on
+    NON_TRIVIAL_NEUTRAL_FILES returned `content` in `lenses` (unioned in via
+    the OLD `BOOTSTRAP_PANEL_LENSES`, which included it, AND independently
+    surfaced by `derive_required_lenses` itself deriving it via
+    `select_panel`'s file-count opt-in) — reproduced directly against
+    `review_panel.select_panel` in
+    test_five_file_neutral_diff_fixture_actually_derives_content_outside_bootstrap
+    below, which stays green on both old and new code since it exercises
+    the generic non-bootstrap function this fix must NOT change.
+    """
+
+    async def test_five_file_neutral_diff_fixture_actually_derives_content_outside_bootstrap(
+        self,
+    ):
+        """Instrument check (CLAUDE.md "validate the instrument before
+        believing the measurement"): confirms NON_TRIVIAL_NEUTRAL_FILES is
+        genuinely >= the content lens's min_changed_files threshold by
+        calling the live `review_panel.select_panel` directly, so a future
+        change to that threshold cannot make this fixture silently stop
+        proving what it claims to prove."""
+        panel = select_panel(
+            gate_contributors=set(),
+            changed_files=NON_TRIVIAL_NEUTRAL_FILES,
+            max_panel=6,
+        )
+        assert "content" in [lens.lens for lens in panel], (
+            "fixture is not actually non-trivial by review_panel's own "
+            "min_changed_files threshold — this test would pass vacuously"
+        )
+
+    async def test_panel_all_never_requires_content_even_for_a_non_trivial_diff(
+        self, monkeypatch
+    ):
+        """The core fix this PR ships: a >=5-file diff that normally selects
+        content must NOT make content required under bootstrap mode
+        (--panel all), even though it clears review_panel's own opt-in path
+        for the forward-looking content lens."""
+        client = _FakeClient(
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
+            check_runs=_green_checks(),
+            changed_files=NON_TRIVIAL_NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+
+        lenses, required, excluded = await target.resolve_lenses(
+            client,
+            repo=REPO,
+            pr=PR,
+            pr_body="Closes #7",
+            extra_lenses=[],
+            panel_all=True,
+        )
+
+        assert "content" not in lenses, (
+            "bootstrap mode (--panel all) must never require content/Corvus, "
+            "even when select_panel's own file-count opt-in would otherwise "
+            "have derived it for this diff"
+        )
+        # select_panel DID derive content into the diff-derived floor here —
+        # `resolve_lenses` must actively strip it, not merely fail to add it.
+        assert "content" in {r.lens for r in required}, (
+            "the derived floor itself (review_panel.select_panel's own "
+            "output) must still show content was selected, so the fix is "
+            "proven to be an explicit exclusion rather than this fixture "
+            "accidentally not triggering select_panel's opt-in at all"
+        )
+        assert excluded == ["content"], (
+            "resolve_lenses must report content as an lens it actively "
+            "excluded, so the dry-run output can say so rather than "
+            "silently omitting it with no explanation"
+        )
+
+    async def test_panel_all_apply_approves_a_non_trivial_diff_with_no_content_comment(
+        self, monkeypatch
+    ):
+        """End-to-end: --apply must succeed on a >=5-file diff under
+        bootstrap mode with every bootstrap-roster lens clear and NO content/
+        Corvus comment ever posted — content is excluded outright, not
+        merely optional."""
+        client = _FakeClient(
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
+            check_runs=_green_checks(),
+            changed_files=NON_TRIVIAL_NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True, panel_all=True)
+
+        assert code == 0, (
+            "a non-trivial diff must be approvable under --panel all with "
+            "no content/Corvus comment at all"
+        )
+        posted_body = client.posted[0]["json"]["body"]
+        assert "content" not in posted_body
+
+    async def test_dry_run_output_names_content_as_excluded_not_silently_absent(
+        self, monkeypatch, capsys
+    ):
+        """Self-review finding: the dry-run table's 'required lenses' list
+        used to print content as part of the diff-derived floor with no
+        indication it would never be evaluated, reading as an unexplained
+        gap. The printed output must say outright that content was
+        excluded by bootstrap mode, not just omit it from the per-lens
+        table."""
+        client = _FakeClient(
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
+            check_runs=_green_checks(),
+            changed_files=NON_TRIVIAL_NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+
+        await target.run(REPO, PR, [], apply=False, panel_all=True)
+
+        out = capsys.readouterr().out
+        assert "content" in out
+        assert "excluded" in out
+
+    async def test_required_panel_alone_still_derives_content_for_a_non_trivial_diff(
+        self, monkeypatch
+    ):
+        """The non-bootstrap path (--panel required, i.e. no panel_all) is
+        UNCHANGED: content must still appear in the plain diff-derived floor
+        for a >=5-file diff, exactly as the normal swarm pipeline
+        (swarm_dispatch.py's canary-lane dispatch via select_panel directly)
+        would derive it. This is the test that fails if the bootstrap
+        exclusion is ever implemented as a change to
+        review_panel.select_panel or derive_required_lenses instead of
+        resolve_lenses's panel_all-only filter."""
+        client = _FakeClient(
+            comments=_all_clear_comments(["pm", "qa", "content"]),
+            check_runs=_green_checks(),
+            changed_files=NON_TRIVIAL_NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        lenses, required, _ = await target.resolve_lenses(
+            client,
+            repo=REPO,
+            pr=PR,
+            pr_body="Closes #7",
+            extra_lenses=[],
+            panel_all=False,
+        )
+
+        assert "content" in lenses, (
+            "outside bootstrap mode (--panel required), content must still "
+            "be derivable for a non-trivial diff — this exclusion is "
+            "bootstrap-only"
+        )
+        assert "content" in {r.lens for r in required}
+
+        code = await target.run(REPO, PR, [], apply=True, panel_all=False)
+        assert code == 0, (
+            "with content actually clear on this head, the required-panel "
+            "path must approve exactly as it did before this fix"
+        )
+
+    async def test_explicit_lenses_content_is_still_blocked_under_panel_all(
+        self, monkeypatch
+    ):
+        """A caller cannot route around the exclusion via --lenses content
+        while --panel all (bootstrap default) is active — the exclusion
+        applies regardless of how content's addition was requested."""
+        client = _FakeClient(
+            comments=_all_clear_comments(sorted(target.BOOTSTRAP_PANEL_LENSES)),
+            check_runs=_green_checks(),
+            changed_files=NEUTRAL_FILES,
+        )
+        _install_client(monkeypatch, client)
+
+        lenses, _, excluded = await target.resolve_lenses(
+            client,
+            repo=REPO,
+            pr=PR,
+            pr_body="Closes #7",
+            extra_lenses=["content"],
+            panel_all=True,
+        )
+        assert "content" not in lenses
+        assert excluded == ["content"], (
+            "an explicit --lenses content request dropped by the bootstrap "
+            "exclusion must be reported back, not silently discarded with "
+            "no trace"
+        )
+
+
 class TestBootstrapPanelLensesConstant:
     """Pins the constant itself against the exact incident: it must be the
-    bootstrap roster (six lenses, no legal), never re-widened back to
-    `LENS_AGENTS` (seven) by a future edit with no failing test to catch it."""
+    bootstrap roster (five lenses, no legal, no content), never re-widened
+    back to `LENS_AGENTS` (seven) by a future edit with no failing test to
+    catch it. Operator ruling 2026-09-26 (ateles#1317) excludes Corvus/
+    content from bootstrap mode outright; see TestBootstrapExcludesContent
+    below for the exclusion behavior itself."""
 
-    def test_bootstrap_panel_is_exactly_six_lenses(self):
+    def test_bootstrap_panel_is_exactly_five_lenses(self):
         assert target.BOOTSTRAP_PANEL_LENSES == frozenset(
-            {"pm", "arch", "ux", "qa", "security", "content"}
+            {"pm", "arch", "ux", "qa", "security"}
         )
 
     def test_bootstrap_panel_excludes_legal(self):
         assert "legal" not in target.BOOTSTRAP_PANEL_LENSES
+
+    def test_bootstrap_panel_excludes_content(self):
+        assert "content" not in target.BOOTSTRAP_PANEL_LENSES
 
     def test_bootstrap_panel_is_a_strict_subset_of_lens_agents(self):
         """Every bootstrap lens must still be a real, registered lens — this
@@ -1678,9 +1909,14 @@ class TestBootstrapPanelLensesConstant:
         `resolve_lenses` does internally, its panel_all output must never
         contain a lens outside BOOTSTRAP_PANEL_LENSES unless select_panel
         itself derived it for the diff. Asserted against the CONSTANT, not
-        against LENS_AGENTS echoed back at itself."""
+        against LENS_AGENTS echoed back at itself. `content` is excluded for
+        a stronger reason than `legal` (see TestBootstrapExcludesContent) but
+        both are, today, outside the bootstrap roster."""
         non_bootstrap = frozenset(target.LENS_AGENTS) - target.BOOTSTRAP_PANEL_LENSES
-        assert non_bootstrap == frozenset({"legal"})
+        assert non_bootstrap == frozenset({"legal", "content"})
+
+    def test_bootstrap_excluded_lenses_is_exactly_content(self):
+        assert target.BOOTSTRAP_EXCLUDED_LENSES == frozenset({"content"})
 
 
 # ── ux finding on PR #1303: a missing lens's reason must say WHICH lens and ─
@@ -1749,7 +1985,7 @@ class TestMissingLensReasonIsActionable:
         # Re-run and capture the outcomes directly via resolve_lenses +
         # evaluate_lens, mirroring exactly what run() does, so the test
         # reads the SAME reason text a real dry run would print.
-        lenses, required = await target.resolve_lenses(
+        lenses, required, _ = await target.resolve_lenses(
             client, repo=REPO, pr=PR, pr_body="", extra_lenses=[], panel_all=True
         )
         floor_names = {r.lens for r in required}
@@ -1819,3 +2055,63 @@ class TestPanelAllDefault:
         target.main()
 
         assert parser_args == [False]
+
+
+# ── ateles#1326: the standard harness attribution footer does not break ────
+# ── a real bootstrap-lens gate comment read through evaluate_lens ───────────
+#
+# `evaluate_lens` calls `lens_own_verdict`/`sign_off_is_warranted` directly on
+# `comment.get("body")` — the bytes already live on GitHub — so this is the
+# dry-run surface Pavo's spec names: "approve_pr_as_app.py's dry run is run
+# ... against all five bootstrap lens comment shapes (pm/ux/arch/qa/security)
+# carrying the real footer, and each resolves to its posted verdict with zero
+# comment edits."
+
+_REAL_FOOTER = "\n\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)\n"
+
+BOOTSTRAP_LENS_AGENTS = {
+    "pm": "pavo",
+    "ux": "accipiter",
+    "arch": "waxwing",
+    "qa": "phoenicurus",
+    "security": "falco",
+}
+
+
+@pytest.mark.asyncio
+class TestEvaluateLensToleratesTheRealHarnessFooter:
+    @pytest.mark.parametrize("lens,agent", sorted(BOOTSTRAP_LENS_AGENTS.items()))
+    async def test_each_bootstrap_lens_comment_with_the_real_footer_resolves_signed_off(
+        self, lens, agent
+    ):
+        body = _lens_comment_body(lens, agent) + _REAL_FOOTER
+        client = _FakeClient(comments=[_comment(1, body)], check_runs=_green_checks())
+        outcome = await target.evaluate_lens(
+            client,
+            repo=REPO,
+            pr=PR,
+            head_sha=HEAD,
+            comments=[_comment(1, body)],
+            lens=lens,
+            diff_derived=True,
+        )
+        assert outcome.head_matched is True
+        assert outcome.verdict == "signed_off"
+        assert outcome.passed is True
+
+    async def test_a_footer_bearing_comment_with_a_blocking_finding_still_fails(self):
+        body = _lens_comment_body(
+            "arch", "waxwing", verdict="REQUEST_CHANGES",
+            extra="[BLOCKING] layering: x",
+        ) + _REAL_FOOTER
+        outcome = await target.evaluate_lens(
+            _FakeClient(comments=[_comment(1, body)], check_runs=_green_checks()),
+            repo=REPO,
+            pr=PR,
+            head_sha=HEAD,
+            comments=[_comment(1, body)],
+            lens="arch",
+            diff_derived=True,
+        )
+        assert outcome.passed is False
+        assert outcome.verdict != "signed_off"
