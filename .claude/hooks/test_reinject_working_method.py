@@ -57,9 +57,9 @@ class TestHappyPath:
         out = capsys.readouterr().out
 
         assert code == 0
-        assert "each reply to the operator" in out
-        assert "whenever one changes" in out
-        assert "background-agent or PR notification" in out
+        assert "each reply to a message the operator actually sent" in out
+        assert "any turn where a decision is new or changed" in out
+        assert "notification turn where no decision changed" in out
 
 
 # ---------------------------------------------------------------------------

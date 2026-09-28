@@ -60,9 +60,10 @@ in the issue, PR or commit message.
 and link each by id into the Ateles app, so the operator can open them.
 5. PROCEED ON YOUR RECOMMENDATION rather than stopping to ask. If you asked \
 something and it went unanswered, re-surface it in each reply to the operator \
-until answered. Restate open decisions in full in each reply to the operator, \
-and whenever one changes — never in a turn triggered only by a background-agent \
-or PR notification.
+until answered. Restate every open decision in full in each reply to a message \
+the operator actually sent, and on any turn where a decision is new or changed. \
+Omit the decision list and count line only on a background-agent or PR \
+notification turn where no decision changed.
 
 Full role definition: `.claude/skills/ateles/SKILL.md`. Repo-wide constraints \
 are in CLAUDE.md, which Claude Code re-injects from disk on its own."""
