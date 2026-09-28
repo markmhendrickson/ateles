@@ -5,7 +5,7 @@
 
 Every rule `planning_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`planning_model.md`](../planning_model.md) and are not repeated here (decision 66).
 
-12 rules.
+17 rules.
 
 ## [The hierarchy is edges, and a task has one line upward](../planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward)
 
@@ -42,3 +42,11 @@ Every rule `planning_model.md` owns, one entry each: the rule's own statement fr
 ## [Which levels an instance declares, and what it calls them](../planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them)
 
 - **PM-12** — the rule this heading states *[P (decision 57, ruled; the design reads the mark and never a level by name, so no row goes red under any answer); decision 58 is ruled and tested under PM-9's operator case]*
+
+## [Commissioning a planning record drives one dependency-ready frontier](../planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier)
+
+- **PM-13** — commission, pause, resume, and cancel are gated actions whose confirmed effects are one `SUPERSEDES` chain of decisions, never a status *[M]*
+- **PM-14** — the same: the dependency-ready frontier and maximum safe parallelism are derived over `PART_OF`, `DEPENDS_ON`, leases, assignments, grants, metered resources, and budgets *[M]*
+- **PM-15** — the same: continuous planning is the recurring control loop and forever-recurring delivery work blocks terminal completion until its declared final occurrence lands *[M]*
+- **PM-16** — the same: completion requires descendant effect evidence for every `completion_criteria[]`; checkpoints are not evidence; discovered out-of-scope work needs an amendment before admission *[M]*
+- **PM-17** — the same: safe resumption re-derives control, dependencies, leases, confirmations, and idempotency keys; stop is proved completion or confirmed cancellation *[M]*

@@ -48,6 +48,7 @@ def test_failure_and_recovery_transitions():
     assert can_transition("failed", "routed")     # retry
     assert can_transition("failed", "blocked")    # give up
     assert can_transition("blocked", "routed")    # operator remediation
+    assert not can_transition("verified", "failed")  # effect is not retryable
 
 
 def test_terminal_states_are_locked():

@@ -37,8 +37,13 @@ def test_inflight_fresh_vs_stalled():
 
 def test_handsoff_states():
     wd = tw.TaskWatchdog(stall_seconds=3600)
-    for s in ("pending", "done", "verified", "awaiting_approval", "blocked", "declined"):
+    for s in ("pending", "done", "awaiting_approval", "blocked", "declined"):
         assert wd.classify("t", s, 99999) == tw.WatchdogAction.NONE
+
+
+def test_verified_reconciles_instead_of_retrying():
+    wd = tw.TaskWatchdog(stall_seconds=3600)
+    assert wd.classify("t", "verified", 99999) == tw.WatchdogAction.RECONCILE
 
 
 def test_backoff_between_retries():
@@ -97,6 +102,30 @@ def test_sweep_skips_during_backoff(monkeypatch):
 
     counts = asyncio.run(wd.sweep(object(), dispatch_fn))
     assert counts["skipped_backoff"] == 1
+    assert dispatched == []
+
+
+def test_sweep_leaves_unresolved_verified_effect_without_dispatch(monkeypatch):
+    wd = tw.TaskWatchdog(stall_seconds=3600)
+    snapshot = {
+        "status": "verified",
+        "result": (
+            "cicada completed (trigger=approved); "
+            "run_session=ent_task:approved-2; provenance=unverified"
+        ),
+    }
+    monkeypatch.setattr(tw, "_query_tasks", lambda _limit: [("ent_task", snapshot)])
+    monkeypatch.setattr(tw, "_reconcile_completed_task", lambda *_args: False)
+
+    dispatched: list[str] = []
+
+    async def dispatch_fn(task_id, _snapshot, _trigger):
+        dispatched.append(task_id)
+
+    counts = asyncio.run(wd.sweep(object(), dispatch_fn))
+
+    assert counts["reconciled"] == 0
+    assert counts["retried"] == 0
     assert dispatched == []
 
 

@@ -45,6 +45,12 @@
         <string>/Users/markmhendrickson/repos/ateles/.venv</string>
         <key>PYTHONPATH</key>
         <string>/Users/markmhendrickson/repos/ateles/.venv/lib/python3.14/site-packages</string>
+        <!-- Matches ProgramArguments above: the checkout this daemon actually
+             runs from. skill_runner.py's claude-local path refuses rather
+             than reading guard hooks from an unrelated ~/repos/ateles
+             fallback when this is unset (ateles task ent_3564a7be0fa135a6e4c1f5fb). -->
+        <key>ATELES_REPO_PATH</key>
+        <string>/Users/markmhendrickson/repos/ateles</string>
         <!-- GitHub webhook gateway (ateles#80). Secret + tokens come from
              ~/.config/neotoma/.env, loaded by the daemon at startup. -->
         <key>APIS_GITHUB_WEBHOOK_PORT</key>
