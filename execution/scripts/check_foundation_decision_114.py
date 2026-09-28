@@ -228,6 +228,22 @@ _FIELD_OWN_PAREN_RE = re.compile(r"`(?:scope|agent_sub)`\s*(\()", re.I)
 #   now available only while checking an edge entry, never a field claim, and
 #   only when the complete clause states the live restrictive fallback:
 #   agent scope + no edge means no target and therefore no bound agent.
+#
+#   A subsequent QA pass (PR #1321 comment 5877900885) demonstrated a
+#   narrower residual gap in the same family: a single word carrying its
+#   negation morphologically (an "un-" prefix, or a free-standing antonym)
+#   rather than as a separate negation token — "unsuperseded," "unbound,"
+#   "edgeless," "unaffected," "authoritative" — is neither "not"/"no"/
+#   "without"/"lacking" (so `_WEAK_HEDGE_RE` misses it) nor already on the
+#   strong-hedge word list (so only the identical, already-listed
+#   "unimplement*" stem was ever caught). `_MORPHOLOGICAL_NEGATION_RE` closes
+#   the demonstrated instances: a general "un-" + relevant-stem pattern for
+#   any future coinage on the same two stems this checker cares about
+#   (superseded, bound/affected), plus the free-standing antonyms QA's
+#   report named by hand. This remains, like the rest of this list, a
+#   defensive enumeration rather than a closed guarantee — the code comment
+#   above already states that trade-off for `_STRONG_HEDGE_RE` and it holds
+#   here too.
 _STRONG_HEDGE_RE = re.compile(
     r"\b(?:never|isn't|aren't|doesn't|don't|n't|fail(?:s|ed)?\s+to|absent|"
     r"nor|neither|unimplement\w*|(?:in\s+practice|only\s+in\s+theory)|"
@@ -235,7 +251,9 @@ _STRONG_HEDGE_RE = re.compile(
     r"proposed\s+but|rejected|no\s+traversal|not\s+(?:actually|really|yet)|"
     r"kept\s+for\s+historical|does\s+not\s+(?:actually\s+)?(?:honor|carry)|"
     r"hypothetical\w*|illustration\w*|if\s+it\s+existed|in\s+name\s+only|"
-    r"nominal(?:ly)?)\b",
+    r"nominal(?:ly)?|"
+    r"un\w*(?:supersed\w*|bound|affected|resolved|traversed)|"
+    r"edgeless|authoritative)\b",
     re.I,
 )
 _WEAK_HEDGE_RE = re.compile(r"\b(?:not|no|without|lack(?:s|ing)?)\b", re.I)

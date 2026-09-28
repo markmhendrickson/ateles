@@ -1081,6 +1081,105 @@ def test_fails_when_superseded_denial_spoofs_scope_fallback_prefix(
     assert "with no hedge or denial word in it" in problems[0]
 
 
+# --- Red: QA review finding (PR #1321 comment 5877900885) — a single word
+# carrying its negation morphologically ("un-" prefix, or a free-standing
+# antonym) rather than as a separate negation token evaded both hedge lists:
+# it is not "not"/"no"/"without"/"lacking" (`_WEAK_HEDGE_RE`), and neither
+# hedge list previously enumerated it as a denial word. Reproduce the exact
+# strings from that review, on both the edges side and the fields side, with
+# and without a "when scope is" prefix, through the full checker pipeline.
+
+DATA_MODEL_GOVERNS_MORPHOLOGICAL_NEGATION = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (legacy; superseded for an agent-specific rule); `agent_sub` (superseded; read nowhere once the edge resolves) | `GOVERNS` -> `agent` (resolved by traversal; note: this specific row is edgeless); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+DATA_MODEL_SUPERSEDED_MORPHOLOGICAL_NEGATION = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (superseded by the GOVERNS edge; note: when scope is agent, this specific field remains unsuperseded); `agent_sub` | `GOVERNS` -> `agent` (the agent this row binds, resolved by traversal); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+
+def test_fails_when_governs_denial_uses_edgeless(tmp_path: Path) -> None:
+    write_corpus(tmp_path, data_model=DATA_MODEL_GOVERNS_MORPHOLOGICAL_NEGATION)
+
+    problems = decision_114.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "edges column is missing a `GOVERNS`" in problems[0]
+    assert "must carry it as a `;`-separated edge-list entry" in problems[0]
+
+
+def test_fails_when_superseded_denial_uses_unsuperseded(tmp_path: Path) -> None:
+    write_corpus(tmp_path, data_model=DATA_MODEL_SUPERSEDED_MORPHOLOGICAL_NEGATION)
+
+    problems = decision_114.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "does not affirmatively state that it is superseded" in problems[0]
+    assert "with no hedge or denial word in it" in problems[0]
+
+
+def test_fails_when_governs_denial_uses_unbound(tmp_path: Path) -> None:
+    data_model = DATA_MODEL_GOVERNS_MORPHOLOGICAL_NEGATION.replace(
+        "this specific row is edgeless", "this specific row remains unbound"
+    )
+    write_corpus(tmp_path, data_model=data_model)
+
+    problems = decision_114.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "edges column is missing a `GOVERNS`" in problems[0]
+
+
+def test_fails_when_superseded_denial_uses_unaffected(tmp_path: Path) -> None:
+    data_model = DATA_MODEL_SUPERSEDED_MORPHOLOGICAL_NEGATION.replace(
+        "when scope is agent, this specific field remains unsuperseded",
+        "this field is unaffected",
+    )
+    write_corpus(tmp_path, data_model=data_model)
+
+    problems = decision_114.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "does not affirmatively state that it is superseded" in problems[0]
+
+
+def test_fails_when_superseded_denial_uses_authoritative(tmp_path: Path) -> None:
+    data_model = DATA_MODEL_SUPERSEDED_MORPHOLOGICAL_NEGATION.replace(
+        "when scope is agent, this specific field remains unsuperseded",
+        "this field stays authoritative",
+    )
+    write_corpus(tmp_path, data_model=data_model)
+
+    problems = decision_114.check(tmp_path)
+
+    assert len(problems) == 1
+    assert "does not affirmatively state that it is superseded" in problems[0]
+
+
 def test_raises_when_conformance_file_is_absent(tmp_path: Path) -> None:
     write_corpus(tmp_path)
     (tmp_path / "docs" / "foundation" / "conformance.md").unlink()
