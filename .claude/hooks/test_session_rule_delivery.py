@@ -24,6 +24,7 @@ Cases:
   7. session_rule_index.py (SessionStart) records a delivered signature, so
      the FIRST session_rule_delivery.py call after it finds nothing changed.
 """
+
 from __future__ import annotations
 
 import http.server
@@ -41,6 +42,8 @@ HOOK = str(Path(__file__).with_name("session_rule_delivery.py"))
 INDEX_HOOK = str(Path(__file__).with_name("session_rule_index.py"))
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+_ABSENT = object()
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -48,22 +51,35 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _row(entity_id, rule="Do the thing.", applies_when="always", scope="global",
-         agent_sub="", status="active", domain="test", rule_kind="mandatory",
-         title="", last_observation_at="2026-01-01T00:00:00.000Z"):
+def _row(
+    entity_id,
+    rule="Do the thing.",
+    applies_when="always",
+    scope="global",
+    agent_sub="",
+    status="active",
+    domain="test",
+    rule_kind="mandatory",
+    title="",
+    last_observation_at="2026-01-01T00:00:00.000Z",
+    index_line=_ABSENT,
+):
+    snapshot = {
+        "rule": rule,
+        "title": title,
+        "applies_when": applies_when,
+        "scope": scope,
+        "agent_sub": agent_sub,
+        "status": status,
+        "domain": domain,
+        "rule_kind": rule_kind,
+    }
+    if index_line is not _ABSENT:
+        snapshot["index_line"] = index_line
     return {
         "entity_id": entity_id,
         "last_observation_at": last_observation_at,
-        "snapshot": {
-            "rule": rule,
-            "title": title,
-            "applies_when": applies_when,
-            "scope": scope,
-            "agent_sub": agent_sub,
-            "status": status,
-            "domain": domain,
-            "rule_kind": rule_kind,
-        },
+        "snapshot": snapshot,
     }
 
 
@@ -106,8 +122,14 @@ def project_dir():
         yield Path(tmp)
 
 
-def _run(hook: str, cwd: Path, project_dir: Path, session_id: str,
-         base_url: str | None = None, extra_env: dict | None = None):
+def _run(
+    hook: str,
+    cwd: Path,
+    project_dir: Path,
+    session_id: str,
+    base_url: str | None = None,
+    extra_env: dict | None = None,
+):
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "CLAUDE_PROJECT_DIR": str(project_dir),
@@ -159,8 +181,13 @@ class TestMidSessionAdditionInjectedOnce:
         # A new rule appears mid-session.
         handler.rows = [
             _row("ent_a", rule="Rule A.", applies_when="always"),
-            _row("ent_b", rule="Rule B, brand new.", applies_when="doing X",
-                 rule_kind="advisory", title="Do X carefully"),
+            _row(
+                "ent_b",
+                rule="Rule B, brand new.",
+                applies_when="doing X",
+                rule_kind="advisory",
+                title="Do X carefully",
+            ),
         ]
         added = _run(HOOK, REPO_ROOT, project_dir, "sess-2", base_url=base_url)
         assert added.returncode == 0
@@ -180,19 +207,148 @@ class TestChangedRowIsRedelivered:
     def test_updated_timestamp_triggers_reinjection(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
         handler.rows = [
-            _row("ent_c", rule="Original text.", applies_when="doing Y",
-                 rule_kind="advisory", title="Do Y", last_observation_at="2026-01-01T00:00:00Z"),
+            _row(
+                "ent_c",
+                rule="Original text.",
+                applies_when="doing Y",
+                rule_kind="advisory",
+                title="Do Y",
+                last_observation_at="2026-01-01T00:00:00Z",
+            ),
         ]
         baseline = _run(HOOK, REPO_ROOT, project_dir, "sess-3", base_url=base_url)
         assert baseline.returncode == 0
 
         handler.rows = [
-            _row("ent_c", rule="Corrected text.", applies_when="doing Y",
-                 rule_kind="advisory", title="Do Y (revised)", last_observation_at="2026-01-02T00:00:00Z"),
+            _row(
+                "ent_c",
+                rule="Corrected text.",
+                applies_when="doing Y",
+                rule_kind="advisory",
+                title="Do Y (revised)",
+                last_observation_at="2026-01-02T00:00:00Z",
+            ),
         ]
         changed = _run(HOOK, REPO_ROOT, project_dir, "sess-3", base_url=base_url)
         assert changed.returncode == 0
         assert "ent_c" in changed.stdout
+
+
+def _delivered_hash(project_dir: Path, session_id: str) -> str:
+    state_path = project_dir / ".claude" / ".session_state" / f"{session_id}.json"
+    state = json.loads(state_path.read_text())
+    return state["rule_index_delivered"]["hash"]
+
+
+class TestIndexLineCorrectionsAreRedelivered:
+    @pytest.mark.parametrize("index_line", ["Corrected operative summary.", ""])
+    def test_shared_fingerprint_distinguishes_index_line_correction(self, index_line):
+        import importlib.util
+
+        state_module_path = Path(HOOK).with_name("rule_index_state.py")
+        spec = importlib.util.spec_from_file_location(
+            "rule_index_state_test", state_module_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        absent = _row("ent_index_line")["snapshot"] | {"_entity_id": "ent_index_line"}
+        corrected = _row("ent_index_line", index_line=index_line)["snapshot"] | {
+            "_entity_id": "ent_index_line"
+        }
+        assert module.row_signature([absent]) != module.row_signature([corrected])
+
+    @pytest.mark.parametrize(
+        ("index_line", "expected", "unexpected"),
+        [
+            (
+                "Corrected operative summary.",
+                "Corrected operative summary.",
+                "Legacy display title",
+            ),
+            ("", "When doing policy work:", "Legacy display title"),
+        ],
+        ids=("nonblank-summary", "absent-to-explicit-blank"),
+    )
+    def test_session_start_redelivers_index_line_correction_and_records_it(
+        self, fake_neotoma, project_dir, index_line, expected, unexpected
+    ):
+        base_url, handler = fake_neotoma
+        session_id = f"sess-index-start-{index_line or 'blank'}"
+        handler.rows = [
+            _row(
+                "ent_index_line",
+                applies_when="doing policy work",
+                rule_kind="advisory",
+                title="Legacy display title",
+            )
+        ]
+        baseline = _run(HOOK, REPO_ROOT, project_dir, session_id, base_url=base_url)
+        assert baseline.returncode == 0
+        assert "Legacy display title" in baseline.stdout
+        baseline_hash = _delivered_hash(project_dir, session_id)
+
+        handler.rows = [
+            _row(
+                "ent_index_line",
+                applies_when="doing policy work",
+                rule_kind="advisory",
+                title="Legacy display title",
+                index_line=index_line,
+            )
+        ]
+        corrected = _run(
+            INDEX_HOOK, REPO_ROOT, project_dir, session_id, base_url=base_url
+        )
+        assert corrected.returncode == 0
+        assert expected in corrected.stdout
+        assert unexpected not in corrected.stdout
+        assert _delivered_hash(project_dir, session_id) != baseline_hash
+
+    @pytest.mark.parametrize(
+        ("index_line", "expected", "unexpected"),
+        [
+            (
+                "Corrected operative summary.",
+                "Corrected operative summary.",
+                "Legacy display title",
+            ),
+            ("", "When doing policy work:", "Legacy display title"),
+        ],
+        ids=("nonblank-summary", "absent-to-explicit-blank"),
+    )
+    def test_user_prompt_submit_redelivers_index_line_correction(
+        self, fake_neotoma, project_dir, index_line, expected, unexpected
+    ):
+        base_url, handler = fake_neotoma
+        session_id = f"sess-index-prompt-{index_line or 'blank'}"
+        handler.rows = [
+            _row(
+                "ent_index_line",
+                applies_when="doing policy work",
+                rule_kind="advisory",
+                title="Legacy display title",
+            )
+        ]
+        baseline = _run(
+            INDEX_HOOK, REPO_ROOT, project_dir, session_id, base_url=base_url
+        )
+        assert baseline.returncode == 0
+        assert "Legacy display title" in baseline.stdout
+
+        handler.rows = [
+            _row(
+                "ent_index_line",
+                applies_when="doing policy work",
+                rule_kind="advisory",
+                title="Legacy display title",
+                index_line=index_line,
+            )
+        ]
+        corrected = _run(HOOK, REPO_ROOT, project_dir, session_id, base_url=base_url)
+        assert corrected.returncode == 0
+        assert expected in corrected.stdout
+        assert unexpected not in corrected.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -202,10 +358,19 @@ class TestRenderShapeByRuleKind:
     def test_mandatory_full_text_advisory_summary_only(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
         handler.rows = [
-            _row("ent_mand", rule="THE FULL MANDATORY RULE BODY TEXT.",
-                 applies_when="always", rule_kind="mandatory"),
-            _row("ent_adv", rule="THE FULL ADVISORY RULE BODY TEXT.",
-                 applies_when="doing Z", rule_kind="advisory", title="Do Z"),
+            _row(
+                "ent_mand",
+                rule="THE FULL MANDATORY RULE BODY TEXT.",
+                applies_when="always",
+                rule_kind="mandatory",
+            ),
+            _row(
+                "ent_adv",
+                rule="THE FULL ADVISORY RULE BODY TEXT.",
+                applies_when="doing Z",
+                rule_kind="advisory",
+                title="Do Z",
+            ),
         ]
         result = _run(HOOK, REPO_ROOT, project_dir, "sess-4", base_url=base_url)
         assert result.returncode == 0
@@ -223,18 +388,27 @@ class TestRenderShapeByRuleKind:
 class TestOutputStaysBounded:
     def test_large_delta_stays_under_measured_cap(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
-        handler.rows = [_row(f"ent_seed{i:03d}", applies_when=f"seed {i}") for i in range(5)]
+        handler.rows = [
+            _row(f"ent_seed{i:03d}", applies_when=f"seed {i}") for i in range(5)
+        ]
         baseline = _run(HOOK, REPO_ROOT, project_dir, "sess-5", base_url=base_url)
         assert baseline.returncode == 0
 
         # Every seed row changes, plus many new ones — a large delta.
         handler.rows = [
-            _row(f"ent_seed{i:03d}", applies_when=f"seed {i}",
-                 last_observation_at="2026-02-01T00:00:00Z")
+            _row(
+                f"ent_seed{i:03d}",
+                applies_when=f"seed {i}",
+                last_observation_at="2026-02-01T00:00:00Z",
+            )
             for i in range(5)
         ] + [
-            _row(f"ent_new{i:03d}", rule="A brand new rule body of moderate length here.",
-                 applies_when=f"new condition {i}", rule_kind="mandatory")
+            _row(
+                f"ent_new{i:03d}",
+                rule="A brand new rule body of moderate length here.",
+                applies_when=f"new condition {i}",
+                rule_kind="mandatory",
+            )
             for i in range(60)
         ]
         result = _run(HOOK, REPO_ROOT, project_dir, "sess-5", base_url=base_url)
@@ -267,12 +441,19 @@ class TestFailOpen:
     def test_missing_session_id_is_a_noop(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
         handler.rows = [_row("ent_a", applies_when="always")]
-        env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
-               "CLAUDE_PROJECT_DIR": str(project_dir),
-               "NEOTOMA_BASE_URL": base_url}
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "CLAUDE_PROJECT_DIR": str(project_dir),
+            "NEOTOMA_BASE_URL": base_url,
+        }
         result = subprocess.run(
-            [sys.executable, HOOK], input="{}", capture_output=True, text=True,
-            cwd=str(REPO_ROOT), env=env, timeout=15,
+            [sys.executable, HOOK],
+            input="{}",
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            env=env,
+            timeout=15,
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
@@ -289,14 +470,23 @@ class TestSessionStartHandoff:
         base_url, handler = fake_neotoma
         handler.rows = [
             _row("ent_always1", rule="Never skip the thing.", applies_when="always"),
-            _row("ent_cond1", rule="Check before merging.", applies_when="opening a PR",
-                 rule_kind="advisory", title="Check first"),
+            _row(
+                "ent_cond1",
+                rule="Check before merging.",
+                applies_when="opening a PR",
+                rule_kind="advisory",
+                title="Check first",
+            ),
         ]
-        index_result = _run(INDEX_HOOK, REPO_ROOT, project_dir, "sess-7", base_url=base_url)
+        index_result = _run(
+            INDEX_HOOK, REPO_ROOT, project_dir, "sess-7", base_url=base_url
+        )
         assert index_result.returncode == 0
         assert "ent_always1" in index_result.stdout
 
-        delivery_result = _run(HOOK, REPO_ROOT, project_dir, "sess-7", base_url=base_url)
+        delivery_result = _run(
+            HOOK, REPO_ROOT, project_dir, "sess-7", base_url=base_url
+        )
         assert delivery_result.returncode == 0
         assert delivery_result.stdout.strip() == "", (
             "the delivery hook re-printed content the SessionStart index "
