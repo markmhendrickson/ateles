@@ -1140,7 +1140,7 @@ class HarnessSandbox:
             return cls(
                 provider=provider,
                 root=sandbox_home,
-                env_extra={},
+                env_extra={"ATELES_LOCAL_REVIEW_HOME": str(sandbox_home)},
                 command_wrapper=[],
                 credential_read_denied=True,
                 credential_binding_protected=True,
@@ -1151,9 +1151,15 @@ class HarnessSandbox:
             )
 
         env_extra = (
-            {"CODEX_HOME": str(sandbox_home)}
+            {
+                "CODEX_HOME": str(sandbox_home),
+                "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
+            }
             if provider == "codex"
-            else {"HOME": str(sandbox_home)}
+            else {
+                "HOME": str(sandbox_home),
+                "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
+            }
         )
         authentication_ready = provider == "codex" and link_codex_auth(sandbox_home)
 
@@ -1460,6 +1466,11 @@ def dry_run_report(
 # ── Posting gate -----------------------------------------------------------------
 
 
+_REVIEW_MARKER_RE = re.compile(
+    r"^<!-- review:(?P<lens>[a-z0-9_-]+) commit=(?P<head>[0-9a-f]{40}) -->$"
+)
+
+
 @dataclass
 class VerdictCheck:
     """Result of validating a captured verdict file before any post."""
@@ -1469,9 +1480,16 @@ class VerdictCheck:
     lens_verdict: str | None = None
     sign_off_warranted: bool | None = None
     pre_post: dict = field(default_factory=dict)
+    artifact_binding: dict = field(default_factory=dict)
 
 
-def validate_verdict(verdict_text: str, *, lens_agent: str) -> VerdictCheck:
+def validate_verdict(
+    verdict_text: str,
+    *,
+    lens_agent: str,
+    expected_lens: str | None = None,
+    expected_head: str | None = None,
+) -> VerdictCheck:
     """Run the SAME reader a Claude bootstrap lens run is instructed to run
     by hand (the lens brief's PRE-POST CHECK step) — swarm_dispatch's own
     ``lens_own_verdict`` / ``sign_off_is_warranted`` — so a codex/cursor
@@ -1485,6 +1503,44 @@ def validate_verdict(verdict_text: str, *, lens_agent: str) -> VerdictCheck:
         "line3": lines[2] if len(lines) > 2 else "",
         "blocking_count": verdict_text.count("[BLOCKING]"),
     }
+    marker = _REVIEW_MARKER_RE.fullmatch(pre_post["line1"])
+    observed = {
+        "marker": pre_post["line1"],
+        "lens": marker.group("lens") if marker else None,
+        "head": marker.group("head") if marker else None,
+    }
+    expected = {"lens": expected_lens, "head": expected_head}
+    artifact_binding = {"expected": expected, "observed": observed}
+    if marker is None:
+        return VerdictCheck(
+            ok=False,
+            reason=(
+                "strict verdict marker missing or malformed — "
+                f"expected={expected!r} observed={observed!r}"
+            ),
+            pre_post=pre_post,
+            artifact_binding=artifact_binding,
+        )
+    if expected_lens is not None and observed["lens"] != expected_lens:
+        return VerdictCheck(
+            ok=False,
+            reason=(
+                "verdict marker lens mismatch — "
+                f"expected={expected!r} observed={observed!r}"
+            ),
+            pre_post=pre_post,
+            artifact_binding=artifact_binding,
+        )
+    if expected_head is not None and observed["head"] != expected_head:
+        return VerdictCheck(
+            ok=False,
+            reason=(
+                "verdict marker commit mismatch — "
+                f"expected={expected!r} observed={observed!r}"
+            ),
+            pre_post=pre_post,
+            artifact_binding=artifact_binding,
+        )
     if swarm_dispatch is None:
         return VerdictCheck(
             ok=False,
@@ -1492,6 +1548,7 @@ def validate_verdict(verdict_text: str, *, lens_agent: str) -> VerdictCheck:
             "verdict without the real reader; refusing to post rather than "
             "invent a weaker check",
             pre_post=pre_post,
+            artifact_binding=artifact_binding,
         )
     verdict = swarm_dispatch.lens_own_verdict(verdict_text, lens_agent=lens_agent)
     warranted = swarm_dispatch.sign_off_is_warranted(
@@ -1509,6 +1566,7 @@ def validate_verdict(verdict_text: str, *, lens_agent: str) -> VerdictCheck:
             lens_verdict=verdict,
             sign_off_warranted=warranted,
             pre_post=pre_post,
+            artifact_binding=artifact_binding,
         )
     return VerdictCheck(
         ok=True,
@@ -1516,6 +1574,7 @@ def validate_verdict(verdict_text: str, *, lens_agent: str) -> VerdictCheck:
         lens_verdict=verdict,
         sign_off_warranted=warranted,
         pre_post=pre_post,
+        artifact_binding=artifact_binding,
     )
 
 
@@ -1696,11 +1755,6 @@ def verify_stash_ref_unchanged_after_dispatch(
     )
 
 
-_REVIEW_MARKER_RE = re.compile(
-    r"^<!-- review:(?P<lens>[a-z0-9_-]+) commit=(?P<head>[0-9a-f]{40}) -->$"
-)
-
-
 def _verdict_identity(verdict_text: str) -> tuple[str, str]:
     """Return the strict lens and attribution header for a verdict body."""
     lines = verdict_text.splitlines()
@@ -1774,14 +1828,13 @@ def _one_verdict_comment(
     return matches[0] if matches else None
 
 
-def post_verdict(*, repo: str, pr: int, verdict_path: Path) -> str:
+def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
     """Create or update the lens's one PR comment and return its URL.
 
     Never called unless ``validate_verdict(...).ok`` AND the caller passed
     ``--post``. Publication still validates the strict identity fields it needs
     to honour the canonical edit-not-duplicate contract.
     """
-    verdict_text = verdict_path.read_text(encoding="utf-8")
     lens, attribution = _verdict_identity(verdict_text)
     last_error: Exception | None = None
     for _attempt in range(1, _POST_VERDICT_ATTEMPTS + 1):
@@ -1794,15 +1847,14 @@ def post_verdict(*, repo: str, pr: int, verdict_path: Path) -> str:
         if existing is None:
             command = [
                 "gh",
-                "pr",
-                "comment",
-                str(pr),
-                "-R",
-                repo,
-                "--body-file",
-                str(verdict_path),
+                "api",
+                "-X",
+                "POST",
+                f"repos/{repo}/issues/{pr}/comments",
+                "--input",
+                "-",
             ]
-            run_kwargs: dict = {}
+            run_kwargs: dict = {"input": json.dumps({"body": verdict_text})}
         else:
             comment_id = existing.get("id")
             if not isinstance(comment_id, int):
@@ -1957,6 +2009,7 @@ async def run_one(
                 seated_reviewer=False,  # see module docstring: no MCP grant requested
                 command_wrapper=sandbox.command_wrapper,
                 codex_outer_sandboxed=sandbox.codex_outer_sandbox_probed,
+                local_review=True,
             )
         except Exception as dispatch_error:
             stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
@@ -1981,7 +2034,9 @@ async def run_one(
         delivery_denial_recovered = False
         if not result.ok and not (
             result.returncode == 0
-            and result.error in _RECOVERABLE_LOCAL_VERDICT_DELIVERY_DENIALS
+            and result.delivery_failure_reason
+            in _RECOVERABLE_LOCAL_VERDICT_DELIVERY_DENIALS
+            and result.error == result.delivery_failure_reason
         ):
             return {
                 "ok": False,
@@ -2026,7 +2081,12 @@ async def run_one(
                 "stderr": result.stderr,
                 "posted": False,
             }
-        check = validate_verdict(verdict_text, lens_agent=target.agent)
+        check = validate_verdict(
+            verdict_text,
+            lens_agent=target.agent,
+            expected_lens=target.lens,
+            expected_head=target.head,
+        )
 
         report = {
             "ok": check.ok,
@@ -2036,6 +2096,7 @@ async def run_one(
             "lens_verdict": check.lens_verdict,
             "sign_off_warranted": check.sign_off_warranted,
             "pre_post": check.pre_post,
+            "artifact_binding": check.artifact_binding,
             "verdict_text": verdict_text,
             "posted": False,
             "comment_url": "",
@@ -2094,7 +2155,9 @@ async def run_one(
             return report
 
         report["comment_url"] = post_verdict(
-            repo=target.repo, pr=target.pr, verdict_path=verdict_path
+            repo=target.repo,
+            pr=target.pr,
+            verdict_text=verdict_text,
         )
         report["posted"] = True
         return report

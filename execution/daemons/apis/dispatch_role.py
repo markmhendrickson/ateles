@@ -88,6 +88,7 @@ import signal
 import sys
 from pathlib import Path
 
+
 # ── Env bootstrap ─────────────────────────────────────────────────────────────
 # An orchestrating session's shell does not necessarily carry the daemon env,
 # and skill_runner hard-requires NEOTOMA_BASE_URL (no localhost default by
@@ -100,7 +101,11 @@ from pathlib import Path
 # materialized dotenv carries operator-behaviour switches (e.g.
 # ATELES_SWARM_REQUIRE_LABEL) that must not silently reach a test process.
 def _dotenv_should_load() -> bool:
-    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         return False
     if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
         return False
@@ -194,9 +199,7 @@ def available_roles() -> list[str]:
     skills_dir = ATELES_REPO / ".claude" / "skills"
     if not skills_dir.is_dir():
         return []
-    return sorted(
-        p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file()
-    )
+    return sorted(p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file())
 
 
 async def dispatch(
@@ -211,6 +214,7 @@ async def dispatch(
     seated_reviewer: bool = False,
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -250,6 +254,10 @@ async def dispatch(
     ``sandbox-exec`` wrapper. It tells the Codex adapter not to attempt an
     unsupported nested Seatbelt sandbox; ``run_skill`` fails closed if the
     flag is supplied without that outer wrapper.
+
+    ``local_review`` selects the inference-only environment: no ambient
+    GitHub/Neotoma publication authority or credential fallback reaches the
+    child. The caller, not the child, owns any later publication.
     """
     return await run_skill(
         role,
@@ -263,6 +271,7 @@ async def dispatch(
         seated_reviewer=seated_reviewer,
         command_wrapper=command_wrapper,
         codex_outer_sandboxed=codex_outer_sandboxed,
+        local_review=local_review,
     )
 
 
@@ -398,6 +407,7 @@ def _install_signal_envelope(emitter: _Emitter) -> None:
     than a laundered exit 0 — a caller checking only the exit code must not be
     told a killed dispatch succeeded.
     """
+
     def _handler(signum, _frame):  # pragma: no cover - exercised as a subprocess
         name = signal.Signals(signum).name
         emitter.emit_failure(

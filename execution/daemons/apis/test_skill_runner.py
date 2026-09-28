@@ -12,6 +12,8 @@ Run with: pytest execution/daemons/apis/test_skill_runner.py -v
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -178,6 +180,78 @@ class TestRunSkill:
 
     def _run(self, coro):
         return asyncio.run(coro)
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_local_review_uses_empty_strict_mcp_and_no_publication_env(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        fake_def = _make_def(
+            prompt_markdown="Review only.",
+            tool_allowlist="Read,Bash,mcp__mcpsrv_neotoma__*",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        for key, value in {
+            "GITHUB_TOKEN": "fake-github",
+            "GH_TOKEN": "fake-gh",
+            "NEOTOMA_BEARER_TOKEN": "fake-neotoma",
+            "PAVO_NEOTOMA_TOKEN": "fake-role-neotoma",
+            "SSH_AUTH_SOCK": "/fake/agent.sock",
+        }.items():
+            monkeypatch.setenv(key, value)
+        captured = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["env"] = kwargs["env"]
+            mcp_path = Path(cmd[cmd.index("--mcp-config") + 1])
+            with mcp_path.open(encoding="utf-8") as mcp_file:
+                captured["mcp"] = json.load(mcp_file)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        review_home = tmp_path / "local-review-home"
+        review_home.mkdir()
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "pavo",
+                    "review prompt",
+                    role="pavo",
+                    provider="claude",
+                    local_review=True,
+                    env_extra={"ATELES_LOCAL_REVIEW_HOME": str(review_home)},
+                )
+            )
+
+        assert result.ok
+        assert "--strict-mcp-config" in captured["cmd"]
+        assert captured["mcp"] == {"mcpServers": {}}
+        allowed = captured["cmd"][captured["cmd"].index("--allowed-tools") + 1]
+        assert "mcp__" not in allowed
+        for key in (
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "NEOTOMA_BEARER_TOKEN",
+            "PAVO_NEOTOMA_TOKEN",
+            "SSH_AUTH_SOCK",
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+        ):
+            assert key not in captured["env"]
+        assert captured["env"]["GH_CONFIG_DIR"].startswith(str(review_home))
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -2540,6 +2614,45 @@ class TestCrossHarnessRouting:
         assert "OPENAI_API_KEY" not in child
         assert "CURSOR_API_KEY" not in child
 
+    def test_local_review_environment_is_allowlisted_and_publication_blind(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        fake_secrets = {
+            "GITHUB_TOKEN": "fake-github",
+            "GH_TOKEN": "fake-gh",
+            "ATELES_AGENT_PAT": "fake-agent-pat",
+            "NEOTOMA_BEARER_TOKEN": "fake-neotoma",
+            "PAVO_NEOTOMA_TOKEN": "fake-role-neotoma",
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": "/fake/key.json",
+            "ATELES_PRIVATE_KEYS_DIR": "/fake/keys",
+            "SSH_AUTH_SOCK": "/fake/agent.sock",
+            "GIT_SSH_COMMAND": "ssh -i /fake/key",
+        }
+        for key, value in fake_secrets.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fake-subscription-oauth")
+        review_home = tmp_path / "review-home"
+        review_home.mkdir()
+
+        child = skill_runner._subscription_only_env(
+            {
+                "CODEX_HOME": str(tmp_path / "codex-home"),
+                "ATELES_LOCAL_REVIEW_HOME": str(review_home),
+            },
+            local_review=True,
+            local_review_home=str(review_home),
+        )
+
+        for key in fake_secrets:
+            assert key not in child
+        assert child["CLAUDE_CODE_OAUTH_TOKEN"] == "fake-subscription-oauth"
+        assert child["HOME"] == str(review_home)
+        assert child["GH_CONFIG_DIR"] == str(review_home / ".config" / "gh")
+        assert child["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert child["GIT_CONFIG_VALUE_0"] == ""
+        assert child["GIT_TERMINAL_PROMPT"] == "0"
+        assert child["CODEX_HOME"] == str(tmp_path / "codex-home")
+
     def test_cursor_headless_login_failure_is_safe_to_fail_over(self) -> None:
         assert (
             skill_runner._provider_failure_kind(
@@ -2849,7 +2962,9 @@ class TestDeliveryFailureIsReportedAsFailure:
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
         ):
             return asyncio.run(
-                skill_runner.run_skill("gryllus", "work", role="gryllus")
+                skill_runner.run_skill(
+                    "gryllus", "work", role="gryllus", provider="claude"
+                )
             )
 
     def test_rc_zero_with_denied_commit_reports_not_ok(self) -> None:
@@ -2868,6 +2983,25 @@ class TestDeliveryFailureIsReportedAsFailure:
         )
         assert result.ok is False
         assert result.error, "ok:false must always carry a reason"
+        assert result.delivery_failure_reason == result.error
+
+    def test_rc_zero_mixed_delivery_and_capacity_is_not_delivery_only(self) -> None:
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n",
+            stderr=(self.NO_NETWORK + "\nquota exceeded").encode(),
+        )
+        assert result.ok is False
+        assert result.delivery_failure_reason == ""
+        assert "providers were exhausted" in result.error
+
+    def test_quoted_capacity_stdout_does_not_cancel_delivery_only_signal(self) -> None:
+        result = self._dispatch_with_child_output(
+            b"The reviewed issue quotes a prior session limit.\n",
+            stderr=self.NO_NETWORK.encode(),
+        )
+        assert result.ok is False
+        assert result.delivery_failure_reason == result.error
+        assert "network access" in result.error
 
     def test_quoted_denial_on_stdout_is_not_a_denial(self) -> None:
         """An agent that READS about a denial has not suffered one.
@@ -2924,6 +3058,7 @@ class TestDeliveryFailureIsReportedAsFailure:
                 self.NO_NETWORK,
                 error=reason,
                 provider=provider,
+                delivery_failure_reason=reason,
             )
 
         result = asyncio.run(

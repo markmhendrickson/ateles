@@ -1021,6 +1021,11 @@ class SkillResult:
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
     provider: str = ""
     attempted_providers: tuple[str, ...] = ()
+    # Set only when the runner independently established that a zero-exit
+    # child encountered one canonical delivery denial and no provider
+    # capacity/auth/launch diagnostic.  Callers must not infer this from the
+    # free-form transcript or from ``error`` alone.
+    delivery_failure_reason: str = ""
     # Per-dispatch model + token attribution (dispatch_usage.py). None when the
     # dispatch never reached a harness (missing binary, unreadable SKILL.md).
     usage: DispatchUsage | None = None
@@ -1346,9 +1351,60 @@ def _requested_model(provider: str, cmd: list[str]) -> str | None:
 
 def _subscription_only_env(
     env_extra: dict[str, str] | None = None,
+    *,
+    local_review: bool = False,
+    local_review_home: str | None = None,
 ) -> dict[str, str]:
-    """Build a child env that cannot silently spill into metered API billing."""
-    child = {**os.environ, **(env_extra or {})}
+    """Build the child environment for a governed harness invocation.
+
+    Local review inference gets an allowlisted environment rather than the
+    daemon's ambient credentials.  Its isolated HOME/GH_CONFIG_DIR plus Git's
+    explicit no-helper settings close credential-file, keychain, SSH-agent,
+    and inherited-token publication paths while retaining only subscription
+    authentication needed to run the selected model.
+    """
+    merged = {**os.environ, **(env_extra or {})}
+    if local_review:
+        if not local_review_home:
+            raise ValueError("local_review requires an isolated local_review_home")
+        allowed = {
+            "PATH",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "NO_COLOR",
+            "CODEX_HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        }
+        child = {key: value for key, value in merged.items() if key in allowed}
+        isolated = Path(local_review_home)
+        child.update(
+            {
+                "HOME": str(isolated),
+                "XDG_CONFIG_HOME": str(isolated / ".config"),
+                "GH_CONFIG_DIR": str(isolated / ".config" / "gh"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GCM_INTERACTIVE": "never",
+                "GIT_ASKPASS": "/usr/bin/false",
+                "SSH_ASKPASS": "/usr/bin/false",
+                # An empty credential.helper resets any helper accumulated
+                # from repository-local configuration before disabling
+                # interactive fallback.
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": "",
+                "GIT_CONFIG_KEY_1": "credential.interactive",
+                "GIT_CONFIG_VALUE_1": "never",
+            }
+        )
+    else:
+        child = merged
     if child.get("APIS_ALLOW_METERED_HARNESS", "0") != "1":
         for key in _METERED_CREDENTIALS:
             child.pop(key, None)
@@ -1377,6 +1433,7 @@ async def _run_skill_once(
     owns_pending_gate: bool = False,
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -1408,6 +1465,11 @@ async def _run_skill_once(
     Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
     to the Claude adapter. Codex and Cursor receive the same system + skill
     instructions as a composite prompt and use their ambient configured tools.
+
+    ``local_review`` gives a child inference-only authority: no GitHub or
+    Neotoma publication credentials, no ambient credential files/keychain,
+    no SSH agent, and (for Claude) an empty strict MCP configuration.  Parent
+    publication remains outside this child environment.
 
     ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
     child subprocess runs with this working directory instead of inheriting the
@@ -1631,6 +1693,22 @@ async def _run_skill_once(
         # this parameter's docstring on _run_skill_once.
         cmd = [*command_wrapper, *cmd]
 
+    local_review_home = (
+        (env_extra or {}).get("ATELES_LOCAL_REVIEW_HOME", "") if local_review else ""
+    )
+    if local_review:
+        if not local_review_home or not Path(local_review_home).is_absolute():
+            raise RuntimeError(
+                "local_review dispatch requires an absolute "
+                "ATELES_LOCAL_REVIEW_HOME supplied by the caller"
+            )
+        if github_token is not None:
+            raise RuntimeError(
+                "local_review dispatch cannot accept github_token; publication "
+                "authority belongs exclusively to the parent"
+            )
+        (Path(local_review_home) / ".config" / "gh").mkdir(parents=True, exist_ok=True)
+
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
     # Dispatched `claude --print` children inherit the ambient Claude MCP config,
     # but in the daemon's context (ateles project scope) there is no neotoma MCP
@@ -1658,7 +1736,19 @@ async def _run_skill_once(
     #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
-    if provider == "claude":
+    if provider == "claude" and local_review:
+        # Claude otherwise merges project/user MCP configuration. A local
+        # review child has no Neotoma publication role at all, so give it an
+        # explicitly empty, strict MCP universe rather than relying on absent
+        # tokens alone. The parent process retains its own MCP/GitHub authority.
+        fd, _mcp_tmp_path = tempfile.mkstemp(
+            suffix=".json", prefix="apis_local_review_mcp_"
+        )
+        os.chmod(_mcp_tmp_path, 0o600)
+        with os.fdopen(fd, "w") as _f:
+            json.dump({"mcpServers": {}}, _f)
+        cmd += ["--mcp-config", _mcp_tmp_path, "--strict-mcp-config"]
+    elif provider == "claude":
         _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
         # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
         # shared daemon bearer, so every agent without its own credential behaves
@@ -1744,8 +1834,10 @@ async def _run_skill_once(
         # server name matches the mcpServers key (here: "mcpsrv_neotoma" — the
         # universal convention across all 31 agent SKILLs and 24 agent_definitions).
         # This allows all tools from that MCP server without enumerating them individually.
-        allowed_list = list(tools)
-        if "mcp__mcpsrv_neotoma__*" not in allowed_list:
+        allowed_list = [
+            tool for tool in tools if not (local_review and tool.startswith("mcp__"))
+        ]
+        if not local_review and "mcp__mcpsrv_neotoma__*" not in allowed_list:
             allowed_list.append("mcp__mcpsrv_neotoma__*")
         # ateles#795: name the two read-only gate tools explicitly even though
         # the `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them —
@@ -1756,7 +1848,8 @@ async def _run_skill_once(
         # `correct()` of `gate_status` must NOT be pre-approved — and, for a
         # gate-owning run, is additionally on the deny list below regardless
         # of the wildcard.
-        allowed_list = gate_writeback_allowlist(allowed_list)
+        if not local_review:
+            allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
         log.info(
@@ -1782,7 +1875,7 @@ async def _run_skill_once(
         # gate-owning run, `correct` is additionally denied below — the `*`
         # wildcard on its own left `correct` reachable, which is exactly the
         # sink Falco's review confirmed on PR #1181.
-        allowed = ",".join(gate_writeback_allowlist(["*"]))
+        allowed = ",".join(["*"] if local_review else gate_writeback_allowlist(["*"]))
         cmd += ["--allowed-tools", allowed]
         log.info(
             f"[apis] Spawning via {provider}: "
@@ -1822,7 +1915,11 @@ async def _run_skill_once(
     # Hard boundary from the approved plan: all three adapters use bundled
     # subscription auth by default. API-key credentials are removed so a capped
     # plan queues/fails over instead of silently spending metered tokens.
-    subprocess_env = _subscription_only_env(env_extra)
+    subprocess_env = _subscription_only_env(
+        env_extra,
+        local_review=local_review,
+        local_review_home=local_review_home or None,
+    )
 
     # ateles#109 — per-agent GitHub identity: when the caller resolved a
     # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),
@@ -1876,7 +1973,7 @@ async def _run_skill_once(
     # a child's MCP writes are attributed to the role; the header is. Reading
     # these three vars as "the lens writes as itself" is what let the shared
     # bearer pass for a per-lens identity while ateles#795 stayed open.
-    if not degraded and agent_def.aauth_sub:
+    if not local_review and not degraded and agent_def.aauth_sub:
         keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
         if keys_dir:
             jwk_path = os.path.join(keys_dir, f"{_role}.jwk.json")
@@ -1998,6 +2095,15 @@ async def _run_skill_once(
         # indistinguishable from "the child was denied", and the reproduction
         # transcript in #601's own body is a verbatim instance of that.
         _delivery_denial = _delivery_failure_reason(_stderr_text)
+        _delivery_only_reason = (
+            _delivery_denial
+            if (
+                _delivery_denial
+                and proc.returncode == 0
+                and _provider_failure_kind(_stderr_text) is None
+            )
+            else ""
+        )
         if _delivery_denial and proc.returncode == 0:
             log.error(
                 f"[apis] {skill} dispatch via {provider} exited 0 but could not "
@@ -2026,6 +2132,7 @@ async def _run_skill_once(
             error=(
                 _delivery_denial if (_delivery_denial and proc.returncode == 0) else ""
             ),
+            delivery_failure_reason=_delivery_only_reason,
             usage=_usage,
         )
 
@@ -2171,6 +2278,7 @@ async def run_skill(
     seated_reviewer: bool = False,
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -2181,6 +2289,10 @@ async def run_skill(
     ``codex_outer_sandboxed`` is the paired adapter signal for an already
     probed outer ``sandbox-exec`` wrapper. `_run_skill_once` validates the pair
     before choosing Codex's no-inner-sandbox mode.
+
+    ``local_review`` selects a child environment with inference authority but
+    no ambient GitHub or Neotoma publication authority. The parent retains and
+    independently applies any publication gate.
 
     The first candidate is selected with smooth weighted round-robin using the
     operator-supplied headroom estimates. Capacity, authentication, and launch
@@ -2237,6 +2349,7 @@ async def run_skill(
             owns_pending_gate=deny_correct,
             command_wrapper=command_wrapper,
             codex_outer_sandboxed=codex_outer_sandboxed,
+            local_review=local_review,
         )
 
     return await _run_provider_attempts(
@@ -2346,19 +2459,26 @@ async def _run_provider_attempts(
         attempted.append(selected)
         result = await attempt(selected)
         result.attempted_providers = tuple(attempted)
-        # _run_skill_once deliberately turns a zero-exit delivery denial into
-        # ok=False with one of the exact canonical reasons above. Return that
-        # result unchanged before scanning the child's (potentially very large)
-        # transcript for provider-failure words. Reclassifying a quoted
-        # "session limit" as capacity here used to cool the healthy provider,
-        # attempt failover, and erase the specific delivery signal behind the
-        # generic "providers exhausted" error.
-        if (
+        # _run_skill_once carries an explicit delivery-only signal only after
+        # independently excluding provider diagnostics from stderr. Preserve
+        # that result before scanning the child's large stdout transcript:
+        # quoted "session limit" prose in a completed verdict is not capacity.
+        # Synthetic/alternate callers must satisfy the same exact invariants;
+        # an error string alone is never the signal.
+        delivery_only = (
             not result.ok
             and result.returncode == 0
-            and result.error in _DELIVERY_DENIAL_REASONS
-        ):
+            and result.delivery_failure_reason in _DELIVERY_DENIAL_REASONS
+            and result.error == result.delivery_failure_reason
+            and _provider_failure_kind(result.error, result.stderr) is None
+            and not result.error.startswith(f"{selected} launch failed:")
+        )
+        if delivery_only:
             return result
+        # A result claiming delivery-only while carrying mixed provider
+        # diagnostics is ambiguous and must take the ordinary failure path.
+        if result.delivery_failure_reason and not delivery_only:
+            result.delivery_failure_reason = ""
         # A successful agent may legitimately discuss "usage limits" in its
         # answer. Only inspect stdout when the process itself failed; stderr and
         # explicit runner errors remain diagnostic on every result.

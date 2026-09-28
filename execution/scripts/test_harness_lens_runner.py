@@ -381,9 +381,9 @@ def test_sandbox_build_cursor_uses_home_isolation(tmp_path):
     assert sandbox.env_extra["HOME"] == str(sandbox.root)
 
 
-def test_sandbox_build_claude_has_no_override(tmp_path):
+def test_sandbox_build_claude_has_only_local_review_home_marker(tmp_path):
     sandbox = hlr.HarnessSandbox.build("claude", tmp_path)
-    assert sandbox.env_extra == {}
+    assert sandbox.env_extra == {"ATELES_LOCAL_REVIEW_HOME": str(sandbox.root)}
     assert sandbox.command_wrapper == []
     assert sandbox.unavailable_guards == ()
     assert sandbox.fully_guarded is True
@@ -1229,7 +1229,9 @@ def test_dry_run_claude_provider_needs_no_sandbox_and_pins_cwd_to_the_worktree(
     # True for this provider (see HarnessSandbox.build's claude branch).
     assert report["command_wrapper"] == []
     assert report["fully_guarded"] is True
-    assert report["sandbox_env_extra"] == {}
+    assert report["sandbox_env_extra"] == {
+        "ATELES_LOCAL_REVIEW_HOME": str(tmp_path / "claude-home")
+    }
     assert report["example_command"] == [
         "claude",
         "--print",
@@ -1256,7 +1258,57 @@ def test_validate_verdict_rejects_unreadable_verdict():
     check = hlr.validate_verdict(UNREADABLE_VERDICT, lens_agent="pavo")
     assert check.ok is False
     assert check.lens_verdict is None
-    assert "not readable" in check.reason
+    assert "marker missing or malformed" in check.reason
+
+
+@pytest.mark.parametrize(
+    ("body", "reason_fragment", "observed_lens", "observed_head"),
+    [
+        (
+            SIGNED_OFF_VERDICT.split("\n", 1)[1],
+            "marker missing or malformed",
+            None,
+            None,
+        ),
+        (
+            SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, SAMPLE_HEAD[:12]),
+            "marker missing or malformed",
+            None,
+            None,
+        ),
+        (
+            SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40),
+            "commit mismatch",
+            "pm",
+            "b" * 40,
+        ),
+        (
+            SIGNED_OFF_VERDICT.replace("review:pm", "review:qa"),
+            "lens mismatch",
+            "qa",
+            SAMPLE_HEAD,
+        ),
+    ],
+    ids=["missing", "abbreviated", "wrong_head", "wrong_lens"],
+)
+def test_validate_verdict_binds_strict_marker_to_requested_artifact(
+    body, reason_fragment, observed_lens, observed_head
+):
+    check = hlr.validate_verdict(
+        body,
+        lens_agent="pavo",
+        expected_lens="pm",
+        expected_head=SAMPLE_HEAD,
+    )
+
+    assert check.ok is False
+    assert reason_fragment in check.reason
+    assert check.artifact_binding["expected"] == {
+        "lens": "pm",
+        "head": SAMPLE_HEAD,
+    }
+    assert check.artifact_binding["observed"]["lens"] == observed_lens
+    assert check.artifact_binding["observed"]["head"] == observed_head
 
 
 def test_validate_verdict_pre_post_lines_captured():
@@ -1314,6 +1366,9 @@ def _delivery_denied_dispatch(
             "",
             error=error,
             provider="codex",
+            delivery_failure_reason=(
+                error if returncode == 0 and error == NETWORK_DELIVERY_DENIAL else ""
+            ),
         )
 
     return _dispatch
@@ -1425,6 +1480,7 @@ def test_router_preserved_delivery_denial_reaches_parent_gate(
                 "Could not resolve host: github.com",
                 error=NETWORK_DELIVERY_DENIAL,
                 provider=provider,
+                delivery_failure_reason=NETWORK_DELIVERY_DENIAL,
             )
 
         return await skill_runner._run_provider_attempts(
@@ -1458,11 +1514,134 @@ def test_router_preserved_delivery_denial_reaches_parent_gate(
     assert harness_router.cooling_providers() == set()
 
 
+def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+
+    async def _dispatch(role, task, **kwargs):
+        verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+
+        async def _attempt(provider):
+            return SkillResult(
+                role,
+                False,
+                0,
+                SIGNED_OFF_VERDICT,
+                "fatal: unable to access 'https://github.com/o/r/': "
+                "Could not resolve host: github.com\nquota exceeded",
+                error=NETWORK_DELIVERY_DENIAL,
+                provider=provider,
+                delivery_failure_reason=NETWORK_DELIVERY_DENIAL,
+            )
+
+        return await skill_runner._run_provider_attempts(
+            role,
+            _attempt,
+            binaries={"codex": "/bin/codex"},
+            provider="codex",
+        )
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(
+        hlr,
+        "current_pr_head",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("mixed diagnostics must not reach parent gates")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert "providers were exhausted" in report["reason"]
+    assert harness_router.cooling_providers() == {"codex"}
+
+
+@pytest.mark.parametrize("recovered", [False, True], ids=["normal", "recovered"])
+def test_run_one_rejects_wrong_artifact_marker_before_parent_gates(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox, recovered
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    wrong_body = SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40)
+    seen_kwargs = []
+
+    if recovered:
+        base_dispatch = _delivery_denied_dispatch(target, verdict_text=wrong_body)
+
+        async def _dispatch(role, task, **kwargs):
+            seen_kwargs.append(kwargs)
+            return await base_dispatch(role, task, **kwargs)
+
+    else:
+
+        async def _dispatch(role, task, **kwargs):
+            seen_kwargs.append(kwargs)
+            verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+            verdict_path.write_text(wrong_body, encoding="utf-8")
+            return SkillResult(role, True, 0, wrong_body, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(
+        hlr,
+        "current_pr_head",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live-head and publication gates must not run")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert "commit mismatch" in report["refusal_reason"]
+    assert report["artifact_binding"] == {
+        "expected": {"lens": target.lens, "head": target.head},
+        "observed": {
+            "marker": f"<!-- review:{target.lens} commit={'b' * 40} -->",
+            "lens": target.lens,
+            "head": "b" * 40,
+        },
+    }
+    assert seen_kwargs[0]["local_review"] is True
+
+
 @pytest.mark.parametrize(
     ("verdict_text", "expected_reason"),
     [
         (None, "expected local verdict file"),
-        (UNREADABLE_VERDICT, "not readable"),
+        (UNREADABLE_VERDICT, "marker missing or malformed"),
     ],
     ids=["missing_file", "invalid_verdict"],
 )
@@ -1643,13 +1822,13 @@ def test_recovered_local_verdict_cannot_post_under_wrong_identity(
 
 
 def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
-    verdict_path = tmp_path / "verdict.md"
-    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
     post_calls = []
     landed = []
 
     def _run(command, **kwargs):
-        if command[1] == "api":
+        if command[1] == "api" and command[2].startswith(
+            "repos/o/r/issues/1/comments?"
+        ):
             pages = (
                 [
                     [
@@ -1667,7 +1846,9 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
             return subprocess.CompletedProcess(
                 command, 0, stdout=json.dumps(pages), stderr=""
             )
-        post_calls.append(command)
+        post_calls.append((command, kwargs))
+        assert command[:4] == ["gh", "api", "-X", "POST"]
+        assert json.loads(kwargs["input"])["body"] == SIGNED_OFF_VERDICT
         if len(post_calls) < 3:
             raise subprocess.CalledProcessError(
                 1, command, stderr="temporary transport failure"
@@ -1680,7 +1861,8 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(hlr.subprocess, "run", _run)
 
     assert (
-        hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path) == "comment-url"
+        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
+        == "comment-url"
     )
     assert len(post_calls) == 3
 
@@ -1688,13 +1870,13 @@ def test_post_verdict_retries_transient_gh_failure(monkeypatch, tmp_path):
 def test_post_verdict_does_not_duplicate_when_failed_call_already_landed(
     monkeypatch, tmp_path
 ):
-    verdict_path = tmp_path / "verdict.md"
-    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
     post_calls = []
     landed = []
 
     def _run(command, **kwargs):
-        if command[1] == "api":
+        if command[1] == "api" and command[2].startswith(
+            "repos/o/r/issues/1/comments?"
+        ):
             pages = (
                 [
                     [
@@ -1713,13 +1895,14 @@ def test_post_verdict_does_not_duplicate_when_failed_call_already_landed(
                 command, 0, stdout=json.dumps(pages), stderr=""
             )
         post_calls.append(command)
+        assert command[:4] == ["gh", "api", "-X", "POST"]
         landed.append(True)
         raise subprocess.CalledProcessError(1, command, stderr="response lost")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
 
     assert (
-        hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
+        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
         == "https://github.com/o/r/pull/1#issuecomment-1"
     )
     assert len(post_calls) == 1
@@ -1728,26 +1911,24 @@ def test_post_verdict_does_not_duplicate_when_failed_call_already_landed(
 def test_post_verdict_persistent_failure_stays_loud_after_three_attempts(
     monkeypatch, tmp_path
 ):
-    verdict_path = tmp_path / "verdict.md"
-    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
     post_calls = []
 
     def _run(command, **kwargs):
-        if command[1] == "api":
+        if command[1] == "api" and command[2].startswith(
+            "repos/o/r/issues/1/comments?"
+        ):
             return subprocess.CompletedProcess(command, 0, stdout="[[]]", stderr="")
         post_calls.append(command)
         raise subprocess.CalledProcessError(1, command, stderr="permission denied")
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
 
-    with pytest.raises(subprocess.CalledProcessError, match="gh.*pr.*comment"):
-        hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
+    with pytest.raises(subprocess.CalledProcessError, match="gh.*api.*POST"):
+        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
     assert len(post_calls) == 3
 
 
 def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path):
-    verdict_path = tmp_path / "verdict.md"
-    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
     old_body = SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40).replace(
         "SIGNED_OFF", "REQUEST_CHANGES"
     )
@@ -1780,7 +1961,7 @@ def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path
 
     monkeypatch.setattr(hlr.subprocess, "run", _run)
 
-    url = hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
+    url = hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
 
     assert url.endswith("#issuecomment-41")
     assert current_body == SIGNED_OFF_VERDICT
@@ -1788,8 +1969,6 @@ def test_post_verdict_edits_existing_lens_comment_in_place(monkeypatch, tmp_path
 
 
 def test_post_verdict_refuses_ambiguous_prior_lens_comments(monkeypatch, tmp_path):
-    verdict_path = tmp_path / "verdict.md"
-    verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
     writes = []
 
     def _run(command, **kwargs):
@@ -1811,7 +1990,7 @@ def test_post_verdict_refuses_ambiguous_prior_lens_comments(monkeypatch, tmp_pat
     monkeypatch.setattr(hlr.subprocess, "run", _run)
 
     with pytest.raises(RuntimeError, match="ambiguous prior review:pm"):
-        hlr.post_verdict(repo="o/r", pr=1, verdict_path=verdict_path)
+        hlr.post_verdict(repo="o/r", pr=1, verdict_text=SIGNED_OFF_VERDICT)
     assert writes == []
 
 
@@ -2366,6 +2545,55 @@ def test_run_one_posts_when_everything_checks_out(
     assert report["comment_url"] == "https://github.com/o/r/pull/1#comment"
 
 
+def test_run_one_publishes_the_already_validated_immutable_body(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    verdict_paths = []
+
+    async def _dispatch(role, task, **kwargs):
+        verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+        verdict_paths.append(verdict_path)
+        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+
+    def _head(**kwargs):
+        verdict_paths[0].write_text(
+            SIGNED_OFF_VERDICT.replace(SAMPLE_HEAD, "b" * 40), encoding="utf-8"
+        )
+        return SAMPLE_HEAD
+
+    monkeypatch.setattr(hlr, "current_pr_head", _head)
+    monkeypatch.setattr(hlr, "gh_login", lambda: "ateles-agent")
+    published = []
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **kwargs: published.append(kwargs["verdict_text"]) or "comment-url",
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is True
+    assert report["posted"] is True
+    assert published == [SIGNED_OFF_VERDICT]
+
+
 # ── Compare mode never posts -----------------------------------------------------
 
 
@@ -2650,6 +2878,7 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     assert seen["command_wrapper"][0] == "/usr/bin/sandbox-exec"
     assert seen["codex_outer_sandboxed"] is True
     assert seen["seated_reviewer"] is False
+    assert seen["local_review"] is True
     assert seen["provider"] == "codex"
 
 
