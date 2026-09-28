@@ -1112,8 +1112,76 @@ def _provider_binaries() -> dict[str, str | None]:
     }
 
 
+_DIAGNOSTIC_PREFIX_RE = re.compile(r"^(?:(?:fatal|error):\s*)+")
+_SSH_AUTH_DIAGNOSTIC_RE = re.compile(
+    r"^(?:[\w.+-]+@[\w.-]+:\s*)?permission denied \(publickey\)(?:$|[ \t:;,.-])"
+)
+_CAPACITY_DIAGNOSTIC_PATTERNS = (
+    re.compile(r"^you(?:'ve| have) hit (?:your )?(?:weekly |session )?usage limit\b"),
+    re.compile(r"^you(?:'ve| have) hit your (?:weekly |session )?limit\b"),
+    re.compile(r"^you(?:'ve| have) reached your usage limit\b"),
+)
+
+
+def _diagnostic_starts_with(line: str, signature: str) -> bool:
+    """Match a diagnostic token with an optional explanatory suffix."""
+    if not line.startswith(signature):
+        return False
+    if len(line) == len(signature):
+        return True
+    return line[len(signature)] in " \t:;,.-(["
+
+
+def _diagnostic_line_kind(raw_line: str) -> str | None:
+    """Classify one provider diagnostic without scanning ordinary prose.
+
+    Harnesses and Git may prefix a diagnostic with ``fatal:`` or ``error:``
+    and append reset times, URLs, or explanations.  Normalize those wrappers
+    while keeping the match anchored at the diagnostic start so a prompt or
+    completed verdict that merely discusses the same words is excluded.
+    """
+    line = raw_line.strip().lower()
+    if not line or len(line) > 500:
+        return None
+    if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", line):
+        return "launch"
+
+    normalized = _DIAGNOSTIC_PREFIX_RE.sub("", line)
+    if _SSH_AUTH_DIAGNOSTIC_RE.match(normalized) or any(
+        _diagnostic_starts_with(normalized, signature)
+        for signature in _AUTH_FAILURE_SIGNATURES
+    ):
+        return "auth"
+    if any(
+        _diagnostic_starts_with(normalized, signature)
+        for signature in _CAPACITY_FAILURE_SIGNATURES
+    ) or any(pattern.match(normalized) for pattern in _CAPACITY_DIAGNOSTIC_PATTERNS):
+        return "capacity"
+    return None
+
+
+def _diagnostic_failure_kinds(*texts: str) -> set[str]:
+    return {
+        kind
+        for text in texts
+        for raw_line in text.splitlines()
+        if (kind := _diagnostic_line_kind(raw_line)) is not None
+    }
+
+
 def _provider_failure_kind(*texts: str) -> str | None:
     """Classify failures that are safe to retry on another harness."""
+    kinds = _diagnostic_failure_kinds(*texts)
+    if "capacity" in kinds:
+        return "capacity"
+    if "auth" in kinds:
+        return "auth"
+
+    # Failed-provider payloads may wrap canonical diagnostics in JSON or a
+    # sentence (for example ``API Error: 401 invalid authentication
+    # credentials``). Preserve those established adapters as a fallback. The
+    # router never calls this fallback for a successful result, and delivery
+    # recovery uses only the anchored line classifier above.
     blob = " ".join(text for text in texts if text).lower()
     if any(signature in blob for signature in _CAPACITY_FAILURE_SIGNATURES):
         return "capacity"
@@ -1269,39 +1337,7 @@ def _delivery_failure_conflicts(
     conflicts: list[str] = []
     if len(reasons) > 1:
         conflicts.append("multiple_delivery_failures")
-    diagnostic_kinds: set[str] = set()
-    for text in texts:
-        for raw_line in text.splitlines():
-            line = raw_line.strip().lower()
-            if not line or len(line) > 500:
-                continue
-            if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", line):
-                diagnostic_kinds.add("launch")
-                continue
-            if "permission denied (publickey)" in line or any(
-                line.startswith(prefix)
-                for prefix in (
-                    "authentication required",
-                    "authentication failed",
-                    "invalid authentication credentials",
-                    "invalid api key",
-                    "not logged in",
-                    "login required",
-                    "oauth token has expired",
-                    "please run /login",
-                    "please run `claude auth login`",
-                    "please run 'agent login'",
-                )
-            ):
-                diagnostic_kinds.add("auth")
-                continue
-            if any(
-                line == signature
-                or line.startswith(f"error: {signature}")
-                or line.startswith(f"fatal: {signature}")
-                for signature in _CAPACITY_FAILURE_SIGNATURES
-            ):
-                diagnostic_kinds.add("capacity")
+    diagnostic_kinds = _diagnostic_failure_kinds(*texts)
     conflicts.extend(
         kind for kind in ("auth", "capacity", "launch") if kind in diagnostic_kinds
     )
@@ -2611,13 +2647,15 @@ async def _run_provider_attempts(
         # reports observed by the parent runner at 0a63667d.
         if result.delivery_failure_reasons:
             return result
-        # A successful agent may legitimately discuss "usage limits" in its
-        # answer. Only inspect stdout when the process itself failed; stderr and
-        # explicit runner errors remain diagnostic on every result.
-        failure_kind = _provider_failure_kind(
-            result.error,
-            result.stderr,
-            result.stdout if not result.ok else "",
+        # A successful zero-exit harness may carry its prompt, transcript, or
+        # verdict on stderr. Once the adapter has established success and the
+        # delivery checks above found no denial, those streams are result
+        # content rather than provider diagnostics. Genuine provider failures
+        # remain classified from every stream on the non-success path.
+        failure_kind = (
+            None
+            if result.ok
+            else _provider_failure_kind(result.error, result.stderr, result.stdout)
         )
         launch_failure = result.error.startswith(f"{selected} launch failed:")
 

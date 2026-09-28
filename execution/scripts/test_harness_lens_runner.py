@@ -1832,6 +1832,110 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
     assert harness_router.cooling_providers() == set()
 
 
+@pytest.mark.parametrize(
+    ("diagnostic", "expected_conflict"),
+    [
+        ("fatal: Authentication failed for 'https://example.invalid/'", "auth"),
+        ("fatal: could not read Username for 'https://example.invalid/'", "auth"),
+        ("authentication_error: invalid api key", "auth"),
+        ("quota exceeded; resets in 2 hours", "capacity"),
+    ],
+    ids=["https_auth", "username_auth", "authentication_error", "suffixed_capacity"],
+)
+@pytest.mark.parametrize(
+    "diagnostic_first", [False, True], ids=["delivery_first", "diagnostic_first"]
+)
+def test_mixed_delivery_diagnostics_never_reach_parent_recovery_or_publication(
+    monkeypatch,
+    tmp_path,
+    target,
+    brief_file,
+    mock_ready_sandbox,
+    diagnostic,
+    expected_conflict,
+    diagnostic_first,
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+    delivery = (
+        "fatal: unable to access 'https://github.com/o/r/': "
+        "Could not resolve host: github.com"
+    )
+    stderr = "\n".join(
+        (diagnostic, delivery) if diagnostic_first else (delivery, diagnostic)
+    )
+
+    async def _dispatch(role, task, **kwargs):
+        verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+        reasons = skill_runner._delivery_failure_reasons(stderr)
+        conflicts = skill_runner._delivery_failure_conflicts(reasons, stderr)
+        error = skill_runner._delivery_diagnostic_error(reasons, conflicts)
+
+        async def _attempt(provider):
+            return SkillResult(
+                role,
+                False,
+                0,
+                SIGNED_OFF_VERDICT,
+                stderr,
+                error=error,
+                provider=provider,
+                delivery_failure_reason=(reasons[0] if not conflicts else ""),
+                delivery_failure_reasons=reasons,
+                delivery_failure_conflicts=conflicts,
+            )
+
+        return await skill_runner._run_provider_attempts(
+            role,
+            _attempt,
+            binaries={"codex": "/bin/codex"},
+            provider="codex",
+        )
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(
+        hlr,
+        "current_pr_head",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("mixed diagnostics must not reach parent recovery")
+        ),
+    )
+    monkeypatch.setattr(
+        hlr,
+        "post_verdict",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("mixed diagnostics must not reach publication")
+        ),
+    )
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=True,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert "mixed delivery diagnostics" in report["reason"]
+    assert (
+        expected_conflict
+        in report["dispatch_diagnostics"]["delivery_failure_conflicts"]
+    )
+    assert harness_router.cooling_providers() == set()
+
+
 @pytest.mark.parametrize("recovered", [False, True], ids=["normal", "recovered"])
 def test_run_one_rejects_wrong_artifact_marker_before_parent_gates(
     monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox, recovered

@@ -2728,6 +2728,34 @@ class TestCrossHarnessRouting:
             == "auth"
         )
 
+    @pytest.mark.parametrize(
+        ("diagnostic", "expected"),
+        [
+            ("fatal: Authentication failed for 'https://example.invalid/'", "auth"),
+            ("fatal: could not read Username for 'https://example.invalid/'", "auth"),
+            ("authentication_error: invalid api key", "auth"),
+            ("quota exceeded; resets in 2 hours", "capacity"),
+        ],
+    )
+    def test_provider_failure_and_delivery_conflict_share_diagnostics(
+        self, diagnostic, expected
+    ) -> None:
+        assert skill_runner._provider_failure_kind(diagnostic) == expected
+        assert skill_runner._diagnostic_failure_kinds(diagnostic) == {expected}
+
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "The review discusses quota exceeded; resets in 2 hours.",
+            "Prompt: explain permission denied (publickey) to the user.",
+            "Verdict: Authentication failed for is an example phrase.",
+        ],
+    )
+    def test_delivery_conflict_classifier_excludes_transcript_prose(
+        self, prose
+    ) -> None:
+        assert skill_runner._diagnostic_failure_kinds(prose) == set()
+
     def test_capacity_failure_fails_over_to_next_provider(self, monkeypatch) -> None:
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
         monkeypatch.setenv(
@@ -2837,6 +2865,53 @@ class TestCrossHarnessRouting:
 
         assert result.ok
         assert attempts == ["claude"]
+
+    def test_successful_stderr_transcript_words_preserve_result_without_cooldown(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A zero-exit provider transcript on stderr is result content, not failure."""
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        harness_router.reset_state()
+        attempts: list[str] = []
+        artifact = "<!-- review:pm commit=" + "a" * 40 + " -->\n**SIGNED_OFF**"
+        transcript = (
+            "Prompt: assess whether the implementation documents its usage limit "
+            "policy and authentication_error handling.\n"
+            "Verdict: the quota exceeded example is benign prose.\n"
+        )
+
+        async def fake_once(skill, prompt, *, provider, **kwargs):
+            attempts.append(provider)
+            return skill_runner.SkillResult(
+                skill,
+                True,
+                0,
+                artifact,
+                transcript,
+                provider=provider,
+            )
+
+        with (
+            patch(
+                "skill_runner._provider_binaries",
+                return_value={
+                    "claude": "/bin/claude",
+                    "codex": "/bin/codex",
+                    "cursor": None,
+                },
+            ),
+            patch("skill_runner._run_skill_once", side_effect=fake_once),
+        ):
+            result = asyncio.run(skill_runner.run_skill("gryllus", "work"))
+
+        assert result.ok is True
+        assert result.stdout == artifact
+        assert result.stderr == transcript
+        assert result.error == ""
+        assert result.attempted_providers == ("claude",)
+        assert attempts == ["claude"]
+        assert harness_router.cooling_providers() == set()
 
 
 # ── ateles#590: codex sandbox must reach the gitdir, and a denied delivery ─────
@@ -3081,6 +3156,30 @@ class TestDeliveryFailureIsReportedAsFailure:
             (INDEX_LOCK, NO_NETWORK, "multiple_delivery_failures"),
             (NO_NETWORK, "codex launch failed: executable unavailable", "launch"),
             ("codex launch failed: executable unavailable", NO_NETWORK, "launch"),
+            (
+                NO_NETWORK,
+                "fatal: Authentication failed for 'https://example.invalid/'",
+                "auth",
+            ),
+            (
+                "fatal: Authentication failed for 'https://example.invalid/'",
+                NO_NETWORK,
+                "auth",
+            ),
+            (
+                NO_NETWORK,
+                "fatal: could not read Username for 'https://example.invalid/'",
+                "auth",
+            ),
+            (
+                "fatal: could not read Username for 'https://example.invalid/'",
+                NO_NETWORK,
+                "auth",
+            ),
+            (NO_NETWORK, "authentication_error: invalid api key", "auth"),
+            ("authentication_error: invalid api key", NO_NETWORK, "auth"),
+            (NO_NETWORK, "quota exceeded; resets in 2 hours", "capacity"),
+            ("quota exceeded; resets in 2 hours", NO_NETWORK, "capacity"),
         ],
         ids=[
             "network_then_ssh_auth",
@@ -3089,6 +3188,14 @@ class TestDeliveryFailureIsReportedAsFailure:
             "index_then_network",
             "network_then_launch",
             "launch_then_network",
+            "network_then_https_auth",
+            "https_auth_then_network",
+            "network_then_username_auth",
+            "username_auth_then_network",
+            "network_then_authentication_error",
+            "authentication_error_then_network",
+            "network_then_suffixed_capacity",
+            "suffixed_capacity_then_network",
         ],
     )
     def test_delivery_recovery_classifies_the_entire_diagnostic_set(
