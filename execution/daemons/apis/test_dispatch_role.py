@@ -167,16 +167,54 @@ def _assert_delivery_scope(invocation: dict, *, enabled: bool) -> None:
     assert (contract in stdin) is enabled
 
 
+def _assert_github_identity(invocation: dict, *, token: str | None) -> None:
+    env = invocation["kwargs"]["env"]
+    if token is None:
+        assert env.get("GITHUB_TOKEN") != "scoped-delivery-token"
+        assert env.get("GH_TOKEN") != "scoped-delivery-token"
+    else:
+        assert env["GITHUB_TOKEN"] == token
+        assert env["GH_TOKEN"] == token
+
+
+@pytest.mark.parametrize("github_token", [None, ""])
+def test_programmatic_github_delivery_refuses_missing_credential_binding(
+    captured_codex_dispatches,
+    monkeypatch,
+    github_token,
+) -> None:
+    """Delivery must not fall through to the daemon's ambient GitHub identity."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+
+    with pytest.raises(RuntimeError, match="explicit GitHub credential binding"):
+        asyncio.run(
+            dispatch_role.dispatch(
+                "cicada",
+                "Commit, push, and open the pull request.",
+                provider="codex",
+                github_delivery=True,
+                github_token=github_token,
+            )
+        )
+
+    assert captured_codex_dispatches == []
+
+
 def test_programmatic_github_delivery_reaches_real_runner_only_when_opted_in(
     captured_codex_dispatches,
+    monkeypatch,
 ) -> None:
     """Programmatic intent must reach `_run_skill_once` without leaking state."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
     delivery = asyncio.run(
         dispatch_role.dispatch(
             "cicada",
             "Commit, push, and open the pull request.",
             provider="codex",
             github_delivery=True,
+            github_token="scoped-delivery-token",
         )
     )
     explicit_false = asyncio.run(
@@ -200,12 +238,60 @@ def test_programmatic_github_delivery_reaches_real_runner_only_when_opted_in(
     _assert_delivery_scope(captured_codex_dispatches[0], enabled=True)
     _assert_delivery_scope(captured_codex_dispatches[1], enabled=False)
     _assert_delivery_scope(captured_codex_dispatches[2], enabled=False)
+    _assert_github_identity(
+        captured_codex_dispatches[0], token="scoped-delivery-token"
+    )
+    _assert_github_identity(captured_codex_dispatches[1], token=None)
+    _assert_github_identity(captured_codex_dispatches[2], token=None)
+
+
+@pytest.mark.parametrize(
+    ("token_env", "token_value"),
+    [(None, None), ("SCOPED_GITHUB_TOKEN", "")],
+)
+def test_cli_github_delivery_refuses_missing_credential_binding_without_leakage(
+    captured_codex_dispatches,
+    monkeypatch,
+    capsys,
+    token_env,
+    token_value,
+) -> None:
+    """The CLI must fail closed on omitted and explicitly empty bindings."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    argv = [
+        "--role",
+        "cicada",
+        "--task",
+        "Commit, push, and open the pull request.",
+        "--provider",
+        "codex",
+        "--github-delivery",
+        "--json",
+    ]
+    if token_env is not None:
+        monkeypatch.setenv(token_env, token_value)
+        argv.extend(["--github-token-env", token_env])
+
+    rc = dispatch_role.main(argv)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured_codex_dispatches == []
+    assert "explicit GitHub credential binding" in captured.out
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
 
 
 def test_cli_github_delivery_reaches_real_runner_without_leaking_to_next_run(
     captured_codex_dispatches,
+    monkeypatch,
+    capsys,
 ) -> None:
     """The CLI flag must drive the same command and stdin effects as the API."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    monkeypatch.setenv("SCOPED_GITHUB_TOKEN", "scoped-delivery-token")
     delivery_rc = dispatch_role.main(
         [
             "--role",
@@ -215,6 +301,8 @@ def test_cli_github_delivery_reaches_real_runner_without_leaking_to_next_run(
             "--provider",
             "codex",
             "--github-delivery",
+            "--github-token-env",
+            "SCOPED_GITHUB_TOKEN",
         ]
     )
     ordinary_rc = dispatch_role.main(
@@ -225,6 +313,14 @@ def test_cli_github_delivery_reaches_real_runner_without_leaking_to_next_run(
     assert len(captured_codex_dispatches) == 2
     _assert_delivery_scope(captured_codex_dispatches[0], enabled=True)
     _assert_delivery_scope(captured_codex_dispatches[1], enabled=False)
+    _assert_github_identity(
+        captured_codex_dispatches[0], token="scoped-delivery-token"
+    )
+    _assert_github_identity(captured_codex_dispatches[1], token=None)
+    captured = capsys.readouterr()
+    assert "scoped-delivery-token" not in captured.out + captured.err
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
 
 
 def test_dispatch_without_override_leaves_provider_to_the_router(
