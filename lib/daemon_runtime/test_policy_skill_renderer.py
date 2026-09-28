@@ -82,9 +82,9 @@ def _row(
     domain: str = "test",
     rule_kind: str = "mandatory",
     title: str = "",
-    index_line: str = "",
+    index_line: str | None = None,
 ) -> dict:
-    return {
+    row = {
         "_entity_id": entity_id,
         "rule": rule,
         "applies_when": applies_when,
@@ -94,8 +94,10 @@ def _row(
         "domain": domain,
         "rule_kind": rule_kind,
         "title": title,
-        "index_line": index_line,
     }
+    if index_line is not None:
+        row["index_line"] = index_line
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -954,11 +956,56 @@ class TestInjectionIsNeutralized:
             "ent_title_only",
             applies_when="doing X",
             title="Only a title here.",
-            index_line="",
         )
         skill = renderer.to_skill(row)
         assert skill is not None
         assert "Only a title here." in skill.description
+
+    @pytest.mark.parametrize(
+        ("applies_when", "title"),
+        [
+            (
+                "merging, re-reviewing, waiving gates, deploying or restarting",
+                "Merge, review, deploy and restart authority",
+            ),
+            (
+                "building, reviewing, or merging any software change",
+                "Software work runs in bootstrap mode",
+            ),
+        ],
+    )
+    def test_explicit_blank_index_line_suppresses_narrowing_title(
+        self, applies_when, title
+    ):
+        """A source-authored blank means no one-line summary is safe.
+
+        These are the two umbrella-policy shapes whose earlier index lines
+        captured only one clause.  Their corrective blank must survive the
+        renderer as trigger-only output instead of silently reviving a
+        label-shaped title as though it were the operative constraint.
+        """
+        row = _row(
+            "ent_umbrella",
+            applies_when=applies_when,
+            title=title,
+            index_line="",
+        )
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert skill.description == f"When {applies_when}:"
+        rendered = renderer.render_index_text([skill], budget_chars=8000)
+        assert title not in rendered
+
+    def test_present_index_line_sanitized_to_blank_does_not_revive_title(self):
+        row = _row(
+            "ent_unsafe_summary",
+            applies_when="doing X",
+            title="Label that is not an operative constraint",
+            index_line="<!-- -->",
+        )
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert skill.description == "When doing X:"
 
     def test_neither_index_line_nor_title_renders_trigger_and_id_only(self):
         row = _row(

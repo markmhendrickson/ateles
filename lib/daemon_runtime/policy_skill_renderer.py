@@ -17,10 +17,11 @@ revised after Falco's round-2 security review — see below):
                      deciding whether to fetch the full rule): `index_line`
                      when the row has one (schema 1.4.0, ateles#1295
                      follow-up — a field authored specifically to state the
-                     rule's OPERATIVE CONSTRAINT, not just its topic), else
-                     the row's `title`. NEVER derived from `rule`/`body`
-                     text — a row with neither `index_line` nor `title`
-                     renders trigger + id only.
+                     rule's OPERATIVE CONSTRAINT, not just its topic). A
+                     legacy row with no `index_line` field falls back to its
+                     `title`; an explicit blank `index_line` means the source
+                     has no safe one-line summary and renders trigger + id
+                     only. NEVER derived from `rule`/`body` text.
   - `body`      — the full rule text plus its entity id, for a FUTURE
                    transport (an agent explicitly fetching a rule by id);
                    never read back into the rendered SessionStart index
@@ -475,9 +476,11 @@ def to_skill(snap: dict) -> PolicySkill | None:
     forbidden action), so an agent acting on the summary alone still
     complies (rule-delivery evals, ateles#1301/#1295: the link-ids rule and
     the AskUserQuestion rule both failed when only a label-shaped `title`
-    reached the index) — falling back to `title` when `index_line` is
-    absent, and omitted entirely (renders tier-B style, trigger + id only)
-    when neither is present. Never falls back to any rule-derived text.
+    reached the index). A row from before schema 1.4.0, with no
+    `index_line` key, falls back to `title`; once the source carries the
+    field, its value is authoritative even when blank. That lets an umbrella
+    rule explicitly decline a narrowing one-line summary and render the
+    trigger + id only. Never falls back to any rule-derived text.
 
     `applies_when` is sanitized before use, same as the imperative, and
     `entity_id` is cut to the id charset — every row-derived field is
@@ -509,14 +512,16 @@ def to_skill(snap: dict) -> PolicySkill | None:
     is_preamble = raw_applies_when.strip().lower() == _ALWAYS
 
     # `index_line` (schema 1.4.0) is a dedicated short-form field for the
-    # one-liner's operative constraint; `title` is the row's display name
-    # and is kept as the fallback so a row authored before `index_line`
-    # existed still renders (ateles#1295 follow-up, ateles#1301 eval).
-    raw_index_line = str(snap.get("index_line") or "")
-    raw_title = str(snap.get("title") or "")
-    imperative = _sanitize_field(raw_index_line, max_len=_IMPERATIVE_MAX) or (
-        _sanitize_field(raw_title, max_len=_IMPERATIVE_MAX)
-    )
+    # one-liner's operative constraint and is authoritative by PRESENCE, not
+    # truthiness.  An explicit blank is a source-level refusal to narrow an
+    # umbrella rule to one clause; falling back to its label-shaped `title`
+    # would undo that correction.  Only legacy rows that lack the field
+    # altogether retain the title fallback (ateles#1295/#1311).
+    if "index_line" in snap:
+        raw_imperative = str(snap.get("index_line") or "")
+    else:
+        raw_imperative = str(snap.get("title") or "")
+    imperative = _sanitize_field(raw_imperative, max_len=_IMPERATIVE_MAX)
 
     if not applies_when and not is_preamble:
         # No usable trigger and not the literal "always" — nothing safe to
