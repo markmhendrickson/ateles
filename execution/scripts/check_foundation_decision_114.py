@@ -51,6 +51,33 @@ FOUNDATION_DIR = Path("docs/foundation")
 
 _DECISION_ROW_RE = re.compile(r"^\|\s*114\s*\|")
 
+
+def _extract_balanced_paren(text: str, open_at: int) -> str | None:
+    """Return the content between a balanced ``(...)`` starting at
+    ``text[open_at]`` (which must be ``"("``), or ``None`` if unbalanced.
+
+    Handles arbitrary nesting depth, unlike a fixed-depth regex group. A
+    prior revision used ``(?:\\s*\\(((?:[^()]|\\([^()]*\\))*)\\))?`` for this,
+    which only balances ONE level of nesting: two levels of nested
+    parentheses (a caveat bolted onto a caveat — an idiomatic pattern in this
+    corpus's own prose style) makes the whole optional group fail to match,
+    silently returning ``None`` and leaving the parenthetical's content never
+    checked at all — a code-review finding on this fix (harness code-review,
+    high effort, this PR). An unbounded balanced scan has no depth limit to
+    exceed.
+    """
+    assert text[open_at] == "("
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1 : i]
+    return None
+
+
 # The concepts table row for the agent behavioural rule type. Matched on the
 # leading cell (the concept name) rather than the entity-type cell, since the
 # concept name is the stable, human-readable anchor and the entity type
@@ -91,8 +118,34 @@ _AGENT_POLICY_ROW_RE = re.compile(
 #    edge") has words before the edge-type token that are not list-entry
 #    syntax, so it can never match this anchor — not because "without" is on
 #    a list, but because a denial is grammatically prose, not a list item.
+#
+#    List-entry shape alone is NOT sufficient, though: Falco's third-round
+#    review (PR #1321, comment 5856636444) demonstrated that a genuinely
+#    list-entry-shaped GOVERNS edge can still carry a denial in its own
+#    trailing parenthetical — "`GOVERNS` -> `agent` (this edge was proposed
+#    but never actually implemented; ... no traversal honors it)" — which the
+#    structural check alone waved through because it never read past the
+#    `agent` token. The entry's own parenthetical is exactly the kind of
+#    author-owned span `_has_affirmative_superseded_claim` already scans for
+#    the fields column; the fix here is the same shape, applied to the edge
+#    entry's own trailing parenthetical instead of the field's.
+#
+#    This regex matches only up through the edge-type token; the trailing
+#    parenthetical (if any) is extracted separately by
+#    `_extract_balanced_paren`, not by a fixed-depth group in this regex —
+#    see that function's docstring for why a fixed-depth group is unsafe
+#    here.
+#
+#    The target token itself needs a right-hand boundary: Phoenicurus's
+#    review (PR #1321 comment 5856295835) demonstrated that `` `?agent`? ``
+#    with no boundary after the literal is a substring match, so
+#    `` `GOVERNS` -> `agent_sub` `` — an edge pointed at the WRONG target,
+#    the pre-114 field this decision retires — satisfies it. `(?!\w)` after
+#    the token rejects any trailing word character (`_sub`, `_policy`,
+#    `_definition`, ...) while still allowing the genuine closing backtick,
+#    whitespace, `(`, `;`, or end of cell.
 _GOVERNS_EDGE_ENTRY_RE = re.compile(
-    r"(?:^|;)\s*`?GOVERNS`?\s*(?:→|->)\s*`?agent`?", re.I
+    r"(?:^|;)\s*`?GOVERNS`?\s*(?:→|->)\s*`?agent`?(?!\w)", re.I
 )
 
 # 2. Superseded claim (fields column): this table's convention is
@@ -104,36 +157,149 @@ _GOVERNS_EDGE_ENTRY_RE = re.compile(
 #    itself an affirmative-shape requirement: a sentence merely mentioning
 #    "scope/agent_sub" and "superseded" elsewhere in the row — including in
 #    a denial bolted onto some other field's description — cannot satisfy it.
-_FIELD_OWN_PAREN_RE = re.compile(
-    r"`(?:scope|agent_sub)`\s*\(((?:[^()]|\([^()]*\))*)\)", re.I
-)
+# Matches only up through the field's opening paren; the balanced content is
+# extracted separately by `_extract_balanced_paren` for the same
+# arbitrary-nesting-depth reason `_GOVERNS_EDGE_ENTRY_RE` does, above.
+_FIELD_OWN_PAREN_RE = re.compile(r"`(?:scope|agent_sub)`\s*(\()", re.I)
 
-# Defense in depth, not the primary mechanism: even inside a field's own
-# parenthetical, reject a hedge/denial word. Clause-scoped to that single
-# parenthetical (a real punctuation boundary, not a character count), so
-# this has no long-distance-negation gap — the whole scoped text is checked,
-# however long the clause is. Kept deliberately broader than the two
-# confirmed bypasses (not just "without"/"lacking"/"fails to") because it is
-# now a secondary check over a narrow, structurally-anchored span rather
-# than the sole gate over free-form prose; being one synonym behind here is
-# a much smaller residual than being one synonym behind was when this list
-# was the only thing standing between a denial and a false green.
-_HEDGE_RE = re.compile(
-    r"\b(?:never|not|no|isn't|aren't|doesn't|don't|n't|without|lack(?:s|ing)?|"
-    r"fail(?:s|ed)?\s+to|absent|nor|neither)\b",
+# Defense in depth, not a closed structural guarantee: even inside a claim's
+# own author-owned parenthetical, reject a hedge/denial word. This list
+# cannot be complete against free-form English (Falco's root-cause finding,
+# PR #1321 comment 5856636444: "unimplemented", "in practice"/"only in
+# theory", "reverted", "rejected", and a parenthetical bluntly stating "(this
+# claim is false...)" all denied the claim they sat beside while using no
+# word from an earlier revision of this list) — kept intentionally broad, and
+# grown each time a new denial shape is demonstrated, rather than trusted as
+# closed. A gap found here is the same class of finding this checker exists
+# to catch in the corpus it reads, not a design defect in the idea of
+# scoping to the owning span.
+#
+# Split into two tiers, scanned over two different scopes, because a single
+# whole-parenthetical scan produces a false positive on the live corpus: the
+# real `agent_policy` GOVERNS gloss is long, and after its first clause goes
+# on to correctly document the no-edge fallback case for a DIFFERENT row
+# shape ("a row carrying none reaches every agent...; when `scope` is
+# `agent` and the row carries no `GOVERNS` edge, it names no target...") —
+# legitimate policy prose that uses the word "no" while asserting nothing
+# false about the edge this entry itself carries. Scanning the whole
+# parenthetical for "no"/"not"/"without" made that real, correct row fail
+# (caught by re-running this check against the live corpus while building
+# this fix, before it was committed).
+#
+# - _STRONG_HEDGE_RE: vocabulary that is a denial in essentially every
+#   reading, never ordinary hedge-quantifier language about a different
+#   case ("false", "fictional", "rejected", "proposed but", "unimplemented",
+#   "reverted", "hypothetical", "illustration", "if it existed", ...).
+#   Scanned over the WHOLE parenthetical, since these words don't show up in
+#   legitimate fallback-case prose. The counterfactual-conditional entries
+#   ("hypothetical", "illustration", "if it existed") close a QA finding (PR
+#   #1321 comment 5856295835): an entry can be list-entry-shaped with an
+#   attached parenthetical that is honest about being counterfactual —
+#   "this is only a hypothetical illustration of what the edge would look
+#   like if it existed" — without using any word this list already had.
+# - _WEAK_HEDGE_RE: "not"/"no"/"without"/"lacking" — ordinary negation words
+#   that also appear in legitimate third-person conditional prose about
+#   other rows/cases. Scanned over every ``;``-delimited clause EXCEPT one
+#   that opens with a generic/conditional subject ("a row...", "any row...",
+#   "when `scope` is..."), which is what the live corpus's legitimate
+#   fallback-case prose looks like grammatically — a clause switching to
+#   describe a different, general case rather than continuing to describe
+#   *this* entry. A code-review pass on an earlier revision of this fix
+#   (which scanned only the first `;`-clause) found that scoping too narrow:
+#   a denial using only weak vocabulary, placed after the first `;` without
+#   a generic/conditional opener ("...resolved by traversal; there is no
+#   edge here for this row"), evaded it entirely. Scanning every
+#   non-generic-opener clause closes that while still sparing the real
+#   corpus's legitimate fallback prose, which does open generically.
+#
+#   That generic-opener carve-out was itself then found too broad by a
+#   second code-review pass: gating it on any clause starting with a bare
+#   "a"/"an"/"any"/"when" also exempted an ordinary-English denial that
+#   happens to start with one of those words for unrelated reasons ("any
+#   reader should know this claim is not accurate"). It was narrowed to
+#   require "row" or "`scope`" to appear as the clause's subject instead of
+#   a bare indefinite article — and a THIRD pass (harness code-review,
+#   self-review before this PR's fourth commit) found that narrowing was
+#   still exploitable: "a row exactly like this one carries no such edge" is
+#   grammatically "a row ..." but is a flat, present-tense denial of THIS
+#   entry, not a description of a different row's fallback behaviour, and
+#   still slipped the weak-hedge scan.
+#
+#   Rather than add a fourth, still-guessable phrasing to what is
+#   structurally a denylist one level down (the same shape of gap Falco's
+#   root-cause finding already named for `_STRONG_HEDGE_RE`), the carve-out
+#   is narrowed to the one shape the live corpus's legitimate prose actually
+#   has and no spoofed denial has yet reproduced: an explicit comparison
+#   against the literal `` `scope` `` field's value (`` when `scope` is
+#   `agent` ``, `` when `scope` is `global` or `swarm` ``). "A row..."/"any
+#   row..." openers are no longer exempted on their own — a clause opening
+#   that way is scanned for weak hedge words like any other, which is
+#   deliberately fail-closed toward flagging a genuinely-conditional "a
+#   row..." clause that doesn't happen to also compare `` `scope` ``'s
+#   value; the live corpus's own legitimate clause already satisfies the
+#   narrower test (see the regression-guard test), so this costs nothing
+#   against real content while closing the spoof.
+_STRONG_HEDGE_RE = re.compile(
+    r"\b(?:never|isn't|aren't|doesn't|don't|n't|fail(?:s|ed)?\s+to|absent|"
+    r"nor|neither|unimplement\w*|(?:in\s+practice|only\s+in\s+theory)|"
+    r"revert\w*|false|fictional|aspirational|placeholder|"
+    r"proposed\s+but|rejected|no\s+traversal|not\s+(?:actually|really|yet)|"
+    r"kept\s+for\s+historical|does\s+not\s+(?:actually\s+)?(?:honor|carry)|"
+    r"hypothetical\w*|illustration\w*|if\s+it\s+existed|in\s+name\s+only|"
+    r"nominal(?:ly)?)\b",
     re.I,
 )
+_WEAK_HEDGE_RE = re.compile(r"\b(?:not|no|without|lack(?:s|ing)?)\b", re.I)
+_GENERIC_CLAUSE_OPENER_RE = re.compile(r"^\s*when\s+`?scope`?`?\s+is\b", re.I)
+
+
+def _is_hedged(parenthetical: str) -> bool:
+    """True when ``parenthetical`` denies the claim it appears to make.
+
+    See the tier comment above for why this is two regexes over two scopes
+    rather than one regex over the whole text.
+    """
+    if _STRONG_HEDGE_RE.search(parenthetical):
+        return True
+    for clause in parenthetical.split(";"):
+        if _GENERIC_CLAUSE_OPENER_RE.match(clause):
+            continue
+        if _WEAK_HEDGE_RE.search(clause):
+            return True
+    return False
 
 
 def _has_governs_edge_entry(edges_cell: str) -> bool:
-    """True when the edges cell contains a genuine ``GOVERNS -> agent`` entry.
+    """True when the edges cell contains a genuine, unnegated ``GOVERNS ->
+    agent`` entry.
 
-    Structural, not lexical: the match must be list-entry-shaped (cell-start
-    or after ``;``, then the edge-type token). Prose describing or denying an
-    edge is never list-entry-shaped, so it cannot satisfy this regardless of
-    what words it uses.
+    Structural, not purely lexical: the match must be list-entry-shaped
+    (cell-start or after ``;``, then the edge-type token) — prose describing
+    or denying an edge is never list-entry-shaped, so it cannot satisfy this
+    regardless of what words it uses. But list-entry shape only proves the
+    edge is *asserted*, not that the assertion is affirmative: Falco's
+    third-round review (PR #1321, comment 5856636444) demonstrated a
+    genuinely list-entry-shaped GOVERNS edge can still carry a denial in its
+    own trailing parenthetical — "`GOVERNS` -> `agent` (this edge was
+    proposed but never actually implemented; ... no traversal honors it)" —
+    which the structural check alone waved through because it never read
+    past the `agent` token. The entry's own parenthetical is exactly the
+    kind of author-owned span `_has_affirmative_superseded_claim` already
+    scans for the fields column; ``_is_hedged`` applies the same two-tier
+    check to it here.
     """
-    return bool(_GOVERNS_EDGE_ENTRY_RE.search(edges_cell))
+    for match in _GOVERNS_EDGE_ENTRY_RE.finditer(edges_cell):
+        open_paren_idx = match.end()
+        # Skip whitespace to see whether a trailing parenthetical follows.
+        i = open_paren_idx
+        while i < len(edges_cell) and edges_cell[i].isspace():
+            i += 1
+        if i < len(edges_cell) and edges_cell[i] == "(":
+            own_paren = _extract_balanced_paren(edges_cell, i)
+            if own_paren is None or _is_hedged(own_paren):
+                continue
+        return True
+    return False
 
 
 def _has_affirmative_superseded_claim(fields_cell: str) -> bool:
@@ -141,10 +307,10 @@ def _has_affirmative_superseded_claim(fields_cell: str) -> bool:
     that it is superseded, with no hedge/denial word in that parenthetical.
     """
     for match in _FIELD_OWN_PAREN_RE.finditer(fields_cell):
-        description = match.group(1)
-        if re.search(r"supersed\w*", description, re.I) and not _HEDGE_RE.search(
-            description
-        ):
+        description = _extract_balanced_paren(fields_cell, match.start(1))
+        if description is None:
+            continue
+        if re.search(r"supersed\w*", description, re.I) and not _is_hedged(description):
             return True
     return False
 
