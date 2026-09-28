@@ -64,8 +64,9 @@ def _write_env_file(tmp_path: Path, **pairs: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# neotoma_credentials(): env first, dotenv fallback, never both silently
-# empty when either source has a value.
+# neotoma_credentials(): endpoint and bearer are an atomic, provenance-bound
+# pair. A complete environment pair wins; otherwise a complete dotenv pair is
+# used. Values from separate sources are never combined.
 # ---------------------------------------------------------------------------
 class TestNeotomaCredentials:
     def test_env_present_file_absent_uses_env(self, monkeypatch):
@@ -85,21 +86,69 @@ class TestNeotomaCredentials:
         assert token == "file-token"
         assert base_url == "https://file.example"
 
-    def test_env_wins_over_file_when_both_present(self, monkeypatch, tmp_path):
+    def test_complete_env_pair_wins_over_complete_file_pair(self, monkeypatch, tmp_path):
         env_file = _write_env_file(
             tmp_path, NEOTOMA_BEARER_TOKEN="file-token",
             NEOTOMA_BASE_URL="https://file.example",
         )
         monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", env_file)
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "env-token")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://env.example")
         base_url, token = si.neotoma_credentials()
         assert token == "env-token"
-        assert base_url == "https://file.example"  # base_url still falls back per-key
+        assert base_url == "https://env.example"
+
+    @pytest.mark.parametrize(
+        ("env_key", "env_value"),
+        [
+            ("NEOTOMA_BEARER_TOKEN", "env-token"),
+            ("NEOTOMA_BASE_URL", "https://env.example"),
+        ],
+    )
+    def test_partial_env_uses_complete_file_pair(
+        self, monkeypatch, tmp_path, env_key, env_value
+    ):
+        env_file = _write_env_file(
+            tmp_path,
+            NEOTOMA_BEARER_TOKEN="file-token",
+            NEOTOMA_BASE_URL="https://file.example",
+        )
+        monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", env_file)
+        monkeypatch.setenv(env_key, env_value)
+
+        assert si.neotoma_credentials() == (
+            "https://file.example",
+            "file-token",
+        )
+
+    @pytest.mark.parametrize(
+        ("env_key", "env_value", "file_pairs"),
+        [
+            (
+                "NEOTOMA_BEARER_TOKEN",
+                "env-token",
+                {"NEOTOMA_BASE_URL": "https://file.example"},
+            ),
+            (
+                "NEOTOMA_BASE_URL",
+                "https://env.example",
+                {"NEOTOMA_BEARER_TOKEN": "file-token"},
+            ),
+        ],
+    )
+    def test_complementary_partial_sources_do_not_form_a_pair(
+        self, monkeypatch, tmp_path, env_key, env_value, file_pairs
+    ):
+        env_file = _write_env_file(tmp_path, **file_pairs)
+        monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", env_file)
+        monkeypatch.setenv(env_key, env_value)
+
+        assert si.neotoma_credentials() == ("", "")
 
     def test_both_absent_returns_empty_token(self):
         base_url, token = si.neotoma_credentials()
         assert token == ""
-        assert base_url  # base_url always has the hardcoded default, never empty
+        assert base_url == ""
 
     def test_malformed_file_lines_are_skipped_not_raised(self, monkeypatch, tmp_path):
         p = tmp_path / ".env"
@@ -217,6 +266,84 @@ class TestEmitHarnessEventRawCredentialFallback:
         captured = capsys.readouterr()
         assert "WARNING" not in captured.err
 
+    @pytest.mark.parametrize(
+        ("env_key", "env_value", "file_pairs"),
+        [
+            (
+                "NEOTOMA_BEARER_TOKEN",
+                "env-token",
+                {"NEOTOMA_BASE_URL": "https://file.example"},
+            ),
+            (
+                "NEOTOMA_BASE_URL",
+                "https://env.example",
+                {"NEOTOMA_BEARER_TOKEN": "file-token"},
+            ),
+        ],
+    )
+    def test_complementary_partial_sources_never_attempt_a_request(
+        self, monkeypatch, tmp_path, capsys, env_key, env_value, file_pairs
+    ):
+        env_file = _write_env_file(tmp_path, **file_pairs)
+        monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", env_file)
+        monkeypatch.setenv(env_key, env_value)
+        requests = []
+        monkeypatch.setattr(
+            si.urllib.request,
+            "urlopen",
+            lambda *args, **kwargs: requests.append((args, kwargs)),
+        )
+
+        si.emit_harness_event_raw(
+            "test-slug", {"event_type": "x"}, log_tag="test", session_id="sess-partial",
+        )
+
+        assert requests == []
+        assert "audit emission is being skipped" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("env_key", "env_value"),
+        [
+            ("NEOTOMA_BEARER_TOKEN", "env-token"),
+            ("NEOTOMA_BASE_URL", "https://env.example"),
+        ],
+    )
+    def test_partial_env_with_complete_file_uses_only_file_pair_for_request(
+        self, monkeypatch, tmp_path, env_key, env_value
+    ):
+        env_file = _write_env_file(
+            tmp_path,
+            NEOTOMA_BEARER_TOKEN="file-token",
+            NEOTOMA_BASE_URL="https://file.example",
+        )
+        monkeypatch.setattr(si, "_NEOTOMA_ENV_PATH", env_file)
+        monkeypatch.setenv(env_key, env_value)
+        requests = []
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def _fake_urlopen(req, timeout):
+            requests.append(req)
+            return _FakeResponse()
+
+        monkeypatch.setattr(si.urllib.request, "urlopen", _fake_urlopen)
+
+        si.emit_harness_event_raw(
+            "test-slug", {"event_type": "x"}, log_tag="test", session_id="sess-file",
+        )
+
+        assert len(requests) == 1
+        assert requests[0].full_url == "https://file.example/store"
+        assert requests[0].headers.get("Authorization") == "Bearer file-token"
+
     def test_both_missing_emits_one_visible_warning(self, capsys):
         si.emit_harness_event_raw(
             "test-slug", {"event_type": "x"}, log_tag="test-tag", session_id="sess-b",
@@ -224,6 +351,8 @@ class TestEmitHarnessEventRawCredentialFallback:
         captured = capsys.readouterr()
         assert "[test-tag] WARNING" in captured.err
         assert "NEOTOMA_BEARER_TOKEN" in captured.err
+        assert "audit emission is being skipped" in captured.err
+        assert "Stop-hook enforcement still runs" in captured.err
 
     def test_warning_never_includes_a_secret_value(self, monkeypatch, capsys, tmp_path):
         # Even with a token present somewhere the warning path could see
