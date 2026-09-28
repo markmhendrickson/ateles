@@ -1,7 +1,8 @@
 """
 Unit tests for skill_runner.py — Stages 1, 2, 5 of ateles#94.
 
-Tests are fully synchronous / mock-based:
+Tests are fully synchronous / mock-based except for one POSIX process-lifecycle
+regression that proves timeout cleanup reaches a real descendant:
   - AgentLoader.load() is monkeypatched to return a fake AgentDefinition
   - _write_harness_event is patched so no real Neotoma calls happen
   - No `claude` subprocess is spawned
@@ -14,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -2444,6 +2446,71 @@ class TestDispatchFailureDiagnostics:
         assert "timed out" in result.error
         assert notifier.send.call_count == 1
         assert "timed out" in notifier.send.call_args.args[0]
+
+    @pytest.mark.skipif(
+        not hasattr(os, "killpg"),
+        reason="process-group cleanup is a POSIX-only daemon contract",
+    )
+    def test_timeout_kills_descendant_process_group(self, tmp_path) -> None:
+        """A timeout must not leave a provider's native descendant alive."""
+        launcher = tmp_path / "provider-launcher"
+        descendant_pid_file = tmp_path / "descendant.pid"
+        launcher.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "import subprocess\n"
+            "import sys\n"
+            "import time\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+            "    stdin=subprocess.DEVNULL,\n"
+            "    stdout=subprocess.DEVNULL,\n"
+            "    stderr=subprocess.DEVNULL,\n"
+            ")\n"
+            "Path(os.environ['DESCENDANT_PID_FILE']).write_text(str(child.pid))\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        loader_instance = MagicMock()
+        loader_instance.load.return_value = fake_def
+
+        with (
+            patch("skill_runner.AgentLoader", return_value=loader_instance),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "df"),
+            patch("skill_runner.CLAUDE_BIN", str(launcher)),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill body"),
+            patch.dict(
+                os.environ,
+                {"DESCENDANT_PID_FILE": str(descendant_pid_file)},
+                clear=False,
+            ),
+        ):
+            result = asyncio.run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "p",
+                    role="gryllus",
+                    task_entity_id="ent_timeout_group",
+                    timeout=1,
+                )
+            )
+
+        assert result.ok is False
+        assert "timed out" in result.error
+        descendant_pid = int(descendant_pid_file.read_text(encoding="utf-8"))
+        try:
+            with pytest.raises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+        finally:
+            try:
+                os.kill(descendant_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     # ── E. secret redaction in persisted output ───────────────────────────────
 

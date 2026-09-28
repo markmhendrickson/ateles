@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -86,6 +87,29 @@ CODEX_BIN = (
 CURSOR_BIN = os.environ.get("APIS_CURSOR_BIN") or shutil.which("cursor-agent")
 TRUSTED_MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
+
+
+async def _kill_spawned_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill and drain exactly the process group created for one provider run.
+
+    Provider CLIs commonly launch a native child. Killing only the immediate
+    wrapper can orphan that child with the stdout/stderr pipes still open,
+    which makes the timeout path's follow-up ``communicate()`` hang forever.
+    Every caller launches with ``start_new_session=True``, so the wrapper PID
+    is also the exact process-group ID; no process-name or broad PID matching
+    is involved.
+    """
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and hasattr(os, "killpg"):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        proc.kill()
+    await proc.communicate()
+
+
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
 )
@@ -2080,6 +2104,7 @@ async def _run_skill_once(
             stderr=asyncio.subprocess.PIPE,
             env=subprocess_env,
             cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree
+            start_new_session=True,
         )
     except OSError as exc:
         if _mcp_tmp_path is not None:
@@ -2110,8 +2135,7 @@ async def _run_skill_once(
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
+            await _kill_spawned_process_group(proc)
             duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
             msg = f"timed out after {timeout}s"
             log.error(f"[apis] {skill} dispatch {msg}")
@@ -2727,6 +2751,7 @@ async def run_review_prompt(
                     stderr=asyncio.subprocess.PIPE,
                     cwd=workdir,
                     env=env,
+                    start_new_session=True,
                 )
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(input=prompt.encode()),
@@ -2758,8 +2783,7 @@ async def run_review_prompt(
                     result.error = "empty review response"
             except asyncio.TimeoutError:
                 if process is not None:
-                    process.kill()
-                    await process.communicate()
+                    await _kill_spawned_process_group(process)
                 result = SkillResult(
                     role,
                     False,
