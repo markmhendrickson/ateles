@@ -54,6 +54,17 @@
         ]
       },
       {
+        "matcher": "^(Bash|apply_patch|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/rule_injection_gate.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking point-of-use rules"
+          }
+        ]
+      },
+      {
         "matcher": "^Bash$",
         "hooks": [
           {
