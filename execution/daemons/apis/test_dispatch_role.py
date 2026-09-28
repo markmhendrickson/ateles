@@ -168,10 +168,13 @@ def _assert_delivery_scope(invocation: dict, *, enabled: bool) -> None:
 
 
 def _assert_github_identity(invocation: dict, *, token: str | None) -> None:
+    """``token=None`` asserts the AMBIENT value survived unchanged — not
+    merely that it differs from the scoped-delivery sentinel, which a bug
+    that wiped ambient identity entirely would also satisfy."""
     env = invocation["kwargs"]["env"]
     if token is None:
-        assert env.get("GITHUB_TOKEN") != "scoped-delivery-token"
-        assert env.get("GH_TOKEN") != "scoped-delivery-token"
+        assert env.get("GITHUB_TOKEN") == "ambient-github-token"
+        assert env.get("GH_TOKEN") == "ambient-gh-token"
     else:
         assert env["GITHUB_TOKEN"] == token
         assert env["GH_TOKEN"] == token
@@ -183,21 +186,29 @@ def test_programmatic_github_delivery_refuses_missing_credential_binding(
     monkeypatch,
     github_token,
 ) -> None:
-    """Delivery must not fall through to the daemon's ambient GitHub identity."""
+    """Delivery must not fall through to the daemon's ambient GitHub identity.
+
+    The refusal is a failed SkillResult, never a raised exception — every
+    caller of run_skill/_run_skill_once (including _run_provider_attempts's
+    unguarded `await attempt(selected)`) expects failures to come back as a
+    SkillResult it can classify, cool down, and fail over on, not as an
+    unhandled exception.
+    """
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
     monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
 
-    with pytest.raises(RuntimeError, match="explicit GitHub credential binding"):
-        asyncio.run(
-            dispatch_role.dispatch(
-                "cicada",
-                "Commit, push, and open the pull request.",
-                provider="codex",
-                github_delivery=True,
-                github_token=github_token,
-            )
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Commit, push, and open the pull request.",
+            provider="codex",
+            github_delivery=True,
+            github_token=github_token,
         )
+    )
 
+    assert result.ok is False
+    assert "explicit GitHub credential binding" in (result.error or "")
     assert captured_codex_dispatches == []
 
 
@@ -245,18 +256,16 @@ def test_programmatic_github_delivery_reaches_real_runner_only_when_opted_in(
     _assert_github_identity(captured_codex_dispatches[2], token=None)
 
 
-@pytest.mark.parametrize(
-    ("token_env", "token_value"),
-    [(None, None), ("SCOPED_GITHUB_TOKEN", "")],
-)
-def test_cli_github_delivery_refuses_missing_credential_binding_without_leakage(
+def test_cli_github_delivery_without_token_env_fails_fast_as_usage_error(
     captured_codex_dispatches,
     monkeypatch,
     capsys,
-    token_env,
-    token_value,
 ) -> None:
-    """The CLI must fail closed on omitted and explicitly empty bindings."""
+    """--github-delivery with no --github-token-env at all is knowable from
+    parsed arguments alone: it must fail through the same fast, structured
+    usage-error path as every other CLI misuse (missing --role, missing
+    --task), rather than reaching the deeper runtime credential-boundary
+    refusal in skill_runner."""
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
     monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
     argv = [
@@ -269,9 +278,42 @@ def test_cli_github_delivery_refuses_missing_credential_binding_without_leakage(
         "--github-delivery",
         "--json",
     ]
-    if token_env is not None:
-        monkeypatch.setenv(token_env, token_value)
-        argv.extend(["--github-token-env", token_env])
+
+    rc = dispatch_role.main(argv)
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured_codex_dispatches == []
+    assert "--github-token-env" in captured.out
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
+
+
+def test_cli_github_delivery_with_empty_token_env_refuses_without_leakage(
+    captured_codex_dispatches,
+    monkeypatch,
+    capsys,
+) -> None:
+    """--github-token-env naming a variable that resolves EMPTY must still
+    reach the deeper runtime credential-boundary refusal (the caller DID try
+    to bind a credential; it just failed to resolve one) — this is the case
+    a fast argv-only usage check cannot catch, since the env var's value is
+    only known once main() reads it."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    monkeypatch.setenv("SCOPED_GITHUB_TOKEN", "")
+    argv = [
+        "--role",
+        "cicada",
+        "--task",
+        "Commit, push, and open the pull request.",
+        "--provider",
+        "codex",
+        "--github-delivery",
+        "--github-token-env",
+        "SCOPED_GITHUB_TOKEN",
+        "--json",
+    ]
 
     rc = dispatch_role.main(argv)
 

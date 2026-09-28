@@ -562,6 +562,19 @@ def main(argv: list[str] | None = None) -> int:
                 emitter, "--github-token-env must name a valid environment variable"
             )
         github_token = os.environ.get(args.github_token_env, "")
+    elif args.github_delivery:
+        # Caught here as a fast, structured usage error — same shape as every
+        # other CLI misuse below — rather than left to surface deep inside
+        # skill_runner's credential-boundary refusal (ateles#590 security
+        # repair) as an unstructured "dispatch raised" error. Both paths
+        # ultimately refuse the same run; this one is knowable from the
+        # parsed arguments alone and should say so immediately.
+        return _usage_failure(
+            emitter,
+            "--github-delivery requires --github-token-env (a network-enabled "
+            "GitHub delivery run must bind an explicit scoped credential; "
+            "omitting it would otherwise be refused deeper in the dispatch)",
+        )
 
     refusal = _preflight(role, provider=args.provider)
     if refusal:
