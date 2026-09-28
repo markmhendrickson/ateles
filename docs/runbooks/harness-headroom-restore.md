@@ -132,12 +132,14 @@ it.)
 
 A `HeadroomExhausted` refusal here means the file was not actually restored
 (or the selected file path differs from the one edited) — fix that before
-spending the first real model call. The CLI intentionally exits zero for a
-cleanly reported `--dry-run` refusal, so automation and human callers MUST
-inspect the JSON body and require `"ok": true`; exit status alone does not
-mean the preflight passed. Once `"ok": true` and
-`"no_model_call_made": true` appear with a sane `example_command`, the first
-live test described in this PR's body is ready to run.
+spending the first real model call. Authentication and sandbox-guard refusals
+use the same JSON contract: `"ok": false` with a concrete `"reason"`. The CLI
+intentionally exits zero for a cleanly reported `--dry-run` refusal, so
+automation and human callers MUST inspect the JSON body and require
+`"ok": true`; exit status alone does not mean the preflight passed. Once
+`"ok": true` and `"no_model_call_made": true` appear with a sane
+`example_command`, the first live test described in this PR's body is ready to
+run.
 
 ## Monitoring a live dispatch from Neotoma alone
 

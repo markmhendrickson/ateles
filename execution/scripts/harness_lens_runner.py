@@ -1728,7 +1728,10 @@ def dry_run_report(
     # of it that could drift.
     example_cmd = [*sandbox.command_wrapper, *example_cmd]
 
-    return {
+    refusal = refuse_if_guard_required(sandbox)
+
+    report = {
+        "ok": refusal is None,
         "dry_run": True,
         "provider": provider,
         "repo": target.repo,
@@ -1754,7 +1757,11 @@ def dry_run_report(
         "example_command": example_cmd,
         "prompt_chars": len(task_text),
         "no_model_call_made": True,
+        "would_refuse": refusal,
     }
+    if refusal:
+        report["reason"] = refusal
+    return report
 
 
 # ── Posting gate -----------------------------------------------------------------
@@ -2265,7 +2272,6 @@ async def run_one(
                 review_worktree=worktree.path,
                 verdict_path=verdict_path,
             )
-            refusal = refuse_if_guard_required(sandbox)
             agent_prompt = read_agent_prompt(worktree.path, target.agent)
             task_text = (
                 render_lens_task(target, brief_path)
@@ -2281,7 +2287,6 @@ async def run_one(
                 task_text=task_text,
                 worktree_path=worktree.path,
             )
-            report["would_refuse"] = refusal
         finally:
             worktree.remove()
         return report

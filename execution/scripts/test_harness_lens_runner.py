@@ -1334,8 +1334,37 @@ def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_
 # ── Dry run: no model call, exact command + prompt size --------------------------
 
 
+def test_dry_run_report_marks_missing_authentication_not_ok(tmp_path, target):
+    sandbox = hlr.HarnessSandbox(
+        provider="codex",
+        root=tmp_path / "codex-home",
+        env_extra={"CODEX_HOME": str(tmp_path / "codex-home")},
+        command_wrapper=["/usr/bin/sandbox-exec", "-f", str(tmp_path / "profile.sb")],
+        credential_read_denied=True,
+        credential_binding_protected=True,
+        user_config_write_denied=True,
+        git_stash_denied=True,
+        authentication_ready=False,
+        unavailable_guards=(),
+        review_write_confined=True,
+    )
+
+    report = hlr.dry_run_report(
+        target,
+        provider="codex",
+        sandbox=sandbox,
+        task_text="review task",
+        worktree_path=tmp_path / "review-worktree",
+    )
+
+    assert report["ok"] is False
+    assert report["reason"] == report["would_refuse"]
+    assert "no authentication available" in report["reason"]
+    assert report["no_model_call_made"] is True
+
+
 def test_dry_run_makes_no_model_call_and_reports_command(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     dispatch_called = False
 
@@ -1376,6 +1405,7 @@ def test_dry_run_makes_no_model_call_and_reports_command(
 
     assert dispatch_called is False
     assert report["dry_run"] is True
+    assert report["ok"] is (report["would_refuse"] is None)
     assert report["no_model_call_made"] is True
     assert report["provider"] == "codex"
     assert "codex" in report["example_command"]
@@ -1384,18 +1414,13 @@ def test_dry_run_makes_no_model_call_and_reports_command(
     assert created["head"] == SAMPLE_HEAD
     # command_wrapper is prepended to the example command too, so the dry run
     # shows exactly what the real dispatch will run.
-    if report["fully_guarded"]:
-        assert report["command_wrapper"]
-        assert (
-            report["example_command"][: len(report["command_wrapper"])]
-            == (report["command_wrapper"])
-        )
-        assert "danger-full-access" in report["example_command"]
-    else:
-        # This host lacks operational sandbox-exec — the dry run must say so
-        # rather than silently pretending the mere wrapper argv is a guard.
-        assert report["would_refuse"] is not None
-        assert "workspace-write" in report["example_command"]
+    assert report["fully_guarded"] is True
+    assert report["command_wrapper"]
+    assert (
+        report["example_command"][: len(report["command_wrapper"])]
+        == (report["command_wrapper"])
+    )
+    assert "danger-full-access" in report["example_command"]
 
 
 def test_dry_run_claude_provider_uses_outer_sandbox_and_pins_cwd_to_the_worktree(
@@ -1467,6 +1492,7 @@ def test_dry_run_claude_provider_uses_outer_sandbox_and_pins_cwd_to_the_worktree
         "<system prompt>",
     ]
     assert report["would_refuse"] is None
+    assert report["ok"] is True
     # The worktree path IS the real repo's own dedicated throwaway checkout
     # of the target repo -- this is the cwd a real dispatch would pass.
     assert report["worktree"].endswith(f"ateles-wt-{target.lens}-{target.pr}-claude")
@@ -3282,6 +3308,126 @@ def test_failed_dry_run_preflight_exits_zero_but_reports_not_ok(
         "ok": False,
         "reason": "configured headroom is zero",
     }
+
+
+def test_successful_dry_run_cli_json_reports_ok_without_external_effects(
+    monkeypatch, tmp_path, capsys, brief_file, mock_ready_sandbox
+):
+    dispatch_called = False
+    publication_called = False
+
+    async def _dispatch_boom(*args, **kwargs):
+        nonlocal dispatch_called
+        dispatch_called = True
+        raise AssertionError("dispatch_role.dispatch called during --dry-run")
+
+    def _publication_boom(*args, **kwargs):
+        nonlocal publication_called
+        publication_called = True
+        raise AssertionError("post_verdict called during --dry-run")
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch_boom)
+    monkeypatch.setattr(hlr, "post_verdict", _publication_boom)
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+    rc = hlr.main(
+        [
+            "--repo",
+            "o/r",
+            "--pr",
+            "1",
+            "--head",
+            SAMPLE_HEAD,
+            "--lens",
+            "pm",
+            "--agent",
+            "pavo",
+            "--provider",
+            "codex",
+            "--brief",
+            str(brief_file),
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["ok"] is True
+    assert report["no_model_call_made"] is True
+    assert report["would_refuse"] is None
+    assert dispatch_called is False
+    assert publication_called is False
+
+
+def test_guard_refused_dry_run_cli_json_reports_not_ok_with_reason(
+    monkeypatch, tmp_path, capsys, brief_file
+):
+    unguarded = hlr.HarnessSandbox(
+        provider="codex",
+        root=tmp_path / "codex-home",
+        env_extra={"CODEX_HOME": str(tmp_path / "codex-home")},
+        command_wrapper=[],
+        credential_read_denied=False,
+        credential_binding_protected=True,
+        user_config_write_denied=True,
+        git_stash_denied=True,
+        authentication_ready=True,
+        unavailable_guards=("credential_read_guard",),
+        review_write_confined=True,
+    )
+
+    monkeypatch.setattr(
+        hlr.HarnessSandbox,
+        "build",
+        classmethod(lambda cls, provider, tmp_root, **kwargs: unguarded),
+    )
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+    rc = hlr.main(
+        [
+            "--repo",
+            "o/r",
+            "--pr",
+            "1",
+            "--head",
+            SAMPLE_HEAD,
+            "--lens",
+            "pm",
+            "--agent",
+            "pavo",
+            "--provider",
+            "codex",
+            "--brief",
+            str(brief_file),
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["ok"] is False
+    assert report["reason"] == report["would_refuse"]
+    assert "failed to probe as fully guarded" in report["reason"]
+    assert report["no_model_call_made"] is True
 
 
 # ── --agent resolved from review_panel.LENSES when omitted -----------------------
