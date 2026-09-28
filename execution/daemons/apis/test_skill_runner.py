@@ -2992,7 +2992,51 @@ class TestDeliveryFailureIsReportedAsFailure:
         )
         assert result.ok is False
         assert result.delivery_failure_reason == ""
-        assert "providers were exhausted" in result.error
+        assert result.delivery_failure_reasons == (
+            "sandbox denied network access — the child could not push or reach the GitHub API",
+        )
+        assert "mixed delivery diagnostics" in result.error
+
+    @pytest.mark.parametrize(
+        ("first", "second", "expected_conflict"),
+        [
+            (
+                NO_NETWORK,
+                "git@github.com: Permission denied (publickey).",
+                "auth",
+            ),
+            (
+                "git@github.com: Permission denied (publickey).",
+                NO_NETWORK,
+                "auth",
+            ),
+            (NO_NETWORK, INDEX_LOCK, "multiple_delivery_failures"),
+            (INDEX_LOCK, NO_NETWORK, "multiple_delivery_failures"),
+            (NO_NETWORK, "codex launch failed: executable unavailable", "launch"),
+            ("codex launch failed: executable unavailable", NO_NETWORK, "launch"),
+        ],
+        ids=[
+            "network_then_ssh_auth",
+            "ssh_auth_then_network",
+            "network_then_index",
+            "index_then_network",
+            "network_then_launch",
+            "launch_then_network",
+        ],
+    )
+    def test_delivery_recovery_classifies_the_entire_diagnostic_set(
+        self, first, second, expected_conflict
+    ) -> None:
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n",
+            stderr=f"{first}\n{second}".encode(),
+        )
+
+        assert result.ok is False
+        assert result.delivery_failure_reason == ""
+        assert result.delivery_failure_reasons
+        assert expected_conflict in result.delivery_failure_conflicts
+        assert "mixed delivery diagnostics" in result.error
 
     def test_quoted_capacity_stdout_does_not_cancel_delivery_only_signal(self) -> None:
         result = self._dispatch_with_child_output(
@@ -3059,6 +3103,7 @@ class TestDeliveryFailureIsReportedAsFailure:
                 error=reason,
                 provider=provider,
                 delivery_failure_reason=reason,
+                delivery_failure_reasons=(reason,),
             )
 
         result = asyncio.run(

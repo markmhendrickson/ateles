@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -120,10 +121,20 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
         return hlr.HarnessSandbox(
             provider=provider,
             root=root,
-            env_extra={"CODEX_HOME": str(root)} if provider == "codex" else {},
-            command_wrapper=["/usr/bin/sandbox-exec", "-f", str(root / "profile.sb")]
-            if provider != "claude"
-            else [],
+            env_extra=(
+                {
+                    "CODEX_HOME": str(root),
+                    "ATELES_LOCAL_REVIEW_HOME": str(root),
+                }
+                if provider == "codex"
+                else {
+                    "HOME": str(root),
+                    "ATELES_LOCAL_REVIEW_HOME": str(root),
+                }
+                if provider == "cursor"
+                else {"ATELES_LOCAL_REVIEW_HOME": str(root)}
+            ),
+            command_wrapper=["/usr/bin/sandbox-exec", "-f", str(root / "profile.sb")],
             credential_read_denied=True,
             credential_binding_protected=True,
             user_config_write_denied=True,
@@ -381,12 +392,76 @@ def test_sandbox_build_cursor_uses_home_isolation(tmp_path):
     assert sandbox.env_extra["HOME"] == str(sandbox.root)
 
 
-def test_sandbox_build_claude_has_only_local_review_home_marker(tmp_path):
+def test_sandbox_build_claude_has_only_local_review_home_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fixture-subscription-token")
+    monkeypatch.setattr(
+        hlr, "trusted_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec"
+    )
+    monkeypatch.setattr(hlr, "probe_sandbox_exec_denies_read", lambda *a, **k: True)
+    monkeypatch.setattr(hlr, "probe_sandbox_exec_denies_write", lambda *a, **k: True)
+    monkeypatch.setattr(
+        hlr, "probe_sandbox_exec_preserves_credential_binding", lambda *a, **k: True
+    )
+    monkeypatch.setattr(hlr, "probe_credential_helper_isolation", lambda *a, **k: True)
+    monkeypatch.setattr(
+        hlr, "probe_stash_effect_denied_across_git_binaries", lambda *a, **k: True
+    )
     sandbox = hlr.HarnessSandbox.build("claude", tmp_path)
-    assert sandbox.env_extra == {"ATELES_LOCAL_REVIEW_HOME": str(sandbox.root)}
-    assert sandbox.command_wrapper == []
-    assert sandbox.unavailable_guards == ()
+    assert sandbox.env_extra["ATELES_LOCAL_REVIEW_HOME"] == str(sandbox.root)
+    assert sandbox.env_extra["PATH"].startswith(str(sandbox.root / "shim-bin"))
+    assert sandbox.command_wrapper
     assert sandbox.fully_guarded is True
+    assert sandbox.authentication_ready is True
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".config/gh/hosts.yml",
+        ".git-credentials",
+        ".config/git/credentials",
+        ".ssh/id_ed25519",
+        ".ssh/id_rsa",
+    ],
+)
+def test_publication_credential_read_denies_cover_synthetic_locations(relative_path):
+    synthetic = f"/fixture-user/{relative_path}"
+    assert any(
+        re.search(pattern, synthetic) for pattern in hlr._CREDENTIAL_READ_DENY_REGEXES
+    ), synthetic
+
+
+def test_profile_denies_synthetic_helper_and_keychain_service(tmp_path):
+    profile = tmp_path / "profile.sb"
+    synthetic_helper = tmp_path / "fixture-git-credential-helper"
+    hlr.build_sandbox_exec_profile(
+        profile,
+        credential_helper_exec_paths=(synthetic_helper,),
+    )
+
+    text = profile.read_text(encoding="utf-8")
+    assert str(synthetic_helper) in text
+    assert 'global-name "com.apple.securityd"' in text
+
+
+def test_claude_with_unproved_outer_guards_refuses_before_launch(tmp_path):
+    sandbox = hlr.HarnessSandbox(
+        provider="claude",
+        root=tmp_path,
+        env_extra={"ATELES_LOCAL_REVIEW_HOME": str(tmp_path)},
+        command_wrapper=[],
+        credential_read_denied=False,
+        credential_binding_protected=False,
+        user_config_write_denied=False,
+        git_stash_denied=False,
+        authentication_ready=True,
+        unavailable_guards=("outer credential isolation unproved",),
+    )
+
+    reason = hlr.refuse_if_guard_required(sandbox)
+    assert reason is not None
+    assert "claude" in reason
+    assert "fully guarded" in reason
 
 
 def test_sandbox_build_puts_a_shim_dir_first_on_path_for_codex(tmp_path):
@@ -885,7 +960,7 @@ def test_fully_guarded_requires_credential_binding_probe(tmp_path):
         provider="codex",
         root=tmp_path,
         env_extra={},
-        command_wrapper=[],
+        command_wrapper=["/usr/bin/sandbox-exec", "-f", str(tmp_path / "profile.sb")],
         credential_read_denied=True,
         credential_binding_protected=False,
         user_config_write_denied=True,
@@ -949,8 +1024,19 @@ def test_sandbox_probe_reports_unbound_without_sandbox_exec(tmp_path, monkeypatc
     assert any("git_stash_guard" in g for g in sandbox.unavailable_guards)
 
 
-def test_refuse_if_guard_required_allows_claude_always(tmp_path):
-    sandbox = hlr.HarnessSandbox.build("claude", tmp_path)
+def test_refuse_if_guard_required_allows_claude_only_when_fully_proved(tmp_path):
+    sandbox = hlr.HarnessSandbox(
+        provider="claude",
+        root=tmp_path,
+        env_extra={"ATELES_LOCAL_REVIEW_HOME": str(tmp_path)},
+        command_wrapper=["/usr/bin/sandbox-exec", "-f", str(tmp_path / "profile.sb")],
+        credential_read_denied=True,
+        credential_binding_protected=True,
+        user_config_write_denied=True,
+        git_stash_denied=True,
+        authentication_ready=True,
+        unavailable_guards=(),
+    )
     assert hlr.refuse_if_guard_required(sandbox) is None
 
 
@@ -1081,7 +1167,7 @@ def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_
         provider="codex",
         root=tmp_path,
         env_extra={},
-        command_wrapper=[],
+        command_wrapper=["/usr/bin/sandbox-exec", "-f", str(tmp_path / "profile.sb")],
         credential_read_denied=True,
         credential_binding_protected=True,
         user_config_write_denied=True,
@@ -1172,8 +1258,8 @@ def test_dry_run_makes_no_model_call_and_reports_command(
         assert "workspace-write" in report["example_command"]
 
 
-def test_dry_run_claude_provider_needs_no_sandbox_and_pins_cwd_to_the_worktree(
-    monkeypatch, tmp_path, target, brief_file
+def test_dry_run_claude_provider_uses_outer_sandbox_and_pins_cwd_to_the_worktree(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     """The operator's decision (bootstrap dispatch defaults to claude first):
     prove --provider claude reaches the exact real command shape, with no
@@ -1224,15 +1310,17 @@ def test_dry_run_claude_provider_needs_no_sandbox_and_pins_cwd_to_the_worktree(
     assert dispatch_called is False
     assert report["no_model_call_made"] is True
     assert report["provider"] == "claude"
-    # claude needs no sandbox wrapper -- its own Claude Code hooks bind
-    # every guard this class attempts, so fully_guarded is unconditionally
-    # True for this provider (see HarnessSandbox.build's claude branch).
-    assert report["command_wrapper"] == []
+    assert report["command_wrapper"] == [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        str(tmp_path / "claude-unit-home" / "profile.sb"),
+    ]
     assert report["fully_guarded"] is True
     assert report["sandbox_env_extra"] == {
-        "ATELES_LOCAL_REVIEW_HOME": str(tmp_path / "claude-home")
+        "ATELES_LOCAL_REVIEW_HOME": str(tmp_path / "claude-unit-home")
     }
     assert report["example_command"] == [
+        *report["command_wrapper"],
         "claude",
         "--print",
         "--append-system-prompt",
@@ -1369,6 +1457,9 @@ def _delivery_denied_dispatch(
             delivery_failure_reason=(
                 error if returncode == 0 and error == NETWORK_DELIVERY_DENIAL else ""
             ),
+            delivery_failure_reasons=(
+                (error,) if returncode == 0 and error == NETWORK_DELIVERY_DENIAL else ()
+            ),
         )
 
     return _dispatch
@@ -1481,6 +1572,7 @@ def test_router_preserved_delivery_denial_reaches_parent_gate(
                 error=NETWORK_DELIVERY_DENIAL,
                 provider=provider,
                 delivery_failure_reason=NETWORK_DELIVERY_DENIAL,
+                delivery_failure_reasons=(NETWORK_DELIVERY_DENIAL,),
             )
 
         return await skill_runner._run_provider_attempts(
@@ -1534,9 +1626,14 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
                 SIGNED_OFF_VERDICT,
                 "fatal: unable to access 'https://github.com/o/r/': "
                 "Could not resolve host: github.com\nquota exceeded",
-                error=NETWORK_DELIVERY_DENIAL,
+                error=(
+                    "mixed delivery diagnostics — delivery="
+                    f"{[NETWORK_DELIVERY_DENIAL]!r}; conflicts={['capacity']!r}"
+                ),
                 provider=provider,
                 delivery_failure_reason=NETWORK_DELIVERY_DENIAL,
+                delivery_failure_reasons=(NETWORK_DELIVERY_DENIAL,),
+                delivery_failure_conflicts=("capacity",),
             )
 
         return await skill_runner._run_provider_attempts(
@@ -1572,8 +1669,10 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
 
     assert report["ok"] is False
     assert report["posted"] is False
-    assert "providers were exhausted" in report["reason"]
-    assert harness_router.cooling_providers() == {"codex"}
+    assert "mixed delivery diagnostics" in report["reason"]
+    assert report["dispatch_diagnostics"]["delivery_failure_conflicts"] == ["capacity"]
+    assert "quota exceeded" in report["dispatch_diagnostics"]["stderr"]
+    assert harness_router.cooling_providers() == set()
 
 
 @pytest.mark.parametrize("recovered", [False, True], ids=["normal", "recovered"])

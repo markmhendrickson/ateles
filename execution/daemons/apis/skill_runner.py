@@ -1026,6 +1026,13 @@ class SkillResult:
     # capacity/auth/launch diagnostic.  Callers must not infer this from the
     # free-form transcript or from ``error`` alone.
     delivery_failure_reason: str = ""
+    # Every distinct delivery denial found across the complete stderr
+    # diagnostic set, in canonical signature order rather than transcript
+    # order.  ``delivery_failure_reason`` is trusted only when this tuple has
+    # exactly that one recoverable entry and ``delivery_failure_conflicts`` is
+    # empty.
+    delivery_failure_reasons: tuple[str, ...] = ()
+    delivery_failure_conflicts: tuple[str, ...] = ()
     # Per-dispatch model + token attribution (dispatch_usage.py). None when the
     # dispatch never reached a harness (missing binary, unreadable SKILL.md).
     usage: DispatchUsage | None = None
@@ -1061,6 +1068,9 @@ _AUTH_FAILURE_SIGNATURES = (
     "invalid api key",
     "not logged in",
     "login required",
+    "permission denied (publickey)",
+    "could not read username for",
+    "authentication failed for",
 )
 
 _METERED_CREDENTIALS = (
@@ -1203,6 +1213,60 @@ _DELIVERY_DENIAL_SIGNATURES: tuple[tuple[str, str], ...] = (
 _DELIVERY_DENIAL_REASONS = frozenset(
     reason for _pattern, reason in _DELIVERY_DENIAL_SIGNATURES
 )
+_RECOVERABLE_DELIVERY_DENIAL_REASONS = frozenset(
+    {
+        "sandbox denied network access — the child could not push or reach the GitHub API",
+        "the child could not reach the git remote — nothing was pushed",
+    }
+)
+
+
+def _delivery_failure_reasons(*texts: str) -> tuple[str, ...]:
+    """Return every distinct delivery denial in canonical signature order.
+
+    Signature order, rather than line order, makes the classification stable
+    when two diagnostics are emitted in the opposite order.  Only stderr is
+    supplied by the runner; stdout may quote these strings as reviewed prose.
+    """
+    lines = [
+        line.strip() for text in texts if text for line in text.lower().splitlines()
+    ]
+    return tuple(
+        reason
+        for pattern, reason in _DELIVERY_DENIAL_SIGNATURES
+        if any(re.match(pattern, line) for line in lines)
+    )
+
+
+def _delivery_failure_conflicts(
+    reasons: tuple[str, ...], *texts: str
+) -> tuple[str, ...]:
+    """Name every condition that makes delivery-only recovery ambiguous."""
+    conflicts: list[str] = []
+    if len(reasons) > 1:
+        conflicts.append("multiple_delivery_failures")
+    provider_failure = _provider_failure_kind(*texts)
+    if provider_failure is not None:
+        conflicts.append(provider_failure)
+    blob = " ".join(text for text in texts if text).lower()
+    if "launch failed:" in blob:
+        conflicts.append("launch")
+    if len(reasons) == 1 and reasons[0] not in _RECOVERABLE_DELIVERY_DENIAL_REASONS:
+        conflicts.append("nonrecoverable_delivery_failure")
+    return tuple(conflicts)
+
+
+def _delivery_diagnostic_error(
+    reasons: tuple[str, ...], conflicts: tuple[str, ...]
+) -> str:
+    if not reasons:
+        return ""
+    if not conflicts:
+        return reasons[0]
+    return (
+        "mixed delivery diagnostics — delivery="
+        f"{list(reasons)!r}; conflicts={list(conflicts)!r}"
+    )
 
 
 def _delivery_failure_reason(*texts: str) -> str | None:
@@ -1219,15 +1283,8 @@ def _delivery_failure_reason(*texts: str) -> str | None:
     # signatures, so any agent dispatched to read them was reported as a failed
     # delivery (ateles#601 pm lens, reproduced). Anchoring is what separates
     # "git said this" from "someone wrote this down".
-    for text in texts:
-        if not text:
-            continue
-        for line in text.lower().splitlines():
-            stripped = line.strip()
-            for pattern, reason in _DELIVERY_DENIAL_SIGNATURES:
-                if re.match(pattern, stripped):
-                    return reason
-    return None
+    reasons = _delivery_failure_reasons(*texts)
+    return reasons[0] if reasons else None
 
 
 def _provider_command(
@@ -2094,13 +2151,19 @@ async def _run_skill_once(
         # stdout as prose. Scanning both made "the child read about a denial"
         # indistinguishable from "the child was denied", and the reproduction
         # transcript in #601's own body is a verbatim instance of that.
-        _delivery_denial = _delivery_failure_reason(_stderr_text)
+        _delivery_reasons = _delivery_failure_reasons(_stderr_text)
+        _delivery_conflicts = _delivery_failure_conflicts(
+            _delivery_reasons, _stderr_text
+        )
+        _delivery_denial = _delivery_diagnostic_error(
+            _delivery_reasons, _delivery_conflicts
+        )
         _delivery_only_reason = (
-            _delivery_denial
+            _delivery_reasons[0]
             if (
-                _delivery_denial
+                len(_delivery_reasons) == 1
+                and not _delivery_conflicts
                 and proc.returncode == 0
-                and _provider_failure_kind(_stderr_text) is None
             )
             else ""
         )
@@ -2124,7 +2187,7 @@ async def _run_skill_once(
 
         result = SkillResult(
             skill=skill,
-            ok=proc.returncode == 0 and _delivery_denial is None,
+            ok=proc.returncode == 0 and not _delivery_denial,
             returncode=proc.returncode,
             stdout=_stdout_text,
             stderr=_stderr_text,
@@ -2133,6 +2196,12 @@ async def _run_skill_once(
                 _delivery_denial if (_delivery_denial and proc.returncode == 0) else ""
             ),
             delivery_failure_reason=_delivery_only_reason,
+            delivery_failure_reasons=(
+                _delivery_reasons if proc.returncode == 0 else ()
+            ),
+            delivery_failure_conflicts=(
+                _delivery_conflicts if proc.returncode == 0 else ()
+            ),
             usage=_usage,
         )
 
@@ -2470,6 +2539,8 @@ async def _run_provider_attempts(
             and result.returncode == 0
             and result.delivery_failure_reason in _DELIVERY_DENIAL_REASONS
             and result.error == result.delivery_failure_reason
+            and result.delivery_failure_reasons == (result.delivery_failure_reason,)
+            and not result.delivery_failure_conflicts
             and _provider_failure_kind(result.error, result.stderr) is None
             and not result.error.startswith(f"{selected} launch failed:")
         )
@@ -2479,6 +2550,15 @@ async def _run_provider_attempts(
         # diagnostics is ambiguous and must take the ordinary failure path.
         if result.delivery_failure_reason and not delivery_only:
             result.delivery_failure_reason = ""
+        # A child that emitted any delivery diagnostic but did not satisfy the
+        # exact delivery-only contract is not safe to replay on another
+        # provider.  Returning the original result preserves its complete
+        # stderr and the structured conflict set instead of cooling a healthy
+        # provider because the completed review's stdout happened to quote a
+        # capacity phrase.  This is the cause of the generic Codex-capacity
+        # reports observed by the parent runner at 0a63667d.
+        if result.delivery_failure_reasons:
+            return result
         # A successful agent may legitimately discuss "usage limits" in its
         # answer. Only inspect stdout when the process itself failed; stderr and
         # explicit runner errors remain diagnostic on every result.

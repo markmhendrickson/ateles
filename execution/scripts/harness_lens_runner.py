@@ -44,10 +44,12 @@ harness mechanisms. They hook Claude Code's own tool-call lifecycle and do
 NOT run when the child process is ``codex`` or ``cursor-agent`` — those
 binaries have never heard of ``.claude/hooks/``. Running a lens on either
 without an equivalent bound guard would silently drop every one of those
-protections. ``claude`` needs nothing further — its own hook set already
-binds every guard this class attempts.
+protections. Those hooks remain useful for Claude, but they govern Claude tool
+calls rather than direct subprocess/file/service access and therefore are not
+treated as credential containment. Every provider, including Claude, must
+pass the same outer enforcement probes or is refused before launch.
 
-For codex/cursor, this script builds and MECHANICALLY BINDS the two guards
+For every provider, this script builds and MECHANICALLY BINDS the two guards
 whose absence has a concrete blast radius, and PROBES each one — against a
 fixture, never a real credential file or the real shared git dir — before
 ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
@@ -57,8 +59,10 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
   * **Credential-file reads, binding integrity, and user-config writes** — a macOS
     ``sandbox-exec`` profile (``build_sandbox_exec_profile``) denies
     ``file-read*`` on the credential-file globs named in this task
-    (``~/.config/neotoma/.env*``, ``~/.neotoma/aauth*/*private*``,
-    ``~/.claude.json``, ``~/.netrc``, ``~/.config/sops/age/*``) and
+    (Neotoma auth, GitHub CLI hosts, git credential stores, SSH private keys,
+    ``~/.claude.json``, ``~/.netrc``, and SOPS age keys), denies execution of
+    ordinary keychain/credential helpers, blocks the keychain service lookup,
+    and
     ``file-write*`` on the credential names and their narrow security-relevant
     config ancestors, plus ``~/.claude``, ``~/.cursor``, ``~/.codex``. This
     prevents a child from changing what a denied credential pathname binds to
@@ -70,7 +74,9 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     ``skill_runner._run_skill_once``'s ``command_wrapper`` parameter, added
     specifically so this could bind onto the actual subprocess rather than
     describe an intended mitigation beside code that runs unwrapped.
-    **What this does NOT claim**: Codex's own ``workspace-write`` sandbox is
+    The profile is positively exercised only against synthetic credential
+    files and helper executables; it never opens a real credential store or
+    keychain. **What this does NOT claim**: Codex's own ``workspace-write`` sandbox is
     not the read-deny mechanism. More importantly, macOS does not permit
     Codex to apply that inner Seatbelt profile while this outer
     ``sandbox-exec`` profile is already active: the nested operation fails
@@ -191,12 +197,10 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
   does not come back ``fully_guarded`` is refused outright — see ``run_one``,
   which checks this before ever calling ``dispatch_role.dispatch``.
 
-  Credentials the run legitimately needs — the `gh` token for posting, and a
-  Neotoma bearer if the lens brief needs one — are injected as NAMED
-  environment variables onto the child's process env (`GH_TOKEN`/`GITHUB_TOKEN`
-  via ``dispatch_role``'s existing ``github_token`` plumbing is the model to
-  extend; this script injects the reviewer's OWN token, never a raw path to
-  the operator's `.env` file, and never prints it).
+  The child receives only a provider subscription capability: an isolated
+  Codex auth link or a dedicated Claude OAuth environment value. GitHub and
+  Neotoma publication authority remain parent-only. Cursor is refused because
+  no equivalently narrow subscription capability is currently wired.
 
 USAGE
 -----
@@ -519,9 +523,38 @@ class Worktree:
 _CREDENTIAL_READ_DENY_REGEXES: tuple[str, ...] = (
     r"/\.config/neotoma/\.env[^/]*$",
     r"/\.neotoma/aauth[^/]*/.*private.*",
+    r"/\.config/gh/(?:hosts|state)\.yml$",
+    r"/\.git-credentials$",
+    r"/\.config/git/credentials$",
+    r"/\.ssh/.*$",
     r"/\.claude\.json$",
     r"/\.netrc$",
     r"/\.config/sops/age/.*",
+)
+
+_SYNTHETIC_PUBLICATION_CREDENTIAL_PATHS: tuple[str, ...] = (
+    ".config/neotoma/.env",
+    ".config/gh/hosts.yml",
+    ".git-credentials",
+    ".config/git/credentials",
+    ".ssh/id_ed25519",
+)
+
+_CREDENTIAL_HELPER_EXEC_PATHS: tuple[Path, ...] = (
+    Path("/usr/bin/security"),
+    Path("/usr/libexec/git-core/git-credential-osxkeychain"),
+    Path(
+        "/Applications/Xcode.app/Contents/Developer/usr/libexec/"
+        "git-core/git-credential-osxkeychain"
+    ),
+    Path("/opt/homebrew/bin/git-credential-osxkeychain"),
+    Path("/usr/local/bin/git-credential-osxkeychain"),
+)
+
+_KEYCHAIN_MACH_SERVICES: tuple[str, ...] = (
+    "com.apple.securityd",
+    "com.apple.securityd.xpc",
+    "com.apple.securityd.general.xpc",
 )
 
 # User-level harness config directories a dispatched child must never be able
@@ -563,9 +596,13 @@ def _credential_binding_write_deny_regexes(
             (
                 rf"{root}/\.config$",
                 rf"{root}/\.config/neotoma(/.*)?$",
+                rf"{root}/\.config/gh(/.*)?$",
+                rf"{root}/\.config/git(/.*)?$",
                 rf"{root}/\.config/sops$",
                 rf"{root}/\.config/sops/age(/.*)?$",
                 rf"{root}/\.neotoma(/.*)?$",
+                rf"{root}/\.ssh(/.*)?$",
+                rf"{root}/\.git-credentials$",
                 rf"{root}/\.claude\.json$",
                 rf"{root}/\.netrc$",
             )
@@ -663,6 +700,7 @@ def build_sandbox_exec_profile(
     profile_path: Path,
     *,
     credential_home_roots: tuple[Path, ...] | None = None,
+    credential_helper_exec_paths: tuple[Path, ...] = _CREDENTIAL_HELPER_EXEC_PATHS,
 ) -> None:
     """Write a macOS sandbox-exec profile denying:
 
@@ -777,6 +815,13 @@ def build_sandbox_exec_profile(
             *binding_write_denies,
         )
     )
+    helper_denies = "\n".join(
+        f'  (literal "{str(path).replace(chr(34), chr(92) + chr(34))}")'
+        for path in credential_helper_exec_paths
+    )
+    keychain_service_denies = "\n".join(
+        f'  (global-name "{service}")' for service in _KEYCHAIN_MACH_SERVICES
+    )
     profile = (
         "(version 1)\n"
         "(allow default)\n"
@@ -786,8 +831,45 @@ def build_sandbox_exec_profile(
         "(deny file-write*\n"
         f"{write_denies}\n"
         ")\n"
+        "(deny process-exec\n"
+        f"{helper_denies}\n"
+        ")\n"
+        "(deny mach-lookup\n"
+        f"{keychain_service_denies}\n"
+        ")\n"
     )
     profile_path.write_text(profile, encoding="utf-8")
+
+
+def probe_credential_helper_isolation(
+    profile_path: Path,
+    *,
+    denied_helper: Path,
+    control_helper: Path,
+) -> bool:
+    """Prove the profile blocks a synthetic credential helper executable.
+
+    Both helpers are disposable scripts created by ``HarnessSandbox.build``;
+    this never invokes ``security``, a real credential helper, or a keychain.
+    The control proves the profile did not simply make all process execution
+    fail.
+    """
+    sandbox_exec = trusted_sandbox_exec_path()
+    if sandbox_exec is None:
+        return False
+    denied = subprocess.run(
+        [sandbox_exec, "-f", str(profile_path), str(denied_helper)],
+        capture_output=True,
+        text=True,
+    )
+    if denied.returncode == 0:
+        return False
+    control = subprocess.run(
+        [sandbox_exec, "-f", str(profile_path), str(control_helper)],
+        capture_output=True,
+        text=True,
+    )
+    return control.returncode == 0 and control.stdout == "control-helper\n"
 
 
 def probe_sandbox_exec_denies_read(
@@ -1108,19 +1190,16 @@ class HarnessSandbox:
             and self.credential_binding_protected
             and self.user_config_write_denied
             and self.git_stash_denied
-        )
-
-    @property
-    def codex_outer_sandbox_probed(self) -> bool:
-        """Whether the exact trusted wrapper/profile pair passed all probes."""
-        return (
-            self.provider == "codex"
-            and self.fully_guarded
             and len(self.command_wrapper) == 3
             and self.command_wrapper[0] == str(TRUSTED_MACOS_SANDBOX_EXEC)
             and self.command_wrapper[1] == "-f"
             and Path(self.command_wrapper[2]).is_absolute()
         )
+
+    @property
+    def codex_outer_sandbox_probed(self) -> bool:
+        """Whether the exact trusted wrapper/profile pair passed all probes."""
+        return self.provider == "codex" and self.fully_guarded
 
     @property
     def ready_to_dispatch(self) -> bool:
@@ -1132,36 +1211,28 @@ class HarnessSandbox:
         sandbox_home = tmp_root / f"{provider}-home"
         sandbox_home.mkdir(parents=True, exist_ok=True)
 
-        if provider == "claude":
-            # Runs under this session's own Claude Code hook set already (or,
-            # dispatched headless via `claude --print`, under whatever hooks
-            # its own settings.json wires) — unaffected by this script, and
-            # every guard is already bound by that mechanism.
-            return cls(
-                provider=provider,
-                root=sandbox_home,
-                env_extra={"ATELES_LOCAL_REVIEW_HOME": str(sandbox_home)},
-                command_wrapper=[],
-                credential_read_denied=True,
-                credential_binding_protected=True,
-                user_config_write_denied=True,
-                git_stash_denied=True,
-                authentication_ready=True,
-                unavailable_guards=(),
-            )
-
-        env_extra = (
-            {
+        if provider == "codex":
+            env_extra = {
                 "CODEX_HOME": str(sandbox_home),
                 "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
             }
-            if provider == "codex"
-            else {
+            authentication_ready = link_codex_auth(sandbox_home)
+        elif provider == "cursor":
+            env_extra = {
                 "HOME": str(sandbox_home),
                 "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
             }
-        )
-        authentication_ready = provider == "codex" and link_codex_auth(sandbox_home)
+            # Cursor subscription state is stored outside the isolated home
+            # and has no narrowly exposable capability equivalent to Codex's
+            # auth.json or Claude's dedicated OAuth environment variable.
+            authentication_ready = False
+        elif provider == "claude":
+            env_extra = {"ATELES_LOCAL_REVIEW_HOME": str(sandbox_home)}
+            authentication_ready = bool(
+                (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
+            )
+        else:
+            raise ValueError(f"unsupported harness provider: {provider}")
 
         # ── sandbox-exec profile: build (credential/user-config/stash-ref
         # denies, all by EFFECT — see build_sandbox_exec_profile), then PROBE
@@ -1170,22 +1241,48 @@ class HarnessSandbox:
         credential_read_denied = False
         credential_binding_protected = False
         user_config_write_denied = False
+        credential_helper_isolated = False
         command_wrapper: list[str] = []
         try:
             fixture_home = sandbox_home / "probe-fixtures" / "fixture-user"
+            denied_helper = (
+                sandbox_home / "probe-fixtures" / "fixture-git-credential-helper"
+            )
+            control_helper = sandbox_home / "probe-fixtures" / "control-helper"
+            for helper, output in (
+                (denied_helper, "denied-helper\n"),
+                (control_helper, "control-helper\n"),
+            ):
+                helper.parent.mkdir(parents=True, exist_ok=True)
+                helper.write_text(f"#!/bin/sh\nprintf '{output}'\n", encoding="utf-8")
+                helper.chmod(0o755)
             build_sandbox_exec_profile(
                 profile_path,
                 credential_home_roots=(Path.home(), fixture_home),
+                credential_helper_exec_paths=(
+                    *_CREDENTIAL_HELPER_EXEC_PATHS,
+                    denied_helper,
+                ),
             )
-            read_fixture_dir = fixture_home / ".config" / "neotoma"
-            read_fixture_dir.mkdir(parents=True, exist_ok=True)
-            read_fixture = read_fixture_dir / ".env"
-            read_fixture.write_text("PROBE_NOT_A_REAL_CREDENTIAL=1\n", encoding="utf-8")
             read_control = sandbox_home / "probe-fixtures" / "control-read.txt"
             read_control.write_text("control\n", encoding="utf-8")
-            credential_read_denied = probe_sandbox_exec_denies_read(
-                profile_path, read_fixture, control_path=read_control
+            read_fixtures = tuple(
+                fixture_home / relative
+                for relative in _SYNTHETIC_PUBLICATION_CREDENTIAL_PATHS
             )
+            for read_fixture in read_fixtures:
+                read_fixture.parent.mkdir(parents=True, exist_ok=True)
+                read_fixture.write_text(
+                    "PROBE_NOT_A_REAL_CREDENTIAL=1\n", encoding="utf-8"
+                )
+            credential_read_denied = all(
+                probe_sandbox_exec_denies_read(
+                    profile_path, read_fixture, control_path=read_control
+                )
+                for read_fixture in read_fixtures
+            )
+            read_fixture_dir = fixture_home / ".config" / "neotoma"
+            read_fixture = read_fixture_dir / ".env"
             credential_binding_protected = (
                 probe_sandbox_exec_preserves_credential_binding(
                     profile_path,
@@ -1193,6 +1290,11 @@ class HarnessSandbox:
                     protected_file=read_fixture,
                     control_root=sandbox_home / "probe-fixtures" / "binding-control",
                 )
+            )
+            credential_helper_isolated = probe_credential_helper_isolation(
+                profile_path,
+                denied_helper=denied_helper,
+                control_helper=control_helper,
             )
 
             write_fixture = sandbox_home / "probe-fixtures" / ".claude" / "probe-write"
@@ -1209,6 +1311,7 @@ class HarnessSandbox:
             credential_read_denied = False
             credential_binding_protected = False
             user_config_write_denied = False
+            credential_helper_isolated = False
 
         # ── git-stash: the shim is advisory-only (a friendly early message
         # for the common PATH-resolved case); the REAL control is the
@@ -1294,6 +1397,13 @@ class HarnessSandbox:
                 "profile did not probe as denying a read of the fixture path "
                 "— see the sandbox's own probe result, not asserted)"
             )
+        if not credential_helper_isolated:
+            unavailable.append(
+                "credential_helper_guard (the outer profile did not probe as "
+                "denying a synthetic credential helper while allowing an "
+                "ordinary control executable; no real helper or keychain was "
+                "invoked)"
+            )
         if not credential_binding_protected:
             unavailable.append(
                 "credential_binding_guard (the profile did not probe as "
@@ -1324,7 +1434,9 @@ class HarnessSandbox:
             root=sandbox_home,
             env_extra=env_extra,
             command_wrapper=command_wrapper,
-            credential_read_denied=credential_read_denied,
+            credential_read_denied=(
+                credential_read_denied and credential_helper_isolated
+            ),
             credential_binding_protected=credential_binding_protected,
             user_config_write_denied=user_config_write_denied,
             git_stash_denied=git_stash_denied,
@@ -1335,25 +1447,23 @@ class HarnessSandbox:
 
 def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
     """Return a refusal reason when *sandbox*'s OWN probed state shows a
-    required guard is unbound for a non-claude provider, or None to proceed.
+    required guard is unbound, or None to proceed.
 
     Driven entirely by ``sandbox.fully_guarded`` — a boolean produced by
     actually running the sandbox-exec profile and the git shim against
-    fixtures in ``HarnessSandbox.build()``, never by a caller-supplied
-    constant. `claude` always proceeds (its own hook set already binds every
-    guard this class attempts). Every lens review this script dispatches
-    needs the full guard set — there is no lighter-weight lens run that could
-    accept a partial bind — so this refuses outright rather than proceeding
-    on a partial result.
+    synthetic fixtures in ``HarnessSandbox.build()``, never by a
+    caller-supplied constant. Every provider, including Claude, needs the
+    same outer credential boundary: project hooks govern tool calls but do
+    not prove that direct absolute-path/helper/keychain access is contained.
+    There is no lighter-weight lens run that can accept a partial bind.
     """
-    if sandbox.provider == "claude":
-        return None
     if not sandbox.authentication_ready:
         return (
             f"provider {sandbox.provider!r} has no authentication available "
             "inside its isolated harness home — refusing before a model call. "
-            "Codex requires an existing ~/.codex/auth.json subscription login; "
-            "Cursor requires a named credential injection that is not yet wired."
+            "Codex requires its isolated auth.json capability; Claude requires "
+            "CLAUDE_CODE_OAUTH_TOKEN; Cursor requires a named subscription "
+            "capability that is not yet wired."
         )
     if not sandbox.fully_guarded:
         missing = "; ".join(sandbox.unavailable_guards) or "unspecified"
@@ -1576,6 +1686,18 @@ def validate_verdict(
         pre_post=pre_post,
         artifact_binding=artifact_binding,
     )
+
+
+def _dispatch_diagnostics(result: SkillResult) -> dict:
+    """Preserve the child's original diagnostics and structured classifier."""
+    return {
+        "returncode": result.returncode,
+        "error": result.error,
+        "stderr": result.stderr,
+        "delivery_failure_reason": result.delivery_failure_reason,
+        "delivery_failure_reasons": list(result.delivery_failure_reasons),
+        "delivery_failure_conflicts": list(result.delivery_failure_conflicts),
+    }
 
 
 def gh_login() -> str:
@@ -2037,6 +2159,8 @@ async def run_one(
             and result.delivery_failure_reason
             in _RECOVERABLE_LOCAL_VERDICT_DELIVERY_DENIALS
             and result.error == result.delivery_failure_reason
+            and result.delivery_failure_reasons == (result.delivery_failure_reason,)
+            and not result.delivery_failure_conflicts
         ):
             return {
                 "ok": False,
@@ -2044,6 +2168,7 @@ async def run_one(
                 "reason": result.error or "dispatch failed",
                 "attempted_providers": list(result.attempted_providers),
                 "stderr": result.stderr,
+                "dispatch_diagnostics": _dispatch_diagnostics(result),
                 "posted": False,
             }
 
@@ -2060,6 +2185,7 @@ async def run_one(
                     "refusal_reason": reason,
                     "attempted_providers": list(result.attempted_providers),
                     "stderr": result.stderr,
+                    "dispatch_diagnostics": _dispatch_diagnostics(result),
                     "posted": False,
                 }
             delivery_denial_recovered = True
@@ -2079,6 +2205,7 @@ async def run_one(
                 "refusal_reason": reason,
                 "attempted_providers": list(result.attempted_providers),
                 "stderr": result.stderr,
+                "dispatch_diagnostics": _dispatch_diagnostics(result),
                 "posted": False,
             }
         check = validate_verdict(
@@ -2101,6 +2228,7 @@ async def run_one(
             "posted": False,
             "comment_url": "",
             "delivery_denial_recovered": delivery_denial_recovered,
+            "dispatch_diagnostics": _dispatch_diagnostics(result),
         }
         if not check.ok:
             report["refusal_reason"] = check.reason
