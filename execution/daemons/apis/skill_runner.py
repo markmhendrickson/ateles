@@ -336,6 +336,16 @@ def _load_agent_def(role: str) -> AgentDefinition:
     return _agent_def_cache[role]
 
 
+def _load_active_policy_prompt(role: str) -> str:
+    """Render the role's live Neotoma policy without caching it locally."""
+    try:
+        rendered = AgentLoader(role).render_policy_prompt()
+        return rendered if isinstance(rendered, str) else ""
+    except Exception as exc:  # noqa: BLE001 — policy outage must not kill dispatch
+        log.warning(f"[apis] live policy unavailable for role {role!r}: {exc}")
+        return ""
+
+
 # ── Review-verdict vocabulary (ateles#938 — one source, defined once) ─────────
 # THE single authoritative list of bold verdict tokens a swarm agent may emit as
 # its one-line GitHub verdict. Every other place that needs this vocabulary —
@@ -628,6 +638,7 @@ def build_system_prompt(
     agent_def: AgentDefinition,
     skill_md: str,
     include_github_contract: bool = False,
+    policy_prompt: str = "",
 ) -> tuple[str, bool]:
     """
     Build the composite system prompt for a role dispatch.
@@ -660,7 +671,18 @@ def build_system_prompt(
     so absent — on a checkout with no docs/foundation/conformance.md, so the
     prompt only ever names a reading list the agent can open; the day a kernel
     document lands, the injected text changes to name it.
+
+    ``policy_prompt`` is the live, role-scoped agent_policy rendering from
+    Neotoma. It follows the stable definition and skill layers so conditional
+    rules are delivered through the same provider-neutral prompt carrier. An
+    empty rendering preserves the pre-policy prompt byte-for-byte.
     """
+    def with_policy(prompt: str) -> str:
+        rendered_policy = policy_prompt.strip()
+        if not rendered_policy:
+            return prompt
+        return f"{prompt}\n\n---\n\n{rendered_policy}"
+
     contracts = ""
     if include_github_contract:
         contracts = f"{SWARM_GITHUB_CONTRACT}\n\n---\n\n{SWARM_PRIOR_ART_CONTRACT}"
@@ -670,22 +692,18 @@ def build_system_prompt(
     definition_prompt = (agent_def.prompt_markdown or "").strip()
     if definition_prompt:
         if include_github_contract:
-            return (
+            return with_policy(
                 f"{definition_prompt}\n\n"
                 "---\n\n"
                 f"{contracts}\n\n"
                 "---\n\n"
-                f"{skill_md}",
-                False,
-            )
-        return (
-            f"{definition_prompt}\n\n---\n\n{skill_md}",
-            False,
-        )
+                f"{skill_md}"
+            ), False
+        return with_policy(f"{definition_prompt}\n\n---\n\n{skill_md}"), False
     # Degraded: no definition_prompt.
     if include_github_contract:
-        return f"{contracts}\n\n---\n\n{skill_md}", True
-    return skill_md, True
+        return with_policy(f"{contracts}\n\n---\n\n{skill_md}"), True
+    return with_policy(skill_md), True
 
 
 # ── Neotoma harness_event writer ───────────────────────────────────────────────
@@ -1364,9 +1382,10 @@ async def _run_skill_once(
     """
     Run one T4 agent to completion and return its output.
 
-    Stage 1: loads the role's agent_definition (role defaults to skill when not
-    passed — skill name == role name in this codebase). Prepends the definition's
-    prompt_markdown to SKILL.md; applies the tool allowlist when restricted.
+    Stage 1: loads the role's agent_definition and live agent_policy (role
+    defaults to skill when not passed — skill name == role name in this
+    codebase). Prepends the definition's prompt_markdown to SKILL.md, appends
+    the policy rendering, and applies the tool allowlist when restricted.
 
     Stage 2: writes harness_event entities to Neotoma at start, completion, and
     failure.
@@ -1389,8 +1408,9 @@ async def _run_skill_once(
     appears in payment, health, finance, or other non-GitHub work.
 
     Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
-    to the Claude adapter. Codex and Cursor receive the same system + skill
-    instructions as a composite prompt and use their ambient configured tools.
+    to the Claude adapter. Claude, Codex, and Cursor receive the same definition
+    + skill + live-policy instructions through their provider prompt carriers
+    and use their ambient configured tools.
 
     ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
     child subprocess runs with this working directory instead of inheriting the
@@ -1497,9 +1517,16 @@ async def _run_skill_once(
             provider=provider,
         )
 
+    # Fetch policy at dispatch time: unlike the stable agent definition, active
+    # rules may change between tasks and must not inherit the definition cache.
+    policy_prompt = await asyncio.to_thread(_load_active_policy_prompt, _role)
+
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
     system_prompt, degraded = build_system_prompt(
-        agent_def, skill_md, include_github_contract=include_github_contract
+        agent_def,
+        skill_md,
+        include_github_contract=include_github_contract,
+        policy_prompt=policy_prompt,
     )
 
     if degraded:
@@ -1507,7 +1534,7 @@ async def _run_skill_once(
         warn_msg = (
             f"Role {_role!r} ran DEGRADED (no agent_definition loaded) "
             f"for task {task_entity_id or '(unknown)'!r}. "
-            "Dispatching with SKILL.md only."
+            "Dispatching with SKILL.md and any available live policy."
         )
         log.warning(f"[apis] {warn_msg}")
         # A role with no agent_definition is ONE fact about that ROLE, not one
