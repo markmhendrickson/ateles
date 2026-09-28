@@ -28,6 +28,12 @@ without restarting Apis:
 
 No metered/API-key fallback is represented here.  That hard boundary is
 enforced by ``skill_runner`` when it constructs each child environment.
+
+``claude-local`` (``local_provider.py``) is recognized but never enters the
+weighted rotation above, even if named in ``APIS_HARNESS_PROVIDERS``: it is
+reached only when pinned, or placed first for an eligible mechanical work
+class via ``provider_candidates(local_first=True)``, with the frontier
+providers behind it as the fallback.
 """
 
 from __future__ import annotations
@@ -38,20 +44,22 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-PROVIDERS = ("claude", "codex", "cursor")
-DEFAULT_PROVIDER_ORDER = PROVIDERS
+FRONTIER_PROVIDERS = ("claude", "codex", "cursor")
+LOCAL_PROVIDERS = ("claude-local",)
+PROVIDERS = FRONTIER_PROVIDERS + LOCAL_PROVIDERS
+DEFAULT_PROVIDER_ORDER = FRONTIER_PROVIDERS
 
 _current_weights: dict[str, float] = {}
 _cooldown_until: dict[str, float] = {}
 
 
 def configured_providers() -> list[str]:
-    """Return the de-duplicated, recognized provider order."""
+    """Return the de-duplicated, recognized frontier provider order."""
     raw = os.environ.get("APIS_HARNESS_PROVIDERS", ",".join(DEFAULT_PROVIDER_ORDER))
     ordered: list[str] = []
     for item in raw.split(","):
         provider = item.strip().lower()
-        if provider in PROVIDERS and provider not in ordered:
+        if provider in FRONTIER_PROVIDERS and provider not in ordered:
             ordered.append(provider)
     return ordered
 
@@ -182,6 +190,7 @@ def provider_candidates(
     *,
     preferred: str | None = None,
     now: float | None = None,
+    local_first: bool = False,
 ) -> list[str]:
     """Return providers in attempt order, with a smooth weighted first choice.
 
@@ -190,6 +199,9 @@ def provider_candidates(
     while unequal values naturally send more work to the roomier plan.
     Remaining eligible providers follow in descending headroom order so a
     capacity failure can fail over within the same dispatch.
+
+    ``local_first`` (unpinned runs only) puts an eligible ``claude-local``
+    ahead of that frontier list, which stays behind it as the fallback.
     """
     moment = time.monotonic() if now is None else now
     order = configured_providers()
@@ -212,8 +224,22 @@ def provider_candidates(
         )
         is None
     ]
+    local = [
+        provider
+        for provider in LOCAL_PROVIDERS
+        if local_first
+        and preferred is None
+        and _provider_exclusion_reason(
+            provider,
+            available,
+            headroom=headroom,
+            minimum=minimum,
+            moment=moment,
+        )
+        is None
+    ]
     if not eligible:
-        return []
+        return local
 
     for provider in list(_current_weights):
         if provider not in eligible:
@@ -238,7 +264,7 @@ def provider_candidates(
         (provider for provider in eligible if provider != first),
         key=lambda provider: (-headroom[provider], order_index[provider]),
     )
-    return [first, *remaining]
+    return [*local, first, *remaining]
 
 
 def reset_state() -> None:

@@ -30,6 +30,7 @@ MANAGED_SCRIPT_NAMES = frozenset(
     {
         "session_rule_index.py",
         "session_rule_delivery.py",
+        "rule_injection_gate.py",
         "sibling_repo_worktree_guard.py",
         "gmail_send_gate.py",
         "git_stash_guard.py",
