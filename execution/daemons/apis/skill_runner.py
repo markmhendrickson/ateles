@@ -1113,6 +1113,8 @@ def _provider_binaries() -> dict[str, str | None]:
 
 
 _DIAGNOSTIC_PREFIX_RE = re.compile(r"^(?:(?:fatal|error):\s*)+")
+_API_ERROR_PREFIX_RE = re.compile(r"^api error:\s*(?:\d{3}\s*:?[ \t]*)?")
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SSH_AUTH_DIAGNOSTIC_RE = re.compile(
     r"^(?:[\w.+-]+@[\w.-]+:\s*)?permission denied \(publickey\)(?:$|[ \t:;,.-])"
 )
@@ -1135,28 +1137,44 @@ def _diagnostic_starts_with(line: str, signature: str) -> bool:
 def _diagnostic_line_kind(raw_line: str) -> str | None:
     """Classify one provider diagnostic without scanning ordinary prose.
 
-    Harnesses and Git may prefix a diagnostic with ``fatal:`` or ``error:``
-    and append reset times, URLs, or explanations.  Normalize those wrappers
-    while keeping the match anchored at the diagnostic start so a prompt or
-    completed verdict that merely discusses the same words is excluded.
+    Normalize provider API/JSON envelopes, SGR color, and Git's ``fatal:`` or
+    ``error:`` prefixes. Keep matching anchored at the extracted diagnostic
+    start so a prompt or verdict discussing these words is excluded.
     """
-    line = raw_line.strip().lower()
+    line = _ANSI_SGR_RE.sub("", raw_line).replace("\u00a0", " ").strip().lower()
     if not line:
         return None
-    if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", line):
-        return "launch"
-
     normalized = _DIAGNOSTIC_PREFIX_RE.sub("", line)
-    if _SSH_AUTH_DIAGNOSTIC_RE.match(normalized) or any(
-        _diagnostic_starts_with(normalized, signature)
-        for signature in _AUTH_FAILURE_SIGNATURES
-    ):
-        return "auth"
-    if any(
-        _diagnostic_starts_with(normalized, signature)
-        for signature in _CAPACITY_FAILURE_SIGNATURES
-    ) or any(pattern.match(normalized) for pattern in _CAPACITY_DIAGNOSTIC_PATTERNS):
-        return "capacity"
+    normalized = _API_ERROR_PREFIX_RE.sub("", normalized)
+    candidates = [normalized]
+    if normalized.startswith("{"):
+        try:
+            envelope = json.loads(normalized)
+        except json.JSONDecodeError:
+            envelope = None
+        if isinstance(envelope, dict):
+            error = envelope.get("error")
+            if isinstance(error, str):
+                candidates = [error]
+            elif isinstance(error, dict):
+                candidates = [
+                    value
+                    for key in ("message", "type")
+                    if isinstance(value := error.get(key), str)
+                ]
+    for candidate in candidates:
+        if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", candidate):
+            return "launch"
+        if _SSH_AUTH_DIAGNOSTIC_RE.match(candidate) or any(
+            _diagnostic_starts_with(candidate, signature)
+            for signature in _AUTH_FAILURE_SIGNATURES
+        ):
+            return "auth"
+        if any(
+            _diagnostic_starts_with(candidate, signature)
+            for signature in _CAPACITY_FAILURE_SIGNATURES
+        ) or any(pattern.match(candidate) for pattern in _CAPACITY_DIAGNOSTIC_PATTERNS):
+            return "capacity"
     return None
 
 
@@ -1177,10 +1195,8 @@ def _provider_failure_kind(*texts: str) -> str | None:
     if "auth" in kinds:
         return "auth"
 
-    # Failed-provider payloads may wrap canonical diagnostics in JSON or a
-    # sentence (for example ``API Error: 401 invalid authentication
-    # credentials``). Preserve those established adapters as a fallback. The
-    # router never calls this fallback for a successful result, and delivery
+    # Failed-provider payloads may embed diagnostics in arbitrary sentences.
+    # Preserve that established fallback for failed attempts only; delivery
     # recovery uses only the anchored line classifier above.
     blob = " ".join(text for text in texts if text).lower()
     if any(signature in blob for signature in _CAPACITY_FAILURE_SIGNATURES):

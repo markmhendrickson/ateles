@@ -1840,6 +1840,14 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
         ("authentication_error: invalid api key", "auth"),
         ("quota exceeded; resets in 2 hours", "capacity"),
         ("codex launch failed: executable unavailable", "launch"),
+        ("API Error: 401 invalid authentication credentials", "auth"),
+        ("API Error: 429 quota exceeded; resets in 2 hours", "capacity"),
+        ('{"error":{"message":"invalid api key"}}', "auth"),
+        ('{"error":{"message":"rate limit reached"}}', "capacity"),
+        ("fatal: codex launch failed: executable unavailable", "launch"),
+        ("error: cursor launch failed: executable unavailable", "launch"),
+        ("\x1b[31mAPI Error:\x1b[0m 401 invalid\u00a0api key", "auth"),
+        ('\x1b[31m{"error":{"message":"quota\u00a0exceeded"}}\x1b[0m', "capacity"),
     ],
     ids=[
         "https_auth",
@@ -1847,6 +1855,14 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
         "authentication_error",
         "suffixed_capacity",
         "launch",
+        "api_auth",
+        "api_capacity",
+        "json_auth",
+        "json_capacity",
+        "fatal_launch",
+        "error_launch",
+        "ansi_nbsp_api",
+        "ansi_nbsp_json",
     ],
 )
 @pytest.mark.parametrize(
@@ -1873,7 +1889,12 @@ def test_mixed_delivery_diagnostics_never_reach_parent_recovery_or_publication(
         "Could not resolve host: github.com"
     )
     if line_length is not None:
-        diagnostic += " " + "x" * (line_length - len(diagnostic) - 1)
+        if diagnostic.startswith(("{", "\x1b[31m{")):
+            padding = ',"padding":"' + "x" * (line_length - len(diagnostic) - 13) + '"'
+            diagnostic = diagnostic.replace("}}", padding + "}}")
+            assert json.loads(re.sub(r"\x1b\[[0-9;]*m", "", diagnostic))["error"]
+        else:
+            diagnostic += " " + "x" * (line_length - len(diagnostic) - 1)
         assert len(diagnostic) == line_length
     stderr = "\n".join(
         (diagnostic, delivery) if diagnostic_first else (delivery, diagnostic)

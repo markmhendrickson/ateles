@@ -3250,6 +3250,84 @@ class TestDeliveryFailureIsReportedAsFailure:
         assert expected_conflict in result.delivery_failure_conflicts
         assert "mixed delivery diagnostics" in result.error
 
+    @pytest.mark.parametrize(
+        ("diagnostic", "expected_conflict"),
+        [
+            ("API Error: 401 invalid authentication credentials", "auth"),
+            ("API Error: 429 quota exceeded; resets in 2 hours", "capacity"),
+            ('{"error":{"message":"invalid api key"}}', "auth"),
+            ('{"error":{"message":"rate limit reached"}}', "capacity"),
+            ('{"error":"authentication_error: invalid api key"}', "auth"),
+            (
+                '{"error":{"type":"rate_limit_error","message":"request rejected"}}',
+                "capacity",
+            ),
+            ("fatal: codex launch failed: executable unavailable", "launch"),
+            ("error: cursor launch failed: executable unavailable", "launch"),
+            ("\x1b[31mAPI Error:\x1b[0m 401 invalid\u00a0api key", "auth"),
+            ('\x1b[31m{"error":{"message":"quota\u00a0exceeded"}}\x1b[0m', "capacity"),
+        ],
+        ids=[
+            "api_auth",
+            "api_capacity",
+            "json_auth",
+            "json_capacity",
+            "json_auth_string",
+            "json_capacity_type",
+            "fatal_launch",
+            "error_launch",
+            "ansi_nbsp_api",
+            "ansi_nbsp_json",
+        ],
+    )
+    @pytest.mark.parametrize("diagnostic_first", [False, True])
+    def test_wrapped_provider_diagnostic_blocks_delivery_only(
+        self, diagnostic, expected_conflict, diagnostic_first
+    ) -> None:
+        lines = (
+            (diagnostic, self.NO_NETWORK)
+            if diagnostic_first
+            else (self.NO_NETWORK, diagnostic)
+        )
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n", stderr="\n".join(lines).encode()
+        )
+
+        assert result.ok is False
+        assert result.delivery_failure_reason == ""
+        assert result.delivery_failure_reasons
+        assert expected_conflict in result.delivery_failure_conflicts
+        assert "mixed delivery diagnostics" in result.error
+
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "The review quotes API Error: 401 invalid authentication credentials and quota exceeded.",
+            "API Error: The review quotes invalid authentication credentials and quota exceeded.",
+            '{"error":{"message":"The review quotes invalid api key and quota exceeded."}}',
+        ],
+    )
+    @pytest.mark.parametrize("diagnostic_first", [False, True])
+    def test_long_ordinary_prose_does_not_block_delivery_only(
+        self, prose, diagnostic_first
+    ) -> None:
+        if prose.startswith("{"):
+            prose = prose.replace('"}}', " " + "x" * (501 - len(prose) - 1) + '"}}')
+            assert json.loads(prose)["error"]["message"]
+        else:
+            prose += " " + "x" * (501 - len(prose) - 1)
+        assert len(prose) == 501
+        lines = (
+            (prose, self.NO_NETWORK) if diagnostic_first else (self.NO_NETWORK, prose)
+        )
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n", stderr="\n".join(lines).encode()
+        )
+
+        assert result.ok is False
+        assert result.delivery_failure_reason == result.error
+        assert result.delivery_failure_conflicts == ()
+
     def test_quoted_capacity_stdout_does_not_cancel_delivery_only_signal(self) -> None:
         result = self._dispatch_with_child_output(
             b"The reviewed issue quotes a prior session limit.\n",
