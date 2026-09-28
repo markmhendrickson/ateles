@@ -110,6 +110,27 @@ PUBLIC_SURFACE_GATE_SCOPES = {
     "internal_leakage_scan": "every public route",
 }
 
+FRAME_BUYER_RECOGNITION_CONTRACTS = {
+    "buyer_language",
+    "recognized_symptom",
+    "failed_alternatives",
+    "category_reframe",
+    "cost_of_inaction",
+}
+
+BUILD_OFFER_CONTRACTS = FRAME_BUYER_RECOGNITION_CONTRACTS | {
+    "offer_timing",
+    "three_step_mechanism",
+    "first_usable_artifact",
+    "longer_term_change",
+    "product_true_proof",
+    "visible_work",
+    "cost_comparison",
+    "risk_reversal",
+    "champion_language",
+    "dominant_next_step",
+}
+
 
 def _skill(**overrides) -> dict:
     """A fixture `skill` entity in the shape fetch_skills() produces."""
@@ -198,6 +219,22 @@ def _public_surface_gate_errors(text: str) -> list[str]:
     return errors
 
 
+def _contract_ids(text: str, heading: str) -> set[str]:
+    """Parse one skill contract table by its stable heading."""
+    start = text.index(heading)
+    next_heading = text.find("\n## ", start + len(heading))
+    section = text[start:] if next_heading == -1 else text[start:next_heading]
+    return {
+        line.split("|", 2)[1].strip().strip("`")
+        for line in section.splitlines()
+        if line.startswith("| `")
+    }
+
+
+def _missing_contract_ids(text: str, heading: str, required: set[str]) -> set[str]:
+    return required - _contract_ids(text, heading)
+
+
 def test_product_finding_routing_contract_stays_in_sync() -> None:
     """Independently loaded skills must not silently diverge on filing behavior.
 
@@ -212,6 +249,48 @@ def test_product_finding_routing_contract_stays_in_sync() -> None:
     assert frame == build, (
         "the duplicated product-finding routing contract diverged; correct both "
         "canonical skill entities, read them back, then regenerate both mirrors"
+    )
+
+
+def test_product_page_skills_bind_buyer_recognition_and_offer_contracts() -> None:
+    """The upstream argument and downstream page contracts must stay complete."""
+    skills_dir = _REPO_ROOT / ".claude" / "skills"
+    frame = (skills_dir / "frame-product-argument" / "SKILL.md").read_text()
+    build = (skills_dir / "build-landing-page" / "SKILL.md").read_text()
+
+    assert _missing_contract_ids(
+        frame,
+        "## Buyer-recognition contract — ambition remains first",
+        FRAME_BUYER_RECOGNITION_CONTRACTS,
+    ) == set()
+    assert _missing_contract_ids(
+        build,
+        "## Buyer-recognition and offer contract",
+        BUILD_OFFER_CONTRACTS,
+    ) == set()
+
+
+@pytest.mark.parametrize(
+    "omitted",
+    ["recognized_symptom", "product_true_proof", "risk_reversal"],
+)
+def test_buyer_offer_contract_check_fails_when_required_row_is_removed(
+    omitted: str,
+) -> None:
+    """Mutation proof: recognition, proof, and risk are independently binding."""
+    skill = (
+        _REPO_ROOT / ".claude" / "skills" / "build-landing-page" / "SKILL.md"
+    ).read_text()
+    mutated = "\n".join(
+        line
+        for line in skill.splitlines()
+        if not line.startswith(f"| `{omitted}` |")
+    )
+
+    assert omitted in _missing_contract_ids(
+        mutated,
+        "## Buyer-recognition and offer contract",
+        BUILD_OFFER_CONTRACTS,
     )
 
 
