@@ -24,7 +24,6 @@ Cases:
   7. session_rule_index.py (SessionStart) records a delivered signature, so
      the FIRST session_rule_delivery.py call after it finds nothing changed.
 """
-
 from __future__ import annotations
 
 import http.server
@@ -122,14 +121,8 @@ def project_dir():
         yield Path(tmp)
 
 
-def _run(
-    hook: str,
-    cwd: Path,
-    project_dir: Path,
-    session_id: str,
-    base_url: str | None = None,
-    extra_env: dict | None = None,
-):
+def _run(hook: str, cwd: Path, project_dir: Path, session_id: str,
+         base_url: str | None = None, extra_env: dict | None = None):
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "CLAUDE_PROJECT_DIR": str(project_dir),
@@ -181,13 +174,8 @@ class TestMidSessionAdditionInjectedOnce:
         # A new rule appears mid-session.
         handler.rows = [
             _row("ent_a", rule="Rule A.", applies_when="always"),
-            _row(
-                "ent_b",
-                rule="Rule B, brand new.",
-                applies_when="doing X",
-                rule_kind="advisory",
-                title="Do X carefully",
-            ),
+            _row("ent_b", rule="Rule B, brand new.", applies_when="doing X",
+                 rule_kind="advisory", title="Do X carefully"),
         ]
         added = _run(HOOK, REPO_ROOT, project_dir, "sess-2", base_url=base_url)
         assert added.returncode == 0
@@ -207,27 +195,15 @@ class TestChangedRowIsRedelivered:
     def test_updated_timestamp_triggers_reinjection(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
         handler.rows = [
-            _row(
-                "ent_c",
-                rule="Original text.",
-                applies_when="doing Y",
-                rule_kind="advisory",
-                title="Do Y",
-                last_observation_at="2026-01-01T00:00:00Z",
-            ),
+            _row("ent_c", rule="Original text.", applies_when="doing Y",
+                 rule_kind="advisory", title="Do Y", last_observation_at="2026-01-01T00:00:00Z"),
         ]
         baseline = _run(HOOK, REPO_ROOT, project_dir, "sess-3", base_url=base_url)
         assert baseline.returncode == 0
 
         handler.rows = [
-            _row(
-                "ent_c",
-                rule="Corrected text.",
-                applies_when="doing Y",
-                rule_kind="advisory",
-                title="Do Y (revised)",
-                last_observation_at="2026-01-02T00:00:00Z",
-            ),
+            _row("ent_c", rule="Corrected text.", applies_when="doing Y",
+                 rule_kind="advisory", title="Do Y (revised)", last_observation_at="2026-01-02T00:00:00Z"),
         ]
         changed = _run(HOOK, REPO_ROOT, project_dir, "sess-3", base_url=base_url)
         assert changed.returncode == 0
@@ -358,19 +334,10 @@ class TestRenderShapeByRuleKind:
     def test_mandatory_full_text_advisory_summary_only(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
         handler.rows = [
-            _row(
-                "ent_mand",
-                rule="THE FULL MANDATORY RULE BODY TEXT.",
-                applies_when="always",
-                rule_kind="mandatory",
-            ),
-            _row(
-                "ent_adv",
-                rule="THE FULL ADVISORY RULE BODY TEXT.",
-                applies_when="doing Z",
-                rule_kind="advisory",
-                title="Do Z",
-            ),
+            _row("ent_mand", rule="THE FULL MANDATORY RULE BODY TEXT.",
+                 applies_when="always", rule_kind="mandatory"),
+            _row("ent_adv", rule="THE FULL ADVISORY RULE BODY TEXT.",
+                 applies_when="doing Z", rule_kind="advisory", title="Do Z"),
         ]
         result = _run(HOOK, REPO_ROOT, project_dir, "sess-4", base_url=base_url)
         assert result.returncode == 0
@@ -388,27 +355,18 @@ class TestRenderShapeByRuleKind:
 class TestOutputStaysBounded:
     def test_large_delta_stays_under_measured_cap(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
-        handler.rows = [
-            _row(f"ent_seed{i:03d}", applies_when=f"seed {i}") for i in range(5)
-        ]
+        handler.rows = [_row(f"ent_seed{i:03d}", applies_when=f"seed {i}") for i in range(5)]
         baseline = _run(HOOK, REPO_ROOT, project_dir, "sess-5", base_url=base_url)
         assert baseline.returncode == 0
 
         # Every seed row changes, plus many new ones — a large delta.
         handler.rows = [
-            _row(
-                f"ent_seed{i:03d}",
-                applies_when=f"seed {i}",
-                last_observation_at="2026-02-01T00:00:00Z",
-            )
+            _row(f"ent_seed{i:03d}", applies_when=f"seed {i}",
+                 last_observation_at="2026-02-01T00:00:00Z")
             for i in range(5)
         ] + [
-            _row(
-                f"ent_new{i:03d}",
-                rule="A brand new rule body of moderate length here.",
-                applies_when=f"new condition {i}",
-                rule_kind="mandatory",
-            )
+            _row(f"ent_new{i:03d}", rule="A brand new rule body of moderate length here.",
+                 applies_when=f"new condition {i}", rule_kind="mandatory")
             for i in range(60)
         ]
         result = _run(HOOK, REPO_ROOT, project_dir, "sess-5", base_url=base_url)
@@ -441,19 +399,12 @@ class TestFailOpen:
     def test_missing_session_id_is_a_noop(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
         handler.rows = [_row("ent_a", applies_when="always")]
-        env = {
-            "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "CLAUDE_PROJECT_DIR": str(project_dir),
-            "NEOTOMA_BASE_URL": base_url,
-        }
+        env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
+               "CLAUDE_PROJECT_DIR": str(project_dir),
+               "NEOTOMA_BASE_URL": base_url}
         result = subprocess.run(
-            [sys.executable, HOOK],
-            input="{}",
-            capture_output=True,
-            text=True,
-            cwd=str(REPO_ROOT),
-            env=env,
-            timeout=15,
+            [sys.executable, HOOK], input="{}", capture_output=True, text=True,
+            cwd=str(REPO_ROOT), env=env, timeout=15,
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
@@ -470,23 +421,14 @@ class TestSessionStartHandoff:
         base_url, handler = fake_neotoma
         handler.rows = [
             _row("ent_always1", rule="Never skip the thing.", applies_when="always"),
-            _row(
-                "ent_cond1",
-                rule="Check before merging.",
-                applies_when="opening a PR",
-                rule_kind="advisory",
-                title="Check first",
-            ),
+            _row("ent_cond1", rule="Check before merging.", applies_when="opening a PR",
+                 rule_kind="advisory", title="Check first"),
         ]
-        index_result = _run(
-            INDEX_HOOK, REPO_ROOT, project_dir, "sess-7", base_url=base_url
-        )
+        index_result = _run(INDEX_HOOK, REPO_ROOT, project_dir, "sess-7", base_url=base_url)
         assert index_result.returncode == 0
         assert "ent_always1" in index_result.stdout
 
-        delivery_result = _run(
-            HOOK, REPO_ROOT, project_dir, "sess-7", base_url=base_url
-        )
+        delivery_result = _run(HOOK, REPO_ROOT, project_dir, "sess-7", base_url=base_url)
         assert delivery_result.returncode == 0
         assert delivery_result.stdout.strip() == "", (
             "the delivery hook re-printed content the SessionStart index "
