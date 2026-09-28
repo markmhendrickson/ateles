@@ -13,6 +13,7 @@ on:
       - "ateles/**"
       - ".claude/hooks/**"
       - "execution/daemons/apis/**"
+      - "execution/local_llm/**"
       - "execution/daemons/test_*.py"
       - "execution/daemons/cotinga/**"
       - "execution/daemons/cyphorhinus/**"
@@ -89,6 +90,11 @@ jobs:
       # execution/daemons/apis/** changes.
       - name: Run swarm daemon (apis) tests
         run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
+      # The claude-local provider's loopback normalizer (ollama_shim.py). Its
+      # own step so a shim regression is attributable, and added with the suite
+      # so it is not another committed-but-uncollected lane (#584, #524, #727).
+      - name: Run local LLM shim tests
+        run: uv run --extra dev python -m pytest execution/local_llm/ -q
       - name: Run phoenicurus-release daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
       - name: Run monedula daemon tests

@@ -36,6 +36,7 @@ USAGE
         --role cicada \\
         --task "Report the current git branch and HEAD sha." \\
         [--provider codex] \\
+        [--work-class rebase] \\
         [--cwd /path/to/worktree] \\
         [--timeout 600] \\
         [--task-entity-id ent_...] \\
@@ -45,6 +46,11 @@ USAGE
 NOT the eligibility rules (headroom floor, cooldowns, binary presence). The
 operator wants this while automatic balancing is still being trusted. Without
 it, ``harness_router`` chooses using the headroom file.
+
+``--work-class`` names the kind of work. A mechanical class
+(``local_provider.MECHANICAL_WORK_CLASSES``) that the ``claude-local``
+config enables runs on the local model first, with the frontier providers as
+the fallback; ``--provider claude-local`` pins the local model outright.
 
 Exit codes: 0 on a successful run, non-zero on any failure. The agent's stdout
 goes to this process's stdout; diagnostics go to stderr, so the caller can pipe
@@ -174,6 +180,12 @@ from harness_router import (  # noqa: E402
     configured_providers,
     cooling_providers,
 )
+from local_provider import (  # noqa: E402
+    LOCAL_PROVIDER,
+    MECHANICAL_WORK_CLASSES,
+    config_path as local_config_path,
+    load_config as load_local_config,
+)
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
     SkillResult,
@@ -207,6 +219,7 @@ async def dispatch(
     cwd: str | None = None,
     timeout: int | None = None,
     task_entity_id: str = "",
+    work_class: str | None = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -227,6 +240,7 @@ async def dispatch(
         timeout=timeout,
         cwd=cwd,
         provider=provider,
+        work_class=work_class,
     )
 
 
@@ -249,7 +263,13 @@ def _preflight(role: str, *, provider: str | None) -> str | None:
             f"unknown role {role!r}. Roles with a SKILL.md in {ATELES_REPO}: "
             + ", ".join(roles)
         )
-    if provider is not None and provider not in configured_providers():
+    if provider == LOCAL_PROVIDER:
+        if load_local_config() is None:
+            return (
+                f"provider {LOCAL_PROVIDER!r} is not configured: no valid, "
+                f"enabled config at {local_config_path()}"
+            )
+    elif provider is not None and provider not in configured_providers():
         return (
             f"provider {provider!r} is not in the configured order "
             f"({', '.join(configured_providers())}); "
@@ -424,10 +444,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--provider",
-        choices=["claude", "codex", "cursor"],
+        choices=["claude", "codex", "cursor", LOCAL_PROVIDER],
         help=(
             "Force one provider, bypassing weighted selection (eligibility "
             "rules still apply). Omit to let the router choose on headroom."
+        ),
+    )
+    parser.add_argument(
+        "--work-class",
+        choices=sorted(MECHANICAL_WORK_CLASSES),
+        help=(
+            "Mechanical work class. When the claude-local config enables it, "
+            "the local model runs first and the frontier providers are the "
+            "fallback."
         ),
     )
     parser.add_argument(
@@ -564,6 +593,7 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 timeout=args.timeout,
                 task_entity_id=args.task_entity_id,
+                work_class=args.work_class,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above

@@ -62,6 +62,7 @@ from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
     foundation_contract,
 )
+import local_provider  # noqa: E402
 from harness_router import (  # noqa: E402
     cool_down,
     cooling_providers,
@@ -1088,6 +1089,11 @@ def _provider_binaries() -> dict[str, str | None]:
         "claude": CLAUDE_BIN,
         "codex": CODEX_BIN,
         "cursor": CURSOR_BIN,
+        # The claude CLI against a local model; absent unless configured
+        # (local_provider.load_config), so an unconfigured host never sees it.
+        local_provider.LOCAL_PROVIDER: (
+            CLAUDE_BIN if local_provider.load_config() is not None else None
+        ),
     }
 
 
@@ -1572,14 +1578,40 @@ async def _run_skill_once(
     # A dispatch carrying the GitHub contract is one whose task involves
     # commit/push/PR — the delivery path #590 is about. Everything else runs
     # with the sandbox's default network denial.
-    cmd, stdin_payload = _provider_command(
-        provider,
-        binary,
-        system_prompt,
-        prompt,
-        cwd=cwd,
-        network=include_github_contract,
-    )
+    local_cfg = None
+    if provider == local_provider.LOCAL_PROVIDER:
+        # claude-local: refuse before launch when the prompt cannot fit the
+        # local window or the guard hooks cannot be bound. Either refusal is a
+        # launch failure, so `_run_provider_attempts` falls over to frontier.
+        local_cfg = local_provider.load_config()
+        refusal = (
+            local_provider.ceiling_refusal(system_prompt, prompt, local_cfg)
+            if local_cfg is not None
+            else f"{provider} is not configured"
+        )
+        guards_path = ""
+        if refusal is None:
+            try:
+                guards_path = local_provider.write_guards_file(ATELES_REPO)
+            except (local_provider.LocalProviderError, OSError) as exc:
+                refusal = f"{local_provider.FAILURE_GUARDS}: {exc}"
+        if refusal is not None:
+            msg = f"{provider} launch failed: {refusal}"
+            log.warning(f"[apis] {skill} dispatch skipped — {msg}")
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+        cmd = local_provider.build_command(
+            binary, system_prompt, agent_def.tools, local_cfg, guards_path
+        )
+        stdin_payload = None
+    else:
+        cmd, stdin_payload = _provider_command(
+            provider,
+            binary,
+            system_prompt,
+            prompt,
+            cwd=cwd,
+            network=include_github_contract,
+        )
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
     # Dispatched `claude --print` children inherit the ambient Claude MCP config,
@@ -1777,6 +1809,10 @@ async def _run_skill_once(
     # subscription auth by default. API-key credentials are removed so a capped
     # plan queues/fails over instead of silently spending metered tokens.
     subprocess_env = _subscription_only_env(env_extra)
+    if local_cfg is not None:
+        # Local inference: point the CLI at the loopback proxy and strip any
+        # frontier OAuth credential so it cannot be sent there.
+        local_provider.apply_env(subprocess_env, local_cfg)
 
     # ateles#109 — per-agent GitHub identity: when the caller resolved a
     # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),
@@ -2123,6 +2159,7 @@ async def run_skill(
     preferred_provider: str | None = None,
     owns_pending_gate: bool = False,
     seated_reviewer: bool = False,
+    work_class: str | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -2159,6 +2196,12 @@ async def run_skill(
     `correct` on the CLI deny list, and claude-only routing, since no other
     adapter here can deny a single MCP tool. No seated lens needs `correct`
     for anything but gate state: they file findings through `store`.
+
+    ``work_class`` names the kind of work (``local_provider.MECHANICAL_WORK_CLASSES``).
+    When it is a configured mechanical class and the run is unpinned and not a
+    seated reviewer, ``claude-local`` is tried first and the frontier
+    providers follow as the fallback. Any other value, or None, leaves routing
+    exactly as before.
     """
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
@@ -2174,17 +2217,60 @@ async def run_skill(
             owns_pending_gate=deny_correct,
         )
 
+    local_first = (
+        provider is None
+        and not deny_correct
+        and local_provider.is_eligible(work_class, local_provider.load_config())
+    )
     return await _run_provider_attempts(
         skill, attempt, binaries=_provider_binaries(), provider=provider,
         role=role, task_entity_id=task_entity_id, notifier=notifier,
         preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
+        local_first=local_first,
     )
+
+
+def _record_local_failover(
+    *,
+    skill: str,
+    role: str,
+    task_entity_id: str,
+    reason: str,
+    next_provider: str | None,
+    detail: str,
+) -> None:
+    """harness_event row naming a claude-local failure and where the run went next."""
+    cfg = local_provider.load_config()
+    try:
+        agent_sub = _load_agent_def(role).aauth_sub
+    except Exception:  # noqa: BLE001 — provenance must not block the fallback
+        agent_sub = ""
+    try:
+        _write_harness_event(
+            task_entity_id=task_entity_id,
+            role=role,
+            agent_sub=agent_sub,
+            event_type="provider_failover",
+            tool_name=f"{local_provider.LOCAL_PROVIDER}:{skill}",
+            success="false",
+            output_summary=(
+                f"provider={local_provider.LOCAL_PROVIDER} failover_reason={reason} "
+                f"next_provider={next_provider or 'none'} {detail}"
+            ),
+            usage=DispatchUsage(
+                provider=local_provider.LOCAL_PROVIDER,
+                model=cfg.model if cfg else None,
+                model_source="requested" if cfg else None,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"[apis] failover harness_event write failed: {exc}")
 
 
 async def _run_provider_attempts(
     skill, attempt, *, binaries, provider=None, role=None, task_entity_id="",
     notifier=None, retry_safe=False, preferred_provider=None,
-    owns_pending_gate: bool = False,
+    owns_pending_gate: bool = False, local_first: bool = False,
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
 
@@ -2226,9 +2312,15 @@ async def _run_provider_attempts(
         binaries = {"claude": binaries.get("claude")}
         preferred_provider = None
 
-    candidates = provider_candidates(binaries, preferred=provider)
+    candidates = provider_candidates(
+        binaries, preferred=provider, local_first=local_first and not owns_pending_gate
+    )
     if preferred_provider in candidates and provider is None:
-        candidates = [preferred_provider, *[p for p in candidates if p != preferred_provider]]
+        # A lens preference reorders the frontier providers; a local-first
+        # claude-local stays ahead of them.
+        head = [p for p in candidates[:1] if p == local_provider.LOCAL_PROVIDER]
+        rest = [p for p in candidates if p not in head and p != preferred_provider]
+        candidates = [*head, preferred_provider, *rest]
     if not candidates:
         if owns_pending_gate and provider is None:
             reason = provider_exclusion_reason("claude", binaries) or "not eligible"
@@ -2278,6 +2370,35 @@ async def _run_provider_attempts(
 
         if result.ok and failure_kind is None:
             return result
+        if selected == local_provider.LOCAL_PROVIDER:
+            # Local inference failed: record why, and fall over to frontier.
+            # Local-first routing is limited to mechanical work classes, which
+            # are safe to re-run from the start (rebase, regeneration, triage).
+            reason = local_provider.classify_failure(
+                result.error, result.stderr, result.stdout
+            )
+            if reason in local_provider.COOLDOWN_FAILURES:
+                # Only an unusable local path is held out; a too-long prompt
+                # or an ordinary task failure says nothing about its health.
+                cool_down(selected)
+            last_result = result
+            next_provider = next(
+                (p for p in candidates[len(attempted):]), None
+            )
+            log.warning(
+                f"[apis] {skill}: {selected} failed ({reason}); "
+                f"falling over to {next_provider or 'nothing'}"
+            )
+            await asyncio.to_thread(
+                _record_local_failover,
+                skill=skill,
+                role=(role or skill).lower(),
+                task_entity_id=task_entity_id,
+                reason=reason,
+                next_provider=next_provider,
+                detail=result.error or result.stderr[:200],
+            )
+            continue
         retryable_prompt_failure = retry_safe and (
             not result.ok or failure_kind is not None
         )
