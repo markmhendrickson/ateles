@@ -233,6 +233,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -369,6 +372,47 @@ def read_agent_prompt(worktree: Path, agent: str) -> str:
 # ── Throwaway worktree -----------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _shared_fetch_lock(repo_path: Path):
+    """Serialize ref-updating fetches for one shared repository.
+
+    Parallel lens runs use separate throwaway worktrees, but prepare them from
+    the same clone. Git fetch transactions can race when two processes update
+    the same remote-tracking ref from different expected old values. Key the
+    lock by the resolved common git directory so paths sharing refs share it.
+
+    The lock file intentionally remains in the system temp directory:
+    unlinking it while another process waits on its inode can admit a third
+    process through a newly-created inode.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "--git-common-dir"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = repo_path / common_dir
+    lock_key = hashlib.sha256(str(common_dir.resolve()).encode("utf-8")).hexdigest()
+    lock_path = Path(tempfile.gettempdir()) / f"ateles-harness-fetch-{lock_key}.lock"
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _fetch_origin_serialized(repo_path: Path) -> None:
+    """Fetch origin while holding the repository's shared-ref update lock."""
+    with _shared_fetch_lock(repo_path):
+        subprocess.run(
+            ["git", "-C", str(repo_path), "fetch", "-q", "origin"],
+            check=True,
+        )
+
+
 @dataclass
 class Worktree:
     repo_name: str
@@ -377,10 +421,7 @@ class Worktree:
 
     def create(self, *, head: str) -> None:
         repo_path = Path.home() / "repos" / self.repo_name
-        subprocess.run(
-            ["git", "-C", str(repo_path), "fetch", "-q", "origin"],
-            check=True,
-        )
+        _fetch_origin_serialized(repo_path)
         subprocess.run(
             [
                 "git",

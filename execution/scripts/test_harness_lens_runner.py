@@ -26,6 +26,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -126,6 +128,79 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
         "capture_stash_ref_state",
         lambda worktree: hlr.StashRefState(resolved_oid=None, packed_oid=None),
     )
+
+
+def test_parallel_prepare_serializes_only_shared_fetch(monkeypatch, tmp_path):
+    """Reproduce the concurrent ref failure, then prove the fetch lock."""
+    repo = tmp_path / "shared-repo"
+    (repo / ".git").mkdir(parents=True)
+    state_lock = threading.Lock()
+    active_fetches = 0
+    max_active_fetches = 0
+
+    def planted_run(command, **kwargs):
+        nonlocal active_fetches, max_active_fetches
+        if command[-2:] == ["rev-parse", "--git-common-dir"]:
+            return subprocess.CompletedProcess(command, 0, stdout=".git\n", stderr="")
+        if command[-3:] != ["fetch", "-q", "origin"]:
+            raise AssertionError(f"unexpected command: {command}")
+        with state_lock:
+            active_fetches += 1
+            max_active_fetches = max(max_active_fetches, active_fetches)
+            overlap = active_fetches > 1
+        time.sleep(0.05)
+        with state_lock:
+            active_fetches -= 1
+        if overlap:
+            raise subprocess.CalledProcessError(
+                1,
+                command,
+                stderr=(
+                    "cannot lock ref 'refs/remotes/origin-pr/1308': "
+                    "is at 07ebc09a but expected 33dfea92"
+                ),
+            )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(hlr.subprocess, "run", planted_run)
+
+    # Prove the planted instrument goes red without the production lock.
+    start = threading.Barrier(2)
+    unprotected_errors = []
+
+    def unprotected_fetch():
+        start.wait()
+        try:
+            planted_run(["git", "-C", str(repo), "fetch", "-q", "origin"], check=True)
+        except subprocess.CalledProcessError as exc:
+            unprotected_errors.append(exc)
+
+    threads = [threading.Thread(target=unprotected_fetch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert unprotected_errors
+    assert "cannot lock ref 'refs/remotes/origin-pr/1308'" in unprotected_errors[0].stderr
+    assert max_active_fetches == 2
+
+    # The same concurrent callers stay single-flight through production code.
+    max_active_fetches = 0
+    protected_errors = []
+
+    def protected_fetch():
+        try:
+            hlr._fetch_origin_serialized(repo)
+        except Exception as exc:  # pragma: no cover - assertion reports details
+            protected_errors.append(exc)
+
+    threads = [threading.Thread(target=protected_fetch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert protected_errors == []
+    assert max_active_fetches == 1
 
 
 @pytest.fixture
