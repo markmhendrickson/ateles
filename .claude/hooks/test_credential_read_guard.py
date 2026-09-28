@@ -93,6 +93,11 @@ BASH_BLOCK = [
     ("plain grep -i", f"grep -i token {ENV}"),
     ("ripgrep plain", f"rg TOKEN {ENV}"),
     ("grep -A context", f"grep -A2 TOKEN {ENV}"),
+    ("grep -o names prefix plus values", f"grep -o '^[A-Z_]*=.*' {ENV}"),
+    (
+        "rg only-matching names prefix plus values",
+        f"rg --only-matching '^[A-Za-z_][A-Za-z0-9_]*=.+' {ENV}",
+    ),
     ("base64", f"base64 {ENV}"),
     ("xxd", f"xxd {ENV}"),
     ("od", f"od -c {ENV}"),
@@ -178,6 +183,15 @@ BASH_BLOCK = [
     ("sudo-wrapped local env dump", "sudo env"),
     ("bare local printenv dump", "printenv"),
     ("targeted printenv still prints a value", "printenv NEOTOMA_BEARER_TOKEN"),
+    ("environment dump in command substitution", "echo \"$(env)\""),
+    ("printenv dump in backtick substitution", "echo \"`printenv`\""),
+    ("environment dump in compact subshell", "(env)"),
+    ("environment dump in compact command group", "{env;}"),
+    ("environment dump nested in shell wrapper", "bash -c '(env)'"),
+    (
+        "printenv dump nested in quoted shell wrapper",
+        "sh -c 'echo \"$(printenv)\"'",
+    ),
     ("launchctl service dump", "launchctl print gui/501/example.agent"),
     ("launchctl getenv prints a value", "launchctl getenv NEOTOMA_BEARER_TOKEN"),
     ("systemctl service-property dump", "systemctl show example-agent.service"),
@@ -201,6 +215,10 @@ BASH_BLOCK = [
 BASH_ALLOW = [
     ("grep -c count", f"grep -c '^NEOTOMA_BEARER_TOKEN=' {ENV}"),
     ("grep -o names only", f"grep -o '^[A-Z_]*=' {ENV}"),
+    (
+        "grep long names-only mode",
+        f"grep --only-matching '^[A-Za-z_][A-Za-z0-9_]*=' {ENV}",
+    ),
     ("grep -l files only", f"grep -l TOKEN {ENV}"),
     ("grep -L files without match", f"grep -L TOKEN {ENV}"),
     ("source without dump", f"set -a; source {ENV}; set +a; echo done"),
@@ -505,6 +523,43 @@ def test_process_discovery_never_emits_synthetic_argv_canary():
     finally:
         child.terminate()
         child.wait(timeout=5)
+
+
+def test_value_matching_grep_bypass_has_a_real_canary_effect_then_is_blocked():
+    """Prove the rejected suffix prints fixture values before trusting the guard."""
+    canary = "fake_test_token_not_real_0000"
+    command = f"grep -o '^[A-Z_]*=.*' {ENV}"
+
+    unguarded = subprocess.run(
+        ["bash", "-c", command], capture_output=True, text=True, check=True
+    )
+    assert canary in unguarded.stdout
+
+    guarded = run_result("Bash", {"command": command})
+    assert guarded.returncode == 2
+    assert canary not in guarded.stdout + guarded.stderr
+
+
+def test_nested_environment_dump_has_a_real_canary_effect_then_is_blocked():
+    """Prove a compact substitution dumps values before trusting the boundary check."""
+    variable = "CREDENTIAL_GUARD_SYNTHETIC_CANARY"
+    canary = "synthetic_environment_canary_not_real"
+    command = 'printf "%s\\n" "$(env)"'
+    synthetic_env = dict(os.environ)
+    synthetic_env[variable] = canary
+
+    unguarded = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=synthetic_env,
+    )
+    assert f"{variable}={canary}" in unguarded.stdout
+
+    guarded = run_result("Bash", {"command": command}, env={variable: canary})
+    assert guarded.returncode == 2
+    assert canary not in guarded.stdout + guarded.stderr
 
 
 if __name__ == "__main__":
