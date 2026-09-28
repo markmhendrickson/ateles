@@ -20,6 +20,7 @@ guard's own credential-path check and asserts the suite would then go red.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -673,11 +674,17 @@ def test_value_matching_grep_bypass_has_a_real_canary_effect_then_is_blocked():
 def test_command_specific_grep_bypasses_have_real_effect_then_are_blocked(
     command, canary
 ):
-    """Prove each command prints a synthetic value, then prove pre-exec denial."""
-    unguarded = subprocess.run(
-        ["bash", "-c", command], capture_output=True, text=True, check=True
-    )
-    assert canary in unguarded.stdout
+    """Prove each command prints a synthetic value, then prove pre-exec denial.
+
+    The effect half needs the real binary. Where it is not installed (ripgrep is
+    absent on the CI runner) that half cannot run, but the denial half still
+    must: the guard refuses the command whether or not the binary exists.
+    """
+    if shutil.which(command.split()[0]):
+        unguarded = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True, check=True
+        )
+        assert canary in unguarded.stdout
 
     guarded = run_result("Bash", {"command": command})
     assert guarded.returncode == 2
