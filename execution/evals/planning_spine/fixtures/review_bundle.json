@@ -1,0 +1,45 @@
+{
+  "artifact_role": "generated review evidence; not an authoring source",
+  "canonical_source": "Neotoma prod skill entities",
+  "captured_at": "2026-09-28",
+  "context_fixture": "execution/evals/planning_spine/fixtures/context.json",
+  "context_sha256": "ecbea246e631434dec3521b8f2de03e08056f736fbaa2a1c19be2e71b3806e90",
+  "generated_by": "execution/scripts/render_planning_spine_review_bundle.py",
+  "public_safe": true,
+  "skills": [
+    {
+      "canonical_locator": {
+        "by": "name",
+        "entity_type": "skill",
+        "identifier": "continue-session"
+      },
+      "path": "execution/evals/planning_spine/fixtures/skills/continue-session/SKILL.md",
+      "sha256": "93cfabe02f62dc8db8a9c8a4964faf2168ac125af1a0d7544e9bd3d54b9ae430",
+      "slug": "continue-session",
+      "snapshot_source": "generated user mirror located by name:continue-session"
+    },
+    {
+      "canonical_locator": {
+        "by": "name",
+        "entity_type": "skill",
+        "identifier": "digest"
+      },
+      "path": "execution/evals/planning_spine/fixtures/skills/digest/SKILL.md",
+      "sha256": "8dd81682e0b66dcc5997146d82819f905194ac9cdb43eeecda741917e5e1bd83",
+      "slug": "digest",
+      "snapshot_source": "generated user mirror located by name:digest"
+    },
+    {
+      "canonical_locator": {
+        "by": "name",
+        "entity_type": "skill",
+        "identifier": "reconcile-planning"
+      },
+      "path": "execution/evals/planning_spine/fixtures/skills/reconcile-planning/SKILL.md",
+      "sha256": "73c8cc24e21facc11875db3aab57f6ad99974b0c80b1a9be69cd148e1dd9581a",
+      "slug": "reconcile-planning",
+      "snapshot_source": "generated user mirror located by name:reconcile-planning"
+    }
+  ],
+  "source_mode": "generated_user_mirror"
+}
