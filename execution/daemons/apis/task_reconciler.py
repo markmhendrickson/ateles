@@ -27,7 +27,7 @@ WHAT IT DOES
 ------------
 Every APIS_RECONCILE_INTERVAL_SECONDS, read a bounded slice of the task table,
 keep the rows that are `pending`, un-owned by any in-flight dispatch, and older
-than a grace window, then dispatch up to APIS_RECONCILE_MAX_PER_SWEEP of them
+than a grace window, then attempt up to APIS_RECONCILE_MAX_PER_SWEEP of them
 through the SAME `dispatch_task` used by the SSE path — so the confidence x
 blast-radius execution gate still applies and high-blast work still holds for a
 checkpoint. The sweep does not dispatch anything; it hands each task to Apis's
@@ -50,10 +50,15 @@ pass, resume where the last pass stopped, and restart from the head once the end
 is reached. Every pending task is eventually reachable without making any one
 pass scan the whole table.
 
-When the per-sweep dispatch cap is hit part-way through a page, the cursor is
-deliberately NOT advanced past that page. The next pass re-reads it and drains
-the rest; the claim ledger keeps already-dispatched rows from consuming that
-pass's budget.
+When the per-sweep dispatch-attempt cap is hit part-way through a page, the
+cursor is deliberately NOT advanced past that page. The next pass re-reads it
+and drains the rest; the claim ledger keeps already-attempted rows from
+consuming that pass's budget. A dispatcher exception still consumes one attempt
+so a failing backlog cannot bypass the fan-out bound.
+
+Query unavailability is not an empty page. A missing bearer token or a query
+error leaves the cursor on the unread page, reports an incomplete scan, and
+does not announce that the end of the table was reached.
 
 NOT DOUBLE-DISPATCHING (the correctness crux)
 ---------------------------------------------
@@ -92,8 +97,9 @@ BOUNDED PER PASS
 ----------------
 ~100 tasks are waiting right now. Fanning all of them into T4 agents in one
 pass would be its own incident. APIS_RECONCILE_MAX_PER_SWEEP (default 5) caps
-dispatches per pass; the remainder are logged as deferred and picked up next
-pass, so the backlog drains at a visible, controlled rate instead of stampeding.
+dispatch attempts per pass; the remainder are logged as deferred and picked up
+next pass, so the backlog drains at a visible, controlled rate instead of
+stampeding.
 
 OBSERVABILITY
 -------------
@@ -104,7 +110,7 @@ are a closed vocabulary (SkipReason) so they can be counted and alerted on.
 Environment:
   APIS_RECONCILE_ENABLED           "1" to run the sweep (default: "0" — off).
   APIS_RECONCILE_INTERVAL_SECONDS  Sweep cadence (default: 900).
-  APIS_RECONCILE_MAX_PER_SWEEP     Max dispatches per pass (default: 5).
+  APIS_RECONCILE_MAX_PER_SWEEP     Max dispatch attempts per pass (default: 5).
   APIS_RECONCILE_GRACE_SECONDS     Min task age before eligible (default: 900).
   APIS_RECONCILE_QUERY_LIMIT       Rows fetched per page (default: 500).
   APIS_RECONCILE_PAGES_PER_SWEEP   Pages walked per pass (default: 5).
@@ -189,6 +195,10 @@ class SkipReason(str, Enum):
     CAP_REACHED = "cap_reached"  # bounded fan-out: deferred to next pass
 
 
+class QueryUnavailableError(RuntimeError):
+    """The task table could not be queried; this is not an empty result."""
+
+
 @dataclass
 class TaskReconciler:
     """Level-triggered sweeper for tasks the edge-triggered path never saw.
@@ -253,7 +263,10 @@ class TaskReconciler:
         counts = {
             "scanned": 0,
             "pages_read": 0,
+            "scan_complete": False,
+            "query_unavailable": 0,
             "query_errors": 0,
+            "dispatch_attempted": 0,
             "dispatched": 0,
             "dispatch_failed": 0,
             SkipReason.NOT_PENDING.value: 0,
@@ -265,6 +278,14 @@ class TaskReconciler:
         for _ in range(self.pages_per_sweep):
             try:
                 page, next_cursor = _query_tasks(QUERY_LIMIT, page_cursor)
+            except QueryUnavailableError as exc:
+                counts["query_unavailable"] += 1
+                log.warning(
+                    "[reconciler] query-unavailable cursor=%r: %s",
+                    page_cursor,
+                    exc,
+                )
+                break
             except Exception as exc:  # noqa: BLE001 — a query error never kills the loop
                 # Fail-open per iteration, but not fail-past: keep the cursor at
                 # this page so the next pass retries instead of stranding it.
@@ -295,6 +316,7 @@ class TaskReconciler:
             page_cursor = next_cursor
             self._cursor = page_cursor
             if page_cursor is None:
+                counts["scan_complete"] = True
                 log.info(
                     "[reconciler] reached the end of the task table — next pass "
                     "restarts from the head"
@@ -335,7 +357,7 @@ class TaskReconciler:
 
             # Bounded fan-out: an otherwise-eligible task past the cap is
             # DEFERRED, not skipped for cause — it is picked up next pass.
-            if skip is None and counts["dispatched"] >= self.max_per_sweep:
+            if skip is None and counts["dispatch_attempted"] >= self.max_per_sweep:
                 skip = SkipReason.CAP_REACHED
 
             if skip is not None:
@@ -375,6 +397,7 @@ class TaskReconciler:
                 title,
             )
             try:
+                counts["dispatch_attempted"] += 1
                 await dispatch_fn(entity_id, snapshot, "reconcile")
                 counts["dispatched"] += 1
             except Exception as exc:  # noqa: BLE001 — one bad task never kills the sweep
@@ -421,12 +444,11 @@ def _query_tasks(
 ) -> tuple[list[tuple[str, dict]], str | None]:
     """Return one task page and its opaque continuation cursor.
 
-    Raises on transport error (the caller swallows it). Returns ``([], None)``
-    when no token is configured.
+    Raises on transport error or query unavailability (the caller records and
+    swallows it). A missing bearer token is unavailable, never an empty page.
     """
     if not NEOTOMA_BEARER_TOKEN:
-        log.warning("[reconciler] no bearer token — cannot query tasks")
-        return [], None
+        raise QueryUnavailableError("no bearer token — cannot query tasks")
     body: dict = {"entity_type": "task", "limit": limit}
     if cursor:
         body["cursor"] = cursor

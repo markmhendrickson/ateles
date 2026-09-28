@@ -446,6 +446,84 @@ def test_cap_holds_scan_on_undrained_page(monkeypatch):
     assert requested[1] is None
 
 
+def test_failed_attempt_consumes_cap_and_undrained_page_eventually_advances(
+    monkeypatch,
+):
+    """Every dispatch attempt consumes the cap, including an exception.
+
+    The failed task and the successful task exhaust the first pass. The page
+    stays pinned until its remaining eligible row is attempted, then traversal
+    continues to the following page without retrying claimed rows.
+
+    Planted red against a3c73382: only successful dispatches consumed the cap,
+    so the first pass attempted three rows and advanced to page two.
+    """
+    rec = tr.TaskReconciler(max_per_sweep=2, pages_per_sweep=5)
+    requested, serve = _pages(
+        [
+            (
+                "ent_completed",
+                {
+                    "status": "done",
+                    "title": "completed before the undrained page",
+                    "updated_at": tr._iso_ago(_OLD),
+                },
+            )
+        ],
+        [
+            (
+                entity_id,
+                {
+                    "status": "pending",
+                    "title": entity_id,
+                    "updated_at": tr._iso_ago(_OLD),
+                },
+            )
+            for entity_id in ("ent_fails", "ent_first", "ent_undrained")
+        ],
+        [
+            (
+                "ent_next_page",
+                {
+                    "status": "pending",
+                    "title": "next page",
+                    "updated_at": tr._iso_ago(_OLD),
+                },
+            )
+        ],
+    )
+    monkeypatch.setattr(tr, "_query_tasks", serve)
+    attempts: list[str] = []
+
+    async def dispatch_fn(task_id, snapshot, trigger):
+        attempts.append(task_id)
+        if task_id == "ent_fails":
+            raise RuntimeError("planted dispatch failure")
+
+    first = asyncio.run(rec.sweep(dispatch_fn))
+
+    assert attempts == ["ent_fails", "ent_first"]
+    assert first["dispatch_attempted"] == 2
+    assert first["dispatched"] == 1
+    assert first["dispatch_failed"] == 1
+    assert first["cap_reached"] == 1
+    assert requested == [None, "page-1"]
+    assert rec._cursor == "page-1"
+
+    second = asyncio.run(rec.sweep(dispatch_fn))
+
+    assert attempts == [
+        "ent_fails",
+        "ent_first",
+        "ent_undrained",
+        "ent_next_page",
+    ]
+    assert second["dispatch_attempted"] == 2
+    assert second["dispatched"] == 2
+    assert requested == [None, "page-1", "page-1", "page-2"]
+    assert rec._cursor is None
+
+
 # ── 4. skips are logged, with reasons ───────────────────────────────
 
 
@@ -553,6 +631,46 @@ def test_query_failure_is_swallowed(monkeypatch):
     assert counts["scanned"] == 0
     assert counts["dispatched"] == 0
     assert counts["query_errors"] == 1
+
+
+def test_missing_bearer_is_unavailable_not_completed_empty_scan(monkeypatch, caplog):
+    """Missing query authority retains progress and is not an empty result.
+
+    Planted red against a3c73382: ``_query_tasks`` returned ``([], None)``, so
+    the sweep reported a successful page, announced end-of-table, and reset a
+    non-head cursor. A real empty response remains observably different.
+    """
+    rec = tr.TaskReconciler()
+    rec._cursor = "page-7"
+    monkeypatch.setattr(tr, "NEOTOMA_BEARER_TOKEN", "")
+
+    async def dispatch_fn(*args):
+        raise AssertionError("an unavailable query cannot dispatch")
+
+    with caplog.at_level(logging.INFO, logger="apis.reconciler"):
+        unavailable = asyncio.run(rec.sweep(dispatch_fn))
+
+    assert unavailable["pages_read"] == 0
+    assert unavailable["query_unavailable"] == 1
+    assert unavailable["query_errors"] == 0
+    assert unavailable["scan_complete"] is False
+    assert rec._cursor == "page-7"
+    assert "query-unavailable cursor='page-7'" in caplog.text
+    assert "reached the end of the task table" not in caplog.text
+
+    caplog.clear()
+    rec._cursor = None
+    monkeypatch.setattr(tr, "_query_tasks", _one_page([]))
+
+    with caplog.at_level(logging.INFO, logger="apis.reconciler"):
+        empty = asyncio.run(rec.sweep(dispatch_fn))
+
+    assert empty["pages_read"] == 1
+    assert empty["query_unavailable"] == 0
+    assert empty["query_errors"] == 0
+    assert empty["scan_complete"] is True
+    assert rec._cursor is None
+    assert "reached the end of the task table" in caplog.text
 
 
 def test_failed_page_is_retried_and_query_error_is_logged(monkeypatch, caplog):
