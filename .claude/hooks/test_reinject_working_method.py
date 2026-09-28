@@ -13,8 +13,9 @@ Four assertions, each guarding a distinct failure mode:
    registered against a SessionStart matcher that excluded `compact`. Pin
    both halves: the matcher covering `session_start.py` includes `compact`,
    and a dedicated `compact` entry wires `reinject_working_method.py`.
-4. Decision-restatement cadence — the observable reminder carries the settled
-   distinction between replies to the operator and notification-only turns.
+4. Canonical-policy boundary — this static reminder must not carry a second
+   decision cadence beside the live agent_policy index that also fires on
+   compact events.
 
 Self-review note (2026-09-02, PR #711 round 2): an earlier revision of
 TestFailOpen had two tests claiming to hit "distinct failure points" (patching
@@ -52,48 +53,15 @@ class TestHappyPath:
         assert "1. DISPATCH" in out
         assert "5. PROCEED" in out
 
-    def test_main_reinjects_decision_restatement_cadence(self, capsys):
+    def test_main_does_not_inject_a_second_decision_cadence(self, capsys):
         code = hook.main()
         out = capsys.readouterr().out
 
         assert code == 0
-        assert hook.decision_cadence_reminder() in out
-
-    @pytest.mark.parametrize(
-        (
-            "operator_message",
-            "decision_new_or_changed",
-            "open_decision_count",
-            "expected",
-        ),
-        [
-            (True, False, 2, True),
-            (False, False, 2, False),
-            (False, True, 2, True),
-            (True, True, 0, False),
-        ],
-        ids=[
-            "operator-reply",
-            "unchanged-notification",
-            "changed-decision-notification",
-            "no-open-decisions",
-        ],
-    )
-    def test_decision_list_requirement_matches_turn_effect(
-        self,
-        operator_message,
-        decision_new_or_changed,
-        open_decision_count,
-        expected,
-    ):
-        assert (
-            hook.should_restate_open_decisions(
-                operator_message=operator_message,
-                decision_new_or_changed=decision_new_or_changed,
-                open_decision_count=open_decision_count,
-            )
-            is expected
-        )
+        lowered = out.lower()
+        assert "decision-list cadence" not in lowered
+        assert "restate every open decision" not in lowered
+        assert "omit the decision list" not in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -153,4 +121,19 @@ class TestSettingsContract:
             "reinject_working_method.py" in h.get("command", "")
             for entry in compact_entries
             for h in entry.get("hooks", [])
+        )
+
+    def test_compact_event_also_wires_the_live_rule_index(self, settings):
+        rule_index_entries = [
+            entry
+            for entry in settings["hooks"]["SessionStart"]
+            if any(
+                "session_rule_index.py" in h.get("command", "")
+                for h in entry.get("hooks", [])
+            )
+        ]
+        assert rule_index_entries, "no SessionStart entry wires session_rule_index.py"
+        assert any(
+            "compact" in entry.get("matcher", "").split("|")
+            for entry in rule_index_entries
         )

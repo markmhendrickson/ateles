@@ -27,6 +27,7 @@ Cases:
       receives a request (so never the bearer token), and the hook falls open.
   4. Preamble-first ordering survives the actual subprocess/JSON round trip.
 """
+
 from __future__ import annotations
 
 import http.server
@@ -41,7 +42,27 @@ from pathlib import Path
 import pytest
 
 HOOK = str(Path(__file__).with_name("session_rule_index.py"))
+REINJECT_HOOK = str(Path(__file__).with_name("reinject_working_method.py"))
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(REPO_ROOT))
+
+import session_rule_index as rule_index_hook  # noqa: E402
+from lib.daemon_runtime.policy_skill_renderer import (  # noqa: E402
+    render_index_text_with_ids,
+    render_skills,
+)
+
+DECISION_POLICY_ID = "ent_985436c69e2170aeba3287de"
+DECISION_POLICY_TRIGGER = (
+    "replying to the operator or a decision is new or changed; except zero "
+    "open decisions and unchanged background or PR notifications"
+)
+DECISION_POLICY_ACTION = (
+    "restate every open decision in full; otherwise omit the decision list "
+    "and count line"
+)
 
 
 def _free_port() -> int:
@@ -50,7 +71,16 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _row(entity_id, rule="Do the thing.", applies_when="", scope="global", agent_sub="", status="active", domain="test"):
+def _row(
+    entity_id,
+    rule="Do the thing.",
+    applies_when="",
+    scope="global",
+    agent_sub="",
+    status="active",
+    domain="test",
+    title="",
+):
     return {
         "entity_id": entity_id,
         "snapshot": {
@@ -61,6 +91,7 @@ def _row(entity_id, rule="Do the thing.", applies_when="", scope="global", agent
             "status": status,
             "domain": domain,
             "rule_kind": "mandatory",
+            "title": title,
         },
     }
 
@@ -116,6 +147,105 @@ def _run(cwd: Path, base_url: str | None = None, extra_env: dict | None = None):
     )
 
 
+def _run_reinject(cwd: Path):
+    return subprocess.run(
+        [sys.executable, REINJECT_HOOK],
+        input="{}",
+        capture_output=True,
+        text=True,
+        cwd=str(cwd),
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+        timeout=15,
+    )
+
+
+def _decision_policy(action: str = DECISION_POLICY_ACTION):
+    return _row(
+        DECISION_POLICY_ID,
+        rule="Canonical decision cadence supplied by agent_policy.",
+        applies_when=DECISION_POLICY_TRIGGER,
+        title=action,
+    )
+
+
+def _render_supplied_policy(row: dict):
+    flat_row = {**row["snapshot"], "_entity_id": row["entity_id"]}
+    skills = render_skills([flat_row], agent_definition_id="", governs={})
+    text, emitted_ids = render_index_text_with_ids(skills, rule_index_hook.BUDGET_CHARS)
+    return text, emitted_ids, [flat_row]
+
+
+class TestDecisionCadenceComesFromLivePolicy:
+    def test_actual_hook_stdout_independently_covers_each_turn_outcome(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(rule_index_hook, "read_hook_input", lambda: {})
+        monkeypatch.setattr(
+            rule_index_hook,
+            "_render",
+            lambda: _render_supplied_policy(_decision_policy()),
+        )
+
+        code = rule_index_hook.main()
+        stdout = capsys.readouterr().out.lower()
+
+        assert code == 0
+        # Literal expectations are intentionally independent of a production
+        # predicate/renderer: reversing either delivered action must fail.
+        assert "replying to the operator" in stdout
+        assert "restate every open decision in full" in stdout
+        assert "unchanged background or pr notifications" in stdout
+        assert "omit the decision list and count line" in stdout
+        assert "a decision is new or changed" in stdout
+        assert "zero open decisions" in stdout
+
+    def test_amended_supplied_policy_changes_stdout_without_hook_edits(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(rule_index_hook, "read_hook_input", lambda: {})
+        monkeypatch.setattr(
+            rule_index_hook,
+            "_render",
+            lambda: _render_supplied_policy(_decision_policy()),
+        )
+        assert rule_index_hook.main() == 0
+        before = capsys.readouterr().out
+
+        amended_action = (
+            "restate every unresolved choice in full; otherwise omit the "
+            "decision list and count line"
+        )
+        monkeypatch.setattr(
+            rule_index_hook,
+            "_render",
+            lambda: _render_supplied_policy(_decision_policy(amended_action)),
+        )
+        assert rule_index_hook.main() == 0
+        after = capsys.readouterr().out
+
+        assert DECISION_POLICY_ACTION in before
+        assert amended_action in after
+        assert DECISION_POLICY_ACTION not in after
+        assert before != after
+
+    def test_compaction_has_no_contradictory_static_cadence(self, monkeypatch, capsys):
+        monkeypatch.setattr(rule_index_hook, "read_hook_input", lambda: {})
+        monkeypatch.setattr(
+            rule_index_hook,
+            "_render",
+            lambda: _render_supplied_policy(_decision_policy()),
+        )
+
+        assert rule_index_hook.main() == 0
+        live_index_stdout = capsys.readouterr().out
+        compact_reminder = _run_reinject(REPO_ROOT)
+        combined = live_index_stdout + compact_reminder.stdout
+
+        assert compact_reminder.returncode == 0
+        assert combined.count(DECISION_POLICY_ACTION) == 1
+        assert "omit every open decision in full" not in combined.lower()
+
+
 # ---------------------------------------------------------------------------
 # 1 & 2. cwd independence
 # ---------------------------------------------------------------------------
@@ -124,7 +254,9 @@ class TestCwdIndependence:
         base_url, handler = fake_neotoma
         handler.rows = [
             _row("ent_always1", rule="Never skip the thing.", applies_when="always"),
-            _row("ent_cond1", rule="Check before merging.", applies_when="opening a PR"),
+            _row(
+                "ent_cond1", rule="Check before merging.", applies_when="opening a PR"
+            ),
         ]
         result = _run(REPO_ROOT, base_url=base_url)
         assert result.returncode == 0
@@ -142,7 +274,9 @@ class TestCwdIndependence:
         base_url, handler = fake_neotoma
         handler.rows = [
             _row("ent_always1", rule="Never skip the thing.", applies_when="always"),
-            _row("ent_cond1", rule="Check before merging.", applies_when="opening a PR"),
+            _row(
+                "ent_cond1", rule="Check before merging.", applies_when="opening a PR"
+            ),
         ]
         with tempfile.TemporaryDirectory() as tmp:
             outside = Path(tmp) / "nowhere-near-a-repo"
@@ -203,7 +337,9 @@ class TestRedirectIsRefusedOverSubprocess:
         class Sink(http.server.BaseHTTPRequestHandler):
             def _answer(self):
                 seen.append(dict(self.headers))
-                body = json.dumps({"entities": [_row("ent_from_sink", applies_when="x")]}).encode()
+                body = json.dumps(
+                    {"entities": [_row("ent_from_sink", applies_when="x")]}
+                ).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -230,7 +366,8 @@ class TestRedirectIsRefusedOverSubprocess:
 
         origin = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
         threads = [
-            threading.Thread(target=srv.serve_forever, daemon=True) for srv in (sink, origin)
+            threading.Thread(target=srv.serve_forever, daemon=True)
+            for srv in (sink, origin)
         ]
         for t in threads:
             t.start()
@@ -254,7 +391,9 @@ class TestRedirectIsRefusedOverSubprocess:
 # 4. Preamble-first, over the real subprocess/JSON path
 # ---------------------------------------------------------------------------
 class TestPreambleFirstOverSubprocess:
-    def test_always_rule_appears_before_conditional_in_subprocess_output(self, fake_neotoma):
+    def test_always_rule_appears_before_conditional_in_subprocess_output(
+        self, fake_neotoma
+    ):
         base_url, handler = fake_neotoma
         handler.rows = [
             _row("ent_conditional_first_in_feed", applies_when="doing X"),
@@ -271,12 +410,22 @@ class TestPreambleFirstOverSubprocess:
 # 5. A large corpus degrades (tiers), it does not fail open.
 # ---------------------------------------------------------------------------
 class TestLargeCorpusDegradesRatherThanFailsOpen:
-    def test_60_rules_over_the_real_subprocess_path_still_renders_a_tier(self, fake_neotoma):
+    def test_60_rules_over_the_real_subprocess_path_still_renders_a_tier(
+        self, fake_neotoma
+    ):
         base_url, handler = fake_neotoma
         handler.rows = [
-            _row("ent_always1", rule="Never skip the safety check.", applies_when="always"),
+            _row(
+                "ent_always1",
+                rule="Never skip the safety check.",
+                applies_when="always",
+            ),
         ] + [
-            _row(f"ent_cond{i:03d}", rule="Rule body text here.", applies_when=f"condition {i}")
+            _row(
+                f"ent_cond{i:03d}",
+                rule="Rule body text here.",
+                applies_when=f"condition {i}",
+            )
             for i in range(60)
         ]
         result = _run(REPO_ROOT, base_url=base_url)
@@ -375,7 +524,11 @@ class TestBudgetIsMeasuredAndSafelyBelowTheHardCap:
         handler.rows = [
             _row("ent_always1", rule="Never skip the thing.", applies_when="always"),
         ] + [
-            _row(f"ent_cond{i:03d}", rule="Rule body text here.", applies_when=f"condition {i}")
+            _row(
+                f"ent_cond{i:03d}",
+                rule="Rule body text here.",
+                applies_when=f"condition {i}",
+            )
             for i in range(80)
         ]
         result = _run(REPO_ROOT, base_url=base_url)
