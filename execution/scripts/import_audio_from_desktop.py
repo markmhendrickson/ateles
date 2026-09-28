@@ -5,7 +5,7 @@ Import Audio Files from Desktop and Voice Memos
 Scans Desktop and macOS Voice Memos for audio files, copies/moves them to
 data/imports/, transcribes them, and emits ANALYZE_MEETING_TRIGGER lines for
 the calling agent. Structured analysis (action items, recap email drafts,
-proposed issues) is handled by the /analyze-meeting skill, auto-invoked by
+proposed issues) is handled by the /process-meeting skill, auto-invoked by
 /import-audio on each transcript.
 
 Default scan sources (in order):
@@ -321,7 +321,7 @@ def summarize_run(
 
     if ok and analyze_hint:
         lines.append(
-            "  Run /analyze-meeting on each ANALYZE_MEETING_TRIGGER line above"
+            "  Run /process-meeting on each ANALYZE_MEETING_TRIGGER line above"
             " for structured analysis (handled automatically when invoked via"
             " /import-audio)."
         )
@@ -394,7 +394,7 @@ def main():
         "--no-analyze",
         action="store_true",
         help=(
-            "Skip the post-transcribe /analyze-meeting hint lines. By default,"
+            "Skip the post-transcribe /process-meeting hint lines. By default,"
             " each successfully transcribed file emits"
             " 'ANALYZE_MEETING_TRIGGER: <transcript_path>' for the calling"
             " agent to fan out structured analysis."
@@ -497,7 +497,7 @@ def main():
             {"file": audio_file, "transcription_result": result}
         )
 
-    # Emit analyze-meeting triggers for the calling agent unless suppressed.
+    # Emit process-meeting triggers for the calling agent unless suppressed.
     if not args.no_analyze:
         for item in transcription_results:
             audio_file = item["file"]
