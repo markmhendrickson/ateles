@@ -28,6 +28,11 @@
     ],
     [
       "PreToolUse",
+      "rule_injection_gate.py",
+      "Edit|Write|NotebookEdit|Bash|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store"
+    ],
+    [
+      "PreToolUse",
       "sibling_repo_worktree_guard.py",
       "Edit|Write|NotebookEdit|Bash"
     ],

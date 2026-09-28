@@ -71,10 +71,15 @@ Task reconciliation sweep (ateles#586 — see task_reconciler.py):
   APIS_RECONCILE_INTERVAL_SECONDS  Sweep cadence (default: 900)
   APIS_RECONCILE_MAX_PER_SWEEP     Max dispatches per pass (default: 5)
   APIS_RECONCILE_GRACE_SECONDS     Min task age before eligible (default: 900)
-  APIS_RECONCILE_QUERY_LIMIT       Tasks fetched per pass (default: 500)
+  APIS_RECONCILE_QUERY_LIMIT       Rows fetched per page (default: 500)
+  APIS_RECONCILE_PAGES_PER_SWEEP   Pages walked per pass (default: 5)
 
 GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
-  APIS_GITHUB_WEBHOOK_SECRET  HMAC secret for the GitHub webhook
+  APIS_GITHUB_WEBHOOK_SECRET       HMAC secret for the GitHub webhook
+  APIS_GITHUB_WEBHOOK_SECRET_NEXT  Incoming value during a staged rotation
+                                   (rotate_swarm_secret.py) — admitted
+                                   alongside the current secret; empty
+                                   outside a rotation
   APIS_GITHUB_WEBHOOK_PORT    Webhook listen port (default: 8742)
   APIS_PANEL_MAX              Max review panelists per PR (default: 6)
   APIS_AUTONOMY_AUTO_MERGE    "1" lets the dispatcher merge after verified
@@ -93,6 +98,7 @@ import sys
 import time
 from pathlib import Path
 
+
 # ── Env bootstrap (launchd does not source shell profiles) ───────────────────
 # Skipped under pytest (ateles#1285): this module is imported directly by
 # several test_*.py in this directory, and the operator's materialized dotenv
@@ -101,7 +107,11 @@ from pathlib import Path
 # turned those switches on for any test importing `apis`, on a machine where
 # the file happens to exist, while CI (no such file) stayed green.
 def _dotenv_should_load() -> bool:
-    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         return False
     if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
         return False
@@ -446,6 +456,10 @@ DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 # GitHub webhook gateway (ateles#80). Port 8742 — Apus owns 8741.
 GITHUB_WEBHOOK_PORT = int(os.environ.get("APIS_GITHUB_WEBHOOK_PORT", "8742"))
 GITHUB_WEBHOOK_SECRET = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET", "")
+# Rotation overlap window (rotate_swarm_secret.py, authority_model.md#grants):
+# the incoming value, admitted alongside the current one until the rotator
+# retires the old value and clears this. Empty outside a rotation.
+GITHUB_WEBHOOK_SECRET_NEXT = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET_NEXT", "")
 
 
 # ── Domain routing ─────────────────────────────────────────────────────────────
@@ -1996,7 +2010,9 @@ async def main() -> None:
         f"{'ENABLED' if _reconcile_cfg.ENABLED else 'DISABLED'} "
         f"(interval={_reconcile_cfg.INTERVAL_SECONDS}s "
         f"cap={_reconcile_cfg.MAX_PER_SWEEP}/sweep "
-        f"grace={_reconcile_cfg.GRACE_SECONDS}s)"
+        f"grace={_reconcile_cfg.GRACE_SECONDS}s "
+        f"page={_reconcile_cfg.QUERY_LIMIT} rows x "
+        f"{_reconcile_cfg.PAGES_PER_SWEEP} pages/sweep)"
     )
 
     # 1. Load agent_definition from Neotoma
@@ -2034,6 +2050,8 @@ async def main() -> None:
         GITHUB_WEBHOOK_SECRET,
         dispatcher.handle_trigger,
         approve_email_secret=os.environ.get("APIS_APPROVE_EMAIL_SECRET", ""),
+        secret_next=GITHUB_WEBHOOK_SECRET_NEXT,
+        approve_email_secret_next=os.environ.get("APIS_APPROVE_EMAIL_SECRET_NEXT", ""),
     )
 
     # 5. Subscribe to SSE events
@@ -2102,9 +2120,7 @@ async def main() -> None:
             cleared = await dispatcher._clear_closed_issue_markers(
                 list(dispatcher.config.resume_repositories)
             )
-            log.info(
-                f"[{DAEMON_NAME}] closed-issue marker sweep: cleared={cleared}"
-            )
+            log.info(f"[{DAEMON_NAME}] closed-issue marker sweep: cleared={cleared}")
         except Exception as exc:  # housekeeping must never kill startup siblings
             log.error(
                 f"[{DAEMON_NAME}] closed-issue marker sweep failed: {exc} "

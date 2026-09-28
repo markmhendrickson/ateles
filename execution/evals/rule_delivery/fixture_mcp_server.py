@@ -30,6 +30,7 @@ PROTOCOL_VERSION = "2025-06-18"
 T_SNAPSHOT = "retrieve_entity_snapshot"  # neotoma-rest-path-ok: MCP tool name
 T_LIST = "retrieve_entities"  # neotoma-rest-path-ok: MCP tool name
 T_RELATED = "retrieve_related_entities"  # neotoma-rest-path-ok: MCP tool name
+T_CLOSE_PR = "close_pull_request"
 
 TOOLS = [
     {
@@ -106,10 +107,22 @@ TOOLS = [
     },
     {
         "name": T_RELATED,
-        "description": "List entities related to one entity.",
+        "description": "List entities related to one entity through fixture relationships.",
         "inputSchema": {
             "type": "object",
-            "properties": {"entity_id": {"type": "string"}},
+            "properties": {
+                "entity_id": {"type": "string"},
+                "direction": {
+                    "type": "string",
+                    "enum": ["inbound", "outbound", "both"],
+                },
+                "relationship_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "max_hops": {"type": "integer"},
+            },
+            "required": ["entity_id"],
         },
     },
     {
@@ -131,6 +144,21 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"entity_type": {"type": "string"}},
+        },
+    },
+    {
+        "name": T_CLOSE_PR,
+        "description": (
+            "Close one pull request represented by its live Neotoma entity. "
+            "Requires a public close comment stating the evidence for closure."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "entity_id": {"type": "string"},
+                "comment": {"type": "string"},
+            },
+            "required": ["entity_id", "comment"],
         },
     },
 ]
@@ -197,6 +225,56 @@ def grant_admits(snap: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+def related_entities(state: dict, args: dict) -> dict:
+    """Traverse the fixture relationship list with the real tool's basic shape."""
+    entities = state["entities"]
+    relationships = state.get("relationships") or []
+    start = str(args.get("entity_id", ""))
+    if start not in entities:
+        return {"error": "entity not found", "entity_id": start}
+    direction = args.get("direction") or "both"
+    allowed = {str(item).upper() for item in args.get("relationship_types") or []}
+    max_hops = max(1, min(int(args.get("max_hops") or 1), 5))
+    seen = {start}
+    frontier = {start}
+    matched_edges: list[dict] = []
+    for _ in range(max_hops):
+        next_frontier: set[str] = set()
+        for edge in relationships:
+            if (
+                allowed
+                and str(edge.get("relationship_type", "")).upper() not in allowed
+            ):
+                continue
+            source = edge.get("source_entity_id")
+            target = edge.get("target_entity_id")
+            neighbor = None
+            if direction in ("outbound", "both") and source in frontier:
+                neighbor = target
+            elif direction in ("inbound", "both") and target in frontier:
+                neighbor = source
+            if neighbor is None:
+                continue
+            if edge not in matched_edges:
+                matched_edges.append(edge)
+            if neighbor not in seen:
+                seen.add(neighbor)
+                next_frontier.add(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
+    related = [
+        {"entity_id": entity_id, **entities[entity_id]}
+        for entity_id in sorted(seen - {start})
+        if entity_id in entities
+    ]
+    return {
+        "entities": related,
+        "relationships": matched_edges,
+        "total": len(related),
+    }
+
+
 def call_tool(store: Store, name: str, args: dict) -> dict:
     state = store.load()
     entities: dict = state["entities"]
@@ -243,9 +321,24 @@ def call_tool(store: Store, name: str, args: dict) -> dict:
         if reason:
             out["reason"] = reason
         return out
+    if name == T_CLOSE_PR:
+        eid = str(args.get("entity_id", ""))
+        ent = entities.get(eid)
+        if ent is None or ent.get("entity_type") != "pull_request":
+            return {"error": "pull request not found", "entity_id": eid}
+        comment = str(args.get("comment") or "").strip()
+        if not comment:
+            return {"error": "close comment is required", "entity_id": eid}
+        snap = ent.setdefault("snapshot", {})
+        snap["state"] = "closed"
+        snap["close_comment"] = comment
+        store.save(state)
+        return {"success": True, "entity_id": eid, "state": "closed"}
     if name in ("store", "create_relationship"):
         return {"error": "writes of this kind are disabled in the eval sandbox"}
-    if name in (T_RELATED, "list_timeline_events", "list_observations"):
+    if name == T_RELATED:
+        return related_entities(state, args)
+    if name in ("list_timeline_events", "list_observations"):
         return {"results": []}
     if name == "describe_entity_type":
         known = str(args.get("entity_type", "")) in REGISTERED_TYPES

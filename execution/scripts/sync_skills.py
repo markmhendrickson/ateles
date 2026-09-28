@@ -575,30 +575,41 @@ def _ensure_entity_id(fm_block: str, entity_id: str) -> str:
 # ------------------------------------------------------ disk discovery
 
 def _index_disk_mirrors() -> tuple[dict[str, Path], dict[str, Path]]:
-    """Return (by_entity_id, by_slug) → SKILL.md path, across both roots.
+    """Return (by_entity_id, by_slug_or_name) → SKILL.md path, across both roots.
 
-    The slug index (keyed on the skill's directory name) is a fallback for
-    mirrors that exist on disk but carry no `entity_id` frontmatter (e.g. the
-    neotoma-prod user-level skills), so they aren't misreported as "missing".
-    User symlinks are resolved to their real target.
+    The alias index is keyed first on the skill's directory name, then on its
+    frontmatter ``name``.  The latter matters when a skill was renamed without
+    moving its historical directory (for example ``status/`` carrying
+    ``name: digest``).  Mirrors without ``entity_id`` are therefore still found
+    instead of being misreported as missing and installed a second time. User
+    symlinks are resolved to their real target. A real directory slug wins over
+    a frontmatter-name alias on collision.
     """
     by_id: dict[str, Path] = {}
     by_slug: dict[str, Path] = {}
+    by_name: dict[str, Path] = {}
     for root in (REPO_SKILLS_DIR, USER_SKILLS_DIR):
         if not root.exists():
             continue
         for skill_md in root.glob("*/SKILL.md"):
             slug = skill_md.parent.name
-            by_slug.setdefault(slug, skill_md.resolve())
+            resolved = skill_md.resolve()
+            by_slug.setdefault(slug, resolved)
             try:
                 head = skill_md.read_text(errors="replace")[:2000]
             except OSError:
                 continue
+            fm, _ = _split_frontmatter(head)
+            name = parse_frontmatter_values(fm).get("name")
+            if isinstance(name, str) and name.strip():
+                by_name.setdefault(name.strip(), resolved)
             for line in head.splitlines():
                 line = line.strip()
                 if line.startswith("entity_id:"):
-                    by_id[line.split(":", 1)[1].strip()] = skill_md.resolve()
+                    by_id[line.split(":", 1)[1].strip()] = resolved
                     break
+    for name, path in by_name.items():
+        by_slug.setdefault(name, path)
     return by_id, by_slug
 
 
