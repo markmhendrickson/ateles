@@ -17,17 +17,22 @@ revised after Falco's round-2 security review — see below):
                      a model sees up front, before deciding whether to fetch
                      the full rule). NEVER derived from `rule`/`body` text —
                      a row with no `title` renders trigger + id only.
-  - `body`      — the full rule text plus its entity id, for a FUTURE
-                   transport (an agent explicitly fetching a rule by id);
+  - `body`      — the sanitized rule text (`_sanitize_body`, multi-line
+                   counterpart to `_sanitize_field`) plus its entity id;
                    never read back into the rendered SessionStart index
                    itself (never logged wholesale, since some rules hold
                    operator payment details).
 
-Two channels share this one artifact:
+Three channels share this one artifact:
   1. Now: `.claude/hooks/session_rule_index.py` (SessionStart hook) prints
      `render_index_text()` — the preamble (always-applies rules) followed by
      one summary line per conditional rule.
-  2. Later: the MCP Skills extension (SEP-2640), once an SDK/host supports
+  2. Now: `.claude/hooks/rule_injection_gate.py` (PreToolUse hook, ateles
+     rule-delivery audit `ent_b66293f0dcc8c887d4fdbeae` recommendation 5)
+     reads `.body` for a small set of high-risk categories and injects it
+     verbatim into the acting model's context immediately before a matching
+     tool call — this is why `.body` is sanitized rather than raw.
+  3. Later: the MCP Skills extension (SEP-2640), once an SDK/host supports
      it — `render_skills()` gives the same skill objects; this module is
      designed so adding that transport is additive, not a rewrite.
 
@@ -256,6 +261,13 @@ _LEADING_MARKDOWN = re.compile(r"^[\s]*(?:[#>*`-]+|\d+\.)+\s*")
 _HTML_COMMENT_MARKERS = re.compile(r"<!--|-->")
 _TIER_MARKER_PATTERN = re.compile(r"tier\s*:\s*[A-Za-z]", re.IGNORECASE)
 
+# Same control/separator sweep as `_LINE_BREAKING_CHARS`, minus \r\n
+# themselves — `_sanitize_body_pass` already splits on those to preserve
+# paragraph structure, so this only needs to catch the control/separator
+# characters that can occur WITHIN one line (NEL, U+2028/U+2029, C0 minus
+# \t\r\n, C1, DEL).
+_INLINE_CONTROL_CHARS = re.compile("[\u0085\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
+
 
 def _sanitize_pass(text: str) -> str:
     """One pass of the neutralizing steps, in order: line-breaking/control
@@ -308,6 +320,241 @@ _ENTITY_ID_DISALLOWED = re.compile(r"[^A-Za-z0-9_]")
 
 _APPLIES_WHEN_MAX = 160
 _IMPERATIVE_MAX = 120
+_BODY_MAX = 4000
+
+
+def _sanitize_body_pass(text: str, *, strip_leading_blanks: bool = True) -> str:
+    """One pass of the neutralizing steps for a MULTI-LINE field, applied
+    per-line so the body keeps its paragraph structure (unlike
+    `_sanitize_pass`, which collapses everything to one line — fine for a
+    160/120-char trigger/imperative, unreadable for a full rule body).
+
+    Same forbidden sequences as `_sanitize_pass` (leading markdown structure,
+    HTML-comment markers, tier-marker patterns), applied to EACH line rather
+    than the whole blob — so a rule body can still open a paragraph with
+    prose while a forged `## Always-applies rules` heading, an embedded
+    `<!-- tier: A -->` marker, or a bullet-list-shaped injected instruction
+    on any line is stripped exactly like `_sanitize_pass` strips it at the
+    start of a single-line field. Blank lines are preserved (collapsed to
+    at most one) so paragraph breaks survive.
+
+    `strip_leading_blanks=False` (Phoenicurus, PR #1320 round 5) keeps a
+    leading blank line in the result instead of popping it off the front.
+    `_sanitize_body`'s `list_item_safe=True` path calls this on the
+    CONTINUATION half of a rule body (everything after the row's own first
+    line, split on `raw`'s own first `\n` before any sanitization runs — see
+    `_sanitize_body`) and indents every non-empty line of the result
+    unconditionally, with no "index 0 is exempt" special case on that half.
+    A leading blank in that continuation half is therefore always a genuine
+    interior paragraph break of the ORIGINAL text, never something that
+    could be mistaken for the row's protected first line — so it must
+    survive here rather than being stripped as if it were a field-level
+    leading blank with no meaning of its own.
+    """
+    lines = text.split("\n")
+    cleaned_lines: list[str] = []
+    for line in lines:
+        line = line.replace("\r", "").strip("\r")
+        line = _INLINE_CONTROL_CHARS.sub(" ", line)
+        line = _LEADING_MARKDOWN.sub("", line)
+        line = _HTML_COMMENT_MARKERS.sub("", line)
+        line = _TIER_MARKER_PATTERN.sub("", line)
+        line = _WHITESPACE_RUN.sub(" ", line).strip()
+        cleaned_lines.append(line)
+    # Collapse runs of blank lines to at most one, and trim trailing blanks —
+    # mirrors _sanitize_field's overall .strip() without losing every line
+    # break the way _LINE_BREAKING_CHARS would. `result` starts empty, so
+    # `result and result[-1]` is False for a blank line seen before any
+    # non-blank content — that already drops a run of leading blanks down to
+    # NONE (not "at most one") regardless of `strip_leading_blanks`, unless
+    # `began` explicitly keeps the first one when the caller wants leading
+    # blanks preserved.
+    result: list[str] = []
+    began = False
+    for line in cleaned_lines:
+        if line:
+            began = True
+            result.append(line)
+        elif began:
+            if result[-1]:  # collapse interior runs to at most one blank
+                result.append(line)
+        elif not strip_leading_blanks and not result:
+            result.append(line)  # keep exactly one leading blank placeholder
+    while result and not result[-1]:
+        result.pop()
+    if strip_leading_blanks:
+        while result and not result[0]:
+            result.pop(0)
+    return "\n".join(result)
+
+
+# Indent applied to every continuation line (all lines after the first) when
+# `_sanitize_body(..., list_item_safe=True)` is requested. Two spaces is the
+# minimum CommonMark content-column for a `- ` bullet marker: a line indented
+# to or past a list item's content column is a "lazy continuation" of that
+# item's own paragraph, structurally incapable of opening a new sibling block
+# (list item, heading, or HTML comment) regardless of which character starts
+# it — the indentation itself, not the character, is what removes the line
+# from "start of a block" position. This closes the STRUCTURAL class Falco's
+# PR #1320 round-4 finding named (an embedded newline followed by `+` or a
+# Unicode dash surviving `_LEADING_MARKDOWN`'s ASCII-only strip class and
+# rendering as a second, indistinguishable policy bullet), rather than
+# widening `_LEADING_MARKDOWN` to deny more specific leading glyphs — a
+# denylist of characters is always one lookalike behind; an indent boundary
+# has no such gap because it does not depend on recognizing the forging
+# character at all.
+_LIST_ITEM_CONTINUATION_INDENT = "  "
+
+
+def _run_body_pass_to_fixed_point(text: str, *, strip_leading_blanks: bool = True) -> str:
+    """Run `_sanitize_body_pass` repeatedly until it stops changing `text`,
+    same convergence discipline as `_sanitize_field`'s loop (a deletion can
+    expose a new forbidden sequence at a line boundary, so one pass is not
+    enough). Shared by every `_sanitize_body` call site that needs a
+    fixed-point sanitize — the whole-text path (`list_item_safe=False`) and
+    the two half-text paths (`first_raw`/`rest_raw`) `list_item_safe=True`
+    splits `raw` into — so the termination logic (the iteration cap, the
+    `cleaned == text` convergence check) lives in exactly one place rather
+    than three copies that could drift apart under a future change.
+    """
+    for _ in range(len(text) + 2):
+        cleaned = _sanitize_body_pass(text, strip_leading_blanks=strip_leading_blanks)
+        if cleaned == text:
+            return text
+        text = cleaned
+    return text
+
+
+def _sanitize_body(raw: str, max_len: int, *, list_item_safe: bool = False) -> str:
+    """Multi-line counterpart to `_sanitize_field` (same threat model,
+    module header above) — used for `PolicySkill.body`, the one field
+    `to_skill` used to leave unsanitized on the theory that "nothing in this
+    module ever reads `.body` back out" (see `to_skill`'s docstring). That
+    theory no longer holds: `rule_injection_gate.py`'s point-of-use
+    `PreToolUse` hook reads `.body` and injects it verbatim into the acting
+    model's context, which is exactly the delivery path this sanitizer
+    family exists to guard (Falco/Waxwing, PR #1320 round 2 — the same
+    CONFIRMED-injection class as ateles#1268 round 2, now reachable through
+    the one field `_sanitize_field` never covered).
+
+    Runs to a fixed point the same way `_sanitize_field` does — a deletion
+    can expose a new forbidden sequence at a line boundary — then caps
+    length with an ellipsis. Returns "" if nothing survives.
+
+    `list_item_safe=True` (Falco, PR #1320 round 4; leading-blank-line fix
+    Phoenicurus, round 5) additionally indents every line after the first by
+    `_LIST_ITEM_CONTINUATION_INDENT`, AFTER the fixed point and BEFORE the
+    length cap. Set this when the caller is going to interpolate the
+    sanitized text into a single flat bullet-list row shared with sibling
+    rows with no per-row wrapper of its own — exactly `render_policy_prompt`'s
+    `- ({kind}, {status}) {rule}` template, where an embedded newline puts
+    arbitrary attacker text at column 0 of the shared list, structurally
+    indistinguishable from a genuine sibling bullet. `to_skill`'s `body`
+    field does NOT set this: each row there is already isolated under its
+    own `### [category] rule {eid}` heading, so a stray line inside one
+    row's block cannot pose as a DIFFERENT row's policy, and forcing an
+    indent there would misrender genuine multi-paragraph prose users are
+    meant to read as normal body text. The indent is applied only to
+    non-empty lines — a blank paragraph-break line stays blank so runs of
+    blank lines are still collapsed the same way by the caller's own
+    formatting; indenting a blank line would make it visibly non-blank.
+
+    Structural ordering fix (Phoenicurus, PR #1320 round 5): the caller's
+    template puts `rule`'s FIRST LINE on the same physical source line as
+    the `- ({kind}, {status})` prefix — that position is safe by
+    construction, since it is never at column 0 of its own line. Every other
+    line of `rule` starts life after an embedded `\n` and is what needs the
+    structural indent. The round-4 fix picked out "every line but the first"
+    by running the FULL fixed-point sanitize (which strips/collapses leading
+    blank lines as part of reaching its fixed point) and then indenting
+    every array index but 0 of the RESULT. That conflates two different
+    things that happen to coincide only when `raw` has no leading blank: the
+    template's safe first physical line, versus whatever line ends up at
+    index 0 after blank-collapsing. A payload that opens with a blank or
+    whitespace-only line (or a line that sanitizes to empty, e.g. a stripped
+    heading) has its real first line collapsed away, promoting the SECOND
+    physical line — fully attacker-controlled — to index 0, where it is
+    then exempted from indenting. Phoenicurus reproduced this end-to-end
+    through `AgentLoader.render_policy_prompt`.
+
+    The fix: decide the safe-first-line/continuation split on `raw` BEFORE
+    any sanitization touches it, using `raw`'s own first `\n` (or lack of
+    one) — never on a post-sanitize array index, which is exactly the
+    position blank-collapsing can shift. `raw.split("\n", 1)` is computed
+    once, up front; `first_raw` is sanitized as its own single-line unit
+    (`_sanitize_body_pass` still applied, and still capable of stripping
+    leading markdown from IT specifically — a real first line that happens
+    to start with `#`/`-`/etc. is still cleaned the same way round-3
+    intended), and `rest_raw` (everything after that first `\n`, still
+    possibly containing many more lines and blank runs) is sanitized as a
+    block and has the indent applied to EVERY one of its non-empty lines,
+    with no exemption for whatever a blank-collapse might promote to its own
+    index 0 — there is no "index 0" on the continuation side to exempt.
+    Both pieces independently reach a fixed point (mirroring `_sanitize_field`
+    /`_sanitize_body`'s existing per-field fixed-point discipline) before
+    being rejoined, so a deletion in either piece cannot rebuild a forbidden
+    sequence that spans the join. `list_item_safe=False` (`to_skill`'s call)
+    is untouched — it keeps running the single whole-text fixed-point loop
+    exactly as before, since `to_skill` has no first-line/continuation
+    distinction to protect.
+    """
+    if not raw:
+        return ""
+    if not list_item_safe:
+        text = _run_body_pass_to_fixed_point(raw)
+        if not text:
+            return ""
+        if len(text) > max_len:
+            text = text[: max_len - 1].rstrip() + "…"
+        return text
+
+    # list_item_safe=True: split on RAW's own first newline before any
+    # sanitization runs, so the safe/continuation boundary is fixed by the
+    # attacker-supplied text's own original structure, never by whatever a
+    # later blank-collapse leaves at array index 0.
+    first_raw, _, rest_raw = raw.partition("\n")
+
+    first_text = _run_body_pass_to_fixed_point(first_raw)
+    # _sanitize_body_pass operates on (and can itself contain) newlines, but
+    # `first_raw` has none by construction (partition split on the first
+    # one) — collapse any that a pass could theoretically introduce back to
+    # spaces so `first_text` stays a true single line and cannot reopen the
+    # index-0 ambiguity this fix exists to close.
+    first_text = first_text.replace("\n", " ")
+
+    rest_text = ""
+    if rest_raw:
+        # A genuine leading blank/whitespace-only line already present in
+        # `rest_raw` (before any sanitization) is a real paragraph break and
+        # must survive ONLY when there is a real first line before it to
+        # break away from (`first_text` non-empty) — a blank with nothing
+        # preceding it is not a paragraph break, it is just more leading
+        # blank, which collapses the same way a leading blank always does.
+        # A line that only becomes blank AFTER sanitization strips its
+        # content (a comment marker, a tier tag) is never preserved either
+        # way — it collapses like any other interior emptied line.
+        # Distinguishing "genuine blank" from "sanitizes to blank" requires
+        # looking at `rest_raw` itself, once, before the fixed-point loop
+        # runs its own passes and erases which case it was.
+        rest_starts_blank = rest_raw.split("\n", 1)[0].strip() == ""
+        rest_text = _run_body_pass_to_fixed_point(
+            rest_raw, strip_leading_blanks=not (first_text and rest_starts_blank)
+        )
+        if rest_text:
+            rest_text = "\n".join(
+                _LIST_ITEM_CONTINUATION_INDENT + line if line else line
+                for line in rest_text.split("\n")
+            )
+
+    if first_text and rest_text:
+        text = first_text + "\n" + rest_text
+    else:
+        text = first_text or rest_text
+    if not text:
+        return ""
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
@@ -473,14 +720,17 @@ def to_skill(snap: dict) -> PolicySkill | None:
     `applies_when` is sanitized before use, same as the imperative, and
     `entity_id` is cut to the id charset — every row-derived field is
     untrusted (Falco's finding applies to the whole row, not only the
-    imperative). `body` still carries
-    the raw `rule` text for the FUTURE MCP Skills-extension transport (an
-    agent that explicitly fetches a rule by id gets the real text, which is
-    fine — that path is not the SessionStart stdout stream this finding is
-    about), but nothing in this module ever reads `.body` back out into the
-    rendered index; `render_index_text`/`_assemble`/`_preamble_lines`/
-    `_conditional_line_*` only ever touch `.description`/`.applies_when`/
-    `.entity_id`.
+    imperative). `body` carries the `rule` text run through `_sanitize_body`
+    — the multi-line counterpart to `_sanitize_field` — for both the FUTURE
+    MCP Skills-extension transport AND `rule_injection_gate.py`'s
+    point-of-use `PreToolUse` hook, which DOES read `.body` back out into
+    live model context (PR #1320 round 2: the "nothing reads `.body` back
+    out" assumption this docstring stated earlier no longer holds now that
+    a second transport consumes it). Sanitizing here, once, keeps every
+    current and future reader of `.body` safe without each needing its own
+    pass; `render_index_text`/`_assemble`/`_preamble_lines`/
+    `_conditional_line_*` still only ever touch `.description`/
+    `.applies_when`/`.entity_id`, unaffected by this change.
     """
     raw_entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "")
     # The server assigns entity ids from a fixed charset; nothing outside it
@@ -519,7 +769,11 @@ def to_skill(snap: dict) -> PolicySkill | None:
         description = f"When {trigger}:"  # tier-B shape even at tier A
 
     domain = str(snap.get("domain") or "")
-    rule = str(snap.get("rule") or "")
+    raw_rule = str(snap.get("rule") or "")
+    rule = _sanitize_body(raw_rule, max_len=_BODY_MAX)
+    # A rule that sanitizes to nothing still gets a body — the "Source:"
+    # citation line alone, so a caller has something to cite even when the
+    # row's own content was entirely forged structure/markup.
     body = f"{rule}\n\nSource: agent_policy {entity_id}".strip()
     return PolicySkill(
         entity_id=entity_id,

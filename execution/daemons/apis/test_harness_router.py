@@ -133,6 +133,7 @@ def test_invalid_headroom_json_fails_open_to_equal_weights(monkeypatch) -> None:
         "claude": 1.0,
         "codex": 1.0,
         "cursor": 1.0,
+        "claude-local": 1.0,
     }
 
 
