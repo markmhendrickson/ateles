@@ -39,6 +39,8 @@ USAGE
         [--cwd /path/to/worktree] \\
         [--timeout 600] \\
         [--task-entity-id ent_...] \\
+        [--github-delivery] \\
+        [--github-token-env ATELES_AGENT_PAT] \\
         [--json]
 
 ``--provider`` pins the run to one adapter, bypassing weighted selection but
@@ -207,6 +209,8 @@ async def dispatch(
     cwd: str | None = None,
     timeout: int | None = None,
     task_entity_id: str = "",
+    github_delivery: bool = False,
+    github_token: str | None = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -218,6 +222,14 @@ async def dispatch(
     subagent happens inside run_skill: identity, allowlist, provider routing,
     credential stripping, and the harness_event rows. This function's only job
     is to hand it a well-formed request.
+
+    ``github_delivery`` states that this task must commit, push, or open a pull
+    request. It reuses ``run_skill``'s existing GitHub-contract path, which both
+    injects the delivery contract and enables Codex network for this dispatch.
+    Such a run must also supply ``github_token`` explicitly; the shared runner
+    refuses omitted or empty bindings instead of inheriting the daemon's ambient
+    GitHub identity. The default stays False so read-only and filesystem-only
+    work remains under the sandbox's network denial.
     """
     return await run_skill(
         role,
@@ -227,6 +239,8 @@ async def dispatch(
         timeout=timeout,
         cwd=cwd,
         provider=provider,
+        github_token=github_token,
+        include_github_contract=github_delivery,
     )
 
 
@@ -448,6 +462,24 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--github-delivery",
+        action="store_true",
+        help=(
+            "Task must commit, push, or open a pull request. Injects the shared "
+            "GitHub delivery contract and enables scoped Codex network access "
+            "for this dispatch only."
+        ),
+    )
+    parser.add_argument(
+        "--github-token-env",
+        help=(
+            "Environment variable containing the scoped token for this GitHub "
+            "delivery invocation. The value is never accepted on argv or "
+            "included in output. Required with --github-delivery until a "
+            "named non-token identity mechanism is established for this path."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the full result as JSON on stdout instead of raw agent output.",
@@ -519,6 +551,31 @@ def main(argv: list[str] | None = None) -> int:
         emitter.emit_failure(reason)
         return 1
 
+    github_token: str | None = None
+    if args.github_token_env:
+        if not args.github_delivery:
+            return _usage_failure(
+                emitter, "--github-token-env requires --github-delivery"
+            )
+        if not args.github_token_env.isidentifier():
+            return _usage_failure(
+                emitter, "--github-token-env must name a valid environment variable"
+            )
+        github_token = os.environ.get(args.github_token_env, "")
+    elif args.github_delivery:
+        # Caught here as a fast, structured usage error — same shape as every
+        # other CLI misuse below — rather than left to surface deep inside
+        # skill_runner's credential-boundary refusal (ateles#590 security
+        # repair) as an unstructured "dispatch raised" error. Both paths
+        # ultimately refuse the same run; this one is knowable from the
+        # parsed arguments alone and should say so immediately.
+        return _usage_failure(
+            emitter,
+            "--github-delivery requires --github-token-env (a network-enabled "
+            "GitHub delivery run must bind an explicit scoped credential; "
+            "omitting it would otherwise be refused deeper in the dispatch)",
+        )
+
     refusal = _preflight(role, provider=args.provider)
     if refusal:
         print(f"dispatch_role: {refusal}", file=sys.stderr)
@@ -564,6 +621,8 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 timeout=args.timeout,
                 task_entity_id=args.task_entity_id,
+                github_delivery=args.github_delivery,
+                github_token=github_token,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above
