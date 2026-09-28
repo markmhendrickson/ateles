@@ -1017,8 +1017,9 @@ async def dispatch_task(
             f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
         )
 
-        # E1: open one conversation for this execution run (flag-gated,
-        # fail-open).
+        # E1: open and verify one conversation + agent_session for this
+        # execution run. When capture is required, the durable provenance is a
+        # precondition of spawning rather than best-effort telemetry.
         run_conversation_id: str | None = None
         run_agent_session_id: str | None = None
         run_session = None
@@ -1038,6 +1039,29 @@ async def dispatch_task(
                     f"conversation {run_conversation_id} opened "
                     f"for task {entity_id} (run={run_key})"
                 )
+            else:
+                reason = (
+                    "required conversation/agent_session provenance could not be "
+                    "persisted and verified"
+                )
+                log.error(
+                    f"[{DAEMON_NAME}] task {entity_id} {reason} — not spawning"
+                )
+                set_task_status(
+                    entity_id,
+                    TaskStatus.FAILED,
+                    handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value,
+                    reason=reason,
+                    key_suffix=trigger,
+                )
+                notifier.send(
+                    f"{skill} not started on {entity_id}: {reason}",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                job.failed(f"task {entity_id} → {skill} not started: {reason}")
+                return
 
         def _run_stage(role: str, content: str, stage: str) -> None:
             """Record one run-thread event in Neotoma and Gmail."""
@@ -1099,11 +1123,39 @@ async def dispatch_task(
             raise
 
         if result.ok:
+            if run_session and not update_run_session_status(
+                run_session, status="completed"
+            ):
+                reason = (
+                    "terminal agent_session state could not be persisted and "
+                    "verified"
+                )
+                _run_stage(
+                    "assistant",
+                    f"{skill} result withheld: {reason}.",
+                    stage="terminal-state-failed",
+                )
+                set_task_status(
+                    entity_id,
+                    TaskStatus.FAILED,
+                    handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value,
+                    reason=reason,
+                    key_suffix=trigger,
+                )
+                notifier.send(
+                    f"{skill} returned successfully on {entity_id}, but {reason}; "
+                    "task marked FAILED",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                job.failed(
+                    f"task {entity_id} → {skill} completion withheld: {reason}"
+                )
+                return
             _run_stage(
                 "assistant", f"{skill} completed (trigger={trigger}).", stage="done"
             )
-            if run_session:
-                update_run_session_status(run_session, status="completed")
             set_task_status(
                 entity_id,
                 TaskStatus.DONE,

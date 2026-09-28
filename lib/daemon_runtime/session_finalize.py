@@ -396,12 +396,18 @@ def create_run_session(
         },
     ):
         return None
-    if not _relationship_readback_matches(
-        agent_session_id,
-        target_entity_id=task_id,
-        relationship_type="REFERS_TO",
-    ):
-        return None
+    required_relationships = (
+        (conversation_id, task_id),
+        (agent_session_id, task_id),
+        (conversation_id, agent_session_id),
+    )
+    for source_entity_id, target_entity_id in required_relationships:
+        if not _relationship_readback_matches(
+            source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type="REFERS_TO",
+        ):
+            return None
     return RunSession(
         conversation_id=conversation_id,
         agent_session_id=agent_session_id,

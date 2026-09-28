@@ -216,9 +216,19 @@ def test_create_run_session_reads_back_both_records_and_task_link(monkeypatch):
             return _Response({"entity_id": "ent_session99", "entity_type": "agent_session",
                               "snapshot": {"harness": "ateles-swarm",
                                            "native_session_id": "ent_task:created-0"}})
-        return _Response({"relationships": [{"source_entity_id": "ent_session99",
-                                              "target_entity_id": "ent_task",
-                                              "relationship_type": "REFERS_TO"}]})
+        source_entity_id = url.split("/entities/", 1)[1].split("/", 1)[0]
+        targets = {
+            "ent_conv99": ["ent_task", "ent_session99"],
+            "ent_session99": ["ent_task"],
+        }
+        return _Response({"relationships": [
+            {
+                "source_entity_id": source_entity_id,
+                "target_entity_id": target_entity_id,
+                "relationship_type": "REFERS_TO",
+            }
+            for target_entity_id in targets[source_entity_id]
+        ]})
     monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
     monkeypatch.setattr(sf.httpx, "post", lambda *a, **k: _Response({"entities": [
         {"entity_type": "conversation", "entity_id": "ent_conv99"},
