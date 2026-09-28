@@ -732,6 +732,7 @@ def _write_harness_event(
     event_type: str,
     tool_name: str,
     success: str,
+    agent_session_id: str = "",
     input_summary: str = "",
     output_summary: str = "",
     duration_ms: int | None = None,
@@ -766,10 +767,9 @@ def _write_harness_event(
         return
 
     event_at = datetime.now(timezone.utc).isoformat()
-    # canonical_name_fields per schema: session_id, event_type, event_at
-    # session_id is not available at dispatch time; use role+task+event_at as a
-    # stable-enough dedup key without it.
-    idempotency_key = f"harness-event-{role}-{task_entity_id}-{event_type}-{event_at}"
+    # canonical_name_fields per schema: session_id, event_type, event_at.
+    session_key = agent_session_id or f"{role}:{task_entity_id}"
+    idempotency_key = f"harness-event-{session_key}-{event_type}-{event_at}"
 
     entity: dict = {
         "entity_type": "harness_event",
@@ -780,6 +780,8 @@ def _write_harness_event(
         "success": success,
         "task_entity_id": task_entity_id,
     }
+    if agent_session_id:
+        entity["session_id"] = agent_session_id
     if input_summary:
         entity["input_summary"] = input_summary[:500]
     if output_summary:
@@ -798,6 +800,21 @@ def _write_harness_event(
         "observation_source": "workflow_state",
         "entities": [entity],
     }
+    relationships = []
+    if task_entity_id:
+        relationships.append({
+            "source_index": 0,
+            "target_entity_id": task_entity_id,
+            "relationship_type": "REFERS_TO",
+        })
+    if agent_session_id:
+        relationships.append({
+            "source_index": 0,
+            "target_entity_id": agent_session_id,
+            "relationship_type": "REFERS_TO",
+        })
+    if relationships:
+        payload["relationships"] = relationships
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{base_url}/store",
@@ -811,8 +828,53 @@ def _write_harness_event(
     )
     req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     try:
-        with urllib.request.urlopen(req, timeout=5.0):
-            pass
+        with urllib.request.urlopen(req, timeout=5.0) as response:
+            raw = response.read()
+        stored = json.loads(raw) if raw else {}
+        event_id = next((
+            row.get("entity_id")
+            for row in stored.get("entities", [])
+            if row.get("entity_type") == "harness_event"
+        ), None)
+        if event_id:
+            readback_req = urllib.request.Request(
+                f"{base_url}/entities/{event_id}", method="GET",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+            readback_req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+            with urllib.request.urlopen(readback_req, timeout=5.0) as response:
+                readback = json.loads(response.read())
+            snapshot = readback.get("snapshot") or {}
+            if isinstance(snapshot.get("snapshot"), dict):
+                snapshot = snapshot["snapshot"]
+            expected = {
+                "task_entity_id": task_entity_id,
+                **({"session_id": agent_session_id} if agent_session_id else {}),
+            }
+            if any(snapshot.get(field) != value for field, value in expected.items()):
+                log.warning(
+                    "[apis] harness_event readback mismatch "
+                    f"(entity_id={event_id}, task_entity_id={task_entity_id})"
+                )
+            relationships_req = urllib.request.Request(
+                f"{base_url}/entities/{event_id}/relationships", method="GET",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+            relationships_req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+            with urllib.request.urlopen(relationships_req, timeout=5.0) as response:
+                stored_relationships = json.loads(response.read()).get("relationships", [])
+            expected_targets = {target for target in (task_entity_id, agent_session_id) if target}
+            actual_targets = {
+                rel.get("target_entity_id")
+                for rel in stored_relationships
+                if rel.get("source_entity_id") == event_id
+                and rel.get("relationship_type") == "REFERS_TO"
+            }
+            if not expected_targets.issubset(actual_targets):
+                log.warning(
+                    "[apis] harness_event relationship readback mismatch "
+                    f"(entity_id={event_id}, task_entity_id={task_entity_id})"
+                )
     except Exception as exc:
         log.debug(f"[apis] harness_event write failed (non-fatal): {exc}")
 
@@ -1391,6 +1453,7 @@ async def _run_skill_once(
     provider: str,
     role: str | None = None,
     task_entity_id: str = "",
+    agent_session_id: str = "",
     timeout: int | None = None,
     env_extra: dict[str, str] | None = None,
     notifier=None,  # lib.notify.Notifier | None — kept optional to avoid hard dep
@@ -1664,6 +1727,7 @@ async def _run_skill_once(
             await asyncio.to_thread(
                 _write_harness_event,
                 task_entity_id=task_entity_id,
+                agent_session_id=agent_session_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
                 event_type="subprocess",
@@ -1692,10 +1756,33 @@ async def _run_skill_once(
         )
         guards_path = ""
         if refusal is None:
-            try:
-                guards_path = local_provider.write_guards_file(ATELES_REPO)
-            except (local_provider.LocalProviderError, OSError) as exc:
-                refusal = f"{local_provider.FAILURE_GUARDS}: {exc}"
+            # ATELES_REPO_PATH unset means ATELES_REPO (module-level,
+            # resolved once at import) silently fell back to ~/repos/ateles —
+            # the shared interactive clone, not the deployment checkout the
+            # daemon actually runs from. Reading guards from ATELES_REPO in
+            # that case would bind the launch to whatever state that clone
+            # happens to be in and proceed on unverified guards rather than
+            # refuse. Building guards_repo from the env var read here (not
+            # from the separately-resolved ATELES_REPO) keeps the refuse/
+            # proceed decision and the path guards are actually read from as
+            # one value instead of two independent reads of the same var.
+            repo_path_env = os.environ.get("ATELES_REPO_PATH", "").strip()
+            if not repo_path_env:
+                refusal = (
+                    f"{local_provider.FAILURE_GUARDS}: ATELES_REPO_PATH is not "
+                    "set — refusing to read guards from the ATELES_REPO "
+                    f"fallback ({ATELES_REPO}); set ATELES_REPO_PATH to the "
+                    "checkout whose guards this dispatch must bind"
+                )
+            else:
+                log.info(
+                    f"[apis] {skill} claude-local guards read from "
+                    f"ATELES_REPO_PATH={repo_path_env}"
+                )
+                try:
+                    guards_path = local_provider.write_guards_file(Path(repo_path_env))
+                except (local_provider.LocalProviderError, OSError) as exc:
+                    refusal = f"{local_provider.FAILURE_GUARDS}: {exc}"
         if refusal is not None:
             msg = f"{provider} launch failed: {refusal}"
             log.warning(f"[apis] {skill} dispatch skipped — {msg}")
@@ -1896,6 +1983,7 @@ async def _run_skill_once(
         await asyncio.to_thread(
             _write_harness_event,
             task_entity_id=task_entity_id,
+            agent_session_id=agent_session_id,
             role=_role,
             agent_sub=agent_def.aauth_sub,
             event_type="subprocess",
@@ -2008,6 +2096,7 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -2128,6 +2217,7 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -2170,6 +2260,7 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -2232,6 +2323,7 @@ async def run_skill(
     *,
     role: str | None = None,
     task_entity_id: str = "",
+    agent_session_id: str = "",
     timeout: int | None = None,
     env_extra: dict[str, str] | None = None,
     notifier=None,
@@ -2295,6 +2387,7 @@ async def run_skill(
         return await _run_skill_once(
             skill, prompt, provider=selected, role=role,
             task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
+            agent_session_id=agent_session_id,
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
             owns_pending_gate=deny_correct,

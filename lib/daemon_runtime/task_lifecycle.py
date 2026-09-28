@@ -59,7 +59,7 @@ class TaskStatus(str, Enum):
     PENDING = "pending"               # created, not yet routed
     ROUTED = "routed"                 # dispatcher resolved an owner/skill
     EXECUTING = "executing"           # T4 agent subprocess spawned
-    VERIFIED = "verified"             # outcome checked (optional pre-done gate)
+    VERIFIED = "verified"             # effect returned; completion provenance pending
     DONE = "done"                     # terminal success
     FAILED = "failed"                 # transient failure; watchdog may retry
     BLOCKED = "blocked"               # needs operator (retries exhausted / blocker)
@@ -152,7 +152,7 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
         }
     ),
     TaskStatus.VERIFIED.value: frozenset(
-        {TaskStatus.DONE.value, TaskStatus.FAILED.value, TaskStatus.BLOCKED.value}
+        {TaskStatus.DONE.value, TaskStatus.BLOCKED.value}
     ),
     TaskStatus.FAILED.value: frozenset(
         {TaskStatus.ROUTED.value, TaskStatus.BLOCKED.value, TaskStatus.DECLINED.value}
@@ -344,6 +344,7 @@ def _selftest() -> int:
     checks["routed_to_executing"] = can_transition("routed", "executing")
     checks["executing_to_done"] = can_transition("executing", "done")
     checks["verified_to_done"] = can_transition("verified", "done")
+    checks["verified_not_retryable"] = not can_transition("verified", "failed")
 
     # Failure / recovery
     checks["executing_to_failed"] = can_transition("executing", "failed")

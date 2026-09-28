@@ -973,6 +973,16 @@ state principle 11 forbids — it asserts a dependency that some process must cl
 and it is invisible to a reader walking the record's edges — where a `DEPENDS_ON` edge is read from either
 end: the batch's open dependencies, and every batch a task is holding up.
 
+**The same edge orders commissioned planning work without changing this hold.** A task or planning record
+may `DEPENDS_ON` a task or planning record. A planning-record source applies the dependency to every task
+on its descendant frontier; a planning-record target satisfies it only when that record has the completion
+proof `planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier` requires.
+This extension does not alter a batch's stronger mid-flight rule: a batch still points to the task it
+created, still refuses its verdict while that edge is open, and still ends the edge explicitly. A task or
+planning record with an unsatisfied dependency is absent from the commissioned frontier rather than given
+a stored `blocked_by` value. The existing cycle refusal applies across the combined `PART_OF` and
+`DEPENDS_ON` walk, so a planning dependency is not a second dependency primitive.
+
 **What binds.** The verdict on the step that recorded the dependency is refused at submission while any
 `DEPENDS_ON` edge from the batch to a non-terminal task is unended — the same shape as a conclusion
 contradicting its own findings, which is refused rather than swallowed
@@ -1068,9 +1078,11 @@ a live one. Work needing two workflows at once is split into child tasks, one pe
 
 ### Parent and child tasks
 
-Children `PART_OF` a parent (at most one parent). Parent completion is derived from children's terminal
-states. Children go through workflows independently. A parent never enters a workflow — it is a
-grouping, and a batch carries tasks that are executed, which a parent never is.
+Children `PART_OF` a parent (at most one parent). Children go through workflows independently. A parent
+never enters a workflow — it is a grouping, and a batch carries tasks that are executed, which a parent
+never is. Parent completion is derived: every child is terminal and landed, and where the parent is under a
+planning record its effect evidence satisfies the applicable `completion_criteria[]`. A terminal child
+count alone therefore cannot close its parent.
 
 **A task's one `PART_OF` edge targets its parent task or a planning record, and the records above it are
 its ascent.** The same edge, with the same one-parent rule, relates a task to the plan it is under and a
@@ -1080,8 +1092,9 @@ read, distinct from the chain, and what a step reads of it is declared and resol
 `planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`). A task with
 no planning record above it is unplanned, a derived read and never a status, and it is admitted through
 intake like any task. Completion at every level above the task is the parent's rule applied again: derived
-from the descendants' terminal states, never stored
-(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`).
+from descendant terminal-and-landed state plus the planning record's criterion evidence, never stored
+(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`,
+`planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`).
 
 ### A recurring task is one live instance, and its completion creates the next
 

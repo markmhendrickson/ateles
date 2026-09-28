@@ -126,6 +126,8 @@ echo "  - Checking decision 117 ruling is bound to the corpus..."
 python3 execution/scripts/check_foundation_decision_117.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking decision 114 ruling is bound to the corpus..."
 python3 execution/scripts/check_foundation_decision_114.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 119 commissioning is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_119.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python3 execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))

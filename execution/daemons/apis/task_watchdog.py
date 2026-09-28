@@ -13,6 +13,8 @@ SSE loop (no inline sleep in dispatch):
     stalled past stall    subprocess died, or the daemon restarted mid-flight),
                         re-dispatch — this also implements task RESUME after a
                         restart — then escalate once attempts are exhausted.
+  * VERIFIED          → reconcile the already-produced result's exact run
+                        provenance and close DONE; never re-run the effect.
   * everything else   → left alone (terminal, awaiting_approval is operator-owned,
                         blocked already escalated, pending is the SSE create path).
 
@@ -28,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -44,12 +47,16 @@ _REPO_ROOT = _Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_REPO_ROOT))
 
-from lib.daemon_runtime.task_lifecycle import (
+from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     MAX_ATTEMPTS,
     TaskStatus,
     backoff_seconds,
     normalize,
     set_task_status,
+)
+from lib.daemon_runtime.session_finalize import (  # noqa: E402
+    recover_run_session,
+    update_run_session_status,
 )
 
 log = logging.getLogger("apis.watchdog")
@@ -78,7 +85,11 @@ _RETRYABLE_INFLIGHT = frozenset({TaskStatus.ROUTED.value, TaskStatus.EXECUTING.v
 class WatchdogAction(str, Enum):
     NONE = "none"
     RETRY = "retry"        # re-dispatch (failed, or stalled in-flight / resume)
+    RECONCILE = "reconcile"  # repair terminal provenance; never repeat the effect
     ESCALATE = "escalate"  # attempts exhausted → BLOCKED + page operator
+
+
+_RUN_SESSION_RESULT = re.compile(r"(?:^|;\s*)run_session=([^;\s]+)")
 
 
 @dataclass
@@ -108,12 +119,15 @@ class TaskWatchdog:
         if s == TaskStatus.FAILED.value:
             return WatchdogAction.RETRY if attempts < MAX_ATTEMPTS else WatchdogAction.ESCALATE
 
+        if s == TaskStatus.VERIFIED.value:
+            return WatchdogAction.RECONCILE
+
         if s in _RETRYABLE_INFLIGHT:
             if age_seconds is not None and age_seconds >= self.stall_seconds:
                 return WatchdogAction.RETRY if attempts < MAX_ATTEMPTS else WatchdogAction.ESCALATE
             return WatchdogAction.NONE
 
-        # pending (SSE create owns it), verified/done/declined/superseded
+        # pending (SSE create owns it), done/declined/superseded
         # (terminal-ish), awaiting_approval (operator-owned), blocked (already
         # escalated) → not the watchdog's job.
         return WatchdogAction.NONE
@@ -143,7 +157,13 @@ class TaskWatchdog:
         dispatch_task closure) used to re-dispatch a retryable task.
         """
         now = time.time()
-        counts = {"scanned": 0, "retried": 0, "escalated": 0, "skipped_backoff": 0}
+        counts = {
+            "scanned": 0,
+            "retried": 0,
+            "reconciled": 0,
+            "escalated": 0,
+            "skipped_backoff": 0,
+        }
         try:
             tasks = _query_tasks(QUERY_LIMIT)
         except Exception as exc:  # noqa: BLE001 — never let a query error kill the loop
@@ -157,6 +177,12 @@ class TaskWatchdog:
             action = self.classify(entity_id, status, age)
 
             if action == WatchdogAction.NONE:
+                continue
+
+            if action == WatchdogAction.RECONCILE:
+                if _reconcile_completed_task(entity_id, snapshot):
+                    counts["reconciled"] += 1
+                    self.forget(entity_id)
                 continue
 
             if action == WatchdogAction.ESCALATE:
@@ -207,6 +233,46 @@ class TaskWatchdog:
             except Exception as exc:  # noqa: BLE001 — never crash the daemon
                 log.warning("[watchdog] sweep error (ignored): %s", exc)
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+
+
+def _reconcile_completed_task(entity_id: str, snapshot: dict) -> bool:
+    """Finish provenance for an effect already produced by the executor.
+
+    ``verified`` is intentionally non-dispatchable. The result field carries
+    the exact native run identity, so recovery repairs that run and never has to
+    infer which earlier attempt produced the effect.
+    """
+    result = str(snapshot.get("result") or "")
+    match = _RUN_SESSION_RESULT.search(result)
+    if not match:
+        log.warning(
+            "[watchdog] verified task %s has no exact run_session marker; "
+            "leaving it verified",
+            entity_id,
+        )
+        return False
+    native_session_id = match.group(1)
+    run = recover_run_session(
+        task_id=entity_id,
+        native_session_id=native_session_id,
+    )
+    if run is None or not update_run_session_status(run, status="completed"):
+        log.warning(
+            "[watchdog] terminal provenance still unresolved for task %s run %s",
+            entity_id,
+            native_session_id,
+        )
+        return False
+    final_result = result.replace("provenance=unverified", "provenance=verified")
+    return set_task_status(
+        entity_id,
+        TaskStatus.DONE,
+        handler="apis-watchdog",
+        from_status=TaskStatus.VERIFIED.value,
+        reason="",
+        result=final_result,
+        key_suffix="provenance-reconciled",
+    )
 
 
 # ── module-level I/O helpers ────────────────────────────────────────────────
@@ -306,6 +372,7 @@ def _selftest() -> int:
     checks["executing_fresh_none"] = wd.classify("t2", "executing", 60) == WatchdogAction.NONE
     checks["executing_stalled_retry"] = wd.classify("t2", "executing", 4000) == WatchdogAction.RETRY
     checks["routed_stalled_retry"] = wd.classify("t3", "routed", 5000) == WatchdogAction.RETRY
+    checks["verified_reconciles"] = wd.classify("t3", "verified", 5000) == WatchdogAction.RECONCILE
 
     # Hands-off states.
     checks["pending_none"] = wd.classify("t4", "pending", 99999) == WatchdogAction.NONE
