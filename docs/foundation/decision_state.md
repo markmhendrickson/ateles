@@ -131,4 +131,5 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 116 | whether a task no declaration fits waits, is handed to the operator, … | yes | yes | unknown | nothing in the design; the path it describes — `route` holding on an amendment … |
 | 117 | whether a grant may say what a principal may do to an … | yes | yes | unknown | decision 41, whose tuple and default-deny shape this widens rather than replaces; decision 43, … |
 | 118 | whether credential rotation is one authority or several, split by who issues … | yes | yes | unknown | decision 105, open, on where a credential's value comes from and how it reaches … |
+| 119 | how an authorized principal commissions an entire plan or project for autonomous … | yes | yes | unknown | decisions 14, 18, 30, 41, 46, 47, 53, 56, 57, and 92; the existing … |
 
