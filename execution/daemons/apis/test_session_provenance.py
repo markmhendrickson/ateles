@@ -15,19 +15,38 @@ for _path in (str(_REPO_ROOT), str(_HERE)):
         sys.path.insert(0, _path)
 
 import apis  # noqa: E402
+from lib.daemon_runtime import session_finalize  # noqa: E402
 
 
 class _Notifier:
+    def __init__(self):
+        self.messages: list[tuple[tuple, dict]] = []
+
     def send(self, *_args, **_kwargs):
-        pass
+        self.messages.append((_args, _kwargs))
 
 
 class _Job:
+    def __init__(self):
+        self.finished_events: list[tuple] = []
+        self.failed_events: list[tuple] = []
+
     def finished(self, *_args, **_kwargs):
-        pass
+        self.finished_events.append(_args)
 
     def failed(self, *_args, **_kwargs):
+        self.failed_events.append(_args)
+
+
+class _Response:
+    def __init__(self, data):
+        self.data = data
+
+    def raise_for_status(self):
         pass
+
+    def json(self):
+        return self.data
 
 
 @pytest.mark.asyncio
@@ -129,3 +148,163 @@ async def test_dispatch_persists_one_session_across_spawn_turns_and_completion(
         "ent_conversation",
     ]
     assert statuses == [(run, "completed")]
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["store_failure", "identity_mismatch", "relationship_verification_failure"],
+)
+@pytest.mark.asyncio
+async def test_dispatch_refuses_to_spawn_without_verified_session_provenance(
+    monkeypatch,
+    failure_mode,
+):
+    spawned: list[dict] = []
+    task_statuses: list[tuple[tuple, dict]] = []
+    job = _Job()
+    notifier = _Notifier()
+
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(
+        apis, "_activity", SimpleNamespace(started=lambda *_args: job)
+    )
+    monkeypatch.setattr(
+        apis,
+        "set_task_status",
+        lambda *args, **kwargs: task_statuses.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_args: True)
+    monkeypatch.setattr(session_finalize, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    if failure_mode == "store_failure":
+        monkeypatch.setattr(
+            session_finalize.httpx,
+            "post",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("down")),
+        )
+    else:
+        monkeypatch.setattr(
+            session_finalize.httpx,
+            "post",
+            lambda *_args, **_kwargs: _Response({
+                "entities": [
+                    {"entity_type": "conversation", "entity_id": "ent_conversation"},
+                    {"entity_type": "agent_session", "entity_id": "ent_session"},
+                ]
+            }),
+        )
+
+        def fake_get(url, **_kwargs):
+            if url.endswith("/entities/ent_conversation"):
+                return _Response({
+                    "entity_id": "ent_conversation",
+                    "entity_type": "conversation",
+                    "snapshot": {
+                        "conversation_id": "ent_task:approved-2",
+                        "session_id": "ent_task:approved-2",
+                    },
+                })
+            if url.endswith("/entities/ent_session"):
+                native_session_id = (
+                    "wrong-session"
+                    if failure_mode == "identity_mismatch"
+                    else "ent_task:approved-2"
+                )
+                return _Response({
+                    "entity_id": "ent_session",
+                    "entity_type": "agent_session",
+                    "snapshot": {
+                        "harness": "ateles-swarm",
+                        "native_session_id": native_session_id,
+                    },
+                })
+            return _Response({"relationships": []})
+
+        monkeypatch.setattr(session_finalize.httpx, "get", fake_get)
+
+    async def fake_spawn(*_args, **kwargs):
+        spawned.append(kwargs)
+        return SimpleNamespace(ok=True, error="", returncode=0)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", fake_spawn)
+
+    await apis.dispatch_task(
+        "ent_task",
+        {
+            "title": "Implement it",
+            "assigned_to": "cicada",
+            "status": "awaiting_approval",
+            "attempt": 2,
+        },
+        "approved",
+        notifier,
+        gate_override=True,
+    )
+
+    assert spawned == []
+    assert task_statuses[-1][0][1] is apis.TaskStatus.FAILED
+    assert "provenance" in task_statuses[-1][1]["reason"]
+    assert job.finished_events == []
+    assert job.failed_events
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_not_report_success_when_terminal_state_is_unverified(
+    monkeypatch,
+):
+    run = SimpleNamespace(
+        conversation_id="ent_conversation",
+        agent_session_id="ent_session",
+        native_session_id="ent_task:approved-2",
+    )
+    task_statuses: list[tuple[tuple, dict]] = []
+    turns: list[dict] = []
+    job = _Job()
+
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(
+        apis, "_activity", SimpleNamespace(started=lambda *_args: job)
+    )
+    monkeypatch.setattr(
+        apis,
+        "set_task_status",
+        lambda *args, **kwargs: task_statuses.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_args: True)
+    monkeypatch.setattr(apis, "create_run_session", lambda **_kwargs: run)
+    monkeypatch.setattr(apis, "append_turn", lambda **kwargs: turns.append(kwargs))
+    monkeypatch.setattr(
+        apis, "update_run_session_status", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(
+        apis,
+        "_spawn_harness_skill",
+        lambda *_args, **_kwargs: _async_result(
+            SimpleNamespace(ok=True, error="", returncode=0)
+        ),
+    )
+
+    await apis.dispatch_task(
+        "ent_task",
+        {
+            "title": "Implement it",
+            "assigned_to": "cicada",
+            "status": "awaiting_approval",
+            "attempt": 2,
+        },
+        "approved",
+        _Notifier(),
+        gate_override=True,
+    )
+
+    assert task_statuses[-1][0][1] is apis.TaskStatus.FAILED
+    assert "terminal" in task_statuses[-1][1]["reason"]
+    assert job.finished_events == []
+    assert job.failed_events
+    assert not any("completed" in turn["content"].lower() for turn in turns)
+
+
+async def _async_result(value):
+    return value
