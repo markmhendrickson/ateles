@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,34 @@ except ImportError:  # pragma: no cover - path-dependent import
     from silence_gate import (  # type: ignore[no-redef]
         measure_sustained_rms_db as _measure_sustained_rms_db,
     )
+
+# --- Speech presence (ateles#777 Path B) --------------------------------
+# RMS cannot separate noisy-room fabrications from quiet speech. WebRTC VAD
+# speech-fraction is the local, language-independent layer. Phrase matching
+# (``hallucination_filter.screen_transcription``) is not the closer here —
+# that module stays on the batch path. See ``speech_presence.py``.
+try:
+    from scripts.speech_presence import (
+        DEFAULT_MIN_SPEECH_FRACTION,
+        DEFAULT_VAD_AGGRESSIVENESS,
+        SKIPPED_BELOW_THRESHOLD,
+        SKIPPED_VAD_NON_SPEECH,
+        apply_no_speech_prob,
+        classify_pre_transcription,
+        measure_speech_fraction,
+    )
+    from scripts.local_whisper import NO_SPEECH_MARKER_PREFIX
+except ImportError:  # pragma: no cover - path-dependent import
+    from speech_presence import (  # type: ignore[no-redef]
+        DEFAULT_MIN_SPEECH_FRACTION,
+        DEFAULT_VAD_AGGRESSIVENESS,
+        SKIPPED_BELOW_THRESHOLD,
+        SKIPPED_VAD_NON_SPEECH,
+        apply_no_speech_prob,
+        classify_pre_transcription,
+        measure_speech_fraction,
+    )
+    from local_whisper import NO_SPEECH_MARKER_PREFIX  # type: ignore[no-redef]
 
 # --- Follow mode ------------------------------------------------------------
 DEFAULT_FOLLOW = os.environ.get("LIVE_TRANSCRIPT_FOLLOW", "") == "1"
@@ -284,6 +313,27 @@ def apply_transcription_result(
     return consecutive_failures + 1
 
 
+def apply_local_backend_marker(record: dict) -> bool:
+    """Treat local_whisper's ``[NO SPEECH DETECTED …]`` marker as already gated.
+
+    The batch path still runs ``hallucination_filter`` inside ``transcribe_local``.
+    When it fires, stdout is that verdict's marker, not operator speech. Fold
+    it into silence with a reason other than ``below_threshold`` so it cannot
+    land under ``text``. This is not the #777 closer.
+    """
+    text = record.get("text")
+    if not record.get("ok") or record.get("silence") or not text:
+        return False
+    if not text.startswith(NO_SPEECH_MARKER_PREFIX):
+        return False
+    record["filtered_text"] = text
+    record["text"] = ""
+    record["silence"] = True
+    record["skipped"] = SKIPPED_VAD_NON_SPEECH
+    record["filtered_reason"] = "local_backend_no_speech_marker"
+    return True
+
+
 #: The only secret transcribe_audio.py needs. The materialized dotenv holds
 #: many unrelated credentials (GitHub PATs, Telegram and Wise tokens, the
 #: Neotoma bearer token and mnemonic); none of them belong in the environment
@@ -358,14 +408,52 @@ def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
         tail = (result.stderr or "").strip().splitlines()
         return False, tail[-1] if tail else f"exit {result.returncode}"
 
-    # transcribe_audio.py prints a "Transcribing audio file: ..." banner ahead of
-    # the transcript; drop it so the JSONL carries only spoken text.
-    lines = [ln for ln in (result.stdout or "").splitlines()
-             if ln.strip() and not ln.startswith("Transcribing audio file:")]
-    text = " ".join(ln.strip() for ln in lines).strip()
+    text = _extract_transcript_text(result.stdout or "")
     if not text:
         return False, SILENCE_SENTINEL
     return True, text
+
+
+# transcribe_audio.py's main() always calls transcribe_audio_file(verbose=True)
+# (main.py has no non-verbose path), so its stdout carries progress banners
+# ahead of the transcript on EVERY call, not only occasionally. On the OpenAI
+# backend that was one line ("Transcribing audio file: ..."). The local
+# whisper-cli backend that commit 32c99c10 made the default prints several more:
+# "TRANSCRIPTION_BACKEND_SELECTED=local", "TRANSCRIPTION_ENGINE=...", and a
+# run of indented progress lines from local_whisper.py ("    Local
+# whisper-cli: ...", "    Model: ...", "    Converting to 16 kHz mono WAV:
+# ...", "    Running whisper-cli on ..."). Stripping only the first banner
+# line (as this function did before) leaves the rest glued onto the front of
+# the real transcript — corrupting every chunk's text on the now-default
+# backend, corrupting every chunk's `text` field.
+# judges. Two independent line shapes distinguish a banner from a transcript:
+# a bare KEY=VALUE line (all-caps key, no leading space, no spaces around
+# "="), and any line with leading whitespace, which is how every progress
+# line above is printed and how whisper-cli's own transcript output never is.
+_BANNER_LINE_RE = re.compile(r"^[A-Z][A-Z0-9_]*=\S")
+
+
+def _extract_transcript_text(stdout: str) -> str:
+    """Strip transcribe_audio.py's verbose progress banners from its stdout.
+
+    Keeps only lines that are neither indented progress output nor a bare
+    KEY=VALUE status line, then joins what remains as the transcript.
+    """
+    lines = []
+    for raw_line in stdout.splitlines():
+        if raw_line.startswith("Transcribing audio file:"):
+            continue
+        if raw_line.startswith("Warning: File extension"):
+            continue
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if raw_line[0].isspace():
+            continue  # indented progress line, e.g. "    Model: ..."
+        if _BANNER_LINE_RE.match(stripped):
+            continue  # bare KEY=VALUE status line
+        lines.append(stripped)
+    return " ".join(lines).strip()
 
 
 def main(argv: list[str]) -> int:
@@ -392,6 +480,18 @@ def main(argv: list[str]) -> int:
                     default=DEFAULT_SILENCE_THRESHOLD_DB,
                     help=f"Skip transcription below this sustained RMS in dB "
                          f"(default: {DEFAULT_SILENCE_THRESHOLD_DB:g})")
+    ap.add_argument("--min-speech-fraction", type=float,
+                    default=DEFAULT_MIN_SPEECH_FRACTION,
+                    help="Skip transcription when WebRTC VAD speech-frame "
+                         f"fraction is below this (default: {DEFAULT_MIN_SPEECH_FRACTION:g})")
+    ap.add_argument("--vad-aggressiveness", type=int,
+                    default=DEFAULT_VAD_AGGRESSIVENESS,
+                    help="webrtcvad aggressiveness 0-3 "
+                         f"(default: {DEFAULT_VAD_AGGRESSIVENESS})")
+    ap.add_argument("--no-vad", action="store_true",
+                    default=os.environ.get("LIVE_TRANSCRIPT_NO_VAD", "") == "1",
+                    help="Disable the VAD speech-presence layer "
+                         "(env LIVE_TRANSCRIPT_NO_VAD=1). RMS gate still runs.")
     args = ap.parse_args(argv)
 
     if not TRANSCRIBE.exists():
@@ -423,6 +523,13 @@ def main(argv: list[str]) -> int:
     log(f"tailing: {recording.name}")
     log(f"chunk interval: {args.interval}s   starting at: {cursor:.0f}s")
     log(f"silence gate: skip below {args.silence_threshold_db:g} dB sustained RMS")
+    if args.no_vad:
+        log("speech presence: OFF (--no-vad); RMS gate only")
+    else:
+        log(
+            f"speech presence: webrtcvad aggressiveness "
+            f"{args.vad_aggressiveness} min_frac {args.min_speech_fraction:g}"
+        )
     if args.follow:
         log(f"follow mode: on — pausing (not exiting) on stop, up to "
             f"{args.follow_timeout_min:g} min per break")
@@ -529,7 +636,8 @@ def main(argv: list[str]) -> int:
             tmp_path = Path(tmp.name)
 
             rms_db: float | None = None
-            skipped_silent = False
+            speech_frac: float | None = None
+            pre_skip: str | None = None
             try:
                 proc = subprocess.run(
                     [
@@ -544,14 +652,24 @@ def main(argv: list[str]) -> int:
                 if proc.returncode != 0:
                     ok, payload = False, f"ffmpeg slice failed: {(proc.stderr or '').strip()[:200]}"
                 else:
-                    # Gate BEFORE transcribing. A measurement failure returns
-                    # None and falls through to transcription — never drop audio
-                    # because the meter broke.
+                    # Gate BEFORE transcribing. Measurement failure returns
+                    # None and falls through — never drop audio because a
+                    # meter or VAD broke.
                     rms_db = measure_slice_rms_db(tmp_path)
-                    if rms_db is not None and rms_db < args.silence_threshold_db:
-                        skipped_silent = True
+                    if not args.no_vad:
+                        speech_frac = measure_speech_fraction(
+                            tmp_path, aggressiveness=args.vad_aggressiveness
+                        )
+                    pre_skip = classify_pre_transcription(
+                        rms_db,
+                        speech_frac,
+                        silence_threshold_db=args.silence_threshold_db,
+                        min_speech_fraction=args.min_speech_fraction,
+                    )
+                    if pre_skip != "transcribe":
                         ok, payload = True, ""
                     else:
+                        pre_skip = None
                         ok, payload = transcribe_slice(tmp_path, env)
             except subprocess.TimeoutExpired:
                 ok, payload = False, "ffmpeg slice timed out"
@@ -565,19 +683,23 @@ def main(argv: list[str]) -> int:
                 "end_s": round(cursor + available, 2),
                 "ok": ok,
             }
-            if skipped_silent:
-                # Same shape as post-hoc silence, plus the measurement that
-                # caused the skip. Not a failure: does not touch the streak.
+            if rms_db is not None:
+                record["rms_db"] = round(rms_db, 1)
+            if speech_frac is not None:
+                record["speech_frac"] = round(speech_frac, 3)
+            if pre_skip in (SKIPPED_BELOW_THRESHOLD, SKIPPED_VAD_NON_SPEECH):
                 record["text"] = ""
                 record["silence"] = True
-                record["skipped"] = "below_threshold"
-                record["rms_db"] = round(rms_db, 1)
+                record["skipped"] = pre_skip
             else:
-                if rms_db is not None:
-                    record["rms_db"] = round(rms_db, 1)
+                streak_before = consecutive_failures
                 consecutive_failures = apply_transcription_result(
                     record, ok, payload, consecutive_failures
                 )
+                if apply_local_backend_marker(record) or apply_no_speech_prob(
+                    record, None
+                ):
+                    consecutive_failures = streak_before
 
             append(record)
 
