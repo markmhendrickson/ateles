@@ -244,6 +244,26 @@ _FIELD_OWN_PAREN_RE = re.compile(r"`(?:scope|agent_sub)`\s*(\()", re.I)
 #   defensive enumeration rather than a closed guarantee — the code comment
 #   above already states that trade-off for `_STRONG_HEDGE_RE` and it holds
 #   here too.
+#
+#   Security's sixth-round review (PR #1321 comment on this exact head,
+#   `58838afa`) found the vocabulary list still missing several ordinary
+#   denial idioms — "superseded by nothing", "on paper only", "notionally",
+#   "hardly" (a rhetorical-question denial), "functionally inert" — and,
+#   more importantly, named the structural root cause every round has shared:
+#   a *denylist* of denial words is one synonym behind by construction, no
+#   matter how many rounds grow it. The words below close the specific
+#   instances demonstrated (still a defensive enumeration, not a closed
+#   guarantee); `_has_affirmative_superseded_claim`'s new clause-position
+#   requirement below is the structural half of the fix security recommended
+#   — it stops relying on the *absence* of a denial word and instead
+#   requires the claim to occupy the *position* a genuine affirmative
+#   statement occupies (immediately after the field's own opening
+#   parenthesis, or immediately after a `;`/`,` clause boundary, with no
+#   copula or hedge-adverb sitting between that boundary and the claim word).
+#   Every one of security's six bypass strings works by inserting a copula
+#   ("is", "remains", "stays") or a hedge-adverb ("notionally", "hardly") in
+#   exactly that gap, so closing the gap closes the class those constructions
+#   share — not merely the six words demonstrated.
 _STRONG_HEDGE_RE = re.compile(
     r"\b(?:never|isn't|aren't|doesn't|don't|n't|fail(?:s|ed)?\s+to|absent|"
     r"nor|neither|unimplement\w*|(?:in\s+practice|only\s+in\s+theory)|"
@@ -251,12 +271,35 @@ _STRONG_HEDGE_RE = re.compile(
     r"proposed\s+but|rejected|no\s+traversal|not\s+(?:actually|really|yet)|"
     r"kept\s+for\s+historical|does\s+not\s+(?:actually\s+)?(?:honor|carry)|"
     r"hypothetical\w*|illustration\w*|if\s+it\s+existed|in\s+name\s+only|"
-    r"nominal(?:ly)?|"
+    r"nominal(?:ly)?|notional(?:ly)?|hardly|on\s+paper\s+only|"
+    r"functionally\s+inert|supersed\w*\s+by\s+nothing|"
     r"un\w*(?:supersed\w*|bound|affected|resolved|traversed)|"
     r"edgeless|authoritative)\b",
     re.I,
 )
 _WEAK_HEDGE_RE = re.compile(r"\b(?:not|no|without|lack(?:s|ing)?)\b", re.I)
+
+# Structural companion to the hedge scan above, for the fields-column claim
+# only (`_has_affirmative_superseded_claim`). A hedge/negation *denylist* can
+# always be evaded by a denial word the list hasn't seen yet — security's
+# sixth-round finding demonstrated four such words ("nothing", "on paper
+# only", "notionally", "hardly") inside a single review pass. Rather than
+# grow the list a seventh time, this requires the claim to sit in the
+# grammatical *position* an affirmative statement occupies: immediately after
+# a clause boundary (the field's own opening parenthesis, a `;`, or a `,`),
+# with nothing but whitespace between that boundary and the claim word. A
+# denial construction needs a subject and a copula or hedge-adverb between
+# the boundary and the word ("is NOT superseded", "remains ... superseded",
+# "notionally superseded", "superseded? hardly") — inserting that copula/
+# adverb is exactly what makes those six constructions denials rather than
+# affirmations, and it is exactly what this position check excludes. A
+# trailing "?" immediately after the claim word (the rhetorical-question
+# shape, "superseded by the edge? hardly") is rejected for the same reason:
+# a genuine affirmative statement is never phrased as a question.
+_CLAIM_PRECEDING_HEDGE_RE = re.compile(
+    r"\b(?:is|was|remains?|stays?|notionally|nominally|technically)\s*\w*\s*$",
+    re.I,
+)
 _LEGITIMATE_NO_EDGE_FALLBACK_RE = re.compile(
     r"^\s*when\s+`?scope`?\s+is\s+`?agent`?\s+and\s+the\s+row\s+carries\s+"
     r"no\s+`?GOVERNS`?\s+edge,\s+it\s+names\s+no\s+target\s+and\s+so\s+"
@@ -326,13 +369,34 @@ def _has_governs_edge_entry(edges_cell: str) -> bool:
 
 def _has_affirmative_superseded_claim(fields_cell: str) -> bool:
     """True when ``scope``'s or ``agent_sub``'s own parenthetical affirms
-    that it is superseded, with no hedge/denial word in that parenthetical.
+    that it is superseded, with no hedge/denial word in that parenthetical
+    AND the claim word itself sits in affirmative position.
+
+    Two independent requirements, not one: the whole-parenthetical hedge scan
+    (``_is_hedged``, defense in depth against denial vocabulary anywhere in
+    the span) and this function's own structural requirement — that at least
+    one occurrence of "supersed*" is not preceded by a copula/hedge-adverb
+    (``_CLAIM_PRECEDING_HEDGE_RE``) and not immediately followed by a "?".
+    Security's sixth-round review demonstrated the hedge scan alone still
+    passes constructions like "is NOT superseded", "remains ... without ...
+    superseded", "notionally superseded", and "superseded? hardly" — each
+    inserts its negation or doubt-marker in the copula/adverb slot between a
+    clause boundary and the claim word, which the position check rejects
+    regardless of which word fills that slot.
     """
     for match in _FIELD_OWN_PAREN_RE.finditer(fields_cell):
         description = _extract_balanced_paren(fields_cell, match.start(1))
         if description is None:
             continue
-        if re.search(r"supersed\w*", description, re.I) and not _is_hedged(description):
+        if _is_hedged(description):
+            continue
+        for claim in re.finditer(r"supersed\w*", description, re.I):
+            preceding = description[: claim.start()]
+            if _CLAIM_PRECEDING_HEDGE_RE.search(preceding[-40:]):
+                continue
+            following = description[claim.end() : claim.end() + 5]
+            if "?" in following:
+                continue
             return True
     return False
 

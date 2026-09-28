@@ -1180,6 +1180,225 @@ def test_fails_when_superseded_denial_uses_authoritative(tmp_path: Path) -> None
     assert "does not affirmatively state that it is superseded" in problems[0]
 
 
+# --- Red: security's sixth-round review (PR #1321 comment on head
+# `58838afa`) — four more ordinary-English denial idioms plus a
+# rhetorical-question denial, none on either hedge list before this fix:
+# "superseded by nothing" (direct-object negation), "on paper only",
+# "notionally", "hardly" (a rhetorical question followed by a flat denial),
+# and "functionally inert". Each is reproduced end-to-end through
+# `check_concepts_row()`, matching security's own verification method, on
+# both the fields side and (for the last two) the edges side.
+
+DATA_MODEL_SUPERSEDED_BY_NOTHING = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (this documentation entry supersedes an earlier draft; the field itself is superseded by nothing); `agent_sub` | `GOVERNS` -> `agent` (the agent this row binds, resolved by traversal); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+DATA_MODEL_SUPERSEDED_ON_PAPER_ONLY = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (superseded by the `GOVERNS` edge on paper only; the loader still reads scope directly); `agent_sub` | `GOVERNS` -> `agent` (the agent this row binds, resolved by traversal); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+DATA_MODEL_SUPERSEDED_NOTIONALLY = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (notionally superseded by the `GOVERNS` edge, though the loader still reads it directly); `agent_sub` | `GOVERNS` -> `agent` (the agent this row binds, resolved by traversal); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+DATA_MODEL_SUPERSEDED_HARDLY_RHETORICAL = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (superseded by the `GOVERNS` edge? hardly — this field is still read directly by the loader); `agent_sub` | `GOVERNS` -> `agent` (the agent this row binds, resolved by traversal); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+DATA_MODEL_GOVERNS_ON_PAPER_ONLY = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (legacy; superseded for an agent-specific rule); `agent_sub` (superseded; read nowhere once the edge resolves) | `GOVERNS` -> `agent` (on paper only; the loader still resolves membership via `scope` directly); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+DATA_MODEL_GOVERNS_FUNCTIONALLY_INERT = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (legacy; superseded for an agent-specific rule); `agent_sub` (superseded; read nowhere once the edge resolves) | `GOVERNS` -> `agent` (an edge? technically stored, functionally inert since nothing reads it); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+
+def test_fails_when_superseded_denial_uses_by_nothing(tmp_path: Path) -> None:
+    """Security finding (PR #1321, sixth round): 'the field itself is
+    superseded by nothing' is a direct-object negation using the claim word
+    itself with no hedge/negation word from either prior list."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_SUPERSEDED_BY_NOTHING)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "superseded" in p for p in problems)
+
+
+def test_fails_when_superseded_denial_uses_on_paper_only(tmp_path: Path) -> None:
+    """Security finding: 'superseded ... on paper only; the loader still
+    reads scope directly' — a plain declarative sentence stating the
+    pre-114 behavior persists, using no word from either prior hedge list."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_SUPERSEDED_ON_PAPER_ONLY)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "superseded" in p for p in problems)
+
+
+def test_fails_when_superseded_denial_uses_notionally(tmp_path: Path) -> None:
+    """Security finding: 'notionally superseded' softens the claim to false
+    in ordinary English; 'notionally' was on neither hedge list."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_SUPERSEDED_NOTIONALLY)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "superseded" in p for p in problems)
+
+
+def test_fails_when_superseded_denial_is_rhetorical_question_hardly(
+    tmp_path: Path,
+) -> None:
+    """Security finding: a rhetorical question ('superseded by the edge?')
+    followed by a flat denial ('hardly') — neither word was on either hedge
+    list, and the claim word is immediately followed by '?' rather than
+    asserted."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_SUPERSEDED_HARDLY_RHETORICAL)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "superseded" in p for p in problems)
+
+
+def test_fails_when_governs_edge_denied_as_on_paper_only(tmp_path: Path) -> None:
+    """Security finding, edges side: 'on paper only; the loader still
+    resolves membership via scope directly' denies the edge is live, using
+    no word from either prior hedge list."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_GOVERNS_ON_PAPER_ONLY)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "GOVERNS" in p for p in problems)
+
+
+def test_fails_when_governs_edge_denied_as_functionally_inert(
+    tmp_path: Path,
+) -> None:
+    """Security finding, edges side: 'functionally inert since nothing reads
+    it' denies the edge is live using vocabulary absent from either prior
+    hedge list."""
+    write_corpus(tmp_path, data_model=DATA_MODEL_GOVERNS_FUNCTIONALLY_INERT)
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "GOVERNS" in p for p in problems)
+
+
+# --- Red: the structural position requirement itself (not just the six
+# vocabulary words security demonstrated) — a copula or hedge-adverb sitting
+# between a clause boundary and the claim word is what makes each of
+# security's constructions a denial, independent of which specific word
+# fills that slot. These fixtures use words that are NOT strong-hedge
+# vocabulary at all, to prove the structural check (not a longer word list)
+# is what rejects them.
+
+DATA_MODEL_SUPERSEDED_COPULA_DENIAL_UNLISTED_WORD = """\
+# Data model
+
+## Concepts
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| agent behavioural rule | `agent_policy` | `rule`; `rule_kind`; `scope` (this field is superseded gradually as callers migrate, but as of today the field is barely superseded); `agent_sub` | `GOVERNS` -> `agent` (the agent this row binds, resolved by traversal); `SUPERSEDES` -> `agent_policy` | the rules in force for an agent at a time | the rendered mirrors | an operator's name |
+
+## Relationships
+
+Unrelated section.
+"""
+
+
+def test_fails_when_copula_precedes_claim_with_no_listed_hedge_word(
+    tmp_path: Path,
+) -> None:
+    """Structural proof: 'is ... superseded' / 'is barely superseded' use no
+    word from either hedge list ('barely' is not enumerated anywhere), yet
+    the copula immediately preceding the claim word is what the position
+    check rejects — demonstrating the fix closes the class (any copula/
+    hedge-adverb in that slot), not merely the specific words security
+    happened to demonstrate."""
+    write_corpus(
+        tmp_path, data_model=DATA_MODEL_SUPERSEDED_COPULA_DENIAL_UNLISTED_WORD
+    )
+
+    problems = decision_114.check(tmp_path)
+
+    assert any("decision-114-data-model" in p and "superseded" in p for p in problems)
+
+
 def test_raises_when_conformance_file_is_absent(tmp_path: Path) -> None:
     write_corpus(tmp_path)
     (tmp_path / "docs" / "foundation" / "conformance.md").unlink()
