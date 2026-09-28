@@ -448,19 +448,17 @@ def test_profile_denies_synthetic_helper_and_keychain_service(tmp_path):
     not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
     reason="the trusted macOS sandbox executable is platform-specific",
 )
-def test_real_profile_binds_live_tempfile_spelling_with_synthetic_fixtures(tmp_path):
-    """Reproduce live /var paths using only disposable files and helpers."""
+def test_real_profile_binds_complete_synthetic_publication_boundary(tmp_path):
+    """Exercise only disposable paths/helpers, never a real credential store."""
+    # tempfile.TemporaryDirectory returns /var/... on macOS while Seatbelt
+    # reports the canonical /private/var/... path.  The live runner uses the
+    # former; reproduce that alias rather than relying on pytest's canonical
+    # tmp_path spelling.
     aliased_root = Path(str(tmp_path).removeprefix("/private"))
     assert aliased_root.resolve() == tmp_path.resolve()
     fixture_home = aliased_root / "fixture-user"
-    denied_helper = aliased_root / "fixture-git-credential-helper"
-    control_helper = aliased_root / "ordinary-control-helper"
-    for helper, output in (
-        (denied_helper, "denied-helper\n"),
-        (control_helper, "control-helper\n"),
-    ):
-        helper.write_text(f"#!/bin/sh\nprintf '{output}'\n", encoding="utf-8")
-        helper.chmod(0o755)
+    denied_helper = hlr._CREDENTIAL_HELPER_PROBE_DENIED
+    control_helper = hlr._CREDENTIAL_HELPER_PROBE_CONTROL
 
     profile = aliased_root / "profile.sb"
     hlr.build_sandbox_exec_profile(

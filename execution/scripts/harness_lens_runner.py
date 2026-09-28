@@ -554,6 +554,14 @@ _CREDENTIAL_HELPER_EXEC_PATHS: tuple[Path, ...] = (
     Path("/usr/local/bin/git-credential-osxkeychain"),
 )
 
+# Harmless system executables used to prove that Seatbelt's process-exec
+# literal matcher discriminates one real executable from another.  A shell
+# script is not a valid probe here: Seatbelt sees its resolved interpreter,
+# not the script pathname.  ``false`` is expected to fail on its own, so the
+# probe additionally requires sandbox-exec's explicit denial diagnostic.
+_CREDENTIAL_HELPER_PROBE_DENIED = Path("/usr/bin/false")
+_CREDENTIAL_HELPER_PROBE_CONTROL = Path("/usr/bin/true")
+
 _KEYCHAIN_MACH_SERVICES: tuple[str, ...] = (
     "com.apple.securityd",
     "com.apple.securityd.xpc",
@@ -855,10 +863,14 @@ def probe_credential_helper_isolation(
 ) -> bool:
     """Prove the profile blocks a synthetic credential helper executable.
 
-    Both helpers are disposable scripts created by ``HarnessSandbox.build``;
-    this never invokes ``security``, a real credential helper, or a keychain.
-    The control proves the profile did not simply make all process execution
-    fail.
+    The inputs are harmless real system executables; this never invokes
+    ``security``, a credential helper, or a keychain.  They must be real
+    executables rather than shell scripts: Seatbelt matches ``process-exec``
+    against the resolved executable (``/bin/sh`` for a script), not the script
+    pathname.  The control proves the profile did not simply make all process
+    execution fail.  The denied probe uses ``/usr/bin/false``, so success
+    requires sandbox-exec's explicit denial diagnostic rather than merely a
+    nonzero status.
     """
     sandbox_exec = trusted_sandbox_exec_path()
     if sandbox_exec is None:
@@ -868,14 +880,14 @@ def probe_credential_helper_isolation(
         capture_output=True,
         text=True,
     )
-    if denied.returncode == 0:
+    if denied.returncode == 0 or "Operation not permitted" not in denied.stderr:
         return False
     control = subprocess.run(
         [sandbox_exec, "-f", str(profile_path), str(control_helper)],
         capture_output=True,
         text=True,
     )
-    return control.returncode == 0 and control.stdout == "control-helper\n"
+    return control.returncode == 0
 
 
 def probe_sandbox_exec_denies_read(
@@ -1251,17 +1263,10 @@ class HarnessSandbox:
         command_wrapper: list[str] = []
         try:
             fixture_home = sandbox_home / "probe-fixtures" / "fixture-user"
-            denied_helper = (
-                sandbox_home / "probe-fixtures" / "fixture-git-credential-helper"
-            )
-            control_helper = sandbox_home / "probe-fixtures" / "control-helper"
-            for helper, output in (
-                (denied_helper, "denied-helper\n"),
-                (control_helper, "control-helper\n"),
-            ):
-                helper.parent.mkdir(parents=True, exist_ok=True)
-                helper.write_text(f"#!/bin/sh\nprintf '{output}'\n", encoding="utf-8")
-                helper.chmod(0o755)
+            denied_helper = _CREDENTIAL_HELPER_PROBE_DENIED
+            control_helper = _CREDENTIAL_HELPER_PROBE_CONTROL
+            if not denied_helper.is_file() or not control_helper.is_file():
+                raise OSError("credential-helper probe executables unavailable")
             build_sandbox_exec_profile(
                 profile_path,
                 credential_home_roots=(Path.home(), fixture_home),
@@ -1271,6 +1276,7 @@ class HarnessSandbox:
                 ),
             )
             read_control = sandbox_home / "probe-fixtures" / "control-read.txt"
+            read_control.parent.mkdir(parents=True, exist_ok=True)
             read_control.write_text("control\n", encoding="utf-8")
             read_fixtures = tuple(
                 fixture_home / relative
