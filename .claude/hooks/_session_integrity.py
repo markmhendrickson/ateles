@@ -73,7 +73,14 @@ def read_hook_input() -> dict:
 
 
 def state_dir() -> Path:
-    root = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    # CLAUDE_PROJECT_DIR is set by Claude Code but by no other harness (Codex
+    # sets neither it nor an equivalent). Falling back to cwd would key this
+    # hook's state on whatever directory a Codex hook happened to run from —
+    # unstable across invocations rather than tied to the checkout this file
+    # ships in. Resolve from THIS FILE's own location instead, matching
+    # session_rule_index.py's "never cwd/CLAUDE_PROJECT_DIR" rule, so a
+    # harness that never sets the env var still gets one stable state root.
+    root = os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parent.parent.parent
     d = Path(root) / ".claude" / ".session_state"
     d.mkdir(parents=True, exist_ok=True)
     return d
