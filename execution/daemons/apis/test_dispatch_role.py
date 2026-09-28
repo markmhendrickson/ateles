@@ -21,6 +21,7 @@ if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
 import dispatch_role  # noqa: E402
+import skill_runner  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
 
@@ -115,6 +116,107 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
     assert seen["prompt"] == "do the thing"
 
 
+def test_programmatic_dispatch_enables_network_for_github_delivery(monkeypatch) -> None:
+    """A delivery-bearing programmatic dispatch must reach Codex with network.
+
+    This is the manual-dispatch half of ateles#590: ``dispatch_role.dispatch``
+    used to expose no way to set the shared GitHub-contract flag, so the Codex
+    command denied network even when the task explicitly required push/PR
+    delivery.
+    """
+    captured_cmd: list[str] = []
+
+    async def _capture(skill, prompt, **kwargs):
+        command, _ = skill_runner._provider_command(
+            "codex",
+            "/bin/codex",
+            "system",
+            prompt,
+            cwd=None,
+            network=kwargs["include_github_contract"],
+        )
+        captured_cmd.extend(command)
+        return SkillResult(skill, True, 0, "done", "", provider="codex")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+
+    import asyncio
+
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Commit, push, and open the pull request.",
+            provider="codex",
+            github_delivery=True,
+        )
+    )
+
+    assert result.ok
+    assert "sandbox_workspace_write.network_access=true" in captured_cmd
+
+
+def test_cli_github_delivery_enables_network(fake_repo, monkeypatch) -> None:
+    """The CLI flag must traverse the same path as the programmatic surface."""
+    captured_cmd: list[str] = []
+
+    async def _capture(skill, prompt, **kwargs):
+        command, _ = skill_runner._provider_command(
+            "codex",
+            "/bin/codex",
+            "system",
+            prompt,
+            cwd=None,
+            network=kwargs["include_github_contract"],
+        )
+        captured_cmd.extend(command)
+        return SkillResult(skill, True, 0, "done", "", provider="codex")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: _stub_def())
+
+    rc = dispatch_role.main(
+        [
+            "--role",
+            "cicada",
+            "--task",
+            "Commit, push, and open the pull request.",
+            "--provider",
+            "codex",
+            "--github-delivery",
+        ]
+    )
+
+    assert rc == 0
+    assert "sandbox_workspace_write.network_access=true" in captured_cmd
+
+
+def test_cli_default_keeps_network_denied(fake_repo, monkeypatch) -> None:
+    """A CLI caller must opt in; ordinary local work stays network-isolated."""
+    captured_cmd: list[str] = []
+
+    async def _capture(skill, prompt, **kwargs):
+        command, _ = skill_runner._provider_command(
+            "codex",
+            "/bin/codex",
+            "system",
+            prompt,
+            cwd=None,
+            network=kwargs["include_github_contract"],
+        )
+        captured_cmd.extend(command)
+        return SkillResult(skill, True, 0, "done", "", provider="codex")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: _stub_def())
+
+    rc = dispatch_role.main(
+        ["--role", "cicada", "--task", "Inspect local files.", "--provider", "codex"]
+    )
+
+    assert rc == 0
+    assert "sandbox_workspace_write.network_access=true" not in captured_cmd
+
+
 def test_dispatch_without_override_leaves_provider_to_the_router(
     monkeypatch,
 ) -> None:
@@ -131,6 +233,7 @@ def test_dispatch_without_override_leaves_provider_to_the_router(
     asyncio.run(dispatch_role.dispatch("cicada", "work"))
     # None, not a default string: run_skill treats None as "route normally".
     assert seen["provider"] is None
+    assert seen["include_github_contract"] is False
 
 
 def test_failed_run_exits_nonzero(fake_repo, monkeypatch) -> None:

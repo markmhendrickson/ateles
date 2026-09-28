@@ -39,6 +39,7 @@ USAGE
         [--cwd /path/to/worktree] \\
         [--timeout 600] \\
         [--task-entity-id ent_...] \\
+        [--github-delivery] \\
         [--json]
 
 ``--provider`` pins the run to one adapter, bypassing weighted selection but
@@ -207,6 +208,7 @@ async def dispatch(
     cwd: str | None = None,
     timeout: int | None = None,
     task_entity_id: str = "",
+    github_delivery: bool = False,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -218,6 +220,12 @@ async def dispatch(
     subagent happens inside run_skill: identity, allowlist, provider routing,
     credential stripping, and the harness_event rows. This function's only job
     is to hand it a well-formed request.
+
+    ``github_delivery`` states that this task must commit, push, or open a pull
+    request. It reuses ``run_skill``'s existing GitHub-contract path, which both
+    injects the delivery contract and enables Codex network for this dispatch.
+    The default stays False so read-only and filesystem-only work remains under
+    the sandbox's network denial.
     """
     return await run_skill(
         role,
@@ -227,6 +235,7 @@ async def dispatch(
         timeout=timeout,
         cwd=cwd,
         provider=provider,
+        include_github_contract=github_delivery,
     )
 
 
@@ -448,6 +457,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--github-delivery",
+        action="store_true",
+        help=(
+            "Task must commit, push, or open a pull request. Injects the shared "
+            "GitHub delivery contract and enables scoped Codex network access "
+            "for this dispatch only."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the full result as JSON on stdout instead of raw agent output.",
@@ -564,6 +582,7 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 timeout=args.timeout,
                 task_entity_id=args.task_entity_id,
+                github_delivery=args.github_delivery,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above
