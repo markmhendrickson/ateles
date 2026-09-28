@@ -32,7 +32,8 @@ WHAT IS REFUSED (would put file content into context):
     content, so it is allowed by default; see `check_glob`.
   - Bash: cat, head, tail, less, more, bat, sed -n (print mode), awk, cut
     (field extraction, e.g. `cut -d= -f2`), dd, and a plain `grep`/`rg` with
-    no -c/-l/-o-names-only mode, run against a credential path. Also `env`,
+    no command-specific count/files-only/-o-names-only mode, run against a
+    credential path. Also `env`,
     `printenv`, a bare `set` dump, or `declare -p`/`export -p`/`typeset -p`
     AFTER sourcing one (a source alone does not print anything; the dump
     does). Also base64/xxd/od/hexdump/strings against a credential path —
@@ -72,7 +73,9 @@ WHAT IS ALLOWED (mirrors the task spec — none of these print a value):
     never dumps the resulting environment afterward.
   - Reading a `*.example`/`*.sample`/`*.template` file — these are
     placeholders by convention, never real secrets.
-  - `grep -l` (files matching, no content) and `wc -l <file>` (a line count).
+  - `grep -l` / `grep -L` and `rg -l` / `rg --files-without-match` (file
+    names only, no content), and `wc -l <file>` (a line count). Ripgrep's
+    short `-L` means follow symlinks and is NOT a files-only mode.
   - `pgrep -x <name>`, `pgrep -l <name>`, and
     `ps -p <pid> -o pid=,comm=` — process presence/identity without argv or
     environment values.
@@ -338,11 +341,11 @@ _STDIN_LOOP_RE = re.compile(r"\b(while\s+read|read\s+-r?\s*\w+|xargs)\b")
 _SED_AWK_RE = re.compile(r"\b(sed|awk)\b")
 
 # A plain `grep`/`rg`/`egrep`/`fgrep` that is NOT restricted to a safe mode.
-# Safe modes: -c/--count, -l/--files-with-matches, or -o/--only-matching
+# Safe modes: command-specific count/file-name flags, or -o/--only-matching
 # whose pattern is a NAMES-ONLY capture (this hook cannot verify the pattern
 # semantically, so -o is allowed only per the documented safe form; see
-# `_grep_is_safe_mode`). `-L` (files WITHOUT match) is likewise safe — no
-# content is ever printed.
+# `_grep_is_safe_mode`). In particular, grep `-L` prints file names, while rg
+# `-L` follows symlinks and leaves ordinary matching-line output enabled.
 _GREP_RE = re.compile(r"\b(?:egrep|fgrep|grep|rg)\b")
 
 # `env` / `printenv` with no args dumps the whole environment; `set` with no
@@ -606,91 +609,214 @@ def _grep_is_safe_mode(segment: str) -> bool:
     except ValueError:
         return False
 
-    command_index = next(
-        (
-            index
-            for index, token in enumerate(tokens)
-            if token.strip("(){}$`").rsplit("/", 1)[-1]
-            in {"grep", "egrep", "fgrep", "rg"}
-        ),
-        None,
-    )
+    command_index = None
+    executable = None
+    for index, token in enumerate(tokens):
+        candidate = token.strip("(){}$`").rsplit("/", 1)[-1]
+        if candidate in {"grep", "egrep", "fgrep", "rg"}:
+            command_index = index
+            executable = candidate
+            break
     if command_index is None:
         return False
 
-    # Parse only the option prefix. A token after `--` is a pattern even when
-    # it happens to be spelled `-c` or `-l`; scanning all argv for those
-    # strings would incorrectly grant a safe-output exemption.
-    options_with_value = {
-        "-A",
-        "-B",
-        "-C",
-        "-D",
-        "-d",
-        "-m",
+    # grep and ripgrep share spellings but not meanings. Most importantly,
+    # grep -L is files-without-match while rg -L is follow-symlinks. Bind the
+    # executable before interpreting any option so one program cannot inherit
+    # the other's safe-output exemption.
+    is_ripgrep = executable == "rg"
+    safe_short_modes = {
+        "c": "count",
+        "l": "files",
+    }
+    if not is_ripgrep:
+        safe_short_modes["L"] = "files"
+
+    # Required operands terminate a short-option cluster: in `-ePATTERN`,
+    # every character after e is the pattern, never another flag. Keeping the
+    # tables command-specific also makes unknown forms fail closed instead of
+    # guessing from a coincidental c/l/o character.
+    short_options_with_value = set("ABCefgjMmrtT") if is_ripgrep else set("ABCDdefm")
+    neutral_short_options = (
+        set("0HIJLNSUVabhinRsvwxyz") if is_ripgrep else set("EFGIPRUZabhinqrsvwxyz")
+    )
+    long_options_with_value = {
         "--after-context",
         "--before-context",
         "--context",
         "--max-count",
         "--binary-files",
-        "--color",
-        "--colour",
         "--label",
+        "--regexp",
+        "--file",
     }
-    has_count = False
-    has_files_only = False
-    has_only_matching = False
-    has_pattern_source_option = False
-    pattern = None
+    if is_ripgrep:
+        long_options_with_value.update(
+            {
+                "--encoding",
+                "--engine",
+                "--glob",
+                "--iglob",
+                "--max-columns",
+                "--replace",
+                "--threads",
+                "--type",
+                "--type-not",
+            }
+        )
+    else:
+        long_options_with_value.update(
+            {
+                "--devices",
+                "--directories",
+                "--exclude",
+                "--exclude-dir",
+                "--exclude-from",
+            }
+        )
+    neutral_long_options = {
+        "--byte-offset",
+        "--fixed-strings",
+        "--ignore-case",
+        "--invert-match",
+        "--line-buffered",
+        "--line-number",
+        "--no-filename",
+        "--null",
+        "--null-data",
+        "--recursive",
+        "--text",
+        "--with-filename",
+        "--word-regexp",
+        "--line-regexp",
+    }
+    if is_ripgrep:
+        neutral_long_options.update(
+            {
+                "--binary",
+                "--follow",
+                "--hidden",
+                "--no-ignore-case",
+                "--no-line-number",
+                "--trim",
+                "--unrestricted",
+            }
+        )
+
+    output_modes = set()
+    patterns = []
+    pattern_is_unknown = False
+    positional_pattern = None
     index = command_index + 1
     while index < len(tokens):
         token = tokens[index]
         if token == "--":
             index += 1
-            pattern = tokens[index] if index < len(tokens) else None
+            positional_pattern = tokens[index] if index < len(tokens) else None
             break
         if token.startswith("--"):
-            option = token.split("=", 1)[0]
-            has_count = has_count or option == "--count"
-            has_files_only = has_files_only or option in {
-                "--files-with-matches",
-                "--files-without-match",
-            }
-            has_only_matching = has_only_matching or option == "--only-matching"
-            has_pattern_source_option = has_pattern_source_option or option in {
-                "--regexp",
-                "--file",
-            }
-            if option in options_with_value and "=" not in token:
-                index += 2
-            else:
+            option, separator, attached_value = token.partition("=")
+            if option in {"--count", "--count-matches"}:
+                if separator or (option == "--count-matches" and not is_ripgrep):
+                    return False
+                output_modes.add("count")
                 index += 1
-            continue
+                continue
+            if option in {"--files-with-matches", "--files-without-match"}:
+                if separator:
+                    return False
+                output_modes.add("files")
+                index += 1
+                continue
+            if option == "--only-matching":
+                if separator:
+                    return False
+                output_modes.add("only_matching")
+                index += 1
+                continue
+            if option in long_options_with_value:
+                if separator:
+                    operand = attached_value
+                else:
+                    index += 1
+                    if index >= len(tokens):
+                        return False
+                    operand = tokens[index]
+                if not operand:
+                    return False
+                if option == "--regexp":
+                    patterns.append(operand)
+                elif option == "--file":
+                    pattern_is_unknown = True
+                index += 1
+                continue
+            if option in neutral_long_options and not separator:
+                index += 1
+                continue
+            # Optional operands and unknown options are ambiguous here. The
+            # guard is deciding whether content can reach model context, so an
+            # unproven output shape is never granted a safe-mode exemption.
+            return False
         if token.startswith("-") and token != "-":
             flags = token[1:]
-            has_count = has_count or "c" in flags
-            has_files_only = has_files_only or "l" in flags or "L" in flags
-            has_only_matching = has_only_matching or "o" in flags
-            has_pattern_source_option = (
-                has_pattern_source_option or "e" in flags or "f" in flags
-            )
-            index += 2 if token in options_with_value else 1
+            if not flags:
+                return False
+            flag_index = 0
+            while flag_index < len(flags):
+                flag = flags[flag_index]
+                if flag in safe_short_modes:
+                    output_modes.add(safe_short_modes[flag])
+                    flag_index += 1
+                    continue
+                if flag == "o":
+                    output_modes.add("only_matching")
+                    flag_index += 1
+                    continue
+                if flag in short_options_with_value:
+                    operand = flags[flag_index + 1 :]
+                    if not operand:
+                        index += 1
+                        if index >= len(tokens):
+                            return False
+                        operand = tokens[index]
+                    if flag == "e":
+                        patterns.append(operand)
+                    elif flag == "f":
+                        pattern_is_unknown = True
+                    # The remainder belongs to this option; do not scan an
+                    # attached pattern such as `-eclient_secret` as flags.
+                    flag_index = len(flags)
+                    continue
+                if flag in neutral_short_options:
+                    flag_index += 1
+                    continue
+                return False
+            index += 1
             continue
-        pattern = token
+        positional_pattern = token
         break
 
-    if has_count or has_files_only:
+    if len(output_modes) != 1:
+        return False
+    output_mode = next(iter(output_modes))
+    if output_mode in {"count", "files"}:
         return True
-    if not has_only_matching or has_pattern_source_option:
+    if output_mode != "only_matching" or pattern_is_unknown:
         return False
 
     # Safe ONLY for the two complete documented names-only patterns.
     # Substring matching is unsafe: `^[A-Z_]*=.*` contains the old accepted
     # prefix but continues through the value and prints it.
-    return pattern in {
-        "^[A-Z_]*=",
-        "^[A-Za-z_][A-Za-z0-9_]*=",
-    }
+    if positional_pattern is not None:
+        patterns.append(positional_pattern)
+    return bool(patterns) and all(
+        pattern
+        in {
+            "^[A-Z_]*=",
+            "^[A-Za-z_][A-Za-z0-9_]*=",
+        }
+        for pattern in patterns
+    )
 
 
 def _extract_paths(segment: str):

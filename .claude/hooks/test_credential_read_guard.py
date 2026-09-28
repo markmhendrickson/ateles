@@ -36,6 +36,7 @@ ENV_FILE = NEOTOMA_DIR / ".env"
 ENV_FILE.write_text(
     "NEOTOMA_BEARER_TOKEN=fake_test_token_not_real_0000\n"
     "NEOTOMA_BASE_URL=https://example.test\n"
+    "client_secret=synthetic_attached_pattern_canary_not_real\n"
     "ANOTHER_SECRET=zzz_fake_value\n"
 )
 ENV_EXAMPLE_FILE = NEOTOMA_DIR / ".env.example"
@@ -107,6 +108,13 @@ BASH_BLOCK = [
     ),
     ("grep count-shaped pattern after option terminator", f"grep -- -c {ENV}"),
     ("grep files-shaped pattern after option terminator", f"grep -- -l {ENV}"),
+    ("ripgrep -L follows symlinks and prints content", f"rg -L TOKEN {ENV}"),
+    ("grep attached regexp operand", f"grep -eclient_secret {ENV}"),
+    ("ripgrep attached regexp operand", f"rg -eclient_secret {ENV}"),
+    ("grep separate regexp operand", f"grep -e client_secret {ENV}"),
+    ("ripgrep separate regexp operand", f"rg -e client_secret {ENV}"),
+    ("grep ambiguous count and files modes", f"grep -cl TOKEN {ENV}"),
+    ("ripgrep unrecognized json output mode", f"rg --json TOKEN {ENV}"),
     ("base64", f"base64 {ENV}"),
     ("xxd", f"xxd {ENV}"),
     ("od", f"od -c {ENV}"),
@@ -264,6 +272,8 @@ BASH_ALLOW = [
     ),
     ("grep -l files only", f"grep -l TOKEN {ENV}"),
     ("grep -L files without match", f"grep -L TOKEN {ENV}"),
+    ("ripgrep -c count", f"rg -c TOKEN {ENV}"),
+    ("ripgrep -l files only", f"rg -l TOKEN {ENV}"),
     ("source without dump", f"set -a; source {ENV}; set +a; echo done"),
     (
         "source then use var, no echo of var",
@@ -642,6 +652,38 @@ def test_value_matching_grep_bypass_has_a_real_canary_effect_then_is_blocked():
     assert canary not in guarded.stdout + guarded.stderr
 
 
+@pytest.mark.parametrize(
+    "command,canary",
+    [
+        (
+            f"rg -L TOKEN {ENV}",
+            "fake_test_token_not_real_0000",
+        ),
+        (
+            f"grep -eclient_secret {ENV}",
+            "synthetic_attached_pattern_canary_not_real",
+        ),
+        (
+            f"rg -eclient_secret {ENV}",
+            "synthetic_attached_pattern_canary_not_real",
+        ),
+    ],
+    ids=["ripgrep-follow-symlinks", "grep-attached-regexp", "ripgrep-attached-regexp"],
+)
+def test_command_specific_grep_bypasses_have_real_effect_then_are_blocked(
+    command, canary
+):
+    """Prove each command prints a synthetic value, then prove pre-exec denial."""
+    unguarded = subprocess.run(
+        ["bash", "-c", command], capture_output=True, text=True, check=True
+    )
+    assert canary in unguarded.stdout
+
+    guarded = run_result("Bash", {"command": command})
+    assert guarded.returncode == 2
+    assert canary not in guarded.stdout + guarded.stderr
+
+
 def test_nested_environment_dump_has_a_real_canary_effect_then_is_blocked():
     """Prove a compact substitution dumps values before trusting the boundary check."""
     variable = "CREDENTIAL_GUARD_SYNTHETIC_CANARY"
@@ -665,19 +707,36 @@ def test_nested_environment_dump_has_a_real_canary_effect_then_is_blocked():
 
 
 def test_exact_names_only_and_count_modes_never_emit_fixture_canary():
-    """The two permitted grep modes remain useful and value-free end to end."""
-    canary = "fake_test_token_not_real_0000"
+    """Every permitted grep/rg output mode stays useful and value-free."""
+    canaries = (
+        "fake_test_token_not_real_0000",
+        "synthetic_attached_pattern_canary_not_real",
+        "zzz_fake_value",
+    )
     commands = (
         f"grep -o '^[A-Z_]*=' {ENV}",
         f"grep --only-matching '^[A-Za-z_][A-Za-z0-9_]*=' {ENV}",
         f"grep -c '^NEOTOMA_BEARER_TOKEN=' {ENV}",
+        f"grep -l TOKEN {ENV}",
+        f"grep -L NOT_PRESENT {ENV}",
+        f"rg -c TOKEN {ENV}",
+        f"rg -l TOKEN {ENV}",
+        f"grep -ceclient_secret {ENV}",
+        f"grep -leclient_secret {ENV}",
+        f"rg -ceclient_secret {ENV}",
+        f"rg -leclient_secret {ENV}",
+        f"grep --count --regexp=client_secret {ENV}",
+        f"rg --count --regexp=client_secret {ENV}",
     )
     for command in commands:
         assert run_bash(command) == 0, command
         actual = subprocess.run(
-            ["bash", "-c", command], capture_output=True, text=True, check=True
+            ["bash", "-c", command], capture_output=True, text=True, check=False
         )
-        assert canary not in actual.stdout + actual.stderr, command
+        assert actual.returncode in {0, 1}, command
+        assert all(
+            canary not in actual.stdout + actual.stderr for canary in canaries
+        ), command
 
 
 if __name__ == "__main__":
