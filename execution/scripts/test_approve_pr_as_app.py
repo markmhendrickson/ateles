@@ -2055,3 +2055,63 @@ class TestPanelAllDefault:
         target.main()
 
         assert parser_args == [False]
+
+
+# ── ateles#1326: the standard harness attribution footer does not break ────
+# ── a real bootstrap-lens gate comment read through evaluate_lens ───────────
+#
+# `evaluate_lens` calls `lens_own_verdict`/`sign_off_is_warranted` directly on
+# `comment.get("body")` — the bytes already live on GitHub — so this is the
+# dry-run surface Pavo's spec names: "approve_pr_as_app.py's dry run is run
+# ... against all five bootstrap lens comment shapes (pm/ux/arch/qa/security)
+# carrying the real footer, and each resolves to its posted verdict with zero
+# comment edits."
+
+_REAL_FOOTER = "\n\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)\n"
+
+BOOTSTRAP_LENS_AGENTS = {
+    "pm": "pavo",
+    "ux": "accipiter",
+    "arch": "waxwing",
+    "qa": "phoenicurus",
+    "security": "falco",
+}
+
+
+@pytest.mark.asyncio
+class TestEvaluateLensToleratesTheRealHarnessFooter:
+    @pytest.mark.parametrize("lens,agent", sorted(BOOTSTRAP_LENS_AGENTS.items()))
+    async def test_each_bootstrap_lens_comment_with_the_real_footer_resolves_signed_off(
+        self, lens, agent
+    ):
+        body = _lens_comment_body(lens, agent) + _REAL_FOOTER
+        client = _FakeClient(comments=[_comment(1, body)], check_runs=_green_checks())
+        outcome = await target.evaluate_lens(
+            client,
+            repo=REPO,
+            pr=PR,
+            head_sha=HEAD,
+            comments=[_comment(1, body)],
+            lens=lens,
+            diff_derived=True,
+        )
+        assert outcome.head_matched is True
+        assert outcome.verdict == "signed_off"
+        assert outcome.passed is True
+
+    async def test_a_footer_bearing_comment_with_a_blocking_finding_still_fails(self):
+        body = _lens_comment_body(
+            "arch", "waxwing", verdict="REQUEST_CHANGES",
+            extra="[BLOCKING] layering: x",
+        ) + _REAL_FOOTER
+        outcome = await target.evaluate_lens(
+            _FakeClient(comments=[_comment(1, body)], check_runs=_green_checks()),
+            repo=REPO,
+            pr=PR,
+            head_sha=HEAD,
+            comments=[_comment(1, body)],
+            lens="arch",
+            diff_derived=True,
+        )
+        assert outcome.passed is False
+        assert outcome.verdict != "signed_off"

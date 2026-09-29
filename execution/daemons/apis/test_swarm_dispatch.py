@@ -3527,6 +3527,80 @@ def test_cicada_ci_fix_prompt_carries_no_merge_guardrail():
     assert "owner/repo#87" in p
 
 
+# ── work_class tagging (ateles task ent_3564a7be0fa135a6e4c1f5fb) ───────────
+#
+# `local_provider.MECHANICAL_WORK_CLASSES` names the dispatches eligible to
+# route to claude-local. These tests pin which `run_skill` call sites carry a
+# `work_class` and which deliberately do not — a call site with no class stays
+# on the frontier providers exactly as before (`local_provider.is_eligible`
+# returns False for `work_class=None`), so a judgement dispatch mistakenly
+# tagged here would silently start trying the local model first.
+
+
+def test_route_ci_failure_tags_cicada_dispatch_as_ci_log_triage(monkeypatch):
+    """CI-fix is reading failing-check logs and fixing the reported cause —
+    mechanical triage, not review judgement. Before this call site threaded
+    `work_class`, `run_skill` never received the kwarg at all here, so this
+    assertion fails red against the pre-change code with a KeyError on
+    `seen["work_class"]` rather than a wrong value."""
+    seen: dict = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen.update(kwargs)
+        return SkillResult(skill, True, 0, "fixed", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._route_ci_failure(_trigger(), parent=80))
+
+    assert seen["work_class"] == "ci_log_triage"
+
+
+def test_route_blocking_findings_cicada_dispatch_carries_no_work_class(monkeypatch):
+    """Applying per-lens review guidance is judgement work (interpreting what
+    a reviewer meant, deciding how to address it) — it must never carry a
+    mechanical `work_class`, or an operator who enables `ci_log_triage`
+    locally would also silently send review fixes to the local model."""
+    cicada_calls: list[dict] = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            cicada_calls.append(kwargs)
+        return SkillResult(skill, True, 0, "guidance/fix applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail here")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+
+    assert len(cicada_calls) == 1, "Cicada must be invoked exactly once here"
+    assert cicada_calls[0].get("work_class") is None
+
+
 # ── lenses_missing_comments ─────────────────────────────────────────────────
 
 

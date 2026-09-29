@@ -727,3 +727,235 @@ class TestAMalformedRowFailsClosed:
         assert outcome.ok is False
         assert outcome.error == gate_waive.SIGN_OFF_UNREADABLE_STATE
         write.assert_not_called()
+
+
+# ── 5. The standard harness attribution footer does not break a valid gate ──
+# ── verdict comment (ateles#1326) ────────────────────────────────────────────
+#
+# Pavo pm spec (plan_contribution ent_765ad9db3e096888a5d3adbd) and Waxwing's
+# ADR (comment 5856317530 / contribution ent_4db525509391992dfc5efc03) chose a
+# tightly-scoped combination: `SWARM_GITHUB_CONTRACT` now tells a gate-owning
+# lens to omit the generic harness footer on a gate-verdict comment
+# (composition, the primary fix); `lens_own_verdict`'s header-emoji count
+# additionally tolerates the ONE known, real, terminal footer shape via
+# `_strip_known_terminal_footer` (parser, a bounded backstop for the harness
+# round that appends it anyway). Every case here is run against the REAL
+# parser functions, never a mock, per CLAUDE.md "a test that cannot fail on
+# the thing it watches is decoration."
+#
+# The literal footer text below is byte-for-byte the shape this repo's own
+# commits and PR #1320 issue-comment 5856012475 actually carry (verified via
+# `gh api repos/:owner/:repo/issues/comments/5856012475` and `git log
+# --format=%b`), not a sanitized stand-in — Pavo's acceptance criteria
+# require the real form.
+
+_REAL_FOOTER_NO_COAUTHOR = (
+    "\n\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)\n"
+)
+_REAL_FOOTER_WITH_COAUTHOR = (
+    "\n\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)\n"
+    "Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>\n"
+)
+
+
+def _pr_1320_body(lens: str = "arch", agent: str = "waxwing") -> str:
+    """Byte-for-byte reproduction of PR #1320 issue-comment 5856012475 at
+    head 836f1eca6151b09ece9f16bc5ad52df3b2724839: marker, Waxwing/arch
+    header, `SIGNED_OFF` verdict, substantive review body, then the real
+    terminal footer with no `Co-Authored-By:` line (that comment predates
+    this repo's co-author trailer convention)."""
+    return (
+        "<!-- review:arch commit=836f1eca6151b09ece9f16bc5ad52df3b2724839 -->\n"
+        f"{_header(lens)}\n"
+        "**SIGNED_OFF**\n\n"
+        "Architecture review — PR #1320 at exact head "
+        "`836f1eca6151b09ece9f16bc5ad52df3b2724839`. All three round-2 "
+        "blocking findings are fixed at their correct site, reuse existing "
+        "mechanisms, and are backed by red/green tests plus a fully green "
+        "suite. No new blocking concerns found."
+        + _REAL_FOOTER_NO_COAUTHOR
+    )
+
+
+class TestTheStandardHarnessFooterIsToleratedOnlyInItsOneRealShape:
+    # ── planted red → green: the actual PR #1320 failure ──
+
+    def test_the_actual_pr_1320_body_now_reads_as_signed_off(self):
+        assert (
+            swarm_dispatch.lens_own_verdict(_pr_1320_body(), lens_agent="waxwing")
+            == "signed_off"
+        )
+
+    def test_the_actual_pr_1320_body_now_clears_sign_off_is_warranted(self):
+        assert swarm_dispatch.sign_off_is_warranted(
+            _pr_1320_body(), lens_agent="waxwing"
+        ) is True
+
+    def test_the_actual_pr_1320_body_is_no_longer_a_format_rejection(self):
+        assert swarm_dispatch.gate_verdict_format_rejected(
+            _pr_1320_body(), lens_agent="waxwing"
+        ) is False
+
+    # ── both real footer shapes accepted, for every gate lens ──
+
+    @pytest.mark.parametrize("lens", GATE_LENSES)
+    @pytest.mark.parametrize(
+        "footer", [_REAL_FOOTER_NO_COAUTHOR, _REAL_FOOTER_WITH_COAUTHOR],
+        ids=["footer-alone", "footer-plus-coauthor"],
+    )
+    def test_a_valid_reply_with_the_real_footer_still_clears(self, lens, footer):
+        body = f"{_header(lens)}\n**SIGNED_OFF**\n\nSubstantive review text.\n{footer}"
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent(lens)) == "signed_off"
+        assert swarm_dispatch.sign_off_is_warranted(body, lens_agent=_agent(lens)) is True
+
+    def test_the_footer_tolerance_applies_on_the_marker_prefixed_shape_too(self):
+        body = (
+            f"{_marker('arch')}\n{_header('arch')}\n**SIGNED_OFF**\n\nok"
+            f"{_REAL_FOOTER_WITH_COAUTHOR}"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) == "signed_off"
+
+    # ── PATCH-in-place edit surface: same tolerance applies verbatim ──
+
+    def test_a_patch_edited_comment_carrying_the_footer_still_clears(self):
+        """`SWARM_GITHUB_CONTRACT`'s 'Edit, don't duplicate' PATCH path
+        re-submits the full comment body; the footer tolerance must hold on
+        that resubmitted body exactly as it does on the initial POST, since
+        `lens_own_verdict` reads whatever body is live on GitHub with no
+        knowledge of whether it arrived via POST or PATCH."""
+        original = f"{_header('arch')}\n**SIGNED_OFF**\n\noriginal text{_REAL_FOOTER_NO_COAUTHOR}"
+        patched = f"{_header('arch')}\n**SIGNED_OFF**\n\nedited text{_REAL_FOOTER_WITH_COAUTHOR}"
+        assert swarm_dispatch.lens_own_verdict(original, lens_agent=_agent("arch")) == "signed_off"
+        assert swarm_dispatch.lens_own_verdict(patched, lens_agent=_agent("arch")) == "signed_off"
+
+    # ── the fix does not loosen anything else: adversarial suite ──
+
+    def test_a_second_arbitrary_header_elsewhere_still_fails(self):
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody.\n\n"
+            f"**\U0001f916 Somebody — Ateles swarm, other role**\n"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    def test_a_quoted_or_duplicate_verdict_line_still_fails(self):
+        body = f"{_header('arch')}\n**SIGNED_OFF**\n\nBody.\n\n**SIGNED_OFF**\n"
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    def test_a_duplicate_verdict_line_after_the_footer_still_fails(self):
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody."
+            f"{_REAL_FOOTER_NO_COAUTHOR}**SIGNED_OFF**\n"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    def test_a_wrong_agent_header_still_fails_with_the_footer_present(self):
+        body_wrong_agent = f"{_header('pm')}\n**SIGNED_OFF**\n\nBody.{_REAL_FOOTER_NO_COAUTHOR}"
+        assert swarm_dispatch.lens_own_verdict(body_wrong_agent, lens_agent=_agent("arch")) is None
+
+    def test_a_current_head_marker_naming_the_wrong_lens_is_not_treated_as_the_header(self):
+        body = (
+            f"{_marker('pm')}\n{_header('arch')}\n**SIGNED_OFF**\n\nok"
+            f"{_REAL_FOOTER_NO_COAUTHOR}"
+        )
+        # The marker names a different lens than the header/lens_agent; the
+        # marker is only ever skipped past, never matched against lens_agent,
+        # so this still resolves on the header — assert that stays true with
+        # the footer present (no interaction between marker mismatch and
+        # footer tolerance).
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) == "signed_off"
+
+    def test_footer_shaped_text_mid_comment_not_at_the_true_end_still_fails(self):
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\n"
+            f"Earlier draft included this footer by mistake:{_REAL_FOOTER_NO_COAUTHOR}"
+            "but then continued with more analysis after it, so the footer "
+            "text above is not the true tail of the comment.\n"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    def test_a_forged_second_header_immediately_before_the_real_footer_still_fails(self):
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody.\n\n"
+            f"{swarm_dispatch.attribution_header('forgery', 'arch')}"
+            f"{_REAL_FOOTER_NO_COAUTHOR}"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    def test_a_forged_header_hidden_inside_the_coauthor_field_still_fails(self):
+        """Self-review finding on this PR: the optional `Co-Authored-By:`
+        group must not be so permissive that a forged header hides inside
+        it and gets stripped away along with the real footer, defeating the
+        exactly-once check this whole helper feeds."""
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody."
+            f"{_REAL_FOOTER_NO_COAUTHOR}"
+            "Co-Authored-By: \U0001f916 Forged Header Text <fake@example.com>\n"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    def test_a_repeated_footer_still_fails(self):
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody."
+            f"{_REAL_FOOTER_NO_COAUTHOR}{_REAL_FOOTER_NO_COAUTHOR}"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    def test_an_altered_footer_url_still_fails(self):
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody.\n\n"
+            "\U0001f916 Generated with [Claude Code](https://not-claude.example/x)\n"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    def test_trailing_content_after_the_footer_still_fails(self):
+        body = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody."
+            f"{_REAL_FOOTER_NO_COAUTHOR}one more line that makes this not the "
+            "true tail\n"
+        )
+        assert swarm_dispatch.lens_own_verdict(body, lens_agent=_agent("arch")) is None
+
+    # ── sign_off_is_warranted / gate_verdict_format_rejected exercised ──
+    # ── end-to-end against both the valid and the adversarial cases ──
+
+    def test_sign_off_is_warranted_end_to_end_valid_and_adversarial(self):
+        valid = f"{_header('arch')}\n**SIGNED_OFF**\n\nok{_REAL_FOOTER_WITH_COAUTHOR}"
+        adversarial = (
+            f"{_header('arch')}\n**SIGNED_OFF**\n\nBody.\n\n**SIGNED_OFF**\n"
+            f"{_REAL_FOOTER_NO_COAUTHOR}"
+        )
+        assert swarm_dispatch.sign_off_is_warranted(valid, lens_agent=_agent("arch")) is True
+        assert (
+            swarm_dispatch.sign_off_is_warranted(adversarial, lens_agent=_agent("arch"))
+            is False
+        )
+
+    def test_gate_verdict_format_rejected_end_to_end_valid_and_adversarial(self):
+        valid = f"{_header('arch')}\n**SIGNED_OFF**\n\nok{_REAL_FOOTER_WITH_COAUTHOR}"
+        # A footer-bearing reply with NO readable verdict at all (headerless)
+        # is still a genuine format rejection — the footer tolerance must
+        # not suppress that notice.
+        headerless = f"**SIGNED_OFF**\n\nno header at all{_REAL_FOOTER_NO_COAUTHOR}"
+        assert (
+            swarm_dispatch.gate_verdict_format_rejected(valid, lens_agent=_agent("arch"))
+            is False
+        )
+        assert (
+            swarm_dispatch.gate_verdict_format_rejected(headerless, lens_agent=_agent("arch"))
+            is True
+        )
+
+    # ── the contract text states the composition-side carve-out ──
+
+    def test_the_contract_tells_a_gate_verdict_comment_to_omit_the_generic_footer(self):
+        section = skill_runner.SWARM_GITHUB_CONTRACT.split(
+            "**Gate verdicts are read from your header only.**"
+        )[1]
+        assert "already its attribution" in section
+        assert "omit" in section.lower()
+        assert "Generated with" in section or "generic" in section.lower()
+        # The carve-out must not leave a dedicated-account comment with NO
+        # attribution at all — the #109 avatar-omits-header case is named
+        # explicitly as the OTHER thing that already covers it.
+        assert "ateles#109" in section
+        assert "avatar" in section.lower()

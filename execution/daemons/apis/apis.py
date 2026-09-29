@@ -71,7 +71,8 @@ Task reconciliation sweep (ateles#586 — see task_reconciler.py):
   APIS_RECONCILE_INTERVAL_SECONDS  Sweep cadence (default: 900)
   APIS_RECONCILE_MAX_PER_SWEEP     Max dispatches per pass (default: 5)
   APIS_RECONCILE_GRACE_SECONDS     Min task age before eligible (default: 900)
-  APIS_RECONCILE_QUERY_LIMIT       Tasks fetched per pass (default: 500)
+  APIS_RECONCILE_QUERY_LIMIT       Rows fetched per page (default: 500)
+  APIS_RECONCILE_PAGES_PER_SWEEP   Pages walked per pass (default: 5)
 
 GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
   APIS_GITHUB_WEBHOOK_SECRET       HMAC secret for the GitHub webhook
@@ -97,6 +98,7 @@ import sys
 import time
 from pathlib import Path
 
+
 # ── Env bootstrap (launchd does not source shell profiles) ───────────────────
 # Skipped under pytest (ateles#1285): this module is imported directly by
 # several test_*.py in this directory, and the operator's materialized dotenv
@@ -105,7 +107,11 @@ from pathlib import Path
 # turned those switches on for any test importing `apis`, on a machine where
 # the file happens to exist, while CI (no such file) stayed green.
 def _dotenv_should_load() -> bool:
-    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         return False
     if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
         return False
@@ -207,10 +213,11 @@ from lib.daemon_runtime import (  # noqa: E402
     enforce_status_or_exit,
     append_turn,
     assess_readiness,
-    create_run_conversation,
+    create_run_session,
     missing_request,
     score_confidence,
     send_run_email,
+    update_run_session_status,
     write_assessment,
     GateAction,
     GateDecision,
@@ -423,10 +430,17 @@ ATELES_REPO = Path(
 
 DRY_RUN = os.environ.get("APIS_DRY_RUN", "0") == "1"
 AUTO_EXECUTE = os.environ.get("APIS_AUTO_EXECUTE", "0") == "1"
-# E1 (docs/task_execution_loop.md): open one conversation per execution run and
-# tell the spawned agent to thread its turns into it. Default off — flag-gated so
-# the live dispatch path is byte-identical until the child side (E2) lands.
-RUN_CONVERSATIONS = os.environ.get("APIS_RUN_CONVERSATIONS", "0") == "1"
+
+
+def _session_capture_enabled(value: str | None) -> bool:
+    """Capture provenance by default; only an explicit ``0`` opts out."""
+    return value != "0"
+
+
+# E1 (docs/task_execution_loop.md): persist every execution run as an
+# agent_session plus its turn conversation. Explicit 0 is the emergency opt-out;
+# provenance is normal dispatch, not an experiment callers must remember.
+RUN_CONVERSATIONS = _session_capture_enabled(os.environ.get("APIS_RUN_CONVERSATIONS"))
 # E2 (docs/task_execution_loop.md): send run kickoff/outcome on a Gmail thread via
 # the dedicated swarm address. Default off; needs the swarm mailbox provisioned
 # (ATELES_SWARM_EMAIL + OPERATOR_EMAIL + ATELES_GMAIL_SEND_CMD). Fail-open.
@@ -545,6 +559,7 @@ async def _spawn_harness_skill(
     *,
     role: str | None = None,
     run_conversation_id: str | None = None,
+    run_agent_session_id: str | None = None,
 ) -> "object":
     """
     Spawn a T4 agent for a task event. The subprocess mechanics live in
@@ -571,9 +586,12 @@ async def _spawn_harness_skill(
         # so progress + finalize append to one task-linked thread (not a new one).
         prompt += (
             f"\n\nThis execution is tracked as Neotoma conversation "
-            f"{run_conversation_id} (PART_OF task {entity_id}). When you finalize "
+            f"{run_conversation_id} (REFERS_TO task {entity_id}). When you finalize "
             f"via /end, store your turns PART_OF this conversation "
-            f"(conversation_id={run_conversation_id}) rather than creating a new one."
+            f"(conversation_id={run_conversation_id}) rather than creating a new one. "
+            f"Every entity or artifact you create during this run must carry a REFERS_TO edge to "
+            f"agent_session {run_agent_session_id}; tasks keep exactly one PART_OF "
+            f"edge to their planning parent."
         )
 
     result = await run_skill(
@@ -581,6 +599,7 @@ async def _spawn_harness_skill(
         prompt,
         role=role or skill,
         task_entity_id=entity_id,
+        agent_session_id=run_agent_session_id or "",
         notifier=notifier,
     )
     return result
@@ -654,6 +673,17 @@ async def dispatch_task(
             f"[{DAEMON_NAME}] task {entity_id!r} is already terminal "
             f"(status={normalize_status(current_status)!r}, trigger={trigger}) "
             "— not dispatching; finished work is not re-opened"
+        )
+        return
+
+    # VERIFIED means the executor already returned successfully and only the
+    # run's terminal provenance remains unresolved. Re-entering normal dispatch
+    # here would repeat the completed effect; the watchdog owns reconciliation
+    # of this state and never calls the executor for it.
+    if normalize_status(current_status) == TaskStatus.VERIFIED.value:
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} has a completed effect with "
+            f"pending provenance (trigger={trigger}) — not dispatching"
         )
         return
 
@@ -1012,22 +1042,51 @@ async def dispatch_task(
             f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
         )
 
-        # E1: open one conversation for this execution run (flag-gated,
-        # fail-open).
+        # E1: open and verify one conversation + agent_session for this
+        # execution run. When capture is required, the durable provenance is a
+        # precondition of spawning rather than best-effort telemetry.
         run_conversation_id: str | None = None
+        run_agent_session_id: str | None = None
+        run_session = None
         if RUN_CONVERSATIONS:
-            run_conversation_id = create_run_conversation(
+            run_session = create_run_session(
                 task_id=entity_id,
                 plan_id=snapshot.get("plan_id") or None,
                 agent=skill,
                 run_key=run_key,
                 title=f"{skill} run · {title[:60]}",
             )
-            if run_conversation_id:
+            if run_session:
+                run_conversation_id = run_session.conversation_id
+                run_agent_session_id = run_session.agent_session_id
                 log.info(
-                    f"[{DAEMON_NAME}] run conversation {run_conversation_id} opened "
+                    f"[{DAEMON_NAME}] run session {run_agent_session_id} and "
+                    f"conversation {run_conversation_id} opened "
                     f"for task {entity_id} (run={run_key})"
                 )
+            else:
+                reason = (
+                    "required conversation/agent_session provenance could not be "
+                    "persisted and verified"
+                )
+                log.error(
+                    f"[{DAEMON_NAME}] task {entity_id} {reason} — not spawning"
+                )
+                set_task_status(
+                    entity_id,
+                    TaskStatus.FAILED,
+                    handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value,
+                    reason=reason,
+                    key_suffix=trigger,
+                )
+                notifier.send(
+                    f"{skill} not started on {entity_id}: {reason}",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                job.failed(f"task {entity_id} → {skill} not started: {reason}")
+                return
 
         def _run_stage(role: str, content: str, stage: str) -> None:
             """Record one run-thread event in Neotoma and Gmail."""
@@ -1063,6 +1122,7 @@ async def dispatch_task(
                 notifier,
                 role=role,
                 run_conversation_id=run_conversation_id,
+                run_agent_session_id=run_agent_session_id,
             )
         except Exception as exc:
             # Unexpected crash in the spawn machinery itself → record as a
@@ -1072,6 +1132,8 @@ async def dispatch_task(
                 f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
                 stage="crash",
             )
+            if run_session:
+                update_run_session_status(run_session, status="failed")
             set_task_status(
                 entity_id,
                 TaskStatus.FAILED,
@@ -1086,6 +1148,53 @@ async def dispatch_task(
             raise
 
         if result.ok:
+            pending_result = (
+                f"{skill} completed (trigger={trigger}); "
+                f"run_session={run_session.native_session_id}; "
+                "provenance=unverified"
+                if run_session
+                else f"{skill} completed (trigger={trigger})"
+            )
+            if run_session:
+                set_task_status(
+                    entity_id,
+                    TaskStatus.VERIFIED,
+                    handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value,
+                    result=pending_result,
+                    key_suffix=trigger,
+                )
+            if run_session and not update_run_session_status(
+                run_session, status="completed"
+            ):
+                reason = (
+                    "terminal agent_session state could not be persisted and "
+                    "verified"
+                )
+                _run_stage(
+                    "assistant",
+                    f"{skill} result withheld: {reason}.",
+                    stage="terminal-state-failed",
+                )
+                set_task_status(
+                    entity_id,
+                    TaskStatus.VERIFIED,
+                    handler=DAEMON_NAME,
+                    from_status=TaskStatus.VERIFIED.value,
+                    reason=reason,
+                    result=pending_result,
+                    key_suffix=trigger,
+                )
+                notifier.send(
+                    f"{skill} returned successfully on {entity_id}, but {reason}; "
+                    "task held VERIFIED for provenance reconciliation",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                job.failed(
+                    f"task {entity_id} → {skill} completion withheld: {reason}"
+                )
+                return
             _run_stage(
                 "assistant", f"{skill} completed (trigger={trigger}).", stage="done"
             )
@@ -1093,8 +1202,14 @@ async def dispatch_task(
                 entity_id,
                 TaskStatus.DONE,
                 handler=DAEMON_NAME,
-                from_status=TaskStatus.EXECUTING.value,
-                result=f"{skill} completed (trigger={trigger})",
+                from_status=(
+                    TaskStatus.VERIFIED.value
+                    if run_session
+                    else TaskStatus.EXECUTING.value
+                ),
+                result=pending_result.replace(
+                    "provenance=unverified", "provenance=verified"
+                ),
                 key_suffix=trigger,
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
@@ -1105,6 +1220,8 @@ async def dispatch_task(
                 f"{skill} failed (trigger={trigger}): {reason}",
                 stage="failed",
             )
+            if run_session:
+                update_run_session_status(run_session, status="failed")
             # FAILED (not BLOCKED): the stall watchdog owns retry-with-backoff
             # and escalation-on-exhaustion out-of-band.
             set_task_status(
@@ -1893,7 +2010,9 @@ async def main() -> None:
         f"{'ENABLED' if _reconcile_cfg.ENABLED else 'DISABLED'} "
         f"(interval={_reconcile_cfg.INTERVAL_SECONDS}s "
         f"cap={_reconcile_cfg.MAX_PER_SWEEP}/sweep "
-        f"grace={_reconcile_cfg.GRACE_SECONDS}s)"
+        f"grace={_reconcile_cfg.GRACE_SECONDS}s "
+        f"page={_reconcile_cfg.QUERY_LIMIT} rows x "
+        f"{_reconcile_cfg.PAGES_PER_SWEEP} pages/sweep)"
     )
 
     # 1. Load agent_definition from Neotoma
@@ -2001,9 +2120,7 @@ async def main() -> None:
             cleared = await dispatcher._clear_closed_issue_markers(
                 list(dispatcher.config.resume_repositories)
             )
-            log.info(
-                f"[{DAEMON_NAME}] closed-issue marker sweep: cleared={cleared}"
-            )
+            log.info(f"[{DAEMON_NAME}] closed-issue marker sweep: cleared={cleared}")
         except Exception as exc:  # housekeeping must never kill startup siblings
             log.error(
                 f"[{DAEMON_NAME}] closed-issue marker sweep failed: {exc} "

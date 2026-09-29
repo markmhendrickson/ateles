@@ -396,6 +396,161 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
         self.assertIn("CODEX_SUBAGENT_CANARY_91DE", result.stdout)
 
 
+class TestCodexPointOfUseRuleInjection(unittest.TestCase):
+    """rule_injection_gate.py (ateles rule delivery audit
+    ent_b66293f0dcc8c887d4fdbeae, recommendation 5) wired under Codex's
+    PreToolUse group. Uses the real ``ent_c4d33237ff2d12b4aaec71af`` mapping
+    (harness_config category) with SYNTHETIC row content served by the fake
+    Neotoma server — the mapped entity id is real, its rule text here is not."""
+
+    def test_configured_pretooluse_command_injects_mapped_rule_on_grant_write(
+        self,
+    ) -> None:
+        command = next(
+            c
+            for c in _hook_commands("PreToolUse")
+            if "rule_injection_gate.py" in c
+        )
+        with _FakeNeotoma() as fake:
+            fake.handler.rows = [
+                {
+                    "entity_id": "ent_1c0cbb99d2c8011358ff1dc3",
+                    "snapshot": {
+                        "title": "Stop for approval before high-risk changes.",
+                        "rule": "CODEX_GRANT_RULE_CANARY_B71E must reach the model before the write.",
+                        "applies_when": "proposing a schema, auth, foundation-doc, or architectural change",
+                        "scope": "swarm",
+                        "status": "active",
+                        "rule_kind": "advisory",
+                    },
+                }
+            ]
+            result = _run(
+                command,
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "mcp__mcpsrv_neotoma__correct",
+                    "tool_input": {
+                        "entity_id": "ent_58ecd30ea709bece07025df1",
+                        "entity_type": "agent_grant",
+                        "field": "entity_types",
+                        "value": [],
+                    },
+                    "cwd": str(REPO_ROOT),
+                },
+                env={"NEOTOMA_BASE_URL": fake.base_url},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(payload["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.assertIn("CODEX_GRANT_RULE_CANARY_B71E", ctx)
+        self.assertIn("get_session_identity", ctx)
+
+    def test_configured_pretooluse_command_matches_apply_patch(self) -> None:
+        """This hook now parses apply_patch payloads for the harness_config
+        category (via `_apply_patch_paths`, delegated to
+        `sibling_repo_worktree_guard.py`'s parser of the same name), so its
+        group must claim apply_patch coverage — Falco/Waxwing, PR #1320
+        round 2: the pre-fix state left the exact audited failure (a
+        harness-config file edit with no governing rule reaching it)
+        reproducible on Codex via apply_patch, with the matcher's own
+        omission the reason nothing caught it."""
+        group = _group_for("rule_injection_gate.py")
+        self.assertIn("apply_patch", group["matcher"])
+
+    def test_configured_pretooluse_command_injects_on_apply_patch_harness_config_edit(
+        self,
+    ) -> None:
+        """End-to-end: an apply_patch payload naming a harness-config path
+        fires the SAME harness_config injection an Edit/Write does under
+        Claude Code. Confirmed RED before this fix (matched_categories had
+        no apply_patch branch at all, so this call matched nothing and
+        injected nothing) — this is the reproduction of Falco's non-blocking
+        finding, now closed."""
+        command = next(
+            c
+            for c in _hook_commands("PreToolUse")
+            if "rule_injection_gate.py" in c
+        )
+        with _FakeNeotoma() as fake:
+            fake.handler.rows = [
+                {
+                    "entity_id": "ent_c4d33237ff2d12b4aaec71af",
+                    "snapshot": {
+                        "title": "Do not rewrite harness config without the governing rule.",
+                        "rule": "CODEX_APPLY_PATCH_HARNESS_CONFIG_CANARY_9F3A",
+                        "applies_when": "configuring Cursor's Neotoma MCP connection for source development",
+                        "scope": "swarm",
+                        "status": "active",
+                        "rule_kind": "mandatory",
+                    },
+                }
+            ]
+            result = _run(
+                command,
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "apply_patch",
+                    "tool_input": {
+                        "command": (
+                            "*** Begin Patch\n"
+                            "*** Update File: .claude/settings.json\n"
+                            "@@\n"
+                            "-old\n"
+                            "+new\n"
+                            "*** End Patch"
+                        ),
+                    },
+                    "cwd": str(REPO_ROOT),
+                },
+                env={"NEOTOMA_BASE_URL": fake.base_url},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(payload["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.assertIn("CODEX_APPLY_PATCH_HARNESS_CONFIG_CANARY_9F3A", ctx)
+
+    def test_configured_pretooluse_command_injects_nothing_for_unrelated_apply_patch(
+        self,
+    ) -> None:
+        """An apply_patch payload touching a file OTHER than a harness-config
+        path must not match — same "affirmative shape, not blanket
+        apply_patch coverage" posture as sibling_repo_worktree_guard.py."""
+        command = next(
+            c
+            for c in _hook_commands("PreToolUse")
+            if "rule_injection_gate.py" in c
+        )
+        with _FakeNeotoma() as fake:
+            fake.handler.rows = []
+            result = _run(
+                command,
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "apply_patch",
+                    "tool_input": {
+                        "command": (
+                            "*** Begin Patch\n"
+                            "*** Update File: src/foo.py\n"
+                            "@@\n"
+                            "-old\n"
+                            "+new\n"
+                            "*** End Patch"
+                        ),
+                    },
+                    "cwd": str(REPO_ROOT),
+                },
+                env={"NEOTOMA_BASE_URL": fake.base_url},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+
 def _pretooluse_groups() -> list[dict]:
     data = json.loads(HOOKS_FILE.read_text(encoding="utf-8"))
     return data["hooks"]["PreToolUse"]

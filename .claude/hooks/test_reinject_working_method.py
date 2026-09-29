@@ -1,6 +1,6 @@
 """Tests for the SessionStart(compact) working-method reinjection hook.
 
-Three assertions, each guarding a distinct failure mode:
+Four assertions, each guarding a distinct failure mode:
 
 1. Happy path — the hook prints the reminder, including the five numbered
    rules, and exits 0. Substrings from REMINDER, not full-string equality,
@@ -13,6 +13,9 @@ Three assertions, each guarding a distinct failure mode:
    registered against a SessionStart matcher that excluded `compact`. Pin
    both halves: the matcher covering `session_start.py` includes `compact`,
    and a dedicated `compact` entry wires `reinject_working_method.py`.
+4. Canonical-policy boundary — this static reminder must not carry a second
+   decision cadence beside the live agent_policy index that also fires on
+   compact events.
 
 Self-review note (2026-09-02, PR #711 round 2): an earlier revision of
 TestFailOpen had two tests claiming to hit "distinct failure points" (patching
@@ -49,6 +52,16 @@ class TestHappyPath:
         assert "[working-method]" in out
         assert "1. DISPATCH" in out
         assert "5. PROCEED" in out
+
+    def test_main_does_not_inject_a_second_decision_cadence(self, capsys):
+        code = hook.main()
+        out = capsys.readouterr().out
+
+        assert code == 0
+        lowered = out.lower()
+        assert "decision-list cadence" not in lowered
+        assert "restate every open decision" not in lowered
+        assert "omit the decision list" not in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -108,4 +121,19 @@ class TestSettingsContract:
             "reinject_working_method.py" in h.get("command", "")
             for entry in compact_entries
             for h in entry.get("hooks", [])
+        )
+
+    def test_compact_event_also_wires_the_live_rule_index(self, settings):
+        rule_index_entries = [
+            entry
+            for entry in settings["hooks"]["SessionStart"]
+            if any(
+                "session_rule_index.py" in h.get("command", "")
+                for h in entry.get("hooks", [])
+            )
+        ]
+        assert rule_index_entries, "no SessionStart entry wires session_rule_index.py"
+        assert any(
+            "compact" in entry.get("matcher", "").split("|")
+            for entry in rule_index_entries
         )
