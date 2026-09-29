@@ -38,9 +38,16 @@ File path: `ateles-private/keys/<name>.json`
 }
 ```
 
-`aauth_signer.py` auto-detects the format: if the file has `kty` and `d`
-fields it is loaded as JWK; otherwise it is loaded as legacy PEM. Legacy files
-at the old path continue to work during migration.
+`lib/daemon_runtime/aauth_signer.py` probes `<name>.jwk.json` first and falls
+back to the legacy `<name>.json`; the file's shape (`kty` and `d` for JWK,
+otherwise PEM) selects the loader. Legacy files at the old path continue to work
+for that signer during migration.
+
+Not every consumer falls back: `lib/daemon_runtime/neotoma_signed.py`'s
+`agent_identity()` (used for the dispatcher-signed gate write) reads **only**
+`<name>.jwk.json`. A role with only a legacy `<name>.json` has no identity there
+and that signed write fails closed, so mint the canonical file for any role that
+needs it.
 
 ## Minting a new keypair
 
@@ -48,10 +55,34 @@ at the old path continue to work during migration.
 python execution/scripts/mint_daemon_keypair.py --name <daemon-name>
 ```
 
-This writes `ateles-private/keys/<name>.jwk.json` with mode 0600 and exits
-with an error if the file already exists (prevents accidental overwrite).
+`<name>` must match `^[a-z][a-z0-9_-]{0,63}$` (lowercased first). The script:
+
+- writes `ateles-private/keys/<name>.jwk.json`, created with mode 0600 at
+  creation time via `O_CREAT|O_EXCL|O_NOFOLLOW` (no check-then-create race, and
+  a symlink at the target is refused, never written through);
+- creates the keys directory with mode 0700 if it does not exist;
+- exits with an error if the file already exists. Deleting the file **or**
+  passing `--force` destroys the previous private key irrecoverably, so neither
+  is done casually;
+- with `--force` (rotation) writes the new key to a temp file in the same
+  directory (0600, fsync'd) and atomically `os.replace`s it onto the target: the
+  old key survives a failed rotation, and the replacement is a new inode so a
+  looser mode on the old file (e.g. 0644) is not inherited;
+- never prints the private scalar `d` or the public coordinates.
 
 Restart the daemon after minting so it picks up the new file.
+
+### Verify the new key
+
+```bash
+python execution/scripts/verify_aauth_signer.py \
+    --jwk ~/repos/ateles-private/keys/<name>.jwk.json --live <neotoma-base-url>
+```
+
+Prints only `status`, `signature_present`, `signature_verified`, an error code,
+and `tier` (no key material) and exits non-zero unless the signature verified.
+A verified signature is not the same as admission: the role also needs an
+active `agent_grant` matching `<name>@ateles-swarm`.
 
 ## Existing keypairs
 
@@ -71,6 +102,9 @@ Migrate to canonical JWK on next rotation (see below).
 ## Rotation
 
 1. Run `mint_daemon_keypair.py --name <daemon>` — this writes `<name>.jwk.json`.
+   If a `<name>.jwk.json` already exists (rotating a canonical key), add
+   `--force`; that destroys the old private key, so only do it once you intend
+   to retire it. Then run the verify step above.
 2. Add the new `kid` to the Neotoma JWKS endpoint (pending — see phase plan).
 3. Restart the daemon. `aauth_signer.py` probes `<name>.jwk.json` first so the
    new key is picked up automatically.
@@ -94,6 +128,6 @@ server-side.
 
 - Keys are stored in `ateles-private` (private repo), never in `ateles` (public).
 - Files must be mode 0600; `aauth_signer.py` does not enforce this at load time
-  but `mint_daemon_keypair.py` sets it on creation.
+  but `mint_daemon_keypair.py` creates the file at 0600 (and the keys directory at 0700).
 - Never commit key files to any repo. `ateles-private/.gitignore` should
   exclude `keys/*.json` and `keys/*.jwk.json` (verify this is in place).

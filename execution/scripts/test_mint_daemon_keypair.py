@@ -11,6 +11,7 @@ generalizes; do not build a parallel one").
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -23,7 +24,8 @@ _SCRIPT = _REPO_ROOT / "execution" / "scripts" / "mint_daemon_keypair.py"
 
 sys.path.insert(0, str(_REPO_ROOT / "execution" / "scripts"))
 
-from mint_daemon_keypair import mint, validate_name  # noqa: E402
+import mint_daemon_keypair  # noqa: E402
+from mint_daemon_keypair import UnsafeKeyTargetError, mint, validate_name  # noqa: E402
 
 
 @pytest.fixture()
@@ -73,6 +75,20 @@ class TestValidateName:
         the rest of the string (e.g. an extension) be silently discarded."""
         with pytest.raises(ValueError):
             validate_name("accipiter\x00.txt")
+
+
+    @pytest.mark.parametrize(
+        "bad",
+        [".hidden", "-lead", "9lead", "has space", "a.b", "a" * 65, "caf\u00e9", "a\nb"],
+    )
+    def test_allowlist_rejects_everything_outside_the_pattern(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            validate_name(bad)
+
+    def test_allowlist_accepts_underscore_dash_and_max_length(self) -> None:
+        assert validate_name("neotoma_agent") == "neotoma_agent"
+        assert validate_name("a-b_c9") == "a-b_c9"
+        assert validate_name("a" * 64) == "a" * 64
 
 
 class TestMintFunction:
@@ -168,3 +184,189 @@ class TestCliEntrypoint:
         result = self._run("--name", "../evil", "--keys-dir", str(keys_dir))
         assert result.returncode != 0
         assert "invalid daemon name" in result.stderr
+
+
+class TestKeyCreationSafety:
+    """Each test here is written to go RED against the pre-hardening mint().
+
+    The pre-hardening code opened the target with O_CREAT|O_TRUNC (no O_EXCL, no
+    O_NOFOLLOW), after a separate `exists()` check, then chmod'ed afterwards.
+    """
+
+    @pytest.fixture()
+    def umask0(self):
+        old = os.umask(0)
+        yield
+        os.umask(old)
+
+    def test_force_over_a_0644_file_ends_0600(self, keys_dir: Path, umask0) -> None:
+        """--force must not inherit the old file's looser mode.
+
+        The mode is asserted with chmod/fchmod made unavailable, so a
+        chmod-after-the-fact cannot be what makes it pass.
+        """
+        keys_dir.mkdir()
+        target = keys_dir / "accipiter.jwk.json"
+        target.write_text("old-key-material")
+        target.chmod(0o644)
+        with pytest.MonkeyPatch.context() as mp:
+            def _no_chmod(*a, **k):
+                raise AssertionError("mode must come from creation, not chmod")
+
+            mp.setattr(os, "chmod", _no_chmod)
+            mp.setattr(os, "fchmod", _no_chmod, raising=False)
+            mint("accipiter", keys_dir, force=True)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert "old-key-material" not in target.read_text()
+
+    def test_creation_mode_is_0600_under_umask_0_without_chmod(
+        self, keys_dir: Path, umask0
+    ) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            def _no_chmod(*a, **k):
+                raise AssertionError("mode must come from creation, not chmod")
+
+            mp.setattr(os, "chmod", _no_chmod)
+            mp.setattr(os, "fchmod", _no_chmod, raising=False)
+            out = mint("accipiter", keys_dir)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+    def test_final_path_is_opened_exclusively_and_nofollow(
+        self, keys_dir: Path
+    ) -> None:
+        opened: list[tuple[str, int, int]] = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, *a, **k):
+            opened.append((str(path), flags, mode))
+            return real_open(path, flags, mode, *a, **k)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(os, "open", spy)
+            out = mint("accipiter", keys_dir)
+        creates = [o for o in opened if o[0] == str(out)]
+        assert creates, f"never opened the final path: {opened}"
+        _, flags, mode = creates[0]
+        assert flags & os.O_EXCL and flags & os.O_CREAT
+        assert flags & os.O_NOFOLLOW
+        assert not flags & os.O_TRUNC
+        assert mode == 0o600
+
+    def test_keys_dir_is_created_0700(self, keys_dir: Path, umask0) -> None:
+        mint("accipiter", keys_dir)
+        assert stat.S_IMODE(keys_dir.stat().st_mode) == 0o700
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_symlink_at_target_is_refused_and_not_followed(
+        self, keys_dir: Path, tmp_path: Path, force: bool
+    ) -> None:
+        keys_dir.mkdir()
+        victim = tmp_path / "victim.txt"
+        victim.write_text("victim-content")
+        link = keys_dir / "accipiter.jwk.json"
+        link.symlink_to(victim)
+        with pytest.raises((FileExistsError, UnsafeKeyTargetError)):
+            mint("accipiter", keys_dir, force=force)
+        assert victim.read_text() == "victim-content", "wrote through the symlink"
+        assert link.is_symlink()
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_dangling_symlink_at_target_is_refused(
+        self, keys_dir: Path, tmp_path: Path, force: bool
+    ) -> None:
+        keys_dir.mkdir()
+        planted = tmp_path / "does-not-exist"
+        (keys_dir / "accipiter.jwk.json").symlink_to(planted)
+        with pytest.raises((FileExistsError, UnsafeKeyTargetError)):
+            mint("accipiter", keys_dir, force=force)
+        assert not planted.exists(), "created a file through a dangling symlink"
+
+    def test_failed_rotation_keeps_the_old_key_intact(self, keys_dir: Path) -> None:
+        mint("accipiter", keys_dir)
+        target = keys_dir / "accipiter.jwk.json"
+        before = target.read_bytes()
+
+        def boom(*a, **k):
+            raise OSError("disk went away")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(os, "replace", boom)
+            with pytest.raises(OSError):
+                mint("accipiter", keys_dir, force=True)
+        assert target.read_bytes() == before, "old key lost by a failed rotation"
+        assert json.loads(before)["d"]
+        assert [p.name for p in keys_dir.iterdir()] == ["accipiter.jwk.json"], (
+            "left a temp file behind"
+        )
+
+    def test_failed_write_during_rotation_keeps_the_old_key_intact(
+        self, keys_dir: Path
+    ) -> None:
+        mint("accipiter", keys_dir)
+        target = keys_dir / "accipiter.jwk.json"
+        before = target.read_bytes()
+
+        def boom(*a, **k):
+            raise OSError("fsync failed")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(os, "fsync", boom)
+            with pytest.raises(OSError):
+                mint("accipiter", keys_dir, force=True)
+        assert target.read_bytes() == before
+        assert [p.name for p in keys_dir.iterdir()] == ["accipiter.jwk.json"]
+
+    def test_failed_first_write_leaves_no_partial_key(self, keys_dir: Path) -> None:
+        def boom(*a, **k):
+            raise OSError("fsync failed")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(os, "fsync", boom)
+            with pytest.raises(OSError):
+                mint("accipiter", keys_dir)
+        assert list(keys_dir.iterdir()) == []
+
+    def test_no_force_does_not_clobber_a_file_created_after_the_check(
+        self, keys_dir: Path
+    ) -> None:
+        """The check-then-act race: the target appears between check and create."""
+        keys_dir.mkdir()
+        target = keys_dir / "accipiter.jwk.json"
+        real_check = mint_daemon_keypair._check_target
+
+        def check_then_lose_the_race(path):
+            result = real_check(path)  # sees "absent"
+            target.write_text("raced-in-by-someone-else")
+            return result
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mint_daemon_keypair, "_check_target", check_then_lose_the_race)
+            with pytest.raises(FileExistsError):
+                mint("accipiter", keys_dir)
+        assert target.read_text() == "raced-in-by-someone-else"
+
+
+class TestCliMessages:
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_SCRIPT), *args],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_exists_error_says_both_delete_and_force_destroy_the_old_key(
+        self, keys_dir: Path
+    ) -> None:
+        self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
+        again = self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
+        assert again.returncode != 0
+        assert "--force" in again.stderr and "destroys" in again.stderr
+
+    def test_help_does_not_call_the_role_a_daemon_name(self) -> None:
+        out = self._run("--help").stdout
+        assert "Daemon name" not in out
+        assert "Role name" in out
+
+    def test_printed_mode_is_the_real_mode(self, keys_dir: Path) -> None:
+        out = self._run("--name", "accipiter", "--keys-dir", str(keys_dir)).stdout
+        real = stat.S_IMODE((keys_dir / "accipiter.jwk.json").stat().st_mode)
+        assert f"mode: {real:04o}" in out

@@ -41,15 +41,15 @@ Neotoma's AAuth pipeline:
 
 All agent identities share one issuer (`iss = https://markmhendrickson.com`). Each distinct agent role gets its own subject and keypair.
 
-### Two identity flavors
+### Three key envelopes
 
-The repo currently maintains **two parallel keypair formats** for two contexts:
+The repo currently has **three key envelopes** across two signing contexts (Cursor's MCP proxy, and Ateles daemons/dispatcher):
 
 1. **JWK format** (`.creds/aauth_agent_*.private.jwk`) — used by the Cursor IDE MCP proxy, consumed by the full RFC 9421 signer (`execution/scripts/aauth_signer.py`). Public keys publish to `markmhendrickson.com/.well-known/jwks.json`. ES256 P-256 only. **No provisioning script for this flavor exists on `main`** — it is not what `execution/scripts/mint_daemon_keypair.py` (below) provisions.
 
-2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by some T3 daemons (e.g. `a2a_executor.py`, `a2a_gateway.py`) via `lib/daemon_runtime/aauth_signer.py`, which produces a lighter `X-AAuth-Token` JWT (not full RFC 9421). `docs/aauth/keys.md` calls this the "legacy" format, still supported but superseded by (3) below on next rotation.
+2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by some T3 daemons (e.g. `a2a_executor.py`, `a2a_gateway.py`) via `lib/daemon_runtime/aauth_signer.py`, which produces a lighter `X-AAuth-Token` JWT (not full RFC 9421). `docs/aauth/keys.md` calls this the "legacy" format, still supported but superseded by (3) below on next rotation. `lib/daemon_runtime/aauth_signer.py` probes `<daemon>.jwk.json` first and falls back to this `<daemon>.json`, so it reads both (2) and (3).
 
-3. **JWK format, T3/T4 flavor (canonical)** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`), and also loaded by `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` for the dispatcher-signed gate-writeback path (see below). **Not yet published to JWKS** — only Neotoma can verify these today (via local key resolution or because the daemon talks to Neotoma over a trusted connection). Provisioned by `execution/scripts/mint_daemon_keypair.py --name <role>` (see below and `docs/aauth/keys.md`, the canonical doc for this format's layout and rotation).
+3. **JWK format, T3/T4 flavor (canonical)** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`), and also loaded by `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` for the dispatcher-signed gate-writeback path (see below). **`agent_identity()` loads ONLY `<agent>.jwk.json` — it has no fallback to the legacy `<agent>.json`**, so a role that has only a legacy PEM key has no identity for that path (`agent_identity()` returns None and the signed write fails closed). **Not yet published to JWKS** — only Neotoma can verify these today (via local key resolution or because the daemon talks to Neotoma over a trusted connection). Provisioned by `execution/scripts/mint_daemon_keypair.py --name <role>` (see below and `docs/aauth/keys.md`, the canonical doc for this format's layout and rotation).
 
 Unifying these formats and publishing all public keys to the same JWKS is on the to-do list below.
 
@@ -148,13 +148,13 @@ Source for the JWKS file in repo: `execution/website/markmhendrickson/react-app/
 
 These are two distinct implementations for two distinct contexts:
 - `execution/scripts/aauth_signer.py` — implements the **full AAuth wire format** (`@hellocoop/httpsig` compatible): signs `@method @authority @path content-type content-digest signature-key`. This is what Neotoma's verifier expects from an external MCP client. Consumes JWK-format keys.
-- `lib/daemon_runtime/aauth_signer.py` — implements a **lighter JWT-only path** for daemons. Consumes PEM-format keys from `ateles-private/keys/<daemon>.json`. Today the daemons that have keypairs (Apus, Formica, Monedula, Cicada, neotoma-agent, Ateles, Vanellus) sign locally; daemons without keypairs (Anthus, Tyto, Turdus, Apis) fall back to stub mode.
+- `lib/daemon_runtime/aauth_signer.py` — implements a **lighter JWT-only path** for daemons. Consumes `ateles-private/keys/<daemon>.jwk.json` (canonical) or the legacy PEM `<daemon>.json`, probing the former first. Per the May 2026 status table above, the daemons recorded with keypairs (Apus, Formica, Monedula, Cicada, neotoma-agent, Ateles, Vanellus) hold legacy PEM `<daemon>.json` files and sign locally; daemons without keypairs (Anthus, Tyto, Turdus, Apis) fall back to stub mode.
 
 ### Identity provisioning
 
 | File | Role |
 |---|---|
-| `execution/scripts/mint_daemon_keypair.py` | **Canonical** minting script for one T3/T4 role's ES256 P-256 keypair, written to `ateles-private/keys/<role>.jwk.json` (mode 0600, written that way from creation, no window at a looser mode) — the flavor `lib/daemon_runtime/aauth_httpsig.py` and `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` both consume. Never prints the private scalar or public coordinates. Does **not** touch `.creds/`, `jwks.json`, or `aauth-agent.json` — those belong to the separate Cursor-proxy flavor, which has no provisioning script on `main` today. Refuses to overwrite an existing key unless `--force` is passed (rotation). Validates `--name` against path traversal, `\`, and NUL bytes. Full layout and rotation procedure: `docs/aauth/keys.md`. There is deliberately only ONE script that writes this format — see that file's module docstring for the "extend, don't parallel" rule this follows. |
+| `execution/scripts/mint_daemon_keypair.py` | **Canonical** minting script for one T3/T4 role's ES256 P-256 keypair, written to `ateles-private/keys/<role>.jwk.json` (mode 0600, written that way from creation, no window at a looser mode) — the flavor `lib/daemon_runtime/aauth_httpsig.py` and `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` both consume. Never prints the private scalar or public coordinates. Does **not** touch `.creds/`, `jwks.json`, or `aauth-agent.json` — those belong to the separate Cursor-proxy flavor, which has no provisioning script on `main` today. Refuses to overwrite an existing key unless `--force` is passed (rotation, which atomically replaces the key via a same-directory temp file, so a failed rotation leaves the old key intact). Creation is `O_EXCL|O_NOFOLLOW` at 0600 (a symlink at the target is refused, never followed) and the keys directory is created 0700. `--name` must match `^[a-z][a-z0-9_-]{0,63}$`. Full layout and rotation procedure: `docs/aauth/keys.md`. There is deliberately only ONE script that writes this format — see that file's module docstring for the "extend, don't parallel" rule this follows. |
 
 Usage:
 ```bash
@@ -178,9 +178,21 @@ This keypair is what `execution/daemons/apis/gate_waive.py`'s `IssueGateStore.si
 `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity(lens_agent, sub=...)`) to sign a gate verdict as
 this role — see "The dispatched child's MCP session does NOT carry gate attribution" above for the full
 mechanism. Provisioning the keypair is necessary but not sufficient: `sign_off` also needs the resolved
-`sub` to be admitted server-side (an `agent_grant` matching `<role>@ateles-swarm`, or the role's `sub`
-present in `NEOTOMA_STRICT_AAUTH_SUBS` if that's how the target instance is configured) for the signed
-write to land as anything other than an unadmitted signature.
+`sub` to be admitted server-side, which means an active `agent_grant` matching `<role>@ateles-swarm`
+with the needed capabilities. `NEOTOMA_STRICT_AAUTH_SUBS`, where an instance sets it, only pins identity
+(it does not admit anything); without an active `agent_grant` the signed write still lands as an
+unadmitted signature.
+
+To confirm a freshly minted key signs in a way Neotoma accepts, without printing any secret:
+
+```bash
+python3 execution/scripts/verify_aauth_signer.py \
+    --jwk ~/repos/ateles-private/keys/<role>.jwk.json --live <neotoma-base-url>
+```
+
+It prints only `status`, `signature_present`, `signature_verified`, an error code, and `tier`, and exits
+non-zero unless `signature_verified` is true. (Signature verification is separate from admission: a
+verified signature with no active `agent_grant` still is not admitted.)
 
 ### Proxy layer (Cursor IDE → Neotoma)
 
@@ -314,6 +326,8 @@ capabilities:
   retrieve:           *
 ```
 
+(Shown as shorthand. The stored and `createAgentGrant` shape is an array of `{"op": ..., "entity_types": [...]}` entries, as in the examples below.)
+
 No thumbprint pin — any valid ES256 key under the same `(sub, iss)` is admitted. This allows software and hardware keys to rotate without updating the grant.
 
 ---
@@ -401,8 +415,10 @@ per-server enforcement (option A) can be layered in for defence-in-depth;
 
 ### 1. Mint missing daemon keypairs
 
-Most T3/T4 roles already have a `ateles-private/keys/<role>.jwk.json` (the `aauth_httpsig.py` flavor).
-For a role that does not yet have one, mint with:
+The dispatcher's signed gate write needs `ateles-private/keys/<role>.jwk.json` for the lens role
+(`agent_identity()` reads no other file). The keypairs recorded in the status table above are legacy PEM
+`<daemon>.json` files, which that path cannot use; check `ls ateles-private/keys/` for which roles
+already have a `.jwk.json`, and mint the rest with:
 
 ```bash
 python3 execution/scripts/mint_daemon_keypair.py --name <role>
@@ -411,7 +427,7 @@ python3 execution/scripts/mint_daemon_keypair.py --name <role>
 This writes directly to the format `lib/daemon_runtime/aauth_httpsig.py` already loads — no PEM/JWK
 conversion step is needed for this flavor. (The separate `.creds/`-based JWK flavor used by the Cursor
 proxy is a different identity and has its own, currently unimplemented, provisioning path — see
-"Two identity flavors" above.)
+"Three key envelopes" above.) Then follow the verify step under "Identity provisioning".
 
 ### 2. Create `agent_grant` entities for remaining subs
 
@@ -445,12 +461,12 @@ Today all populated grants use `*` for `store_structured` and `correct` capabili
 {
   "match_sub": "monedula@ateles-swarm",
   "match_iss": "https://markmhendrickson.com",
-  "capabilities": {
-    "store_structured":   ["transaction", "payment_profile", "daemon_report"],
-    "correct":            ["payment_profile"],
-    "retrieve":           ["transaction", "recurring_expense", "account_balance", "contact"],
-    "create_relationship": ["transaction->contact", "payment_profile->contact"]
-  }
+  "capabilities": [
+    { "op": "store_structured",    "entity_types": ["transaction", "payment_profile", "daemon_report"] },
+    { "op": "correct",             "entity_types": ["payment_profile"] },
+    { "op": "retrieve",            "entity_types": ["transaction", "recurring_expense", "account_balance", "contact"] },
+    { "op": "create_relationship", "entity_types": ["transaction->contact", "payment_profile->contact"] }
+  ]
 }
 ```
 
@@ -506,7 +522,7 @@ ateles/
 │       └── jwks.json                      ← public keys endpoint (sw-cursor-1 only today)
 ├── lib/
 │   └── daemon_runtime/
-│       ├── aauth_signer.py                ← daemon signer (PEM keys, X-AAuth-Token, stub-capable)
+│       ├── aauth_signer.py                ← daemon signer (<name>.jwk.json or legacy PEM <name>.json, X-AAuth-Token, stub-capable)
 │       ├── aauth_httpsig.py               ← full RFC 9421 signer (ateles-private/keys/<role>.jwk.json)
 │       ├── agent_loader.py                ← loads agent_definition incl. aauth_sub
 │       └── __init__.py                    ← re-exports AAuthSigner
@@ -517,7 +533,7 @@ ateles/
     └── ...                                ← same pattern in all T3 daemons
 
 ateles-private/           ← private repo, checked out alongside ateles
-└── keys/                                  ← PEM format, 7 keypairs present
+└── keys/                                  ← legacy PEM <name>.json (7 recorded May 2026) and canonical <name>.jwk.json as minted
     └── <daemon>.json                      ← per-daemon private JWK (not yet minted)
 ```
 
