@@ -218,7 +218,12 @@ _EVALUATOR_NAME_MAP = {
     "Eriks": "an evaluator",
     "Sidney Brown": "an evaluator",
     "Jacob Cohen": "an evaluator",
+    "Brandon/AIBTC": "an evaluator deployment",
+    "Mark": "the operator",
 }
+# Names that are also ordinary words: matched case-SENSITIVELY so the scrub
+# does not rewrite the verb "mark" in prose.
+_CASE_SENSITIVE_NAMES = frozenset({"Mark"})
 # entity_id references to customer_development_note / named-evaluator sources
 # are dropped from rendered "sources"/"source_artifacts" lists (the record
 # itself, not just the name, is the PII-bearing thing) AND scrubbed inline in
@@ -235,6 +240,9 @@ _PII_ENTITY_IDS = {
     "ent_13b6325f273ce0b002832377",  # Larry, feedback
     "ent_22a0ca680051fabd42c1f537",  # Jeroen van 't Hoff, feedback
     "ent_59e1b896157641f9240f9e86",  # Eriks Reks, feedback
+    "ent_c649232feaf95688b25be6af",  # named evaluator, feedback
+    "ent_1862a583f9ea47cf6b1aa716",  # named evaluator, feedback
+    "ent_ca46eb9e4e3150bb0637eb40",  # named evaluator deployment, product_feedback
 }
 _PII_SOURCE_MARKERS = ("customer_development_note", "product_feedback")
 
@@ -358,7 +366,8 @@ def _scrub_evaluator_pii(text: str) -> str:
         return text
     out = _scrub_entity_ids(text)
     for name, replacement in _EVALUATOR_NAME_MAP.items():
-        out = re.sub(rf"\b{re.escape(name)}\b", replacement, out, flags=re.IGNORECASE)
+        flags = 0 if name in _CASE_SENSITIVE_NAMES else re.IGNORECASE
+        out = re.sub(rf"\b{re.escape(name)}\b", replacement, out, flags=flags)
     _assert_no_unscrubbed_name(out)
     return out
 

@@ -1,0 +1,18 @@
+{
+  "_origin": "page_specific — sourced from rendered_page ent_3855e049f8acf1307117d2aa, closing sibling-product handoff section, required by the product_homepage template's 'The other half' section guidance when a sibling product exists.",
+  "eyebrow": "The other half",
+  "headline": "You cannot delegate real work to agents you cannot hold to account.",
+  "lede": "Accountability has two halves, and both scale the same way — from a single principal to an organization of them.",
+  "sibling": [
+    {
+      "title": "Ateles answers who was authorized",
+      "body": "Initiative, delegation, and approval — governed execution for a single principal, then multi-operator ownership, scoped delegation and approval, distributed authority, and an organization that governs itself."
+    },
+    {
+      "title": "Neotoma answers what was true",
+      "href": "https://neotoma.io",
+      "body": "The system of record for AI agents — deterministic state for a single writer, then for many, authority over what may be corrected, disagreement between principals represented rather than flattened, and governance an organization can read. Ateles acts against Neotoma state."
+    }
+  ],
+  "closing": "Neither is sufficient alone. Authority without a record tells you who may act but not against what state. A record without authority tells you what happened but not whether it was permitted."
+}
