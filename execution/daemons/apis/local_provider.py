@@ -33,7 +33,26 @@ A failed local run may fall over only to the cheapest frontier tier: the model t
 provider. That binding is the single source; this config carries no model
 names. A provider with no such binding, or no ``vendor_binding`` at all, is not a
 fallback: the run is refused and recorded as a local failure rather than replayed
-on a provider's ambient default.
+on a provider's ambient default. The operator's ruling of 2026-09-29 makes that
+model Claude Haiku (`{"claude": {"mechanical": "haiku"}}` in the vendor_binding).
+
+No file, ``enabled: false`` or an invalid record means the provider does not
+exist for this process: every dispatch stays on the frontier providers.
+
+Two safety properties are enforced here and pinned by tests:
+
+* The command NEVER carries ``--bare``. Verified 2026-09-28 against claude
+  2.1.x: ``--bare`` skips every hook, including hooks passed via
+  ``--settings``, so a stash probe executed under it. ``build_command``
+  asserts the flag is absent.
+* The guards file is DERIVED from the repo's own ``.claude/settings.json``
+  PreToolUse entries, so the local path binds exactly the guards the frontier
+  path does and cannot drift into a stale hand-kept copy. A missing required
+  guard refuses the launch rather than running unguarded.
+
+Work that git or a generator can finish never reaches this provider at all: see
+``mechanical_first.py``, which also refuses anything but a dedicated linked
+worktree, since direct subprocess git bypasses those guards.
 """
 
 from __future__ import annotations

@@ -60,9 +60,9 @@ def commit(cwd: Path, name: str, text: str, message: str) -> None:
 
 
 @pytest.fixture
-def repo(tmp_path):
-    """main has advanced past the point where `feature` branched."""
-    root = tmp_path / "repo"
+def clone(tmp_path):
+    """A repo's shared MAIN clone, checked out on `main`, with `feature` behind it."""
+    root = tmp_path / "clone"
     root.mkdir()
     git(root, "init", "-q")
     commit(root, "shared.txt", "line1\nline2\nline3\n", "base")
@@ -70,15 +70,21 @@ def repo(tmp_path):
     commit(root, "feature.txt", "feature work\n", "feature change")
     git(root, "checkout", "-q", "main")
     commit(root, "other.txt", "main work\n", "main change")
-    git(root, "checkout", "-q", "feature")
     return root
+
+
+@pytest.fixture
+def repo(tmp_path, clone):
+    """A dedicated linked worktree on `feature`; main has advanced past its fork point."""
+    wt = tmp_path / "wt"
+    git(clone, "worktree", "add", "-q", str(wt), "feature")
+    return wt
 
 
 def add_conflict(repo: Path) -> None:
     """main and feature both rewrite shared.txt line2 differently."""
-    git(repo, "checkout", "-q", "main")
-    commit(repo, "shared.txt", "line1\nMAIN line2\nline3\n", "main edits shared")
-    git(repo, "checkout", "-q", "feature")
+    clone = repo.parent / "clone"
+    commit(clone, "shared.txt", "line1\nMAIN line2\nline3\n", "main edits shared")
     commit(repo, "shared.txt", "line1\nFEATURE line2\nline3\n", "feature edits shared")
 
 
@@ -88,7 +94,12 @@ def add_conflict(repo: Path) -> None:
 def test_clean_rebase_finishes_and_verifies_in_git(repo):
     outcome = mf.attempt_integration(str(repo), "main", mf.MODE_REBASE)
     assert outcome.status == mf.DONE, outcome.summary
-    assert mf.verify_integration(str(repo), outcome.base_sha) is None
+    assert (
+        mf.verify_integration(
+            str(repo), outcome.base_sha, mf.MODE_REBASE, outcome.orig_head
+        )
+        is None
+    )
     # feature now sits on top of main, and history is linear.
     assert git(repo, "rev-parse", "HEAD~1") == git(repo, "rev-parse", "main")
     assert (repo / "other.txt").exists() and (repo / "feature.txt").exists()
@@ -110,7 +121,12 @@ def test_merge_mode_keeps_the_pushed_history_and_adds_a_merge_commit(repo):
     assert len(parents) == 2, "expected a merge commit"
     # The published commit is untouched: an ancestor, not rewritten.
     assert git(repo, "merge-base", "--is-ancestor", before, "HEAD") == ""
-    assert mf.verify_integration(str(repo), outcome.base_sha, mf.MODE_MERGE) is None
+    assert (
+        mf.verify_integration(
+            str(repo), outcome.base_sha, mf.MODE_MERGE, outcome.orig_head
+        )
+        is None
+    )
 
 
 def test_rebase_rewrites_history_where_merge_does_not(repo):
@@ -187,9 +203,12 @@ def test_merge_conflicts_brief_names_the_merge_finish_command(repo):
 
 
 def test_brief_is_bounded_by_its_budget(repo):
-    git(repo, "checkout", "-q", "main")
-    commit(repo, "big.txt", "".join(f"main {i}\n" for i in range(400)), "main big")
-    git(repo, "checkout", "-q", "feature")
+    commit(
+        repo.parent / "clone",
+        "big.txt",
+        "".join(f"main {i}\n" for i in range(400)),
+        "main big",
+    )
     commit(repo, "big.txt", "".join(f"feat {i}\n" for i in range(400)), "feature big")
     outcome = mf.attempt_integration(str(repo), "main", brief_budget=1500)
     assert outcome.status == mf.CONFLICTS
@@ -200,7 +219,9 @@ def test_brief_is_bounded_by_its_budget(repo):
 def test_verification_catches_unfinished_and_unresolved_integrations(repo):
     add_conflict(repo)
     outcome = mf.attempt_integration(str(repo), "main")
-    problem = mf.verify_integration(str(repo), outcome.base_sha)
+    problem = mf.verify_integration(
+        str(repo), outcome.base_sha, mf.MODE_REBASE, outcome.orig_head
+    )
     assert problem and ("in progress" in problem or "unmerged" in problem)
     # Resolve for real and continue: only now does it verify.
     (repo / "shared.txt").write_text("line1\nBOTH line2\nline3\n")
@@ -213,13 +234,21 @@ def test_verification_catches_unfinished_and_unresolved_integrations(repo):
         env={**__import__("os").environ, "GIT_EDITOR": "true"},
     )
     assert proc.returncode == 0, proc.stderr
-    assert mf.verify_integration(str(repo), outcome.base_sha) is None
+    assert (
+        mf.verify_integration(
+            str(repo), outcome.base_sha, mf.MODE_REBASE, outcome.orig_head
+        )
+        is None
+    )
 
 
 def test_verification_fails_when_head_lacks_the_base(repo):
     base_sha = git(repo, "rev-parse", "main")
     assert "does not contain the base" in (
-        mf.verify_integration(str(repo), base_sha) or ""
+        mf.verify_integration(
+            str(repo), base_sha, mf.MODE_REBASE, git(repo, "rev-parse", "HEAD")
+        )
+        or ""
     )
 
 
@@ -419,7 +448,7 @@ def test_a_model_that_claims_success_without_finishing_is_not_believed(
         )
     )
     assert result.ok is False
-    assert "did not verify" in result.error and "aborted" in result.error
+    assert "did not verify" in result.error and "undid" in result.error
     assert (
         git(repo, "rev-parse", "HEAD") == head
         and mf.operation_in_progress(str(repo)) == ""
@@ -523,9 +552,11 @@ def cli(tmp_path, monkeypatch, capsys):
 
     def run(*argv):
         rc = dispatch_role.main(["--role", "cicada", "--task", "t", "--json", *argv])
-        out = capsys.readouterr().out
-        return rc, json.loads(out)
+        captured = capsys.readouterr()
+        run.stderr = captured.err
+        return rc, json.loads(captured.out)
 
+    run.stderr = ""
     return run
 
 
@@ -560,3 +591,263 @@ def test_cli_clean_rebase_reports_the_deterministic_provider(
     assert envelope["provider"] == "deterministic"
     assert envelope["attempted_providers"] == ["deterministic"]
     assert envelope["local_failure"] == ""
+
+
+# ── security: never mutate a shared main clone ──────────────────────────────
+# sibling_repo_worktree_guard refuses this on every tool path; direct subprocess
+# git does not pass through that hook, so the module must refuse for itself.
+
+
+@pytest.fixture
+def solo_main_clone(tmp_path):
+    """A main clone sitting ON the branch to integrate, so a rebase would rewrite it."""
+    root = tmp_path / "solo"
+    root.mkdir()
+    git(root, "init", "-q")
+    commit(root, "shared.txt", "line1\nline2\nline3\n", "base")
+    git(root, "checkout", "-q", "-b", "feature")
+    commit(root, "feature.txt", "feature work\n", "feature change")
+    git(root, "checkout", "-q", "main")
+    commit(root, "other.txt", "main work\n", "main change")
+    git(root, "checkout", "-q", "feature")
+    return root
+
+
+@pytest.mark.parametrize("mode", [mf.MODE_REBASE, mf.MODE_MERGE])
+def test_integration_in_a_shared_main_clone_is_refused_with_no_mutation(
+    solo_main_clone, mode
+):
+    head = git(solo_main_clone, "rev-parse", "HEAD")
+    outcome = mf.attempt_integration(str(solo_main_clone), "main", mode)
+    assert outcome.status == mf.REFUSED and "linked worktree" in outcome.summary
+    assert git(solo_main_clone, "rev-parse", "HEAD") == head
+    assert git(solo_main_clone, "status", "--porcelain") == ""
+
+
+def test_a_linked_worktree_of_the_same_repo_is_allowed(clone, repo):
+    assert mf.attempt_integration(str(repo), "main").status == mf.DONE
+    assert git(clone, "rev-parse", "--abbrev-ref", "HEAD") == "main", (
+        "the shared clone is untouched"
+    )
+
+
+def test_abort_in_a_shared_main_clone_does_nothing(solo_main_clone):
+    proc = subprocess.run(
+        ["git", "rebase", "main"], cwd=solo_main_clone, capture_output=True, text=True
+    )
+    assert (
+        proc.returncode == 0
+    )  # this test creates the state directly, bypassing the module
+    git(solo_main_clone, "checkout", "-q", "-B", "feature2", "HEAD~1")
+    commit(solo_main_clone, "shared.txt", "line1\nA\nline3\n", "a")
+    git(solo_main_clone, "checkout", "-q", "main")
+    commit(solo_main_clone, "shared.txt", "line1\nB\nline3\n", "b")
+    git(solo_main_clone, "checkout", "-q", "feature2")
+    subprocess.run(["git", "rebase", "main"], cwd=solo_main_clone, capture_output=True)
+    assert mf.operation_in_progress(str(solo_main_clone)) == "rebase"
+    assert mf.abort_integration(str(solo_main_clone)) == ""
+    assert mf.operation_in_progress(str(solo_main_clone)) == "rebase", (
+        "must not abort a shared clone"
+    )
+
+
+def test_generators_refuse_a_shared_main_clone_and_a_non_repository(
+    solo_main_clone, tmp_path
+):
+    script = "import pathlib; pathlib.Path('gen.out').write_text('x')"
+    command = f'{sys.executable} -c "{script}"'
+    outcome = mf.run_generators(str(solo_main_clone), [command])
+    assert outcome.status == mf.REFUSED and "linked worktree" in outcome.summary
+    assert not (solo_main_clone / "gen.out").exists()
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert mf.run_generators(str(plain), [command]).status == mf.REFUSED
+    assert not (plain / "gen.out").exists()
+
+
+def test_dispatch_in_a_shared_main_clone_never_reaches_git_or_a_model(
+    solo_main_clone, monkeypatch, no_events
+):
+    calls = _model_must_not_run(monkeypatch)
+    head = git(solo_main_clone, "rev-parse", "HEAD")
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "x",
+            cwd=str(solo_main_clone),
+            work_class="rebase",
+            integration_base="main",
+        )
+    )
+    assert not result.ok and calls == [] and "linked worktree" in result.error
+    assert git(solo_main_clone, "rev-parse", "HEAD") == head
+
+
+# ── arch: verification must prove the branch's own work survived ────────────
+
+
+def _finish_by_discarding_the_branch(repo: Path, base_sha: str, mode: str) -> None:
+    """What a bad "resolution" does: abort the integration, then reset to the base."""
+    subprocess.run(["git", mode, "--abort"], cwd=repo, capture_output=True)
+    git(repo, "reset", "-q", "--hard", base_sha)
+
+
+def _finish_with_a_genuine_resolution(repo: Path, mode: str) -> None:
+    (repo / "shared.txt").write_text("line1\nBOTH line2\nline3\n")
+    git(repo, "add", "shared.txt")
+    child = {**__import__("os").environ, "GIT_EDITOR": "true"}
+    argv = (
+        ["git", "rebase", "--continue"]
+        if mode == "rebase"
+        else ["git", "commit", "--no-edit"]
+    )
+    proc = subprocess.run(argv, cwd=repo, capture_output=True, text=True, env=child)
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("mode", [mf.MODE_REBASE, mf.MODE_MERGE])
+def test_a_reset_to_base_resolution_fails_verification(repo, mode):
+    add_conflict(repo)
+    outcome = mf.attempt_integration(str(repo), "main", mode)
+    assert outcome.status == mf.CONFLICTS
+    _finish_by_discarding_the_branch(repo, outcome.base_sha, mode)
+    # The four old checks all pass here: nothing in progress, nothing unmerged, clean, base contained.
+    problem = mf.verify_integration(
+        str(repo), outcome.base_sha, mode, outcome.orig_head
+    )
+    assert problem and "branch's own work" in problem
+
+
+@pytest.mark.parametrize("mode", [mf.MODE_REBASE, mf.MODE_MERGE])
+def test_a_genuine_resolution_passes_verification(repo, mode):
+    """A resolution changes the conflicted commit's patch, so patch-ids alone would reject it."""
+    add_conflict(repo)
+    outcome = mf.attempt_integration(str(repo), "main", mode)
+    _finish_with_a_genuine_resolution(repo, mode)
+    assert (
+        mf.verify_integration(str(repo), outcome.base_sha, mode, outcome.orig_head)
+        is None
+    )
+
+
+@pytest.mark.parametrize("mode", [mf.MODE_REBASE, mf.MODE_MERGE])
+def test_resolving_a_conflict_by_taking_the_base_side_is_flagged(repo, mode):
+    """The branch's other work survives, but its edit to the conflicted file is gone."""
+    add_conflict(repo)
+    outcome = mf.attempt_integration(str(repo), "main", mode)
+    (repo / "shared.txt").write_text(
+        "line1\nMAIN line2\nline3\n"
+    )  # exactly base's version
+    git(repo, "add", "shared.txt")
+    child = {**__import__("os").environ, "GIT_EDITOR": "true"}
+    argv = (
+        ["git", "rebase", "--continue"]
+        if mode == "rebase"
+        else ["git", "commit", "--no-edit"]
+    )
+    subprocess.run(argv, cwd=repo, capture_output=True, env=child)
+    problem = mf.verify_integration(
+        str(repo), outcome.base_sha, mode, outcome.orig_head
+    )
+    assert problem and "shared.txt" in problem
+
+
+def test_a_clean_integration_records_the_original_tip_and_verifies(repo):
+    before = git(repo, "rev-parse", "HEAD")
+    outcome = mf.attempt_integration(str(repo), "main")
+    assert outcome.orig_head == before
+    assert (
+        mf.verify_integration(
+            str(repo), outcome.base_sha, mf.MODE_REBASE, outcome.orig_head
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("mode", [mf.MODE_REBASE, mf.MODE_MERGE])
+def test_dispatch_rejects_a_model_that_discards_the_branch_and_restores_it(
+    repo, monkeypatch, no_events, mode
+):
+    add_conflict(repo)
+    original = git(repo, "rev-parse", "HEAD")
+    base_sha = git(repo, "rev-parse", "main")
+
+    async def discarder(skill, prompt, **kwargs):
+        _finish_by_discarding_the_branch(repo, base_sha, mode)
+        return SkillResult(skill, True, 0, "done", "", provider="claude-local")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", discarder)
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "x",
+            cwd=str(repo),
+            work_class="rebase",
+            integration_base="main",
+            integration_mode=mode,
+        )
+    )
+    assert result.ok is False and "did not verify" in result.error
+    assert git(repo, "rev-parse", "HEAD") == original, "the branch is put back as found"
+    assert (repo / "feature.txt").exists()
+
+
+def test_a_model_that_raises_still_leaves_the_worktree_as_found(
+    repo, monkeypatch, no_events
+):
+    add_conflict(repo)
+    original = git(repo, "rev-parse", "HEAD")
+
+    async def crashes(skill, prompt, **kwargs):
+        raise asyncio.TimeoutError("model run cancelled")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", crashes)
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(
+            dispatch_role.dispatch(
+                "cicada",
+                "x",
+                cwd=str(repo),
+                work_class="rebase",
+                integration_base="main",
+            )
+        )
+    assert mf.operation_in_progress(str(repo)) == ""
+    assert git(repo, "rev-parse", "HEAD") == original
+
+
+# ── generators report only what they changed ────────────────────────────────
+
+
+def test_generator_refuses_a_worktree_that_already_has_changes(repo):
+    (repo / "stray.txt").write_text("not the generator's\n")
+    outcome = mf.run_generators(str(repo), ["true"])
+    assert outcome.status == mf.REFUSED and "stray.txt" in outcome.summary
+
+
+# ── CLI: operator-visible failure report, and --integration on its own ──────
+
+
+def test_cli_reports_a_local_failure_on_stdout_json_and_stderr(cli, repo, monkeypatch):
+    async def ran_on_frontier(skill, prompt, **kwargs):
+        return SkillResult(
+            skill,
+            True,
+            0,
+            "ok",
+            "",
+            provider="claude",
+            local_failure="local_run_failed:autocompact_thrash",
+        )
+
+    monkeypatch.setattr(dispatch_role, "run_skill", ran_on_frontier)
+    rc, envelope = cli("--work-class", "rebase")
+    assert (
+        rc == 0 and envelope["local_failure"] == "local_run_failed:autocompact_thrash"
+    )
+    assert "claude-local failed (local_run_failed:autocompact_thrash)" in cli.stderr
+
+
+def test_cli_rejects_integration_without_rebase_onto(cli):
+    rc, envelope = cli("--work-class", "rebase", "--integration", "merge", "--cwd", ".")
+    assert rc != 0 and "--integration requires --rebase-onto" in envelope["reason"]

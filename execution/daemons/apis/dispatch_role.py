@@ -67,8 +67,10 @@ merge`` makes a merge commit, which is the right method for a branch that is
 already pushed and reviewed. A clean result is verified against the repository
 and reported with NO model call. Only when git stops on conflicts is a model
 invoked, with a brief scoped to the conflicted hunks; its result is verified the
-same way, and a failed run aborts the operation so the worktree is left as it
-was found. ``--work-class regenerate_generated_files --regenerate-cmd CMD`` (repeatable)
+same way, and a failed run is undone so the worktree is left as it was found. Both
+refuse anything but a dedicated linked worktree (never a shared main clone), and
+verification proves the branch's own work survived, not only that the base is in
+HEAD. ``--work-class regenerate_generated_files --regenerate-cmd CMD`` (repeatable)
 runs the named generator directly and reports the changed files, also with no
 model call. Without those flags the class runs on the model path as before.
 
@@ -215,6 +217,9 @@ from skill_runner import (  # noqa: E402
     run_skill,
 )
 
+# A pseudo-provider for runs that made no model call: it spends nothing, so a
+# per-provider budget or cooldown consumer must treat it as "no spend", not as an
+# unknown provider.
 DETERMINISTIC_PROVIDER = "deterministic"
 
 
@@ -373,20 +378,31 @@ async def _integrate_then_model(
         + "authoritative):\n"
         + task[:2000]
     )
-    result = await run_skill(role, prompt, **run_kwargs)
+    try:
+        result = await run_skill(role, prompt, **run_kwargs)
+    except BaseException:
+        # A crash or cancellation mid-run must not leave the integration open.
+        await asyncio.to_thread(mechanical_first.restore_original, workdir, outcome.orig_head)
+        raise
     if result.ok:
         problem = await asyncio.to_thread(
-            mechanical_first.verify_integration, workdir, outcome.base_sha, mode
+            mechanical_first.verify_integration,
+            workdir,
+            outcome.base_sha,
+            mode,
+            outcome.orig_head,
         )
         if problem:
             result.ok = False
             result.error = f"the model reported success but the integration did not verify: {problem}"
     if not result.ok:
-        aborted = await asyncio.to_thread(mechanical_first.abort_integration, workdir)
-        if aborted:
+        undone = await asyncio.to_thread(
+            mechanical_first.restore_original, workdir, outcome.orig_head
+        )
+        if undone:
             result.error = (
-                f"{result.error or 'dispatch failed'} (the in-progress {aborted} was "
-                "aborted; the worktree is as it was found)"
+                f"{result.error or 'dispatch failed'} (undid {undone}; the worktree is as it "
+                "was found)"
             )
     result.attempted_providers = (DETERMINISTIC_PROVIDER, *result.attempted_providers)
     return result
@@ -643,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--integration",
         choices=list(mechanical_first.MODES),
-        default=mechanical_first.MODE_REBASE,
+        default=None,
         help=(
             "How --rebase-onto integrates: 'rebase' (default) or 'merge' for a "
             "merge commit — use merge for a branch that is already pushed and "
@@ -773,6 +789,8 @@ def main(argv: list[str] | None = None) -> int:
         return _usage_failure(
             emitter, "--regenerate-cmd requires --work-class regenerate_generated_files"
         )
+    if args.integration and not args.rebase_onto:
+        return _usage_failure(emitter, "--integration requires --rebase-onto")
     if args.rebase_onto and not args.cwd:
         return _usage_failure(
             emitter, "--rebase-onto requires --cwd (the worktree to integrate in)"
@@ -858,7 +876,7 @@ def main(argv: list[str] | None = None) -> int:
                 action_class=args.action_class,
                 model=args.model,
                 integration_base=args.rebase_onto,
-                integration_mode=args.integration,
+                integration_mode=args.integration or mechanical_first.MODE_REBASE,
                 regenerate_commands=args.regenerate_cmd,
             )
         )

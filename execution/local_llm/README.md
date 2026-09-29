@@ -115,7 +115,9 @@ The provider is off until `~/.config/ateles/claude-local.json` (or the path in
 `local_provider.MECHANICAL_WORK_CLASSES` can be enabled. A run with an eligible
 `work_class` tries `claude-local` first. A local failure falls over only to a
 frontier provider that has a model bound to the cheapest frontier tier
-(`mechanical`) in the `vendor_binding`, pinned to that model; with none bound the
+(`mechanical`) in the `vendor_binding` (`~/.config/ateles/vendor-binding.json`, or
+the file named by `APIS_VENDOR_BINDING_FILE`), pinned to that model; the operator
+ruled 2026-09-29 that this is Claude Haiku (`{"claude": {"mechanical": "haiku"}}`); with none bound the
 run is refused, never replayed on a provider's default model. Either way the
 failure and its reason (for example `local_run_failed:autocompact_thrash`) are
 recorded as a `provider_failover` harness_event and on the result's
@@ -142,5 +144,11 @@ python3 execution/daemons/apis/dispatch_role.py --role cicada \
   --work-class regenerate_generated_files --regenerate-cmd "python3 scripts/gen.py" \
   --cwd <worktree> --task "Regenerate the generated files."
 ```
+
+The deterministic path refuses anything but a dedicated linked worktree (never a
+shared main clone), because direct git bypasses the PreToolUse guards that
+protect model tool calls; it verifies that the branch's own work survived, not
+only that the base is in HEAD; and a `--regenerate-cmd` run refuses a worktree
+that already has changes, so its changed-file list is only the generator's.
 
 Without `--rebase-onto` / `--regenerate-cmd` the class runs on the model path.

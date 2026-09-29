@@ -2738,7 +2738,8 @@ def _refuse_local_fallback(
         f"{local_provider.LOCAL_PROVIDER} failed ({reason}) and the frontier "
         f"fallback was refused: the vendor_binding binds no "
         f"{LOCAL_FALLBACK_TIER!r}-tier model for {named}. Bind one to allow a "
-        "cheapest-tier fallback."
+        "cheapest-tier fallback: add e.g. {\"claude\": {\"mechanical\": \"haiku\"}} to "
+        "~/.config/ateles/vendor-binding.json (or the file named by APIS_VENDOR_BINDING_FILE)."
     )
     log.error(f"[apis] {skill} dispatch refused — {error}")
     if last_result is None:
