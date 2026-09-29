@@ -2,8 +2,9 @@
 
 Each daemon has its own ES256 P-256 keypair stored in `ateles-private/keys/`.
 Two signers use it. `lib/daemon_runtime/aauth_httpsig.py` (and the node helper
-behind `neotoma_signed.signed_request`) sign RFC 9421 requests that Neotoma
-verifies and attributes to the daemon (`agent_sub`). `lib/daemon_runtime/aauth_signer.py`
+behind `neotoma_signed.signed_request`) sign RFC 9421 requests for which Neotoma
+verifies key possession and records the sub the request claims as `agent_sub`
+(a self-asserted sub; see "What verification proves" below). `lib/daemon_runtime/aauth_signer.py`
 attaches an `X-AAuth-Token` JWT that Neotoma does not verify today, so it gives
 no verified attribution. See "What Neotoma verifies today" below.
 
@@ -25,9 +26,11 @@ File mode: `0600`
 ```
 
 The `sub` value is `<genus>@ateles-swarm`. When a request is signed on the
-RFC 9421 path and Neotoma verifies it, Neotoma records the `sub` as the
-`agent_sub` provenance field. The JWT-only `aauth_signer.py` path is not verified
-by Neotoma and does not produce a verified `agent_sub`.
+RFC 9421 path and Neotoma verifies key possession, Neotoma records the `sub` the
+request claims as the `agent_sub` provenance field. That value is a self-asserted
+claim on a request whose key possession was proven, not a proof of which agent
+sent it. The JWT-only `aauth_signer.py` path is not verified by Neotoma and does
+not produce an `agent_sub`.
 
 ## Legacy format (still supported)
 
@@ -152,8 +155,11 @@ rotation (see below), because `agent_identity()` reads only `<name>.jwk.json`.
    `--force` destroys the old private key irrecoverably; there is no undo.
 1. Run `mint_daemon_keypair.py --name <daemon>` — this writes `<name>.jwk.json`.
    If a `<name>.jwk.json` already exists (rotating a canonical key), add
-   `--force`. An unpinned grant matches `(sub, iss)` (no `match_thumbprint`), so
-   a rotation does not need a new grant; still run the check (step 3 of the order
+   `--force`. A grant that matches on the sub (`match_sub`, with or without
+   `match_iss` and with or without a `match_thumbprint`; see "What each grant
+   shape admits" in `docs/aauth.md`) admits the new key too, so a rotation does
+   not need a new grant. A **thumbprint-only** grant would not: it needs the new
+   key's thumbprint; still run the check (step 3 of the order
    above) and then the verify step.
 2. JWKS: **nothing to do today.** No JWKS is published for daemon keys and
    Neotoma verifies from the inline key, so there is nothing to add. Once daemon
@@ -167,9 +173,22 @@ rotation (see below), because `agent_identity()` reads only `<name>.jwk.json`.
 Rotate keypairs at least quarterly or immediately on suspected compromise.
 
 If the **sub itself is suspect** (compromise, or the key may have been copied),
-rotating the key is not enough: an unpinned grant admits any key that presents
-the same `(sub, iss)`. Revoke or replace the `agent_grant` for that sub (via the
-operator's Neotoma session), not just the key.
+rotating the key is not enough, and neither is replacing the grant with another
+one that matches on the same sub: a grant that matches on `match_sub` (alone, with
+`match_iss`, or together with a `match_thumbprint`) admits **any key that claims
+the sub**, so the old (compromised) key is readmitted. Table:
+"What each grant shape admits" in `docs/aauth.md`. To cut the old key off:
+
+1. Revoke the old `agent_grant` (operator's Neotoma session). Operation names, from
+   Neotoma's `openapi.yaml`: `listAgentGrants` (each grant's `grant_id`) then
+   `revokeAgentGrant`, whose path parameter is `id`. With the CLI the shape is
+   `neotoma request --operation revokeAgentGrant --path '{"id": "<grant_id>"}'`.
+   (Shape taken from the CLI source and `openapi.yaml`; not run against a live
+   instance, so check it on a non-critical grant first.)
+2. Then either move the role to a **new sub** (new key, new grant, and update
+   whatever names the old sub), or register a **thumbprint-only** grant
+   (`match_thumbprint` set, no `match_sub`) for the fresh key, which admits only
+   that key.
 
 ## JWKS endpoint (planned)
 
@@ -198,10 +217,12 @@ their public key inline (see below).
 - **What verification proves.** It proves the sender holds the private key
   matching the public key the request carries. It does **not** prove who the
   agent is: `sub` and `iss` are self-asserted (Neotoma decodes the agent-token JWT
-  without checking the JWT's own signature and takes the key from its `cnf.jwk`),
-  and grants match on `(sub, iss)`. Only a grant's optional `match_thumbprint` ties
-  an identity to a specific key; an unpinned grant admits any ES256 key that
-  presents the matching `(sub, iss)`.
+  without checking the JWT's own signature and takes the key from its `cnf.jwk`).
+  What a grant then admits depends on its shape, and only a **thumbprint-only**
+  grant (no `match_sub`) ties admission to a specific key: a grant with
+  `match_sub` (with or without `match_iss`, and even together with a
+  `match_thumbprint`) admits any key that claims the sub. See "What each grant
+  shape admits" in `docs/aauth.md`, which is the single statement of this.
 - A daemon that only sends the JWT-only `X-AAuth-Token` is therefore **not
   verified** by Neotoma today.
 
