@@ -16,6 +16,7 @@ for the planted fake secret value.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -105,6 +106,7 @@ def fake_op_subprocess_run(monkeypatch, recorded_subprocess_calls):
     """
     item = FakeOpItem()
     written_templates: list[dict] = []
+    template_modes: list[int] = []
 
     def fake_run(
         argv, *, capture_output=None, text=None, timeout=None, stdin=None, **kwargs
@@ -113,15 +115,17 @@ def fake_op_subprocess_run(monkeypatch, recorded_subprocess_calls):
         if argv[1:3] == ["item", "get"]:
             return SimpleNamespace(returncode=0, stdout=item.as_json(), stderr="")
         if argv[1:3] == ["item", "edit"]:
-            if stdin is not None:
-                content = stdin.read()
-                if isinstance(content, bytes):
-                    content = content.decode("utf-8")
-                written_templates.append(json.loads(content))
+            # op reads --template from a FILE PATH (op 2.32 rejects "-"), so
+            # read the file while it still exists, and record its mode.
+            path = argv[argv.index("--template") + 1]
+            template_modes.append(os.stat(path).st_mode & 0o777)
+            with open(path, encoding="utf-8") as fh:
+                written_templates.append(json.load(fh))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"unexpected op invocation in test: {argv!r}")
 
     monkeypatch.setattr(rpk.subprocess, "run", fake_run)
+    fake_run.template_modes = template_modes
     return written_templates
 
 
@@ -160,11 +164,11 @@ def test_item_id_from_malformed_ref_raises():
 
 
 # ---------------------------------------------------------------------------
-# op_write_password_field — the piped-template contract
+# op_write_password_field — the template-file contract
 # ---------------------------------------------------------------------------
 
 
-def test_op_write_uses_stdin_template_not_cli_assignment(
+def test_op_write_uses_template_file_not_cli_assignment(
     fake_op_subprocess_run, recorded_subprocess_calls
 ):
     templates = fake_op_subprocess_run
@@ -182,10 +186,15 @@ def test_op_write_uses_stdin_template_not_cli_assignment(
             assert FAKE_NEW_OPENAI_KEY not in arg, (
                 f"secret value appeared in op argv (must be piped via stdin only): {argv!r}"
             )
-    # Confirm the edit call used --template - (stdin), not an assignment string.
+    # The edit call passes the template as a FILE PATH (op 2.32 rejects
+    # "--template -"), never as an assignment string, and the file is 0600.
     edit_calls = [c for c in recorded_subprocess_calls if c[1:3] == ["item", "edit"]]
     assert edit_calls, "no 'op item edit' call recorded"
-    assert "--template" in edit_calls[0] and "-" in edit_calls[0]
+    template_arg = edit_calls[0][edit_calls[0].index("--template") + 1]
+    assert template_arg != "-", "op 2.32 cannot read --template from stdin"
+    assert template_arg.endswith(".op-item.json")
+    assert rpk.subprocess.run.template_modes == [0o600]
+    assert not os.path.exists(template_arg), "template file must be removed after the edit"
 
 
 def test_op_write_raises_when_field_not_found(fake_op_subprocess_run):

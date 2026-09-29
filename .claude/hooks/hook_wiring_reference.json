@@ -8,6 +8,11 @@
     ],
     [
       "PreToolUse",
+      "credential_read_guard.py",
+      "Bash|Read|Grep|Glob"
+    ],
+    [
+      "PreToolUse",
       "gh_identity_guard.py",
       "Edit|Write|NotebookEdit|Bash"
     ],
