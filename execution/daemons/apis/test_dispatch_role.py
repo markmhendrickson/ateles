@@ -159,6 +159,52 @@ def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
     assert seen["model"] is None
 
 
+def test_cli_escalation_flags_reach_run_skill_and_raise_the_tier(
+    monkeypatch, tmp_path
+) -> None:
+    """The bootstrap review runner passes measured facts as flags; they must
+    arrive as `EscalationSignals` on run_skill, and raise a mid-tier lens to
+    top. Round 1 with no facts passes no signals at all."""
+    import model_tiering
+
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(policy))
+    seen: list[dict] = []
+
+    async def _capture(skill, prompt, **kwargs):
+        seen.append(kwargs)
+        return SkillResult(skill, True, 0, "out", "", provider="claude")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+    monkeypatch.setattr(dispatch_role, "_preflight", lambda *a, **k: None)
+    base = ["--role", "pavo", "--task", "review", "--action-class", "lens_review:pm"]
+
+    dispatch_role.main(base)
+    assert seen[-1]["escalation_signals"] is None
+    assert model_tiering.resolve_tier(
+        "lens_review:pm", signals=seen[-1]["escalation_signals"]
+    ).tier == "mid"
+
+    dispatch_role.main(base + ["--review-round", "2"])
+    resolved = model_tiering.resolve_tier(
+        "lens_review:pm", signals=seen[-1]["escalation_signals"]
+    )
+    assert resolved.tier == "top" and resolved.source == "escalated"
+
+    dispatch_role.main(base + ["--changed-file", "execution/hooks/x.py"])
+    assert "touches_security_sensitive_path" in model_tiering.resolve_tier(
+        "lens_review:pm", signals=seen[-1]["escalation_signals"]
+    ).escalation_reasons
+
+    dispatch_role.main(base + ["--diff-lines", "900", "--prior-blocking-finding"])
+    reasons = model_tiering.resolve_tier(
+        "lens_review:pm", signals=seen[-1]["escalation_signals"]
+    ).escalation_reasons
+    assert "prior_blocking_finding" in reasons
+    assert any(r.startswith("diff_lines_changed=") for r in reasons)
+
+
 @pytest.fixture
 def captured_codex_dispatches(fake_repo, monkeypatch):
     """Capture real ``run_skill`` subprocess boundaries without launching Codex."""

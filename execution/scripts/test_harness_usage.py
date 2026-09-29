@@ -58,3 +58,32 @@ def test_malformed_window_is_rejected() -> None:
         harness_usage.main(["usage", "claude", "--window", "weekly=lots"])
     with pytest.raises(SystemExit):
         harness_usage.main(["exhausted", "claude", "--until", "next tuesday"])
+
+
+def test_tiers_command_reports_dispatch_counts_per_tier(capsys, monkeypatch, tmp_path) -> None:
+    """`harness_usage.py tiers` reads the ledger every dispatch writes, so the
+    per-tier spend can be read against the weekly budget."""
+    import model_tiering
+
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "ledger.jsonl"))
+    for tier, klass in (("top", "build"), ("mid", "lens_review:pm"), ("mid", "lens_review:qa")):
+        model_tiering.record_dispatch(
+            skill="x", provider="claude",
+            resolved=model_tiering.ResolvedTier(tier, "policy", klass), model="m",
+        )
+    model_tiering.record_dispatch(skill="x", provider="claude", resolved=None, model=None)
+
+    assert harness_usage.main(["tiers"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total"] == 4
+    assert report["by_tier"] == {"top": 1, "mid": 2, "untiered": 1}
+    assert report["by_class"]["lens_review:pm"] == {"mid": 1}
+
+    assert harness_usage.main(["tiers", "--since-hours", "1"]) == 0
+    assert json.loads(capsys.readouterr().out)["total"] == 4
+
+
+def test_tiers_command_on_a_missing_ledger_is_an_empty_report(capsys, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "absent.jsonl"))
+    assert harness_usage.main(["tiers"]) == 0
+    assert json.loads(capsys.readouterr().out)["total"] == 0
