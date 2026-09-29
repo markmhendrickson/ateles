@@ -2847,6 +2847,67 @@ class TestCrossHarnessRouting:
         assert "OPENAI_API_KEY" not in child
         assert "CURSOR_API_KEY" not in child
 
+    def test_generation_vendor_keys_absent_from_subscription_only_env(
+        self, monkeypatch
+    ) -> None:
+        """Media-generation credentials in the daemon env never reach an agent.
+
+        Asserted by key ABSENCE in the returned dict, not by denylist
+        membership. Red when the scrub is reverted: the keys pass through and
+        every assertion below fails.
+        """
+        keys = {
+            "RECRAFT_API_KEY": "recraft-metered",
+            "GEMINI_API_KEY": "google-image-metered",
+            "GOOGLE_API_KEY": "google-metered",
+            "VEO_API_KEY": "veo-metered",
+            "GEMINI_API_KEY_2": "a-sibling-key-nobody-named",  # prefix rule
+        }
+        for name, value in keys.items():
+            monkeypatch.setenv(name, value)
+        child = skill_runner._subscription_only_env()
+        for name in keys:
+            assert name not in child, name
+        assert not any(value in child.values() for value in keys.values())
+
+    def test_generation_keys_are_stripped_even_under_the_metered_override(
+        self, monkeypatch
+    ) -> None:
+        # APIS_ALLOW_METERED_HARNESS releases harness keys only, never these.
+        monkeypatch.setenv("APIS_ALLOW_METERED_HARNESS", "1")
+        monkeypatch.setenv("GEMINI_API_KEY", "google-image-metered")
+        child = skill_runner._subscription_only_env(
+            {"RECRAFT_API_KEY": "smuggled-through-env-extra"}
+        )
+        assert "GEMINI_API_KEY" not in child
+        assert "RECRAFT_API_KEY" not in child
+
+    def test_unrelated_google_keys_are_not_collateral(self, monkeypatch) -> None:
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "maps-key")
+        assert skill_runner._subscription_only_env()["GOOGLE_MAPS_API_KEY"] == "maps-key"
+
+    def test_dispatched_child_is_marked_so_the_capability_client_refuses(
+        self, monkeypatch
+    ) -> None:
+        from lib.credential_scrub import AGENT_CHILD_MARKER_ENV
+
+        monkeypatch.delenv(AGENT_CHILD_MARKER_ENV, raising=False)
+        assert skill_runner._subscription_only_env()[AGENT_CHILD_MARKER_ENV] == "1"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "STAGED: _subscription_only_env is still a denylist, so a metered "
+            "key nobody has named passes through. The standing control is an "
+            "allowlist child environment (follow-up issue). strict=True: when "
+            "the allowlist lands this XPASSes and must be un-marked, never "
+            "deleted."
+        ),
+    )
+    def test_unnamed_future_metered_key_is_scrubbed(self, monkeypatch) -> None:
+        monkeypatch.setenv("SOME_FUTURE_VENDOR_API_KEY", "future-metered")
+        assert "SOME_FUTURE_VENDOR_API_KEY" not in skill_runner._subscription_only_env()
+
     def test_cursor_headless_login_failure_is_safe_to_fail_over(self) -> None:
         assert (
             skill_runner._provider_failure_kind(
@@ -4432,3 +4493,664 @@ class TestGateOwnerFailoverToClaude:
         assert result.ok
         assert result.provider == "cursor"
         assert attempted == ["cursor"]
+
+
+# ── Model tiering (operator ruling 2026-09-29, model_tiering.py) ────────────
+
+
+class TestModelTieringProviderCommandParity:
+    """Cross-surface parity: each provider's natural call shape, with `model`."""
+
+    def test_claude_model_before_append_system_prompt(self) -> None:
+        cmd, _ = skill_runner._provider_command(
+            "claude", "/bin/claude", "SYSTEM", "WORK", cwd="/repo",
+            model="claude-opus-5-thinking-high",
+        )
+        assert cmd == [
+            "/bin/claude",
+            "--print",
+            "--model",
+            "claude-opus-5-thinking-high",
+            "--append-system-prompt",
+            "SYSTEM",
+        ]
+
+    def test_claude_no_model_flag_when_model_is_none(self) -> None:
+        """claude stays on its ambient session model when no tier is bound —
+        model_tiering.py's module docstring explains why: pinning an alias
+        risks a downgrade from the top subscription model already in use."""
+        cmd, _ = skill_runner._provider_command(
+            "claude", "/bin/claude", "SYSTEM", "WORK", cwd="/repo",
+        )
+        assert "--model" not in cmd
+
+    def test_codex_model_directly_after_exec(self) -> None:
+        cmd, stdin = skill_runner._provider_command(
+            "codex", "/bin/codex", "SYSTEM", "WORK", cwd="/repo",
+            model="gpt-5.6-sol-high",
+        )
+        assert cmd[:4] == ["/bin/codex", "exec", "--model", "gpt-5.6-sol-high"]
+        assert "--sandbox" in cmd
+        assert stdin is not None
+        assert b"SYSTEM" in stdin and b"WORK" in stdin
+
+    def test_codex_no_model_flag_when_model_is_none(self) -> None:
+        cmd, _ = skill_runner._provider_command(
+            "codex", "/bin/codex", "SYSTEM", "WORK", cwd="/repo",
+        )
+        assert "--model" not in cmd
+
+    def test_cursor_model_before_workspace(self) -> None:
+        cmd, stdin = skill_runner._provider_command(
+            "cursor", "/bin/cursor-agent", "SYSTEM", "WORK", cwd="/repo",
+            model="claude-sonnet-5-thinking-high",
+        )
+        model_index = cmd.index("--model")
+        workspace_index = cmd.index("--workspace")
+        assert model_index < workspace_index
+        assert cmd[model_index + 1] == "claude-sonnet-5-thinking-high"
+        # Composite prompt stays last — existing test asserts cmd[-1].
+        assert "SYSTEM" in cmd[-1]
+        assert "WORK" in cmd[-1]
+        assert stdin is None
+
+    def test_cursor_no_model_flag_when_model_is_none(self) -> None:
+        cmd, _ = skill_runner._provider_command(
+            "cursor", "/bin/cursor-agent", "SYSTEM", "WORK", cwd="/repo",
+        )
+        assert "--model" not in cmd
+
+
+class TestModelTieringDispatch:
+    """Effect tests: the resolved model reaches the child argv AND the
+    persisted harness_event — not merely that model_tiering resolves a tier
+    in isolation (policy `fixed_means_behavior_verified_not_contract_accepted`,
+    ent_db0b7855d47012084477fb00)."""
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _fake_exec_capturing(self, captured: dict):
+        async def fake_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["env"] = dict(kwargs.get("env", {}))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        return fake_exec
+
+    @patch("skill_runner.AgentLoader")
+    def test_explicit_model_override_reaches_argv(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """An explicit `model=` override (no action_class needed) reaches the
+        real child argv end to end."""
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        captured: dict = {}
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing(captured),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "pavo", "work prompt", role="pavo", task_entity_id="ent_abc",
+                    model="claude-opus-5-thinking-high",
+                )
+            )
+
+        assert result.ok
+        assert "--model" in captured["cmd"]
+        assert (
+            captured["cmd"][captured["cmd"].index("--model") + 1]
+            == "claude-opus-5-thinking-high"
+        )
+
+    @patch("skill_runner.AgentLoader")
+    def test_action_class_resolves_tier_and_model_reaches_argv(
+        self, MockLoader, monkeypatch
+    ) -> None:
+        """End-to-end: action_class -> action_policy -> tier -> vendor_binding
+        -> model -> real child argv. No 'auto' anywhere in the command."""
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        captured: dict = {}
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv(
+            "APIS_ACTION_POLICY", '{"lens_review:security": "top"}'
+        )
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING",
+            '{"claude": {"top": "claude-opus-5-thinking-high"}}',
+        )
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing(captured),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "falco", "work prompt", role="falco", task_entity_id="ent_abc",
+                    action_class="lens_review:security",
+                )
+            )
+
+        assert result.ok
+        assert "--model" in captured["cmd"]
+        model_value = captured["cmd"][captured["cmd"].index("--model") + 1]
+        assert model_value == "claude-opus-5-thinking-high"
+        assert "auto" not in [c.lower() for c in captured["cmd"]]
+
+    @patch("skill_runner.AgentLoader")
+    def test_action_class_with_no_action_class_leaves_argv_unchanged(
+        self, MockLoader, monkeypatch
+    ) -> None:
+        """action_class=None (every call site that predates this) must not
+        add a --model flag — exact prior behaviour, no regression."""
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        captured: dict = {}
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing(captured),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "pavo", "work prompt", role="pavo", task_entity_id="ent_abc",
+                )
+            )
+
+        assert result.ok
+        assert "--model" not in captured["cmd"]
+
+    @patch("skill_runner.AgentLoader")
+    def test_unbound_tier_refuses_without_spawning_a_child(
+        self, MockLoader, monkeypatch
+    ) -> None:
+        """A tier with no bound model for this provider must refuse loudly —
+        never fall back to the ambient default or a different tier's model."""
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "top"}')
+        # vendor_binding configured for claude, but with no "top" tier bound.
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING", '{"claude": {"mechanical": "cheap-model"}}'
+        )
+
+        spawn_called = False
+
+        async def fake_exec(*cmd, **kwargs):  # pragma: no cover - must not run
+            nonlocal spawn_called
+            spawn_called = True
+            raise AssertionError("child must not be spawned on an unbound tier")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event") as mock_write,
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc", action_class="build",
+                    provider="claude",
+                )
+            )
+
+        assert not spawn_called
+        assert not result.ok
+        assert "top" in result.error
+        assert "cheap-model" not in (result.error or "")
+        # A refusal is still recorded, so an operator can see why nothing ran.
+        mock_write.assert_called_once()
+        assert mock_write.call_args.kwargs["success"] == "false"
+
+    @patch("skill_runner.AgentLoader")
+    def test_persisted_harness_event_carries_resolved_tier(
+        self, MockLoader, monkeypatch
+    ) -> None:
+        """Effect at the HTTP boundary (skill_runner.urllib.request.urlopen,
+        never the wrapper function itself): the tiering decision reaches the
+        POSTed harness_event body on the success path."""
+        import json as _json
+
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING", '{"claude": {"mid": "claude-sonnet-5"}}'
+        )
+
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=None)
+        cm.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing({}),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner.urllib.request.urlopen", return_value=cm) as mock_urlopen,
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc", action_class="build",
+                )
+            )
+
+        assert result.ok
+        payload = _json.loads(mock_urlopen.call_args.args[0].data)
+        entity = payload["entities"][0]
+        assert entity["requested_tier"] == "mid"
+        assert entity["tier_action_class"] == "build"
+        assert entity["tier_source"] == "policy"
+        assert "model=claude-sonnet-5" in entity.get("output_summary", "")
+        assert entity["output_summary"].startswith("tiering=mid(policy) ")
+
+    @patch("skill_runner.AgentLoader")
+    def test_real_dispatch_logs_and_ledgers_tier_source_and_model(
+        self, MockLoader, monkeypatch, tmp_path, caplog
+    ) -> None:
+        """Effect through the real runner: a dispatch leaves
+        `tiering=<tier>(<source>) model=<model>` in the log AND one row in the
+        tier ledger the `harness_usage.py tiers` report reads."""
+        import json as _json
+        import logging
+
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        ledger = tmp_path / "tier-ledger.jsonl"
+        monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING", '{"claude": {"mid": "claude-sonnet-5"}}'
+        )
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing({}),
+            ),
+            patch("os.path.exists", return_value=False),
+            caplog.at_level(logging.INFO, logger="apis.skill_runner"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada", action_class="build",
+                )
+            )
+
+        assert result.ok
+        assert any(
+            "tiering=mid(policy) model=claude-sonnet-5" in r.getMessage()
+            for r in caplog.records
+        )
+        rows = [_json.loads(line) for line in ledger.read_text().splitlines()]
+        assert [(r["tier"], r["source"], r["model"], r["action_class"]) for r in rows] == [
+            ("mid", "policy", "claude-sonnet-5", "build")
+        ]
+
+    @patch("skill_runner.AgentLoader")
+    def test_real_dispatch_with_no_action_class_is_counted_untiered(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """A site that never names a class must be visible as `untiered`, so
+        the report shows how much still runs on the provider default."""
+        import json as _json
+
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        ledger = tmp_path / "tier-ledger.jsonl"
+        monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing({}),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            result = self._run(
+                skill_runner.run_skill("cicada", "work prompt", role="cicada")
+            )
+
+        assert result.ok
+        rows = [_json.loads(line) for line in ledger.read_text().splitlines()]
+        assert [(r["tier"], r["source"]) for r in rows] == [
+            ("untiered", "no_action_class")
+        ]
+
+    @patch("skill_runner.AgentLoader")
+    def test_failover_carries_the_same_action_class_to_the_next_provider(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """A dispatch that fails over from cursor to codex is tiered
+        identically on both — the tier is a property of the work, not of
+        which provider ends up running it."""
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM", '{"cursor": 1.0, "codex": 1.0}'
+        )
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
+        )
+        harness_router.reset_state()
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING",
+            '{"cursor": {"mid": "cursor-mid-model"}, '
+            '"codex": {"mid": "codex-mid-model"}}',
+        )
+
+        seen_action_classes: list[str | None] = []
+        seen_precomputed_tiers: list = []
+        real_run_once = skill_runner._run_skill_once
+
+        async def spy_run_once(*args, **kwargs):
+            seen_action_classes.append(kwargs.get("action_class"))
+            seen_precomputed_tiers.append(kwargs.get("precomputed_tier"))
+            if kwargs.get("provider") == "cursor":
+                return skill_runner.SkillResult(
+                    "cicada", False, None, "", "usage limit reached",
+                    error="cursor launch failed: capacity",
+                    provider="cursor",
+                )
+            return await real_run_once(*args, **kwargs)
+
+        with (
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing({}),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner._run_skill_once", side_effect=spy_run_once),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc", action_class="build",
+                )
+            )
+
+        assert result.ok
+        assert result.provider == "codex"
+        assert seen_action_classes == ["build", "build"]
+        # The SAME ResolvedTier object reaches both attempts — resolved once
+        # in run_skill, not re-derived per attempt.
+        assert seen_precomputed_tiers[0] is seen_precomputed_tiers[1]
+        assert seen_precomputed_tiers[0] is not None
+        assert seen_precomputed_tiers[0].tier == "mid"
+
+    @patch("skill_runner.AgentLoader")
+    def test_provider_without_a_bound_tier_is_skipped_not_fatal(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """vendor_binding binds the tier only on codex; cursor would otherwise
+        be tried first. The unbound provider must never be attempted — its
+        in-attempt UnboundTierError refusal is not a failover signal, so
+        reaching it would end the dispatch instead of running on codex."""
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM", '{"cursor": 1.0, "codex": 1.0}'
+        )
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
+        )
+        harness_router.reset_state()
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING", '{"codex": {"mid": "codex-mid-model"}}'
+        )
+        captured: dict = {}
+
+        with (
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing(captured),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc", action_class="build",
+                )
+            )
+
+        assert result.ok, result.error
+        assert result.provider == "codex"
+        assert result.attempted_providers == ("codex",)
+        cmd = captured["cmd"]
+        assert cmd[cmd.index("--model") + 1] == "codex-mid-model"
+
+    def _run_unbound_scenario(self, MockLoader, monkeypatch, tmp_path, *, providers, binding, **kwargs):
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", providers)
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM", '{"claude": 1.0, "cursor": 1.0, "codex": 1.0}'
+        )
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
+        )
+        harness_router.reset_state()
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
+        monkeypatch.setenv("APIS_VENDOR_BINDING", binding)
+        spawned: dict = {}
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing(spawned),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc", action_class="build", **kwargs,
+                )
+            )
+        return result, spawned
+
+    @patch("skill_runner.AgentLoader")
+    def test_gate_owning_run_with_unbound_claude_names_the_binding(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """A gate-owning run can only use claude. With the tier bound on codex
+        alone, the failure must name the missing vendor_binding entry, not
+        report claude as an ineligible (missing) binary."""
+        result, spawned = self._run_unbound_scenario(
+            MockLoader, monkeypatch, tmp_path,
+            providers="claude,codex",
+            binding='{"codex": {"mid": "codex-mid-model"}}',
+            owns_pending_gate=True,
+        )
+        assert not result.ok
+        assert "vendor_binding" in result.error
+        assert "'claude'" in result.error
+        assert "cmd" not in spawned
+
+    @patch("skill_runner.AgentLoader")
+    def test_binding_only_on_an_unconfigured_provider_names_the_binding(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """codex is installed but not in APIS_HARNESS_PROVIDERS, and it is the
+        only bound provider. Filtering must not leave the router with nothing
+        and a misleading "no headroom" error; the refusal names the binding."""
+        result, spawned = self._run_unbound_scenario(
+            MockLoader, monkeypatch, tmp_path,
+            providers="cursor",
+            binding='{"codex": {"mid": "codex-mid-model"}}',
+        )
+        assert not result.ok
+        assert "vendor_binding" in result.error
+        assert "headroom" not in result.error
+        assert "cmd" not in spawned
+
+    @patch("skill_runner.AgentLoader")
+    def test_failover_tier_is_pinned_even_if_policy_changes_mid_failover(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """Regression guard: without resolving the tier ONCE in run_skill (and
+        passing it to every attempt via precomputed_tier), an action_policy
+        edit landing between the cursor attempt and the codex fallback could
+        retier the SAME logical dispatch differently on each provider. This
+        proves the fix: mutate the live policy file between the two attempts
+        and assert the SECOND attempt still resolves to the tier read at the
+        START of run_skill, not the changed one."""
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"cursor": 1.0, "codex": 1.0}')
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
+        )
+        harness_router.reset_state()
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+
+        policy_path = tmp_path / "action-policy.json"
+        policy_path.write_text('{"build": "mid"}')
+        monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(policy_path))
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING",
+            '{"cursor": {"mid": "cursor-mid", "top": "cursor-top"}, '
+            '"codex": {"mid": "codex-mid", "top": "codex-top"}}',
+        )
+
+        # A real SKILL.md under a real ATELES_REPO, rather than the usual
+        # `patch.object(Path, "read_text", ...)` global patch — that patch
+        # would ALSO intercept this test's own read of policy_path (both are
+        # Path.read_text calls), masking the very race this test exists to
+        # catch behind a stubbed "skill md" string.
+        skills_dir = tmp_path / ".claude" / "skills" / "cicada"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text("skill md", encoding="utf-8")
+        monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
+
+        real_run_once = skill_runner._run_skill_once
+
+        async def spy_run_once(*args, **kwargs):
+            if kwargs.get("provider") == "cursor":
+                # Simulate an operator editing the policy file WHILE this
+                # dispatch is mid-failover — a config change model_tiering's
+                # OWN fresh-read-every-call design deliberately allows for the
+                # NEXT dispatch, but must not retier THIS one.
+                policy_path.write_text('{"build": "top"}')
+                return skill_runner.SkillResult(
+                    "cicada", False, None, "", "usage limit reached",
+                    error="cursor launch failed: capacity", provider="cursor",
+                )
+            return await real_run_once(*args, **kwargs)
+
+        captured: dict = {}
+        with (
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
+            patch("asyncio.create_subprocess_exec", side_effect=self._fake_exec_capturing(captured)),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner._run_skill_once", side_effect=spy_run_once),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc", action_class="build",
+                )
+            )
+
+        assert result.ok
+        assert result.provider == "codex"
+        # The failover really happened (cursor was attempted, then codex);
+        # without cursor eligible the mid-failover edit is never exercised.
+        assert result.attempted_providers == ("cursor", "codex")
+        # Without the fix, codex's attempt would re-read the now-changed file
+        # and resolve "top" -> codex-top. The fix pins "mid" -> codex-mid.
+        cmd = captured["cmd"]
+        assert "--model" in cmd
+        assert cmd[cmd.index("--model") + 1] == "codex-mid"

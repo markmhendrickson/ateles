@@ -42,6 +42,7 @@ behind APIS_AUTONOMY_AUTO_MERGE regardless.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -98,6 +99,7 @@ from review_panel import (
     select_expectation_agents,
     select_panel,
 )
+import model_tiering
 from skill_runner import (
     GATE_OWNER_TOOL_DENY_UNAVAILABLE,
     GATE_VERDICT_POSITION_RULE,
@@ -2440,7 +2442,9 @@ def detect_auth_failure(*texts: str) -> bool:
 
 def review_failure_class(result: SkillResult) -> str:
     """Return a public-safe reason for one incomplete review invocation."""
-    if detect_session_limit(result.stdout, result.stderr, result.error):
+    if getattr(result, "cooled_until", "") or detect_session_limit(
+        result.stdout, result.stderr, result.error
+    ):
         return "usage limit"
     if "no subscription-backed harness provider" in (result.error or ""):
         return "provider exhaustion"
@@ -2844,6 +2848,59 @@ def lens_comment_satisfies_presence(
     if expected:
         return False
     return _legacy_lens_prefix_present(text, lens)
+
+
+def security_named_in_review_text(text: str | None) -> bool:
+    """True when a standing blocking review's text names the security lens.
+
+    Deliberately coarse and fail-closed: a `review:security` marker or line, or
+    the bare word "security" anywhere in the body. A formal aggregate review can
+    carry a security blocker with no lens marker, and a miss here runs a
+    security fix on the mid tier, while a false positive only runs a repair on
+    `top`. (Security review of ateles#1358.)
+    """
+    return bool(re.search(r"\bsecurity\b", text or "", re.IGNORECASE))
+
+
+def _finding_fingerprint(lens: str, finding) -> tuple[str, str, str]:
+    return (
+        lens.lower(),
+        finding.category,
+        " ".join(finding.summary.lower().split()),
+    )
+
+
+def has_new_blocking_finding(comments: list[dict]) -> bool:
+    """Whether the most recent reviewed head's blocking findings include one no
+    earlier head raised (ruling `small_rereview_rounds_run_mid`).
+
+    Lens comments carry `<!-- review:<lens> commit=<sha> -->` and keep their
+    body when later superseded, so each head's blockers can be rebuilt from the
+    thread. Heads are ordered by first appearance. One head (or none) has
+    nothing to be new against. A reworded finding reads as new, which fails
+    toward `top`.
+    """
+    order: list[str] = []
+    by_head: dict[str, set[tuple[str, str, str]]] = {}
+    for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+        body = comment.get("body") or ""
+        marker = _LENS_MARKER_RE.search(body)
+        if not marker:
+            continue
+        sha = marker.group("sha").lower()
+        lens = marker.group("lens").lower()
+        if sha not in by_head:
+            order.append(sha)
+            by_head[sha] = set()
+        for finding in parse_findings(body, lens=lens):
+            if finding.blocking:
+                by_head[sha].add(_finding_fingerprint(lens, finding))
+    if len(order) < 2:
+        return False
+    earlier: set[tuple[str, str, str]] = set()
+    for sha in order[:-1]:
+        earlier |= by_head[sha]
+    return bool(by_head[order[-1]] - earlier)
 
 
 def lenses_missing_comments(
@@ -4120,6 +4177,13 @@ class SwarmDispatcher:
                     # someone acting on them, not another opinion. Re-paneling
                     # would also spend a full panel run per stuck PR across a
                     # 23-PR backlog.
+                    # A repair of findings a lens already wrote: mid tier. The
+                    # blocking finding is this dispatch's INPUT, not an
+                    # escalation signal (that would pin every repair to top);
+                    # a failed earlier attempt — a prior sweep retry or a
+                    # recorded fix round — is.
+                    prior_fix_rounds = await self._fix_round_count(trigger)
+                    blocking_review = pr.get("_blocking_review_body") or ""
                     result = await run_skill(
                         "cicada",
                         self._cicada_fix_prompt(
@@ -4128,11 +4192,23 @@ class SwarmDispatcher:
                                 pr.get("body") or "", repository
                             ),
                             attempts + 1,
-                            pr.get("_blocking_review_body") or "",
+                            blocking_review,
                         ),
                         github_token=_token_for_agent_on_repo("cicada", repository),
                         include_github_contract=True,
                         notifier=self.notifier,
+                        # Same classifier as the fix-round path, fed by what
+                        # the outstanding review actually contains: a repair
+                        # of a security finding is a `security_fix` (top).
+                        action_class=model_tiering.repair_action_class(
+                            await self._standing_blocking_lenses(
+                                trigger, blocking_review
+                            )
+                        ),
+                        escalation_signals=await self._tier_signals(
+                            trigger,
+                            prior_attempt_failed=attempts > 0 or prior_fix_rounds > 0,
+                        ),
                     )
                     if not result.ok:
                         raise RuntimeError(
@@ -4433,6 +4509,9 @@ class SwarmDispatcher:
             if lens.gate in PRE_IMPL_GATES
             else {}
         )
+        review_signals = await self._review_signals(
+            trigger, changed_files=changed_files
+        )
         try:
             result = await run_skill(
                 lens.agent,
@@ -4444,6 +4523,8 @@ class SwarmDispatcher:
                     has_worktree=bool(worktree),
                     changed_files=changed_files,
                 ),
+                action_class=model_tiering.lens_review_class(lens.lens),
+                escalation_signals=review_signals,
                 github_token=_token_for_agent_on_repo(lens.agent, repository),
                 include_github_contract=True,
                 notifier=self.notifier,
@@ -5075,6 +5156,7 @@ class SwarmDispatcher:
             github_token=_token_for_agent_on_repo("lanius", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            action_class=model_tiering.ACTION_ISSUE_TRIAGE,
         )
         if not lanius.ok:
             self.notifier.send(
@@ -5165,6 +5247,9 @@ class SwarmDispatcher:
                 # an advisory section still held the Neotoma wildcard over the
                 # shared bearer.
                 seated_reviewer=True,
+                # A spec section is its lens's review of the issue. No diff
+                # exists yet, so there is nothing to escalate on.
+                action_class=model_tiering.lens_review_class(section.lens),
             )
             section_text = self._extract_section_text(result.stdout, section)
             # Persist ADDITIVELY: correct only this section's field. Even when
@@ -5896,6 +5981,7 @@ class SwarmDispatcher:
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            action_class=model_tiering.ACTION_BUILD,
         )
         if not result.ok:
             log.error(
@@ -6136,12 +6222,20 @@ class SwarmDispatcher:
 
         # 1. Lanius: enforce PR gate inheritance against the parent issue.
         _lanius_token = _token_for_agent_on_repo("lanius", trigger.repository)
+        # Gate-inheritance check = a carry-forward check. It reads the parent
+        # issue's gates, not the diff, so it escalates on the round and a
+        # prior blocking finding only (no diff measurement).
+        lanius_signals = await self._review_signals(
+            trigger, measure_diff=False, detect_new_finding=False
+        )
         lanius = await run_skill(
             "lanius",
             self._lanius_pr_prompt(trigger, parent),
             github_token=_lanius_token,
             include_github_contract=True,
             notifier=self.notifier,
+            action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
+            escalation_signals=lanius_signals,
         )
         verdict = parse_gate_verdict(lanius.stdout)
         if verdict is None:
@@ -6169,6 +6263,12 @@ class SwarmDispatcher:
                 github_token=_lanius_token,
                 include_github_contract=True,
                 notifier=self.notifier,
+                action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
+                # The retry exists because the first attempt failed to produce
+                # a verdict: that is the "failed prior attempt" signal.
+                escalation_signals=dataclasses.replace(
+                    lanius_signals, prior_attempt_failed=True
+                ),
             )
             verdict = parse_gate_verdict(lanius.stdout)
 
@@ -6327,6 +6427,11 @@ class SwarmDispatcher:
         # alone left the always-seated pm owner running undenied. A failed or
         # unreadable read denies every pre-impl gate owner.
         live_gates = await self._live_gate_status(trigger.repository, parent)
+        # Tiering signals, measured once per panel run (not per lens): every
+        # seat reviews the same head.
+        panel_signals = await self._review_signals(
+            trigger, changed_files=changed_files
+        )
         # (lens, agent, reason) for each gate-owning lens refused AT LAUNCH
         # (ateles#795, PR #1181 ux [BLOCKING]) — distinct from `failed_lenses`
         # below: these never ran at all, so they get the Design **BLOCKED**
@@ -6390,6 +6495,8 @@ class SwarmDispatcher:
                     # re-seated after their gate cleared held the Neotoma
                     # wildcard over the shared bearer too.
                     seated_reviewer=True,
+                    action_class=model_tiering.lens_review_class(lens.lens),
+                    escalation_signals=panel_signals,
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
@@ -6675,6 +6782,9 @@ class SwarmDispatcher:
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            # Not a class the ruling names: left unmapped, so it runs at top.
+            action_class=model_tiering.ACTION_PANEL_AGGREGATION,
+            escalation_signals=panel_signals,
         )
 
         # 4a-0. Session/usage-limit guard (checked BEFORE auth, since a limit
@@ -7639,6 +7749,13 @@ class SwarmDispatcher:
             if any(g in PRE_IMPL_GATES for g in gate_by_lens.values())
             else {}
         )
+        # A fix round after the first means the previous fix did not clear
+        # review: escalate. The blocking findings themselves are this round's
+        # input, so they are NOT passed as `prior_blocking_finding` (that
+        # would pin every repair to top).
+        fix_signals = await self._tier_signals(
+            trigger, prior_attempt_failed=this_round > 1
+        )
         for lens in sorted(by_lens):
             agent = self._lens_fix_agent(lens)
             findings_text = "\n".join(
@@ -7655,6 +7772,10 @@ class SwarmDispatcher:
                 # Every seated lens is denied `correct`, not only a gate
                 # owner (dispatcher security run at e874537f, BLOCKING).
                 seated_reviewer=True,
+                # Fix guidance is the lens's own domain judgement, so it runs
+                # at the lens's tier: security and arch stay top.
+                action_class=model_tiering.lens_review_class(lens),
+                escalation_signals=fix_signals,
             )
             if result.ok and result.stdout.strip():
                 guidance_blocks.append(
@@ -7681,6 +7802,10 @@ class SwarmDispatcher:
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            # Implementing already-diagnosed findings is mid-tier work; a
+            # security finding makes it a security fix, which stays on top.
+            action_class=model_tiering.repair_action_class(set(by_lens)),
+            escalation_signals=fix_signals,
         )
         # An auth-expired claude call can exit 0 with the 401 in stdout, so a
         # bare `ok` is not enough — reframe an auth failure as an infra page.
@@ -8193,6 +8318,9 @@ class SwarmDispatcher:
         this_round = prior_rounds + 1
         await self._record_fix_round(trigger, this_round)
         head_before = await self._pr_head_sha(trigger)
+        ci_signals = await self._tier_signals(
+            trigger, prior_attempt_failed=this_round > 1
+        )
         cicada_result = await run_skill(
             "cicada",
             self._cicada_ci_fix_prompt(trigger, parent, this_round),
@@ -8203,6 +8331,8 @@ class SwarmDispatcher:
             # mechanical triage, not review judgement — eligible for
             # claude-local per local_provider.MECHANICAL_WORK_CLASSES.
             work_class="ci_log_triage",
+            action_class=model_tiering.ACTION_CI_LOG_TRIAGE,
+            escalation_signals=ci_signals,
         )
         if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
             await self._handle_panel_auth_failure(trigger, "cicada")
@@ -10493,6 +10623,7 @@ class SwarmDispatcher:
             github_token=_token_for_agent_on_repo("lanius", repository),
             include_github_contract=True,
             notifier=self.notifier,
+            action_class=model_tiering.ACTION_ISSUE_TRIAGE,
         )
         if not result.ok:
             log.error(
@@ -11385,6 +11516,145 @@ class SwarmDispatcher:
                 "always-on lenses"
             )
             return []
+
+    async def _standing_blocking_lenses(
+        self, trigger: SwarmTrigger, review_body: str
+    ) -> set[str]:
+        """Lenses with a standing blocking finding, for repair classification.
+
+        Two sources, unioned: the lens comments at the PR's current head (the
+        authoritative attribution, the same read `_route_blocking_findings`
+        falls back to), and the outstanding review body's own text, which may
+        be a formal aggregate carrying no lens marker. The body check is
+        deliberately coarse and fails toward `top`: see
+        `security_named_in_review_text`.
+        """
+        lenses: set[str] = set()
+        head = _normalise_full_sha(trigger.head_sha or "")
+        if head:
+            lenses |= set(
+                await self._blocking_findings_from_reviewed_head_comments(
+                    trigger, head
+                )
+            )
+        if security_named_in_review_text(review_body):
+            lenses.add("security")
+        return lenses
+
+    async def _new_blocking_finding(self, trigger: SwarmTrigger) -> bool:
+        """Did the last review round raise a blocking finding no earlier round
+        had? Unreadable comments answer True (fail-closed: unknown escalates)."""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] new-finding scan failed for "
+                f"{trigger.repository}#{trigger.number}: {exc} — tiering treats "
+                "it as a new blocking finding and escalates"
+            )
+            return True
+        return has_new_blocking_finding(comments)
+
+    async def _diff_lines_changed(self, t: SwarmTrigger) -> int | None:
+        """Added + deleted lines of the PR, or None when GitHub could not say.
+
+        None is a distinct state from 0: `_tier_signals` turns it into
+        `diff_unreadable`, which escalates, so an API failure can never tier a
+        possibly-large diff down.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"https://api.github.com/repos/{t.repository}/pulls/{t.number}",
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                return int(body["additions"]) + int(body["deletions"])
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] diff-size fetch failed for "
+                f"{t.repository}#{t.number}: {exc} — tiering treats the diff "
+                "as unmeasured and escalates"
+            )
+            return None
+
+    async def _tier_signals(
+        self,
+        trigger: SwarmTrigger,
+        *,
+        review_round: int = 1,
+        prior_blocking_finding: bool = False,
+        prior_attempt_failed: bool = False,
+        changed_files: list[str] | None = None,
+        measure_diff: bool = True,
+    ) -> model_tiering.EscalationSignals:
+        """Escalation signals for one PR dispatch (operator ruling 2026-09-29).
+
+        Only facts the dispatcher can measure: diff size, security-sensitive
+        paths, the round, a prior blocking finding, a failed prior attempt.
+        `measure_diff=False` is for dispatches whose work does not read the
+        diff (Lanius's gate bookkeeping); it skips the two GitHub reads rather
+        than reporting an unmeasured diff as unreadable.
+        """
+        files: tuple[str, ...] = ()
+        lines = 0
+        unreadable = False
+        if measure_diff:
+            fetched = (
+                changed_files
+                if changed_files is not None
+                else await self._changed_files(trigger)
+            )
+            files = tuple(fetched)
+            measured = await self._diff_lines_changed(trigger)
+            # `_changed_files` returns [] on a failed fetch, which is
+            # indistinguishable from an empty PR; a real PR always changes a
+            # file, so an empty list means "could not read".
+            unreadable = measured is None or not files
+            lines = measured or 0
+        return model_tiering.EscalationSignals(
+            changed_files=files,
+            diff_lines_changed=lines,
+            prior_blocking_finding=prior_blocking_finding,
+            review_round=review_round,
+            prior_attempt_failed=prior_attempt_failed,
+            diff_unreadable=unreadable,
+        )
+
+    async def _review_signals(
+        self,
+        trigger: SwarmTrigger,
+        *,
+        changed_files: list[str] | None = None,
+        measure_diff: bool = True,
+        detect_new_finding: bool = True,
+    ) -> model_tiering.EscalationSignals:
+        """Signals for a REVIEW of this PR: a repeated round, or a blocking
+        finding an earlier round already raised, raise the tier for a class
+        that is not round-tolerant (`small_rereview_rounds_run_mid` exempts
+        pm/qa/ux). The fix-round marker is the dispatcher's own record of both.
+
+        A NEW blocking finding is read from the PR's lens comments, and only
+        when a repeat round exists (round 1 has nothing to be new against).
+        """
+        prior_fix_rounds = await self._fix_round_count(trigger)
+        new_finding = (
+            detect_new_finding
+            and prior_fix_rounds > 0
+            and await self._new_blocking_finding(trigger)
+        )
+        signals = await self._tier_signals(
+            trigger,
+            review_round=prior_fix_rounds + 1,
+            prior_blocking_finding=prior_fix_rounds > 0,
+            changed_files=changed_files,
+            measure_diff=measure_diff,
+        )
+        return dataclasses.replace(signals, new_blocking_finding=bool(new_finding))
 
     async def _preregistered_expectations(
         self, repository: str, issue_number: int
