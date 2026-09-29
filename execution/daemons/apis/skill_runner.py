@@ -1461,6 +1461,7 @@ async def _run_skill_once(
     include_github_contract: bool = False,
     cwd: str | None = None,
     owns_pending_gate: bool = False,
+    work_class: str | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -1517,6 +1518,19 @@ async def _run_skill_once(
     of a PR branch so it can author an eval fixture, run ``eval:tier1``, commit,
     and push. When None (every call site that predates QE3), the child inherits
     the daemon's directory unchanged — exact current behaviour, no regression.
+
+    ``work_class`` (ateles task ent_71387d9c1d1d3d1eef9ecc01 — lean local
+    prompt): when ``provider == local_provider.LOCAL_PROVIDER``, this replaces
+    the full agent_definition + live-policy system prompt with
+    ``local_provider.build_lean_prompt`` — role summary, the work class's own
+    hard rules, and the task's SKILL.md, nothing else. This keeps the local
+    prompt well under the local context ceiling regardless of how large the
+    frontier prompt (agent_definition + agent_policy) grows. It has no effect
+    on any other provider: a Claude/Codex/Cursor dispatch is built exactly as
+    before, full stop, whether or not ``work_class`` is passed. After a local
+    run, ``local_provider.verify_postcondition`` checks the work class's
+    ground truth (where one exists) and fails the result over to a frontier
+    provider rather than accepting a wrong local answer as ``ok``.
     """
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
@@ -1674,17 +1688,34 @@ async def _run_skill_once(
             provider=provider,
         )
 
-    # Fetch policy at dispatch time: unlike the stable agent definition, active
-    # rules may change between tasks and must not inherit the definition cache.
-    policy_prompt = await asyncio.to_thread(_load_active_policy_prompt, _role)
-
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
-    system_prompt, degraded = build_system_prompt(
-        agent_def,
-        skill_md,
-        include_github_contract=include_github_contract,
-        policy_prompt=policy_prompt,
-    )
+    # claude-local gets the LEAN prompt (role + work-class hard rules + task),
+    # never the full agent_definition + live-policy rendering: that full
+    # prompt is sized for a frontier context window and does not fit a local
+    # one (ateles task ent_71387d9c1d1d3d1eef9ecc01). Every other provider is
+    # built exactly as before — this branch changes nothing for them.
+    if provider == local_provider.LOCAL_PROVIDER:
+        system_prompt = local_provider.build_lean_prompt(work_class)
+        # `degraded` must reflect whether agent_def actually loaded (a stub
+        # from AgentLoader's load-failure fallback has empty prompt_markdown
+        # — see lib/daemon_runtime/agent_loader.py's `_stub()`), the same
+        # condition build_system_prompt uses below, NOT whether the lean
+        # prompt happens to omit prompt_markdown by design. Getting this
+        # wrong would silently skip the undefined-role alerting AND let a
+        # stub's synthesized aauth_sub receive AAuth signing-key injection
+        # further down (`if not degraded and agent_def.aauth_sub:`).
+        degraded = not (agent_def.prompt_markdown or "").strip()
+    else:
+        # Fetch policy at dispatch time: unlike the stable agent definition,
+        # active rules may change between tasks and must not inherit the
+        # definition cache.
+        policy_prompt = await asyncio.to_thread(_load_active_policy_prompt, _role)
+        system_prompt, degraded = build_system_prompt(
+            agent_def,
+            skill_md,
+            include_github_contract=include_github_contract,
+            policy_prompt=policy_prompt,
+        )
 
     if degraded:
         _title_hint = prompt[:80].replace("\n", " ")
@@ -2164,6 +2195,24 @@ async def _run_skill_once(
                 f"deliver: {_delivery_denial}"
             )
 
+        # ── Local post-condition check (ateles task ent_71387d9c1d1d3d1eef9ecc01) ──
+        # A local run that exits 0 with a syntactically fine reply is not
+        # necessarily a CORRECT one — the regression this exists to catch was
+        # exactly that: rc=0, plausible prose, and a wrong count. Checked only
+        # for claude-local, only for a work class with a real ground truth
+        # (local_provider._POSTCONDITION_CHECKS); every other provider and
+        # every other work class is unaffected.
+        _postcondition_failure = (
+            local_provider.verify_postcondition(work_class, _stdout_text, cwd=cwd)
+            if provider == local_provider.LOCAL_PROVIDER
+            else None
+        )
+        if _postcondition_failure:
+            log.error(
+                f"[apis] {skill} dispatch via {provider} exited 0 but failed "
+                f"its post-condition check: {_postcondition_failure}"
+            )
+
         # ── Per-dispatch usage attribution ───────────────────────────────────────
         # Parsed from what the harness already emitted; never estimated. Under
         # the swarm's text-mode invocations most harnesses report no token
@@ -2178,7 +2227,11 @@ async def _run_skill_once(
 
         result = SkillResult(
             skill=skill,
-            ok=proc.returncode == 0 and _delivery_denial is None,
+            ok=(
+                proc.returncode == 0
+                and _delivery_denial is None
+                and _postcondition_failure is None
+            ),
             returncode=proc.returncode,
             stdout=_stdout_text,
             stderr=_stderr_text,
@@ -2186,7 +2239,7 @@ async def _run_skill_once(
             error=(
                 _delivery_denial
                 if (_delivery_denial and proc.returncode == 0)
-                else ""
+                else (_postcondition_failure or "")
             ),
             usage=_usage,
         )
@@ -2390,12 +2443,23 @@ async def run_skill(
             agent_session_id=agent_session_id,
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
-            owns_pending_gate=deny_correct,
+            owns_pending_gate=deny_correct, work_class=work_class,
         )
 
     local_first = (
         provider is None
         and not deny_correct
+        # A GitHub-delivery dispatch (commit/push/PR) must never route
+        # local-first: local_provider.build_lean_prompt deliberately omits
+        # SWARM_GITHUB_CONTRACT/SWARM_PRIOR_ART_CONTRACT (they don't fit the
+        # local window either), so a local child given this work would have
+        # no attribution-header/verdict-vocabulary contract and no prior-art
+        # check — neither of which any `_LEAN_HARD_RULES` entry covers. Every
+        # work class this could combine with today is mechanical
+        # (ci_log_triage is the live example, swarm_dispatch.py's CI-fix
+        # path), so this only removes local eligibility, never frontier
+        # eligibility.
+        and not include_github_contract
         and local_provider.is_eligible(work_class, local_provider.load_config())
     )
     return await _run_provider_attempts(

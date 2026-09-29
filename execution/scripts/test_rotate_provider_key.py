@@ -16,6 +16,7 @@ for the planted fake secret value.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +54,17 @@ def _reset_known_secrets_registry():
     rpk._known_secrets.clear()
     yield
     rpk._known_secrets.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    """Verification retries back off with `rpk._sleep`; record instead of
+    waiting so the suite stays fast. Also clears the manifest overlay
+    selector so the host's value never leaks into a test."""
+    delays: list[float] = []
+    monkeypatch.setattr(rpk, "_sleep", delays.append)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    return delays
 
 
 def assert_no_secret_leaked(capsys, recorded_argvs: list[list[str]]) -> None:
@@ -105,6 +117,7 @@ def fake_op_subprocess_run(monkeypatch, recorded_subprocess_calls):
     """
     item = FakeOpItem()
     written_templates: list[dict] = []
+    template_modes: list[int] = []
 
     def fake_run(
         argv, *, capture_output=None, text=None, timeout=None, stdin=None, **kwargs
@@ -113,15 +126,17 @@ def fake_op_subprocess_run(monkeypatch, recorded_subprocess_calls):
         if argv[1:3] == ["item", "get"]:
             return SimpleNamespace(returncode=0, stdout=item.as_json(), stderr="")
         if argv[1:3] == ["item", "edit"]:
-            if stdin is not None:
-                content = stdin.read()
-                if isinstance(content, bytes):
-                    content = content.decode("utf-8")
-                written_templates.append(json.loads(content))
+            # op reads --template from a FILE PATH (op 2.32 rejects "-"), so
+            # read the file while it still exists, and record its mode.
+            path = argv[argv.index("--template") + 1]
+            template_modes.append(os.stat(path).st_mode & 0o777)
+            with open(path, encoding="utf-8") as fh:
+                written_templates.append(json.load(fh))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"unexpected op invocation in test: {argv!r}")
 
     monkeypatch.setattr(rpk.subprocess, "run", fake_run)
+    fake_run.template_modes = template_modes
     return written_templates
 
 
@@ -160,11 +175,11 @@ def test_item_id_from_malformed_ref_raises():
 
 
 # ---------------------------------------------------------------------------
-# op_write_password_field — the piped-template contract
+# op_write_password_field — the template-file contract
 # ---------------------------------------------------------------------------
 
 
-def test_op_write_uses_stdin_template_not_cli_assignment(
+def test_op_write_uses_template_file_not_cli_assignment(
     fake_op_subprocess_run, recorded_subprocess_calls
 ):
     templates = fake_op_subprocess_run
@@ -182,10 +197,17 @@ def test_op_write_uses_stdin_template_not_cli_assignment(
             assert FAKE_NEW_OPENAI_KEY not in arg, (
                 f"secret value appeared in op argv (must be piped via stdin only): {argv!r}"
             )
-    # Confirm the edit call used --template - (stdin), not an assignment string.
+    # The edit call passes the template as a FILE PATH (op 2.32 rejects
+    # "--template -"), never as an assignment string, and the file is 0600.
     edit_calls = [c for c in recorded_subprocess_calls if c[1:3] == ["item", "edit"]]
     assert edit_calls, "no 'op item edit' call recorded"
-    assert "--template" in edit_calls[0] and "-" in edit_calls[0]
+    template_arg = edit_calls[0][edit_calls[0].index("--template") + 1]
+    assert template_arg != "-", "op 2.32 cannot read --template from stdin"
+    assert template_arg.endswith(".op-item.json")
+    assert rpk.subprocess.run.template_modes == [0o600]
+    assert not os.path.exists(template_arg), (
+        "template file must be removed after the edit"
+    )
 
 
 def test_op_write_raises_when_field_not_found(fake_op_subprocess_run):
@@ -805,7 +827,86 @@ def test_cmd_anthropic_archive_requires_admin_key_ref(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_run_downstream_steps_invokes_publish_then_materialize(monkeypatch, tmp_path):
+# Mirrors the real manifest's shape (op:// references only, never values):
+# ANTHROPIC_API_KEY lives in BOTH the neotoma and the openclaw blocks. On
+# 2026-09-29 a fixed ANTHROPIC_API_KEY -> neotoma mapping left openclaw's
+# .env holding the old key.
+FAKE_MANIFEST = {
+    "files": {
+        "neotoma": {
+            "target": "~/.config/neotoma/.env",
+            "default": {
+                "ANTHROPIC_API_KEY": "op://Private/fake_item/fake_field",
+                "OPENAI_API_KEY": "op://Private/fake_item/fake_field",
+            },
+        },
+        "openclaw": {
+            "target": "~/repos/openclaw/.env",
+            "default": {
+                "ANTHROPIC_API_KEY": "op://Private/fake_item/fake_field",
+                "OPENAI_API_KEY": "op://Private/fake_item/fake_field",
+            },
+        },
+        # Reads OPENAI_API_KEY from a DIFFERENT 1Password item: rotating
+        # fake_item must not republish it or claim it rotated.
+        "client": {
+            "target": "~/client/.env",
+            "default": {"OPENAI_API_KEY": "op://Private/client_item/credential"},
+        },
+        # Maps the var only in a production overlay: counts only when
+        # ENVIRONMENT=production, exactly as secrets_publish.py resolves it.
+        "prod_only": {
+            "target": "~/prod/.env",
+            "production": {"ANTHROPIC_API_KEY": "op://Private/fake_item/fake_field"},
+        },
+        "unrelated": {"default": {"SOME_OTHER_VAR": "op://Private/x/y"}},
+    }
+}
+
+
+@pytest.fixture()
+def fake_manifest(monkeypatch):
+    monkeypatch.setattr(sl, "load_manifest", lambda: FAKE_MANIFEST)
+    return FAKE_MANIFEST
+
+
+ROTATED_REF = "op://Private/fake_item/fake_field"
+
+
+def test_manifest_files_for_env_var_finds_every_block_reading_the_rotated_item():
+    assert rpk.manifest_files_for_env_var(
+        FAKE_MANIFEST, "ANTHROPIC_API_KEY", ROTATED_REF
+    ) == (["neotoma", "openclaw"], [])
+    assert rpk.manifest_files_for_env_var(FAKE_MANIFEST, "NOPE", ROTATED_REF) == (
+        [],
+        [],
+    )
+
+
+def test_manifest_files_for_env_var_separates_blocks_on_another_item():
+    assert rpk.manifest_files_for_env_var(
+        FAKE_MANIFEST, "OPENAI_API_KEY", ROTATED_REF
+    ) == (["neotoma", "openclaw"], ["client"])
+
+
+def test_manifest_files_for_env_var_applies_only_the_active_overlay():
+    assert (
+        "prod_only"
+        not in rpk.manifest_files_for_env_var(
+            FAKE_MANIFEST, "ANTHROPIC_API_KEY", ROTATED_REF, None
+        )[0]
+    )
+    assert (
+        "prod_only"
+        in rpk.manifest_files_for_env_var(
+            FAKE_MANIFEST, "ANTHROPIC_API_KEY", ROTATED_REF, "production"
+        )[0]
+    )
+
+
+def test_run_downstream_steps_invokes_publish_then_materialize(
+    monkeypatch, tmp_path, fake_manifest
+):
     calls = []
 
     def fake_run(argv, *, capture_output=None, text=None, timeout=None):
@@ -813,7 +914,7 @@ def test_run_downstream_steps_invokes_publish_then_materialize(monkeypatch, tmp_
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(rpk.subprocess, "run", fake_run)
-    lines = rpk.run_downstream_steps("ANTHROPIC_API_KEY", tmp_path)
+    lines = rpk.run_downstream_steps("ANTHROPIC_API_KEY", ROTATED_REF, tmp_path)
 
     assert any("secrets_publish.py" in " ".join(c) for c in calls)
     assert any("secrets_materialize.py" in " ".join(c) for c in calls)
@@ -828,23 +929,298 @@ def test_run_downstream_steps_invokes_publish_then_materialize(monkeypatch, tmp_
     assert any("com.ateles.apis" in line for line in lines)
 
 
-def test_run_downstream_steps_stops_after_publish_failure(monkeypatch, tmp_path):
+def test_run_downstream_steps_covers_every_manifest_target_for_the_var(
+    monkeypatch, tmp_path, fake_manifest
+):
+    """Effect test for the 2026-09-29 miss: a rotated ANTHROPIC_API_KEY must
+    be published AND materialized into every target that maps it (neotoma and
+    openclaw), not only the one a fixed table named."""
     calls = []
 
     def fake_run(argv, *, capture_output=None, text=None, timeout=None):
-        calls.append(list(argv))
-        if "secrets_publish.py" in " ".join(argv):
-            return SimpleNamespace(returncode=1, stdout="", stderr="publish failed")
-        raise AssertionError("materialize must not run after a publish failure")
+        calls.append((Path(argv[1]).name, argv[2]))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(rpk.subprocess, "run", fake_run)
-    lines = rpk.run_downstream_steps("OPENAI_API_KEY", tmp_path)
+    rpk.run_downstream_steps("ANTHROPIC_API_KEY", ROTATED_REF, tmp_path)
+
+    for name in ("neotoma", "openclaw"):
+        assert ("secrets_publish.py", name) in calls
+        assert ("secrets_materialize.py", name) in calls
+    assert not any(target == "unrelated" for _, target in calls)
+
+
+def test_run_downstream_steps_prints_required_commit_and_push(
+    monkeypatch, tmp_path, fake_manifest
+):
+    monkeypatch.setattr(
+        rpk.subprocess,
+        "run",
+        lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    lines = rpk.run_downstream_steps("ANTHROPIC_API_KEY", ROTATED_REF, tmp_path)
+    joined = "\n".join(lines)
+    assert "REQUIRED" in joined
+    assert "secrets/neotoma.sops.enc" in joined
+    assert "secrets/openclaw.sops.enc" in joined
+    assert "git push" in joined
+
+
+def test_run_downstream_steps_skips_materialize_after_publish_failure(
+    monkeypatch, tmp_path, fake_manifest
+):
+    calls = []
+
+    def fake_run(argv, *, capture_output=None, text=None, timeout=None):
+        calls.append((Path(argv[1]).name, argv[2]))
+        if "secrets_publish.py" in argv[1] and argv[2] == "neotoma":
+            return SimpleNamespace(returncode=1, stdout="", stderr="publish failed")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rpk.subprocess, "run", fake_run)
+    lines = rpk.run_downstream_steps("OPENAI_API_KEY", ROTATED_REF, tmp_path)
     assert any("FAILED" in line for line in lines)
+    assert ("secrets_materialize.py", "neotoma") not in calls
+    # A failure on one target does not strand the others on the old key.
+    assert ("secrets_materialize.py", "openclaw") in calls
+    joined = "\n".join(lines)
+    assert "secrets/openclaw.sops.enc" in joined
+    assert "secrets/neotoma.sops.enc" not in joined
+    # A block on a different 1Password item is named, never republished.
+    assert not any(target == "client" for _, target in calls)
+    assert "secrets/client.sops.enc" not in joined
+    assert any(
+        "different 1Password item" in line and "client" in line for line in lines
+    )
 
 
-def test_run_downstream_steps_unknown_var_skips_cleanly(tmp_path):
-    lines = rpk.run_downstream_steps("SOME_UNKNOWN_VAR", tmp_path)
+def test_run_downstream_steps_unknown_var_skips_cleanly(tmp_path, fake_manifest):
+    lines = rpk.run_downstream_steps("SOME_UNKNOWN_VAR", ROTATED_REF, tmp_path)
     assert any("skipped" in line for line in lines)
+
+
+def test_run_downstream_steps_missing_manifest_skips_cleanly(monkeypatch, tmp_path):
+    def missing():
+        raise FileNotFoundError("Manifest not found")
+
+    monkeypatch.setattr(sl, "load_manifest", missing)
+    lines = rpk.run_downstream_steps("ANTHROPIC_API_KEY", ROTATED_REF, tmp_path)
+    assert any("skipped" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# Verify before write: a key that fails verification must never reach
+# 1Password. On 2026-09-29 an unusable Anthropic key overwrote the 1Password
+# item before verification rejected it, leaving 1Password disagreeing with
+# the SOPS snapshot and the live services.
+# ---------------------------------------------------------------------------
+
+
+def _op_edit_calls(recorded_argvs):
+    return [a for a in recorded_argvs if a[1:3] == ["item", "edit"]]
+
+
+def test_cmd_openai_verify_failure_leaves_1password_untouched(
+    monkeypatch,
+    fake_op_subprocess_run,
+    fake_op_read,
+    recorded_subprocess_calls,
+    capsys,
+    tmp_path,
+):
+    def fake_http_json(method, url, *, headers, body=None, timeout=30.0):
+        if method == "POST":
+            return {
+                "id": "svc_new",
+                "api_key": {"value": FAKE_NEW_OPENAI_KEY, "id": "k"},
+            }
+        raise rpk.ProviderHTTPError("GET /v1/models -> HTTP 401: invalid key")
+
+    monkeypatch.setattr(rpk, "_http_json", fake_http_json)
+    args = _no_downstream_args(
+        admin_key_ref="op://Private/item_abc/credential",
+        project_id="proj_abc",
+        op_item_ref="op://Private/item_abc/credential",
+        service_account_name="t",
+        revoke_old=None,
+    )
+    assert rpk.cmd_openai(args, tmp_path) == 1
+    assert _op_edit_calls(recorded_subprocess_calls) == []
+    assert fake_op_subprocess_run == []
+    err = capsys.readouterr().err
+    assert "Nothing was written to 1Password" in err
+    assert "svc_new" in err
+
+
+def test_cmd_elevenlabs_verify_failure_leaves_1password_untouched(
+    monkeypatch,
+    fake_op_subprocess_run,
+    fake_op_read,
+    recorded_subprocess_calls,
+    capsys,
+    tmp_path,
+):
+    def fake_http_json(method, url, *, headers, body=None, timeout=30.0):
+        if method == "POST":
+            return {"xi-api-key": FAKE_NEW_ELEVEN_KEY, "key_id": "key_new"}
+        raise rpk.ProviderHTTPError("GET /v1/user -> HTTP 401: invalid key")
+
+    monkeypatch.setattr(rpk, "_http_json", fake_http_json)
+    args = _no_downstream_args(
+        admin_key_ref="op://Private/item_abc/credential",
+        service_account_user_id="user_abc",
+        op_item_ref="op://Private/item_abc/credential",
+        key_name="t",
+        permission=None,
+        character_limit=None,
+        revoke_old=None,
+    )
+    assert rpk.cmd_elevenlabs(args, tmp_path) == 1
+    assert _op_edit_calls(recorded_subprocess_calls) == []
+    assert fake_op_subprocess_run == []
+    assert "key_new" in capsys.readouterr().err
+
+
+def test_cmd_anthropic_verify_failure_leaves_1password_untouched(
+    monkeypatch,
+    fake_op_subprocess_run,
+    recorded_subprocess_calls,
+    capsys,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        rpk.getpass, "getpass", lambda prompt="": FAKE_PASTED_ANTHROPIC_KEY
+    )
+
+    def fake_http_json(method, url, *, headers, body=None, timeout=30.0):
+        raise rpk.ProviderHTTPError("GET /v1/models -> HTTP 401: invalid x-api-key")
+
+    monkeypatch.setattr(rpk, "_http_json", fake_http_json)
+    args = _no_downstream_args(
+        op_item_ref="op://Private/item_abc/credential",
+        admin_key_ref=None,
+        archive_old=None,
+    )
+    assert rpk.cmd_anthropic(args, tmp_path) == 1
+    assert _op_edit_calls(recorded_subprocess_calls) == []
+    assert fake_op_subprocess_run == []
+    captured = capsys.readouterr()
+    assert "Nothing was written to 1Password" in captured.err
+    assert "inside a workspace" not in captured.err
+
+
+def test_cmd_anthropic_workspace_unscoped_key_is_refused_with_guidance(
+    monkeypatch,
+    fake_op_subprocess_run,
+    recorded_subprocess_calls,
+    capsys,
+    tmp_path,
+):
+    """The exact 2026-09-29 response: an unscoped key gets a 400 asking for
+    the anthropic-workspace-id header. The script must refuse it, explain
+    that consumers never send that header, and not touch 1Password."""
+    monkeypatch.setattr(
+        rpk.getpass, "getpass", lambda prompt="": FAKE_PASTED_ANTHROPIC_KEY
+    )
+    sent_headers = []
+
+    def fake_http_json(method, url, *, headers, body=None, timeout=30.0):
+        sent_headers.append(dict(headers))
+        raise rpk.ProviderHTTPError(
+            "GET /v1/models -> HTTP 400: "
+            '{"type":"error","error":{"type":"invalid_request_error","message":'
+            '"This API key is not scoped to a workspace, so this request must '
+            'include the anthropic-workspace-id header"}}'
+        )
+
+    monkeypatch.setattr(rpk, "_http_json", fake_http_json)
+    args = _no_downstream_args(
+        op_item_ref="op://Private/item_abc/credential",
+        admin_key_ref=None,
+        archive_old=None,
+    )
+    assert rpk.cmd_anthropic(args, tmp_path) == 1
+    assert _op_edit_calls(recorded_subprocess_calls) == []
+    # Verification must not paper over the problem by adding the header.
+    assert all("anthropic-workspace-id" not in h for h in sent_headers)
+    err = capsys.readouterr().err
+    assert "inside a workspace" in err
+    assert "Claude Code" in err
+    assert FAKE_PASTED_ANTHROPIC_KEY not in err
+
+
+def test_is_anthropic_unscoped_key_error_ignores_other_failures():
+    assert not rpk.is_anthropic_unscoped_key_error(
+        rpk.ProviderHTTPError("GET /v1/models -> HTTP 401: invalid x-api-key")
+    )
+    assert rpk.is_anthropic_unscoped_key_error(
+        rpk.ProviderHTTPError(
+            "GET /v1/models -> HTTP 400: This API key is not scoped to a workspace"
+        )
+    )
+
+
+@pytest.mark.parametrize("provider", ["openai", "elevenlabs", "anthropic"])
+def test_verification_runs_before_the_1password_write(
+    provider,
+    monkeypatch,
+    fake_op_read,
+    capsys,
+    tmp_path,
+):
+    """Success path ordering: the verify call is recorded before `op item get`
+    / `op item edit` on every provider."""
+    events = []
+
+    def fake_run(argv, *, capture_output=None, text=None, timeout=None, **kw):
+        events.append(("op", argv[2]))
+        if argv[2] == "get":
+            return SimpleNamespace(
+                returncode=0, stdout=FakeOpItem().as_json(), stderr=""
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_http_json(method, url, *, headers, body=None, timeout=30.0):
+        if method == "POST" and "service_accounts" in url:
+            return {"id": "svc", "api_key": {"value": FAKE_NEW_OPENAI_KEY, "id": "k"}}
+        if method == "POST" and "api-keys" in url:
+            return {"xi-api-key": FAKE_NEW_ELEVEN_KEY, "key_id": "k"}
+        events.append(("verify", url))
+        return {}
+
+    monkeypatch.setattr(rpk.subprocess, "run", fake_run)
+    monkeypatch.setattr(rpk, "_http_json", fake_http_json)
+    monkeypatch.setattr(
+        rpk.getpass, "getpass", lambda prompt="": FAKE_PASTED_ANTHROPIC_KEY
+    )
+    common = dict(op_item_ref="op://Private/item_abc/credential")
+    if provider == "openai":
+        args = _no_downstream_args(
+            admin_key_ref="op://Private/a/b",
+            project_id="p",
+            service_account_name="t",
+            revoke_old=None,
+            **common,
+        )
+        rc = rpk.cmd_openai(args, tmp_path)
+    elif provider == "elevenlabs":
+        args = _no_downstream_args(
+            admin_key_ref="op://Private/a/b",
+            service_account_user_id="u",
+            key_name="t",
+            permission=None,
+            character_limit=None,
+            revoke_old=None,
+            **common,
+        )
+        rc = rpk.cmd_elevenlabs(args, tmp_path)
+    else:
+        args = _no_downstream_args(admin_key_ref=None, archive_old=None, **common)
+        rc = rpk.cmd_anthropic(args, tmp_path)
+    assert rc == 0
+    kinds = [kind for kind, _ in events]
+    assert kinds.index("verify") < kinds.index("op")
+    assert ("op", "edit") in events
 
 
 # ---------------------------------------------------------------------------
@@ -1112,3 +1488,91 @@ def test_module_docstring_usage_examples_parse_with_all_optionals_populated():
         "module docstring Usage: example(s) failed to parse:\n"
         + "\n".join(f"  {cmd!r} -> {err}" for cmd, err in failures)
     )
+
+
+# ---------------------------------------------------------------------------
+# Verification retry: verify-before-write must not drop a valid, show-once
+# key over one transient failure.
+# ---------------------------------------------------------------------------
+
+
+def test_verify_with_retry_recovers_from_a_transient_failure(_no_real_sleep, capsys):
+    outcomes = [
+        rpk.ProviderHTTPError("GET /v1/models -> HTTP 401: key not yet active"),
+        rpk.ProviderHTTPError("GET /v1/models -> HTTP 503: overloaded"),
+        None,
+    ]
+
+    def verify(key):
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    rpk.verify_with_retry(verify, FAKE_NEW_OPENAI_KEY, "openai")
+    assert outcomes == []
+    assert _no_real_sleep == list(rpk.VERIFY_RETRY_DELAYS_SECONDS[:2])
+    assert FAKE_NEW_OPENAI_KEY not in capsys.readouterr().out
+
+
+def test_verify_with_retry_never_retries_a_400(_no_real_sleep):
+    calls = []
+
+    def verify(key):
+        calls.append(key)
+        raise rpk.ProviderHTTPError(
+            "GET /v1/models -> HTTP 400: This API key is not scoped to a workspace"
+        )
+
+    with pytest.raises(rpk.ProviderHTTPError):
+        rpk.verify_with_retry(verify, FAKE_PASTED_ANTHROPIC_KEY, "anthropic")
+    assert len(calls) == 1
+    assert _no_real_sleep == []
+
+
+def test_verify_with_retry_gives_up_after_bounded_attempts(_no_real_sleep):
+    calls = []
+
+    def verify(key):
+        calls.append(key)
+        raise ConnectionError("network down")
+
+    with pytest.raises(rpk.ProviderHTTPError, match="ConnectionError"):
+        rpk.verify_with_retry(verify, FAKE_NEW_ELEVEN_KEY, "elevenlabs")
+    assert len(calls) == len(rpk.VERIFY_RETRY_DELAYS_SECONDS) + 1
+
+
+def test_cmd_openai_transient_verify_failure_still_writes_the_key(
+    monkeypatch,
+    fake_op_subprocess_run,
+    fake_op_read,
+    recorded_subprocess_calls,
+    capsys,
+    tmp_path,
+):
+    """Effect test: a key that verifies on the second attempt reaches
+    1Password with the new value, rather than being lost."""
+    verify_calls = []
+
+    def fake_http_json(method, url, *, headers, body=None, timeout=30.0):
+        if method == "POST":
+            return {
+                "id": "svc_new",
+                "api_key": {"value": FAKE_NEW_OPENAI_KEY, "id": "k"},
+            }
+        verify_calls.append(url)
+        if len(verify_calls) == 1:
+            raise rpk.ProviderHTTPError("GET /v1/models -> HTTP 401: not yet active")
+        return {"data": []}
+
+    monkeypatch.setattr(rpk, "_http_json", fake_http_json)
+    args = _no_downstream_args(
+        admin_key_ref="op://Private/item_abc/credential",
+        project_id="proj_abc",
+        op_item_ref="op://Private/item_abc/credential",
+        service_account_name="t",
+        revoke_old=None,
+    )
+    assert rpk.cmd_openai(args, tmp_path) == 0
+    assert len(verify_calls) == 2
+    assert fake_op_subprocess_run[0]["fields"][0]["value"] == FAKE_NEW_OPENAI_KEY
+    assert_no_secret_leaked(capsys, recorded_subprocess_calls)
