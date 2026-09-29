@@ -24,6 +24,7 @@ import pytest
 
 import apis
 import model_tiering
+import review_delta
 import swarm_dispatch
 from skill_runner import SkillResult
 from swarm_dispatch import SwarmDispatcher
@@ -53,6 +54,10 @@ class _World:
         self.lines: int | None = 40
         self.fix_rounds: int = 0
         self.new_blocking_finding: bool = False
+        # The re-round's own change since the last reviewed head; None means
+        # "not measurable / round 1", so the whole PR is measured.
+        self.delta: review_delta.Delta | None = None
+        self.delta_reads: int = 0
         self.changed_files_stub = None  # re-applied after helpers that override it
 
 
@@ -77,6 +82,10 @@ def world(monkeypatch, tmp_path) -> _World:
     async def new_finding(self, trigger):
         return w.new_blocking_finding
 
+    async def delta(self, trigger):
+        w.delta_reads += 1
+        return w.delta
+
     async def noop(self, *a, **k):
         return None
 
@@ -84,6 +93,7 @@ def world(monkeypatch, tmp_path) -> _World:
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", files)
     monkeypatch.setattr(SwarmDispatcher, "_diff_lines_changed", lines, raising=False)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", rounds)
+    monkeypatch.setattr(SwarmDispatcher, "_review_delta", delta, raising=False)
     monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", noop)
     monkeypatch.setattr(
         SwarmDispatcher, "_new_blocking_finding", new_finding, raising=False
@@ -257,16 +267,16 @@ def test_lanius_pr_check_is_a_carry_forward_check_on_mid(monkeypatch, world):
 
 def test_lanius_pr_check_does_not_measure_the_diff(monkeypatch, world):
     """Gate bookkeeping does not read the diff: a huge diff must not push it
-    to top (only the round / a prior blocking finding do)."""
+    to top, and neither does the round: a carry-forward check is defined by
+    the PR being carried through another round."""
     world.lines = 5000
     world.files = ["execution/hooks/x.py"]
     rec = _run_handle_pr(monkeypatch, world)
     assert tier_of(rec.only("lanius")).tier == "mid"
-    # Lanius is not one of the three round-tolerant lenses: a repeat round
-    # still raises it.
     world.fix_rounds = 2
     rec = _run_handle_pr(monkeypatch, world)
-    assert tier_of(rec.only("lanius")).tier == "top"
+    resolved = tier_of(rec.only("lanius"))
+    assert (resolved.tier, resolved.source) == ("mid", "policy")
 
 
 def test_lanius_verdict_retry_escalates_as_a_failed_prior_attempt(
@@ -953,3 +963,332 @@ def test_round_one_never_reads_the_thread_for_a_new_finding(monkeypatch, world):
     world.fix_rounds = 1
     signals = asyncio.run(_dispatcher()._review_signals(_trigger()))
     assert scans == [1] and signals.new_blocking_finding is True
+
+
+# ── re-round delta sizing (ruling `small_rereview_rounds_run_mid`) ───────────
+#
+# Measured 2026-09-29: 47 of 53 dispatches ran top and none mid, because a
+# re-round was sized by the WHOLE PR (1054/1344/1824 lines) rather than by what
+# changed since the last reviewed head, and a merge of the base branch made even
+# that delta look huge and security-touching.
+
+import httpx  # noqa: E402
+
+from test_review_delta import _file, _patch  # noqa: E402
+
+PREV_HEAD = "1" * 40
+CUR_HEAD = "2" * 40
+
+
+def _lens_marker(lens: str, sha: str, blocking: tuple[str, ...] = ()) -> dict:
+    body = f"<!-- review:{lens} commit={sha} -->\n**REQUEST_CHANGES**\n" + "\n".join(
+        f"[BLOCKING] {b}\ndetail" for b in blocking
+    )
+    return {"body": body, "created_at": f"2026-09-29T0{int(sha[0])}:00:00Z"}
+
+
+class _Github:
+    """A fake GitHub the dispatcher's httpx client talks to; records every path."""
+
+    def __init__(self) -> None:
+        self.comments: list[dict] = [_lens_marker("qa", PREV_HEAD)]
+        self.compare: dict[str, object] = {}  # sha -> files list | int status
+        self.paths: list[str] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.paths.append(path)
+        if path.endswith("/issues/87/comments"):
+            return httpx.Response(200, json=self.comments)
+        if "/compare/" in path:
+            spec = path.rsplit("/compare/", 1)[1]
+            sha = spec.split("...", 1)[1]
+            result = self.compare.get(sha, 404)
+            if isinstance(result, int):
+                return httpx.Response(result, json={"message": "nope"})
+            return httpx.Response(200, json={"files": result})
+        if path.endswith("/pulls/87"):
+            return httpx.Response(200, json={"base": {"ref": "main"}})
+        return httpx.Response(404, json={})
+
+
+@pytest.fixture
+def github(monkeypatch, world):
+    """Real `_review_delta` / `_new_blocking_finding` against a fake GitHub,
+    with the whole-PR facts of today's case: 1054 lines touching a hook."""
+    gh = _Github()
+    real = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(gh.handler)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", factory)
+    # The world fixture stubbed these two; the point here is the real ones.
+    monkeypatch.setattr(
+        SwarmDispatcher, "_review_delta", _REAL_REVIEW_DELTA, raising=False
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_new_blocking_finding", _REAL_NEW_BLOCKING, raising=False
+    )
+    world.lines = 1054
+    world.files = ["src/feature.py", ".claude/hooks/gate.py", "docs/notes.md"]
+    world.fix_rounds = 1
+    return gh
+
+
+_REAL_REVIEW_DELTA = getattr(SwarmDispatcher, "_review_delta", None)
+_REAL_NEW_BLOCKING = SwarmDispatcher._new_blocking_finding
+
+
+def _small_delta_after_merging_main(gh: _Github) -> None:
+    """The PR's own diff at both heads: same two files, its own lines unchanged
+    bar one added line, while hunks moved because main changed around them."""
+    gh.compare[PREV_HEAD] = [
+        _file("src/feature.py", _patch("+one", "-two", start=10)),
+        _file(".claude/hooks/gate.py", _patch("+guard", start=5)),
+    ]
+    gh.compare[CUR_HEAD] = [
+        _file("src/feature.py", _patch("+one", "-two", "+fix from review", start=430)),
+        _file(".claude/hooks/gate.py", _patch("+guard", start=77)),
+    ]
+
+
+def _signals(github_world, **trigger_overrides):
+    trigger = _trigger(head_sha=CUR_HEAD, base_ref="main", **trigger_overrides)
+    return asyncio.run(_dispatcher()._review_signals(trigger))
+
+
+def _tier_for(lens: str, signals) -> str:
+    return model_tiering.resolve_tier(
+        model_tiering.lens_review_class(lens), signals=signals
+    ).tier
+
+
+def test_a_small_rereview_delta_runs_pm_qa_ux_mid_and_arch_security_top(github):
+    """Today's ledger case: a 1054-line PR whose re-round delta is one line."""
+    _small_delta_after_merging_main(github)
+    signals = _signals(github)
+    assert signals.diff_lines_changed == 1
+    assert signals.changed_files == ("src/feature.py",)
+    assert signals.review_round == 2 and signals.prior_blocking_finding
+    assert not signals.new_blocking_finding and not signals.diff_unreadable
+    assert {l: _tier_for(l, signals) for l in ("pm", "qa", "ux")} == {
+        "pm": "mid", "qa": "mid", "ux": "mid",
+    }
+    assert _tier_for("arch", signals) == "top"
+    assert _tier_for("security", signals) == "top"
+
+
+def test_a_branch_that_merged_main_is_sized_by_its_own_change_not_mains(github):
+    """Everything main brought in sits between the two heads. Only the
+    merge-base compares (`main...<sha>`) are read, so it cannot be counted."""
+    _small_delta_after_merging_main(github)
+    github.compare["raw"] = [
+        _file(f".claude/hooks/from_main_{i}.py", _patch("+x" * 9)) for i in range(40)
+    ]
+    signals = _signals(github)
+    assert signals.diff_lines_changed == 1
+    assert not signals.touches_security_sensitive_path()
+    compares = [p for p in github.paths if "/compare/" in p]
+    assert compares == [
+        f"/repos/owner/repo/compare/main...{PREV_HEAD}",
+        f"/repos/owner/repo/compare/main...{CUR_HEAD}",
+    ]
+
+
+def test_a_delta_that_touches_a_security_path_goes_top(github):
+    _small_delta_after_merging_main(github)
+    github.compare[CUR_HEAD].append(_file("execution/hooks/new_gate.py", _patch("+x")))
+    signals = _signals(github)
+    assert signals.touches_security_sensitive_path()
+    assert _tier_for("pm", signals) == "top"
+
+
+def test_a_large_delta_goes_top_even_though_it_is_a_reround(github):
+    _small_delta_after_merging_main(github)
+    github.compare[CUR_HEAD].append(
+        _file("src/big.py", _patch(*[f"+line {i}" for i in range(450)]))
+    )
+    signals = _signals(github)
+    assert signals.diff_lines_changed == 1 + 450
+    assert _tier_for("qa", signals) == "top"
+
+
+def test_round_one_measures_the_whole_pr_and_reads_no_delta(github, world):
+    _small_delta_after_merging_main(github)
+    world.fix_rounds = 0
+    signals = _signals(github)
+    assert signals.review_round == 1
+    assert signals.diff_lines_changed == 1054
+    assert set(signals.changed_files) == set(world.files)
+    assert _tier_for("pm", signals) == "top"
+    assert github.paths == []  # neither the thread nor a compare was read
+
+
+@pytest.mark.parametrize(
+    "break_delta",
+    [
+        pytest.param(lambda gh: gh.compare.pop(PREV_HEAD), id="old-head-compare-404"),
+        pytest.param(lambda gh: gh.compare.pop(CUR_HEAD), id="current-compare-404"),
+        pytest.param(
+            lambda gh: gh.compare.__setitem__(
+                PREV_HEAD, [_file(f"f{i}.py", _patch("+x")) for i in range(300)]
+            ),
+            id="compare-may-be-truncated",
+        ),
+        pytest.param(
+            lambda gh: setattr(gh, "comments", [_lens_marker("qa", CUR_HEAD)]),
+            id="no-earlier-reviewed-head",
+        ),
+        pytest.param(lambda gh: setattr(gh, "comments", []), id="no-review-comments"),
+    ],
+)
+def test_an_unreadable_delta_falls_back_to_the_whole_diff_never_a_smaller_one(
+    github, break_delta
+):
+    _small_delta_after_merging_main(github)
+    break_delta(github)
+    signals = _signals(github)
+    assert signals.diff_lines_changed == 1054  # the whole PR, not 0 and not less
+    assert set(signals.changed_files) == {
+        "src/feature.py", ".claude/hooks/gate.py", "docs/notes.md",
+    }
+    assert _tier_for("pm", signals) == "top"
+
+
+def test_the_base_branch_is_read_from_the_pr_when_the_trigger_has_none(github):
+    _small_delta_after_merging_main(github)
+    signals = asyncio.run(
+        _dispatcher()._review_signals(_trigger(head_sha=CUR_HEAD, base_ref=""))
+    )
+    assert signals.diff_lines_changed == 1
+    assert any(p.endswith("/pulls/87") for p in github.paths)
+
+
+def test_a_delta_is_not_used_by_a_dispatch_that_does_not_read_the_diff(github):
+    """Lanius's gate check measures nothing, so it must not spend the reads."""
+    _small_delta_after_merging_main(github)
+    trigger = _trigger(head_sha=CUR_HEAD, base_ref="main")
+    signals = asyncio.run(
+        _dispatcher()._review_signals(
+            trigger, measure_diff=False, detect_new_finding=False
+        )
+    )
+    assert signals.diff_lines_changed == 0 and not signals.diff_unreadable
+    assert github.paths == []
+
+
+# ── a NEW blocking finding needs two reviewed heads before the current one ───
+
+
+def test_the_head_being_reviewed_is_not_an_earlier_round():
+    """The first re-round has one earlier round (the one it verifies). Lens
+    comments already posted against the head under review, from a previous
+    attempt or another lens, must not be mistaken for a second earlier round."""
+    comments = [
+        _lens_marker("qa", "1" * 40, ("coverage: no test for X",)),
+        _lens_marker("qa", "2" * 40, ("coverage: no test for Y",)),
+    ]
+    # Read as two reviewed heads, head 2's Y is "new" ...
+    assert swarm_dispatch.has_new_blocking_finding(comments) is True
+    # ... but when head 2 is the one under review, only head 1 is reviewed.
+    assert swarm_dispatch.has_new_blocking_finding(
+        comments, current_head="2" * 40
+    ) is False
+
+
+def test_the_latest_reviewed_round_is_compared_with_every_earlier_one():
+    comments = [
+        _lens_marker("qa", "1" * 40, ("a: one",)),
+        _lens_marker("qa", "2" * 40, ("b: two",)),
+        _lens_marker("qa", "3" * 40, ("c: three",)),
+    ]
+    # Head 4 is under review; head 3 is the latest reviewed round and raised
+    # a blocker neither head 1 nor head 2 had.
+    assert swarm_dispatch.has_new_blocking_finding(
+        comments, current_head="4" * 40
+    ) is True
+    comments.append(_lens_marker("qa", "4" * 40, ("z: partial run of the head under review",)))
+    assert swarm_dispatch.has_new_blocking_finding(
+        comments, current_head="4" * 40
+    ) is True
+
+
+def test_the_first_rereview_is_never_new_even_with_the_current_head_partly_reviewed(
+    github,
+):
+    github.comments = [
+        _lens_marker("qa", PREV_HEAD, ("coverage: no test for X",)),
+        _lens_marker("pm", CUR_HEAD, ("scope: something else entirely",)),
+    ]
+    _small_delta_after_merging_main(github)
+    signals = _signals(github)
+    assert signals.new_blocking_finding is False
+    assert _tier_for("pm", signals) == "mid"
+
+
+def test_a_genuinely_new_blocker_on_the_latest_reviewed_head_still_goes_top(github):
+    prev, older = PREV_HEAD, "0" * 40
+    github.comments = [
+        _lens_marker("qa", older, ("coverage: no test for X",)),
+        _lens_marker("qa", prev, ("coverage: no test for Y",)),
+    ]
+    _small_delta_after_merging_main(github)
+    signals = _signals(github)
+    assert signals.new_blocking_finding is True
+    assert _tier_for("pm", signals) == "top"
+
+
+def test_an_unreadable_thread_still_fails_toward_top(github):
+    _small_delta_after_merging_main(github)
+    real_handler = github.handler
+    github.handler = lambda request: (
+        httpx.Response(500, json={})
+        if request.url.path.endswith("/comments")
+        else real_handler(request)
+    )
+    signals = _signals(github)
+    assert signals.new_blocking_finding is True
+    # The delta is unreadable too (it needs the thread): whole diff, top.
+    assert signals.diff_lines_changed == 1054
+    assert _tier_for("pm", signals) == "top"
+
+
+def test_panel_rereview_of_a_big_pr_with_a_small_delta_runs_mid_for_pm_and_qa(
+    monkeypatch, world
+):
+    """The whole panel path, today's case: 1054 lines and a security-path file
+    in the PR, a three-line delta in the re-round."""
+    world.fix_rounds = 1
+    world.lines = 1054
+    world.files = ["src/feature.py", ".claude/hooks/gate.py"]
+    world.delta = review_delta.Delta(3, ("src/feature.py",))
+    rec = _run_handle_pr(monkeypatch, world)
+    for agent in ("pavo", "phoenicurus"):
+        resolved = tier_of(rec.only(agent))
+        assert (resolved.tier, resolved.source) == ("mid", "policy"), agent
+        assert resolved.escalation_reasons == ()
+    assert tier_of(rec.only("waxwing")).tier == "top"  # arch re-rounds stay top
+
+
+def test_panel_rereview_with_an_unreadable_delta_stays_top(monkeypatch, world):
+    world.fix_rounds = 1
+    world.lines = 1054
+    world.delta = None  # unreadable: the whole PR is measured instead
+    rec = _run_handle_pr(monkeypatch, world)
+    resolved = tier_of(rec.only("pavo"))
+    assert resolved.tier == "top"
+    assert "diff_lines_changed=1054>400" in resolved.escalation_reasons
+
+
+def test_missing_lens_rerun_of_a_big_pr_with_a_small_delta_runs_mid(
+    monkeypatch, world
+):
+    world.fix_rounds = 1
+    world.lines = 1054
+    world.delta = review_delta.Delta(3, ("src/feature.py",))
+    rec = _run_missing_lens(monkeypatch, "qa")
+    assert tier_of(rec.only("phoenicurus")).tier == "mid"
+    rec = _run_missing_lens(monkeypatch, "security")
+    assert tier_of(rec.only("falco")).tier == "top"

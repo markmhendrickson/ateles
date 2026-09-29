@@ -22,6 +22,9 @@ at its reported reset without a hand edit of the headroom file.
     # Dispatch attempts per model tier (from the tier ledger; a provider
     # failover counts once per provider tried):
     harness_usage.py tiers --since-hours 24
+
+    # ...and why dispatches ran above their policy tier (escalation signals):
+    harness_usage.py tiers --since-hours 24 --reasons
 """
 
 from __future__ import annotations
@@ -108,11 +111,22 @@ def main(argv: list[str] | None = None) -> int:
         "--since-hours", type=float, default=None,
         help="only count dispatches from the last N hours (default: all)",
     )
+    tiers.add_argument(
+        "--reasons", action="store_true",
+        help=(
+            "also report why dispatches were raised a tier: how many "
+            "escalated dispatches each signal appears on, overall and per "
+            "action class"
+        ),
+    )
 
     args = parser.parse_args(argv)
     if args.command == "tiers":
         print(json.dumps(
-            model_tiering.tier_counts(since_hours=args.since_hours), indent=2,
+            model_tiering.tier_counts(
+                since_hours=args.since_hours, with_reasons=args.reasons
+            ),
+            indent=2,
             sort_keys=True,
         ))
         return 0

@@ -109,6 +109,20 @@ ROUND_TOLERANT_ACTION_CLASSES: frozenset[str] = frozenset(
 )
 
 
+# Classes whose defining condition IS "an earlier round blocked": a carry-forward
+# check runs because a PR is being carried through another round, and a
+# diagnosed repair runs because a review already diagnosed blocking findings.
+# `prior_blocking_finding` and `review_round` are therefore true of every such
+# dispatch by definition, so escalating on them pinned every one to top
+# (tier ledger 2026-09-29: carry_forward_check and repair_diagnosed both 100%
+# top on exactly those two signals). Every OTHER signal still raises them: a
+# failed prior attempt, security paths, a large or unreadable diff.
+# `security_fix` is deliberately absent: it stays top on its own policy tier.
+ROUND_DEFINED_ACTION_CLASSES: frozenset[str] = frozenset(
+    {"carry_forward_check", "repair_diagnosed"}
+)
+
+
 def _tier_index(tier: str) -> int:
     try:
         return TIERS.index(tier)
@@ -249,10 +263,15 @@ class EscalationSignals:
 
         ``action_class`` matters for exactly one narrowing: a re-review round
         (and the fact that an earlier round blocked) does not by itself raise
-        a class in ``ROUND_TOLERANT_ACTION_CLASSES``. Size, security paths, a
-        NEW blocking finding, a failed attempt and an unreadable diff still do.
+        a class in ``ROUND_TOLERANT_ACTION_CLASSES`` (pm/qa/ux re-reviews) or
+        ``ROUND_DEFINED_ACTION_CLASSES`` (carry-forward checks and diagnosed
+        repairs, which those two signals define). Size, security paths, a NEW
+        blocking finding, a failed attempt and an unreadable diff still do.
         """
-        tolerant = action_class in ROUND_TOLERANT_ACTION_CLASSES
+        tolerant = (
+            action_class in ROUND_TOLERANT_ACTION_CLASSES
+            or action_class in ROUND_DEFINED_ACTION_CLASSES
+        )
         out: list[str] = []
         if self.diff_lines_changed > LARGE_DIFF_LINE_THRESHOLD:
             out.append(f"diff_lines_changed={self.diff_lines_changed}>{LARGE_DIFF_LINE_THRESHOLD}")
@@ -559,18 +578,37 @@ def record_dispatch(
     return marker
 
 
-def tier_counts(*, since_hours: float | None = None) -> dict:
+def reason_name(reason: str) -> str:
+    """The signal a ledger escalation reason names, without its measurement.
+
+    ``diff_lines_changed=1054>400`` -> ``diff_lines_changed``;
+    ``review_round=2`` -> ``review_round``; a bare reason is its own name.
+    """
+    return str(reason).split("=", 1)[0].strip()
+
+
+def tier_counts(
+    *, since_hours: float | None = None, with_reasons: bool = False
+) -> dict:
     """Dispatch counts per tier (and per action class) from the ledger.
 
     ``{"total": n, "by_tier": {...}, "by_class": {"class": {"tier": n}}}``.
     Malformed lines are skipped, not fatal: one torn write must not blind the
     report. A missing ledger is an empty report, never an error.
+
+    ``with_reasons`` adds ``"by_reason": {reason: {"total": n, "by_class":
+    {class: n}}}``: how many escalated dispatches each signal appears on, so a
+    change to the signals can be measured against the ledger. A dispatch with
+    several reasons counts once under each, so the totals can exceed the
+    number of escalated dispatches. Rows written before reasons were recorded
+    simply contribute nothing.
     """
     cutoff = None
     if since_hours is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
     by_tier: dict[str, int] = {}
     by_class: dict[str, dict[str, int]] = {}
+    by_reason: dict[str, dict] = {}
     total = 0
     path = tier_ledger_path()
     try:
@@ -591,7 +629,18 @@ def tier_counts(*, since_hours: float | None = None) -> dict:
         klass = str(row.get("action_class") or "(none)")
         by_class.setdefault(klass, {})
         by_class[klass][tier] = by_class[klass].get(tier, 0) + 1
-    return {"total": total, "by_tier": by_tier, "by_class": by_class}
+        if with_reasons:
+            raw_reasons = row.get("escalation_reasons") or []
+            if not isinstance(raw_reasons, list):
+                raw_reasons = []
+            for name in {reason_name(r) for r in raw_reasons if str(r).strip()}:
+                entry = by_reason.setdefault(name, {"total": 0, "by_class": {}})
+                entry["total"] += 1
+                entry["by_class"][klass] = entry["by_class"].get(klass, 0) + 1
+    report = {"total": total, "by_tier": by_tier, "by_class": by_class}
+    if with_reasons:
+        report["by_reason"] = by_reason
+    return report
 
 
 # ── Config validation: `model_tiering.py --check <file> [<file> ...]` ─────────
