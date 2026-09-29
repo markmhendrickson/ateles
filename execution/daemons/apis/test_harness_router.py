@@ -403,3 +403,44 @@ def test_concurrent_recorders_do_not_drop_entries(tmp_path, monkeypatch) -> None
         "codex",
         "cursor",
     }
+
+
+def test_headroom_resolution_names_the_winning_source(tmp_path, monkeypatch) -> None:
+    """``headroom_resolution`` labels which precedence tier produced each value,
+    and agrees with ``configured_headroom`` on the value itself."""
+    now = time.time()
+    _usage_file(tmp_path, monkeypatch)
+    harness_router.record_exhausted("codex", now + 3600, observed_at=now - 60)
+    _headroom_file(
+        tmp_path,
+        monkeypatch,
+        {
+            "claude": {"headroom": 0.0, "cooldown_reason": "manual"},
+            "codex": 1.0,
+            "cursor": {"headroom": 0.0, "cooldown_until": _iso_after(now, 3600)},
+        },
+        mtime=now - 10,
+    )
+    resolved = harness_router.headroom_resolution(now_wall=now)
+    assert resolved["claude"] == (0.0, harness_router.HEADROOM_SOURCE_MANUAL_OVERRIDE)
+    # A live 0.0 is never outvoted by a hand-set 1.0.
+    assert resolved["codex"] == (0.0, harness_router.HEADROOM_SOURCE_LIVE_USAGE)
+    assert resolved["cursor"] == (0.0, harness_router.HEADROOM_SOURCE_DATED_OVERRIDE)
+    assert harness_router.configured_headroom(now_wall=now) == {
+        provider: value for provider, (value, _s) in resolved.items()
+    }
+
+
+def test_headroom_resolution_labels_undated_and_default(
+    tmp_path, monkeypatch
+) -> None:
+    now = time.time()
+    _headroom_file(tmp_path, monkeypatch, {"codex": 0.4}, mtime=now)
+    resolved = harness_router.headroom_resolution(now_wall=now)
+    assert resolved["codex"] == (0.4, harness_router.HEADROOM_SOURCE_UNDATED_OVERRIDE)
+    assert resolved["claude"] == (1.0, harness_router.HEADROOM_SOURCE_DEFAULT)
+    assert harness_router.headroom_override_origin() == "file"
+
+
+def _iso_after(now: float, seconds: float) -> str:
+    return harness_router._iso_from_wall(now + seconds)

@@ -1,7 +1,8 @@
 """
 Unit tests for skill_runner.py — Stages 1, 2, 5 of ateles#94.
 
-Tests are fully synchronous / mock-based:
+Tests are fully synchronous / mock-based except for one POSIX process-lifecycle
+regression that proves timeout cleanup reaches a real descendant:
   - AgentLoader.load() is monkeypatched to return a fake AgentDefinition
   - _write_harness_event is patched so no real Neotoma calls happen
   - No `claude` subprocess is spawned
@@ -12,6 +13,9 @@ Run with: pytest execution/daemons/apis/test_skill_runner.py -v
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -219,6 +223,78 @@ class TestRunSkill:
 
     def _run(self, coro):
         return asyncio.run(coro)
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_local_review_uses_empty_strict_mcp_and_no_publication_env(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        fake_def = _make_def(
+            prompt_markdown="Review only.",
+            tool_allowlist="Read,Bash,mcp__mcpsrv_neotoma__*",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        for key, value in {
+            "GITHUB_TOKEN": "fake-github",
+            "GH_TOKEN": "fake-gh",
+            "NEOTOMA_BEARER_TOKEN": "fake-neotoma",
+            "PAVO_NEOTOMA_TOKEN": "fake-role-neotoma",
+            "SSH_AUTH_SOCK": "/fake/agent.sock",
+        }.items():
+            monkeypatch.setenv(key, value)
+        captured = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["env"] = kwargs["env"]
+            mcp_path = Path(cmd[cmd.index("--mcp-config") + 1])
+            with mcp_path.open(encoding="utf-8") as mcp_file:
+                captured["mcp"] = json.load(mcp_file)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        review_home = tmp_path / "local-review-home"
+        review_home.mkdir()
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "pavo",
+                    "review prompt",
+                    role="pavo",
+                    provider="claude",
+                    local_review=True,
+                    env_extra={"ATELES_LOCAL_REVIEW_HOME": str(review_home)},
+                )
+            )
+
+        assert result.ok
+        assert "--strict-mcp-config" in captured["cmd"]
+        assert captured["mcp"] == {"mcpServers": {}}
+        allowed = captured["cmd"][captured["cmd"].index("--allowed-tools") + 1]
+        assert "mcp__" not in allowed
+        for key in (
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "NEOTOMA_BEARER_TOKEN",
+            "PAVO_NEOTOMA_TOKEN",
+            "SSH_AUTH_SOCK",
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+        ):
+            assert key not in captured["env"]
+        assert captured["env"]["GH_CONFIG_DIR"].startswith(str(review_home))
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -1260,7 +1336,9 @@ class TestHarnessEventEmptyToken:
         cm.__exit__ = MagicMock(return_value=False)
 
         with (
-            patch("skill_runner.urllib.request.urlopen", return_value=cm) as mock_urlopen,
+            patch(
+                "skill_runner.urllib.request.urlopen", return_value=cm
+            ) as mock_urlopen,
             caplog.at_level(_logging.WARNING, logger="apis.skill_runner"),
         ):
             self._call()
@@ -2748,6 +2826,71 @@ class TestDispatchFailureDiagnostics:
         assert notifier.send.call_count == 1
         assert "timed out" in notifier.send.call_args.args[0]
 
+    @pytest.mark.skipif(
+        not hasattr(os, "killpg"),
+        reason="process-group cleanup is a POSIX-only daemon contract",
+    )
+    def test_timeout_kills_descendant_process_group(self, tmp_path) -> None:
+        """A timeout must not leave a provider's native descendant alive."""
+        launcher = tmp_path / "provider-launcher"
+        descendant_pid_file = tmp_path / "descendant.pid"
+        launcher.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "import subprocess\n"
+            "import sys\n"
+            "import time\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+            "    stdin=subprocess.DEVNULL,\n"
+            "    stdout=subprocess.DEVNULL,\n"
+            "    stderr=subprocess.DEVNULL,\n"
+            ")\n"
+            "Path(os.environ['DESCENDANT_PID_FILE']).write_text(str(child.pid))\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        loader_instance = MagicMock()
+        loader_instance.load.return_value = fake_def
+
+        with (
+            patch("skill_runner.AgentLoader", return_value=loader_instance),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "df"),
+            patch("skill_runner.CLAUDE_BIN", str(launcher)),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill body"),
+            patch.dict(
+                os.environ,
+                {"DESCENDANT_PID_FILE": str(descendant_pid_file)},
+                clear=False,
+            ),
+        ):
+            result = asyncio.run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "p",
+                    role="gryllus",
+                    task_entity_id="ent_timeout_group",
+                    timeout=1,
+                )
+            )
+
+        assert result.ok is False
+        assert "timed out" in result.error
+        descendant_pid = int(descendant_pid_file.read_text(encoding="utf-8"))
+        try:
+            with pytest.raises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+        finally:
+            try:
+                os.kill(descendant_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
     # ── E. secret redaction in persisted output ───────────────────────────────
 
     def test_secrets_are_redacted_from_the_failure_log(self, tmp_path) -> None:
@@ -2817,6 +2960,75 @@ class TestCrossHarnessRouting:
         assert b"SYSTEM" in stdin
         assert b"WORK" in stdin
 
+    def test_codex_adapter_avoids_nested_sandbox_only_under_outer_guard(self) -> None:
+        cmd, _ = skill_runner._provider_command(
+            "codex",
+            "/bin/codex",
+            "SYSTEM",
+            "WORK",
+            cwd="/repo",
+            codex_outer_sandboxed=True,
+        )
+        assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
+        assert "workspace-write" not in cmd
+        assert "--add-dir" not in cmd
+
+    def test_codex_outer_sandbox_flag_refuses_without_real_wrapper(self) -> None:
+        result = asyncio.run(
+            skill_runner._run_skill_once(
+                "cicada",
+                "work",
+                provider="codex",
+                command_wrapper=[],
+                codex_outer_sandboxed=True,
+            )
+        )
+        assert result.ok is False
+        assert "requires provider='codex'" in (result.error or "")
+        assert "refusing to disable" in (result.error or "")
+
+    def test_codex_outer_sandbox_flag_refuses_lookalike_wrapper(self, tmp_path) -> None:
+        lookalike = tmp_path / "sandbox-exec"
+        lookalike.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        lookalike.chmod(0o755)
+        result = asyncio.run(
+            skill_runner._run_skill_once(
+                "cicada",
+                "work",
+                provider="codex",
+                command_wrapper=[str(lookalike), "-f", "profile.sb"],
+                codex_outer_sandboxed=True,
+            )
+        )
+        assert result.ok is False
+        assert "trusted wrapper/profile pair" in (result.error or "")
+
+    def test_codex_outer_sandbox_flag_rejects_path_shadowing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A PATH-preferred look-alike must not validate against itself."""
+        shadow_bin = tmp_path / "shadow-bin"
+        shadow_bin.mkdir()
+        lookalike = shadow_bin / "sandbox-exec"
+        lookalike.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        lookalike.chmod(0o755)
+        profile = tmp_path / "profile.sb"
+        profile.write_text("(version 1)\n(allow default)\n", encoding="utf-8")
+        monkeypatch.setenv("PATH", str(shadow_bin))
+
+        result = asyncio.run(
+            skill_runner._run_skill_once(
+                "cicada",
+                "work",
+                provider="codex",
+                command_wrapper=["sandbox-exec", "-f", str(profile)],
+                codex_outer_sandboxed=True,
+            )
+        )
+
+        assert result.ok is False
+        assert "/usr/bin/sandbox-exec" in (result.error or "")
+
     def test_cursor_adapter_uses_headless_agent(self) -> None:
         cmd, stdin = skill_runner._provider_command(
             "cursor",
@@ -2866,6 +3078,45 @@ class TestCrossHarnessRouting:
         assert "ANTHROPIC_API_KEY" not in child
         assert "OPENAI_API_KEY" not in child
         assert "CURSOR_API_KEY" not in child
+
+    def test_local_review_environment_is_allowlisted_and_publication_blind(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        fake_secrets = {
+            "GITHUB_TOKEN": "fake-github",
+            "GH_TOKEN": "fake-gh",
+            "ATELES_AGENT_PAT": "fake-agent-pat",
+            "NEOTOMA_BEARER_TOKEN": "fake-neotoma",
+            "PAVO_NEOTOMA_TOKEN": "fake-role-neotoma",
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": "/fake/key.json",
+            "ATELES_PRIVATE_KEYS_DIR": "/fake/keys",
+            "SSH_AUTH_SOCK": "/fake/agent.sock",
+            "GIT_SSH_COMMAND": "ssh -i /fake/key",
+        }
+        for key, value in fake_secrets.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fake-subscription-oauth")
+        review_home = tmp_path / "review-home"
+        review_home.mkdir()
+
+        child = skill_runner._subscription_only_env(
+            {
+                "CODEX_HOME": str(tmp_path / "codex-home"),
+                "ATELES_LOCAL_REVIEW_HOME": str(review_home),
+            },
+            local_review=True,
+            local_review_home=str(review_home),
+        )
+
+        for key in fake_secrets:
+            assert key not in child
+        assert child["CLAUDE_CODE_OAUTH_TOKEN"] == "fake-subscription-oauth"
+        assert child["HOME"] == str(review_home)
+        assert child["GH_CONFIG_DIR"] == str(review_home / ".config" / "gh")
+        assert child["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert child["GIT_CONFIG_VALUE_0"] == ""
+        assert child["GIT_TERMINAL_PROMPT"] == "0"
+        assert child["CODEX_HOME"] == str(tmp_path / "codex-home")
 
     def test_generation_vendor_keys_absent_from_subscription_only_env(
         self, monkeypatch
@@ -2936,9 +3187,95 @@ class TestCrossHarnessRouting:
             == "auth"
         )
 
-    def test_capacity_failure_fails_over_to_next_provider(
-        self, monkeypatch
+    @pytest.mark.parametrize(
+        ("diagnostic", "expected"),
+        [
+            ("fatal: Authentication failed for 'https://example.invalid/'", "auth"),
+            ("fatal: could not read Username for 'https://example.invalid/'", "auth"),
+            ("authentication_error: invalid api key", "auth"),
+            ("quota exceeded; resets in 2 hours", "capacity"),
+        ],
+    )
+    def test_provider_failure_and_delivery_conflict_share_diagnostics(
+        self, diagnostic, expected
     ) -> None:
+        assert skill_runner._provider_failure_kind(diagnostic) == expected
+        assert skill_runner._diagnostic_failure_kinds(diagnostic) == {expected}
+
+    @pytest.mark.parametrize(
+        ("payload", "indent", "expected"),
+        [
+            ({"error": {"message": "invalid\u00a0api key"}}, None, "auth"),
+            (
+                {
+                    "error": "  error: API Error: 401 invalid authentication "
+                    "credentials  "
+                },
+                None,
+                "auth",
+            ),
+            (
+                {
+                    "error": {
+                        "message": "request rejected",
+                        "type": "  rate_limit_error  ",
+                    }
+                },
+                None,
+                "capacity",
+            ),
+            (
+                {"error": {"message": "  ERROR: API Error: 429 quota\u00a0exceeded  "}},
+                2,
+                "capacity",
+            ),
+            (
+                {"error": {"message": " error: codex launch failed: unavailable "}},
+                2,
+                "launch",
+            ),
+        ],
+        ids=[
+            "escaped_nbsp",
+            "padded_nested_prefixes",
+            "padded_type",
+            "formatted_capacity",
+            "formatted_launch",
+        ],
+    )
+    @pytest.mark.parametrize("line_length", [None, 500, 501])
+    def test_structured_diagnostic_candidates_are_normalized_before_matching(
+        self, payload, indent, expected, line_length
+    ) -> None:
+        payload = dict(payload)
+        if line_length is not None:
+            payload["padding"] = ""
+            rendered = json.dumps(payload, indent=indent, separators=(",", ":"))
+            payload["padding"] = "x" * (line_length - len(rendered))
+        diagnostic = json.dumps(payload, indent=indent, separators=(",", ":"))
+        if line_length is not None:
+            assert len(diagnostic) == line_length
+
+        assert skill_runner._diagnostic_failure_kinds(diagnostic) == {expected}
+
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "The review discusses quota exceeded; resets in 2 hours.",
+            "Prompt: explain permission denied (publickey) to the user.",
+            "Verdict: Authentication failed for is an example phrase.",
+        ],
+    )
+    @pytest.mark.parametrize("line_length", [None, 501])
+    def test_delivery_conflict_classifier_excludes_transcript_prose(
+        self, prose, line_length
+    ) -> None:
+        if line_length is not None:
+            prose += " " + "x" * (line_length - len(prose) - 1)
+            assert len(prose) == line_length
+        assert skill_runner._diagnostic_failure_kinds(prose) == set()
+
+    def test_capacity_failure_fails_over_to_next_provider(self, monkeypatch) -> None:
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
         monkeypatch.setenv(
             "APIS_HARNESS_HEADROOM",
@@ -3048,6 +3385,53 @@ class TestCrossHarnessRouting:
         assert result.ok
         assert attempts == ["claude"]
 
+    def test_successful_stderr_transcript_words_preserve_result_without_cooldown(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A zero-exit provider transcript on stderr is result content, not failure."""
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        harness_router.reset_state()
+        attempts: list[str] = []
+        artifact = "<!-- review:pm commit=" + "a" * 40 + " -->\n**SIGNED_OFF**"
+        transcript = (
+            "Prompt: assess whether the implementation documents its usage limit "
+            "policy and authentication_error handling.\n"
+            "Verdict: the quota exceeded example is benign prose.\n"
+        )
+
+        async def fake_once(skill, prompt, *, provider, **kwargs):
+            attempts.append(provider)
+            return skill_runner.SkillResult(
+                skill,
+                True,
+                0,
+                artifact,
+                transcript,
+                provider=provider,
+            )
+
+        with (
+            patch(
+                "skill_runner._provider_binaries",
+                return_value={
+                    "claude": "/bin/claude",
+                    "codex": "/bin/codex",
+                    "cursor": None,
+                },
+            ),
+            patch("skill_runner._run_skill_once", side_effect=fake_once),
+        ):
+            result = asyncio.run(skill_runner.run_skill("gryllus", "work"))
+
+        assert result.ok is True
+        assert result.stdout == artifact
+        assert result.stderr == transcript
+        assert result.error == ""
+        assert result.attempted_providers == ("claude",)
+        assert attempts == ["claude"]
+        assert harness_router.cooling_providers() == set()
+
 
 # ── ateles#590: codex sandbox must reach the gitdir, and a denied delivery ─────
 #    must be reported as a failure rather than as ok:true over nothing.
@@ -3071,9 +3455,7 @@ class TestCodexSandboxGitRoots:
             ["git", "-C", str(main), "config", "user.email", "t@example.com"],
             check=True,
         )
-        subprocess.run(
-            ["git", "-C", str(main), "config", "user.name", "T"], check=True
-        )
+        subprocess.run(["git", "-C", str(main), "config", "user.name", "T"], check=True)
         (main / "seed.txt").write_text("seed\n")
         subprocess.run(["git", "-C", str(main), "add", "seed.txt"], check=True)
         subprocess.run(
@@ -3241,7 +3623,9 @@ class TestDeliveryFailureIsReportedAsFailure:
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
         ):
             return asyncio.run(
-                skill_runner.run_skill("gryllus", "work", role="gryllus")
+                skill_runner.run_skill(
+                    "gryllus", "work", role="gryllus", provider="claude"
+                )
             )
 
     def test_rc_zero_with_denied_commit_reports_not_ok(self) -> None:
@@ -3260,6 +3644,231 @@ class TestDeliveryFailureIsReportedAsFailure:
         )
         assert result.ok is False
         assert result.error, "ok:false must always carry a reason"
+        assert result.delivery_failure_reason == result.error
+
+    def test_rc_zero_mixed_delivery_and_capacity_is_not_delivery_only(self) -> None:
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n",
+            stderr=(self.NO_NETWORK + "\nquota exceeded").encode(),
+        )
+        assert result.ok is False
+        assert result.delivery_failure_reason == ""
+        assert result.delivery_failure_reasons == (
+            "sandbox denied network access — the child could not push or reach the GitHub API",
+        )
+        assert "mixed delivery diagnostics" in result.error
+
+    @pytest.mark.parametrize(
+        ("first", "second", "expected_conflict"),
+        [
+            (
+                NO_NETWORK,
+                "git@github.com: Permission denied (publickey).",
+                "auth",
+            ),
+            (
+                "git@github.com: Permission denied (publickey).",
+                NO_NETWORK,
+                "auth",
+            ),
+            (NO_NETWORK, INDEX_LOCK, "multiple_delivery_failures"),
+            (INDEX_LOCK, NO_NETWORK, "multiple_delivery_failures"),
+            (NO_NETWORK, "codex launch failed: executable unavailable", "launch"),
+            ("codex launch failed: executable unavailable", NO_NETWORK, "launch"),
+            (
+                NO_NETWORK,
+                "fatal: Authentication failed for 'https://example.invalid/'",
+                "auth",
+            ),
+            (
+                "fatal: Authentication failed for 'https://example.invalid/'",
+                NO_NETWORK,
+                "auth",
+            ),
+            (
+                NO_NETWORK,
+                "fatal: could not read Username for 'https://example.invalid/'",
+                "auth",
+            ),
+            (
+                "fatal: could not read Username for 'https://example.invalid/'",
+                NO_NETWORK,
+                "auth",
+            ),
+            (NO_NETWORK, "authentication_error: invalid api key", "auth"),
+            ("authentication_error: invalid api key", NO_NETWORK, "auth"),
+            (NO_NETWORK, "quota exceeded; resets in 2 hours", "capacity"),
+            ("quota exceeded; resets in 2 hours", NO_NETWORK, "capacity"),
+        ],
+        ids=[
+            "network_then_ssh_auth",
+            "ssh_auth_then_network",
+            "network_then_index",
+            "index_then_network",
+            "network_then_launch",
+            "launch_then_network",
+            "network_then_https_auth",
+            "https_auth_then_network",
+            "network_then_username_auth",
+            "username_auth_then_network",
+            "network_then_authentication_error",
+            "authentication_error_then_network",
+            "network_then_suffixed_capacity",
+            "suffixed_capacity_then_network",
+        ],
+    )
+    def test_delivery_recovery_classifies_the_entire_diagnostic_set(
+        self, first, second, expected_conflict
+    ) -> None:
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n",
+            stderr=f"{first}\n{second}".encode(),
+        )
+
+        assert result.ok is False
+        assert result.delivery_failure_reason == ""
+        assert result.delivery_failure_reasons
+        assert expected_conflict in result.delivery_failure_conflicts
+        assert "mixed delivery diagnostics" in result.error
+
+    @pytest.mark.parametrize(
+        ("diagnostic", "expected_conflict"),
+        [
+            ("fatal: Authentication failed for 'https://example.invalid/'", "auth"),
+            ("authentication_error: invalid api key", "auth"),
+            ("quota exceeded; resets in 2 hours", "capacity"),
+            ("codex launch failed: executable unavailable", "launch"),
+        ],
+        ids=["https_auth", "authentication_error", "capacity", "launch"],
+    )
+    @pytest.mark.parametrize("line_length", [500, 501])
+    @pytest.mark.parametrize("diagnostic_first", [False, True])
+    def test_long_diagnostic_preserves_delivery_conflict(
+        self, diagnostic, expected_conflict, line_length, diagnostic_first
+    ) -> None:
+        diagnostic += " " + "x" * (line_length - len(diagnostic) - 1)
+        assert len(diagnostic) == line_length
+        lines = (
+            (diagnostic, self.NO_NETWORK)
+            if diagnostic_first
+            else (
+                self.NO_NETWORK,
+                diagnostic,
+            )
+        )
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n", stderr="\n".join(lines).encode()
+        )
+
+        assert result.ok is False
+        assert result.delivery_failure_reason == ""
+        assert expected_conflict in result.delivery_failure_conflicts
+        assert "mixed delivery diagnostics" in result.error
+
+    @pytest.mark.parametrize(
+        ("diagnostic", "expected_conflict"),
+        [
+            ("API Error: 401 invalid authentication credentials", "auth"),
+            ("API Error: 429 quota exceeded; resets in 2 hours", "capacity"),
+            ('{"error":{"message":"invalid api key"}}', "auth"),
+            ('{"error":{"message":"rate limit reached"}}', "capacity"),
+            ('{"error":"authentication_error: invalid api key"}', "auth"),
+            (
+                '{"error":{"type":"rate_limit_error","message":"request rejected"}}',
+                "capacity",
+            ),
+            ("fatal: codex launch failed: executable unavailable", "launch"),
+            ("error: cursor launch failed: executable unavailable", "launch"),
+            ("\x1b[31mAPI Error:\x1b[0m 401 invalid\u00a0api key", "auth"),
+            ('\x1b[31m{"error":{"message":"quota\u00a0exceeded"}}\x1b[0m', "capacity"),
+        ],
+        ids=[
+            "api_auth",
+            "api_capacity",
+            "json_auth",
+            "json_capacity",
+            "json_auth_string",
+            "json_capacity_type",
+            "fatal_launch",
+            "error_launch",
+            "ansi_nbsp_api",
+            "ansi_nbsp_json",
+        ],
+    )
+    @pytest.mark.parametrize("diagnostic_first", [False, True])
+    def test_wrapped_provider_diagnostic_blocks_delivery_only(
+        self, diagnostic, expected_conflict, diagnostic_first
+    ) -> None:
+        lines = (
+            (diagnostic, self.NO_NETWORK)
+            if diagnostic_first
+            else (self.NO_NETWORK, diagnostic)
+        )
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n", stderr="\n".join(lines).encode()
+        )
+
+        assert result.ok is False
+        assert result.delivery_failure_reason == ""
+        assert result.delivery_failure_reasons
+        assert expected_conflict in result.delivery_failure_conflicts
+        assert "mixed delivery diagnostics" in result.error
+
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "The review quotes API Error: 401 invalid authentication credentials and quota exceeded.",
+            "API Error: The review quotes invalid authentication credentials and quota exceeded.",
+            '{"error":{"message":"The review quotes invalid api key and quota exceeded."}}',
+        ],
+    )
+    @pytest.mark.parametrize("diagnostic_first", [False, True])
+    def test_long_ordinary_prose_does_not_block_delivery_only(
+        self, prose, diagnostic_first
+    ) -> None:
+        if prose.startswith("{"):
+            prose = prose.replace('"}}', " " + "x" * (501 - len(prose) - 1) + '"}}')
+            assert json.loads(prose)["error"]["message"]
+        else:
+            prose += " " + "x" * (501 - len(prose) - 1)
+        assert len(prose) == 501
+        lines = (
+            (prose, self.NO_NETWORK) if diagnostic_first else (self.NO_NETWORK, prose)
+        )
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n", stderr="\n".join(lines).encode()
+        )
+
+        assert result.ok is False
+        assert result.delivery_failure_reason == result.error
+        assert result.delivery_failure_conflicts == ()
+
+    def test_quoted_capacity_stdout_does_not_cancel_delivery_only_signal(self) -> None:
+        result = self._dispatch_with_child_output(
+            b"The reviewed issue quotes a prior session limit.\n",
+            stderr=self.NO_NETWORK.encode(),
+        )
+        assert result.ok is False
+        assert result.delivery_failure_reason == result.error
+        assert "network access" in result.error
+
+    def test_successful_model_transcript_words_do_not_cancel_delivery_signal(
+        self,
+    ) -> None:
+        """The provider stderr may include the prompt and completed verdict."""
+        transcript = (
+            "role prompt: compare the phrases quota exceeded and launch failed: in prose\n"
+            "<!-- review:pm commit=" + "a" * 40 + " -->\n"
+            "**SIGNED_OFF**\n"
+            "The launch capacity discussion is complete.\n"
+        )
+        result = self._dispatch_with_child_output(
+            b"A complete local verdict exists.\n",
+            stderr=(transcript + self.NO_NETWORK).encode(),
+        )
+        assert result.ok is False
+        assert result.delivery_failure_reason == result.error
+        assert result.delivery_failure_conflicts == ()
 
     def test_quoted_denial_on_stdout_is_not_a_denial(self) -> None:
         """An agent that READS about a denial has not suffered one.
@@ -3289,6 +3898,106 @@ class TestDeliveryFailureIsReportedAsFailure:
         result = self._dispatch_with_child_output(b"All done. 12 passed.\n")
         assert result.ok is True
         assert result.error == ""
+
+    def test_pinned_codex_delivery_denial_is_not_reclassified_as_capacity(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A live Codex transcript mentioned limits after the real denial.
+
+        RED before the fix: the provider router scanned stdout because ok was
+        false, classified this as capacity, cooled Codex, and replaced the
+        exact delivery reason with the generic providers-exhausted message.
+        """
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        attempts: list[str] = []
+        reason = skill_runner._delivery_failure_reason(self.NO_NETWORK)
+        assert reason is not None
+
+        async def attempt(provider: str) -> skill_runner.SkillResult:
+            attempts.append(provider)
+            return skill_runner.SkillResult(
+                "pavo",
+                False,
+                0,
+                "The brief discusses a prior session limit, but the verdict is complete.",
+                self.NO_NETWORK,
+                error=reason,
+                provider=provider,
+                delivery_failure_reason=reason,
+                delivery_failure_reasons=(reason,),
+            )
+
+        result = asyncio.run(
+            skill_runner._run_provider_attempts(
+                "pavo",
+                attempt,
+                binaries={"codex": "/bin/codex"},
+                provider="codex",
+            )
+        )
+
+        assert attempts == ["codex"]
+        assert result.ok is False
+        assert result.returncode == 0
+        assert result.error == reason
+        assert result.stdout.startswith("The brief discusses")
+        assert result.stderr == self.NO_NETWORK
+        assert result.attempted_providers == ("codex",)
+        assert harness_router.cooling_providers() == set()
+
+    @pytest.mark.parametrize("failure_kind", ["capacity", "auth", "launch"])
+    def test_real_provider_failures_still_fail_over(
+        self, monkeypatch, tmp_path, failure_kind
+    ) -> None:
+        """The delivery carve-out must not widen to real provider failures."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,claude")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        attempts: list[str] = []
+
+        async def attempt(provider: str) -> skill_runner.SkillResult:
+            attempts.append(provider)
+            if provider == "claude":
+                return skill_runner.SkillResult(
+                    "pavo", True, 0, "done", "", provider=provider
+                )
+            if failure_kind == "capacity":
+                return skill_runner.SkillResult(
+                    "pavo", False, 1, "", "quota exceeded", provider=provider
+                )
+            if failure_kind == "auth":
+                return skill_runner.SkillResult(
+                    "pavo",
+                    False,
+                    1,
+                    "",
+                    "Authentication required. Please run 'agent login' first",
+                    provider=provider,
+                )
+            return skill_runner.SkillResult(
+                "pavo",
+                False,
+                None,
+                "",
+                "",
+                error=f"{provider} launch failed: executable unavailable",
+                provider=provider,
+            )
+
+        result = asyncio.run(
+            skill_runner._run_provider_attempts(
+                "pavo",
+                attempt,
+                binaries={"codex": "/bin/codex", "claude": "/bin/claude"},
+            )
+        )
+
+        assert result.ok is True
+        assert result.provider == "claude"
+        assert attempts == ["codex", "claude"]
+        assert "codex" in harness_router.cooling_providers()
 
 
 # ── Per-dispatch usage attribution (model + tokens) ───────────────────────────
@@ -3445,7 +4154,9 @@ class TestRequestedModelFromArgv:
 
     def test_reads_equals_spelling(self) -> None:
         assert (
-            skill_runner._requested_model("cursor", ["cursor-agent", "--model=composer-2.5"])
+            skill_runner._requested_model(
+                "cursor", ["cursor-agent", "--model=composer-2.5"]
+            )
             == "composer-2.5"
         )
 
@@ -3454,7 +4165,11 @@ class TestRequestedModelFromArgv:
         assert skill_runner._requested_model("claude", ["claude", "--print"]) is None
 
     def test_handles_trailing_flag_without_value(self) -> None:
-        assert skill_runner._requested_model("cursor", ["cursor-agent", "--model"]) is None
+        assert (
+            skill_runner._requested_model("cursor", ["cursor-agent", "--model"]) is None
+        )
+
+
 # ── Prior-art contract (check existing context before building) ───────────────
 #
 # The contract exists because dispatched agents rebuilt work that already
@@ -3608,7 +4323,9 @@ class TestFoundationContract:
             "Do the task.",
             include_github_contract=True,
         )
-        assert "`docs/foundation/principles.md` — SENTINEL-PRINCIPLES-PURPOSE." in prompt
+        assert (
+            "`docs/foundation/principles.md` — SENTINEL-PRINCIPLES-PURPOSE." in prompt
+        )
         assert "`docs/foundation/work_model.md` — not yet written" in prompt
 
     def test_present_when_degraded(self, foundation_root) -> None:
@@ -3618,7 +4335,9 @@ class TestFoundationContract:
         assert degraded
         assert skill_runner.SWARM_FOUNDATION_CONTRACT in prompt
 
-    def test_absent_on_a_checkout_with_no_reading_list(self, tmp_path, monkeypatch) -> None:
+    def test_absent_on_a_checkout_with_no_reading_list(
+        self, tmp_path, monkeypatch
+    ) -> None:
         """No conformance.md → nothing to bind to → the contract is not
         injected, and the prior-art contract is unaffected."""
         monkeypatch.setenv("ATELES_FOUNDATION_ROOT", str(tmp_path))
@@ -3650,32 +4369,47 @@ class TestFoundationContract:
         assert "docs/foundation/conformance.md" in text
 
 
-def test_prompt_review_quota_failover_preserves_role_prompt_and_cost_policy(monkeypatch, tmp_path):
+def test_prompt_review_quota_failover_preserves_role_prompt_and_cost_policy(
+    monkeypatch, tmp_path
+):
     harness_router.reset_state()
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
-    monkeypatch.setenv("APIS_REVIEW_MODELS", '{"claude":"qualified-a","codex":"qualified-b"}')
+    monkeypatch.setenv(
+        "APIS_REVIEW_MODELS", '{"claude":"qualified-a","codex":"qualified-b"}'
+    )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "metered-must-not-reach-child")
     monkeypatch.setenv("GITHUB_TOKEN", "publisher-must-not-reach-child")
-    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"claude", "codex":"codex"})
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": "claude", "codex": "codex"},
+    )
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
     attempts = []
 
     async def spawn(*cmd, **kwargs):
         attempts.append((cmd, kwargs))
+
         class Process:
             returncode = 1 if cmd[0] == "claude" else 0
+
             async def communicate(self, input=None):
                 attempts[-1][1]["input"] = input
                 if self.returncode:
                     return b"", b"quota exceeded"
                 return b"Verdict: APPROVE", b""
+
         return Process()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    result = asyncio.run(skill_runner.run_review_prompt(
-        role="loxia", prompt="EXACT ROLE AND HEAD REVIEW INPUT", timeout=1,
-    ))
+    result = asyncio.run(
+        skill_runner.run_review_prompt(
+            role="loxia",
+            prompt="EXACT ROLE AND HEAD REVIEW INPUT",
+            timeout=1,
+        )
+    )
     assert result.ok and result.provider == "codex"
     assert result.attempted_providers == ("claude", "codex")
     assert len(attempts) == 2
@@ -3687,38 +4421,74 @@ def test_prompt_review_quota_failover_preserves_role_prompt_and_cost_policy(monk
     assert "--ignore-user-config" in attempts[1][0]
 
 
-@pytest.mark.parametrize("failure", ["quota exceeded", "request timed out", "upstream unavailable"])
-def test_prompt_only_failover_retries_without_repeating_external_effects(monkeypatch, tmp_path, failure):
+@pytest.mark.parametrize(
+    "failure", ["quota exceeded", "request timed out", "upstream unavailable"]
+)
+def test_prompt_only_failover_retries_without_repeating_external_effects(
+    monkeypatch, tmp_path, failure
+):
     harness_router.reset_state()
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
     attempts = []
+
     async def attempt(provider):
         attempts.append(provider)
-        return skill_runner.SkillResult("loxia", provider == "codex", 1 if provider == "claude" else 0,
-                                        "" if provider == "claude" else "Verdict: APPROVE", "",
-                                        error=failure if provider == "claude" else "", provider=provider)
-    result = asyncio.run(skill_runner._run_provider_attempts(
-        "loxia", attempt, binaries={"claude":"a", "codex":"b"}, retry_safe=True,
-    ))
+        return skill_runner.SkillResult(
+            "loxia",
+            provider == "codex",
+            1 if provider == "claude" else 0,
+            "" if provider == "claude" else "Verdict: APPROVE",
+            "",
+            error=failure if provider == "claude" else "",
+            provider=provider,
+        )
+
+    result = asyncio.run(
+        skill_runner._run_provider_attempts(
+            "loxia",
+            attempt,
+            binaries={"claude": "a", "codex": "b"},
+            retry_safe=True,
+        )
+    )
     assert result.ok and attempts == ["claude", "codex"]
 
 
-def test_role_provider_preference_does_not_disable_capacity_failover(monkeypatch, tmp_path):
+def test_role_provider_preference_does_not_disable_capacity_failover(
+    monkeypatch, tmp_path
+):
     harness_router.reset_state()
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
-    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"a", "codex":"b"})
+    monkeypatch.setattr(
+        skill_runner, "_provider_binaries", lambda: {"claude": "a", "codex": "b"}
+    )
     attempts = []
+
     async def once(skill, prompt, **kwargs):
         attempts.append((kwargs["provider"], kwargs["role"], prompt))
         p = kwargs["provider"]
-        return skill_runner.SkillResult(skill, p == "claude", 0 if p == "claude" else 1,
-                                        "review" if p == "claude" else "", "quota exceeded" if p == "codex" else "", provider=p)
+        return skill_runner.SkillResult(
+            skill,
+            p == "claude",
+            0 if p == "claude" else 1,
+            "review" if p == "claude" else "",
+            "quota exceeded" if p == "codex" else "",
+            provider=p,
+        )
+
     monkeypatch.setattr(skill_runner, "_run_skill_once", once)
-    result = asyncio.run(skill_runner.run_skill("falco", "exact input", role="falco", preferred_provider="codex"))
+    result = asyncio.run(
+        skill_runner.run_skill(
+            "falco", "exact input", role="falco", preferred_provider="codex"
+        )
+    )
     assert result.ok
-    assert attempts == [("codex", "falco", "exact input"), ("claude", "falco", "exact input")]
+    assert attempts == [
+        ("codex", "falco", "exact input"),
+        ("claude", "falco", "exact input"),
+    ]
 
 
 def test_usable_providers_excludes_zero_headroom_preference(monkeypatch, tmp_path):
@@ -3768,10 +4538,16 @@ def test_zero_headroom_hard_pin_reports_provider_exclusion(monkeypatch, tmp_path
     assert "minimum=0.050" in result.error
 
 
-@pytest.mark.parametrize("models", ["", "[]", "broken", '{"claude":null}', '{"cursor":"qualified"}'])
+@pytest.mark.parametrize(
+    "models", ["", "[]", "broken", '{"claude":null}', '{"cursor":"qualified"}']
+)
 def test_prompt_review_requires_qualified_supported_adapter(monkeypatch, models):
     monkeypatch.setenv("APIS_REVIEW_MODELS", models)
-    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude":"a", "codex":"b", "cursor":"c"})
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": "a", "codex": "b", "cursor": "c"},
+    )
     result = asyncio.run(skill_runner.run_review_prompt(role="loxia", prompt="input"))
     assert not result.ok and result.attempted_providers == ()
 
@@ -4418,7 +5194,11 @@ class TestGateOwnerFailoverToClaude:
                 # an error that is neither a classified failure_kind nor a
                 # "launch failed:"-prefixed string.
                 return skill_runner.SkillResult(
-                    "waxwing", False, None, "", "",
+                    "waxwing",
+                    False,
+                    None,
+                    "",
+                    "",
                     error=(
                         f"{skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
                         f"provider {selected!r} has no mechanism..."
@@ -4426,7 +5206,12 @@ class TestGateOwnerFailoverToClaude:
                     provider=selected,
                 )
             return skill_runner.SkillResult(
-                "waxwing", True, 0, "**SIGNED_OFF**", "", provider=selected,
+                "waxwing",
+                True,
+                0,
+                "**SIGNED_OFF**",
+                "",
+                provider=selected,
             )
 
         result = self._run(
@@ -4498,7 +5283,12 @@ class TestGateOwnerFailoverToClaude:
         async def attempt(selected: str) -> skill_runner.SkillResult:
             attempted.append(selected)
             return skill_runner.SkillResult(
-                "falco", True, 0, "**COMMENT**", "", provider=selected,
+                "falco",
+                True,
+                0,
+                "**COMMENT**",
+                "",
+                provider=selected,
             )
 
         result = self._run(
