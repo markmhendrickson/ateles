@@ -33,8 +33,9 @@ same PR, which puts the new wording in front of review rather than past it.
 **What it does not verify.** Prose elsewhere in the row — another field's description, another edge's
 parenthetical, the derived-reads column — is not read. A contradiction written there is review's to
 catch, not this check's; the check guarantees that the three spans that carry the ruled claim say
-exactly what was ruled. It also requires every edges-column entry to be edge-shaped
-(`` `TYPE` → target ``), so a bare prose entry cannot sit in the edge list.
+exactly what was ruled. It also requires every edges-column entry to be an edge of a type in
+``ALLOWED_EDGE_TYPES`` (`` `TYPE` → target ``), so a bare prose entry cannot sit in the edge list, and
+exactly one `GOVERNS` → `agent` entry, so a second one cannot carry a denial beside the approved one.
 
 This is a corpus-shape check, the same kind `check_foundation_decision_101.py` and
 `check_foundation_decision_117.py` already are: it takes on no traversal or loader-implementation scope.
@@ -117,8 +118,12 @@ _AGENT_POLICY_ROW_RE = re.compile(
     r"(?P<edges>[^|]*)\|"
 )
 
+# The relationship types this row may carry, closed: an entry naming any other backticked token (a
+# `NOTE`, a `CAVEAT`) is prose dressed as an edge. Add a type here in the same PR that adds it to the row.
+ALLOWED_EDGE_TYPES = frozenset({"GOVERNS", "PART_OF", "SUPERSEDES", "REFERS_TO"})
+
 # An edges-column entry: a backticked relationship type, an arrow, then the target.
-_EDGE_ENTRY_RE = re.compile(r"^\s*`[A-Z_]+`\s*(?:→|->|←|<-)\s*\S")
+_EDGE_ENTRY_RE = re.compile(r"^\s*`(?P<type>[A-Z_]+)`\s*(?:→|->|←|<-)\s*\S")
 
 # The GOVERNS → agent entry. `(?!\w)` after the target rejects `agent_sub` and any other longer
 # identifier, while allowing the closing backtick, whitespace, or `(`.
@@ -128,31 +133,39 @@ _FIELD_OWN_PAREN_RE = re.compile(r"`(scope|agent_sub)`\s*(\()")
 
 
 def _malformed_edge_entries(edges_cell: str) -> list[str]:
-    return [
-        entry.strip()
-        for entry in _split_top_level(edges_cell)
-        if entry.strip() and not _EDGE_ENTRY_RE.match(entry)
-    ]
+    malformed = []
+    for entry in _split_top_level(edges_cell):
+        if not entry.strip():
+            continue
+        match = _EDGE_ENTRY_RE.match(entry)
+        if not match or match.group("type") not in ALLOWED_EDGE_TYPES:
+            malformed.append(entry.strip())
+    return malformed
+
+
+def _governs_agent_entry_is_approved(entry_rest: str) -> bool:
+    """``entry_rest`` is what follows the target: exactly one approved parenthetical, then nothing."""
+    rest = entry_rest.strip()
+    if not rest.startswith("("):
+        return False
+    own_paren = _extract_balanced_paren(rest, 0)
+    if own_paren is None or rest[len(own_paren) + 2:].strip():
+        return False
+    return _approved(own_paren, APPROVED_GOVERNS_AGENT_TEXTS)
 
 
 def _has_governs_edge_entry(edges_cell: str) -> bool:
-    """True when the edges cell carries ``GOVERNS`` → ``agent`` with an approved parenthetical.
+    """True when the edges cell carries exactly one ``GOVERNS`` → ``agent`` entry, and it is approved.
 
-    The entry must be exactly the edge, then one parenthetical equal to an approved text, then nothing.
+    A second such entry fails it even beside an approved one, the same rule the fields column applies
+    to a second `scope`/`agent_sub` description: otherwise a denial rides in as another entry.
     """
-    for entry in _split_top_level(edges_cell):
-        match = _GOVERNS_AGENT_RE.match(entry)
-        if not match:
-            continue
-        rest = entry[match.end():].strip()
-        if not rest.startswith("("):
-            continue
-        own_paren = _extract_balanced_paren(rest, 0)
-        if own_paren is None or rest[len(own_paren) + 2:].strip():
-            continue
-        if _approved(own_paren, APPROVED_GOVERNS_AGENT_TEXTS):
-            return True
-    return False
+    entries = [
+        entry[match.end():]
+        for entry in _split_top_level(edges_cell)
+        if (match := _GOVERNS_AGENT_RE.match(entry))
+    ]
+    return len(entries) == 1 and _governs_agent_entry_is_approved(entries[0])
 
 
 def _field_descriptions(fields_cell: str) -> dict[str, list[str]]:
@@ -247,13 +260,14 @@ def check_concepts_row(
     for entry in _malformed_edge_entries(edges_cell):
         problems.append(
             f"{path}:{row_no}: decision-114-data-model — agent behavioural rule row's edges column "
-            f"has an entry that is not an edge (`` `TYPE` → target (...) ``): {entry[:80]!r}"
+            f"has an entry that is not an edge of a type in ALLOWED_EDGE_TYPES (`` `TYPE` → target (...) ``): "
+            f"{entry[:80]!r}"
         )
     if not _has_governs_edge_entry(edges_cell):
         problems.append(
             f"{path}:{row_no}: decision-114-data-model — agent behavioural rule row's edges column "
-            "does not carry `GOVERNS` → `agent` with an approved parenthetical while register row 114 "
-            "is **ruled**. The entry's parenthetical must equal one of APPROVED_GOVERNS_AGENT_TEXTS in "
+            "does not carry exactly one `GOVERNS` → `agent` entry with an approved parenthetical while "
+            "register row 114 is **ruled**. The entry's parenthetical must equal one of APPROVED_GOVERNS_AGENT_TEXTS in "
             "execution/scripts/check_foundation_decision_114.py; to reword it, change the approved "
             "text there in the same PR"
         )

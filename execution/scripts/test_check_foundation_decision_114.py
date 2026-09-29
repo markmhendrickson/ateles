@@ -294,3 +294,18 @@ def test_security_combined_bypass_fixture_fails(tmp_path: Path) -> None:
     )
     write_corpus(tmp_path, data_model_text=data_model(row))
     assert len(decision_114.check(tmp_path)) == 2
+
+
+def test_fails_when_a_second_governs_agent_entry_denies_the_approved_one(tmp_path: Path) -> None:
+    """Self-review finding: one approved entry must not vouch for a second, denying one."""
+    row = rule_row(extra_edges="; `GOVERNS` → `agent` (not yet; the scope field is still what the loader reads)")
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    assert decision_114.check(tmp_path)
+
+
+def test_fails_when_prose_is_dressed_as_an_edge_of_an_unknown_type(tmp_path: Path) -> None:
+    """Self-review finding: `NOTE` → x is not an edge the row may carry."""
+    row = rule_row(extra_edges="; `NOTE` → x (all of the above is superseded and not in force)")
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "not an edge" in problems[0]

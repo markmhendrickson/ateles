@@ -878,7 +878,12 @@ naming decision 114 ruled — `agent_policy` was named the home of a behavioural
 the new names from this ruling on; the live record keeps the old ones until the migration runs, and this
 section is where the two are mapped. The migration itself is not performed here: planning it — the
 retyping, every reader that selects a rule by type, and a window in which readers accept both names — is
-Neotoma task `ent_f9930006ca11de6d72c6162b`.
+Neotoma task `ent_f9930006ca11de6d72c6162b`. That task also owns renaming the corpus's own references:
+outside this section, `vocabulary.md`, and the concepts row, the foundation still names the type
+`agent_policy` — among them the closed list of governance types
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`) and
+`conformance_suite.md`'s WM-22, which `render_data_model.py` reads — and those move to `rule` in one
+change with the checkers that read them, not piecemeal ahead of it.
 
 | Live name | Design name | What moves, and what the migration must not do |
 |---|---|---|
