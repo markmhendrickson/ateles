@@ -283,6 +283,7 @@ def _signals_from_args(args: argparse.Namespace) -> "model_tiering.EscalationSig
         args.review_round > 1
         or args.prior_blocking_finding
         or args.prior_attempt_failed
+        or args.new_blocking_finding
         or args.diff_lines
         or args.changed_file
     ):
@@ -293,6 +294,7 @@ def _signals_from_args(args: argparse.Namespace) -> "model_tiering.EscalationSig
         prior_blocking_finding=args.prior_blocking_finding,
         review_round=args.review_round,
         prior_attempt_failed=args.prior_attempt_failed,
+        new_blocking_finding=args.new_blocking_finding,
     )
 
 
@@ -528,11 +530,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--review-round", type=int, default=1,
-        help="Review round number for tier escalation; 2 or later raises to top.",
+        help=(
+            "Review round number for tier escalation. Round 2 or later raises "
+            "to top, except a small pm/qa/ux re-review, which stays mid."
+        ),
     )
     parser.add_argument(
         "--prior-blocking-finding", action="store_true",
-        help="An earlier round raised a blocking finding; raises the tier to top.",
+        help=(
+            "An earlier round raised a blocking finding; raises the tier to "
+            "top (not for a pm/qa/ux re-review, which needs a NEW finding)."
+        ),
+    )
+    parser.add_argument(
+        "--new-blocking-finding", action="store_true",
+        help=(
+            "The last round raised a blocking finding no earlier round had; "
+            "raises the tier to top, including for pm/qa/ux re-reviews."
+        ),
     )
     parser.add_argument(
         "--prior-attempt-failed", action="store_true",
