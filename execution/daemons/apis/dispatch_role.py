@@ -252,6 +252,9 @@ async def dispatch(
     resolution outright. Neither is required — an orchestrating session's
     one-off dispatch that names no ``action_class`` runs exactly as before.
     """
+    # work_class reaches run_skill's local-first routing AND (via
+    # _run_skill_once) the lean-prompt/post-condition path — see
+    # local_provider.build_lean_prompt / verify_postcondition.
     return await run_skill(
         role,
         task,
