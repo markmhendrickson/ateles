@@ -144,6 +144,7 @@ import httpx  # noqa: E402
 
 from lib import github_app_token as _github_app_token  # noqa: E402
 
+import review_carry  # noqa: E402
 from review_panel import LENSES, Lens, select_panel  # noqa: E402
 from swarm_dispatch import (  # noqa: E402
     EXPECTATION_MARKER,
@@ -154,6 +155,7 @@ from swarm_dispatch import (  # noqa: E402
     _reviewer_app_private_key_pem,
     compose_lens_review_marker,
     lens_own_verdict,
+    lens_records,
     sign_off_is_warranted,
 )
 
@@ -301,9 +303,13 @@ class LensOutcome:
         passed: bool,
         comment_url: str = "",
         reason: str = "",
+        carried_from: str = "",
     ) -> None:
         self.lens = lens
         self.agent = agent
+        # Full head SHA of an EARLIER round whose sign-off stands in for this
+        # head's; "" when the lens reviewed the current head itself.
+        self.carried_from = carried_from
         self.head_matched = head_matched
         self.verdict = verdict
         self.passed = passed
@@ -674,6 +680,69 @@ async def evaluate_lens(
         comment_url=comment.get("html_url", ""),
         reason=reason,
     )
+
+
+async def carry_earlier_signoffs(
+    client: httpx.AsyncClient,
+    *,
+    repo: str,
+    base_ref: str,
+    head_sha: str,
+    comments: list[dict],
+    lens_outcomes: list[LensOutcome],
+) -> list[LensOutcome]:
+    """Replace a failing lens outcome with a carried sign-off where that is safe.
+
+    Operator ruling `rereview_only_blockers_and_touched_areas` (2026-09-29). A
+    lens with no verdict on the current head clears on an EARLIER head's verdict
+    only when all three hold: it signed off there (its latest verdict, no
+    blocking verdict at that head), it did not block, and the fix's own delta
+    since that head (`review_delta.interdiff`) touches none of its areas
+    (`review_carry.lenses_touched`, fail-closed: an unmapped file touches every
+    lens). An unreadable delta carries nothing. A lens that reviewed the
+    current head is never carried, whatever it said.
+    """
+    records = lens_records(comments)
+    pending = [o for o in lens_outcomes if not o.passed and not o.head_matched]
+    heads = review_carry.candidate_heads([o.lens for o in pending], records, head_sha)
+    if not heads:
+        return lens_outcomes
+    deltas = {
+        old: await review_carry.fetch_interdiff(
+            client,
+            repo=repo,
+            base_ref=base_ref,
+            old_head=old,
+            new_head=head_sha,
+            headers=_github_headers(repo),
+        )
+        for old in heads
+    }
+    selection = review_carry.select_rerun(
+        [o.lens for o in pending], records, head_sha, deltas
+    )
+    out: list[LensOutcome] = []
+    for outcome in lens_outcomes:
+        carried = selection.carried.get(outcome.lens)
+        if carried is None or outcome not in pending:
+            out.append(outcome)
+            continue
+        out.append(
+            LensOutcome(
+                outcome.lens,
+                agent=outcome.agent,
+                head_matched=False,
+                verdict=carried.verdict or None,
+                passed=True,
+                comment_url=carried.url,
+                reason=(
+                    f"carried from {carried.head[:7]}: the fix since then touched "
+                    "none of its areas"
+                ),
+                carried_from=carried.head,
+            )
+        )
+    return out
 
 
 def find_non_required_blocks(
@@ -1141,7 +1210,23 @@ async def submit_app_approval(
         f"PR's current head `{head_sha}`.",
         "",
     ]
+    carried_outcomes = [o for o in lens_outcomes if o.carried_from]
+    if carried_outcomes:
+        body_lines[0] = (
+            "Approved by the swarm App — every required review lens cleared, "
+            f"{len(lens_outcomes) - len(carried_outcomes)} on the PR's current head "
+            f"`{head_sha}` and {len(carried_outcomes)} carried forward from an "
+            "earlier head (listed below)."
+        )
     for outcome in lens_outcomes:
+        if outcome.carried_from:
+            body_lines.append(
+                f"- **{outcome.lens}** ({outcome.agent}): CARRIED FORWARD, "
+                f"`{outcome.verdict}` at head `{outcome.carried_from}` — "
+                f"{outcome.comment_url}. The fix since that head touched none of "
+                "this lens's areas, so it was not re-run."
+            )
+            continue
         body_lines.append(
             f"- **{outcome.lens}** ({outcome.agent}): `{outcome.verdict}` — {outcome.comment_url}"
         )
@@ -1239,7 +1324,7 @@ def _print_table(lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOut
     print("-" * 80)
     for o in lens_outcomes:
         verdict_s = o.verdict or "(none)"
-        head_s = "yes" if o.head_matched else "no"
+        head_s = "carried" if o.carried_from else ("yes" if o.head_matched else "no")
         pf = "PASS" if o.passed else "FAIL"
         print(f"{o.lens:<10} {verdict_s:<14} {head_s:<11} {pf:<10} {o.reason}")
     print()
@@ -1345,6 +1430,7 @@ async def run(
     *,
     apply: bool,
     panel_all: bool = False,
+    carry: bool = True,
 ) -> int:
     async with httpx.AsyncClient(timeout=30) as client:
         pr_data = await _fetch_pr(client, repo, pr)
@@ -1417,6 +1503,15 @@ async def run(
         )
 
         base_ref = str((pr_data.get("base") or {}).get("ref") or "")
+        if carry:
+            lens_outcomes = await carry_earlier_signoffs(
+                client,
+                repo=repo,
+                base_ref=base_ref,
+                head_sha=head_sha,
+                comments=comments,
+                lens_outcomes=lens_outcomes,
+            )
         check_outcomes, checks_green = await evaluate_checks(
             client, repo=repo, head_sha=head_sha, base_ref=base_ref
         )
@@ -1520,6 +1615,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-carry",
+        action="store_true",
+        help=(
+            "require every lens to have cleared the CURRENT head itself; do not "
+            "accept an earlier head's sign-off for a lens the fix did not touch"
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="submit the APPROVE review as the App if every lens and check passes (default: dry run)",
@@ -1535,6 +1638,8 @@ def main() -> int:
             extra_lenses,
             apply=args.apply,
             panel_all=(args.panel == "all"),
+            # Only named when the operator opts out; carrying is the default.
+            **({"carry": False} if args.no_carry else {}),
         )
     )
 

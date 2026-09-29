@@ -101,6 +101,7 @@ from review_panel import (
     select_panel,
 )
 import model_tiering
+import review_carry
 import review_delta
 from skill_runner import (
     GATE_OWNER_TOOL_DENY_UNAVAILABLE,
@@ -2912,6 +2913,46 @@ def last_reviewed_head(comments: list[dict], exclude_head: str = "") -> str:
     return order[-1] if order else ""
 
 
+def _original_lens_body(body: str) -> str:
+    """A lens comment as its lens wrote it. `compose_superseded_verdict` puts a
+    note and a `review:<lens>-superseded` marker ahead of a retired verdict and
+    keeps the rest verbatim; a fixed-position read needs the verbatim part."""
+    match = _LENS_SUPERSEDED_RE.search(body or "")
+    return (body or "")[match.end():].lstrip("\n") if match else (body or "")
+
+
+def lens_records(comments: list[dict]) -> dict[str, list[review_carry.LensRecord]]:
+    """Every lens verdict on the PR, per lens in comment order, at its own head.
+
+    The one reader both the panel dispatch and the approval gate use to decide
+    what an earlier head's sign-off is: `sign_off_is_warranted` for `cleared`
+    (an explicit clear, nothing else) and `lens_own_verdict` for the token. A
+    lens the registry does not know, or a comment with no head marker, yields
+    no record: there is nothing to carry from it.
+    """
+    out: dict[str, list[review_carry.LensRecord]] = {}
+    for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+        raw = comment.get("body") or ""
+        marker = _LENS_MARKER_RE.search(raw)
+        if not marker:
+            continue
+        lens = marker.group("lens").lower()
+        known = lens_by_name(lens)
+        if known is None:
+            continue
+        body = _original_lens_body(raw)
+        out.setdefault(lens, []).append(
+            review_carry.LensRecord(
+                lens=lens,
+                head=marker.group("sha").lower(),
+                cleared=sign_off_is_warranted(body, lens_agent=known.agent),
+                verdict=lens_own_verdict(body, lens_agent=known.agent) or "",
+                url=str(comment.get("html_url") or ""),
+            )
+        )
+    return out
+
+
 def has_new_blocking_finding(comments: list[dict], current_head: str = "") -> bool:
     """Whether the latest reviewed round raised a blocking finding no earlier
     round did (ruling `small_rereview_rounds_run_mid`).
@@ -3167,6 +3208,20 @@ class DispatchConfig:
     # today's notify-and-wait exactly.
     auto_rereview_on_push: bool = (
         os.environ.get("ATELES_SWARM_AUTO_REREVIEW", "0") == "1"
+    )
+    # Narrow re-review rounds (operator ruling `rereview_only_blockers_and_
+    # touched_areas`, 2026-09-29): after a fix, re-run only the lenses that
+    # blocked plus any lens whose area the fix touched; the rest carry forward
+    # (`review_carry`). Fail-closed inside: an unmapped file, an unreadable
+    # delta or a blocked lens re-runs. Default ON; `ATELES_SWARM_NARROW_REREVIEW=0`
+    # restores the full panel every round.
+    narrow_rereview: bool = (
+        os.environ.get("ATELES_SWARM_NARROW_REREVIEW", "1") != "0"
+    )
+    # pm, qa and ux review in one mid-tier pass (ruling `combined_pm_qa_ux_pass`),
+    # each still posting its own verdict comment. `=0` runs them one by one.
+    combined_review_pass: bool = (
+        os.environ.get("ATELES_SWARM_COMBINED_REVIEW_PASS", "1") != "0"
     )
     # Repos the startup resume sweep scans for issue pipelines left in flight by
     # a daemon restart. The daemon is otherwise webhook-driven and keeps no repo
@@ -6436,6 +6491,24 @@ class SwarmDispatcher:
             max_panel=self.config.panel_max,
             pending_gates=pending_gates,
         )
+        # Narrow a re-round (ruling `rereview_only_blockers_and_touched_areas`).
+        # Extends the carry-forward above: a pending gate's owner is forced to
+        # re-run, and every other lens re-runs only when it blocked or the fix
+        # touched its area. Any failure here keeps the FULL panel.
+        carried_lenses: dict[str, review_carry.Carried] = {}
+        if self.config.narrow_rereview:
+            selection = await self._rereview_selection(
+                trigger, panel, review_head, forced=pending_gates
+            )
+            if selection is not None and selection.carried:
+                panel = [item for item in panel if item.lens in selection.rerun]
+                carried_lenses = selection.carried
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: narrow re-review — re-running "
+                    f"{sorted(selection.rerun)}, carrying "
+                    f"{ {k: v.head[:7] for k, v in carried_lenses.items()} }"
+                )
+                await self._post_carry_note(trigger, selection, review_head)
 
         reviews: list[tuple[str, str]] = []
         failed_lenses: list[tuple[str, str]] = []
@@ -6469,6 +6542,21 @@ class SwarmDispatcher:
         # (gate, agent, header, observed) for each gate-owning lens whose reply
         # was refused only for its format (PR #1181 ux review at b76b1376).
         unreadable_verdicts: list[tuple[str, str, str, str]] = []
+        # pm, qa and ux in one mid-tier pass (ruling `combined_pm_qa_ux_pass`).
+        # A lens whose block is missing or unreadable is simply absent here and
+        # runs alone below, so the combined pass can only save work.
+        combined_results: dict[str, SkillResult] = {}
+        if self.config.combined_review_pass:
+            combined_results = await self._run_combined_pass(
+                trigger,
+                panel,
+                expectations,
+                parent,
+                review_head,
+                pending_gates=pending_gates,
+                live_gates=live_gates,
+                signals=panel_signals,
+            )
         for lens in panel:
             # Whether this seat's clean verdict is signed for its gate, decided
             # from the LIVE record (and the pre-panel re-proof), never from
@@ -6482,12 +6570,12 @@ class SwarmDispatcher:
             # writable PR-branch checkout as its cwd. Other lenses stay diff-only
             # (cwd=None). Best-effort: prep failure → diff-only fallback, no stall.
             qa_worktree: str | None = None
-            if lens.agent == "phoenicurus":
+            if lens.agent == "phoenicurus" and lens.lens not in combined_results:
                 qa_worktree = await prepare_pr_worktree(
                     trigger.repository, trigger.number, lens.agent
                 )
             try:
-                result = await run_skill(
+                result = combined_results.get(lens.lens) or await run_skill(
                     lens.agent,
                     self._panelist_prompt(
                         trigger,
@@ -6806,6 +6894,7 @@ class SwarmDispatcher:
                 reviews,
                 pending_gates=pending_gates,
                 reviewed_head=review_head,
+                **({"carried": carried_lenses} if carried_lenses else {}),
             ),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
@@ -11407,6 +11496,7 @@ class SwarmDispatcher:
         reviews: list[tuple[str, str]] | None = None,
         pending_gates: set[str] | None = None,
         reviewed_head: str | None = None,
+        carried: "dict[str, review_carry.Carried] | None" = None,
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -11420,6 +11510,18 @@ class SwarmDispatcher:
             )
         else:
             panel_block = "(no panel lens reviews captured — GHA baseline only)"
+        if carried:
+            # Carried sign-offs are named, never inlined as this head's reviews.
+            panel_block += (
+                "\n\n### CARRIED FORWARD (not re-run at this head)\n"
+                + "\n".join(
+                    f"- {lens}: `{c.verdict or 'clear'}` at `{c.head}` — the fix "
+                    "since then touched none of this lens's areas"
+                    for lens, c in sorted(carried.items())
+                )
+                + "\nThese lenses cleared an earlier head and are not missing; "
+                "do not list them as NOT RECEIVED."
+            )
         marker_head = _normalise_full_sha(
             reviewed_head if reviewed_head is not None else t.head_sha
         )
@@ -11631,19 +11733,14 @@ class SwarmDispatcher:
                     base_ref = str((resp.json().get("base") or {}).get("ref") or "")
                 if not base_ref:
                     return None
-                sides: list[list[dict]] = []
-                for sha in (previous, head):
-                    resp = await client.get(
-                        f"https://api.github.com/repos/{trigger.repository}/"
-                        f"compare/{quote(base_ref, safe='/')}...{sha}",
-                        headers=self._github_headers(trigger.repository),
-                    )
-                    resp.raise_for_status()
-                    files = review_delta.compare_files(resp.json())
-                    if files is None:
-                        return None
-                    sides.append(files)
-            return review_delta.interdiff(sides[0], sides[1])
+                return await review_carry.fetch_interdiff(
+                    client,
+                    repo=trigger.repository,
+                    base_ref=base_ref,
+                    old_head=previous,
+                    new_head=head,
+                    headers=self._github_headers(trigger.repository),
+                )
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] delta read failed for "
@@ -11651,6 +11748,225 @@ class SwarmDispatcher:
                 "measures the whole diff instead"
             )
             return None
+
+    async def _rereview_selection(
+        self,
+        trigger: SwarmTrigger,
+        panel: list[Lens],
+        review_head: str,
+        *,
+        forced: set[str],
+    ) -> review_carry.RerunSelection | None:
+        """Which panel lenses this round must re-run, or None for the full panel.
+
+        None on round 1 (no earlier verdict exists) and on ANY failure: the
+        narrowing only ever removes work when it can prove the removal.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    trigger.repository, trigger.number, client
+                )
+                records = lens_records(comments)
+                names = [item.lens for item in panel]
+                heads = review_carry.candidate_heads(names, records, review_head)
+                if not heads:
+                    return None
+                base_ref = trigger.base_ref
+                if not base_ref:
+                    resp = await client.get(
+                        f"https://api.github.com/repos/{trigger.repository}/pulls/"
+                        f"{trigger.number}",
+                        headers=self._github_headers(trigger.repository),
+                    )
+                    resp.raise_for_status()
+                    base_ref = str((resp.json().get("base") or {}).get("ref") or "")
+                deltas = {
+                    head: await review_carry.fetch_interdiff(
+                        client,
+                        repo=trigger.repository,
+                        base_ref=base_ref,
+                        old_head=head,
+                        new_head=review_head,
+                        headers=self._github_headers(trigger.repository),
+                    )
+                    for head in heads
+                }
+            return review_carry.select_rerun(
+                names, records, review_head, deltas, forced=forced
+            )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: narrow "
+                f"re-review selection failed ({exc}) — running the full panel"
+            )
+            return None
+
+    async def _post_carry_note(
+        self,
+        trigger: SwarmTrigger,
+        selection: review_carry.RerunSelection,
+        review_head: str,
+    ) -> None:
+        """Say on the PR which lenses were carried and which re-ran. Best-effort."""
+        rows = "\n".join(
+            f"- **{lens}**: `{c.verdict or 'clear'}` at `{c.head}`"
+            for lens, c in sorted(selection.carried.items())
+        )
+        body = (
+            f"Re-review of `{review_head[:7]}` is narrowed. Re-running: "
+            f"{', '.join(sorted(selection.rerun)) or 'none'}. Carried forward "
+            "because they cleared an earlier head and the fix since then touched "
+            f"none of their areas:\n{rows}"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"https://api.github.com/repos/{trigger.repository}/issues/"
+                    f"{trigger.number}/comments",
+                    json={"body": body},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning(f"[{DAEMON_NAME}] carry note not posted: {exc}")
+
+    def _combined_prompt(
+        self,
+        t: SwarmTrigger,
+        lenses: list[Lens],
+        expectations: dict[str, str],
+        head: str,
+    ) -> str:
+        """One prompt that has the pm, qa and ux lenses review together.
+
+        Each lens gets its own delimiter block that opens with its OWN header and
+        verdict line, so each block is exactly the reply that lens would return
+        alone and the gate's reader parses it unchanged."""
+        blocks = []
+        for lens in lenses:
+            header = attribution_header(lens.agent, f"{lens.lens} lens panelist")
+            blocks.append(
+                f"{review_carry.combined_delimiter(lens.lens)}\n{header}\n"
+                "**SIGNED_OFF** (or `**BLOCKED**` / `**REQUEST_CHANGES**` plus "
+                "`[BLOCKING] <category>: <summary>` lines)\n"
+                f"<findings for the {lens.lens} lens only>\n"
+            )
+            expectation = expectations.get(lens.agent, "")
+            blocks[-1] = (
+                f"Lens `{lens.lens}` checks: {lens.checks}\n"
+                + (f"Pre-registered expectations: {expectation}\n" if expectation else "")
+                + "Block format:\n" + blocks[-1]
+            )
+        return (
+            f"Review PR {t.repository}#{t.number} ({t.title}) at head `{head}` "
+            "as the following lenses IN ONE PASS. You run diff-only: read the PR "
+            "diff, do not post comments yourself, and mark a finding "
+            "`[BLOCKING]` only when it is evident from the diff.\n\n"
+            "Return ONE reply made of one block per lens, in this order. Each "
+            "block starts with its own delimiter line, then its header line "
+            "EXACTLY as shown, then its verdict line, then its findings. Never "
+            "write one lens's header or verdict inside another lens's block, "
+            "and do not quote a verdict line anywhere. The dispatcher posts each "
+            "block as that lens's own comment under its head marker ("
+            + ", ".join(f"`{compose_lens_review_marker(l.lens, head)}`" for l in lenses)
+            + "); do not write a marker yourself. A block whose second "
+            f"line is not its own verdict is read as not passing. "
+            f"{GATE_VERDICT_POSITION_RULE}.\n\n"
+            + "\n".join(blocks)
+        )
+
+    async def _run_combined_pass(
+        self,
+        trigger: SwarmTrigger,
+        panel: list[Lens],
+        expectations: dict[str, str],
+        parent: int | None,
+        review_head: str,
+        *,
+        pending_gates: set[str],
+        live_gates,
+        signals,
+    ) -> dict[str, SkillResult]:
+        """Review the panel's pm/qa/ux lenses in one mid-tier dispatch.
+
+        Returns a synthesized result per lens whose block the gate's own reader
+        accepts (its header names that lens's agent, its verdict is readable),
+        already posted as that lens's own head-marked comment. Anything less —
+        fewer than two combinable lenses, a failed run, an unreadable or
+        missing block — leaves that lens out, and it runs alone as before."""
+        combinable = [item for item in panel if item.lens in review_carry.COMBINED_LENSES]
+        if len(combinable) < 2:
+            return {}
+        try:
+            first = combinable[0]
+            result = await run_skill(
+                first.agent,
+                self._combined_prompt(trigger, combinable, expectations, review_head),
+                github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
+                include_github_contract=True,
+                notifier=self.notifier,
+                preferred_provider=resolve_lens_provider(
+                    first, available_providers=usable_providers()
+                ),
+                owns_pending_gate=any(
+                    gate_owner_tool_deny(
+                        item.gate, live_gates, reported_pending=item.lens in pending_gates
+                    )
+                    for item in combinable
+                ),
+                seated_reviewer=True,
+                action_class=model_tiering.lens_review_class(first.lens),
+                escalation_signals=signals,
+            )
+            if not result.ok:
+                return {}
+            blocks = review_carry.split_combined_reply(
+                result.stdout, [item.lens for item in combinable]
+            )
+            accepted: dict[str, SkillResult] = {}
+            for item in combinable:
+                block = blocks.get(item.lens)
+                if block is None or lens_own_verdict(block, lens_agent=item.agent) is None:
+                    continue
+                accepted[item.lens] = dataclasses.replace(result, stdout=block)
+            posted = await self._post_combined_comments(trigger, accepted, review_head)
+            return {lens: res for lens, res in accepted.items() if lens in posted}
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: combined "
+                f"pm/qa/ux pass failed ({exc}) — lenses run one by one"
+            )
+            return {}
+
+    async def _post_combined_comments(
+        self,
+        trigger: SwarmTrigger,
+        accepted: dict[str, SkillResult],
+        review_head: str,
+    ) -> set[str]:
+        """Post each accepted lens's own verdict comment; the lenses posted."""
+        posted: set[str] = set()
+        if not accepted or not review_head:
+            return posted
+        url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                for lens, res in accepted.items():
+                    body = review_carry.compose_combined_comment(
+                        res.stdout, compose_lens_review_marker(lens, review_head)
+                    )
+                    resp = await client.post(
+                        url, json={"body": body}, headers=self._github_headers(trigger.repository)
+                    )
+                    resp.raise_for_status()
+                    posted.add(lens)
+        except Exception as exc:
+            log.warning(f"[{DAEMON_NAME}] combined-pass comment post failed: {exc}")
+        return posted
 
     async def _diff_lines_changed(self, t: SwarmTrigger) -> int | None:
         """Added + deleted lines of the PR, or None when GitHub could not say.

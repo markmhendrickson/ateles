@@ -14,6 +14,7 @@ stubbed through ``_World`` so each test states the one fact it varies.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import subprocess
 import sys
@@ -165,6 +166,13 @@ def _pr_dispatcher(monkeypatch, world) -> SwarmDispatcher:
 
 def _run_handle_pr(monkeypatch, world) -> _Recorder:
     d = _pr_dispatcher(monkeypatch, world)
+    # These tests pin what each lens's OWN dispatch runs at. The combined
+    # pm/qa/ux pass and the narrowed re-round change how many dispatches a
+    # panel makes, not the tier a lens resolves to; both are covered in
+    # test_review_carry.py, so they are switched off here.
+    d.config = dataclasses.replace(
+        d.config, combined_review_pass=False, narrow_rereview=False
+    )
     # `_pr_dispatcher_with_stubs` installed its own run_skill; replace it with
     # the recorder so kwargs are captured, keeping its verdict outputs.
     rec = _Recorder(
@@ -1292,3 +1300,42 @@ def test_missing_lens_rerun_of_a_big_pr_with_a_small_delta_runs_mid(
     assert tier_of(rec.only("phoenicurus")).tier == "mid"
     rec = _run_missing_lens(monkeypatch, "security")
     assert tier_of(rec.only("falco")).tier == "top"
+
+
+def test_panel_narrowed_reround_dispatches_only_the_lenses_it_selected(
+    monkeypatch, world
+):
+    """Ruling `rereview_only_blockers_and_touched_areas`: the panel dispatch
+    applies the selection, so a carried lens is not dispatched at all."""
+    import review_carry
+
+    world.fix_rounds = 1
+    d = _pr_dispatcher(monkeypatch, world)
+    d.config = dataclasses.replace(
+        d.config, combined_review_pass=False, narrow_rereview=True
+    )
+    seen: dict[str, list[str]] = {}
+
+    async def fake_selection(self, trigger, panel, review_head, *, forced):
+        seen["panel"] = [item.lens for item in panel]
+        carried = {
+            lens: review_carry.Carried(lens, "b" * 40, "signed_off", "u")
+            for lens in seen["panel"]
+            if lens != "arch"
+        }
+        return review_carry.RerunSelection(frozenset({"arch"}), carried)
+
+    async def no_note(self, *a, **k):
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_rereview_selection", fake_selection)
+    monkeypatch.setattr(SwarmDispatcher, "_post_carry_note", no_note)
+    rec = _Recorder(
+        monkeypatch,
+        stdout={"lanius": "GATE_INHERITANCE: clear", "vanellus": "**APPROVE**\nlgtm"},
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    lens_agents = {"pavo", "waxwing", "phoenicurus", "falco", "accipiter"}
+    dispatched = {skill for skill, _ in rec.calls} & lens_agents
+    assert "arch" in seen["panel"] and len(seen["panel"]) > 1
+    assert dispatched == {"waxwing"}

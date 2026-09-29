@@ -2115,3 +2115,163 @@ class TestEvaluateLensToleratesTheRealHarnessFooter:
         )
         assert outcome.passed is False
         assert outcome.verdict != "signed_off"
+
+
+# ── carried sign-offs (ruling `rereview_only_blockers_and_touched_areas`) ────
+
+SECURITY_FIX_FILE = ".claude/hooks/some_guard.py"  # security area only
+DOC_FILE = "docs/guide/how_to.md"  # ux area
+UNMAPPED_FILE = "lib/some_util.py"  # in no area
+FIVE = ["pm", "arch", "ux", "qa", "security"]
+_HEADERS = {
+    "pm": "Pavo", "arch": "Waxwing", "ux": "Accipiter", "qa": "Phoenicurus",
+    "security": "Falco",
+}
+
+
+class _CompareClient(_FakeClient):
+    """A `_FakeClient` that also serves the three-dot compares the carry reads.
+
+    `sides` maps a head SHA to the PR's file list at that head. The PR's diff at
+    the OLD head and at the current head differ by exactly the fix, so the
+    interdiff is the fix; a head missing from `sides` answers 404 (an unreadable
+    delta).
+    """
+
+    def __init__(self, *a, sides: dict[str, list[dict]] | None = None, **k):
+        super().__init__(*a, **k)
+        self.sides = sides or {}
+
+    async def get(self, url, headers=None, params=None):
+        if "/compare/" in url:
+            self.get_urls.append(url)
+            sha = url.rsplit("...", 1)[1]
+            if sha not in self.sides:
+                return _FakeResponse({"message": "Not Found"}, status_code=404)
+            return _FakeResponse({"files": self.sides[sha]})
+        return await super().get(url, headers=headers, params=params)
+
+
+def _pr_file(name: str, patch: str = "+x\n") -> dict:
+    return {"filename": name, "patch": patch, "changes": 1, "additions": 1, "deletions": 0}
+
+
+def _round_comments(head: str, *, blocked: tuple[str, ...] = (), skip=()) -> list[dict]:
+    out = []
+    for n, lens in enumerate(FIVE):
+        if lens in skip:
+            continue
+        marker = swarm_dispatch.compose_lens_review_marker(lens, head)
+        verdict = "BLOCKED" if lens in blocked else "SIGNED_OFF"
+        text = (
+            f"{marker}\n**\U0001f916 {_HEADERS[lens]} — Ateles swarm, {lens} lens panelist**\n"
+            f"**{verdict}**\n"
+        )
+        if lens in blocked:
+            text += "\n[BLOCKING] correctness: wrong\n"
+        out.append(
+            {
+                "id": 100 + n + (0 if head == OLD_HEAD else 50),
+                "created_at": f"2026-09-29T{'09' if head == OLD_HEAD else '11'}:0{n}:00Z",
+                "body": text,
+                "html_url": f"https://github.com/{REPO}/pull/{PR}#issuecomment-{head[:2]}{n}",
+            }
+        )
+    return out
+
+
+def _fix_sides(*fix_files: str) -> dict[str, list[dict]]:
+    """PR file lists at OLD and the current head; the fix adds `fix_files`."""
+    base = [_pr_file("a_random_file.txt")]
+    return {
+        OLD_HEAD: base,
+        HEAD: base + [_pr_file(f) for f in fix_files],
+    }
+
+
+def _fix_round_comments(*, blocked=("security",), reran=("security",)) -> list[dict]:
+    earlier = _round_comments(OLD_HEAD, blocked=blocked)
+    now = [c for c in _round_comments(HEAD) if any(
+        f"review:{lens} " in c["body"] for lens in reran)]
+    return earlier + now
+
+
+@pytest.mark.asyncio
+class TestCarriedSignOffs:
+    async def _run(self, monkeypatch, comments, sides, *, apply=True, no_carry=False):
+        client = _CompareClient(
+            comments=comments, check_runs=_green_checks(), sides=sides,
+            changed_files=[SECURITY_FIX_FILE, "a_random_file.txt"],
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        kwargs = {"carry": False} if no_carry else {}
+        code = await target.run(REPO, PR, [], apply=apply, panel_all=True, **kwargs)
+        return code, client
+
+    async def test_a_security_fix_reviewed_by_security_alone_approves_and_names_the_carried(
+        self, monkeypatch
+    ):
+        code, client = await self._run(
+            monkeypatch, _fix_round_comments(), _fix_sides(SECURITY_FIX_FILE)
+        )
+        assert code == 0
+        body = client.posted[0]["json"]["body"]
+        for lens in ("pm", "arch", "ux", "qa"):
+            assert f"**{lens}**" in body
+        # every carried lens is named with the full head its verdict came from
+        assert body.count("CARRIED FORWARD") == 4
+        assert body.count(f"at head `{OLD_HEAD}`") == 4
+        assert "**security** (falco): `signed_off` —" in body
+        assert "carried forward from an earlier head" in body
+
+    async def test_a_docs_fix_also_needs_ux_at_the_current_head(self, monkeypatch):
+        sides = _fix_sides(SECURITY_FIX_FILE, DOC_FILE)
+        code, client = await self._run(monkeypatch, _fix_round_comments(), sides)
+        assert code == 1 and client.posted == []  # ux was not re-run
+        comments = _fix_round_comments(reran=("security", "ux"))
+        code, client = await self._run(monkeypatch, comments, sides)
+        assert code == 0
+        assert client.posted[0]["json"]["body"].count("CARRIED FORWARD") == 3
+
+    async def test_an_unmapped_file_carries_nothing(self, monkeypatch):
+        code, client = await self._run(
+            monkeypatch, _fix_round_comments(), _fix_sides(UNMAPPED_FILE)
+        )
+        assert code == 1 and client.posted == []
+
+    async def test_a_lens_that_blocked_is_never_carried(self, monkeypatch):
+        # arch blocked at OLD and was not re-run; the fix touched only security.
+        comments = _fix_round_comments(blocked=("arch", "security"))
+        code, client = await self._run(
+            monkeypatch, comments, _fix_sides(SECURITY_FIX_FILE)
+        )
+        assert code == 1 and client.posted == []
+
+    async def test_an_unreadable_delta_carries_nothing(self, monkeypatch):
+        sides = _fix_sides(SECURITY_FIX_FILE)
+        del sides[OLD_HEAD]  # the earlier head cannot be compared
+        code, client = await self._run(monkeypatch, _fix_round_comments(), sides)
+        assert code == 1 and client.posted == []
+
+    async def test_no_carry_flag_requires_every_lens_at_the_current_head(self, monkeypatch):
+        code, client = await self._run(
+            monkeypatch, _fix_round_comments(), _fix_sides(SECURITY_FIX_FILE),
+            no_carry=True,
+        )
+        assert code == 1 and client.posted == []
+
+    async def test_a_live_blocking_verdict_at_the_current_head_still_refuses(self, monkeypatch):
+        comments = _round_comments(OLD_HEAD) + _round_comments(HEAD, blocked=("qa",), skip=("pm", "arch", "ux", "security"))
+        code, client = await self._run(
+            monkeypatch, comments, _fix_sides(SECURITY_FIX_FILE)
+        )
+        assert code == 1 and client.posted == []
+
+    async def test_the_dry_run_table_marks_carried_rows(self, monkeypatch, capsys):
+        code, _ = await self._run(
+            monkeypatch, _fix_round_comments(), _fix_sides(SECURITY_FIX_FILE),
+            apply=False,
+        )
+        assert code == 0
+        assert capsys.readouterr().out.count("carried") >= 4
