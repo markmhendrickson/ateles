@@ -324,14 +324,15 @@ def op_write_password_field(item_ref: str, field_label: str, value: str) -> None
         os.chmod(tmp_path, 0o600)
         with os.fdopen(fd, "w") as fh:
             json.dump(item, fh)
-        with open(tmp_path, "rb") as template_fh:
-            edit_result = subprocess.run(
-                [sl.op_path(), "item", "edit", item_id, "--template", "-"],
-                stdin=template_fh,
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
+        # `op item edit --template` takes a file path; op 2.32 rejects "-"
+        # ("failed to open template file specified by --template: open -").
+        # The temp file is already 0600 and is removed in the finally block.
+        edit_result = subprocess.run(
+            [sl.op_path(), "item", "edit", item_id, "--template", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
         if edit_result.returncode != 0:
             raise RuntimeError(
                 f"op item edit failed for item {item_id!r}: {_safe_excerpt(edit_result.stderr)}"
