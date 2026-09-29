@@ -10,6 +10,7 @@ file-beats-env precedence visible.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,8 @@ if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
 import dispatch_role  # noqa: E402
+import harness_router  # noqa: E402
+import skill_runner  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
 
@@ -115,6 +118,253 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
     assert seen["prompt"] == "do the thing"
 
 
+@pytest.fixture
+def captured_codex_dispatches(fake_repo, monkeypatch):
+    """Capture real ``run_skill`` subprocess boundaries without launching Codex."""
+    captured: list[dict] = []
+    agent_def = _stub_def()
+
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"codex": 1.0}')
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM_FILE", str(fake_repo / "missing-headroom.json")
+    )
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: agent_def)
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: agent_def)
+    monkeypatch.setattr(skill_runner, "ATELES_REPO", fake_repo)
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": None, "codex": "/bin/codex", "cursor": None},
+    )
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kwargs: None)
+    harness_router.reset_state()
+
+    async def _capture_subprocess(*cmd, **kwargs):
+        invocation = {"cmd": list(cmd), "kwargs": kwargs}
+        captured.append(invocation)
+
+        class _Process:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                invocation["stdin"] = input
+                return b"done", b""
+
+        return _Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _capture_subprocess)
+    yield captured
+    harness_router.reset_state()
+
+
+def _assert_delivery_scope(invocation: dict, *, enabled: bool) -> None:
+    command = invocation["cmd"]
+    stdin = invocation["stdin"]
+    network_flag = "sandbox_workspace_write.network_access=true"
+    contract = skill_runner.SWARM_GITHUB_CONTRACT.encode()
+    assert (network_flag in command) is enabled
+    assert (contract in stdin) is enabled
+
+
+def _assert_github_identity(invocation: dict, *, token: str | None) -> None:
+    """``token=None`` asserts the AMBIENT value survived unchanged — not
+    merely that it differs from the scoped-delivery sentinel, which a bug
+    that wiped ambient identity entirely would also satisfy."""
+    env = invocation["kwargs"]["env"]
+    if token is None:
+        assert env.get("GITHUB_TOKEN") == "ambient-github-token"
+        assert env.get("GH_TOKEN") == "ambient-gh-token"
+    else:
+        assert env["GITHUB_TOKEN"] == token
+        assert env["GH_TOKEN"] == token
+
+
+@pytest.mark.parametrize("github_token", [None, ""])
+def test_programmatic_github_delivery_refuses_missing_credential_binding(
+    captured_codex_dispatches,
+    monkeypatch,
+    github_token,
+) -> None:
+    """Delivery must not fall through to the daemon's ambient GitHub identity.
+
+    The refusal is a failed SkillResult, never a raised exception — every
+    caller of run_skill/_run_skill_once (including _run_provider_attempts's
+    unguarded `await attempt(selected)`) expects failures to come back as a
+    SkillResult it can classify, cool down, and fail over on, not as an
+    unhandled exception.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Commit, push, and open the pull request.",
+            provider="codex",
+            github_delivery=True,
+            github_token=github_token,
+        )
+    )
+
+    assert result.ok is False
+    assert "explicit GitHub credential binding" in (result.error or "")
+    assert captured_codex_dispatches == []
+
+
+def test_programmatic_github_delivery_reaches_real_runner_only_when_opted_in(
+    captured_codex_dispatches,
+    monkeypatch,
+) -> None:
+    """Programmatic intent must reach `_run_skill_once` without leaking state."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    delivery = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Commit, push, and open the pull request.",
+            provider="codex",
+            github_delivery=True,
+            github_token="scoped-delivery-token",
+        )
+    )
+    explicit_false = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Inspect local files.",
+            provider="codex",
+            github_delivery=False,
+        )
+    )
+    ordinary_after_delivery = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Inspect another local file.",
+            provider="codex",
+        )
+    )
+
+    assert delivery.ok and explicit_false.ok and ordinary_after_delivery.ok
+    assert len(captured_codex_dispatches) == 3
+    _assert_delivery_scope(captured_codex_dispatches[0], enabled=True)
+    _assert_delivery_scope(captured_codex_dispatches[1], enabled=False)
+    _assert_delivery_scope(captured_codex_dispatches[2], enabled=False)
+    _assert_github_identity(
+        captured_codex_dispatches[0], token="scoped-delivery-token"
+    )
+    _assert_github_identity(captured_codex_dispatches[1], token=None)
+    _assert_github_identity(captured_codex_dispatches[2], token=None)
+
+
+def test_cli_github_delivery_without_token_env_fails_fast_as_usage_error(
+    captured_codex_dispatches,
+    monkeypatch,
+    capsys,
+) -> None:
+    """--github-delivery with no --github-token-env at all is knowable from
+    parsed arguments alone: it must fail through the same fast, structured
+    usage-error path as every other CLI misuse (missing --role, missing
+    --task), rather than reaching the deeper runtime credential-boundary
+    refusal in skill_runner."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    argv = [
+        "--role",
+        "cicada",
+        "--task",
+        "Commit, push, and open the pull request.",
+        "--provider",
+        "codex",
+        "--github-delivery",
+        "--json",
+    ]
+
+    rc = dispatch_role.main(argv)
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured_codex_dispatches == []
+    assert "--github-token-env" in captured.out
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
+
+
+def test_cli_github_delivery_with_empty_token_env_refuses_without_leakage(
+    captured_codex_dispatches,
+    monkeypatch,
+    capsys,
+) -> None:
+    """--github-token-env naming a variable that resolves EMPTY must still
+    reach the deeper runtime credential-boundary refusal (the caller DID try
+    to bind a credential; it just failed to resolve one) — this is the case
+    a fast argv-only usage check cannot catch, since the env var's value is
+    only known once main() reads it."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    monkeypatch.setenv("SCOPED_GITHUB_TOKEN", "")
+    argv = [
+        "--role",
+        "cicada",
+        "--task",
+        "Commit, push, and open the pull request.",
+        "--provider",
+        "codex",
+        "--github-delivery",
+        "--github-token-env",
+        "SCOPED_GITHUB_TOKEN",
+        "--json",
+    ]
+
+    rc = dispatch_role.main(argv)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured_codex_dispatches == []
+    assert "explicit GitHub credential binding" in captured.out
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
+
+
+def test_cli_github_delivery_reaches_real_runner_without_leaking_to_next_run(
+    captured_codex_dispatches,
+    monkeypatch,
+    capsys,
+) -> None:
+    """The CLI flag must drive the same command and stdin effects as the API."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    monkeypatch.setenv("SCOPED_GITHUB_TOKEN", "scoped-delivery-token")
+    delivery_rc = dispatch_role.main(
+        [
+            "--role",
+            "cicada",
+            "--task",
+            "Commit, push, and open the pull request.",
+            "--provider",
+            "codex",
+            "--github-delivery",
+            "--github-token-env",
+            "SCOPED_GITHUB_TOKEN",
+        ]
+    )
+    ordinary_rc = dispatch_role.main(
+        ["--role", "cicada", "--task", "Inspect local files.", "--provider", "codex"]
+    )
+
+    assert delivery_rc == 0 and ordinary_rc == 0
+    assert len(captured_codex_dispatches) == 2
+    _assert_delivery_scope(captured_codex_dispatches[0], enabled=True)
+    _assert_delivery_scope(captured_codex_dispatches[1], enabled=False)
+    _assert_github_identity(
+        captured_codex_dispatches[0], token="scoped-delivery-token"
+    )
+    _assert_github_identity(captured_codex_dispatches[1], token=None)
+    captured = capsys.readouterr()
+    assert "scoped-delivery-token" not in captured.out + captured.err
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
+
+
 def test_dispatch_without_override_leaves_provider_to_the_router(
     monkeypatch,
 ) -> None:
@@ -131,6 +381,7 @@ def test_dispatch_without_override_leaves_provider_to_the_router(
     asyncio.run(dispatch_role.dispatch("cicada", "work"))
     # None, not a default string: run_skill treats None as "route normally".
     assert seen["provider"] is None
+    assert seen["include_github_contract"] is False
 
 
 def test_failed_run_exits_nonzero(fake_repo, monkeypatch) -> None:

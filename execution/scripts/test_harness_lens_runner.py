@@ -91,6 +91,13 @@ def _default_full_headroom(monkeypatch):
     monkeypatch.setenv(
         "APIS_HARNESS_HEADROOM_FILE", "/nonexistent/harness-headroom.json"
     )
+    # The router also folds the live plan-usage snapshot
+    # (~/.config/ateles/harness-usage.json) into configured_headroom(); a
+    # host whose real snapshot shows a provider exhausted would otherwise
+    # fail every test here. Same isolation as execution/daemons/apis/conftest.
+    monkeypatch.setenv(
+        "APIS_HARNESS_USAGE_FILE", "/nonexistent/harness-usage.json"
+    )
 
 
 @pytest.fixture(autouse=True)

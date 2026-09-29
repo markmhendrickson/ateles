@@ -29,6 +29,7 @@ check_cmd npm
 check_cmd gh
 check_cmd flyctl
 check_cmd git
+check_cmd python3
 
 echo "Env file: $ENV_FILE"
 if [ -f "$ENV_FILE" ]; then
@@ -59,10 +60,32 @@ echo "Neotoma repo:"
 # ~/neotoma-rc-src exists for exactly this and mirrors how the ateles daemons
 # already run from ~/ateles-rc-src. Falls back to the shared clone when it is
 # absent so a fresh install still works.
-if [ -z "${NEOTOMA_REPO_ROOT:-}" ] && [ -f "$HOME/neotoma-rc-src/package.json" ]; then
-  NEOTOMA_REPO_ROOT="$HOME/neotoma-rc-src"
+#
+# The policy itself ("prefer ~/neotoma-rc-src when its package.json exists,
+# else fall back to ~/repos/neotoma") is NOT re-typed here. It is defined
+# once, in release_checkout_root.py's default_neotoma_repo_root() — the same
+# function prepare.py imports for its own NEOTOMA_REPO_ROOT default — and
+# this script derives from it via that module's own CLI (ateles#1293 follow-
+# up, arch REQUEST_CHANGES: two independent copies of the same policy drift
+# the next time only one of them is updated). Only when python3 or the
+# module itself is unavailable does this fall back to the bash-only literal
+# (kept so a broken/partial checkout still gets a preflight answer), and the
+# fallback path is named explicitly so the operator knows the two are not
+# provably in sync on that run.
+if [ -z "${NEOTOMA_REPO_ROOT:-}" ]; then
+  if command -v python3 >/dev/null 2>&1 && \
+     NEOTOMA_REPO_ROOT="$(python3 "$SCRIPT_DIR/release_checkout_root.py" print 2>/dev/null)" && \
+     [ -n "$NEOTOMA_REPO_ROOT" ]; then
+    :
+  else
+    echo "    ! could not derive the default from release_checkout_root.py — using the bash-only fallback"
+    if [ -f "$HOME/neotoma-rc-src/package.json" ]; then
+      NEOTOMA_REPO_ROOT="$HOME/neotoma-rc-src"
+    else
+      NEOTOMA_REPO_ROOT="$HOME/repos/neotoma"
+    fi
+  fi
 fi
-NEOTOMA_REPO_ROOT="${NEOTOMA_REPO_ROOT:-$HOME/repos/neotoma}"
 if [ -f "$NEOTOMA_REPO_ROOT/package.json" ]; then
   echo "  ✓ $NEOTOMA_REPO_ROOT"
   case "$NEOTOMA_REPO_ROOT" in

@@ -107,6 +107,12 @@ fi
 echo "  - Checking hook-wiring reference matches .claude/settings.json..."
 python3 .claude/hooks/hook_wiring_reference.py --check || ERRORS=$((ERRORS + 1))
 
+# Codex hook delivery (ateles#981). This is an effect check, not a config
+# presence check: it executes the commands named by .codex/hooks.json against
+# a synthetic local agent_policy corpus and a blocked stash command.
+echo "  - Checking Codex live-rule and guard hook effects..."
+python3 execution/scripts/test_codex_rule_hooks.py || ERRORS=$((ERRORS + 1))
+
 # Foundation documents (docs/foundation/). Registered in
 # conformance.md#mechanical-checks-on-this-directory. All stdlib-only, no Neotoma needed.
 echo "  - Checking foundation anchors (every intra-foundation link resolves)..."
@@ -116,6 +122,10 @@ echo "  - Checking foundation decision 78 is ruled in the corpus..."
 python3 execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking decision 101 ruling is bound to the corpus..."
 python3 execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 117 ruling is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_117.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 119 commissioning is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_119.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python3 execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
@@ -149,15 +159,17 @@ python3 execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRO
 # ruled / merged / implemented, which the register's single status field cannot
 # express. Regenerate with the same script and no flag.
 #
-# The check reads every remote branch, so it needs a fetched remote to be
-# meaningful and is SKIPPED rather than failed where origin/main is absent — a
-# shallow CI clone or an offline machine would otherwise report drift it cannot
-# see. Skipping is the honest verdict there: unknown is not a failure
-# (principles.md), and failing on an unfetchable remote would train the reader
-# to ignore this row.
+# --source worktree (the default; named explicitly here) reads
+# docs/foundation/conformance.md as checked out, not a re-fetched origin/main
+# blob -- ateles#1138 round two: a branch that adds or rules a register row
+# could never regenerate correctly against origin/main alone, since that row
+# does not exist on origin/main until the branch merges. The origin/main guard
+# below stays as a sanity check that this is a real clone with a remote, not
+# because the render itself still sweeps branches (#1292 already made it
+# read exactly one source).
 if git rev-parse --verify --quiet origin/main >/dev/null; then
   echo "  - Checking decision state is in sync with the register..."
-  python3 execution/scripts/render_decision_state.py --check || ERRORS=$((ERRORS + 1))
+  python3 execution/scripts/render_decision_state.py --check --source worktree || ERRORS=$((ERRORS + 1))
 else
   echo "  - Skipping decision state (no origin/main to read the register from)"
 fi

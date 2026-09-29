@@ -2118,9 +2118,15 @@ def test_auto_merge_runs_only_with_verified_receipt_and_atomic_head(monkeypatch)
         )
         return True, "d" * 40
 
+    async def no_outside_block(self, trigger, *, reviewed_head, panel_lenses):
+        return None
+
     monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
     monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
     monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_live_blocking_verdict_outside_panel", no_outside_block
+    )
     dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
     receipt = ReviewBindingReceipt(
         review_id="103",
@@ -2234,10 +2240,16 @@ def test_auto_merge_atomic_base_refusal_is_recorded_without_success_notice(
     def fake_refusal(self, **kwargs):
         refusals.append(kwargs)
 
+    async def no_outside_block(self, trigger, *, reviewed_head, panel_lenses):
+        return None
+
     monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
     monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
     monkeypatch.setattr(SwarmDispatcher, "_merge_pr", atomic_base_unavailable)
     monkeypatch.setattr(SwarmDispatcher, "record_merge_refusal", fake_refusal)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_live_blocking_verdict_outside_panel", no_outside_block
+    )
     dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
     receipt = ReviewBindingReceipt(
         review_id="123",
@@ -2271,6 +2283,311 @@ def test_auto_merge_atomic_base_refusal_is_recorded_without_success_notice(
         "MERGED automatically" in message
         for message in dispatcher.notifier.sent
     )
+
+
+# ── _live_blocking_verdict_outside_panel: extends #1293's protection to the ──
+# ── dispatcher's own auto-merge path (PR #1303, Waxwing arch review, task ────
+# ── ent_296de91107a9051d809ebb22) ─────────────────────────────────────────────
+#
+# approve_pr_as_app.py's find_non_required_blocks closed the #1293 gap for
+# ONE caller that can produce a merge-enabling formal review. This is the
+# SAME gap, one hop further down the call graph: _gate_merge_readiness's
+# auto-merge branch trusts a ReviewBindingReceipt (a formal APPROVE exists)
+# plus Vanellus's aggregation (built from the diff-derived panel's captured
+# review text alone). A lens OUTSIDE that panel with a live REQUEST_CHANGES/
+# [BLOCKING] verdict on the same head was invisible to both — exactly
+# #1293's shape, replayed at this layer.
+
+
+def _outside_lens_comment_body(lens: str, agent: str, *, head: str, verdict: str = "SIGNED_OFF", extra: str = "") -> str:
+    marker = swarm_dispatch.compose_lens_review_marker(lens, head)
+    header_name = {"pm": "Pavo", "arch": "Waxwing", "qa": "Phoenicurus", "security": "Falco"}.get(
+        lens, agent.capitalize()
+    )
+    body = f"{marker}\n**\U0001f916 {header_name} — Ateles swarm, {lens} review**\n**{verdict}**\n"
+    if extra:
+        body += f"\n{extra}\n"
+    return body
+
+
+class TestLiveBlockingVerdictOutsidePanel:
+    """Direct unit tests of the new predicate, independent of _gate_merge_readiness."""
+
+    def test_reports_a_block_from_a_lens_outside_the_panel(self, monkeypatch):
+        head = "c" * 40
+
+        async def fake_comments(self, repository, number, client):
+            return [
+                {
+                    "body": _outside_lens_comment_body(
+                        "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
+                    ),
+                    "html_url": "https://github.com/owner/repo/pull/87#issuecomment-1",
+                }
+            ]
+
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+        d = SwarmDispatcher(_StubNotifier(), _config())
+
+        reason = asyncio.run(
+            d._live_blocking_verdict_outside_panel(
+                _trigger(head_sha=head), reviewed_head=head, panel_lenses={"pm", "qa"}
+            )
+        )
+
+        assert reason is not None
+        assert "arch" in reason
+        assert "waxwing" in reason
+        assert "issuecomment-1" in reason
+
+    def test_no_block_when_the_outside_lens_cleared(self, monkeypatch):
+        head = "c" * 40
+
+        async def fake_comments(self, repository, number, client):
+            return [
+                {"body": _outside_lens_comment_body("arch", "waxwing", head=head)}
+            ]
+
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+        d = SwarmDispatcher(_StubNotifier(), _config())
+
+        reason = asyncio.run(
+            d._live_blocking_verdict_outside_panel(
+                _trigger(head_sha=head), reviewed_head=head, panel_lenses={"pm", "qa"}
+            )
+        )
+        assert reason is None
+
+    def test_no_block_when_the_lens_never_commented(self, monkeypatch):
+        head = "c" * 40
+
+        async def fake_comments(self, repository, number, client):
+            return []
+
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+        d = SwarmDispatcher(_StubNotifier(), _config())
+
+        reason = asyncio.run(
+            d._live_blocking_verdict_outside_panel(
+                _trigger(head_sha=head), reviewed_head=head, panel_lenses={"pm", "qa"}
+            )
+        )
+        assert reason is None
+
+    def test_stale_head_block_does_not_count(self, monkeypatch):
+        """A block on an OLD head must not count — the lens has not spoken
+        about the head actually being merged. Mirrors the same bound
+        approve_pr_as_app.py's find_non_required_blocks enforces."""
+        head = "c" * 40
+        old_head = "d" * 40
+
+        async def fake_comments(self, repository, number, client):
+            return [
+                {
+                    "body": _outside_lens_comment_body(
+                        "arch", "waxwing", head=old_head, verdict="REQUEST_CHANGES"
+                    )
+                }
+            ]
+
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+        d = SwarmDispatcher(_StubNotifier(), _config())
+
+        reason = asyncio.run(
+            d._live_blocking_verdict_outside_panel(
+                _trigger(head_sha=head), reviewed_head=head, panel_lenses={"pm", "qa"}
+            )
+        )
+        assert reason is None
+
+    def test_a_lens_inside_the_panel_is_skipped_even_if_it_blocks(self, monkeypatch):
+        """A lens already IN the panel is the required-floor path's job to
+        judge (via Vanellus aggregation / the panel's own captured reviews),
+        not this predicate's — double-reporting it here is not the point of
+        this check."""
+        head = "c" * 40
+
+        async def fake_comments(self, repository, number, client):
+            return [
+                {
+                    "body": _outside_lens_comment_body(
+                        "qa", "phoenicurus", head=head, verdict="REQUEST_CHANGES"
+                    )
+                }
+            ]
+
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+        d = SwarmDispatcher(_StubNotifier(), _config())
+
+        reason = asyncio.run(
+            d._live_blocking_verdict_outside_panel(
+                _trigger(head_sha=head), reviewed_head=head, panel_lenses={"pm", "qa"}
+            )
+        )
+        assert reason is None
+
+    def test_a_later_clearing_comment_supersedes_an_earlier_block(self, monkeypatch):
+        head = "c" * 40
+
+        async def fake_comments(self, repository, number, client):
+            return [
+                {
+                    "body": _outside_lens_comment_body(
+                        "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
+                    )
+                },
+                {
+                    "body": _outside_lens_comment_body(
+                        "arch", "waxwing", head=head, verdict="SIGNED_OFF"
+                    )
+                },
+            ]
+
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+        d = SwarmDispatcher(_StubNotifier(), _config())
+
+        reason = asyncio.run(
+            d._live_blocking_verdict_outside_panel(
+                _trigger(head_sha=head), reviewed_head=head, panel_lenses={"pm", "qa"}
+            )
+        )
+        assert reason is None
+
+    def test_unreadable_head_refuses_closed(self):
+        d = SwarmDispatcher(_StubNotifier(), _config())
+        reason = asyncio.run(
+            d._live_blocking_verdict_outside_panel(
+                _trigger(), reviewed_head="", panel_lenses={"pm", "qa"}
+            )
+        )
+        assert reason is not None
+
+    def test_comment_read_failure_refuses_closed(self, monkeypatch):
+        head = "c" * 40
+
+        async def raising_comments(self, repository, number, client):
+            raise RuntimeError("simulated GitHub API failure")
+
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", raising_comments)
+        d = SwarmDispatcher(_StubNotifier(), _config())
+
+        reason = asyncio.run(
+            d._live_blocking_verdict_outside_panel(
+                _trigger(head_sha=head), reviewed_head=head, panel_lenses={"pm", "qa"}
+            )
+        )
+        assert reason is not None
+
+
+class TestGateMergeReadinessRefusesOnOutsidePanelBlock:
+    """Replays #1293's exact shape one hop further down the call graph: the
+    panel (pm, qa) clears and a verified APPROVE receipt exists, but arch —
+    NOT in the panel — posted a live REQUEST_CHANGES on the same head.
+    Before this fix, _gate_merge_readiness would merge anyway."""
+
+    def test_auto_merge_held_when_an_outside_lens_blocks(self, monkeypatch):
+        merged = []
+        head = "e" * 40
+
+        async def fake_head(self, trigger):
+            return head
+
+        async def fake_ci(self, trigger):
+            return "green"
+
+        async def fake_merge(self, *args, **kwargs):
+            merged.append((args, kwargs))
+            return True, "f" * 40
+
+        async def fake_comments(self, repository, number, client):
+            return [
+                {
+                    "body": _outside_lens_comment_body(
+                        "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
+                    ),
+                    "html_url": "https://github.com/owner/repo/pull/87#issuecomment-9",
+                }
+            ]
+
+        monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+        monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+        monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+        dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+        receipt = ReviewBindingReceipt(
+            review_id="200",
+            reviewer_login=agent_github_login("vanellus"),
+            commit_id=head,
+            state="APPROVED",
+        )
+        # panel=[pm, qa] mirrors #1293's real shape: the required floor for a
+        # diff that does not pull arch in, so arch's block is invisible to
+        # Vanellus's aggregation (built from panel's captured text alone).
+        panel = [Lens(agent="pavo", lens="pm", gate="pm", checks="", always=True),
+                 Lens(agent="phoenicurus", lens="qa", gate="qa", checks="", always=True)]
+
+        asyncio.run(
+            dispatcher._gate_merge_readiness(
+                _trigger(head_sha=head),
+                parent=80,
+                panel=panel,
+                reviewed_head=head,
+                binding_receipt=receipt,
+            )
+        )
+
+        assert merged == [], "must not merge past a live block from a lens outside the panel"
+        assert any("auto-merge HELD" in m for m in dispatcher.notifier.sent)
+        assert any("arch" in m and "waxwing" in m for m in dispatcher.notifier.sent)
+
+    def test_auto_merge_proceeds_when_no_outside_lens_blocks(self, monkeypatch):
+        """Sanity check: the SAME panel/receipt shape, but the outside lens
+        (arch) has cleared — merge must proceed. Proves the new check is not
+        simply refusing unconditionally."""
+        merged = []
+        head = "e" * 40
+
+        async def fake_head(self, trigger):
+            return head
+
+        async def fake_ci(self, trigger):
+            return "green"
+
+        async def fake_merge(self, repository, number, method, *, expected_head="", require_default_base=False):
+            merged.append((repository, number, method, expected_head, require_default_base))
+            return True, "f" * 40
+
+        async def fake_comments(self, repository, number, client):
+            return [
+                {"body": _outside_lens_comment_body("arch", "waxwing", head=head)}
+            ]
+
+        monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+        monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+        monkeypatch.setattr(SwarmDispatcher, "_merge_pr", fake_merge)
+        monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_comments)
+        dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_merge=True))
+        receipt = ReviewBindingReceipt(
+            review_id="201",
+            reviewer_login=agent_github_login("vanellus"),
+            commit_id=head,
+            state="APPROVED",
+        )
+        panel = [Lens(agent="pavo", lens="pm", gate="pm", checks="", always=True),
+                 Lens(agent="phoenicurus", lens="qa", gate="qa", checks="", always=True)]
+
+        asyncio.run(
+            dispatcher._gate_merge_readiness(
+                _trigger(head_sha=head),
+                parent=80,
+                panel=panel,
+                reviewed_head=head,
+                binding_receipt=receipt,
+            )
+        )
+
+        assert merged == [("owner/repo", 87, "squash", head, True)]
+        assert any("MERGED automatically" in m for m in dispatcher.notifier.sent)
 
 
 # ── _required_ci_state (CI detection — status API + check-runs precedence) ───
@@ -3208,6 +3525,80 @@ def test_cicada_ci_fix_prompt_carries_no_merge_guardrail():
     assert "do NOT open a new PR" in p
     assert "CI is FAILING" in p or "required CI is FAILING" in p
     assert "owner/repo#87" in p
+
+
+# ── work_class tagging (ateles task ent_3564a7be0fa135a6e4c1f5fb) ───────────
+#
+# `local_provider.MECHANICAL_WORK_CLASSES` names the dispatches eligible to
+# route to claude-local. These tests pin which `run_skill` call sites carry a
+# `work_class` and which deliberately do not — a call site with no class stays
+# on the frontier providers exactly as before (`local_provider.is_eligible`
+# returns False for `work_class=None`), so a judgement dispatch mistakenly
+# tagged here would silently start trying the local model first.
+
+
+def test_route_ci_failure_tags_cicada_dispatch_as_ci_log_triage(monkeypatch):
+    """CI-fix is reading failing-check logs and fixing the reported cause —
+    mechanical triage, not review judgement. Before this call site threaded
+    `work_class`, `run_skill` never received the kwarg at all here, so this
+    assertion fails red against the pre-change code with a KeyError on
+    `seen["work_class"]` rather than a wrong value."""
+    seen: dict = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen.update(kwargs)
+        return SkillResult(skill, True, 0, "fixed", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
+    )
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._route_ci_failure(_trigger(), parent=80))
+
+    assert seen["work_class"] == "ci_log_triage"
+
+
+def test_route_blocking_findings_cicada_dispatch_carries_no_work_class(monkeypatch):
+    """Applying per-lens review guidance is judgement work (interpreting what
+    a reviewer meant, deciding how to address it) — it must never carry a
+    mechanical `work_class`, or an operator who enables `ci_log_triage`
+    locally would also silently send review fixes to the local model."""
+    cicada_calls: list[dict] = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            cicada_calls.append(kwargs)
+        return SkillResult(skill, True, 0, "guidance/fix applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail here")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+
+    assert len(cicada_calls) == 1, "Cicada must be invoked exactly once here"
+    assert cicada_calls[0].get("work_class") is None
 
 
 # ── lenses_missing_comments ─────────────────────────────────────────────────

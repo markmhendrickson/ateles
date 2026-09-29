@@ -17,17 +17,22 @@ revised after Falco's round-2 security review — see below):
                      a model sees up front, before deciding whether to fetch
                      the full rule). NEVER derived from `rule`/`body` text —
                      a row with no `title` renders trigger + id only.
-  - `body`      — the full rule text plus its entity id, for a FUTURE
-                   transport (an agent explicitly fetching a rule by id);
+  - `body`      — the sanitized rule text (`_sanitize_body`, multi-line
+                   counterpart to `_sanitize_field`) plus its entity id;
                    never read back into the rendered SessionStart index
                    itself (never logged wholesale, since some rules hold
                    operator payment details).
 
-Two channels share this one artifact:
+Three channels share this one artifact:
   1. Now: `.claude/hooks/session_rule_index.py` (SessionStart hook) prints
      `render_index_text()` — the preamble (always-applies rules) followed by
      one summary line per conditional rule.
-  2. Later: the MCP Skills extension (SEP-2640), once an SDK/host supports
+  2. Now: `.claude/hooks/rule_injection_gate.py` (PreToolUse hook, ateles
+     rule-delivery audit `ent_b66293f0dcc8c887d4fdbeae` recommendation 5)
+     reads `.body` for a small set of high-risk categories and injects it
+     verbatim into the acting model's context immediately before a matching
+     tool call — this is why `.body` is sanitized rather than raw.
+  3. Later: the MCP Skills extension (SEP-2640), once an SDK/host supports
      it — `render_skills()` gives the same skill objects; this module is
      designed so adding that transport is additive, not a rewrite.
 
@@ -72,17 +77,18 @@ line so a session (and a test) can see which one ran without re-deriving it:
             rules from the index is real information loss, and silence
             about it is exactly the failure this file exists to avoid.
 
-Scope filter: `policy_binds_agent` (`lib/daemon_runtime/agent_loader.py`) is
+Scope filter: `policy_binds_agent_by_edge` (`lib/daemon_runtime/agent_loader.py`) is
 imported, never re-implemented — CLAUDE.md's "extend the mechanism that
-already generalizes" rule, and the specific mechanism ateles#1118 fixed. A
-session runs as ONE agent, the session principal (`ATELES_SESSION_PRINCIPAL`,
-default the operator's interactive agent — the same principal
-`execution/mcp/ateles/server.py` resolves rules for on the other session
-transport). The index holds the rows that bind that principal: every
-`global`/`swarm` row, plus an `agent`-scoped row only when its `agent_sub`
-names the principal. A row scoped to a different agent is withheld; a row
-whose `scope` is absent or outside the closed vocabulary
-(`agent_loader.POLICY_SCOPES`) is withheld too. See `_session_scope_ok`.
+already generalizes" rule, and the specific mechanism ateles#1118 fixed and
+decision 114 (2026-09-25) superseded. A session runs as ONE agent, the
+session principal (`ATELES_SESSION_PRINCIPAL`, default the operator's
+interactive agent — the same principal `execution/mcp/ateles/server.py`
+resolves rules for on the other session transport). The index holds the rows
+that bind that principal: every `global`/`swarm` row with no `GOVERNS` edge,
+plus a row with a `GOVERNS` edge to the principal's own `agent_definition`.
+A row edged to a different agent is withheld; a row whose `scope` is absent
+or outside the closed vocabulary (`agent_loader.POLICY_SCOPES`) AND carries
+no edge is withheld too. See `_session_scope_ok`.
 
 `applies_when` is a newer field than the ones `docs/foundation/data_model.md`
 already documents for `agent_policy` (`rule`, `rule_kind`, `scope`,
@@ -122,18 +128,26 @@ if str(_THIS_DIR) not in sys.path:
 
 try:  # package import (normal runtime) with script-import fallback
     from .agent_loader import (  # type: ignore
+        AGENT_POLICY_GOVERNS_EDGE,
         POLICY_QUERY_BODY,
         POLICY_SCOPES,
         POLICY_SCOPES_REACHING_EVERY_AGENT,
+        fetch_governs_edges,
         policy_binds_agent,
+        policy_binds_agent_by_edge,
+        resolve_agent_definition_id,
         unwrap_policy_entities,
     )
 except ImportError:  # pragma: no cover
     from agent_loader import (  # type: ignore
+        AGENT_POLICY_GOVERNS_EDGE,
         POLICY_QUERY_BODY,
         POLICY_SCOPES,
         POLICY_SCOPES_REACHING_EVERY_AGENT,
+        fetch_governs_edges,
         policy_binds_agent,
+        policy_binds_agent_by_edge,
+        resolve_agent_definition_id,
         unwrap_policy_entities,
     )
 
@@ -154,10 +168,12 @@ DEFAULT_SESSION_PRINCIPAL = "ateles@ateles-swarm"
 
 
 def session_principal() -> str:
-    """The `agent_sub` this session evaluates `agent`-scoped rows against.
-    Read at call time, not import time, so the hook and tests see the
-    environment they actually run in. An explicitly empty value binds no
-    `agent`-scoped row (`policy_binds_agent` never matches an empty sub)."""
+    """The `agent_sub` this session resolves to an `agent_definition` id
+    (via `resolve_agent_definition_id`) before evaluating `GOVERNS`-edged
+    rows against it. Read at call time, not import time, so the hook and
+    tests see the environment they actually run in. An explicitly empty
+    value resolves to no `agent_definition` id and so binds no edge-scoped
+    row (`policy_binds_agent_by_edge` never matches an empty id)."""
     return os.environ.get(SESSION_PRINCIPAL_ENV, DEFAULT_SESSION_PRINCIPAL).strip()
 
 # The one literal spelling that promotes a rule into the preamble. Anything
@@ -245,6 +261,13 @@ _LEADING_MARKDOWN = re.compile(r"^[\s]*(?:[#>*`-]+|\d+\.)+\s*")
 _HTML_COMMENT_MARKERS = re.compile(r"<!--|-->")
 _TIER_MARKER_PATTERN = re.compile(r"tier\s*:\s*[A-Za-z]", re.IGNORECASE)
 
+# Same control/separator sweep as `_LINE_BREAKING_CHARS`, minus \r\n
+# themselves — `_sanitize_body_pass` already splits on those to preserve
+# paragraph structure, so this only needs to catch the control/separator
+# characters that can occur WITHIN one line (NEL, U+2028/U+2029, C0 minus
+# \t\r\n, C1, DEL).
+_INLINE_CONTROL_CHARS = re.compile("[\u0085\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
+
 
 def _sanitize_pass(text: str) -> str:
     """One pass of the neutralizing steps, in order: line-breaking/control
@@ -297,6 +320,241 @@ _ENTITY_ID_DISALLOWED = re.compile(r"[^A-Za-z0-9_]")
 
 _APPLIES_WHEN_MAX = 160
 _IMPERATIVE_MAX = 120
+_BODY_MAX = 4000
+
+
+def _sanitize_body_pass(text: str, *, strip_leading_blanks: bool = True) -> str:
+    """One pass of the neutralizing steps for a MULTI-LINE field, applied
+    per-line so the body keeps its paragraph structure (unlike
+    `_sanitize_pass`, which collapses everything to one line — fine for a
+    160/120-char trigger/imperative, unreadable for a full rule body).
+
+    Same forbidden sequences as `_sanitize_pass` (leading markdown structure,
+    HTML-comment markers, tier-marker patterns), applied to EACH line rather
+    than the whole blob — so a rule body can still open a paragraph with
+    prose while a forged `## Always-applies rules` heading, an embedded
+    `<!-- tier: A -->` marker, or a bullet-list-shaped injected instruction
+    on any line is stripped exactly like `_sanitize_pass` strips it at the
+    start of a single-line field. Blank lines are preserved (collapsed to
+    at most one) so paragraph breaks survive.
+
+    `strip_leading_blanks=False` (Phoenicurus, PR #1320 round 5) keeps a
+    leading blank line in the result instead of popping it off the front.
+    `_sanitize_body`'s `list_item_safe=True` path calls this on the
+    CONTINUATION half of a rule body (everything after the row's own first
+    line, split on `raw`'s own first `\n` before any sanitization runs — see
+    `_sanitize_body`) and indents every non-empty line of the result
+    unconditionally, with no "index 0 is exempt" special case on that half.
+    A leading blank in that continuation half is therefore always a genuine
+    interior paragraph break of the ORIGINAL text, never something that
+    could be mistaken for the row's protected first line — so it must
+    survive here rather than being stripped as if it were a field-level
+    leading blank with no meaning of its own.
+    """
+    lines = text.split("\n")
+    cleaned_lines: list[str] = []
+    for line in lines:
+        line = line.replace("\r", "").strip("\r")
+        line = _INLINE_CONTROL_CHARS.sub(" ", line)
+        line = _LEADING_MARKDOWN.sub("", line)
+        line = _HTML_COMMENT_MARKERS.sub("", line)
+        line = _TIER_MARKER_PATTERN.sub("", line)
+        line = _WHITESPACE_RUN.sub(" ", line).strip()
+        cleaned_lines.append(line)
+    # Collapse runs of blank lines to at most one, and trim trailing blanks —
+    # mirrors _sanitize_field's overall .strip() without losing every line
+    # break the way _LINE_BREAKING_CHARS would. `result` starts empty, so
+    # `result and result[-1]` is False for a blank line seen before any
+    # non-blank content — that already drops a run of leading blanks down to
+    # NONE (not "at most one") regardless of `strip_leading_blanks`, unless
+    # `began` explicitly keeps the first one when the caller wants leading
+    # blanks preserved.
+    result: list[str] = []
+    began = False
+    for line in cleaned_lines:
+        if line:
+            began = True
+            result.append(line)
+        elif began:
+            if result[-1]:  # collapse interior runs to at most one blank
+                result.append(line)
+        elif not strip_leading_blanks and not result:
+            result.append(line)  # keep exactly one leading blank placeholder
+    while result and not result[-1]:
+        result.pop()
+    if strip_leading_blanks:
+        while result and not result[0]:
+            result.pop(0)
+    return "\n".join(result)
+
+
+# Indent applied to every continuation line (all lines after the first) when
+# `_sanitize_body(..., list_item_safe=True)` is requested. Two spaces is the
+# minimum CommonMark content-column for a `- ` bullet marker: a line indented
+# to or past a list item's content column is a "lazy continuation" of that
+# item's own paragraph, structurally incapable of opening a new sibling block
+# (list item, heading, or HTML comment) regardless of which character starts
+# it — the indentation itself, not the character, is what removes the line
+# from "start of a block" position. This closes the STRUCTURAL class Falco's
+# PR #1320 round-4 finding named (an embedded newline followed by `+` or a
+# Unicode dash surviving `_LEADING_MARKDOWN`'s ASCII-only strip class and
+# rendering as a second, indistinguishable policy bullet), rather than
+# widening `_LEADING_MARKDOWN` to deny more specific leading glyphs — a
+# denylist of characters is always one lookalike behind; an indent boundary
+# has no such gap because it does not depend on recognizing the forging
+# character at all.
+_LIST_ITEM_CONTINUATION_INDENT = "  "
+
+
+def _run_body_pass_to_fixed_point(text: str, *, strip_leading_blanks: bool = True) -> str:
+    """Run `_sanitize_body_pass` repeatedly until it stops changing `text`,
+    same convergence discipline as `_sanitize_field`'s loop (a deletion can
+    expose a new forbidden sequence at a line boundary, so one pass is not
+    enough). Shared by every `_sanitize_body` call site that needs a
+    fixed-point sanitize — the whole-text path (`list_item_safe=False`) and
+    the two half-text paths (`first_raw`/`rest_raw`) `list_item_safe=True`
+    splits `raw` into — so the termination logic (the iteration cap, the
+    `cleaned == text` convergence check) lives in exactly one place rather
+    than three copies that could drift apart under a future change.
+    """
+    for _ in range(len(text) + 2):
+        cleaned = _sanitize_body_pass(text, strip_leading_blanks=strip_leading_blanks)
+        if cleaned == text:
+            return text
+        text = cleaned
+    return text
+
+
+def _sanitize_body(raw: str, max_len: int, *, list_item_safe: bool = False) -> str:
+    """Multi-line counterpart to `_sanitize_field` (same threat model,
+    module header above) — used for `PolicySkill.body`, the one field
+    `to_skill` used to leave unsanitized on the theory that "nothing in this
+    module ever reads `.body` back out" (see `to_skill`'s docstring). That
+    theory no longer holds: `rule_injection_gate.py`'s point-of-use
+    `PreToolUse` hook reads `.body` and injects it verbatim into the acting
+    model's context, which is exactly the delivery path this sanitizer
+    family exists to guard (Falco/Waxwing, PR #1320 round 2 — the same
+    CONFIRMED-injection class as ateles#1268 round 2, now reachable through
+    the one field `_sanitize_field` never covered).
+
+    Runs to a fixed point the same way `_sanitize_field` does — a deletion
+    can expose a new forbidden sequence at a line boundary — then caps
+    length with an ellipsis. Returns "" if nothing survives.
+
+    `list_item_safe=True` (Falco, PR #1320 round 4; leading-blank-line fix
+    Phoenicurus, round 5) additionally indents every line after the first by
+    `_LIST_ITEM_CONTINUATION_INDENT`, AFTER the fixed point and BEFORE the
+    length cap. Set this when the caller is going to interpolate the
+    sanitized text into a single flat bullet-list row shared with sibling
+    rows with no per-row wrapper of its own — exactly `render_policy_prompt`'s
+    `- ({kind}, {status}) {rule}` template, where an embedded newline puts
+    arbitrary attacker text at column 0 of the shared list, structurally
+    indistinguishable from a genuine sibling bullet. `to_skill`'s `body`
+    field does NOT set this: each row there is already isolated under its
+    own `### [category] rule {eid}` heading, so a stray line inside one
+    row's block cannot pose as a DIFFERENT row's policy, and forcing an
+    indent there would misrender genuine multi-paragraph prose users are
+    meant to read as normal body text. The indent is applied only to
+    non-empty lines — a blank paragraph-break line stays blank so runs of
+    blank lines are still collapsed the same way by the caller's own
+    formatting; indenting a blank line would make it visibly non-blank.
+
+    Structural ordering fix (Phoenicurus, PR #1320 round 5): the caller's
+    template puts `rule`'s FIRST LINE on the same physical source line as
+    the `- ({kind}, {status})` prefix — that position is safe by
+    construction, since it is never at column 0 of its own line. Every other
+    line of `rule` starts life after an embedded `\n` and is what needs the
+    structural indent. The round-4 fix picked out "every line but the first"
+    by running the FULL fixed-point sanitize (which strips/collapses leading
+    blank lines as part of reaching its fixed point) and then indenting
+    every array index but 0 of the RESULT. That conflates two different
+    things that happen to coincide only when `raw` has no leading blank: the
+    template's safe first physical line, versus whatever line ends up at
+    index 0 after blank-collapsing. A payload that opens with a blank or
+    whitespace-only line (or a line that sanitizes to empty, e.g. a stripped
+    heading) has its real first line collapsed away, promoting the SECOND
+    physical line — fully attacker-controlled — to index 0, where it is
+    then exempted from indenting. Phoenicurus reproduced this end-to-end
+    through `AgentLoader.render_policy_prompt`.
+
+    The fix: decide the safe-first-line/continuation split on `raw` BEFORE
+    any sanitization touches it, using `raw`'s own first `\n` (or lack of
+    one) — never on a post-sanitize array index, which is exactly the
+    position blank-collapsing can shift. `raw.split("\n", 1)` is computed
+    once, up front; `first_raw` is sanitized as its own single-line unit
+    (`_sanitize_body_pass` still applied, and still capable of stripping
+    leading markdown from IT specifically — a real first line that happens
+    to start with `#`/`-`/etc. is still cleaned the same way round-3
+    intended), and `rest_raw` (everything after that first `\n`, still
+    possibly containing many more lines and blank runs) is sanitized as a
+    block and has the indent applied to EVERY one of its non-empty lines,
+    with no exemption for whatever a blank-collapse might promote to its own
+    index 0 — there is no "index 0" on the continuation side to exempt.
+    Both pieces independently reach a fixed point (mirroring `_sanitize_field`
+    /`_sanitize_body`'s existing per-field fixed-point discipline) before
+    being rejoined, so a deletion in either piece cannot rebuild a forbidden
+    sequence that spans the join. `list_item_safe=False` (`to_skill`'s call)
+    is untouched — it keeps running the single whole-text fixed-point loop
+    exactly as before, since `to_skill` has no first-line/continuation
+    distinction to protect.
+    """
+    if not raw:
+        return ""
+    if not list_item_safe:
+        text = _run_body_pass_to_fixed_point(raw)
+        if not text:
+            return ""
+        if len(text) > max_len:
+            text = text[: max_len - 1].rstrip() + "…"
+        return text
+
+    # list_item_safe=True: split on RAW's own first newline before any
+    # sanitization runs, so the safe/continuation boundary is fixed by the
+    # attacker-supplied text's own original structure, never by whatever a
+    # later blank-collapse leaves at array index 0.
+    first_raw, _, rest_raw = raw.partition("\n")
+
+    first_text = _run_body_pass_to_fixed_point(first_raw)
+    # _sanitize_body_pass operates on (and can itself contain) newlines, but
+    # `first_raw` has none by construction (partition split on the first
+    # one) — collapse any that a pass could theoretically introduce back to
+    # spaces so `first_text` stays a true single line and cannot reopen the
+    # index-0 ambiguity this fix exists to close.
+    first_text = first_text.replace("\n", " ")
+
+    rest_text = ""
+    if rest_raw:
+        # A genuine leading blank/whitespace-only line already present in
+        # `rest_raw` (before any sanitization) is a real paragraph break and
+        # must survive ONLY when there is a real first line before it to
+        # break away from (`first_text` non-empty) — a blank with nothing
+        # preceding it is not a paragraph break, it is just more leading
+        # blank, which collapses the same way a leading blank always does.
+        # A line that only becomes blank AFTER sanitization strips its
+        # content (a comment marker, a tier tag) is never preserved either
+        # way — it collapses like any other interior emptied line.
+        # Distinguishing "genuine blank" from "sanitizes to blank" requires
+        # looking at `rest_raw` itself, once, before the fixed-point loop
+        # runs its own passes and erases which case it was.
+        rest_starts_blank = rest_raw.split("\n", 1)[0].strip() == ""
+        rest_text = _run_body_pass_to_fixed_point(
+            rest_raw, strip_leading_blanks=not (first_text and rest_starts_blank)
+        )
+        if rest_text:
+            rest_text = "\n".join(
+                _LIST_ITEM_CONTINUATION_INDENT + line if line else line
+                for line in rest_text.split("\n")
+            )
+
+    if first_text and rest_text:
+        text = first_text + "\n" + rest_text
+    else:
+        text = first_text or rest_text
+    if not text:
+        return ""
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
@@ -391,37 +649,59 @@ def fetch_active_policy_rows(
     return unwrap_policy_entities(data)
 
 
-def _session_scope_ok(snap: dict, principal: str | None = None) -> bool:
+def _session_scope_ok(
+    snap: dict,
+    principal: str | None = None,
+    *,
+    agent_definition_id: "str | None" = None,
+    governs: "dict[str, frozenset[str]] | None" = None,
+) -> bool:
     """Whether one row belongs in THIS session's index.
 
     A session runs as one agent — the session principal (`session_principal()`,
     default the operator's interactive agent) — so a row is in scope exactly
-    when it binds that agent, decided by the daemon dispatcher's own
-    predicate, `policy_binds_agent(snap, principal)`, with the principal
-    supplied from OUTSIDE the row. (An earlier revision passed the row's own
-    `agent_sub` back in as the identity, which compared the field with itself
-    and admitted every row that had one — ateles#1268 rounds 1 and 3.)
+    when it binds that agent, decided by the SAME shared predicate the
+    daemon loader uses, `policy_binds_agent_by_edge(snap, agent_definition_id,
+    governs)` (operator ruling 2026-09-25, decision 114). `agent_sub` is
+    read NOWHERE here — a copied predicate is how the two readers drift, and
+    `policy_binds_agent_by_edge` is the ONE place both consult.
 
-    Case by case:
-      - `scope` absent, empty, or outside the closed vocabulary
-        (`agent_loader.POLICY_SCOPES`: global, swarm, agent) -> withheld,
-        whatever `agent_sub` says. `scope` carries the reach of a rule, so an
-        unreadable value fails CLOSED (principles.md #5). This is stricter than
-        `policy_binds_agent` alone, which would still bind such a row to an
-        exactly-matching `agent_sub`; the session index refuses it outright.
-      - `global` / `swarm` -> included.
-      - `agent` -> included only when `agent_sub` equals the session
-        principal. A row scoped to any other agent is withheld, as is one
-        with no `agent_sub`. If the principal is set to an empty string, no
-        `agent`-scoped row is included.
+    Case by case (identical to `policy_binds_agent_by_edge`'s own doc):
+      - A row with a `GOVERNS` edge to ANY agent binds ONLY the agent(s) it
+        has an edge to, regardless of `scope`.
+      - A row with no edge binds every agent when `scope` is `global` or
+        `swarm`.
+      - A row with no edge and no recognised swarm-wide `scope` binds
+        NOBODY — the fail-closed default (`principles.md #5`); an
+        `agent`-scoped row that has not been migrated to an edge is no
+        longer read by its `agent_sub` at all, since that field (and
+        `scope: agent`) are superseded by the edge, not a fallback to it.
 
-    `principal=None` reads `session_principal()`; tests pass one explicitly.
+    `principal` is `session_principal()` by default (or an explicit override
+    in a test) — it is NEVER compared against a row's `agent_sub` (that
+    field is superseded), but it is still the identity `agent_definition_id`
+    is resolved FROM when the caller has not already resolved one.
+    Resolving a principal's `agent_sub` to its `agent_definition` entity id
+    is itself a Neotoma read, so `render_skills` resolves it ONCE per call
+    and passes the result in as `agent_definition_id`, never re-resolving
+    per row; a direct caller of this function (tests; a caller that already
+    has the id) may pass `agent_definition_id` explicitly to skip that
+    lookup entirely. When neither is available, no edge can ever match, so
+    a row is included only through the swarm-wide `scope` branch above —
+    the same fail-closed posture an unresolvable principal already had
+    under the field-based predicate. `governs=None` treats every row as
+    edgeless, for the same reason: never an implicit per-row fetch.
     """
     scope = str(snap.get("scope") or "").strip().lower()
-    if scope not in POLICY_SCOPES:
+    entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "")
+    edge_targets = (governs or {}).get(entity_id, frozenset())
+    if scope not in POLICY_SCOPES and not edge_targets:
         return False
-    sub = session_principal() if principal is None else principal.strip()
-    return policy_binds_agent(snap, sub)
+    resolved_id = agent_definition_id
+    if resolved_id is None and edge_targets:
+        sub = session_principal() if principal is None else principal.strip()
+        resolved_id = resolve_agent_definition_id(sub) if sub else None
+    return policy_binds_agent_by_edge(snap, resolved_id or "", governs or {})
 
 
 def to_skill(snap: dict) -> PolicySkill | None:
@@ -440,14 +720,17 @@ def to_skill(snap: dict) -> PolicySkill | None:
     `applies_when` is sanitized before use, same as the imperative, and
     `entity_id` is cut to the id charset — every row-derived field is
     untrusted (Falco's finding applies to the whole row, not only the
-    imperative). `body` still carries
-    the raw `rule` text for the FUTURE MCP Skills-extension transport (an
-    agent that explicitly fetches a rule by id gets the real text, which is
-    fine — that path is not the SessionStart stdout stream this finding is
-    about), but nothing in this module ever reads `.body` back out into the
-    rendered index; `render_index_text`/`_assemble`/`_preamble_lines`/
-    `_conditional_line_*` only ever touch `.description`/`.applies_when`/
-    `.entity_id`.
+    imperative). `body` carries the `rule` text run through `_sanitize_body`
+    — the multi-line counterpart to `_sanitize_field` — for both the FUTURE
+    MCP Skills-extension transport AND `rule_injection_gate.py`'s
+    point-of-use `PreToolUse` hook, which DOES read `.body` back out into
+    live model context (PR #1320 round 2: the "nothing reads `.body` back
+    out" assumption this docstring stated earlier no longer holds now that
+    a second transport consumes it). Sanitizing here, once, keeps every
+    current and future reader of `.body` safe without each needing its own
+    pass; `render_index_text`/`_assemble`/`_preamble_lines`/
+    `_conditional_line_*` still only ever touch `.description`/
+    `.applies_when`/`.entity_id`, unaffected by this change.
     """
     raw_entity_id = str(snap.get("_entity_id") or snap.get("entity_id") or "")
     # The server assigns entity ids from a fixed charset; nothing outside it
@@ -486,7 +769,11 @@ def to_skill(snap: dict) -> PolicySkill | None:
         description = f"When {trigger}:"  # tier-B shape even at tier A
 
     domain = str(snap.get("domain") or "")
-    rule = str(snap.get("rule") or "")
+    raw_rule = str(snap.get("rule") or "")
+    rule = _sanitize_body(raw_rule, max_len=_BODY_MAX)
+    # A rule that sanitizes to nothing still gets a body — the "Source:"
+    # citation line alone, so a caller has something to cite even when the
+    # row's own content was entirely forged structure/markup.
     body = f"{rule}\n\nSource: agent_policy {entity_id}".strip()
     return PolicySkill(
         entity_id=entity_id,
@@ -501,12 +788,26 @@ def to_skill(snap: dict) -> PolicySkill | None:
 
 
 def render_skills(
-    rows: list[dict], principal: str | None = None
+    rows: list[dict],
+    principal: str | None = None,
+    *,
+    agent_definition_id: "str | None" = None,
+    governs: "dict[str, frozenset[str]] | None" = None,
 ) -> list[PolicySkill]:
     """Session-scoped rows, projected to PolicySkill, preamble first.
 
-    Scoping is `_session_scope_ok(row, principal)`; `principal=None` means
-    the session principal from the environment (see `session_principal`).
+    Scoping is `_session_scope_ok(row, principal, agent_definition_id=,
+    governs=)`; `principal=None` means the session principal from the
+    environment (see `session_principal`).
+
+    `agent_definition_id` and `governs` are resolved ONCE here (not once per
+    row) when the caller has not already supplied them — a `GOVERNS` fetch
+    or an `agent_definition` lookup per row would turn one session-start
+    read into N. Both degrade to "resolve/bind nothing" on a Neotoma
+    failure rather than raising: a caller that cannot reach the edge data
+    still gets the swarm-wide (`global`/`swarm`) rows, which is the same
+    fail-open-on-transport / fail-closed-on-data posture every other read
+    in this module takes.
 
     Rows that sanitize to nothing renderable are SKIPPED, not raised —
     Falco's fix says "skip the row and count it," and one malformed or
@@ -514,7 +815,43 @@ def render_skills(
     logged at WARNING so a real data problem (not just an attack) is still
     visible.
     """
-    scoped = [r for r in rows if _session_scope_ok(r, principal)]
+    resolved_governs = governs
+    if resolved_governs is None:
+        try:
+            resolved_governs = fetch_governs_edges(NEOTOMA_BASE_URL, _request=_request)
+        except Exception as exc:  # noqa: BLE001 — degrade to edgeless, don't raise
+            log.warning(
+                "could not fetch GOVERNS edges for the session index: %s: %s — "
+                "treating every row as edgeless",
+                type(exc).__name__, exc,
+            )
+            resolved_governs = {}
+
+    resolved_definition_id = agent_definition_id
+    if resolved_definition_id is None:
+        sub = session_principal() if principal is None else principal.strip()
+        if sub:
+            try:
+                resolved_definition_id = resolve_agent_definition_id(
+                    sub, NEOTOMA_BASE_URL, _request=_request
+                )
+            except Exception as exc:  # noqa: BLE001 — unresolvable, don't raise
+                log.warning(
+                    "could not resolve agent_definition id for %r: %s: %s",
+                    sub, type(exc).__name__, exc,
+                )
+                resolved_definition_id = None
+
+    scoped = [
+        r
+        for r in rows
+        if _session_scope_ok(
+            r,
+            principal,
+            agent_definition_id=resolved_definition_id,
+            governs=resolved_governs,
+        )
+    ]
     skills: list[PolicySkill] = []
     skipped = 0
     for r in scoped:
@@ -649,12 +986,28 @@ def _assemble(
     return "\n".join(lines)
 
 
-def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
-    """The plain-text session index, degrading through four tiers rather
-    than failing open on size (operator ruling, ateles#1261 follow-up: size
-    must DEGRADE, never fail open — fail-open is reserved for Neotoma being
-    unreachable or rendering itself raising, never merely for being over
-    budget).
+def render_index_text_with_ids(
+    skills: list[PolicySkill], budget_chars: int
+) -> tuple[str, frozenset[str]]:
+    """Like `render_index_text`, but also returns the exact set of entity ids
+    that were actually given their own rendered line — computed STRUCTURALLY
+    from which `PolicySkill`s were selected into each tier, never by scanning
+    the rendered text for a bracket pattern.
+
+    ateles#1323 follow-up (Falco security review, task
+    ent_bd3fcf561449b6ebbabc36ca). A prior revision inferred "what got
+    delivered" by regex-scanning rendered output for a trailing `[entity_id]`
+    token. That is spoofable: a mandatory row's own `body`/`rule` text is
+    NEVER sanitized for index rendering (this module's own standing
+    guarantee — see the class docstring, "NEVER derived from `rule`/`body`
+    text"), so a rule body that happens to cite another rule's id in prose
+    (e.g. "see agent_policy ent_xxx") reads to a text scanner exactly like
+    that other rule's real index line, even when that other rule was the one
+    tier C actually dropped. This function closes that gap by construction:
+    every skill added to `kept`/`conditional`/`preamble` below is the SAME
+    list a bracketed line is generated FROM, so the returned id set is
+    exactly (and only) the rows that produced their own line — a body's
+    internal text is never consulted.
 
     Tier A:  full conditional lines (trigger + imperative + id) for EVERY
              row, regardless of scope.
@@ -678,14 +1031,18 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
     so a session or a test can see which one ran. Always returns a string
     that fits `budget_chars` — the empty-corpus case (no preamble, no
     conditional) trivially fits at tier A and is not a special case here.
+    Tiers A, A2 and B always emit every row in `skills` (nothing is ever
+    dropped at those tiers), so their returned id set is always the full
+    `{s.entity_id for s in skills}`. Only tier C's id set is a proper subset.
     """
     preamble = [s for s in skills if s.is_preamble]
     conditional = [s for s in skills if not s.is_preamble]
+    all_ids = frozenset(s.entity_id for s in skills)
 
     # --- Tier A ---
     tier_a = _assemble(preamble, [_conditional_line_full(s) for s in conditional], "A")
     if len(tier_a) <= budget_chars:
-        return tier_a
+        return tier_a, all_ids
 
     # --- Tier A2: audience split — compact the both-audience rows only ---
     tier_a2 = _assemble(
@@ -701,7 +1058,7 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
             len(tier_a), budget_chars, len(tier_a2), both_audience_count,
             len(conditional),
         )
-        return tier_a2
+        return tier_a2, all_ids
 
     # --- Tier B ---
     tier_b = _assemble(
@@ -715,7 +1072,7 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
             "kept).",
             len(tier_a), len(tier_a2), budget_chars, len(tier_b), len(conditional),
         )
-        return tier_b
+        return tier_b, all_ids
 
     # --- Tier C: mandatory first, keep whole lines only, state the cut ---
     ordered = sorted(
@@ -739,6 +1096,7 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
     # integer), never on which rules were kept, so probing with the count
     # this candidate WOULD leave omitted is exact, not a worst case.
     kept_lines: list[str] = []
+    kept_skills: list[PolicySkill] = []
     kept_count = 0
     for s in ordered:
         candidate_lines = kept_lines + [_conditional_line_trigger_only(s)]
@@ -748,6 +1106,7 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
         if len(probe) > budget_chars:
             break
         kept_lines = candidate_lines
+        kept_skills.append(s)
         kept_count += 1
 
     omitted = len(ordered) - kept_count
@@ -772,4 +1131,20 @@ def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
             "Shorten agent_policy.applies_when / the preamble rules "
             "themselves, or raise the budget."
         )
-    return tier_c
+    # Tier C's emitted set is preamble (always full) + only the KEPT
+    # conditional skills — structurally exact, never inferred from text.
+    tier_c_ids = frozenset(s.entity_id for s in preamble) | frozenset(
+        s.entity_id for s in kept_skills
+    )
+    return tier_c, tier_c_ids
+
+
+def render_index_text(skills: list[PolicySkill], budget_chars: int) -> str:
+    """Back-compat wrapper: the text only, for callers that don't need the
+    emitted-id set (existing callers outside the two rule-delivery hooks —
+    the eval runner, the module's own test suite). New callers that need to
+    know exactly what was rendered should call
+    `render_index_text_with_ids` instead of re-deriving it from the string.
+    """
+    text, _ids = render_index_text_with_ids(skills, budget_chars)
+    return text

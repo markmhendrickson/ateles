@@ -399,7 +399,7 @@ def test_stale_block_escalates_again_once_the_blocker_changes(ready_to_prepare, 
 
 def test_stale_block_re_escalates_once_cadence_elapses(ready_to_prepare, monkeypatch):
     """
-    ateles#1291: before this fix, a stale block escalated exactly ONCE per
+    ateles#1304: before this fix, a stale block escalated exactly ONCE per
     blocking entity, ever — then logged "already escalated — not
     re-notifying" on every subsequent run FOREVER, even as days passed and
     more commits piled up behind it. v0.23.1 blocked prep of 13 commits
@@ -456,7 +456,7 @@ def test_npm_reconcile_unblocks_prep_when_registry_already_shows_it_published(
     ready_to_prepare, monkeypatch
 ):
     """
-    ateles#1291's actual incident: v0.23.1 published to npm at 13:41Z, but the
+    ateles#1304's actual incident: v0.23.1 published to npm at 13:41Z, but the
     release_result's terminal status write never landed, leaving it stuck at
     'publishing'. Every prepare run thereafter re-blocked on a fact the
     registry already contradicted. Once npm confirms the version is live,

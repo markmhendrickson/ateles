@@ -51,6 +51,13 @@ import urllib.request
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+_DAEMON_DIR = Path(__file__).resolve().parent
+if str(_DAEMON_DIR) not in sys.path:
+    sys.path.insert(0, str(_DAEMON_DIR))
+from release_checkout_root import (  # noqa: E402
+    default_neotoma_repo_root as _default_neotoma_repo_root,
+)
+
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
 NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
@@ -98,32 +105,22 @@ AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
 # none) is the blocker.
 STALE_ESCALATION_FILE = Path(__file__).parent / ".phoenicurus_prepare_stale_escalated"
 
-def _default_neotoma_repo_root() -> Path:
-    """
-    Fall back to the dedicated release checkout, never the shared main clone.
-
-    Mirrors install.sh's precedent exactly (see its "Neotoma repo:" section):
-    prefer ``~/neotoma-rc-src`` when it looks like a real checkout, since that
-    is where releases are meant to be cut from (publish.py refuses to tag atop
-    a dirty tree, and ``~/repos/neotoma`` is where interactive sessions work,
-    so it is dirty most of the time). Only when the dedicated checkout is
-    absent does this fall back to the shared clone, so a fresh install still
-    works.
-
-    Without this, any caller that spawns prepare.py without explicitly setting
-    NEOTOMA_REPO_ROOT — e.g. swarm_dispatch._handle_push_main, which inherits
-    the Apis daemon's own environment rather than the phoenicurus-prepare
-    plist's — silently defaulted to the shared clone. That is exactly what
-    happened: the merge-triggered path logged "could not determine checkout
-    state (no upstream branch configured)" against ~/repos/neotoma on every
-    run, even though the scheduled path (which DOES set the env var in its
-    plist) was pointed correctly.
-    """
-    rc_src = Path.home() / "neotoma-rc-src"
-    if (rc_src / "package.json").exists():
-        return rc_src
-    return Path.home() / "repos" / "neotoma"
-
+# `_default_neotoma_repo_root` used to be defined here, duplicating the exact
+# same "prefer ~/neotoma-rc-src, else fall back to ~/repos/neotoma" policy
+# install.sh independently re-typed in bash (arch REQUEST_CHANGES on #1293:
+# the two would drift the next time only one was updated). It is now imported
+# above as an alias for `release_checkout_root.default_neotoma_repo_root` —
+# the ONE source both this module and install.sh (via that module's own CLI)
+# derive from. See release_checkout_root.py's module docstring.
+#
+# Without a correct default here, any caller that spawns prepare.py without
+# explicitly setting NEOTOMA_REPO_ROOT — e.g. swarm_dispatch._handle_push_main,
+# which inherits the Apis daemon's own environment rather than the
+# phoenicurus-prepare plist's — silently defaults to the shared clone. That is
+# exactly what happened: the merge-triggered path logged "could not determine
+# checkout state (no upstream branch configured)" against ~/repos/neotoma on
+# every run, even though the scheduled path (whose plist DOES set the env var)
+# was pointed correctly.
 
 NEOTOMA_REPO_ROOT = Path(
     os.environ.get("NEOTOMA_REPO_ROOT", "") or str(_default_neotoma_repo_root())
@@ -145,7 +142,7 @@ STALE_RELEASE_BLOCK_DAYS = int(
 )
 
 # How often to re-page the operator about the SAME still-stuck release_result,
-# once it has already crossed STALE_RELEASE_BLOCK_DAYS. ateles#1291: a
+# once it has already crossed STALE_RELEASE_BLOCK_DAYS. ateles#1304: a
 # release_result stuck past the stale threshold used to escalate exactly ONCE
 # per blocking entity, then log "already escalated — not re-notifying" on
 # every subsequent run forever. v0.23.1 blocked every release behind it for
@@ -244,7 +241,7 @@ def _already_escalated_stale_block(entity_id: str) -> bool:
     True if the operator was paged about THIS blocking entity within the
     re-escalation cadence, so this run should stay quiet.
 
-    Before ateles#1291, this was "ever" rather than "within N days": once
+    Before ateles#1304, this was "ever" rather than "within N days": once
     escalated, a stuck release_result silently blocked every release forever
     afterward with nothing but a repeated INFO log line nobody was watching —
     exactly what happened to v0.23.1, stuck 9+ days while main gained 13
@@ -747,13 +744,20 @@ def _reconcile_against_npm(
     Auto-correct a stuck 'publishing' release_result when npm already shows it
     published, instead of escalating a block that has actually resolved.
 
-    ateles#1291: v0.23.1 published to npm at 2026-09-16T13:41Z, but the
+    ateles#1304: v0.23.1 published to npm at 2026-09-16T13:41Z, but the
     release_result stayed 'publishing' — the terminal status write after
-    npm_publish never landed (the exact write-then-crash gap "verify before
-    asserting" warns about). Every prepare run for the next 9+ days re-read
-    the same stale 'publishing' row and blocked, even though the thing it was
-    waiting on had already happened. A stale WRITE should not require a human
-    to notice a fact the registry already knows.
+    npm_publish never landed on the SAME entity this daemon reads back
+    (confirmed 2026-09-26: this incident is the same root cause as
+    ateles#508/#518, not a distinct write-loss bug — release_result has no
+    canonical_name_fields bound to version, so each status-transition payload
+    shape lands on a different heuristically-keyed entity; v0.23.1 fragmented
+    into three rows exactly as #508 documents for v0.22.0). This function is
+    the containment for the SYMPTOM, not a fix for #508/#518's identity gap —
+    it still needs to reconcile every 'publishing' block against npm until
+    that lands. Every prepare run for the next 9+ days re-read the same stale
+    'publishing' row and blocked, even though the thing it was waiting on had
+    already happened. A stale WRITE should not require a human to notice a
+    fact the registry already knows.
 
     Scope: only 'publishing' reconciles this way. 'prepared',
     'pending_approval', and 'approved' are stages BEFORE the irreversible
@@ -767,7 +771,7 @@ def _reconcile_against_npm(
     Signs the correction as phoenicurus, the same identity + entity_id-scoped
     /correct path used everywhere else this daemon writes release_result
     (store_release_result.py cannot do this: it only creates, with no
-    entity_id target — see ateles#1291's investigation notes). Returns True
+    entity_id target — see ateles#1304's investigation notes). Returns True
     if the release_result was corrected (caller should stop treating it as a
     block), False if reconciliation did not apply or failed.
     """
@@ -1158,7 +1162,7 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
                 "stale threshold."
             )
             # Before paging anyone: is this actually still blocked, or did the
-            # terminal status write just never land? (ateles#1291 — v0.23.1's
+            # terminal status write just never land? (ateles#1304 — v0.23.1's
             # exact failure.) Only attempted once a block is already stale, so
             # a genuinely-in-progress publish (minutes long) never triggers an
             # npm registry call on every routine run.
@@ -1181,7 +1185,7 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
             else:
                 # Genuinely still stuck (or reconciliation couldn't confirm
                 # either way) — escalate, but on a CADENCE rather than once
-                # ever. Before ateles#1291, this escalated exactly once per
+                # ever. Before ateles#1304, this escalated exactly once per
                 # blocking entity, then logged "already escalated — not
                 # re-notifying" forever after — which is how v0.23.1 blocked
                 # 13 commits' worth of releases (3 of them security fixes) for

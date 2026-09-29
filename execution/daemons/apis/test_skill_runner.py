@@ -130,6 +130,26 @@ class TestBuildSystemPrompt:
         assert degraded
         assert prompt == skill_md
 
+    def test_live_policy_follows_definition_and_skill(self) -> None:
+        agent_def = _make_def(prompt_markdown="Identity.")
+        prompt, degraded = skill_runner.build_system_prompt(
+            agent_def,
+            "Task instructions.",
+            policy_prompt="LIVE POLICY CANARY",
+        )
+        assert not degraded
+        assert prompt.index("Identity.") < prompt.index("Task instructions.")
+        assert prompt.index("Task instructions.") < prompt.index("LIVE POLICY CANARY")
+
+    def test_live_policy_is_delivered_in_degraded_definition_mode(self) -> None:
+        prompt, degraded = skill_runner.build_system_prompt(
+            _stub_def(),
+            "Fallback instructions.",
+            policy_prompt="LIVE POLICY CANARY",
+        )
+        assert degraded
+        assert prompt == "Fallback instructions.\n\n---\n\nLIVE POLICY CANARY"
+
 
 # ── _load_agent_def caching ────────────────────────────────────────────────────
 
@@ -161,6 +181,26 @@ class TestAgentDefCache:
             skill_runner._load_agent_def("monedula")
             # AgentLoader should only have been instantiated once
             assert MockLoader.call_count == 1
+
+
+class TestActivePolicyCarrier:
+    def test_policy_is_rendered_fresh_for_every_dispatch(self) -> None:
+        with patch("skill_runner.AgentLoader") as MockLoader:
+            instance = MagicMock()
+            instance.render_policy_prompt.side_effect = ["first", "second"]
+            MockLoader.return_value = instance
+
+            assert skill_runner._load_active_policy_prompt("cicada") == "first"
+            assert skill_runner._load_active_policy_prompt("cicada") == "second"
+
+        assert MockLoader.call_count == 2
+
+    def test_policy_render_failure_degrades_to_empty_prompt(self) -> None:
+        with patch("skill_runner.AgentLoader") as MockLoader:
+            MockLoader.return_value.render_policy_prompt.side_effect = RuntimeError(
+                "unavailable"
+            )
+            assert skill_runner._load_active_policy_prompt("cicada") == ""
 
 
 # ── run_skill — full integration (mocked subprocess + Neotoma) ────────────────
@@ -265,6 +305,7 @@ class TestRunSkill:
         fake_def = _make_def(prompt_markdown="Role: Gryllus. You are an issue worker.")
         instance = MagicMock()
         instance.load.return_value = fake_def
+        instance.render_policy_prompt.return_value = "LIVE POLICY CANARY"
         MockLoader.return_value = instance
 
         captured_cmd: list = []
@@ -297,11 +338,12 @@ class TestRunSkill:
             )
 
         assert result.ok
-        # The --append-system-prompt argument should contain BOTH texts
+        # The --append-system-prompt argument should contain all three layers.
         sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
         system_prompt_arg = captured_cmd[sys_prompt_idx]
         assert "Role: Gryllus" in system_prompt_arg
         assert skill_md_content in system_prompt_arg
+        assert "LIVE POLICY CANARY" in system_prompt_arg
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -1297,6 +1339,50 @@ class TestHarnessEventEmptyToken:
         sent_req = mock_urlopen.call_args.args[0]
         assert sent_req.get_header("Authorization") == "Bearer test-bearer-xyz"
 
+    def test_links_event_to_task_and_agent_session(self, monkeypatch) -> None:
+        import json as _json
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=None)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch("skill_runner.urllib.request.urlopen", return_value=cm) as mock_urlopen:
+            self._call(agent_session_id="ent_session")
+        payload = _json.loads(mock_urlopen.call_args.args[0].data)
+        assert payload["entities"][0]["session_id"] == "ent_session"
+        assert payload["relationships"] == [
+            {"source_index": 0, "target_entity_id": "ent_abc", "relationship_type": "REFERS_TO"},
+            {"source_index": 0, "target_entity_id": "ent_session", "relationship_type": "REFERS_TO"},
+        ]
+
+    def test_reads_back_fields_that_carry_provenance(self, monkeypatch) -> None:
+        import json as _json
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+        class _Response:
+            def __init__(self, body): self.body = _json.dumps(body).encode()
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self): return self.body
+        responses = iter([
+            _Response({"entities": [{"entity_type": "harness_event", "entity_id": "ent_event"}]}),
+            _Response({"snapshot": {"task_entity_id": "ent_abc", "session_id": "ent_session"}}),
+            _Response({"relationships": [
+                {"source_entity_id": "ent_event", "target_entity_id": "ent_abc",
+                 "relationship_type": "REFERS_TO"},
+                {"source_entity_id": "ent_event", "target_entity_id": "ent_session",
+                 "relationship_type": "REFERS_TO"},
+            ]}),
+        ])
+        with patch("skill_runner.urllib.request.urlopen",
+                   side_effect=lambda *_a, **_k: next(responses)) as mock_urlopen:
+            self._call(agent_session_id="ent_session")
+        assert mock_urlopen.call_count == 3
+        assert mock_urlopen.call_args_list[1].args[0].full_url.endswith("/entities/ent_event")
+        assert mock_urlopen.call_args_list[2].args[0].full_url.endswith(
+            "/entities/ent_event/relationships"
+        )
+
 
 # ── ateles#109 — github_token injection ──────────────────────────────────────
 
@@ -1468,16 +1554,23 @@ class TestGithubTokenInjection:
             ),
             patch("os.path.exists", return_value=False),
         ):
-            with pytest.raises(RuntimeError, match="EMPTY string"):
-                self._run(
-                    skill_runner.run_skill(
-                        "gryllus",
-                        "work prompt",
-                        role="gryllus",
-                        task_entity_id="ent_abc",
-                        github_token="",
-                    )
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    github_token="",
                 )
+            )
+
+        # ateles#590 security repair (PR #1334): this refusal is a failed
+        # SkillResult, not a raised exception — every caller of run_skill
+        # (including _run_provider_attempts's unguarded `await attempt(...)`)
+        # expects failures to come back as a SkillResult it can classify,
+        # cool down, and fail over on.
+        assert result.ok is False
+        assert "EMPTY string" in (result.error or "")
 
         # The subprocess must never have been spawned under the ambient
         # identity — the failure happens before exec, not after.
@@ -1616,6 +1709,12 @@ class TestSwarmGithubContractInjection:
                     role="gryllus",
                     task_entity_id="ent_abc",
                     include_github_contract=True,
+                    # A network-enabled (include_github_contract=True) run
+                    # requires an explicit scoped credential — see
+                    # TestGithubDeliveryCredentialBoundary below. This test is
+                    # about prompt content, not the credential contract, so it
+                    # supplies one to stay on the success path.
+                    github_token="scoped-test-token",
                 )
             )
 
@@ -1716,6 +1815,9 @@ class TestSwarmGithubContractInjection:
                     role="gryllus",
                     task_entity_id="ent_abc",
                     include_github_contract=True,
+                    # See TestGithubDeliveryCredentialBoundary — a
+                    # network-enabled run requires an explicit token.
+                    github_token="scoped-test-token",
                 )
             )
 
@@ -1734,6 +1836,263 @@ class TestSwarmGithubContractInjection:
             if "degraded_generic_subagent" in (call.kwargs.get("output_summary") or "")
         ]
         assert len(degraded_calls) >= 1
+
+
+# ── ateles#590 security repair (PR #1334): GitHub delivery credential boundary ─
+
+
+class TestGithubDeliveryCredentialBoundary:
+    """A network-enabled dispatch (include_github_contract=True) must never
+    silently keep the daemon's ambient GITHUB_TOKEN/GH_TOKEN.
+
+    Before this fix, `github_token=None` (the default for every caller) left
+    the spawned child's env exactly as `_subscription_only_env` copied it from
+    `os.environ` — ambient GitHub identity intact. That was masked while
+    `include_github_contract=True` was reachable only from swarm_dispatch.py
+    call sites, which always resolve and pass a `github_token` string. Once
+    `dispatch_role.py` (#590) could request the contract on its own and omit
+    the token, the silent-inherit path became reachable. These tests exercise
+    the real `run_skill` -> `_run_skill_once` -> provider-command construction
+    path, mocking only the subprocess boundary (`asyncio.create_subprocess_exec`)
+    — not `_run_skill_once` itself — so they prove the actual env dict handed
+    to the child, not a stand-in for it.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _capture_env_fixture(self):
+        captured_env: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        return captured_env, fake_exec
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_network_enabled_omitted_token_refuses_before_spawn(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """github_token omitted (None) + include_github_contract=True must
+        return a failed SkillResult before any child is spawned, even with an
+        ambient GH identity set in the daemon's own environment. This is a
+        preflight refusal — a failed SkillResult, not a raised exception —
+        matching every other refusal in _run_skill_once, since
+        _run_provider_attempts's `await attempt(selected)` has no try/except
+        around it and would otherwise let this escape as an unhandled
+        exception with no failover/cooldown/notification."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env, fake_exec = self._capture_env_fixture()
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "commit, push, open the PR",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                )
+            )
+
+        assert result.ok is False
+        assert "explicit GitHub credential" in (result.error or "")
+        assert captured_env == {}, "no child process may be spawned on refusal"
+        # This is a PREFLIGHT refusal: it must return before the Stage 2
+        # "dispatch start" harness_event write, or a refused dispatch leaves
+        # an audit row claiming a subprocess started that never did — a
+        # phantom in-flight entry no later write ever corrects.
+        mock_write_harness.assert_not_called()
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_network_enabled_empty_token_refuses_before_spawn(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """github_token explicitly resolved to "" must refuse identically to
+        omission — a caller-side resolution failure must not read as opt-out."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env, fake_exec = self._capture_env_fixture()
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "commit, push, open the PR",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                    github_token="",
+                )
+            )
+
+        assert result.ok is False
+        assert "explicit GitHub credential" in (result.error or "")
+        assert captured_env == {}, "no child process may be spawned on refusal"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_network_enabled_explicit_token_reaches_child_env_and_strips_ambient(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """An explicitly supplied scoped token must be the ONLY GitHub identity
+        the child sees — the ambient daemon value must not survive alongside
+        it or leak through under a different key."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env, fake_exec = self._capture_env_fixture()
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "commit, push, open the PR",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                    github_token="scoped-delivery-token",
+                )
+            )
+
+        assert result.ok
+        assert captured_env["GITHUB_TOKEN"] == "scoped-delivery-token"
+        assert captured_env["GH_TOKEN"] == "scoped-delivery-token"
+        assert captured_env["GITHUB_TOKEN"] != "ambient-operator-token"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_non_network_default_dispatch_keeps_ambient_identity_unchanged(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """A dispatch that never requests the GitHub contract (the ordinary
+        SSE task-path default) must be byte-identical to pre-fix behaviour:
+        no refusal, ambient GH identity passes through unmolested, no
+        network flag on the provider command."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env, fake_exec = self._capture_env_fixture()
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "read-only status check",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        assert result.ok
+        assert captured_env["GITHUB_TOKEN"] == "ambient-operator-token"
+        assert captured_env["GH_TOKEN"] == "ambient-operator-token"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_network_dispatch_does_not_leak_scoped_token_into_next_ordinary_run(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """A scoped token supplied for one delivery dispatch must not persist
+        into a SUBSEQUENT, unrelated non-delivery dispatch in the same
+        process — `_subscription_only_env` must read fresh from `os.environ`
+        each call rather than caching or mutating it in place."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        first_env, first_exec = self._capture_env_fixture()
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=first_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "commit, push, open the PR",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                    github_token="scoped-delivery-token",
+                )
+            )
+        assert first_env["GITHUB_TOKEN"] == "scoped-delivery-token"
+
+        second_env, second_exec = self._capture_env_fixture()
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=second_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "ordinary follow-up task",
+                    role="gryllus",
+                    task_entity_id="ent_def",
+                )
+            )
+        assert second_env["GITHUB_TOKEN"] == "ambient-operator-token"
+        assert second_env["GITHUB_TOKEN"] != "scoped-delivery-token"
+        assert second_env["GH_TOKEN"] != "scoped-delivery-token"
 
 
 # ── Phase 1 / Layer A: tightened attribution spec (neotoma#1686 follow-up) ───
@@ -2672,7 +3031,26 @@ class TestCrossHarnessRouting:
         assert "WORK" in cmd[-1]
         assert stdin is None
 
-    def test_all_metered_credentials_are_removed_by_default(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("provider", ["claude", "codex", "cursor"])
+    def test_live_policy_uses_every_provider_prompt_carrier(self, provider) -> None:
+        system_prompt, _ = skill_runner.build_system_prompt(
+            _make_def(),
+            "SKILL",
+            policy_prompt="LIVE POLICY CANARY",
+        )
+        cmd, stdin = skill_runner._provider_command(
+            provider,
+            f"/bin/{provider}",
+            system_prompt,
+            "WORK",
+            cwd="/repo",
+        )
+        carrier = stdin.decode() if stdin is not None else " ".join(cmd)
+        assert "LIVE POLICY CANARY" in carrier
+
+    def test_all_metered_credentials_are_removed_by_default(
+        self, monkeypatch
+    ) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-metered")
         monkeypatch.setenv("OPENAI_API_KEY", "openai-metered")
         monkeypatch.setenv("CURSOR_API_KEY", "cursor-metered")
