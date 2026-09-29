@@ -128,9 +128,9 @@ Every rule `adapters.md` owns, one entry each: the rule's own statement from `co
 
 ## [Coverage and sourced time travel with adapter-sourced state to every surface that presents it](../adapters.md#coverage-and-sourced-time-travel-with-adapter-sourced-state-to-every-surface-that-presents-it)
 
-- **AD-44** — (decision 104): a surface presenting adapter-sourced state carries its coverage and sourced time, derived at the read; the operator's view (decision 37) first *[M for the provenance read and the absence of a stored copy; R for whether the rendering makes coverage legible to the operator]*
+- **AD-44** — (decision 104): a surface presenting adapter-sourced state carries its coverage and sourced time, derived at the read; the operator's view (decision 37) first *[M for the provenance read and the absence of a stored copy; R for a surface that reads provenance and then drops it from what it renders, which only its output shows, and for legibility]*
 
 ## [Adapter-sourced material is incorporated by a declared step, bounded by what it names](../adapters.md#adapter-sourced-material-is-incorporated-by-a-declared-step-bounded-by-what-it-names)
 
 - **AD-45** — (decision 104): a declared step, never the adapter, makes typed entities and edges; each links to its interpretation *[M]*
-- **AD-46** — the same: bounded by what the material names; no third-party Art. 9 categories *[M for the named bound and the allowlist; R for whether a summary of an incidental disclosure is minimal]*
+- **AD-46** — the same: bounded by what the material names; no third-party Art. 9 categories *[M for the named bound, the marker, and the allowlist; R for whether a summary of an incidental disclosure is minimal]*

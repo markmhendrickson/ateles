@@ -450,7 +450,8 @@ to that reader is unchanged: a step declares the freshness it requires and hydra
 declaration (`gates_and_workflows.md#declaration-batch-projection`), and a reader outside a step derives
 what it needs from coverage or asks for the read through a step. Nothing in the record states completeness
 for an artifact kind, as a field, a flag, or a reading of an absence, because nothing establishes it
-(principle 5), and a stored form of it would be the maintained state principle 11 forbids.
+(principle 5) and an entry outside the coverage read is unknown, never a conclusion that it is absent
+(principle 7); a stored form of it would be the maintained state principle 11 forbids.
 
 #### Coverage and sourced time travel with adapter-sourced state to every surface that presents it
 
@@ -460,9 +461,12 @@ record rendered for a reader who is not a step: the operator's view of work, a r
 handed to a person, a channel message that carries adapter-sourced state. The coverage and sourced time it
 carries are derived at the read from the observations' provenance, as freshness is derived above, and
 never a field the surface keeps: a surface that stored them would be the second copy decision 37 refuses,
-stale in the direction that matters.
+stale in the direction that matters. A surface that persists once composed — a channel message sent, a page
+rendered — makes its read at composition: it carries coverage and sourced time as of that moment and states
+when it was composed, so a reader sees how old the picture is rather than taking a sent copy for a live
+read.
 
-**Where the requirement lives.** It is a requirement on the operator's view of work
+**Where the requirement binds first.** The rule's home is this section; it binds first on the operator's view of work
 (`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`,
 decision 37): that view is a read of the record rendered for a principal, and this rule states what such a
 read owes the reader when what it renders came through an adapter. The console that realises the
@@ -494,17 +498,26 @@ interpretation provenance chain.** Four bounds, each one the corpus already stat
   found wrong, and corrected (`#when-an-adapter-is-wrong` states why an adapter's error is the harder kind
   to find).
 - **What it extends to.** What the material **names** — a sender, a recipient, a party named in the body, the
-  organisation a signature names — and nothing selected on relevance alone. This is decision 39's rule for
+  organisation a signature names — and nothing selected on relevance alone. What the material names is the
+  **ceiling**; the **obligation** is what the declared step's purpose selects within it, and within that
+  selection the step must incorporate — a step that signs having extracted nothing its purpose selects has
+  not done its work. So the purpose test `calendar.md#what-this-adapter-refuses` states in its first refusal,
+  that a person appearing once on someone else's invitation is not one of the operator's actual
+  relationships, stays compatible: a
+  calendar incorporation step's purpose may exclude that person although the material names them. This is decision 39's rule for
   `link` (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`) applied to extraction: a
   relevance-judged pull has no stopping rule and is purpose-blind, and a bound of "what might later matter"
   would reopen that ruling rather than compose with it.
 - **What it never extends to.** Art. 9 special categories for a third party: the generous purpose under
   which capture is ruled (`data_model.md#record-conventions`) does not reach them, and correspondence is
   precisely where third-party material arrives. The step summarizes or omits such a disclosure, as
-  `meeting_processing`'s `extract` already does.
+  `meeting_processing`'s `extract` already does. And a person's recorded objection to further processing,
+  read at intake, binds every later step about that person, this one included (`workflows.md#intake`).
 - **How it is attributed.** Each extracted entity and edge links to the interpretation that produced it from
   its source (`#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`), so a wrong
-  extraction is findable by provenance and corrected by a new interpretation, never deleted.
+  extraction is findable by provenance and corrected by a new interpretation rather than deleted. That is
+  about correcting an error; it does not limit a person's request to erase what is held about them, which
+  the record's own conventions govern.
 
 The rule makes **no completeness claim**: it states what the material read becomes, not whether the source
 was read in full, so the first rule's scope is untouched by it.
@@ -551,7 +564,7 @@ response `telegram.md#delivery-webhooks-long-polling-and-what-the-dedup-rule-key
 irrecoverable coverage gap, making it legible rather than pretending it is absent. The objection registered
 against it was that the design states its requirements on writes, and this one binds read surfaces, so it
 had to say what fails when a surface omits it (principle 1) and where the requirement lives. The ruling
-answers both in the rule above: it lives on the operator's view of work under decision 37, and a surface
+answers both in the rule above: it binds first on the operator's view of work under decision 37, and a surface
 that omits it is non-conforming, with the omission observable as a read of the value without the read of its
 provenance.
 
