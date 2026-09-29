@@ -56,6 +56,10 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from lib.capabilities.credential_names import (  # noqa: E402
+    AGENT_CHILD_MARKER_ENV,
+    is_generation_credential,
+)
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
@@ -1432,7 +1436,23 @@ def _requested_model(provider: str, cmd: list[str]) -> str | None:
 def _subscription_only_env(
     env_extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Build a child env that cannot silently spill into metered API billing."""
+    """Build a child env that cannot silently spill into metered API billing.
+
+    Two independent controls:
+
+    * The harness metered keys (``_METERED_CREDENTIALS``) are stripped unless
+      ``APIS_ALLOW_METERED_HARNESS=1`` explicitly allows them.
+    * Media-generation vendor credentials are ALWAYS stripped, by name and by
+      prefix (``lib.capabilities.credential_names``), and the override above
+      never releases them. They belong to the host-side capability client only
+      (ateles#1189); a dispatched agent must never hold one. The child is also
+      marked so the capability client refuses to run inside it.
+
+    STAGED CONTROL: this is still a denylist. A metered key nobody has named
+    passes through. The standing fix is an allowlist child environment
+    (tracked as a follow-up); until then ``test_unnamed_future_metered_key_is_scrubbed``
+    is an ``xfail(strict=True)`` documenting the gap.
+    """
     child = {**os.environ, **(env_extra or {})}
     if child.get("APIS_ALLOW_METERED_HARNESS", "0") != "1":
         for key in _METERED_CREDENTIALS:
@@ -1440,6 +1460,9 @@ def _subscription_only_env(
     elif child.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         # Even under the explicit override, prefer Max-plan OAuth for Claude.
         child.pop("ANTHROPIC_API_KEY", None)
+    for key in [k for k in child if is_generation_credential(k)]:
+        child.pop(key, None)
+    child[AGENT_CHILD_MARKER_ENV] = "1"
     return child
 
 
