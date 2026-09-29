@@ -1477,7 +1477,7 @@ def test_preview_refuses_to_serve_a_build_with_unresolved_sections(
 # Each test below was run against the pre-fix generator and failed there.
 # ---------------------------------------------------------------------------
 
-from templates.safe_url import safe_href  # noqa: E402
+from url_policy import local_asset_url, public_href  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -1495,25 +1495,54 @@ from templates.safe_url import safe_href  # noqa: E402
         "​javascript:alert%281%29",
     ],
 )
-def test_safe_href_rejects_dangerous_schemes(href):
-    assert safe_href(href) == "#"
+def test_public_href_rejects_dangerous_schemes(href):
+    assert public_href(href) is None
 
 
 @pytest.mark.parametrize(
     "href",
     [
         "https://example.com/a?b=c",
-        "http://example.com",
-        "mailto:someone@example.com",
         "/docs/page/",
         "#section",
-        "relative/path.md",
-        "../up.md",
-        "?q=1",
     ],
 )
-def test_safe_href_keeps_ordinary_links(href):
-    assert safe_href(href) == href
+def test_public_href_keeps_ordinary_links(href):
+    assert public_href(href) == href
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://good.example.com%2f%2f" + "@" + "evil.com/",
+        "https://good.example.com%23" + "@" + "evil.com/",
+        "https://example.com\\" + "@" + "evil.com/",
+    ],
+)
+def test_public_href_refuses_encoded_delimiters_that_change_the_host(href):
+    """The raw string is what reaches the page, so the host that was
+    validated must be the host a browser navigates to. The first two used to
+    be accepted: the decoded parse saw good.example.com, the raw parse
+    evil.com."""
+    assert public_href(href) is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/assets/..\\..\\private.txt",
+        "/assets/\uff0e\uff0e/private.txt",
+        "/assets/film.webm\x00.php",
+        "/assets/%5c..%5cprivate.txt",
+        "/assets/a\nb.png",
+    ],
+)
+def test_local_asset_url_refuses_backslash_fullwidth_and_control_characters(path):
+    assert local_asset_url(path) is None
+
+
+def test_local_asset_url_keeps_ordinary_assets():
+    assert local_asset_url("/assets/neotoma/film.webm") == "/assets/neotoma/film.webm"
 
 
 def test_markdown_link_with_dangerous_scheme_is_neutralised():
@@ -1569,8 +1598,11 @@ def test_page_specific_cta_hrefs_are_gated(tmp_repo):
     )
     assert build_site.build("testproduct", repo_root / "dist" / "site") == []
     html = (repo_root / "dist" / "site" / "testproduct" / "index.html").read_text()
-    assert "javascript" not in html.lower()
-    assert "data:text" not in html
+    import re as _re
+
+    hrefs = _re.findall(r'href="([^"]*)"', html)
+    assert hrefs, "expected rendered links"
+    assert all(h.startswith(("#", "/", "https://")) for h in hrefs), hrefs
 
 
 def _single_section_inventory(gen_dir, origin, source):
@@ -1617,8 +1649,8 @@ def test_symlink_out_of_root_is_refused(tmp_repo, tmp_path):
 def test_authored_source_must_be_markdown_and_not_a_dotenv(tmp_repo):
     repo_root, gen_dir = tmp_repo
     (repo_root / ".env").write_text("K=V")
-    (repo_root / "config.json").write_text("{}")
-    for source in (".env", "config.json"):
+    (repo_root / "notes.txt").write_text("x")
+    for source in (".env", "notes.txt"):
         _single_section_inventory(gen_dir, "authored", source)
         assert build_site.build("testproduct", repo_root / "dist" / "site")
 

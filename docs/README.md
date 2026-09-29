@@ -197,6 +197,14 @@ Companion report (not a foundation design document; not in the review reading li
 - [**Linting guide**](linting-guide.md) · [**Test setup**](test-setup-guide.md) ·
   [**Testing patterns**](testing/) — the 8 linters, git hooks, and test conventions.
 - [**Daemon RC autodeploy**](daemon_rc_autodeploy.md) — rolling-main = release-candidate deployment.
+- **Product site previews** — `execution/scripts/site_generator/` builds the static Ateles and Neotoma
+  preview sites from repo files only. Ateles routes: `/`, `/design/`, `/compare/`, `/status/`, `/brand/`;
+  Neotoma routes: `/`, `/install/`, `/evaluate/`, `/compare/`, `/brand/` (`/brand/` is an internal
+  review route and is not linked from the primary navigation). Build with
+  `python3 execution/scripts/site_generator/build_site.py <ateles|neotoma>`; serve with
+  `python3 execution/scripts/site_generator/preview_server.py <product>`; verify with `--check`. The
+  preview server binds all network interfaces by design, so the internal `/brand/` route is readable by
+  anyone on the same network while it runs.
 - [**Credential health**](credential_health.md) · [**Credential management**](credential_management.md) —
   proactive re-auth across the swarm.
 

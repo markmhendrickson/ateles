@@ -19,6 +19,33 @@ def _safe_href(value: object, fallback: str = "#") -> str:
     return _esc(public_href(value) or fallback)
 
 
+class TokenError(ValueError):
+    """A design-token value that is not safe to place in the <style> block."""
+
+
+# Characters a CSS value from the design system may contain. No `;`, braces,
+# angle brackets, backslash or `@`: any of those could end the declaration,
+# the rule or the <style> element.
+_CSS_VALUE_OK = re.compile(r"^[A-Za-z0-9 #%.,()\-_'\"+/:!]*$")
+
+
+def _css(value: object, what: str) -> str:
+    """Return a design-token value if it is safe in a CSS declaration, else
+    raise TokenError (the build stops; nothing is silently sanitised)."""
+    text = str(value)
+    lowered = text.lower()
+    if (
+        not _CSS_VALUE_OK.match(text)
+        or "/*" in text
+        or "*/" in text
+        or "url(" in lowered
+        or "expression(" in lowered
+        or "import" in lowered
+    ):
+        raise TokenError(f"design token {what!r} has a value that is not safe in CSS")
+    return text
+
+
 def _css_vars(mode_tokens: dict) -> str:
     order = (
         "ink",
@@ -38,7 +65,7 @@ def _css_vars(mode_tokens: dict) -> str:
         "warn",
     )
     return "\n    ".join(
-        f"--{key.replace('_', '-')}: {mode_tokens[key]};"
+        f"--{key.replace('_', '-')}: {_css(mode_tokens[key], key)};"
         for key in order
         if key in mode_tokens
     )
@@ -46,7 +73,9 @@ def _css_vars(mode_tokens: dict) -> str:
 
 def _token_number(source: dict, key: str, fallback: str) -> str:
     text = " ".join(str(value) for value in (source or {}).values())
-    match = re.search(rf"--{re.escape(key)}\s*:\s*([^;}}]+)", text)
+    # Capture a CSS length only: the token text is prose-bearing and a greedy
+    # capture used to swallow the sentence after the value.
+    match = re.search(rf"--{re.escape(key)}\s*:\s*([0-9.]+(?:px|rem|em|ch|vw|%)?)", text)
     return match.group(1).strip() if match else fallback
 
 
@@ -111,6 +140,19 @@ def build_css(
         h2_size = "clamp(1.9rem, 4vw, 3.2rem)"
         max_w = "1180px"
         root_radius = "8px"
+
+    # Every design-token value that reaches the <style> block is checked by
+    # _css(): a value that could end the declaration, rule or element stops
+    # the build (TokenError) instead of being interpolated.
+    heading_font = _css(heading_font, "heading_font_family")
+    body_font = _css(body_font, "body_font_family")
+    code_font = _css(code_font, "code_font_family")
+    body_size = _css(body_size, "body_base_size")
+    heading_weight = _css(heading_weight, "heading_weight")
+    h1_size = _css(h1_size, "h1_size")
+    h2_size = _css(h2_size, "h2_size")
+    max_w = _css(max_w, "container --maxw")
+    root_radius = _css(root_radius, "root_radius")
 
     return f"""
 :root {{
