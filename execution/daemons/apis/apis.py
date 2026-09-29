@@ -50,6 +50,9 @@ Environment variables:
                               Local/mechanical work is never gated.
   APIS_USAGE_REFRESH_SECONDS  Age at which a dispatch first refreshes Claude's
                               reading via a minimal probe run (default: 600).
+  APIS_USAGE_PROBE_BACKOFF_SECONDS
+                              No automatic probe for this long after a failed one
+                              (default: 300).
   APIS_USAGE_PROBE            "off" disables that probe (then keep the reading fed
                               with `harness_usage.py refresh`).
   APIS_CLAUDE_BIN             Claude CLI path (default: autodetect on PATH).

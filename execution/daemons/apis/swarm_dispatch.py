@@ -109,7 +109,7 @@ from skill_runner import (
     REVIEW_VERDICT_TOKENS,
     SkillResult,
     run_skill,
-    usable_providers,
+    usable_providers_async,
     write_dispatch_failure_log,
 )
 
@@ -4558,7 +4558,7 @@ class SwarmDispatcher:
                 notifier=self.notifier,
                 cwd=worktree,
                 preferred_provider=resolve_lens_provider(
-                    lens, available_providers=usable_providers()
+                    lens, available_providers=await usable_providers_async()
                 ),
                 owns_pending_gate=gate_owner_tool_deny(lens.gate, live_gates),
                 # Every seated lens is denied `correct`, not only a gate
@@ -6506,7 +6506,7 @@ class SwarmDispatcher:
                     notifier=self.notifier,
                     cwd=qa_worktree,
                     preferred_provider=resolve_lens_provider(
-                        lens, available_providers=usable_providers()
+                        lens, available_providers=await usable_providers_async()
                     ),
                     # ateles#795: the gate-owner `correct` deny. True when the
                     # live record shows this lens's pre-impl gate not cleared,

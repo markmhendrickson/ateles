@@ -227,6 +227,14 @@ example "Not logged in"): `show` prints the same as `last_refresh_failure`. Read
 it before anything else; it tells login trouble from a missing binary from a
 changed report shape.
 
+After a failed automatic refresh the daemon does not probe again for
+`APIS_USAGE_PROBE_BACKOFF_SECONDS` (default 300), however many dispatches (one per
+lens) arrive; the refusal says when the next automatic attempt is due. The
+refresh runs in a worker thread, never on the Apis event loop. A hand `refresh`
+ignores the backoff but runs under **your** login and environment, so it can
+succeed while the daemon's own refresh, under its launchd environment, still
+fails: after the next dispatch, check `show` for `last_refresh_failure`.
+
 An account whose report has **no weekly window** cannot be paced, so it is
 refused as malformed on every dispatch; the only way past that is the valve
 below.

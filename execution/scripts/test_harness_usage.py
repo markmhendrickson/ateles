@@ -207,3 +207,14 @@ def test_show_surfaces_why_the_last_refresh_failed(monkeypatch, capsys) -> None:
     assert gate["dispatch_allowed"] is False
     assert "Not logged in" in gate["last_refresh_failure"]
     assert "harness_usage.py refresh" in gate["reason"]
+
+
+def test_refresh_command_says_it_ran_under_the_operators_login(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(harness_usage.shutil, "which", lambda name: "/bin/claude")
+    monkeypatch.setattr(
+        harness_usage.usage_probe, "refresh_usage_if_stale",
+        lambda binaries, **kw: {"claude": "refreshed"},
+    )
+    harness_usage.main(["refresh"])
+    err = capsys.readouterr().err
+    assert "YOUR login" in err and "can still fail there" in err

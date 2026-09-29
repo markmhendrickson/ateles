@@ -685,13 +685,18 @@ REFRESH_HINT = (
 )
 
 
-def _probe_failure_text(entry: object) -> str | None:
+def _probe_failure_text(entry: object, moment: float) -> str | None:
     failure = entry.get("last_probe_failure") if isinstance(entry, dict) else None
     if not isinstance(failure, dict) or not failure.get("detail"):
         return None
     at = _wall_from_iso(failure.get("at"))
     when = f" at {render_wall(at)}" if at is not None else ""
-    return f"last automatic refresh failed{when}: {failure['detail']}"
+    text = f"last automatic refresh failed{when}: {failure['detail']}"
+    if at is not None:
+        retry = at + usage_probe_backoff_seconds()
+        if retry > moment:
+            text += f" (next automatic retry after {render_wall(retry)})"
+    return text
 
 
 def _env_float(name: str, default: float, *, low: float, high: float) -> float:
@@ -733,6 +738,15 @@ def usage_retry_seconds() -> float:
     return _env_float("APIS_USAGE_RETRY_SECONDS", 600.0, low=30.0, high=6 * 3600.0)
 
 
+def usage_probe_backoff_seconds() -> float:
+    """After a failed automatic refresh, wait this long before probing again (5 min).
+
+    A logged-out or missing CLI leaves the reading stale, so without a backoff
+    every dispatch (one per lens) would relaunch the same failing probe.
+    """
+    return _env_float("APIS_USAGE_PROBE_BACKOFF_SECONDS", 300.0, low=0.0, high=6 * 3600.0)
+
+
 def weekly_ceiling_percent() -> float:
     """Share of the weekly allowance the swarm may use (operator ruling: 60)."""
     return _env_float("APIS_USAGE_WEEKLY_CEILING_PERCENT", 60.0, low=1.0, high=100.0)
@@ -748,7 +762,7 @@ def _refused(
     entry: object = None, **fields: object
 ) -> UsageGate:
     """A refusal for a reading that needs REFRESHING: says how, and why it failed."""
-    failure = _probe_failure_text(entry)
+    failure = _probe_failure_text(entry, moment)
     text = f"{message}; {failure}" if failure else message
     return UsageGate(
         provider=provider,
@@ -869,7 +883,8 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
         f"weekly usage {used:.0f}% is at or above the pace line {pace:.1f}% "
         f"({ceiling:.0f}% ceiling x {elapsed:.0%} of the week elapsed + "
         f"{burst:.0f} burst); frontier capacity for {normalized} returns at "
-        f"{render_wall(returns_at)} if nothing more is used",
+        f"{render_wall(returns_at)} if nothing more is used (the weekly percent "
+        "is the whole account, so the operator's own sessions count toward it)",
         returns_at=returns_at, **common,  # type: ignore[arg-type]
     )
 

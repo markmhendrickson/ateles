@@ -244,6 +244,16 @@ def _observed_age(provider: str, moment: float) -> float | None:
     return None if observed is None else moment - observed
 
 
+def _backoff_until(provider: str) -> float | None:
+    """When the automatic probe may run again after a failure, or ``None``."""
+    entry = harness_router._read_json_object(harness_router._usage_path()).get(provider)
+    failure = entry.get("last_probe_failure") if isinstance(entry, dict) else None
+    at = harness_router._wall_from_iso(failure.get("at")) if isinstance(failure, dict) else None
+    if at is None:
+        return None
+    return at + harness_router.usage_probe_backoff_seconds()
+
+
 def _refresh_claude(
     binary: str, *, env: Mapping[str, str], now_wall: float | None, force: bool, run
 ) -> str:
@@ -262,8 +272,20 @@ def _refresh_claude(
             and gate.code in (harness_router.GATE_OK, harness_router.GATE_PACED)
         )
 
+    def in_backoff() -> str | None:
+        until = _backoff_until("claude")
+        if not force and until is not None and moment < until:
+            return (
+                "backoff (last automatic refresh failed; next attempt after "
+                f"{harness_router.render_wall(until)}; "
+                "`harness_usage.py refresh` ignores the backoff)"
+            )
+        return None
+
     if is_fresh():
         return "fresh"
+    if (waiting := in_backoff()) is not None:
+        return waiting
     if not force and harness_router.persisted_cooling("claude", now_wall=moment):
         # Held out until its reset anyway; the next dispatch after it probes.
         return "cooled (probe skipped)"
@@ -275,11 +297,15 @@ def _refresh_claude(
         moment = time.time() if now_wall is None else now_wall
         if is_fresh():
             return "fresh"
+        # ...or failed while this one waited: one failed probe per backoff
+        # window across every concurrent dispatch, not one per lens.
+        if (waiting := in_backoff()) is not None:
+            return waiting
         result = probe_claude(binary, env=env, run=run)
         if not result.ok:
             log.warning(f"[apis] claude usage probe failed: {result.detail}")
             try:
-                harness_router.record_probe_failure("claude", result.detail)
+                harness_router.record_probe_failure("claude", result.detail, observed_at=moment)
             except Exception as exc:  # noqa: BLE001 - diagnostics must not break dispatch
                 log.error(f"[apis] could not record the usage probe failure: {exc}")
             return f"probe failed: {result.detail}"

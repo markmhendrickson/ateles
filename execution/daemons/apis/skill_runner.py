@@ -3067,8 +3067,33 @@ def usable_providers() -> set[str]:
     """
     binaries = _provider_binaries()
     # The usage gate is part of "usable": refresh a stale reading first, or a
-    # provider that would be usable after the refresh looks excluded.
-    _refresh_usage_snapshot(binaries)
+    # provider that would be usable after the refresh looks excluded.  The probe
+    # blocks (a file lock plus a CLI run), so it is never run from a thread that
+    # hosts an event loop: async code must call `usable_providers_async`.
+    if _on_event_loop():
+        log.debug("[apis] usable_providers() called on the event loop; usage refresh skipped")
+    else:
+        _refresh_usage_snapshot(binaries)
+    return usable_provider_names(binaries)
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+async def usable_providers_async() -> set[str]:
+    """`usable_providers` for async callers: refreshes the usage reading off the loop.
+
+    Refresh-before-selection still holds (the refresh completes before the gate is
+    read), but the probe runs in a worker thread so the Apis event loop never
+    stalls for its duration.
+    """
+    binaries = _provider_binaries()
+    await asyncio.to_thread(_refresh_usage_snapshot, binaries)
     return usable_provider_names(binaries)
 
 

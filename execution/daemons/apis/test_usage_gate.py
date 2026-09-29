@@ -546,3 +546,159 @@ def test_account_without_a_weekly_window_names_the_valve() -> None:
     gate = hr.usage_gate("claude", now_wall=NOW)
     assert gate is not None and gate.code == hr.GATE_MALFORMED
     assert "APIS_USAGE_GATE=off" in gate.message
+
+
+# --- the probe never runs on the event loop; a failing probe backs off (arch + qa, PR #1369 round 2)
+
+import ast
+import threading
+
+
+def _record_refresh_threads(monkeypatch) -> list:
+    """Fake refresh that records which thread ran it and whether that thread hosts a loop."""
+    seen: list = []
+
+    def fake_refresh(binaries, **kwargs):
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        seen.append({"thread": threading.get_ident(), "on_loop": on_loop})
+        return {}
+
+    monkeypatch.setattr(skill_runner, "refresh_usage_if_stale", fake_refresh)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/bin/claude"})
+    return seen
+
+
+def test_async_usable_providers_refreshes_off_the_event_loop(monkeypatch) -> None:
+    seen = _record_refresh_threads(monkeypatch)
+
+    async def caller():
+        loop_thread = threading.get_ident()
+        await skill_runner.usable_providers_async()
+        return loop_thread
+
+    loop_thread = asyncio.run(caller())
+    assert len(seen) == 1
+    assert seen[0]["thread"] != loop_thread and seen[0]["on_loop"] is False
+
+
+def test_sync_usable_providers_never_probes_when_called_on_a_running_loop(monkeypatch) -> None:
+    """A future sync caller inside async code must not be able to stall the daemon."""
+    seen = _record_refresh_threads(monkeypatch)
+
+    async def caller():
+        return skill_runner.usable_providers()
+
+    asyncio.run(caller())
+    assert seen == []
+
+
+def test_sync_usable_providers_still_refreshes_off_a_loop(monkeypatch) -> None:
+    seen = _record_refresh_threads(monkeypatch)
+    skill_runner.usable_providers()
+    assert len(seen) == 1
+
+
+def test_no_async_function_calls_the_blocking_usable_providers() -> None:
+    """swarm_dispatch's lens-preference call sites run on the Apis event loop."""
+    offenders = []
+    for path in sorted(_DAEMON_DIR.glob("*.py")):
+        if path.name.startswith("test_") or path.name == "conftest.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.AsyncFunctionDef):
+                continue
+            for node in ast.walk(fn):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "usable_providers"
+                ):
+                    offenders.append(f"{path.name}:{node.lineno} in {fn.name}")
+    assert offenders == []
+
+
+def _failing_run(calls: list):
+    def run(cmd, **kwargs):
+        calls.append(kwargs.get("cwd"))
+        return subprocess.CompletedProcess(cmd, 1, NOT_LOGGED_IN, "")
+    return run
+
+
+def _refresh(now, run):
+    return usage_probe.refresh_usage_if_stale(
+        {"claude": "/bin/claude"}, env={}, now_wall=now, run=run)
+
+
+def test_failed_probe_backs_off_across_repeated_dispatches() -> None:
+    calls: list = []
+    first = _refresh(NOW, _failing_run(calls))
+    assert first["claude"].startswith("probe failed") and len(calls) == 1
+    for offset in (1, 60, 299):  # one per lens, all inside the 5 minute window
+        outcome = _refresh(NOW + offset, _failing_run(calls))
+        assert outcome["claude"].startswith("backoff")
+    assert len(calls) == 1
+    # Still stale in the gate, still carrying the recorded reason, still no probe.
+    gate = hr.usage_gate("claude", now_wall=NOW + 299)
+    assert gate is not None and not gate.allowed and "Not logged in" in gate.message
+    assert "next automatic retry" in gate.message
+
+
+def test_probe_runs_again_once_the_backoff_window_ends() -> None:
+    calls: list = []
+    _refresh(NOW, _failing_run(calls))
+    _refresh(NOW + 301, _failing_run(calls))
+    assert len(calls) == 2
+
+
+def test_backoff_window_is_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("APIS_USAGE_PROBE_BACKOFF_SECONDS", "60")
+    calls: list = []
+    _refresh(NOW, _failing_run(calls))
+    _refresh(NOW + 61, _failing_run(calls))
+    assert len(calls) == 2
+
+
+def test_manual_refresh_ignores_the_backoff_and_success_clears_it() -> None:
+    calls: list = []
+    _refresh(NOW, _failing_run(calls))
+    ok = usage_probe.refresh_usage_if_stale(
+        {"claude": "/bin/claude"}, env={}, now_wall=NOW + 5, force=True,
+        run=_fake_run(REAL_SHAPE, []))
+    assert ok == {"claude": "refreshed"}
+    assert "last_probe_failure" not in hr._read_json_object(hr._usage_path())["claude"]
+
+
+def test_concurrent_lens_dispatches_share_one_failed_probe() -> None:
+    calls: list = []
+    gate_open = threading.Event()
+
+    def slow_failing(cmd, **kwargs):
+        calls.append(1)
+        gate_open.wait(1.0)
+        return subprocess.CompletedProcess(cmd, 1, NOT_LOGGED_IN, "")
+
+    threads = [threading.Thread(target=_refresh, args=(NOW, slow_failing)) for _ in range(5)]
+    for t in threads:
+        t.start()
+    time.sleep(0.2)
+    gate_open.set()
+    for t in threads:
+        t.join(5)
+    assert len(calls) == 1
+
+
+def test_paced_refusal_says_operator_sessions_count_toward_the_percent() -> None:
+    _record(66.0)
+    gate = hr.usage_gate("claude", now_wall=NOW)
+    assert gate is not None and "operator's own sessions count" in gate.message
+
+
+def test_async_usable_providers_keeps_refresh_before_selection(monkeypatch) -> None:
+    _stale_then_fresh(monkeypatch)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/bin/claude"})
+    assert "claude" in asyncio.run(skill_runner.usable_providers_async())

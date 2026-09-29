@@ -148,6 +148,12 @@ def _refresh_claude() -> int:
            if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     outcome = usage_probe.refresh_usage_if_stale({"claude": binary}, env=env, force=True)
     print(json.dumps(outcome, indent=2))
+    print(
+        "note: this ran under YOUR login and environment; the daemon refreshes under "
+        "its own, so it can still fail there. Check `show` (last_refresh_failure) "
+        "after its next dispatch.",
+        file=sys.stderr,
+    )
     return 0 if outcome.get("claude") == "refreshed" else 1
 
 
