@@ -54,3 +54,18 @@ def _isolate_tier_ledger(monkeypatch, tmp_path):
     budget against. Tests that read the ledger set their own path.
     """
     monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "isolated-tier-dispatch.jsonl"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tiering_config(monkeypatch, tmp_path):
+    """Never let a test read the operator's live tiering config.
+
+    `~/.config/ateles/action-policy.json` and `vendor-binding.json` are read
+    fresh on every dispatch, and a FILE beats the env var. Once the operator
+    installs them, a test that sets `APIS_VENDOR_BINDING` (or expects no
+    binding at all) silently reads the host's instead: two #1348 tests failed
+    exactly this way on the host after the config was installed. Point both at
+    absent files; tests that exercise config set their own.
+    """
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "isolated-action-policy.json"))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "isolated-vendor-binding.json"))
