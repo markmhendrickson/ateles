@@ -203,8 +203,10 @@ Companion report (not a foundation design document; not in the review reading li
   review route and is not linked from the primary navigation). Build with
   `python3 execution/scripts/site_generator/build_site.py <ateles|neotoma>`; serve with
   `python3 execution/scripts/site_generator/preview_server.py <product>`; verify with `--check`. The
-  preview server binds all network interfaces by design, so the internal `/brand/` route is readable by
-  anyone on the same network while it runs.
+  preview server binds `127.0.0.1` only by default. Pass `--lan` to bind all interfaces (for example to
+  open it on a phone); the preview has no authentication and the internal `/brand/` route holds
+  competitive research and rejected creative alternatives, so anyone on the same network can read it
+  while a `--lan` server runs.
 - [**Credential health**](credential_health.md) · [**Credential management**](credential_management.md) —
   proactive re-auth across the swarm.
 
