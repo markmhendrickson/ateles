@@ -22,7 +22,28 @@ CauseCode = Literal[
     "invalid_ref_shape",
     "wrong_body_for_dispatch",
     "record_not_saved",
+    "ref_unverifiable",
+    "ref_check_unavailable",
 ]
+
+# What the resolver can say about a PR or commit reference. "unavailable" is
+# NOT "absent": a rate limit, 5xx, timeout or OSError says nothing about whether
+# the ref exists, and treating it as absent would send a task with a real PR into
+# the watchdog's automatic re-run lane (a second PR).
+RefCheck = Literal["exists", "absent", "unavailable"]
+
+# Causes whose task status is FAILED, which the stall watchdog re-runs
+# automatically with backoff (TaskWatchdog.classify("failed") -> RETRY). Every
+# other cause is BLOCKED, which nothing retries.
+WATCHDOG_RETRIED: frozenset[str] = frozenset(
+    {
+        "missing_header",
+        "empty_body",
+        "wrong_body_for_dispatch",
+        "invalid_ref_shape",
+        "unresolvable_ref",
+    }
+)
 
 BodyShape = Literal["pr_or_commit", "eng_spec_section", "prose"]
 ResolverPolicy = Literal["github_ref", "none"]
@@ -33,22 +54,28 @@ ARTIFACT_GATE_PREFIX = "[ARTIFACT_GATE]"
 # Shell / injection metacharacters never allowed in a ref body.
 _SHELL_METACHAR_RE = re.compile(r"[;&|`$()<>\\]")
 
+# ASCII-only: with Unicode semantics `\d` matches other scripts' digits (int() then
+# accepts them) and IGNORECASE folds a few non-ASCII letters onto ASCII ones.
 _PR_URL_RE = re.compile(
     r"^https?://(?:www\.)?github\.com/"
-    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<number>\d+)\s*$",
-    re.IGNORECASE,
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<number>[0-9]+)\s*$",
+    re.IGNORECASE | re.ASCII,
 )
 _PR_SHORTHAND_RE = re.compile(
-    r"^(?:PR\s*)?#(?P<number>\d+)\s*$",
-    re.IGNORECASE,
+    r"^(?:PR\s*)?#(?P<number>[0-9]+)\s*$",
+    re.IGNORECASE | re.ASCII,
 )
-_SHA_RE = re.compile(r"^(?P<sha>[0-9a-f]{40})\s*$", re.IGNORECASE)
+_SHA_RE = re.compile(r"^(?P<sha>[0-9a-f]{40})\s*$", re.IGNORECASE | re.ASCII)
+# A GitHub owner/repo as it may reach `gh` argv: the same character class the URL
+# regex allows, with no leading dash (would read as an option) and no dot-only
+# component.
+_REPO_PART_RE = re.compile(r"^(?![-.])[A-Za-z0-9_.-]+$", re.ASCII)
 # An abbreviated SHA (7-39 hex) is recognized as a ref SHAPE so it is refused as
-# `invalid_ref_shape` ("give the full 40-character SHA") rather than mis-read as
+# `ref_unverifiable` (BLOCKED: a real commit may exist) rather than mis-read as
 # prose (`wrong_body_for_dispatch`): it answered the right question, but a
 # prefix can be ambiguous, so this gate never resolves one. Only a full 40-char
 # SHA is accepted as a commit ref.
-_SHORT_SHA_RE = re.compile(r"^(?P<sha>[0-9a-f]{7,39})\s*$", re.IGNORECASE)
+_SHORT_SHA_RE = re.compile(r"^(?P<sha>[0-9a-f]{7,39})\s*$", re.IGNORECASE | re.ASCII)
 _ENG_SPEC_RE = re.compile(r"^ENG_SPEC_SECTION\b", re.IGNORECASE)
 
 # Plain-language wording for each cause: what happened, and what the operator
@@ -61,48 +88,174 @@ CAUSE_HINTS: dict[CauseCode, str] = {
     ),
     "empty_body": "The header line was present but named nothing after the colon.",
     "blocked": (
-        "The agent reported that it is blocked, in its own words below. This is the "
-        "agent asking for something, not a gate failure."
+        "The agent stopped and asked for something instead of delivering (its words "
+        "are quoted below)."
     ),
     "unresolvable_ref": (
-        "The PR or commit reference is well-formed but GitHub could not find it."
+        "The PR or commit reference is well-formed and GitHub answered that it does "
+        "not exist."
     ),
     "invalid_ref_shape": (
-        "The reference is not a PR or commit link this gate can check: a link to "
-        "another repo or host, a bare #N or SHA with no repo on the task, an "
-        "abbreviated SHA, or malformed text."
+        "The agent offered a reference this gate will not accept: a link to another "
+        "repo or host, or malformed text."
     ),
     "wrong_body_for_dispatch": (
         "The agent answered a different question than this dispatch asked."
     ),
+    "ref_unverifiable": (
+        "The reference cannot be checked as offered (the task records no repo, or a "
+        "malformed one; the reference names a different repo than the task; or it is "
+        "an abbreviated SHA), so the agent's work is neither accepted nor judged "
+        "wrong. A PR or commit may already exist."
+    ),
+    "ref_check_unavailable": (
+        "GitHub could not be asked right now (rate limit, outage, timeout or network "
+        "error), so the reference is neither confirmed nor refuted. A PR or commit "
+        "very likely exists."
+    ),
     "record_not_saved": (
-        "The agent's deliverable was accepted, but the task record did not save "
+        "The agent's PR or commit was accepted, but the task record did not save "
         "(the result or status write did not read back)."
     ),
 }
 
+# `record_not_saved` fires for every gated role, not only Cicada. A prose role's
+# deliverable is text, not a PR, so it has its own wording.
+RECORD_NOT_SAVED_TEXT_HINT = (
+    "The agent's deliverable text was accepted, but the task record did not save "
+    "(the result or status write did not read back)."
+)
+
+_RETRY_NOTE = (
+    "The task is FAILED, so the stall watchdog re-runs it automatically with "
+    "backoff (up to APIS_MAX_TASK_ATTEMPTS attempts, default 3); you do not need "
+    "to re-dispatch it."
+)
+
+# `{record_cmd}` is filled by `artifact_gate_reason` (see `record_done_command`).
 CAUSE_NEXT_STEPS: dict[CauseCode, str] = {
     "missing_header": (
-        "Read the stdout tail; re-dispatch only if the work was not done."
+        _RETRY_NOTE + " If the work was actually done (a PR or file exists), stop "
+        "the retries by recording it first: {record_cmd}"
     ),
-    "empty_body": "Re-dispatch, or ask the agent to state its deliverable.",
-    "blocked": "Give the agent what it says it needs, then reopen the task.",
+    "empty_body": (
+        _RETRY_NOTE + " If the agent did deliver something, record it first: "
+        "{record_cmd}"
+    ),
+    "blocked": (
+        "Give the agent what it says it needs, then reopen the task. A BLOCKED task "
+        "is not retried automatically."
+    ),
     "unresolvable_ref": (
-        "Check the reference exists; re-dispatch only if it does not."
+        _RETRY_NOTE + " If a real PR or commit exists for this task under a "
+        "different reference, record it first, or a retry may open a second one: "
+        "{record_cmd}"
     ),
     "invalid_ref_shape": (
-        "Fix the reference (full PR URL for this repo, or a full 40-character "
-        "SHA), and make sure the task carries its repo, then re-dispatch."
+        _RETRY_NOTE + " If the agent already opened a real PR or commit for this "
+        "task, record it first, or a retry may open a second one: {record_cmd}"
     ),
     "wrong_body_for_dispatch": (
-        "Re-dispatch in the right mode, or correct the body by hand."
+        _RETRY_NOTE + " If the body is actually the deliverable, record it: "
+        "{record_cmd}"
+    ),
+    "ref_unverifiable": (
+        "The task is BLOCKED and is NOT retried automatically. Do not re-dispatch "
+        "(it could open a second PR). Check the offered reference by hand, then "
+        "record it and mark the task done: {record_cmd}"
+    ),
+    "ref_check_unavailable": (
+        "The task is BLOCKED and is NOT retried automatically. Do not re-dispatch. "
+        "Once GitHub is reachable, check the reference by hand, then record it and "
+        "mark the task done: {record_cmd}"
     ),
     "record_not_saved": (
-        "The PR exists; the task record did not save. Do not re-dispatch (that "
-        "would open a second PR). Record the reference on the task and mark it "
-        "done by hand."
+        "The PR exists; the task record did not save. The task is BLOCKED and is not "
+        "retried. Do not re-dispatch (it would open a second PR). Record it: "
+        "{record_cmd}"
     ),
 }
+
+RECORD_NOT_SAVED_TEXT_NEXT = (
+    "The deliverable is in the alert above; only the task record did not save. The "
+    "task is BLOCKED and is not retried. Do not re-dispatch (it would redo the "
+    "work). Record it: {record_cmd}"
+)
+
+
+def trim_on_word(text: str, limit: int = 160) -> str:
+    """Trim to *limit* characters on a word boundary, marking the cut with an ellipsis."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if not text[limit].isspace() and " " in cut:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(" ,;:") + "…"
+
+
+def record_done_command(
+    task_id: str | None, ref: str | None, *, ref_based: bool = True
+) -> str:
+    """The exact CLI to record a deliverable on a task and close it.
+
+    Shape read from the Neotoma CLI (`neotoma corrections create`); `result` and
+    `status` are the two task fields the dispatcher itself writes. Corrections can
+    silently no-op, so the instruction ends with a read-back.
+    """
+    tid = task_id or "<task_id>"
+    placeholder = "<the PR or commit reference>" if ref_based else "<the deliverable text>"
+    value = trim_on_word(ref or placeholder, 160).replace("'", "")
+    return (
+        f"neotoma corrections create --entity-id {tid} --entity-type task "
+        f"--field-name result --corrected-value '{value}', then the same with "
+        f"--field-name status --corrected-value done, and read the task back "
+        f"(a correction can silently no-op)."
+    )
+
+
+_GH_UNAVAILABLE_MARKERS = (
+    "rate limit",
+    "secondary rate",
+    "abuse",
+    "http 403",
+    "http 429",
+    "http 401",
+    "bad credentials",
+    "http 5",  # 500 / 502 / 503 / 504
+    "timed out",
+    "timeout",
+    "connection",
+    "could not resolve host",
+    "tls",
+    "eof",
+    "could not resolve to a repository",  # unknown repo OR no access: cannot tell
+)
+_GH_ABSENT_MARKERS = (
+    "could not resolve to a pullrequest",
+    "no pull requests found",
+    "no commit found for sha",
+    "http 404",
+    "http 422",
+)
+
+
+def classify_gh_ref_failure(returncode: int, stderr: str) -> RefCheck:
+    """Map a finished `gh` invocation to a tri-state answer.
+
+    Only a clear not-found is "absent". Anything else that failed (rate limit,
+    auth, 5xx, unknown non-zero) is "unavailable": it says nothing about whether
+    the reference exists, and calling it absent would push a task that has a real
+    PR into the watchdog's re-run lane. Unavailable markers win over absent ones.
+    """
+    if returncode == 0:
+        return "exists"
+    text = (stderr or "").lower()
+    if any(m in text for m in _GH_UNAVAILABLE_MARKERS):
+        return "unavailable"
+    if any(m in text for m in _GH_ABSENT_MARKERS):
+        return "absent"
+    return "unavailable"
 
 
 @dataclass(frozen=True)
@@ -114,6 +267,11 @@ class ArtifactContract:
     gates: tuple[str, ...]
     accepted_body_shapes: frozenset[str]
     resolver_policy: ResolverPolicy
+    # Shapes in `accepted_body_shapes` that are accepted ONLY on a dispatch that
+    # asked for them (`ordered_spec` / `eng_lens`), not on a generic one. The
+    # table is the enforced source: `body_shape_for_dispatch` reads this field
+    # and carries no per-role special case.
+    mode_gated_shapes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -201,6 +359,9 @@ ARTIFACT_CONTRACTS: tuple[ArtifactContract, ...] = (
         gates=("impl",),
         accepted_body_shapes=frozenset({"pr_or_commit", "eng_spec_section"}),
         resolver_policy="github_ref",
+        # An eng-spec section answers the ordered-spec / eng-lens question; on a
+        # generic direct implementation it is how a task closes without one.
+        mode_gated_shapes=frozenset({"eng_spec_section"}),
     ),
     ArtifactContract(
         role="phoenicurus",
@@ -307,18 +468,25 @@ def parse_artifact_header(
 ) -> ArtifactHeader | None:
     """Last MULTILINE match of ``[agent] kind: body``; exact matched line returned.
 
-    Linear in the scanned text: every gap is `[ \\t]*` and the body is `[^\\n]*`,
-    never `\\s`, so a run of newlines or spaces cannot make the engine retry the
+    Linear in the scanned text: every gap is horizontal whitespace and the body is
+    `[^\\n]*`, so a run of newlines or spaces cannot make the engine retry the
     same span from every line start.
+
+    Grammar vs the pre-#1155 Anthus regex (which used `\\s` everywhere): the gaps
+    still accept every Unicode whitespace character that is not a line break
+    (NBSP, ideographic space, form feed, ...), so those headers still match. The
+    one deliberate difference is that a newline between the `[agent]` tag and the
+    kind (or before the colon) no longer matches: a header is one line.
     """
     if not text:
         return None
     if len(text) > _MAX_SCAN_CHARS:
         text = text[-_MAX_SCAN_CHARS:]
         text = text.split("\n", 1)[1] if "\n" in text else text
+    hs = r"[^\S\r\n]"  # horizontal whitespace: any \s except a line break
     pattern = re.compile(
-        rf"^(?P<line>[ \t]*\[(?P<agent>{re.escape(agent)})\][ \t]+"
-        rf"(?P<kind>{re.escape(artifact_kind)})[ \t]*:[ \t]*(?P<body>[^\n]*))$",
+        rf"^(?P<line>{hs}*\[(?P<agent>{re.escape(agent)})\]{hs}+"
+        rf"(?P<kind>{re.escape(artifact_kind)}){hs}*:{hs}*(?P<body>[^\n]*))$",
         re.IGNORECASE | re.MULTILINE,
     )
     matches = list(pattern.finditer(text))
@@ -333,14 +501,19 @@ def parse_artifact_header(
     )
 
 
+# The stop-and-ask body: the word BLOCKED followed by nothing, or by any
+# separator an agent might use (colon, em/en dash, hyphen, comma, full stop,
+# parenthetical, or just whitespace and then its reason). `\\b` keeps a longer
+# word such as BLOCKED_BY_X or BLOCKEDNESS from matching.
+_BLOCKED_RE = re.compile(r"^BLOCKED\b", re.IGNORECASE | re.ASCII)
+
+
 def classify_artifact_body(body: str) -> BodyClass:
     """Classify header body: blocked / empty / valid."""
     stripped = (body or "").strip()
     if not stripped:
         return "empty"
-    if stripped.upper() == "BLOCKED" or stripped.upper().startswith("BLOCKED —"):
-        return "blocked"
-    if stripped.upper().startswith("BLOCKED -"):  # ASCII hyphen variant
+    if _BLOCKED_RE.match(stripped):
         return "blocked"
     return "valid"
 
@@ -394,38 +567,44 @@ def infer_body_shape(body: str) -> BodyShape:
 def body_shape_for_dispatch(*, role: str, dispatch_mode: str | None) -> frozenset[str]:
     """Accepted shapes for this role under the given dispatch mode.
 
-    A generic direct-implementation dispatch of Cicada accepts ONLY
-    ``pr_or_commit``: an eng-spec section is the deliverable of a different
-    question, and accepting it there is how an implementation task closes
-    without an implementation. ``ordered_spec`` / ``eng_lens`` are the
-    dispatches that actually asked for the section, so they accept both.
+    Read from the contract table, with no per-role special case:
+
+    * `mode_gated_shapes` (Cicada's `eng_spec_section`) are accepted only on an
+      `ordered_spec` / `eng_lens` dispatch, the ones that actually asked for the
+      section; on a generic direct implementation they are how a task closes
+      without an implementation.
+    * A contract that accepts `prose` accepts any shape: prose is the floor, and a
+      docs note that links its PR is still a valid note. Only a contract that
+      NARROWS the shapes turns a shape into a refusal.
     """
     contract = role_required_artifact().get(role)
     if contract is None:
         return frozenset()
     mode = (dispatch_mode or "").strip().lower()
-    if role == "cicada":
-        if mode in {"ordered_spec", "eng_lens"}:
-            return frozenset({"pr_or_commit", "eng_spec_section"})
-        return frozenset({"pr_or_commit"})
-    accepted = frozenset(contract.accepted_body_shapes)
+    accepted = set(contract.accepted_body_shapes)
+    if mode not in {"ordered_spec", "eng_lens"}:
+        accepted -= contract.mode_gated_shapes
     if "prose" in accepted:
-        # Prose is the floor: a contract that accepts prose accepts a URL, a
-        # ref-looking token, or a spec section too, because all of those are
-        # text and the role's deliverable may legitimately contain any of them
-        # (e.g. a docs note that links its PR). Only a contract that NARROWS
-        # the shapes (Cicada, above) turns a shape into a refusal.
         return frozenset({"prose", "pr_or_commit", "eng_spec_section"})
-    return accepted
+    return frozenset(accepted)
 
 
 def _split_dispatch_repo(dispatch_repo: str | None) -> tuple[str, str] | None:
+    """`(owner, name)`, or None unless both parts are safe to hand to `gh` argv.
+
+    Validated against the same character class the URL regex allows, so a value
+    such as `--flag/x`, `a/b/c`, or one with spaces or metacharacters never
+    reaches a subprocess argument.
+    """
     if not dispatch_repo:
         return None
     parts = dispatch_repo.strip().split("/")
-    if len(parts) != 2 or not parts[0] or not parts[1]:
+    if len(parts) != 2:
         return None
-    return parts[0], parts[1]
+    owner, name = parts
+    if not (_REPO_PART_RE.match(owner) and _REPO_PART_RE.match(name)):
+        return None
+    return owner, name
 
 
 def parse_github_ref(
@@ -466,11 +645,11 @@ def parse_github_ref(
             # nothing to check the URL against, and a full PR URL for ANY
             # public repo would resolve and close the task.
             return InvalidRef(
-                code="invalid_ref_shape",
+                code="ref_unverifiable",
                 reason=(
-                    "PR URL without a known dispatch_repo to check it against"
+                    "PR URL, and the task records no repo to check it against"
                     if not dispatch_repo
-                    else "malformed dispatch_repo for PR URL"
+                    else "PR URL, and the repo recorded on the task is malformed"
                 ),
                 body=stripped,
             )
@@ -478,9 +657,11 @@ def parse_github_ref(
             expected[0].lower(),
             expected[1].lower(),
         ):
+            # A real PR exists, in the wrong repo: BLOCKED, so a retry does not
+            # open a second one.
             return InvalidRef(
-                code="invalid_ref_shape",
-                reason="cross-repo PR URL vs dispatch_repo",
+                code="ref_unverifiable",
+                reason="cross-repo PR URL vs the repo recorded on the task",
                 body=stripped,
             )
         return ParsedRef(
@@ -493,24 +674,22 @@ def parse_github_ref(
 
     if _SHORT_SHA_RE.match(stripped) and not _SHA_RE.match(stripped):
         return InvalidRef(
-            code="invalid_ref_shape",
-            reason="abbreviated SHA; give the full 40-character SHA",
+            code="ref_unverifiable",
+            reason="abbreviated SHA; only a full 40-character SHA can be checked",
             body=stripped,
         )
 
     sha_m = _SHA_RE.match(stripped)
     if sha_m:
-        if not dispatch_repo:
-            return InvalidRef(
-                code="invalid_ref_shape",
-                reason="ambiguous SHA without dispatch_repo",
-                body=stripped,
-            )
         owner_repo = _split_dispatch_repo(dispatch_repo)
         if not owner_repo:
             return InvalidRef(
-                code="invalid_ref_shape",
-                reason="malformed dispatch_repo for SHA",
+                code="ref_unverifiable",
+                reason=(
+                    "SHA, and the task records no repo to check it against"
+                    if not dispatch_repo
+                    else "SHA, and the repo recorded on the task is malformed"
+                ),
                 body=stripped,
             )
         sha = sha_m.group("sha").lower()
@@ -524,17 +703,15 @@ def parse_github_ref(
 
     short_m = _PR_SHORTHAND_RE.match(stripped)
     if short_m:
-        if not dispatch_repo:
-            return InvalidRef(
-                code="invalid_ref_shape",
-                reason="ambiguous bare #N without dispatch_repo",
-                body=stripped,
-            )
         owner_repo = _split_dispatch_repo(dispatch_repo)
         if not owner_repo:
             return InvalidRef(
-                code="invalid_ref_shape",
-                reason="malformed dispatch_repo for bare #N",
+                code="ref_unverifiable",
+                reason=(
+                    "bare #N, and the task records no repo to say which repository it means"
+                    if not dispatch_repo
+                    else "bare #N, and the repo recorded on the task is malformed"
+                ),
                 body=stripped,
             )
         number = int(short_m.group("number"))
@@ -560,24 +737,49 @@ def artifact_gate_reason(
     kind: str | None = None,
     extra: str = "",
     verbatim_body: str | None = None,
+    task_id: str | None = None,
+    offered: str | None = None,
+    expected_repo: str | None = None,
+    ref_based: bool = True,
+    record_ref: str | None = None,
 ) -> str:
     """Build a grep-stable ``[ARTIFACT_GATE] <code> …`` reason string.
 
-    The head (`[ARTIFACT_GATE] <code> role=… kind=… extra`) is grep-stable; what
-    follows is plain wording for the operator: what happened, any verbatim agent
-    text, and a `Next:` line saying what to do.
+    Layout: a grep-stable head (`[ARTIFACT_GATE] <code> role=… kind=… …`), then
+    what happened, then the agent's own words on their own line (never run into
+    the next step), then a `Next:` line that says what happens automatically
+    (whether the watchdog will retry) and what the operator can do, with the
+    exact command where one exists.
+
+    ``offered`` / ``expected_repo`` put the reference the agent gave and the repo
+    the task expected into the head, so the operator does not have to dig.
+    ``ref_based`` is False for a prose deliverable (only `record_not_saved`
+    changes: a prose role has no PR to point at).
     """
     parts = [f"{ARTIFACT_GATE_PREFIX} {code}", f"role={role}"]
     if kind is not None:
         parts.append(f"kind={kind}")
+    if offered is not None:
+        parts.append(f'offered="{trim_on_word(offered, 160)}"')
+    if expected_repo is not None or offered is not None:
+        parts.append(f"expected_repo={expected_repo or 'none recorded on the task'}")
     if extra:
         parts.append(extra)
     head = " ".join(parts)
-    tail_bits = [CAUSE_HINTS[code]]
+
+    if code == "record_not_saved" and not ref_based:
+        hint, nxt = RECORD_NOT_SAVED_TEXT_HINT, RECORD_NOT_SAVED_TEXT_NEXT
+    else:
+        hint, nxt = CAUSE_HINTS[code], CAUSE_NEXT_STEPS[code]
+    nxt = nxt.format(
+        record_cmd=record_done_command(task_id, record_ref or offered, ref_based=ref_based)
+    )
+
+    lines = [f"{head} — {hint}"]
     if verbatim_body is not None:
-        tail_bits.append(verbatim_body)
-    tail_bits.append(f"Next: {CAUSE_NEXT_STEPS[code]}")
-    return f"{head} — " + " ".join(tail_bits)
+        lines.append(f'Agent said: "{verbatim_body}"')
+    lines.append(f"Next: {nxt}")
+    return "\n".join(lines)
 
 
 def stdout_tail_for_reason(text: str, *, limit: int = 2048) -> str:

@@ -355,10 +355,15 @@ a body that has already failed a cheaper check.
 5. Canonicalize the ref and resolve it out of process (`gh` via argv, never
    `shell=True`, never an HTTP URL probe) — only for contracts whose
    `resolver_policy` is `github_ref` (today, Cicada only). A full PR URL must
-   name the **task's own repo**: with no `repo` on the task snapshot (or a
-   malformed one) a URL is refused exactly as a bare `#N` is, because there is
-   nothing to check it against. A commit must be a full 40-character SHA; an
-   abbreviated one is refused rather than resolved
+   name the **task's own repo**, and `dispatch_repo` must be a plain
+   `owner/name` (validated before it reaches `gh` argv). A URL, bare `#N` or SHA
+   on a task with no repo (or a malformed one), a URL for a different repo, and
+   an abbreviated SHA cannot be checked as offered, so they are **BLOCKED**
+   (`ref_unverifiable`), never FAILED. A commit must be a full 40-character SHA.
+   The resolver answers **tri-state**: exists / absent (GitHub said not found) /
+   unavailable (rate limit, 5xx, auth, timeout, `OSError`, any non-zero exit that
+   is not a clear not-found). Unavailable is **BLOCKED** (`ref_check_unavailable`),
+   never FAILED, because FAILED is re-run automatically
    The stored header (and a retained BLOCKED body) is passed through the secret
    redactor first.
 6. Write `result` (the agent's exact matched header line), **read it back**,
@@ -369,7 +374,7 @@ a body that has already failed a cheaper check.
    idempotency-key replay or a dropped field also returns 2xx. The result
    read-back must equal the header line exactly before DONE is written; the
    status read-back must read `done` while still carrying that result before the
-   finished claim. The reader is a required argument, so a caller cannot skip the
+   finished claim. A miss at any of the four steps is `record_not_saved` (BLOCKED, not retried), after one more read of the task that can turn a stale read-back into success. The reader is a required argument, so a caller cannot skip the
    check by omission.
 
 ### Known gap, deferred to #1355
@@ -382,6 +387,11 @@ rather than the bare header, and the completion path writes the bare header last
 so the `run_session` / provenance marker is overwritten on gated roles. Both are
 tracked in ateles#1355; neither is fixed by the read-back described above, which
 covers only the dispatcher's own completion.
+
+Also tracked there: a two-failure residue. If the `result` write lands, the
+`status` write is dropped, and the follow-up BLOCKED write also fails, the task
+is left VERIFIED without a run_session marker, and the watchdog (which reconciles
+VERIFIED tasks only through that marker) skips it forever.
 
 ### Which roles are opted in
 
@@ -405,30 +415,66 @@ what opts a role in.
 
 ### Cause codes (`[ARTIFACT_GATE] <code> role=… kind=…`)
 
-Each reason has a grep-stable head, then plain wording, then a `Next:` line. The
-wording lives in `CAUSE_HINTS` / `CAUSE_NEXT_STEPS` in
-`lib/daemon_runtime/artifact_contract.py`, and a test binds every code to both.
+Two task statuses, two very different consequences:
 
-| Code | Task status | Meaning | What to do |
-|---|---|---|---|
-| `missing_header` | FAILED | Required header absent from both streams. The reason carries a secret-redacted 2KB tail of stdout | Read the tail; re-dispatch only if the work was not done |
-| `empty_body` | FAILED | Header present, nothing after the colon (or a bare `ENG_SPEC_SECTION`) | Re-dispatch, or ask the agent to state its deliverable |
-| `blocked` | BLOCKED | The agent wrote `BLOCKED` / `BLOCKED — …`; the reason keeps its words (redacted, capped at 800 chars). **Not a gate failure**: the alert says the agent is asking for something | Give the agent what it says it needs, then reopen the task |
-| `wrong_body_for_dispatch` | FAILED | The body answers a different question, e.g. `ENG_SPEC_SECTION` or prose on a generic Cicada direct-impl. Refused before any resolve | Re-dispatch in the right mode, or correct the body by hand |
-| `invalid_ref_shape` | FAILED | Foreign host, another repo, no `repo` on the task to check a URL / bare `#N` / SHA against, abbreviated SHA, or shell metacharacters. Refused before any resolve | Fix the ref (full URL for this repo, or a full 40-character SHA) and make sure the task carries its repo, then re-dispatch |
-| `unresolvable_ref` | FAILED | Shape is sound but the resolve returned false: GitHub cannot find it | Check the ref exists; re-dispatch only if it does not |
-| `record_not_saved` | BLOCKED | The deliverable **was accepted** (the ref resolved), but the task record did not save: the `result` or `status` write did not read back. The reason and alert carry the accepted ref and which step failed | **Do not re-dispatch** (it would open a second PR). Record the ref on the task and mark it done by hand |
+* **FAILED is re-run automatically.** `TaskWatchdog.classify("failed")` returns
+  RETRY, so the stall watchdog re-dispatches the task with backoff (30s doubling,
+  capped at 900s) up to `APIS_MAX_TASK_ATTEMPTS` attempts (default 3), then
+  escalates. Every FAILED code below is therefore **auto-retried**, and its hint
+  says so instead of telling the operator to re-dispatch.
+* **BLOCKED is not the watchdog's job.** Nothing retries it; it waits for the
+  operator. Use BLOCKED whenever a real deliverable may already exist, because
+  re-running the agent could open a second PR.
 
-`BLOCKED` is a status, not a failure: FAILED is the stall watchdog's
-retry-with-backoff lane, and retrying an agent that has just stated what it is
-missing burns harness capacity and changes nothing. BLOCKED is the state
-operator remediation reopens. `record_not_saved` is BLOCKED for a different
-reason: the work is done, and FAILED would re-run all of it.
+Each reason has a grep-stable head (with the offered ref and the repo the task
+expected where they apply), plain wording, the agent's own words on their own
+line, then a `Next:` line. The wording lives in `CAUSE_HINTS` /
+`CAUSE_NEXT_STEPS` in `lib/daemon_runtime/artifact_contract.py`, and a test binds
+every code to both, and to its lane.
 
-The operator alert is worded per situation so the three never read alike:
-`… ARTIFACT GATE FAILED …` (a check failed), `… reports it is BLOCKED … (not a
-gate failure)` (the agent is asking for something), and `… deliverable ACCEPTED
-but the task record did NOT save …` (do not re-dispatch).
+| Code | Status | Auto-retried? | Meaning | What to do |
+|---|---|---|---|---|
+| `missing_header` | FAILED | yes (watchdog) | Required header absent from both streams. The reason carries a secret-redacted 2KB tail of stdout | Nothing needed. If the work was actually done, record it first (command below) or the retry may duplicate it |
+| `empty_body` | FAILED | yes | Header present, nothing after the colon (or a bare `ENG_SPEC_SECTION`) | Nothing needed; record the deliverable first if one exists |
+| `wrong_body_for_dispatch` | FAILED | yes | The body answers a different question, e.g. prose or `ENG_SPEC_SECTION` on a generic Cicada direct-impl | Nothing needed; record the body by hand if it is the deliverable |
+| `invalid_ref_shape` | FAILED | yes | The agent offered a reference on another host, or malformed text or shell metacharacters | Nothing needed; if a real PR/commit exists, record it first |
+| `unresolvable_ref` | FAILED | yes | GitHub definitively answered that the PR/commit does not exist (a clear not-found, not a rate limit) | Nothing needed; record a real one first if it exists under another reference |
+| `ref_unverifiable` | BLOCKED | **no** | The reference cannot be checked as offered: the task has no `repo` (or a malformed one), the URL names a different repo, or the SHA is abbreviated. A PR/commit may already exist | **Do not re-dispatch.** Check the offered ref by hand, then record it and mark done (command below). A `repo` on the task (tracked in #1363) lets the gate check it |
+| `ref_check_unavailable` | BLOCKED | **no** | GitHub could not be asked (rate limit, 5xx, auth, timeout, network). The ref is neither confirmed nor refuted | **Do not re-dispatch.** When GitHub is reachable, check the ref by hand, then record it and mark done |
+| `record_not_saved` | BLOCKED | **no** | The deliverable was accepted, but the `result` or `status` write did not read back. The reason and alert carry the accepted ref and the step that failed. Wording differs for a PR role (the PR exists; a retry would open a second one) and a prose role (the text is in the alert; a retry would redo the work) | **Do not re-dispatch.** Record the deliverable and mark done (command below) |
+| `blocked` | BLOCKED | **no** | The agent wrote `BLOCKED` in any of its separator forms (colon, dash, en/em dash, comma, full stop, parenthetical, or just a space) and its reason. **Not a gate failure**: the alert says the agent is asking for something. The words are redacted and capped at 800 chars | Give the agent what it says it needs, then reopen the task |
+
+Recording a deliverable by hand (the reason prints this with the task id and ref
+filled in; shape from the Neotoma CLI, `result` and `status` are the task fields
+the dispatcher itself writes):
+
+```
+neotoma corrections create --entity-id <task_id> --entity-type task \
+    --field-name result --corrected-value '<the ref or text>'
+neotoma corrections create --entity-id <task_id> --entity-type task \
+    --field-name status --corrected-value done
+```
+
+Then read the task back: a correction can silently no-op.
+
+The operator alert is worded per situation so they never read alike:
+`… ARTIFACT GATE FAILED … (task FAILED; the watchdog will retry it
+automatically)`, `… reports it is BLOCKED … (not a gate failure)`,
+`… deliverable HELD … (task BLOCKED, NOT retried; do not re-dispatch)`, and
+`… deliverable ACCEPTED but the task record did NOT save …`. The dispatcher's job
+log names each accurately (it does not log a persistence miss as an "artifact
+gate" refusal).
+
+Status writes for gate outcomes carry the attempt in their idempotency key
+(`<trigger>-<attempt>`), because the watchdog re-dispatches with a constant
+trigger and would otherwise replay attempt 1's key on attempts 2 and 3. Before
+writing BLOCKED for a persistence miss the dispatcher reads the task once more,
+so a stale read-back never blocks (or overwrites) a task that is truly DONE.
+
+**Choice, stated:** definitive `unresolvable_ref` stays FAILED (GitHub says
+nothing is there, so a retry cannot duplicate anything). Everything where a real
+PR/commit may exist but cannot be confirmed (no repo, a different repo, an
+abbreviated SHA, GitHub unavailable, an unsaved record) is BLOCKED.
 
 ### Examples
 
@@ -450,8 +496,10 @@ Refused:
 - `[cicada] pull_request_link: https://evil.example/o/r/pull/1` → `failed`,
   `invalid_ref_shape`, and the resolver is never called
 - `[cicada] pull_request_link: https://github.com/<other-org>/<other-repo>/pull/7`
-  on a task with no `repo` → `failed`, `invalid_ref_shape` (nothing to check the
-  URL against), resolver never called
+  on a task with no `repo` → `blocked`, `ref_unverifiable` (nothing to check the
+  URL against; the PR may exist), resolver never called, **not** retried
+- a real PR when `gh` is rate limited → `blocked`, `ref_check_unavailable`, not
+  retried
 
 `dispatch_repo` is read from the task snapshot, first present of `repo`,
 `dispatch_repo`, `github_repo`, `repository`; `dispatch_mode` from

