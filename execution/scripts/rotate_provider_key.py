@@ -16,8 +16,8 @@ SECRET-HANDLING CONTRACT (read before changing this file):
     interactively-pasted Anthropic key are read via `--admin-key-ref op://...`
     (a 1Password REFERENCE, resolved in-process) or `getpass`, never as a
     plain CLI value.
-  - The new key is written to 1Password via `op item edit`, fed through STDIN
-    (a piped JSON template), never as an `op` command-line assignment
+  - The new key is written to 1Password via `op item edit --template <file>`
+    (a mode-600 JSON template file), never as an `op` command-line assignment
     (1Password's own CLI help says command arguments are visible to other
     processes on this machine).
   - Anything staged to disk (the JSON template) goes to a mode-600 temp file
@@ -35,16 +35,27 @@ SECRET-HANDLING CONTRACT (read before changing this file):
     without live accounts) assumption that providers and `op` never echo a
     request's own secret value back in an error body.
 
-VERIFY-THEN-ACT ORDER (per provider), matching the operator's spec:
+VERIFY-THEN-ACT ORDER (per provider):
   1. Create/rotate the key at the provider (openai, elevenlabs) or accept the
      pasted key (anthropic).
-  2. Write the new value to 1Password (op item edit, template via stdin).
-  3. Verify the NEW key with a harmless read-only provider call.
-  4. Only on success, and only if --revoke-old was passed, revoke/archive the
-     OLD key. Otherwise print the exact follow-up command and stop.
-  5. Run the swarm's downstream steps (secrets_publish.py, secrets_materialize.py,
-     list the daemons/plists that read the rotated env var) — unless
-     --no-downstream is passed.
+  2. Verify the NEW key with a harmless read-only provider call, retrying
+     transient failures (401/403/408/429/5xx, network errors) a bounded number
+     of times while a fresh key propagates; 400 is never retried. On failure,
+     stop: nothing is written to 1Password, so 1Password keeps agreeing with
+     the SOPS snapshot and the live services (which still hold the old key).
+     A key minted at the provider in step 1 is left there, and its id is
+     printed so the operator can delete it.
+  3. Only after verification succeeds, write the new value to 1Password
+     (op item edit, template via a mode-600 file).
+  4. Only if --revoke-old/--archive-old was passed, revoke/archive the OLD
+     key. Otherwise print the exact follow-up command and stop.
+  5. Run the swarm's downstream steps — unless --no-downstream is passed:
+     publish and materialize EVERY manifest file block that reads the rotated
+     env var from the rotated 1Password item (derived from
+     manifest.env-map.json with the same ENVIRONMENT overlay
+     secrets_publish.py applies, not a fixed list), list the
+     daemons/plists that read it, and print the required commit-and-push of
+     the updated snapshots in the private secrets repo.
   6. Print a status summary naming which steps ran and the new key's id/hint.
      Never the value.
 
@@ -89,6 +100,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -274,7 +286,7 @@ def _safe_excerpt(text: str, limit: int = 300) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1Password: write the new secret value via a piped JSON template — never a
+# 1Password: write the new secret value via a JSON template file — never a
 # command-line assignment (those are visible to other processes; op's own
 # --help says so). Never read back a value we just wrote, either — the
 # summary reports by NAME/HINT only.
@@ -288,8 +300,8 @@ def op_write_password_field(item_ref: str, field_label: str, value: str) -> None
     reference (only the item portion is used for lookup; op resolves the
     rest). Uses `op item get --format=json` to fetch the current item, edits
     the named field's value in memory, writes it to a mode-600 temp file, and
-    pipes that file to `op item edit --template - <item>` via stdin — never
-    as a CLI argument. The temp file is unlinked in a `finally` block even on
+    passes that file's PATH to `op item edit <item> --template <path>` — the
+    value itself is never a CLI argument. The temp file is unlinked in a `finally` block even on
     error. The value itself never touches argv, stdout, or stderr.
     """
     item_id = _item_id_from_ref(item_ref)
@@ -461,6 +473,29 @@ def anthropic_verify_key(api_key: str) -> None:
     _http_json("GET", url, headers=headers)
 
 
+# Anthropic returns this for a key minted outside any workspace. Consumers of
+# ANTHROPIC_API_KEY (Claude Code, the SDK, LiteLLM) never send the
+# `anthropic-workspace-id` header, so such a key would fail for them too;
+# verification deliberately does not add the header to make it pass.
+_ANTHROPIC_UNSCOPED_KEY_MARKER = "not scoped to a workspace"
+
+ANTHROPIC_UNSCOPED_KEY_GUIDANCE = (
+    "This key was minted outside any workspace. Anthropic rejects it unless "
+    "every request carries an `anthropic-workspace-id` header, and the "
+    "services that read ANTHROPIC_API_KEY (Claude Code, the Anthropic SDK, "
+    "LiteLLM) do not send that header, so the key would break them. Mint the "
+    "key again from inside a workspace in the Anthropic console (Settings -> "
+    "Workspaces -> choose one -> API keys) and re-run this command. Nothing "
+    "was written to 1Password."
+)
+
+
+def is_anthropic_unscoped_key_error(exc: BaseException) -> bool:
+    """True when a verification failure is Anthropic's workspace-unscoped 400."""
+    message = str(exc)
+    return "HTTP 400" in message and _ANTHROPIC_UNSCOPED_KEY_MARKER in message
+
+
 def anthropic_archive_key(admin_key: str, api_key_id: str) -> dict[str, Any]:
     """POST /v1/organizations/api_keys/{api_key_id} with status=archived.
 
@@ -480,13 +515,6 @@ def anthropic_archive_key(admin_key: str, api_key_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Downstream swarm steps (shared across providers)
 # ---------------------------------------------------------------------------
-
-# env_var -> which manifest file block carries it (per manifest.env-map.json).
-ENV_VAR_TO_MANIFEST_FILE = {
-    "ANTHROPIC_API_KEY": "neotoma",
-    "OPENAI_API_KEY": "neotoma",
-    "ELEVENLABS_API_KEY": "neotoma",
-}
 
 # Daemons/plists known to read each var, by NAME only (never inline secret
 # values). Kept here as a documented starting point; the manifest and
@@ -508,53 +536,128 @@ ENV_VAR_CONSUMERS = {
 }
 
 
-def run_downstream_steps(env_var: str, repo_root: Path) -> list[str]:
-    """Publish the encrypted snapshot, materialize it, list known consumers.
+def manifest_files_for_env_var(
+    manifest: dict,
+    env_var: str,
+    op_item_ref: str,
+    environment: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Split the manifest blocks that map `env_var` by whether they read the
+    1Password item that was just rotated.
+
+    Returns `(matching, other_item)`, both in manifest order. A block maps
+    the var when its resolved references (`default` plus the `environment`
+    overlay, exactly as secrets_publish.py resolves them) name it. It is
+    `matching` when that reference's item is the rotated item, and
+    `other_item` when it points at a different 1Password item (which this
+    run did not change, so republishing it would falsely report it rotated).
+
+    Derived from manifest.env-map.json on each run rather than a fixed list:
+    on 2026-09-29 a fixed `ANTHROPIC_API_KEY -> neotoma` entry left the
+    `openclaw` target holding the old key.
+    """
+    rotated_item = _item_id_from_ref(op_item_ref)
+    matching: list[str] = []
+    other_item: list[str] = []
+    for name in manifest.get("files", {}):
+        try:
+            refs = sl.resolve_refs(manifest, name, environment)
+        except (KeyError, AttributeError, TypeError):
+            continue
+        ref = refs.get(env_var)
+        if not ref:
+            continue
+        try:
+            same_item = _item_id_from_ref(ref) == rotated_item
+        except ValueError:
+            same_item = False
+        (matching if same_item else other_item).append(name)
+    return matching, other_item
+
+
+def run_downstream_steps(env_var: str, op_item_ref: str, repo_root: Path) -> list[str]:
+    """Publish and materialize every snapshot carrying `env_var`, then list
+    known consumers and the required commit-and-push of the snapshots.
 
     Returns the list of status lines printed (for the final summary). Never
     prints a secret value — secrets_publish.py and secrets_materialize.py
-    already guarantee that on their own output.
+    already guarantee that on their own output, and the manifest holds
+    op:// references, not values.
     """
     lines: list[str] = []
-    manifest_file = ENV_VAR_TO_MANIFEST_FILE.get(env_var)
-    if manifest_file is None:
+    try:
+        manifest = sl.load_manifest()
+    except (OSError, ValueError) as exc:
         lines.append(
-            f"[downstream] no manifest file block known for {env_var} — skipped publish/materialize"
+            f"[downstream] could not load the secrets manifest "
+            f"({type(exc).__name__}) — skipped publish/materialize"
         )
         return lines
+    manifest_files, other_item = manifest_files_for_env_var(
+        manifest, env_var, op_item_ref, os.environ.get("ENVIRONMENT")
+    )
+    if other_item:
+        lines.append(
+            f"[downstream] not republished — these blocks read {env_var} from a "
+            f"different 1Password item than the one rotated: {', '.join(other_item)}"
+        )
+    if not manifest_files:
+        lines.append(
+            f"[downstream] no manifest file block reads {env_var} from "
+            f"{_item_id_from_ref(op_item_ref)!r} — skipped publish/materialize"
+        )
+        return lines
+    lines.append(
+        f"[downstream] manifest file blocks mapping {env_var}: {', '.join(manifest_files)}"
+    )
 
     publish_script = repo_root / "execution" / "scripts" / "secrets_publish.py"
     materialize_script = repo_root / "execution" / "scripts" / "secrets_materialize.py"
 
-    publish_result = subprocess.run(
-        [sys.executable, str(publish_script), manifest_file],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    lines.append(
-        f"[downstream] secrets_publish.py {manifest_file}: "
-        f"{'ok' if publish_result.returncode == 0 else 'FAILED'}"
-    )
-    if publish_result.returncode != 0:
-        lines.append(f"[downstream]   stderr: {_safe_excerpt(publish_result.stderr)}")
-        return lines
-
-    materialize_result = subprocess.run(
-        [sys.executable, str(materialize_script), manifest_file],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    lines.append(
-        f"[downstream] secrets_materialize.py {manifest_file}: "
-        f"{'ok' if materialize_result.returncode == 0 else 'FAILED'}"
-    )
-    if materialize_result.returncode != 0:
-        lines.append(
-            f"[downstream]   stderr: {_safe_excerpt(materialize_result.stderr)}"
+    published: list[str] = []
+    for manifest_file in manifest_files:
+        publish_result = subprocess.run(
+            [sys.executable, str(publish_script), manifest_file],
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
-        return lines
+        lines.append(
+            f"[downstream] secrets_publish.py {manifest_file}: "
+            f"{'ok' if publish_result.returncode == 0 else 'FAILED'}"
+        )
+        if publish_result.returncode != 0:
+            lines.append(
+                f"[downstream]   stderr: {_safe_excerpt(publish_result.stderr)}"
+            )
+            continue
+        published.append(manifest_file)
+
+        materialize_result = subprocess.run(
+            [sys.executable, str(materialize_script), manifest_file],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        lines.append(
+            f"[downstream] secrets_materialize.py {manifest_file}: "
+            f"{'ok' if materialize_result.returncode == 0 else 'FAILED'}"
+        )
+        if materialize_result.returncode != 0:
+            lines.append(
+                f"[downstream]   stderr: {_safe_excerpt(materialize_result.stderr)}"
+            )
+
+    if published:
+        snapshot_paths = " ".join(f"secrets/{name}.sops.enc" for name in published)
+        lines.append(
+            "[downstream] REQUIRED: commit and push the updated snapshots, or other "
+            "machines and CI keep materializing the old key:"
+        )
+        lines.append(
+            f"[downstream]   cd {sl.SECRETS_BASE} && git add {snapshot_paths} && "
+            f'git commit -m "chore(secrets): rotate {env_var}" && git push'
+        )
 
     consumers = ENV_VAR_CONSUMERS.get(env_var, [])
     if consumers:
@@ -568,6 +671,48 @@ def run_downstream_steps(env_var: str, repo_root: Path) -> list[str]:
             f"[downstream] no known consumers listed for {env_var} — check manifest targets by hand"
         )
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Verification with bounded retry
+# ---------------------------------------------------------------------------
+
+# A freshly minted key can be rejected for a few seconds while it propagates,
+# and a provider can return a transient 5xx. Since verification now runs
+# BEFORE the 1Password write, a single transient failure would otherwise
+# drop a valid OpenAI/ElevenLabs key that the provider shows only once.
+# 400 is never retried: it is a property of the key (e.g. Anthropic's
+# workspace-unscoped rejection), not of timing.
+VERIFY_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
+_RETRYABLE_STATUS_RE = re.compile(r"-> HTTP (401|403|408|429|5\d\d):")
+_sleep = time.sleep
+
+
+def verify_with_retry(verify, api_key: str, label: str) -> None:
+    """Call `verify(api_key)`, retrying transient failures a bounded number
+    of times. Re-raises the last failure as ProviderHTTPError."""
+    attempts = len(VERIFY_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            verify(api_key)
+            return
+        except ProviderHTTPError as exc:
+            if attempt == attempts or not _RETRYABLE_STATUS_RE.search(str(exc)):
+                raise
+            reason = str(exc)
+        except Exception as exc:  # noqa: BLE001 — network errors from requests/urllib
+            if attempt == attempts:
+                raise ProviderHTTPError(
+                    f"verification request failed ({type(exc).__name__}): "
+                    f"{_safe_excerpt(str(exc))}"
+                ) from None
+            reason = type(exc).__name__
+        delay = VERIFY_RETRY_DELAYS_SECONDS[attempt - 1]
+        print(
+            f"[{label}] verification attempt {attempt}/{attempts} failed "
+            f"({_safe_excerpt(reason, limit=120)}); retrying in {delay:g}s…"
+        )
+        _sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -599,19 +744,26 @@ def cmd_openai(args: argparse.Namespace, repo_root: Path) -> int:
         return 1
     print(f"[openai] created service account id={service_account_id} key_id={key_id}")
 
+    print("[openai] verifying new key with GET /v1/models…")
+    try:
+        verify_with_retry(openai_verify_key, new_key, "openai")
+    except ProviderHTTPError as exc:
+        print(f"[openai] FATAL: new key failed verification: {exc}", file=sys.stderr)
+        print(
+            "[openai] Nothing was written to 1Password. The new service account "
+            f"id={service_account_id} still exists at OpenAI; delete it in the "
+            "OpenAI dashboard (project -> service accounts). Re-running this "
+            "command mints another key, so do not use it to clean up.",
+            file=sys.stderr,
+        )
+        return 1
+    print("[openai] new key verified.")
+
     field_label = _field_label_from_ref(args.op_item_ref)
     print(
         f"[openai] writing new key to 1Password ({_item_id_from_ref(args.op_item_ref)} / {field_label})…"
     )
     op_write_password_field(args.op_item_ref, field_label, new_key)
-
-    print("[openai] verifying new key with GET /v1/models…")
-    try:
-        openai_verify_key(new_key)
-    except ProviderHTTPError as exc:
-        print(f"[openai] FATAL: new key failed verification: {exc}", file=sys.stderr)
-        return 1
-    print("[openai] new key verified.")
 
     if args.revoke_old:
         print(f"[openai] revoking old service account {args.revoke_old}…")
@@ -628,7 +780,9 @@ def cmd_openai(args: argparse.Namespace, repo_root: Path) -> int:
 
     downstream_lines: list[str] = []
     if not args.no_downstream:
-        downstream_lines = run_downstream_steps("OPENAI_API_KEY", repo_root)
+        downstream_lines = run_downstream_steps(
+            "OPENAI_API_KEY", args.op_item_ref, repo_root
+        )
         for line in downstream_lines:
             print(line)
 
@@ -663,21 +817,28 @@ def cmd_elevenlabs(args: argparse.Namespace, repo_root: Path) -> int:
         return 1
     print(f"[elevenlabs] created key_id={key_id}")
 
+    print("[elevenlabs] verifying new key with GET /v1/user…")
+    try:
+        verify_with_retry(elevenlabs_verify_key, new_key, "elevenlabs")
+    except ProviderHTTPError as exc:
+        print(
+            f"[elevenlabs] FATAL: new key failed verification: {exc}", file=sys.stderr
+        )
+        print(
+            "[elevenlabs] Nothing was written to 1Password. The new key "
+            f"key_id={key_id} still exists at ElevenLabs; delete it in the "
+            "ElevenLabs dashboard (service accounts -> API keys). Re-running "
+            "this command mints another key, so do not use it to clean up.",
+            file=sys.stderr,
+        )
+        return 1
+    print("[elevenlabs] new key verified.")
+
     field_label = _field_label_from_ref(args.op_item_ref)
     print(
         f"[elevenlabs] writing new key to 1Password ({_item_id_from_ref(args.op_item_ref)} / {field_label})…"
     )
     op_write_password_field(args.op_item_ref, field_label, new_key)
-
-    print("[elevenlabs] verifying new key with GET /v1/user…")
-    try:
-        elevenlabs_verify_key(new_key)
-    except ProviderHTTPError as exc:
-        print(
-            f"[elevenlabs] FATAL: new key failed verification: {exc}", file=sys.stderr
-        )
-        return 1
-    print("[elevenlabs] new key verified.")
 
     if args.revoke_old:
         print(f"[elevenlabs] deleting old key {args.revoke_old}…")
@@ -696,7 +857,9 @@ def cmd_elevenlabs(args: argparse.Namespace, repo_root: Path) -> int:
 
     downstream_lines: list[str] = []
     if not args.no_downstream:
-        downstream_lines = run_downstream_steps("ELEVENLABS_API_KEY", repo_root)
+        downstream_lines = run_downstream_steps(
+            "ELEVENLABS_API_KEY", args.op_item_ref, repo_root
+        )
         for line in downstream_lines:
             print(line)
 
@@ -743,19 +906,23 @@ def cmd_anthropic(args: argparse.Namespace, repo_root: Path) -> int:
         print("[anthropic] FATAL: no key entered", file=sys.stderr)
         return 1
 
+    print("[anthropic] verifying new key with GET /v1/models…")
+    try:
+        verify_with_retry(anthropic_verify_key, new_key, "anthropic")
+    except ProviderHTTPError as exc:
+        print(f"[anthropic] FATAL: new key failed verification: {exc}", file=sys.stderr)
+        if is_anthropic_unscoped_key_error(exc):
+            print(f"[anthropic] {ANTHROPIC_UNSCOPED_KEY_GUIDANCE}", file=sys.stderr)
+        else:
+            print("[anthropic] Nothing was written to 1Password.", file=sys.stderr)
+        return 1
+    print("[anthropic] new key verified.")
+
     field_label = _field_label_from_ref(args.op_item_ref)
     print(
         f"[anthropic] writing new key to 1Password ({_item_id_from_ref(args.op_item_ref)} / {field_label})…"
     )
     op_write_password_field(args.op_item_ref, field_label, new_key)
-
-    print("[anthropic] verifying new key with GET /v1/models…")
-    try:
-        anthropic_verify_key(new_key)
-    except ProviderHTTPError as exc:
-        print(f"[anthropic] FATAL: new key failed verification: {exc}", file=sys.stderr)
-        return 1
-    print("[anthropic] new key verified.")
 
     print(
         "[anthropic] No --archive-old was given. Anthropic has no delete endpoint either — "
@@ -767,7 +934,9 @@ def cmd_anthropic(args: argparse.Namespace, repo_root: Path) -> int:
 
     downstream_lines: list[str] = []
     if not args.no_downstream:
-        downstream_lines = run_downstream_steps("ANTHROPIC_API_KEY", repo_root)
+        downstream_lines = run_downstream_steps(
+            "ANTHROPIC_API_KEY", args.op_item_ref, repo_root
+        )
         for line in downstream_lines:
             print(line)
 
