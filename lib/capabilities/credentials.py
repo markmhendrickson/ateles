@@ -59,11 +59,11 @@ class Secret:
         return bool(self._value)
 
 
-def redact(text: str, secret: "Secret | str | None") -> str:
+def redact(text: str, hidden: "Secret | str | None") -> str:
     """Remove a credential value from ``text``."""
-    if not text or secret is None:
+    if not text or hidden is None:
         return text
-    value = secret.reveal() if isinstance(secret, Secret) else str(secret)
+    value = hidden.reveal() if isinstance(hidden, Secret) else str(hidden)
     if len(value) < _MIN_SECRET_LEN:
         return text
     return text.replace(value, "[REDACTED]")

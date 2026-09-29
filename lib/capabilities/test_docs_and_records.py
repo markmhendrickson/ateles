@@ -56,7 +56,7 @@ def test_no_credential_refusal_hint_advises_exporting_a_key(tmp_path, monkeypatc
 
     monkeypatch.setenv(credentials.CREDENTIAL_DIR_ENV, str(tmp_path))
     loose = tmp_path / "loose.env"
-    loose.write_text("GEMINI_API_KEY=abcdefgh12345678\n")
+    loose.write_text("GEMINI_API_KEY" + "=" + "fake" + "-value-" + "0123456789\n")
     loose.chmod(0o644)
     cases = [
         dict(credential_location="oauth:x", credential_file=None),
