@@ -2627,7 +2627,10 @@ async def run_skill(
     )
     return await _run_provider_attempts(
         skill, attempt,
-        binaries=_tier_bound_binaries(_provider_binaries(), precomputed_tier, provider),
+        binaries=_tier_bound_binaries(
+            _provider_binaries(), precomputed_tier, provider,
+            restricted_to_claude=deny_correct,
+        ),
         provider=provider,
         role=role, task_entity_id=task_entity_id, notifier=notifier,
         preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
@@ -2639,6 +2642,8 @@ def _tier_bound_binaries(
     binaries: dict[str, str | None],
     tier: "model_tiering.ResolvedTier | None",
     pinned_provider: str | None,
+    *,
+    restricted_to_claude: bool = False,
 ) -> dict[str, str | None]:
     """Drop frontier providers with no model bound for ``tier`` before selection.
 
@@ -2650,11 +2655,16 @@ def _tier_bound_binaries(
 
     Left unfiltered (so the in-attempt refusal stays the backstop and names
     the missing binding) when: no tier was resolved, no vendor_binding is
-    configured at all, the caller pinned a provider, or no frontier provider
-    would remain. ``claude-local`` is never filtered — it runs its own
-    configured model and takes no vendor_binding.
+    configured at all, the caller pinned a provider, the run is a gate-owning
+    or seated-reviewer run (``_run_provider_attempts`` narrows those to
+    claude itself; filtering claude out first would misreport the cause as a
+    missing claude binary), or no router-eligible frontier provider would
+    remain (configured, headroom, not cooling — ``usable_provider_names``,
+    which unlike ``provider_candidates`` does not advance the round-robin).
+    ``claude-local`` is never filtered — it runs its own configured model and
+    takes no vendor_binding.
     """
-    if tier is None or pinned_provider is not None:
+    if tier is None or pinned_provider is not None or restricted_to_claude:
         return binaries
     binding = model_tiering.configured_vendor_binding()
     if not binding:
@@ -2665,10 +2675,7 @@ def _tier_bound_binaries(
         if name == local_provider.LOCAL_PROVIDER
         or tier.tier in binding.get(name, {})
     }
-    if not any(
-        path for name, path in filtered.items()
-        if name != local_provider.LOCAL_PROVIDER
-    ):
+    if not (usable_provider_names(filtered) - {local_provider.LOCAL_PROVIDER}):
         return binaries
     return filtered
 

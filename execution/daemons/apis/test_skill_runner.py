@@ -4856,6 +4856,78 @@ class TestModelTieringDispatch:
         cmd = captured["cmd"]
         assert cmd[cmd.index("--model") + 1] == "codex-mid-model"
 
+    def _run_unbound_scenario(self, MockLoader, monkeypatch, tmp_path, *, providers, binding, **kwargs):
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", providers)
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM", '{"claude": 1.0, "cursor": 1.0, "codex": 1.0}'
+        )
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
+        )
+        harness_router.reset_state()
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
+        monkeypatch.setenv("APIS_VENDOR_BINDING", binding)
+        spawned: dict = {}
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing(spawned),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc", action_class="build", **kwargs,
+                )
+            )
+        return result, spawned
+
+    @patch("skill_runner.AgentLoader")
+    def test_gate_owning_run_with_unbound_claude_names_the_binding(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """A gate-owning run can only use claude. With the tier bound on codex
+        alone, the failure must name the missing vendor_binding entry, not
+        report claude as an ineligible (missing) binary."""
+        result, spawned = self._run_unbound_scenario(
+            MockLoader, monkeypatch, tmp_path,
+            providers="claude,codex",
+            binding='{"codex": {"mid": "codex-mid-model"}}',
+            owns_pending_gate=True,
+        )
+        assert not result.ok
+        assert "vendor_binding" in result.error
+        assert "'claude'" in result.error
+        assert "cmd" not in spawned
+
+    @patch("skill_runner.AgentLoader")
+    def test_binding_only_on_an_unconfigured_provider_names_the_binding(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """codex is installed but not in APIS_HARNESS_PROVIDERS, and it is the
+        only bound provider. Filtering must not leave the router with nothing
+        and a misleading "no headroom" error; the refusal names the binding."""
+        result, spawned = self._run_unbound_scenario(
+            MockLoader, monkeypatch, tmp_path,
+            providers="cursor",
+            binding='{"codex": {"mid": "codex-mid-model"}}',
+        )
+        assert not result.ok
+        assert "vendor_binding" in result.error
+        assert "headroom" not in result.error
+        assert "cmd" not in spawned
+
     @patch("skill_runner.AgentLoader")
     def test_failover_tier_is_pinned_even_if_policy_changes_mid_failover(
         self, MockLoader, monkeypatch, tmp_path
