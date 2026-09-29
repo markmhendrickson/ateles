@@ -724,3 +724,60 @@ class TestProseDecisionEndToEnd:
         )
         assert code == 0
         assert out == ""
+
+
+class TestCheck4ScopedToInteractiveSessions:
+    """Arch finding on #1344: check 4 is session conduct and must not fire in
+    headless dispatched runs (`claude --print`), which cannot call the tool."""
+
+    @staticmethod
+    def _rows(table):
+        return lambda pid: table.get(pid, "")
+
+    def test_claude_print_ancestor_is_headless(self, monkeypatch):
+        monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
+        rows = {300: "200 /bin/sh -c python3 hook.py",
+                200: "100 /opt/homebrew/bin/claude --print --model x"}
+        assert dsg.launched_in_print_mode(row=self._rows(rows)) is True
+
+    def test_claude_short_p_flag_is_headless(self, monkeypatch):
+        monkeypatch.setattr(dsg.os, "getppid", lambda: 200)
+        assert dsg.launched_in_print_mode(row=self._rows({200: "1 claude -p"})) is True
+
+    def test_interactive_claude_is_not_headless(self, monkeypatch):
+        monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
+        rows = {300: "200 /bin/sh -c python3 hook.py", 200: "100 claude --resume abc"}
+        assert dsg.launched_in_print_mode(row=self._rows(rows)) is False
+
+    def test_lookup_failure_keeps_the_check_on(self, monkeypatch):
+        monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
+        assert dsg.launched_in_print_mode(row=self._rows({})) is False
+
+    def test_no_claude_ancestor_keeps_the_check_on(self, monkeypatch):
+        monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
+        rows = {300: "200 bash", 200: "1 login"}
+        assert dsg.launched_in_print_mode(row=self._rows(rows)) is False
+
+    def _prose_decision_transcript(self, tmp_path):
+        row = {"type": "assistant", "message": {"role": "assistant",
+               "content": [{"type": "text", "text": PLANTED_RED}]}}
+        p = tmp_path / "t.jsonl"
+        p.write_text(json.dumps(row) + "\n")
+        return str(p)
+
+    def test_headless_run_skips_check_4_end_to_end(self, tmp_path, monkeypatch, capsys):
+        calls = _no_emit(monkeypatch)
+        monkeypatch.setattr(dsg, "ENFORCE", True)
+        monkeypatch.setattr(dsg, "launched_in_print_mode", lambda: True)
+        ev = {"transcript_path": self._prose_decision_transcript(tmp_path), "session_id": "h1"}
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
+        assert dsg.main() == 0
+        assert calls == []
+
+    def test_interactive_session_still_blocks_end_to_end(self, tmp_path, monkeypatch, capsys):
+        _no_emit(monkeypatch)
+        monkeypatch.setattr(dsg, "ENFORCE", True)
+        monkeypatch.setattr(dsg, "launched_in_print_mode", lambda: False)
+        ev = {"transcript_path": self._prose_decision_transcript(tmp_path), "session_id": "h2"}
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
+        assert dsg.main() == 2

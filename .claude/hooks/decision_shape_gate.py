@@ -411,6 +411,50 @@ def closing_section(text: str) -> str:
     return tail[-CLOSING_BLOCK_MAX:] if len(tail) > CLOSING_BLOCK_MAX else tail
 
 
+def _process_row(pid: int) -> str:
+    """`ps` row "<ppid> <argv...>" for one pid, or "" on any failure."""
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["ps", "-o", "ppid=,command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+
+def launched_in_print_mode(max_depth: int = 6, row=_process_row) -> bool:
+    """True when the Claude process that fired this hook runs headless (`--print` / `-p`).
+
+    Check 4 enforces the interactive-session rule that operator decisions go
+    through the question tool. Dispatched swarm agents run `claude --print`: no
+    operator is on the other end, they cannot call the tool, and their normal
+    reports (lens option lists, remediation choices) read as prose decisions, so
+    CLAUDE.md scopes that rule to sessions. The signal is read from the ancestor
+    Claude process's own argv, not an environment marker, so an agent cannot set
+    it from inside its run and no spawn site has to remember to add it. Only the
+    argv flags are examined; nothing is printed. Any lookup failure returns
+    False, which keeps the check ON.
+    """
+    pid = os.getppid()
+    for _ in range(max_depth):
+        if pid <= 1:
+            return False
+        out = row(pid)
+        if not out:
+            return False
+        ppid_s, _, command = out.partition(" ")
+        argv = command.split()
+        if argv and os.path.basename(argv[0]) == "claude":
+            return "--print" in argv or "-p" in argv
+        try:
+            pid = int(ppid_s)
+        except ValueError:
+            return False
+    return False
+
+
 def findings(text: str, asked_via_tool: bool = True) -> list[str]:
     """Standing-rule findings on the turn's closing section.
 
@@ -533,7 +577,9 @@ def main() -> int:
     try:
         transcript = ev.get("transcript_path")
         text = last_assistant_text(transcript)
-        found = findings(text, asked_via_tool=turn_used_question_tool(transcript))
+        # Check 4 is session conduct; headless dispatched runs are out of its scope.
+        asked = True if launched_in_print_mode() else turn_used_question_tool(transcript)
+        found = findings(text, asked_via_tool=asked)
     except Exception:
         return 0
 
