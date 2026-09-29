@@ -38,6 +38,14 @@ WHAT IT CHECKS, all string-detectable in the assistant's own final message:
    remain prose plus a runnable command block; they are not choices, so a
    command block alone never fires this check.
 
+   Known limits of check 4, so they are not read as coverage:
+   - Any AskUserQuestion call in the turn exempts every later prose decision
+     in that turn. Notification-triggered rows do not start a turn, so a call
+     in the last operator-prompted turn also exempts the notification turns
+     after it.
+   - Numbered lists are not option markers, so a "1. ... I recommend yes"
+     list with no letters and no decision cue does not fire.
+
 MODE: BLOCK, set by the operator 2026-09-11 via ATELES_DECISION_SHAPE_ENFORCE=1
 in .claude/settings.json.
 
@@ -148,6 +156,9 @@ RECOMMEND_CUE_RE = re.compile(
 )
 # Words that, just before a decision cue on the same line, empty it.
 NEGATED_CUE_RE = re.compile(r"\b(?:no|zero|nothing|none|without)\b[^.\n?!]{0,20}$", re.I)
+# An empty decisions section can also put the negation AFTER the cue:
+# "Open decisions: none." (qa lens, PR 1344).
+NEGATED_AFTER_CUE_RE = re.compile(r"^\s*[:\u2014-]?\s*(?:none|n/a|nothing)\b", re.I)
 UNPOSED_MARKER = "[decisions-unposed]"
 QUESTION_TOOL_NAME = "AskUserQuestion"
 
@@ -172,7 +183,8 @@ def poses_decision_in_prose(tail: str) -> bool:
     # into a finding.
     for m in DECISION_CUE_RE.finditer(tail):
         before = tail[max(0, m.start() - 25):m.start()]
-        if not NEGATED_CUE_RE.search(before):
+        after = tail[m.end():m.end() + 25]
+        if not NEGATED_CUE_RE.search(before) and not NEGATED_AFTER_CUE_RE.search(after):
             return True
     return False
 
@@ -254,6 +266,10 @@ def _is_operator_prompt(row: dict) -> bool:
     # erase it and the gate would block a turn that followed the rule.
     if row.get("isMeta"):
         return False
+    # A compaction summary is filed as a user row too; it is the harness
+    # restating context, not the operator starting a turn (qa lens, PR 1344).
+    if row.get("isCompactSummary"):
+        return False
     content = msg.get("content")
     if isinstance(content, str):
         return bool(content.strip()) and not content.lstrip().startswith(
@@ -269,6 +285,12 @@ def _is_operator_prompt(row: dict) -> bool:
         )
         return not str(first).lstrip().startswith("<task-notification>")
     return False
+
+
+def _is_question_tool(name: str) -> bool:
+    """The built-in tool, or an MCP-namespaced copy of it (`mcp__x__...`).
+    Not any name that merely ends in the string (security lens, PR 1344)."""
+    return name == QUESTION_TOOL_NAME or name.endswith("__" + QUESTION_TOOL_NAME)
 
 
 def turn_used_question_tool(transcript_path: str | None) -> bool:
@@ -307,7 +329,7 @@ def turn_used_question_tool(transcript_path: str | None) -> bool:
                     if (
                         isinstance(b, dict)
                         and b.get("type") == "tool_use"
-                        and str(b.get("name", "")).endswith(QUESTION_TOOL_NAME)
+                        and _is_question_tool(str(b.get("name", "")))
                     ):
                         used = True
     except Exception:
@@ -475,7 +497,9 @@ def findings(text: str, asked_via_tool: bool = True) -> list[str]:
             "decision through the questions tool (options, what each implies, "
             "what is settled, a recommendation). Only if the tool is unavailable, "
             "print [decisions-unposed] and each question's full text. Operator-only "
-            "actions stay prose plus a runnable command block."
+            "actions stay prose plus a runnable command block. If the lettered "
+            "items are sequential steps rather than alternatives, nothing needs "
+            "asking: carry them out and say so."
         )
 
     return out

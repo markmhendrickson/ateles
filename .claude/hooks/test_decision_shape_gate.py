@@ -585,10 +585,36 @@ class TestDecisionPosedAsProse:
             "overnight.",
             "Nothing needs your decision this turn. I recommend leaving the "
             "sweep to finish.",
+            # The negation can also FOLLOW the cue (qa lens, PR 1344).
+            "Open decisions: none. I recommend merging when green.",
+            "Pending decisions \u2014 none. I recommend we let the canary run.",
         ],
     )
     def test_false_positive_probes(self, text):
         assert dsg.findings(text, asked_via_tool=False) == []
+
+    def test_negation_after_cue_does_not_hide_a_real_decision(self):
+        # The post-cue negation must be the empty-section form, not any "none"
+        # later on the line.
+        text = (
+            "Open decision: whether to cap reviews, since none ran overnight. "
+            "If you say nothing I will cap them at two."
+        )
+        assert dsg.findings(text, asked_via_tool=False) != []
+
+    def test_numbered_list_without_letters_is_a_pinned_negative(self):
+        # Deliberate limit (see the module docstring): numbers are not option
+        # markers. Widening this must be a deliberate change, not a drift.
+        text = "Decisions:\n1. Merge #12? I recommend yes.\n2. Close #13? I recommend no."
+        assert dsg.findings(text, asked_via_tool=False) == []
+
+    def test_finding_text_lets_sequential_steps_be_dismissed(self):
+        found = dsg.findings(
+            "To finish: (a) run the migration, (b) restart apis. I recommend "
+            "doing it tonight.",
+            asked_via_tool=False,
+        )
+        assert found and "sequential steps" in found[0]
 
     def test_default_keeps_text_only_callers_out(self):
         # findings(text) with no transcript cannot know whether the tool was
@@ -640,6 +666,30 @@ class TestTurnUsedQuestionTool:
              _assistant_text(PLANTED_RED)],
         )
         assert dsg.turn_used_question_tool(path) is True
+
+    def test_compaction_summary_does_not_start_a_new_turn(self, tmp_path):
+        compact = {"type": "user", "isCompactSummary": True, "message": {
+            "role": "user", "content": "This session is being continued..."}}
+        path = _write_turn(
+            tmp_path,
+            [_user("go"), _ask_tool_use(), _tool_result(), compact,
+             _assistant_text(PLANTED_RED)],
+        )
+        assert dsg.turn_used_question_tool(path) is True
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("AskUserQuestion", True),
+            ("mcp__x__AskUserQuestion", True),
+            ("NotAskUserQuestion", False),
+        ],
+    )
+    def test_question_tool_name_is_matched_exactly(self, tmp_path, name, expected):
+        use = _ask_tool_use()
+        use["message"]["content"][0]["name"] = name
+        path = _write_turn(tmp_path, [_user("go"), use, _assistant_text(PLANTED_RED)])
+        assert dsg.turn_used_question_tool(path) is expected
 
     def test_missing_transcript_fails_open(self, tmp_path):
         assert dsg.turn_used_question_tool(str(tmp_path / "nope.jsonl")) is True
