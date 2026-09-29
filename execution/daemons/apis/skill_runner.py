@@ -1000,10 +1000,24 @@ def _slug(value: str, *, limit: int = 60) -> str:
     return (cleaned or "unknown")[:limit]
 
 
+def _redacted_env_var_names() -> list[str]:
+    """The fixed secret variable names plus every per-agent PAT variable.
+
+    Agent PATs are named `<ROLE>_AGENT_PAT` (plus the shared `ATELES_AGENT_PAT`),
+    one per role, so they are found by suffix rather than listed: a new agent's
+    PAT is redacted without editing this file.
+    """
+    names = list(_REDACTED_ENV_VARS)
+    for var in sorted(os.environ):
+        if var.endswith("_AGENT_PAT") and var not in names:
+            names.append(var)
+    return names
+
+
 def _redact_secrets(text: str) -> str:
     """Replace any known secret value appearing in child output."""
     out = text
-    for var in _REDACTED_ENV_VARS:
+    for var in _redacted_env_var_names():
         secret = os.environ.get(var, "")
         if secret and len(secret) >= 8:
             out = out.replace(secret, f"<redacted:{var}>")

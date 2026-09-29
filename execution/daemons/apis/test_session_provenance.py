@@ -39,6 +39,38 @@ class _Job:
         self.failed_events.append(_args)
 
 
+_PR_HEADER = (
+    "[cicada] pull_request_link: https://github.com/markmhendrickson/ateles/pull/999"
+)
+
+
+def _delivered_pr():
+    """Cicada's success now has to name its PR to reach DONE (ateles#1155)."""
+    return SimpleNamespace(
+        ok=True, error="", returncode=0, stdout=_PR_HEADER + "\n", stderr=""
+    )
+
+
+def _resolve_pr_and_store_completion(monkeypatch):
+    """Resolve the ref as real; point artifact completion at an in-memory task.
+
+    Returns the task fields so a test can assert what the completion left behind.
+    """
+    from lib.daemon_runtime import task_lifecycle
+
+    fields: dict = {}
+
+    def post(url, headers=None, json=None, timeout=None):
+        fields[json["field"]] = json["value"]
+        return SimpleNamespace(raise_for_status=lambda: None)
+
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    monkeypatch.setattr(task_lifecycle, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(task_lifecycle.httpx, "post", post)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: dict(fields))
+    return fields
+
+
 class _Response:
     def __init__(self, data):
         self.data = data
@@ -109,9 +141,11 @@ async def test_dispatch_persists_one_session_across_spawn_turns_and_completion(
         lambda actual_run, *, status: statuses.append((actual_run, status)) or True,
     )
 
+    task_fields = _resolve_pr_and_store_completion(monkeypatch)
+
     async def fake_spawn(*_args, **kwargs):
         spawned.append(kwargs)
-        return SimpleNamespace(ok=True, error="", returncode=0)
+        return _delivered_pr()
 
     monkeypatch.setattr(apis, "_spawn_harness_skill", fake_spawn)
 
@@ -120,6 +154,7 @@ async def test_dispatch_persists_one_session_across_spawn_turns_and_completion(
         {
             "title": "Implement it",
             "assigned_to": "cicada",
+            "repo": "markmhendrickson/ateles",
             "status": "awaiting_approval",
             "attempt": 2,
         },
@@ -128,6 +163,8 @@ async def test_dispatch_persists_one_session_across_spawn_turns_and_completion(
         gate_override=True,
     )
 
+    # DONE rests on the agent's exact header, read back after the session closed.
+    assert task_fields == {"result": _PR_HEADER, "status": "done"}
     assert created == [
         {
             "task_id": "ent_task",
@@ -235,6 +272,7 @@ async def test_dispatch_refuses_to_spawn_without_verified_session_provenance(
         {
             "title": "Implement it",
             "assigned_to": "cicada",
+            "repo": "markmhendrickson/ateles",
             "status": "awaiting_approval",
             "attempt": 2,
         },
@@ -282,16 +320,16 @@ async def test_dispatch_holds_verified_when_terminal_state_is_unverified(
     monkeypatch.setattr(
         apis,
         "_spawn_harness_skill",
-        lambda *_args, **_kwargs: _async_result(
-            SimpleNamespace(ok=True, error="", returncode=0)
-        ),
+        lambda *_args, **_kwargs: _async_result(_delivered_pr()),
     )
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
 
     await apis.dispatch_task(
         "ent_task",
         {
             "title": "Implement it",
             "assigned_to": "cicada",
+            "repo": "markmhendrickson/ateles",
             "status": "awaiting_approval",
             "attempt": 2,
         },
@@ -319,6 +357,7 @@ async def test_watchdog_reconciles_terminal_provenance_without_repeating_effect(
     snapshot = {
         "title": "Implement it",
         "assigned_to": "cicada",
+        "repo": "markmhendrickson/ateles",
         "status": "awaiting_approval",
         "attempt": 2,
     }
@@ -350,9 +389,11 @@ async def test_watchdog_reconciles_terminal_provenance_without_repeating_effect(
 
     monkeypatch.setattr(apis, "update_run_session_status", terminal_update)
 
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+
     async def execute_effect(*_args, **_kwargs):
         executions.append("executed")
-        return SimpleNamespace(ok=True, error="", returncode=0)
+        return _delivered_pr()
 
     monkeypatch.setattr(apis, "_spawn_harness_skill", execute_effect)
     monkeypatch.setattr(tw, "_query_tasks", lambda _limit: [("ent_task", snapshot)])
