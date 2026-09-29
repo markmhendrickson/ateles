@@ -453,3 +453,103 @@ def test_ascii_arrow_less_than_is_not_markup(tmp_path: Path) -> None:
     row = _live_like_row().replace("; `PART_OF` → `policy`", "; `REFERS_TO` <- finding (the finding)")
     write_corpus(tmp_path, data_model_text=data_model(row))
     assert decision_114.check(tmp_path) == []
+
+
+# --- Red: row lookup that a reader and the checker disagree on (security, 835ec7b3) ------------
+#
+# Each fixture pairs a broken real row (what renders in the table) with an approved copy elsewhere in
+# the section. At 835ec7b3 the checker located only the copy, so each returned 0 problems.
+
+_BROKEN_ROW = rule_row(governs=None, scope="the live target selector")
+
+
+def _with_section_prefix(text: str, heading: str, prefix: str) -> str:
+    return text.replace(heading + "\n", heading + "\n\n" + prefix, 1)
+
+
+def test_format_character_in_the_key_with_a_details_copy_is_red(tmp_path: Path) -> None:
+    """Real row's key cell carries U+200B; the approved row sits in a `<details>` block."""
+    real = _BROKEN_ROW.replace("| agent behavioural rule |", "| agent behavioural rule​ |", 1)
+    text = data_model(real, "", "<details>", "", rule_row(), "", "</details>")
+    write_corpus(tmp_path, data_model_text=text)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "more than one" in problems[0]
+
+
+def test_fenced_heading_does_not_end_the_section_early(tmp_path: Path) -> None:
+    """An approved copy under the heading, then a fence holding a `## ` line, then the real table."""
+    text = _with_section_prefix(
+        data_model(_BROKEN_ROW), "## Concepts", rule_row() + "\n\n```\n## x\n```\n\n"
+    )
+    write_corpus(tmp_path, data_model_text=text)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "more than one" in problems[0]
+
+
+def test_indented_real_row_with_a_fenced_copy_is_red(tmp_path: Path) -> None:
+    text = data_model(" " + _BROKEN_ROW, trailer="")
+    text = text.replace("\n## Relationships", "\n```\n" + rule_row() + "\n```\n\n## Relationships", 1)
+    write_corpus(tmp_path, data_model_text=text)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "more than one" in problems[0]
+
+
+def test_indented_register_row_with_a_fenced_non_ruled_copy_is_red(tmp_path: Path) -> None:
+    """The real ruled row indented one space; a non-ruled copy in a fence must not switch the check off."""
+    conformance = CONFORMANCE_RULED.replace("| 114 |", " | 114 |", 1) + (
+        "\n```\n| 114 | decoy | x | y | **open** |\n```\n"
+    )
+    write_corpus(tmp_path, conformance=conformance, data_model_text=data_model(_BROKEN_ROW))
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "more than one register row" in problems[0]
+
+
+def test_heading_inside_an_html_pre_block_does_not_end_the_section(tmp_path: Path) -> None:
+    text = _with_section_prefix(
+        data_model(_BROKEN_ROW), "## Concepts", rule_row() + "\n\n<pre>\n\n## x\n\n</pre>\n\n"
+    )
+    write_corpus(tmp_path, data_model_text=text)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "more than one" in problems[0]
+
+
+@pytest.mark.parametrize("prefix", ("> ", "- ", "    "))
+def test_a_row_behind_a_container_marker_counts_toward_ambiguity(tmp_path: Path, prefix: str) -> None:
+    text = data_model(rule_row(), "", prefix + _BROKEN_ROW)
+    write_corpus(tmp_path, data_model_text=text)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "more than one" in problems[0]
+
+
+def test_a_row_without_a_leading_pipe_counts_toward_ambiguity(tmp_path: Path) -> None:
+    text = data_model(rule_row(), _BROKEN_ROW.lstrip("| "))
+    write_corpus(tmp_path, data_model_text=text)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "more than one" in problems[0]
+
+
+def test_real_row_indented_four_columns_is_not_located(tmp_path: Path) -> None:
+    """Four columns is indented code, not a table row: the lookup fails closed as "no row"."""
+    write_corpus(tmp_path, data_model_text=data_model("", "    " + rule_row()))
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "no concepts-table row" in problems[0]
+
+
+def test_row_is_located_with_up_to_three_spaces_of_indentation(tmp_path: Path) -> None:
+    write_corpus(tmp_path, data_model_text=data_model("   " + rule_row()))
+    assert decision_114.check(tmp_path) == []
+
+
+@pytest.mark.parametrize("char", ("\u200b", "\u2060", "\u202e", "\ufeff"))
+def test_format_character_on_the_row_is_refused(tmp_path: Path, char: str) -> None:
+    row = rule_row().replace("| agent behavioural rule |", f"| agent behavioural rule{char} |", 1)
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "decision-114-format-character" in problems[0]
+
+
+def test_format_character_on_register_row_114_is_refused(tmp_path: Path) -> None:
+    conformance = CONFORMANCE_RULED.replace("| 114 |", "| 1\u200d14 |", 1)
+    write_corpus(tmp_path, conformance=conformance)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "decision-114-format-character" in problems[0]

@@ -61,11 +61,13 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 FOUNDATION_DIR = Path("docs/foundation")
 
-_DECISION_ROW_RE = re.compile(r"^\|\s*114\s*\|")
+DECISION_KEY = "114"
+CONCEPT_KEY = "agent behavioural rule"
 
 REGISTER_HEADING = "## The register of open design decisions"
 CONCEPTS_HEADING = "## Concepts"
@@ -76,10 +78,103 @@ _HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 _HIDING_MARKUP_RE = re.compile(r"<!--|-->|~~|</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
 
 
+# CommonMark's line endings. `str.splitlines()` also splits on U+2028, U+0085 and others that a renderer
+# keeps inside one line, so the checker and a reader would disagree on where a row starts.
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+
+
+def _lines(text: str) -> list[str]:
+    return _LINE_BREAK_RE.split(text)
+
+
 def _blank_html_comments(text: str) -> str:
-    """Remove HTML comments (an unclosed one runs to the end), keeping every newline so line numbers
+    """Remove HTML comments (an unclosed one runs to the end), keeping every line break so line numbers
     in the result match the raw text."""
-    return _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    return _HTML_COMMENT_RE.sub(lambda m: "".join(_LINE_BREAK_RE.findall(m.group(0))), text)
+
+
+def _format_characters(line: str) -> list[str]:
+    """Unicode format (category Cf) characters in ``line``: zero-width and bidi controls render as
+    nothing, so a cell carrying one reads the same as a cell without it."""
+    return sorted({f"U+{ord(ch):04X}" for ch in line if unicodedata.category(ch) == "Cf"})
+
+
+def _normalize_key(text: str) -> str:
+    """A table cell as a reader sees it: NFKC, format characters dropped, whitespace collapsed, casefolded."""
+    text = "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
+    return " ".join(text.split()).casefold()
+
+
+# --- Block structure ------------------------------------------------------------------------------
+#
+# A row is located only where CommonMark would render it as table text, and a section ends only at a
+# `## ` heading a reader would see. Lines inside fenced code, HTML blocks, and indented code are raw:
+# never a row, never a heading. Where this scanner and a renderer could disagree it errs toward raw,
+# which can only hide a row from the strict lookup (then a problem, or ambiguity via the loose count
+# below) and never end a section early.
+
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+_HTML_BLOCK_STARTS = (
+    (re.compile(r"^ {0,3}<(?:script|pre|style|textarea)(?:\s|>|$)", re.I),
+     re.compile(r"</(?:script|pre|style|textarea)>", re.I)),
+    (re.compile(r"^ {0,3}<!--"), re.compile(r"-->")),
+    (re.compile(r"^ {0,3}<\?"), re.compile(r"\?>")),
+    (re.compile(r"^ {0,3}<![A-Za-z]"), re.compile(r">")),
+    (re.compile(r"^ {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
+)
+# Any other tag opening a line starts an HTML block that runs to the next blank line (CommonMark types
+# 6 and 7; type 7 cannot interrupt a paragraph, but treating it as raw anyway only errs toward raw).
+_HTML_BLOCK_TAG_RE = re.compile(r"^ {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:\s|/?>|$)")
+
+
+def _rendered_flags(lines: list[str]) -> list[bool]:
+    """For each line, True when it is block content a reader sees as markdown (not raw code or HTML)."""
+    flags: list[bool] = []
+    fence: tuple[str, int] | None = None
+    html_end: re.Pattern[str] | None = None
+    in_blank_ended_html = False
+    for line in lines:
+        expanded = line.expandtabs(4)
+        if fence is not None:
+            flags.append(False)
+            closing = re.match(r"^ {0,3}(`+|~+)\s*$", expanded)
+            if closing and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= fence[1]:
+                fence = None
+            continue
+        if html_end is not None:
+            flags.append(False)
+            if html_end.search(line):
+                html_end = None
+            continue
+        if in_blank_ended_html:
+            if not line.strip():
+                in_blank_ended_html = False
+                flags.append(True)
+            else:
+                flags.append(False)
+            continue
+        opened = _FENCE_OPEN_RE.match(expanded)
+        if opened and not (opened.group("fence")[0] == "`" and "`" in opened.group("info")):
+            fence = (opened.group("fence")[0], len(opened.group("fence")))
+            flags.append(False)
+            continue
+        started = next(
+            ((m, end_re) for start_re, end_re in _HTML_BLOCK_STARTS if (m := start_re.match(expanded))),
+            None,
+        )
+        if started is not None:
+            flags.append(False)
+            start_match, end_re = started
+            if not end_re.search(expanded, start_match.end()):
+                html_end = end_re
+            continue
+        if _HTML_BLOCK_TAG_RE.match(expanded):
+            flags.append(False)
+            in_blank_ended_html = True
+            continue
+        # Indented four or more columns: indented code, or a continuation no table row starts.
+        flags.append(len(expanded) - len(expanded.lstrip(" ")) < 4 or not expanded.strip())
+    return flags
 
 
 def _hiding_markup(line: str) -> list[str]:
@@ -145,9 +240,27 @@ def _split_top_level(cell: str, sep: str = ";") -> list[str]:
 # The concepts table row for the agent behavioural rule type, matched on the leading cell (the concept
 # name): the stable anchor, since the entity-type cell changed from `agent_policy` to `rule` (decision 120).
 _AGENT_POLICY_ROW_RE = re.compile(
-    r"^\|\s*agent behavioural rule\s*\|(?P<entity_type>[^|]*)\|(?P<fields>[^|]*)\|"
+    r"^ {0,3}\|(?P<key>[^|]*)\|(?P<entity_type>[^|]*)\|(?P<fields>[^|]*)\|"
     r"(?P<edges>[^|]*)\|"
 )
+
+# A table row's first cell, after up to three columns of indentation.
+_FIRST_CELL_RE = re.compile(r"^ {0,3}\|(?P<key>[^|]*)\|")
+
+# Anything that can precede a table row inside a container: indentation, blockquote markers, list markers.
+_CONTAINER_PREFIX_RE = re.compile(r"^(?:[ \t>]|[-*+](?=[ \t])|\d{1,9}[.)](?=[ \t]))*")
+
+
+def _loose_key(line: str) -> str | None:
+    """The normalized first cell of anything shaped like a table row, wherever it sits (in code, in HTML,
+    in a comment, behind container markers, with or without a leading pipe), else ``None``."""
+    text = unicodedata.normalize("NFKC", line)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    text = _CONTAINER_PREFIX_RE.sub("", text)
+    if "|" not in text:
+        return None
+    first = text.lstrip("|").split("|", 1)[0]
+    return _normalize_key(first)
 
 # The relationship types this row may carry, closed: an entry naming any other backticked token (a
 # `NOTE`, a `CAVEAT`) is prose dressed as an edge. Add a type here in the same PR that adds it to the row.
@@ -246,50 +359,74 @@ class AmbiguousCorpusRow(Exception):
     """More than one candidate row was found where exactly one is required."""
 
 
-def _iter_section_lines(text: str, heading: str) -> "list[tuple[int, str]]":
-    """(line no, line) pairs for lines inside the ``heading`` section, HTML comments blanked.
+def _section_ranges(text: str, heading: str) -> "list[range]":
+    """0-based line index ranges of each ``heading`` section: from the heading to the next ``## ``
+    heading a reader sees. A ``## `` line inside fenced code or an HTML block is not a heading, so it
+    neither opens nor closes a section. Headings are recognized at column 0 only; an indented one is not
+    a boundary, which can only widen a section, never shorten it."""
+    lines = _lines(text)
+    flags = _rendered_flags(lines)
+    ranges: list[range] = []
+    start: int | None = None
+    for i, (line, rendered) in enumerate(zip(lines, flags)):
+        if rendered and line.startswith("## "):
+            if start is not None:
+                ranges.append(range(start, i))
+                start = None
+            if line.strip() == heading:
+                start = i + 1
+    if start is not None:
+        ranges.append(range(start, len(lines)))
+    return ranges
 
-    Scoped to that section — stopping at the next ``## `` heading — rather than the whole document, so a
-    second table sharing the row's shape elsewhere is never mistaken for the live row, and a row inside
-    an HTML comment (which a reader never sees) is never found.
+
+def _locate_rows(text: str, heading: str, key: str, what: str) -> "list[int]":
+    """1-based line numbers of the rendered rows keyed ``key`` inside the ``heading`` section.
+
+    A row is found only where a reader sees a table row: outside fenced code, HTML blocks and indented
+    code, HTML comments blanked, up to three columns of indentation, and its first cell compared after
+    NFKC normalization with format characters dropped. Raises ``AmbiguousCorpusRow`` when anything in
+    the section's raw text — code, HTML, comments included — is shaped like a row with that key more than
+    once, so a copy placed where the strict lookup cannot see it still makes the check ambiguous rather
+    than letting either one stand in for the other.
     """
-    lines: list[tuple[int, str]] = []
-    in_section = False
-    for no, line in enumerate(_blank_html_comments(text).splitlines(), 1):
-        if line.startswith("## "):
-            in_section = line.strip() == heading
-            continue
-        if in_section:
-            lines.append((no, line))
-    return lines
-
-
-def _iter_concepts_section_lines(data_model_text: str) -> "list[tuple[int, str]]":
-    return _iter_section_lines(data_model_text, CONCEPTS_HEADING)
+    raw = _lines(text)
+    blanked = _lines(_blank_html_comments(text))
+    flags = _rendered_flags(raw)
+    want = _normalize_key(key)
+    found: list[int] = []
+    loose: list[int] = []
+    for section in _section_ranges(text, heading):
+        for i in section:
+            if _loose_key(raw[i]) == want:
+                loose.append(i + 1)
+            if not flags[i]:
+                continue
+            match = _FIRST_CELL_RE.match(blanked[i].expandtabs(4))
+            if match and _normalize_key(match.group("key")) == want:
+                found.append(i + 1)
+    candidates = sorted(set(found) | set(loose))
+    if len(candidates) > 1:
+        raise AmbiguousCorpusRow(
+            f"found more than one {what} within {heading} "
+            f"(lines {', '.join(map(str, candidates))}); expected exactly one"
+        )
+    return found
 
 
 def decision_114_row(conformance_text: str) -> tuple[int, list[str]] | None:
     """(line no, cells of the raw line) for register row 114.
 
-    Requires exactly one row beginning ``| 114 |`` inside the register section; more than one raises
-    ``AmbiguousCorpusRow``, so a non-ruled decoy placed above the real row cannot switch the check off.
-    The cells come from the raw line, comments included, so ``**ruled**`` hidden in a comment still
-    enables the check — hiding can only turn it on.
+    Requires exactly one row keyed ``114`` inside the register section (see ``_locate_rows``); a second
+    one anywhere in that section's raw text raises ``AmbiguousCorpusRow``, so a non-ruled decoy cannot
+    switch the check off. The cells come from the raw line, comments included, so ``**ruled**`` hidden
+    in a comment still enables the check — hiding can only turn it on.
     """
-    raw_lines = conformance_text.splitlines()
-    matches = [
-        no for no, line in _iter_section_lines(conformance_text, REGISTER_HEADING)
-        if _DECISION_ROW_RE.match(line)
-    ]
+    matches = _locate_rows(conformance_text, REGISTER_HEADING, DECISION_KEY, "register row keyed `114`")
     if not matches:
         return None
-    if len(matches) > 1:
-        raise AmbiguousCorpusRow(
-            "found more than one register row beginning `| 114 |` within "
-            f"{REGISTER_HEADING} (lines {', '.join(map(str, matches))}); expected exactly one"
-        )
     no = matches[0]
-    line = raw_lines[no - 1]
+    line = _lines(conformance_text)[no - 1]
     return no, [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
@@ -298,26 +435,22 @@ def agent_policy_concepts_row(
 ) -> tuple[int, str, str, str] | None:
     """Return (line no, fields cell, edges cell, whole row) for the row.
 
-    Requires exactly one matching row within ``## Concepts``. Zero matches
-    returns ``None`` (handled by the caller as "no row"); more than one
-    raises ``AmbiguousCorpusRow`` rather than silently taking the first —
-    a compliant decoy placed first must not be able to mask a broken real
-    row placed second.
+    Requires exactly one row keyed ``agent behavioural rule`` within ``## Concepts`` (see
+    ``_locate_rows``). Zero returns ``None`` (handled by the caller as "no row"); more than one raises
+    ``AmbiguousCorpusRow`` rather than silently taking the first — a compliant decoy must not be able
+    to mask a broken real row.
     """
-    matches: list[tuple[int, str, str, str]] = []
-    for no, line in _iter_concepts_section_lines(data_model_text):
-        match = _AGENT_POLICY_ROW_RE.match(line)
-        if match:
-            matches.append((no, match.group("fields"), match.group("edges"), line))
+    matches = _locate_rows(
+        data_model_text, CONCEPTS_HEADING, CONCEPT_KEY, "`agent behavioural rule` concepts-table row"
+    )
     if not matches:
         return None
-    if len(matches) > 1:
-        line_nos = ", ".join(str(no) for no, _, _, _ in matches)
-        raise AmbiguousCorpusRow(
-            "found more than one `agent behavioural rule` concepts-table row "
-            f"within ## Concepts (lines {line_nos}); expected exactly one"
-        )
-    return matches[0]
+    no = matches[0]
+    line = _lines(_blank_html_comments(data_model_text))[no - 1].expandtabs(4)
+    match = _AGENT_POLICY_ROW_RE.match(line)
+    if match is None:
+        return no, "", "", line
+    return no, match.group("fields"), match.group("edges"), line
 
 
 def check_concepts_row(
@@ -367,7 +500,7 @@ def check(root: Path) -> list[str]:
     if row is None:
         return [
             f"{conformance_path}:1: decision-114-register — no register row "
-            f'beginning "| 114 |" within {REGISTER_HEADING}'
+            f"keyed `114` within {REGISTER_HEADING}"
         ]
 
     row_no, cells = row
@@ -391,9 +524,16 @@ def check(root: Path) -> list[str]:
     concepts_row_no, fields_cell, edges_cell, _whole_row = concepts_row
     problems = []
     for path, no, raw in (
-        (conformance_path, row_no, conformance_text.splitlines()[row_no - 1]),
-        (data_model_path, concepts_row_no, data_model_text.splitlines()[concepts_row_no - 1]),
+        (conformance_path, row_no, _lines(conformance_text)[row_no - 1]),
+        (data_model_path, concepts_row_no, _lines(data_model_text)[concepts_row_no - 1]),
     ):
+        format_chars = _format_characters(raw)
+        if format_chars:
+            problems.append(
+                f"{path}:{no}: decision-114-format-character — the row carries Unicode format "
+                f"characters ({', '.join(format_chars)}), which render as nothing; they are refused on "
+                "the rows decision 114's check reads, so what it verifies is what renders"
+            )
         markup = _hiding_markup(raw)
         if markup:
             problems.append(
