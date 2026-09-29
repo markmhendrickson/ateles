@@ -475,13 +475,16 @@ _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 # `git` and `python3` are admitted only in their argument-only forms (`_git_is_argument_only`, `python3 -m venv`),
 # and `rg` only without `--pre`/`--hostname-bin`. Programs with an option
 # that runs a separate-word operand (`tar --use-compress-program`, `zip
-# -TT`, `git grep -O`) are left out (third self-review of this change).
+# -TT`, `git grep -O`, `vim '+!cmd'`) are left out, and so are `cp`, `mv`
+# and `ln`, which can put the binary under a name this match cannot see and
+# run it later in the same command (third and fourth self-review of this
+# change).
 _ARGUMENT_ONLY_PROGRAMS = frozenset(
     {
-        "ls", "cd", "pushd", "rm", "rmdir", "mkdir", "cp", "mv", "ln", "touch",
-        "cat", "head", "tail", "wc", "stat", "file", "du", "tree", "chmod",
-        "chown", "chgrp", "realpath", "readlink", "grep", "egrep", "fgrep",
-        "diff", "cmp", "unzip", "code", "vim", "vi", "nano", "trash",
+        "ls", "cd", "pushd", "rm", "rmdir", "mkdir", "touch", "cat", "head",
+        "tail", "wc", "stat", "file", "du", "tree", "chmod", "chown", "chgrp",
+        "realpath", "readlink", "grep", "egrep", "fgrep", "diff", "cmp",
+        "unzip", "trash",
     }
 )  # fmt: skip
 _GIT_ARGUMENT_ONLY_SUBCOMMANDS = frozenset(

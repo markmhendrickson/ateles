@@ -440,6 +440,11 @@ BASH_BLOCK = [
     ("pipe into a brace group", "ls ./env | { sh; }"),
     ("pipe into awk system", "ls ./env | awk '{system($0)}'"),
     ("output written to a file then run", "ls ./env > /tmp/x; sh /tmp/x"),
+    # Fourth self-review: vim runs `+!cmd`, and cp/ln rename the binary out
+    # of the match's sight before a later segment runs it.
+    ("vim running a pathed printenv", "vim -es '+!/usr//bin/printenv' '+qa!'"),
+    ("cp a pathed printenv then run it", "cp /usr//bin/printenv /tmp/p && /tmp/p"),
+    ("ln a pathed printenv then run it", "ln -s /usr/bin/./printenv /tmp/p; /tmp/p"),
     (
         "env -u running perl -pe after source",
         f"source {ENV}; env -u X perl -pe 1",
