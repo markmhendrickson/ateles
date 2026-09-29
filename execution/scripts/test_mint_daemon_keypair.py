@@ -385,6 +385,12 @@ class TestCliMessages:
         ).stdout
         assert "ROTATED" in out and "destroyed" in out
         assert "Keypair written to:" not in out
+        # The existing grant still applies, so a rotation must not tell the
+        # operator to register one; it says to re-verify, restart, and
+        # re-register only if the sub or capabilities changed.
+        assert "createAgentGrant" not in out
+        assert out.index("Re-verify") < out.index("Restart the daemon")
+        assert "only if its sub or capabilities changed" in out
 
     def test_force_with_no_existing_key_is_a_first_mint_message(
         self, keys_dir: Path

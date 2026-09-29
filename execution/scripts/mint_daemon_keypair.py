@@ -255,19 +255,32 @@ def main() -> None:
     print(f"  format: canonical JWK (ES256 P-256)")
     print(f"  mode: {stat.S_IMODE(out_path.stat().st_mode):04o}")
     print()
-    # Same order as docs/aauth.md "Identity provisioning": mint (done), register
-    # the grant, check it, verify, restart.
-    print('Next, in this order (details: docs/aauth.md, "Identity provisioning"):')
-    print(f"  2. Register the agent_grant for {sub} (operator: neotoma request --operation createAgentGrant).")
-    print(
-        "  3. Check it exists: neotoma request --operation listAgentGrants "
-        f"--query '{{\"q\": \"{sub}\", \"status\": \"active\"}}'"
-    )
-    print(
-        f"  4. Verify the signer: python3 execution/scripts/verify_aauth_signer.py "
+    verify_cmd = (
+        "python3 execution/scripts/verify_aauth_signer.py "
         f"--jwk {out_path} --live <neotoma-base-url>"
     )
-    print("  5. Restart the daemon so it picks up the new keypair.")
+    if rotated:
+        # The existing agent_grant matches (sub, iss) with no thumbprint pin, so
+        # it still applies to the new key; do not tell the operator to register
+        # a new one.
+        print('Rotation next steps (details: docs/aauth.md, "Identity provisioning"):')
+        print(f"  1. Re-verify the signer: {verify_cmd}")
+        print("  2. Restart the daemon so it picks up the new keypair.")
+        print(
+            f"  Re-register the agent_grant for {sub} only if its sub or capabilities "
+            "changed (then check it with neotoma request --operation listAgentGrants)."
+        )
+    else:
+        # Same order as docs/aauth.md "Identity provisioning": mint (done),
+        # register the grant, check it, verify, restart.
+        print('Next, in this order (details: docs/aauth.md, "Identity provisioning"):')
+        print(f"  2. Register the agent_grant for {sub} (operator: neotoma request --operation createAgentGrant).")
+        print(
+            "  3. Check it exists: neotoma request --operation listAgentGrants "
+            f"--query '{{\"q\": \"{sub}\", \"status\": \"active\"}}'"
+        )
+        print(f"  4. Verify the signer: {verify_cmd}")
+        print("  5. Restart the daemon so it picks up the new keypair.")
     print(
         "Note: the dispatcher reads ATELES_AAUTH_KEYS_DIR; it must point at the "
         "same directory as this key."

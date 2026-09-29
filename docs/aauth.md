@@ -18,7 +18,7 @@ AAuth is the agent authentication protocol Ateles uses to give every daemon and 
 
 AAuth solves two intertwined problems:
 
-1. **Attribution — which agent wrote this observation?** Without AAuth, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, each daemon signs its requests with its own EC keypair, so Neotoma records `agent_sub: anthus@ateles-swarm` (or `cursor@markmhendrickson.com` for IDE sessions) on every observation — provenance down to the agent, not just the operator.
+1. **Attribution — which agent wrote this observation?** Without AAuth, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, a daemon that signs its requests on the RFC 9421 path with its own EC keypair is verified by Neotoma, which then records `agent_sub` (for example `anthus@ateles-swarm`, or `cursor@markmhendrickson.com` for IDE sessions) on the observations from that verified request — provenance down to the agent, not just the operator. A daemon that only sends the lighter `X-AAuth-Token` JWT (`lib/daemon_runtime/aauth_signer.py`) is **not** verified by Neotoma today (nothing in Neotoma consumes that header), so it gets no `agent_sub` from it.
 
 2. **Authorization — what is this agent allowed to do, and to which entities and tools?** Each verified `(sub, iss)` is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
    - by **operation** (`store_structured`, `create_relationship`, `correct`, `retrieve`, …)
@@ -49,7 +49,7 @@ The repo currently has **three key envelopes** across two signing contexts (Curs
 
 2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by some T3 daemons (e.g. `a2a_executor.py`, `a2a_gateway.py`) via `lib/daemon_runtime/aauth_signer.py`, which produces a lighter `X-AAuth-Token` JWT (not full RFC 9421). `docs/aauth/keys.md` calls this the "legacy" format, still supported but superseded by (3) below on next rotation. `lib/daemon_runtime/aauth_signer.py` probes `<daemon>.jwk.json` first and falls back to this `<daemon>.json`, so it reads both (2) and (3).
 
-3. **JWK format, T3/T4 flavor (canonical)** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`), and also loaded by `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` for the dispatcher-signed gate-writeback path (see below). **`agent_identity()` loads ONLY `<agent>.jwk.json` — it has no fallback to the legacy `<agent>.json`**, so a role that has only a legacy PEM key has no identity for that path (`agent_identity()` returns None and the signed write fails closed). **Not yet published to JWKS** — only Neotoma can verify these today (via local key resolution or because the daemon talks to Neotoma over a trusted connection). Provisioned by `execution/scripts/mint_daemon_keypair.py --name <role>` (see below and `docs/aauth/keys.md`, the canonical doc for this format's layout and rotation).
+3. **JWK format, T3/T4 flavor (canonical)** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`), and also loaded by `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` for the dispatcher-signed gate-writeback path (see below). **`agent_identity()` loads ONLY `<agent>.jwk.json` — it has no fallback to the legacy `<agent>.json`**, so a role that has only a legacy PEM key has no identity for that path (`agent_identity()` returns None and the signed write fails closed). **Not published to JWKS, and it does not need to be for Neotoma:** an RFC 9421 request carries the public key inline (the `Signature-Key` header holds an `aa-agent+jwt` whose `cnf.jwk` binds the signing key) and Neotoma verifies against that embedded key. Neotoma does not read `ateles-private/keys`. Verification is separate from admission, which still needs an active `agent_grant`. Provisioned by `execution/scripts/mint_daemon_keypair.py --name <role>` (see below and `docs/aauth/keys.md`, the canonical doc for this format's layout and rotation).
 
 Unifying these formats and publishing all public keys to the same JWKS is on the to-do list below.
 
@@ -131,9 +131,10 @@ AAuth-signed, authorized principal may write `gate_status.<gate>`. That is filed
 
 ### What "active" means per row
 
-- **Keypair on disk + JWKS publish + agent_grant** → fully active, end-to-end attribution and admission. Only Cursor reaches this today.
-- **Keypair on disk only** → daemon can mint AAuth JWTs locally, but external verifiers can't fetch the public key, and Neotoma will verify but won't admit unless a grant matches. Effectively "signs but unadmitted." This covers Apus, Formica, Monedula, neotoma-agent, Sylvia, Ateles.
-- **Keypair + grant, no JWKS publish** → Cicada and Vanellus can be admitted by Neotoma for github_harness writes, but only over the local network where Neotoma already has the key. Publishing to JWKS would extend trust to any AAuth resource.
+- **Keypair on disk + JWKS publish + agent_grant** → fully active, end-to-end attribution and admission. Only Cursor reaches this today. (JWKS publication is not what makes Neotoma verify: an RFC 9421 request carries its public key inline.)
+- **Keypair on disk only, RFC 9421-signed** → Neotoma verifies the signature from the inline key but does not admit without a matching active `agent_grant`: "verified but unadmitted".
+- **Keypair on disk only, `X-AAuth-Token` JWT only** (the `lib/daemon_runtime/aauth_signer.py` path) → Neotoma has no consumer for that header, so the request is **not verified at all**; it is attribution metadata sent alongside the operator bearer token. This is the case for the daemons recorded with legacy PEM keys (Apus, Formica, Monedula, neotoma-agent, Sylvia, Ateles).
+- **Keypair + grant** → admission needs both an RFC 9421-signed request and an active matching `agent_grant`. Cicada and Vanellus have grants.
 - **No keypair** → daemon falls back to stub mode (logs a warning, sends no AAuth headers, attribution defaults to operator-scoped auth).
 
 The JWKS and `aauth-agent.json` files are served from the website, whose source is **not in this checkout** (no `execution/website/` on `main`).
@@ -152,7 +153,7 @@ The JWKS and `aauth-agent.json` files are served from the website, whose source 
 
 These are distinct implementations for distinct contexts:
 - `aauth_httpsig.py` / `neotoma_signed.py` implement the **full AAuth wire format** (`@hellocoop/httpsig` compatible): signs `@method @authority @path content-type content-digest signature-key`. This is what Neotoma's verifier (`src/middleware/aauth_verify.ts`) checks. They consume JWK-format keys only.
-- `aauth_signer.py` implements a **lighter JWT-only path** for daemons. It consumes `ateles-private/keys/<daemon>.jwk.json` (canonical) or the legacy PEM `<daemon>.json`, probing the former first. Per the May 2026 status table above, the daemons recorded with keypairs (Apus, Formica, Monedula, Cicada, neotoma-agent, Sylvia, Ateles, Vanellus) held legacy PEM `<daemon>.json` files and sign locally; a daemon with neither file falls back to stub mode.
+- `aauth_signer.py` implements a **lighter JWT-only path** for daemons. It consumes `ateles-private/keys/<daemon>.jwk.json` (canonical) or the legacy PEM `<daemon>.json`, probing the former first. Per the May 2026 status table above, the daemons recorded with keypairs (Apus, Formica, Monedula, Cicada, neotoma-agent, Sylvia, Ateles, Vanellus) held legacy PEM `<daemon>.json` files and attach an `X-AAuth-Token` JWT locally (which Neotoma does not verify); a daemon with neither file falls back to stub mode.
 
 ### Keys directory environment variables
 
@@ -160,10 +161,10 @@ Two variables name the keys directory, read by different code:
 
 | Variable | Read by | Default |
 |---|---|---|
-| `ATELES_PRIVATE_KEYS_DIR` | `mint_daemon_keypair.py`, `lib/daemon_runtime/aauth_signer.py`, `skill_runner.py` | `<ateles>/../ateles-private/keys` |
+| `ATELES_PRIVATE_KEYS_DIR` | including `mint_daemon_keypair.py`, `lib/daemon_runtime/aauth_signer.py`, `skill_runner.py`, `secrets_lib.py`, `ateles/config.py` | `<ateles>/../ateles-private/keys` |
 | `ATELES_AAUTH_KEYS_DIR` | `neotoma_signed.agent_identity()` (the dispatcher's gate write-back) | `~/repos/ateles-private/keys` |
 
-They must point at the **same directory**. If they diverge, the script mints into one place and the dispatcher looks in another, so `agent_identity()` returns None and the signed write fails closed with no obvious cause. Set both (or neither, on a host where both defaults resolve to the same path).
+They must point at the **same directory**. If they diverge, the script mints into one place and the dispatcher looks in another, so `agent_identity()` returns None and the signed write fails closed with no obvious cause. Set both (or neither, on a host where both defaults resolve to the same path). `mint_daemon_keypair.py --keys-dir <dir>` overrides `ATELES_PRIVATE_KEYS_DIR` for one mint; if you use it, `<dir>` must be the directory the dispatcher's `ATELES_AAUTH_KEYS_DIR` names, or the dispatcher will not see the key.
 
 ### Identity provisioning
 
@@ -171,7 +172,7 @@ They must point at the **same directory**. If they diverge, the script mints int
 |---|---|
 | `execution/scripts/mint_daemon_keypair.py` | **Canonical** minting script for one T3/T4 role's ES256 P-256 keypair, written to `ateles-private/keys/<role>.jwk.json` (mode 0600, written that way from creation, no window at a looser mode) — the flavor `lib/daemon_runtime/aauth_httpsig.py` and `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` both consume. Never prints the private scalar or public coordinates. Does **not** touch `.creds/`, `jwks.json`, or `aauth-agent.json` — those belong to the separate Cursor-proxy flavor, which has no provisioning script on `main` today. Refuses to overwrite an existing key unless `--force` is passed (rotation, which atomically replaces the key via a same-directory temp file, so a failed rotation leaves the old key intact). Creation is `O_EXCL|O_NOFOLLOW` at 0600 (a symlink at the target is refused, never followed) and the keys directory is created 0700. `--name` must match `^[a-z][a-z0-9_-]{0,63}$`. Full layout and rotation procedure: `docs/aauth/keys.md`. There is deliberately only ONE script that writes this format — see that file's module docstring for the "extend, don't parallel" rule this follows. |
 
-**Canonical order (the same in every doc and in the script's closing hint):**
+**Canonical order (the same in every doc and in the script's closing hint after a first mint; after a `--force` rotation the existing grant still applies, so the hint says to re-verify and restart, and to re-register only if the sub or capabilities changed):**
 
 1. **Mint** the key.
 2. **Register** the `agent_grant` (operator).
@@ -180,14 +181,15 @@ They must point at the **same directory**. If they diverge, the script mints int
 5. **Restart** the daemon.
 
 ```bash
-# 1. Mint (or rotate with --force; read docs/aauth/keys.md before rotating):
-python3 execution/scripts/mint_daemon_keypair.py --name accipiter
+# 1. Mint (or rotate with --force; read docs/aauth/keys.md before rotating).
+#    --keys-dir <dir> overrides the default keys directory for this run.
+python3 execution/scripts/mint_daemon_keypair.py --name <role>
 
 # 2. As the OPERATOR (own authenticated Neotoma session, not this script and
 #    not an unattended agent), register the matching agent_grant:
 neotoma request --operation createAgentGrant --body '{
-  "label": "accipiter",
-  "match_sub": "accipiter@ateles-swarm",
+  "label": "<role>",
+  "match_sub": "<role>@ateles-swarm",
   "match_iss": "https://markmhendrickson.com",
   "capabilities": [
     {"op": "retrieve", "entity_types": ["issue"]},
@@ -197,11 +199,11 @@ neotoma request --operation createAgentGrant --body '{
 
 # 3. Confirm it exists and is active (expect one grant whose match_sub is the role's sub):
 neotoma request --operation listAgentGrants \
-    --query '{"q": "accipiter@ateles-swarm", "status": "active"}'
+    --query '{"q": "<role>@ateles-swarm", "status": "active"}'
 
 # 4. Verify the key signs in a way Neotoma accepts (prints no key material):
 python3 execution/scripts/verify_aauth_signer.py \
-    --jwk ~/repos/ateles-private/keys/accipiter.jwk.json --live <neotoma-base-url>
+    --jwk ~/repos/ateles-private/keys/<role>.jwk.json --live <neotoma-base-url>
 
 # 5. Restart the daemon so it picks up the new key.
 ```
@@ -286,9 +288,9 @@ Daemon status as recorded in May 2026 (a snapshot; the topology table above carr
 | Anthus (orchestrator) | `anthus@ateles-swarm` | ❌ stub | ❌ | ❌ |
 | Tyto, Turdus, Apis | `<name>@ateles-swarm` | ❌ stub | ❌ | ❌ |
 
-"Stub" means the daemon runs without per-agent signing — Neotoma attributes its observations to the operator-scoped auth instead. "No JWKS publish" means external resources can't verify the signature without out-of-band key distribution; Neotoma in-network can verify because it has access to the same `ateles-private/keys/` directory or has the key cached.
+"Stub" means the daemon runs without per-agent signing — Neotoma attributes its observations to the operator-scoped auth instead. "No JWKS publish" means the public key is not available at a well-known endpoint for other verifiers. It does not stop Neotoma verifying an RFC 9421 request, because that request carries its public key inline; Neotoma does not read `ateles-private/keys`.
 
-Only the Cursor IDE proxy is **fully end-to-end active** (keypair + JWKS publish + grant):
+Only the Cursor IDE proxy is **fully end-to-end active** (RFC 9421-signed, JWKS published, and a grant):
 
 ```
 GET /session → {
@@ -333,7 +335,7 @@ The `aa-agent+jwt` inside `Signature-Key` carries:
 }
 ```
 
-The `cnf.jwk` lets Neotoma verify the signature inline without a JWKS fetch, which matters during local development before the website is deployed.
+The `cnf.jwk` is the public key Neotoma verifies the signature against; the request carries it inline, so no JWKS fetch and no read of `ateles-private/keys` is involved.
 
 ---
 
@@ -457,7 +459,7 @@ proxy is a different identity and has its own, currently unimplemented, provisio
 
 ### 2. Create `agent_grant` entities for remaining subs
 
-Today only Cursor, Cicada, and Vanellus have grants. Apus, Formica, Monedula, neotoma-agent, and Ateles sign locally but are not admitted — Neotoma falls back to operator-level attribution. Create one grant per sub, scoped to the operations that daemon needs, via the operator's own authenticated Neotoma CLI session (`agent_grant` is a protected entity type — see `docs/subsystems/aauth.md` on the Neotoma side — so it is created through the `createAgentGrant` operation, not the generic `store` verb):
+Today only Cursor, Cicada, and Vanellus have grants. Apus, Formica, Monedula, neotoma-agent, and Ateles hold keys but are not admitted — Neotoma attributes their writes at operator level. Create one grant per sub, scoped to the operations that daemon needs, via the operator's own authenticated Neotoma CLI session (`agent_grant` is a protected entity type — see `docs/subsystems/aauth.md` on the Neotoma side — so it is created through the `createAgentGrant` operation, not the generic `store` verb):
 
 ```bash
 neotoma request --operation createAgentGrant --body '{
@@ -473,7 +475,7 @@ neotoma request --operation createAgentGrant --body '{
 
 ### 3. Publish daemon public keys to the JWKS endpoint
 
-Today `https://markmhendrickson.com/.well-known/jwks.json` serves `sw-cursor-1` only. To extend trust to external verifiers, each daemon's public PEM needs to be converted to JWK form and merged into the website's `.well-known/jwks.json` (website source is not in this checkout), then the website redeployed. Subjects also need to be added to `aauth-agent.json` `subjects_supported`.
+Today `https://markmhendrickson.com/.well-known/jwks.json` serves `sw-cursor-1` only. To make daemon public keys available to verifiers other than Neotoma (Neotoma itself does not need this for RFC 9421 requests), each daemon's public PEM needs to be converted to JWK form and merged into the website's `.well-known/jwks.json` (website source is not in this checkout), then the website redeployed. Subjects also need to be added to `aauth-agent.json` `subjects_supported`.
 
 ### 4. Reconcile the two keypair formats
 

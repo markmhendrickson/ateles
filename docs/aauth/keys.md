@@ -1,8 +1,11 @@
 # AAuth keypair layout and rotation
 
 Each daemon has its own ES256 P-256 keypair stored in `ateles-private/keys/`.
-The keypair is used by `lib/daemon_runtime/aauth_signer.py` to sign outbound
-Neotoma API requests, establishing per-daemon attribution on all observations.
+Two signers use it. `lib/daemon_runtime/aauth_httpsig.py` (and the node helper
+behind `neotoma_signed.signed_request`) sign RFC 9421 requests that Neotoma
+verifies and attributes to the daemon (`agent_sub`). `lib/daemon_runtime/aauth_signer.py`
+attaches an `X-AAuth-Token` JWT that Neotoma does not verify today, so it gives
+no verified attribution. See "What Neotoma verifies today" below.
 
 ## Canonical format (preferred)
 
@@ -21,8 +24,10 @@ File mode: `0600`
 }
 ```
 
-The `sub` value is `<genus>@ateles-swarm`. It is stamped into every Neotoma
-observation as the `agent_sub` provenance field, giving full per-agent audit.
+The `sub` value is `<genus>@ateles-swarm`. When a request is signed on the
+RFC 9421 path and Neotoma verifies it, Neotoma records the `sub` as the
+`agent_sub` provenance field. The JWT-only `aauth_signer.py` path is not verified
+by Neotoma and does not produce a verified `agent_sub`.
 
 ## Legacy format (still supported)
 
@@ -97,8 +102,10 @@ signs through the node helper in `neotoma_signed.signed_request`.
 
 ### Keys directory variables
 
-`ATELES_PRIVATE_KEYS_DIR` is read by this script, by
-`lib/daemon_runtime/aauth_signer.py` and by `skill_runner.py`.
+`ATELES_PRIVATE_KEYS_DIR` is read by (including) this script, by
+`lib/daemon_runtime/aauth_signer.py`, `skill_runner.py`, `secrets_lib.py` and
+`ateles/config.py`. This script's `--keys-dir <dir>` flag overrides it for one
+run; `<dir>` must be the directory `ATELES_AAUTH_KEYS_DIR` names.
 `ATELES_AAUTH_KEYS_DIR` is read by `neotoma_signed.agent_identity()` (the
 dispatcher's gate write-back). **They must point at the same directory**, or the
 script mints where the dispatcher does not look and the signed write fails
@@ -138,27 +145,33 @@ rotation (see below), because `agent_identity()` reads only `<name>.jwk.json`.
 
 0. **Only if you may need the old key** (for example, to roll back), copy the
    existing `<name>.jwk.json` aside first, to a mode-0600 file outside any git
-   repo, and delete the copy once the new key is confirmed. `--force` destroys
-   the old private key irrecoverably; there is no undo.
+   repo and outside any cloud-synced folder, and delete the copy once the new
+   key is confirmed. For example:
+   `(umask 077; cp -p ~/repos/ateles-private/keys/<name>.jwk.json <private-dir>/<name>.jwk.json.old)`
+   or `install -m 600 ~/repos/ateles-private/keys/<name>.jwk.json <private-dir>/<name>.jwk.json.old`.
+   `--force` destroys the old private key irrecoverably; there is no undo.
 1. Run `mint_daemon_keypair.py --name <daemon>` — this writes `<name>.jwk.json`.
    If a `<name>.jwk.json` already exists (rotating a canonical key), add
    `--force`. The grant matches `(sub, iss)` with no thumbprint pin, so a
    rotation does not need a new grant; still run the check (step 3 of the order
    above) and then the verify step.
-2. Add the new `kid` to the Neotoma JWKS endpoint (pending — see phase plan).
+2. JWKS: **nothing to do today.** No JWKS is published for daemon keys and
+   Neotoma verifies from the inline key, so there is nothing to add. Once daemon
+   keys are published to a JWKS, add the new `kid` here.
 3. Restart the daemon. `aauth_signer.py` probes `<name>.jwk.json` first so the
    new key is picked up automatically.
 4. After confirming the daemon signs correctly, delete the old `<name>.json`.
-5. Remove the old `kid` from JWKS after the observation expiry window (5 min).
+5. Once daemon keys are published to a JWKS, remove the old `kid` after the
+   observation expiry window (5 min). Until then there is nothing to remove.
 
 Rotate keypairs at least quarterly or immediately on suspected compromise.
 
 ## JWKS endpoint (planned)
 
-A future `ateles-private/keys/jwks.json` will aggregate all public keys so
-Neotoma and other verifiers can validate incoming JWTs without requiring
-individual key distribution. The endpoint will be served at
-`https://ateles.markmhendrickson.com/.well-known/jwks.json` (Phase 6).
+A future `ateles-private/keys/jwks.json` is planned to aggregate all public
+keys, to be served at `https://ateles.markmhendrickson.com/.well-known/jwks.json`
+(Phase 6). It is not needed for Neotoma to verify RFC 9421 requests, which carry
+their public key inline (see below).
 
 ### What Neotoma verifies today
 
@@ -169,13 +182,16 @@ individual key distribution. The endpoint will be served at
   by a matching active `agent_grant`. `verify_aauth_signer.py --live` checks this
   signature path.
 - The lighter `X-AAuth-Token` JWT produced by `lib/daemon_runtime/aauth_signer.py`
-  is **not** referenced by Neotoma's AAuth verifier in the Neotoma checkout (no
-  consumer of that header was found in its source or docs), so treat it as
-  attribution metadata, not a verified credential. Requests without an RFC 9421
-  signature authenticate with the operator-configured bearer token.
-- Publishing public keys to a JWKS endpoint (above) is still pending; until then
-  Neotoma resolves the daemon keys locally rather than through a published
-  endpoint.
+  has no consumer in Neotoma's source or docs, so treat it as attribution
+  metadata, not a verified credential. Requests without an RFC 9421 signature
+  authenticate with the operator-configured bearer token.
+- Neotoma verifies an RFC 9421 request against the public key the request
+  carries inline (the `Signature-Key` header holds an `aa-agent+jwt` whose
+  `cnf.jwk` binds the signing key). It does not read `ateles-private/keys` and
+  needs no published JWKS to do so. Verification is separate from admission:
+  admission still needs an active `agent_grant` matching `(sub, iss)`.
+- A daemon that only sends the JWT-only `X-AAuth-Token` is therefore **not
+  verified** by Neotoma today.
 
 ## Security notes
 
