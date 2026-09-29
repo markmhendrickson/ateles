@@ -1,0 +1,10 @@
+# ateles#1189: findings in EARLIER commits of PR #1354 that matched fake test values
+# (secret-shaped literals in unit tests; the parameter name 'secret'). The later commit
+# builds these at runtime and renames the parameter, but the PR-range scan reads history.
+b11ef920bd9454933b42cea3f35c90fcaf398706:lib/capabilities/test_credentials.py:generic-api-key:40
+b11ef920bd9454933b42cea3f35c90fcaf398706:lib/capabilities/test_credentials.py:generic-api-key:60
+b11ef920bd9454933b42cea3f35c90fcaf398706:lib/capabilities/test_credentials.py:generic-api-key:68
+b11ef920bd9454933b42cea3f35c90fcaf398706:lib/capabilities/test_credentials.py:generic-api-key:78
+b11ef920bd9454933b42cea3f35c90fcaf398706:lib/capabilities/test_credentials.py:protected-patterns:40
+b11ef920bd9454933b42cea3f35c90fcaf398706:lib/capabilities/test_docs_and_records.py:generic-api-key:59
+cfa8234cff32be66f29e04027911674b06fb1e1c:lib/capabilities/credentials.py:protected-patterns:62

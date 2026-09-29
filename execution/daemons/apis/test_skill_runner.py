@@ -2847,6 +2847,67 @@ class TestCrossHarnessRouting:
         assert "OPENAI_API_KEY" not in child
         assert "CURSOR_API_KEY" not in child
 
+    def test_generation_vendor_keys_absent_from_subscription_only_env(
+        self, monkeypatch
+    ) -> None:
+        """Media-generation credentials in the daemon env never reach an agent.
+
+        Asserted by key ABSENCE in the returned dict, not by denylist
+        membership. Red when the scrub is reverted: the keys pass through and
+        every assertion below fails.
+        """
+        keys = {
+            "RECRAFT_API_KEY": "recraft-metered",
+            "GEMINI_API_KEY": "google-image-metered",
+            "GOOGLE_API_KEY": "google-metered",
+            "VEO_API_KEY": "veo-metered",
+            "GEMINI_API_KEY_2": "a-sibling-key-nobody-named",  # prefix rule
+        }
+        for name, value in keys.items():
+            monkeypatch.setenv(name, value)
+        child = skill_runner._subscription_only_env()
+        for name in keys:
+            assert name not in child, name
+        assert not any(value in child.values() for value in keys.values())
+
+    def test_generation_keys_are_stripped_even_under_the_metered_override(
+        self, monkeypatch
+    ) -> None:
+        # APIS_ALLOW_METERED_HARNESS releases harness keys only, never these.
+        monkeypatch.setenv("APIS_ALLOW_METERED_HARNESS", "1")
+        monkeypatch.setenv("GEMINI_API_KEY", "google-image-metered")
+        child = skill_runner._subscription_only_env(
+            {"RECRAFT_API_KEY": "smuggled-through-env-extra"}
+        )
+        assert "GEMINI_API_KEY" not in child
+        assert "RECRAFT_API_KEY" not in child
+
+    def test_unrelated_google_keys_are_not_collateral(self, monkeypatch) -> None:
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "maps-key")
+        assert skill_runner._subscription_only_env()["GOOGLE_MAPS_API_KEY"] == "maps-key"
+
+    def test_dispatched_child_is_marked_so_the_capability_client_refuses(
+        self, monkeypatch
+    ) -> None:
+        from lib.credential_scrub import AGENT_CHILD_MARKER_ENV
+
+        monkeypatch.delenv(AGENT_CHILD_MARKER_ENV, raising=False)
+        assert skill_runner._subscription_only_env()[AGENT_CHILD_MARKER_ENV] == "1"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "STAGED: _subscription_only_env is still a denylist, so a metered "
+            "key nobody has named passes through. The standing control is an "
+            "allowlist child environment (follow-up issue). strict=True: when "
+            "the allowlist lands this XPASSes and must be un-marked, never "
+            "deleted."
+        ),
+    )
+    def test_unnamed_future_metered_key_is_scrubbed(self, monkeypatch) -> None:
+        monkeypatch.setenv("SOME_FUTURE_VENDOR_API_KEY", "future-metered")
+        assert "SOME_FUTURE_VENDOR_API_KEY" not in skill_runner._subscription_only_env()
+
     def test_cursor_headless_login_failure_is_safe_to_fail_over(self) -> None:
         assert (
             skill_runner._provider_failure_kind(
