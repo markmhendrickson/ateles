@@ -43,6 +43,16 @@ evaluated independently, so a stash hidden after an innocuous first segment is
 still caught. Shell line continuations are folded first so a wrapped
 invocation stays one segment.
 
+Heredoc BODY content is stripped (`_command_segments.strip_heredoc_bodies`)
+before any of the above, so a stash phrase appearing only as DATA inside a
+heredoc — a Neotoma `agent_policy` string quoting "never git stash", an issue
+body pasted for a commit message draft — is inert regardless of which command
+consumes the heredoc, including a text-bearing leader's own segment
+(ateles#1265). This does NOT widen `TEXT_BEARING_LEADERS`: an interpreter's
+ACTUAL argument (`python3 -c "...git stash..."`, not heredoc data) is still
+judged as an invocation and still refused — see the module note on
+`TEXT_BEARING_LEADERS` below for why an interpreter must never be added there.
+
 Override: prefix ATELES_ALLOW_GIT_STASH=1 to that one invocation, e.g.
 
     ATELES_ALLOW_GIT_STASH=1 git stash pop
@@ -66,6 +76,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input  # noqa: E402
+from _command_segments import (  # noqa: E402
+    is_text_bearing_leader,
+    join_line_continuations,
+    split_segments as _shared_split_segments,
+    strip_heredoc_bodies,
+)
 
 OVERRIDE_ENV = "ATELES_ALLOW_GIT_STASH"
 
@@ -106,22 +122,24 @@ GIT_STASH_ARGV_RE = re.compile(
     r"""(?:[\s,\]\[]+['"](?P<sub>[A-Za-z-]+)['"])?""",
 )
 
-SEGMENT_SPLIT = re.compile(r"&&|\|\||[;\n|&]")
-
 # Commands that merely CARRY the pattern as text rather than invoking it: a
 # commit message documenting this hazard, a grep for it, a PR body explaining
 # the hook. Matching those would block work that touches no stash — the first
 # casualty is this hook's own commit and PR.
 #
+# This is the shared base set (`_command_segments.is_text_bearing_leader`,
+# extracted from this file's own pre-#1265 implementation) with no extra
+# leaders — git_stash_guard.py's allowlist has always matched the base set
+# exactly. Using the shared classifier here rather than a second hand-rolled
+# copy means a future addition to the base set (or gmail_send_gate.py's, once
+# migrated) cannot silently drift out of sync with this guard.
+#
 # This list must contain ONLY commands that cannot themselves execute another
 # command. Interpreters (`python -c`, `node -e`, `sh -c`, `perl -e`) and
 # heredoc-consuming readers (`cat`) must NEVER appear here: they were live
 # bypasses in an early revision of gmail_send_gate.py, because the gated
-# command rode through as the exempt leader's argument. Do not add an executor.
-TEXT_BEARING_LEADERS = re.compile(
-    r"^(?:git\s+(?:commit|tag|notes)|echo|printf|grep|rg|"
-    r"gh\s+(?:pr|issue|release))\b"
-)
+# command rode through as the exempt leader's argument. Do not add an executor
+# — see `_command_segments`'s own module docstring for the same constraint.
 
 # An override must PREFIX the stashing segment itself (optionally after `env`),
 # which is the documented usage. Anchored at the segment start so an override
@@ -173,17 +191,6 @@ def guidance(label: str) -> str:
     )
 
 
-def _join_line_continuations(command: str) -> str:
-    r"""Fold `\<newline>` sequences so a continued command stays ONE segment.
-
-    Without this, `git stash \<newline> pop` splits on the newline into two
-    segments and the subcommand is evaluated separately from `git stash` — a
-    bypass found in gmail_send_gate.py's adversarial pass. A backslash-newline
-    is shell line continuation, not a command separator.
-    """
-    return re.sub(r"\\[ \t]*\n", " ", command)
-
-
 def find_stash_mutation(command: str):
     """Return a label for the first unapproved stash-mutating segment, or None.
 
@@ -192,7 +199,7 @@ def find_stash_mutation(command: str):
     vouch for a later stash — otherwise
     `ATELES_ALLOW_GIT_STASH=1 echo ok && git stash` would smuggle one past.
     """
-    for segment in SEGMENT_SPLIT.split(_join_line_continuations(command)):
+    for segment in _shared_split_segments(join_line_continuations(command)):
         normalized = " ".join(segment.split())
         if not normalized:
             continue
@@ -200,7 +207,7 @@ def find_stash_mutation(command: str):
         # TEXT and invokes nothing. Not a bypass: the leader must be the first
         # token, so a real invocation cannot hide behind it — `echo x && git
         # stash` splits into two segments and the stashing one is judged alone.
-        if TEXT_BEARING_LEADERS.match(normalized):
+        if is_text_bearing_leader(normalized):
             continue
         match = GIT_STASH_RE.search(normalized) or GIT_STASH_ARGV_RE.search(normalized)
         if not match:
@@ -221,8 +228,17 @@ def main() -> int:
     if payload.get("tool_name") != "Bash":
         return 0
 
-    command = (payload.get("tool_input") or {}).get("command")
-    if not isinstance(command, str) or "stash" not in command:
+    raw_command = (payload.get("tool_input") or {}).get("command")
+    if not isinstance(raw_command, str):
+        return 0
+
+    # Strip heredoc BODY content once, up front, and use the stripped text for
+    # BOTH the cheap substring early-out below AND find_stash_mutation — never
+    # re-check the raw command. A command whose only "stash" occurrence lives
+    # inside a heredoc body (a Neotoma agent_policy string quoting "never git
+    # stash", an issue body) must not be judged an invocation (ateles#1265).
+    command = strip_heredoc_bodies(raw_command)
+    if "stash" not in command:
         return 0
 
     # The inline form (ATELES_ALLOW_GIT_STASH=1 git stash ...) is the ONLY
