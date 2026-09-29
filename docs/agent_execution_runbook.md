@@ -372,6 +372,17 @@ a body that has already failed a cheaper check.
    finished claim. The reader is a required argument, so a caller cannot skip the
    check by omission.
 
+### Known gap, deferred to #1355
+
+`task_watchdog._reconcile_completed_task` still writes DONE through
+`set_task_status` **without a read-back**. On a gated role that went through the
+VERIFIED hold (run-session provenance), the watchdog's DONE write also rewrites
+`result` from the interim value (header plus `run_session=…; provenance=…`)
+rather than the bare header, and the completion path writes the bare header last,
+so the `run_session` / provenance marker is overwritten on gated roles. Both are
+tracked in ateles#1355; neither is fixed by the read-back described above, which
+covers only the dispatcher's own completion.
+
 ### Which roles are opted in
 
 The seeded `ARTIFACT_CONTRACTS` table opts in **15 roles**: Cicada plus **14
