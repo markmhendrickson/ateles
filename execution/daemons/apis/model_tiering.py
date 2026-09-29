@@ -48,6 +48,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 log = logging.getLogger("apis.model_tiering")
@@ -209,6 +210,11 @@ class EscalationSignals:
     prior_blocking_finding: bool = False
     review_round: int = 1
     prior_attempt_failed: bool = False
+    # The caller tried to measure the diff (changed files / line count) and
+    # could not. An unmeasured diff must not be treated as a small one: with no
+    # measurement the security-path and size signals are both silently False,
+    # which would tier a possibly-large or security-sensitive dispatch DOWN.
+    diff_unreadable: bool = False
 
     def touches_security_sensitive_path(self) -> bool:
         return any(
@@ -230,6 +236,8 @@ class EscalationSignals:
             out.append(f"review_round={self.review_round}")
         if self.prior_attempt_failed:
             out.append("prior_attempt_failed")
+        if self.diff_unreadable:
+            out.append("diff_unreadable")
         return out
 
 
@@ -326,6 +334,53 @@ DEFAULT_ACTION_POLICY_HINT: dict[str, str] = {
 }
 
 
+# ── Action-class vocabulary used by the Apis dispatch sites ──────────────────
+#
+# The single home for the class names ``swarm_dispatch`` passes to
+# ``run_skill(action_class=...)``. Names come from the operator ruling and
+# ``DEFAULT_ACTION_POLICY_HINT`` above; the three below the line are classes
+# the ruling does not name. They are passed as their own explicit names and
+# are deliberately absent from the committed example policy, so they resolve
+# ``unresolved_class -> top`` (fail-closed) until the operator rules on them.
+# Every dispatch of one is visible as ``tiering=top(unresolved_class)``, which
+# is how their volume gets measured before anyone loosens them.
+
+ACTION_BUILD = "build"
+ACTION_SECURITY_FIX = "security_fix"
+ACTION_REPAIR_DIAGNOSED = "repair_diagnosed"
+ACTION_CARRY_FORWARD_CHECK = "carry_forward_check"
+ACTION_CI_LOG_TRIAGE = "ci_log_triage"
+# Not named by the ruling — unmapped on purpose, so they run at ``top``:
+ACTION_ISSUE_TRIAGE = "issue_triage"  # Lanius new-issue protocol
+ACTION_PANEL_AGGREGATION = "panel_aggregation"  # Vanellus verdict aggregation
+ACTION_TASK_DISPATCH_FALLBACK = "task_dispatch"  # queue task with no action_type
+
+LENS_REVIEW_PREFIX = "lens_review:"
+
+# Lenses ``review_panel.LENSES`` seats today. ``legal`` and ``content`` have no
+# entry in the ruling, so ``lens_review:legal`` / ``lens_review:content`` are
+# left unmapped and run at ``top``.
+KNOWN_LENSES: tuple[str, ...] = ("pm", "arch", "ux", "legal", "qa", "security", "content")
+
+# Every class an Apis call site passes, for ``--check`` to warn about classes a
+# config leaves unmapped (which then resolve to ``top``).
+DISPATCH_ACTION_CLASSES: tuple[str, ...] = (
+    ACTION_BUILD,
+    ACTION_SECURITY_FIX,
+    ACTION_REPAIR_DIAGNOSED,
+    ACTION_CARRY_FORWARD_CHECK,
+    ACTION_CI_LOG_TRIAGE,
+    ACTION_ISSUE_TRIAGE,
+    ACTION_PANEL_AGGREGATION,
+    *(f"{LENS_REVIEW_PREFIX}{lens}" for lens in KNOWN_LENSES),
+)
+
+
+def lens_review_class(lens: str) -> str:
+    """Action class for one lens's review (or spec section, or fix guidance)."""
+    return f"{LENS_REVIEW_PREFIX}{lens.strip().lower()}"
+
+
 class UnboundTierError(ValueError):
     """A resolved tier has no model bound for the target provider."""
 
@@ -375,3 +430,266 @@ def model_for_tier(
             "falling back silently"
         )
     return model
+
+
+# ── Observability: which tier did each dispatch actually run at ──────────────
+#
+# Every dispatch appends one JSON line here and logs the same facts, so "how
+# much of the week ran on each tier" is answerable from one file instead of a
+# Neotoma query per harness_event. Best-effort by construction: a ledger write
+# failure is logged and swallowed, never raised into a dispatch. The Neotoma
+# ``harness_event`` (skill_runner) stays the durable audit row; this is the
+# cheap local read for budget pacing.
+
+_TIER_LEDGER_FILE_ENV = "APIS_TIER_LEDGER_FILE"
+_DEFAULT_TIER_LEDGER_PATH = (
+    Path.home() / "Library" / "Logs" / "ateles" / "tier-dispatch.jsonl"
+)
+
+# Ledger buckets that are not tiers. A dispatch that named no action class runs
+# on the provider's ambient default (the most expensive model) — the very thing
+# this whole change exists to remove — so it is counted under its own name
+# rather than hidden inside a real tier.
+UNTIERED = "untiered"
+EXPLICIT_MODEL = "explicit_model"
+
+
+def tier_ledger_path() -> Path:
+    configured = os.environ.get(_TIER_LEDGER_FILE_ENV, "").strip()
+    return Path(configured).expanduser() if configured else _DEFAULT_TIER_LEDGER_PATH
+
+
+def describe_tiering(
+    resolved: "ResolvedTier | None", model: str | None
+) -> tuple[str, str]:
+    """Return ``(tier, source)`` for a dispatch, including the un-tiered cases."""
+    if resolved is not None:
+        return resolved.tier, resolved.source
+    if model:
+        return EXPLICIT_MODEL, "explicit_model"
+    return UNTIERED, "no_action_class"
+
+
+def record_dispatch(
+    *,
+    skill: str,
+    provider: str,
+    resolved: "ResolvedTier | None",
+    model: str | None,
+) -> str:
+    """Log and ledger one dispatch's tiering; return the log marker.
+
+    The marker (``tiering=<tier>(<source>) model=<model|default>``) is what the
+    caller logs, so the log line and the ledger row cannot disagree.
+    """
+    tier, source = describe_tiering(resolved, model)
+    marker = f"tiering={tier}({source}) model={model or 'default'}"
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "skill": skill,
+        "provider": provider,
+        "action_class": resolved.action_class if resolved else "",
+        "tier": tier,
+        "source": source,
+        "model": model or "",
+        "escalation_reasons": list(resolved.escalation_reasons) if resolved else [],
+    }
+    try:
+        path = tier_ledger_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError as exc:
+        log.warning(f"[apis] model_tiering: tier ledger write failed (non-fatal): {exc}")
+    return marker
+
+
+def tier_counts(*, since_hours: float | None = None) -> dict:
+    """Dispatch counts per tier (and per action class) from the ledger.
+
+    ``{"total": n, "by_tier": {...}, "by_class": {"class": {"tier": n}}}``.
+    Malformed lines are skipped, not fatal: one torn write must not blind the
+    report. A missing ledger is an empty report, never an error.
+    """
+    cutoff = None
+    if since_hours is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    by_tier: dict[str, int] = {}
+    by_class: dict[str, dict[str, int]] = {}
+    total = 0
+    path = tier_ledger_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+            tier = str(row["tier"])
+            when = datetime.fromisoformat(str(row["ts"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if cutoff is not None and when < cutoff:
+            continue
+        total += 1
+        by_tier[tier] = by_tier.get(tier, 0) + 1
+        klass = str(row.get("action_class") or "(none)")
+        by_class.setdefault(klass, {})
+        by_class[klass][tier] = by_class[klass].get(tier, 0) + 1
+    return {"total": total, "by_tier": by_tier, "by_class": by_class}
+
+
+# ── Config validation: `model_tiering.py --check <file> [<file> ...]` ─────────
+
+
+def _classify_config(data: object) -> str | None:
+    """``action-policy`` (all string values), ``vendor-binding`` (all dict
+    values), or None when the shape is neither or empty."""
+    if not isinstance(data, dict) or not data:
+        return None
+    if all(isinstance(v, str) for v in data.values()):
+        return "action-policy"
+    if all(isinstance(v, dict) for v in data.values()):
+        return "vendor-binding"
+    return None
+
+
+def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str]]:
+    """Validate one config file strictly. Returns ``(kind, data, errors, warnings)``.
+
+    Stricter than the runtime loaders on purpose: the loaders drop a bad entry
+    and carry on (so a typo can never crash a daemon), which means a typo only
+    shows up as a class quietly running at ``top``. This is where a typo is
+    caught before the file is installed.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return None, {}, [f"cannot read {path}: {exc}"], warnings
+    except ValueError as exc:
+        return None, {}, [f"{path}: not valid JSON ({exc})"], warnings
+    kind = _classify_config(data)
+    if kind is None:
+        return None, {}, [
+            f"{path}: neither an action_policy ({{class: tier}}) nor a "
+            "vendor_binding ({provider: {tier: model}}) object, or empty"
+        ], warnings
+
+    if kind == "action-policy":
+        for klass, tier in data.items():
+            if not str(klass).strip():
+                errors.append("action_policy has an empty class name")
+            if str(tier).strip().lower() not in TIERS:
+                errors.append(
+                    f"action_policy class {klass!r} names unknown tier {tier!r} "
+                    f"(valid: {', '.join(TIERS)}); the runtime would drop this "
+                    f"entry and run the class at {DEFAULT_TIER!r}"
+                )
+        unmapped = [c for c in DISPATCH_ACTION_CLASSES if c not in data]
+        if unmapped:
+            warnings.append(
+                "classes with no entry resolve to "
+                f"{DEFAULT_TIER!r} (fail-closed): {', '.join(unmapped)}"
+            )
+        stale = [
+            c for c in data
+            if c not in DISPATCH_ACTION_CLASSES and c not in DEFAULT_ACTION_POLICY_HINT
+        ]
+        if stale:
+            warnings.append(
+                "classes no Apis call site passes (harmless, but dead): "
+                + ", ".join(stale)
+            )
+    else:
+        from harness_router import FRONTIER_PROVIDERS as PROVIDERS  # lazy: import-light
+
+        for provider, tiers in data.items():
+            name = str(provider).strip().lower()
+            if name not in PROVIDERS:
+                errors.append(
+                    f"vendor_binding provider {provider!r} is not a frontier "
+                    f"harness provider ({', '.join(PROVIDERS)})"
+                )
+            for tier, model in tiers.items():
+                if str(tier).strip().lower() not in TIERS:
+                    errors.append(
+                        f"vendor_binding {provider!r} names unknown tier {tier!r}"
+                    )
+                if not str(model).strip():
+                    errors.append(
+                        f"vendor_binding {provider!r} tier {tier!r} has an empty model"
+                    )
+            if DEFAULT_TIER not in {str(t).strip().lower() for t in tiers}:
+                errors.append(
+                    f"vendor_binding {provider!r} binds no {DEFAULT_TIER!r} "
+                    "model, but every escalation and every unmapped class "
+                    "resolves there — the provider could run nothing"
+                )
+    return kind, data, errors, warnings
+
+
+def check_cross(policy: dict, binding: dict) -> list[str]:
+    """Errors for tiers the policy can require that a provider does not bind.
+
+    A provider missing a needed tier is dropped from selection for that tier
+    (skill_runner's pre-selection filter), which is legal, so this reports it
+    as an error only when NO provider binds the tier — that dispatch would fail.
+    """
+    needed = {str(t).strip().lower() for t in policy.values()} | {DEFAULT_TIER}
+    needed &= set(TIERS)
+    errors: list[str] = []
+    for tier in sorted(needed, key=_tier_index):
+        if tier == "local":
+            continue  # served by claude-local, which is exempt from binding
+        if not any(tier in {str(t).strip().lower() for t in tiers}
+                   for tiers in binding.values()):
+            errors.append(
+                f"the policy resolves classes to tier {tier!r} but no provider "
+                "in the vendor_binding binds it — those dispatches would be refused"
+            )
+    return errors
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="model_tiering",
+        description=(
+            "Validate model-tiering config files before installing them. Pass "
+            "an action_policy file, a vendor_binding file, or both (the two "
+            "are then cross-checked). Exit 0 valid, 1 invalid."
+        ),
+    )
+    parser.add_argument(
+        "--check", nargs="+", metavar="FILE", required=True,
+        help="config file(s) to validate; the kind is detected from the shape",
+    )
+    args = parser.parse_args(argv)
+
+    exit_code = 0
+    loaded: dict[str, dict] = {}
+    for raw in args.check:
+        path = Path(raw).expanduser()
+        kind, data, errors, warnings = check_config_file(path)
+        for msg in errors:
+            print(f"ERROR {path}: {msg}")
+        for msg in warnings:
+            print(f"warn  {path}: {msg}")
+        if errors or kind is None:
+            exit_code = 1
+            print(f"FAIL  {path}")
+            continue
+        loaded[kind] = data
+        print(f"ok    {path} ({kind}, {len(data)} entries)")
+    if "action-policy" in loaded and "vendor-binding" in loaded:
+        for msg in check_cross(loaded["action-policy"], loaded["vendor-binding"]):
+            print(f"ERROR cross-check: {msg}")
+            exit_code = 1
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
