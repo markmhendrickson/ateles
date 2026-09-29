@@ -4779,6 +4779,7 @@ class TestModelTieringDispatch:
 
         with (
             patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
             patch(
@@ -4987,6 +4988,7 @@ class TestModelTieringDispatch:
         captured: dict = {}
         with (
             patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
             patch("asyncio.create_subprocess_exec", side_effect=self._fake_exec_capturing(captured)),
             patch("skill_runner._write_harness_event"),
             patch("skill_runner._run_skill_once", side_effect=spy_run_once),
@@ -5000,6 +5002,9 @@ class TestModelTieringDispatch:
 
         assert result.ok
         assert result.provider == "codex"
+        # The failover really happened (cursor was attempted, then codex);
+        # without cursor eligible the mid-failover edit is never exercised.
+        assert result.attempted_providers == ("cursor", "codex")
         # Without the fix, codex's attempt would re-read the now-changed file
         # and resolve "top" -> codex-top. The fix pins "mid" -> codex-mid.
         cmd = captured["cmd"]
