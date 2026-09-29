@@ -107,6 +107,12 @@ fi
 echo "  - Checking hook-wiring reference matches .claude/settings.json..."
 python3 .claude/hooks/hook_wiring_reference.py --check || ERRORS=$((ERRORS + 1))
 
+# Codex hook delivery (ateles#981). This is an effect check, not a config
+# presence check: it executes the commands named by .codex/hooks.json against
+# a synthetic local agent_policy corpus and a blocked stash command.
+echo "  - Checking Codex live-rule and guard hook effects..."
+python3 execution/scripts/test_codex_rule_hooks.py || ERRORS=$((ERRORS + 1))
+
 # Foundation documents (docs/foundation/). Registered in
 # conformance.md#mechanical-checks-on-this-directory. All stdlib-only, no Neotoma needed.
 echo "  - Checking foundation anchors (every intra-foundation link resolves)..."
@@ -116,6 +122,10 @@ echo "  - Checking foundation decision 78 is ruled in the corpus..."
 python3 execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking decision 101 ruling is bound to the corpus..."
 python3 execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 117 ruling is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_117.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 119 commissioning is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_119.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking foundation vocabulary (no Never word in the prose)..."
 python3 execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))

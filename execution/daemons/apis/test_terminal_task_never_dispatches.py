@@ -220,6 +220,14 @@ def test_gate_override_does_not_reopen_a_terminal_task(writes, briefs, spawns):
     assert spawns == []
 
 
+def test_verified_effect_is_reserved_for_reconciliation(writes, briefs, spawns):
+    """A task whose effect already returned must not re-enter the executor."""
+    _dispatch("ent_verified_1", _task("verified"), trigger="watchdog_retry")
+    assert writes == []
+    assert briefs == []
+    assert spawns == []
+
+
 # ── The guard must not over-reach ────────────────────────────────────────────
 
 

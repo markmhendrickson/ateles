@@ -127,5 +127,9 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | no | no | unknown | decision 48's counting rule, which would read such an edge and count two operators … |
 | 110 | whether a **role** may be seated to review what a principal produced … | yes | yes | unknown | nothing in the design; a declaration whose steps seat a producing role and a … |
 | 111 | whether a rule's end may be a **condition** rather than a date … | yes | yes | unknown | the live rows that carry a condition in `scope`, which both defeats that field's … |
+| 114 | where a rule that binds **every agent's behaviour** lives, and whether the … | yes | yes | unknown | nothing in the design blocks it, and it blocks nothing: G34's resolution is the … |
+| 116 | whether a task no declaration fits waits, is handed to the operator, … | yes | yes | unknown | nothing in the design; the path it describes — `route` holding on an amendment … |
+| 117 | whether a grant may say what a principal may do to an … | yes | yes | unknown | decision 41, whose tuple and default-deny shape this widens rather than replaces; decision 43, … |
 | 118 | whether credential rotation is one authority or several, split by who issues … | yes | yes | unknown | decision 105, open, on where a credential's value comes from and how it reaches … |
+| 119 | how an authorized principal commissions an entire plan or project for autonomous … | yes | yes | unknown | decisions 14, 18, 30, 41, 46, 47, 53, 56, 57, and 92; the existing … |
 

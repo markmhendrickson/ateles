@@ -30,6 +30,24 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/refuse_task_chip.py\""
           }
         ]
+      },
+      {
+        "matcher": "Bash|Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/credential_read_guard.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/rule_injection_gate.py\""
+          }
+        ]
       }
     ],
     "SessionStart": [

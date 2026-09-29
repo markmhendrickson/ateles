@@ -30,3 +30,16 @@ def _isolate_dispatch_failure_logs(monkeypatch, tmp_path):
     monkeypatch.setattr(
         skill_runner, "DISPATCH_FAILURE_LOG_DIR", tmp_path / "dispatch-failures"
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_harness_usage_snapshot(monkeypatch, tmp_path):
+    """Never let a test read or write the operator's live plan-usage snapshot.
+
+    The router folds ``~/.config/ateles/harness-usage.json`` into every
+    selection, so an unisolated test would pass or fail on the host's real
+    quota state. Tests that exercise the snapshot set their own path.
+    """
+    monkeypatch.setenv(
+        "APIS_HARNESS_USAGE_FILE", str(tmp_path / "isolated-harness-usage.json")
+    )

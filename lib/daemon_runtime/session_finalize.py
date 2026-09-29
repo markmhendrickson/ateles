@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 
@@ -54,10 +56,11 @@ def build_finalize_payload(
     """Build the /store body that finalizes one (autonomous) turn.
 
     Stores the trigger + outcome as a user/assistant agent_message pair PART_OF a
-    conversation (created here when no conversation_id is supplied), links the
-    conversation PART_OF the bound plan and/or task, and — when a learning is
-    given — stores it as a `learning` artifact REFERS_TO the conversation and
-    PART_OF the plan/task. Pure: returns the dict; does no I/O.
+    conversation (created here when no conversation_id is supplied), makes the
+    conversation REFERS_TO the task, and — when a learning is given — stores it
+    as a `learning` artifact REFERS_TO the conversation and PART_OF the task.
+    The task's single PART_OF edge is the authoritative planning ascent; a
+    session never binds a plan directly. Pure: returns the dict; does no I/O.
     """
     entities: list[dict] = []
     relationships: list[dict] = []
@@ -95,19 +98,17 @@ def build_finalize_payload(
             "content": learning,
         })
         relationships.append(_conv_ref({"source_index": learn_idx, "relationship_type": "REFERS_TO"}))
-        for anchor in (plan_id, task_id):
-            if anchor:
-                relationships.append({
-                    "source_index": learn_idx,
-                    "target_entity_id": anchor,
-                    "relationship_type": "PART_OF",
-                })
+        if task_id:
+            relationships.append({
+                "source_index": learn_idx,
+                "target_entity_id": task_id,
+                "relationship_type": "PART_OF",
+            })
 
-    # anchor the conversation to the plan and/or task (binding)
-    for anchor in (plan_id, task_id):
-        if not anchor:
-            continue
-        rel = {"target_entity_id": anchor, "relationship_type": "PART_OF"}
+    # Sessions do not join the planning hierarchy. They refer to the task whose
+    # own one-edge ascent supplies plan/project/strategy context.
+    if task_id:
+        rel = {"target_entity_id": task_id, "relationship_type": "REFERS_TO"}
         if conv_index is not None:
             rel["source_index"] = conv_index
         else:
@@ -125,11 +126,18 @@ def build_finalize_payload(
 
 # ── E1: conversation-per-execution-run ───────────────────────────────────────
 # A task execution RUN gets exactly ONE conversation, opened at dispatch and
-# anchored PART_OF the task (and plan when known) — the SAME anchoring
-# build_finalize_payload uses, so the session-integrity invariant (conversation
-# PART_OF plan OR task) holds and a later finalize_session(conversation_id=…)
-# APPENDS to it rather than creating a second conversation. A retry/reopen passes
-# a fresh run_key and therefore opens a new run conversation.
+# represented by an agent_session that REFERS_TO the task. The task's one
+# PART_OF edge supplies its planning ascent. A retry/reopen passes a fresh
+# run_key and therefore opens a new run session.
+
+
+@dataclass(frozen=True)
+class RunSession:
+    """The two durable records for one autonomous swarm execution."""
+
+    conversation_id: str
+    agent_session_id: str
+    native_session_id: str
 
 
 def build_run_conversation_payload(
@@ -143,27 +151,73 @@ def build_run_conversation_payload(
 ) -> dict:
     """Build the /store body that OPENS the conversation for one execution run.
 
-    The conversation is linked PART_OF the task and (when given) the plan. The
-    idempotency key embeds run_key so SSE replays of the same run reuse the
-    conversation while a genuine retry (new run_key) opens a fresh one. Pure.
+    The conversation refers to the task. ``plan_id`` remains accepted for API
+    compatibility but is deliberately not written: the task's PART_OF ascent
+    is the only authoritative plan binding. Pure.
     """
+    native_session_id = f"{task_id}:{run_key}"
     entities = [{
         "entity_type": "conversation",
+        "conversation_id": native_session_id,
+        "session_id": native_session_id,
         "name": title or f"{agent} run · task {task_id}",
         "summary": summary
         or f"Execution run for task {task_id} (agent {agent}, run {run_key}).",
     }]
-    relationships = [
-        {"source_index": 0, "target_entity_id": anchor, "relationship_type": "PART_OF"}
-        for anchor in (task_id, plan_id)
-        if anchor
-    ]
+    relationships = [{
+        "source_index": 0,
+        "target_entity_id": task_id,
+        "relationship_type": "REFERS_TO",
+    }]
     return {
         "entities": entities,
         "relationships": relationships,
         "observation_source": "workflow_state",
         "idempotency_key": f"run-conv-{task_id}-{run_key}",
     }
+
+
+def build_run_session_payload(
+    *,
+    task_id: str,
+    plan_id: str | None = None,
+    agent: str,
+    run_key: str,
+    title: str | None = None,
+    summary: str | None = None,
+) -> dict:
+    """Build the durable conversation + runtime identity for one swarm run."""
+    body = build_run_conversation_payload(
+        task_id=task_id, plan_id=plan_id, agent=agent,
+        run_key=run_key, title=title, summary=summary,
+    )
+    native_session_id = f"{task_id}:{run_key}"
+    body["entities"].append({
+        "entity_type": "agent_session",
+        "harness": "ateles-swarm",
+        "native_session_id": native_session_id,
+        "kind": "autonomous",
+        "title": title or f"{agent} run · task {task_id}",
+        "summary": summary
+        or f"Execution run for task {task_id} (agent {agent}, run {run_key}).",
+        "status": "active",
+        "trigger_kind": "task_dispatch",
+        "trigger_ref": task_id,
+    })
+    body["relationships"].extend([
+        {
+            "source_index": 1,
+            "target_entity_id": task_id,
+            "relationship_type": "REFERS_TO",
+        },
+        {
+            "source_index": 0,
+            "target_index": 1,
+            "relationship_type": "REFERS_TO",
+        },
+    ])
+    body["idempotency_key"] = f"run-session-{task_id}-{run_key}"
+    return body
 
 
 def build_turn_payload(
@@ -220,17 +274,304 @@ def create_run_conversation(
     title: str | None = None,
     summary: str | None = None,
 ) -> str | None:
-    """Open (idempotently) the run conversation; return its entity_id. Fail-open."""
+    """Open a legacy conversation-only run and verify it by readback."""
     data = _post_store(build_run_conversation_payload(
         task_id=task_id, plan_id=plan_id, agent=agent,
         run_key=run_key, title=title, summary=summary,
     ))
     if not data:
         return None
+    native_session_id = f"{task_id}:{run_key}"
     for e in data.get("entities", []):
         if e.get("entity_type") == "conversation":
-            return e.get("entity_id")
+            entity_id = e.get("entity_id")
+            if entity_id and _entity_readback_matches(
+                entity_id,
+                entity_type="conversation",
+                required_fields={
+                    "conversation_id": native_session_id,
+                    "session_id": native_session_id,
+                },
+            ):
+                return entity_id
     return None
+
+
+def _entity_readback_matches(
+    entity_id: str,
+    *,
+    entity_type: str,
+    required_fields: dict[str, str],
+) -> bool:
+    """Read an entity after write and verify the fields carrying identity."""
+    try:
+        response = httpx.get(
+            f"{NEOTOMA_BASE_URL}/entities/{entity_id}",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        snapshot = data.get("snapshot") or {}
+        if isinstance(snapshot.get("snapshot"), dict):
+            snapshot = snapshot["snapshot"]
+        actual_type = data.get("entity_type") or snapshot.get("entity_type")
+        matches = actual_type == entity_type and all(
+            snapshot.get(field) == value for field, value in required_fields.items()
+        )
+        if not matches:
+            log.warning("[finalize] %s readback mismatch for %s", entity_type, entity_id)
+        return matches
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[finalize] %s readback failed: %s", entity_type, exc)
+        return False
+
+
+def _relationship_readback_matches(
+    source_entity_id: str,
+    *,
+    target_entity_id: str,
+    relationship_type: str,
+) -> bool:
+    """Verify a relationship created by the same store write."""
+    try:
+        response = httpx.get(
+            f"{NEOTOMA_BASE_URL}/entities/{source_entity_id}/relationships",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return any(
+            rel.get("source_entity_id") == source_entity_id
+            and rel.get("target_entity_id") == target_entity_id
+            and rel.get("relationship_type") == relationship_type
+            for rel in response.json().get("relationships", [])
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[finalize] relationship readback failed: %s", exc)
+        return False
+
+
+def create_run_session(
+    *,
+    task_id: str,
+    plan_id: str | None = None,
+    agent: str,
+    run_key: str,
+    title: str | None = None,
+    summary: str | None = None,
+) -> RunSession | None:
+    """Open and verify the conversation and agent_session for one run."""
+    native_session_id = f"{task_id}:{run_key}"
+    data = _post_store(build_run_session_payload(
+        task_id=task_id, plan_id=plan_id, agent=agent,
+        run_key=run_key, title=title, summary=summary,
+    ))
+    if not data:
+        return None
+    ids = {
+        e.get("entity_type"): e.get("entity_id")
+        for e in data.get("entities", [])
+        if e.get("entity_id")
+    }
+    conversation_id = ids.get("conversation")
+    agent_session_id = ids.get("agent_session")
+    if not conversation_id or not agent_session_id:
+        return None
+    if not _entity_readback_matches(
+        conversation_id,
+        entity_type="conversation",
+        required_fields={
+            "conversation_id": native_session_id,
+            "session_id": native_session_id,
+        },
+    ):
+        return None
+    if not _entity_readback_matches(
+        agent_session_id,
+        entity_type="agent_session",
+        required_fields={
+            "harness": "ateles-swarm",
+            "native_session_id": native_session_id,
+        },
+    ):
+        return None
+    required_relationships = (
+        (conversation_id, task_id),
+        (agent_session_id, task_id),
+        (conversation_id, agent_session_id),
+    )
+    for source_entity_id, target_entity_id in required_relationships:
+        if not _relationship_readback_matches(
+            source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type="REFERS_TO",
+        ):
+            return None
+    return RunSession(
+        conversation_id=conversation_id,
+        agent_session_id=agent_session_id,
+        native_session_id=native_session_id,
+    )
+
+
+def _query_entity_rows(
+    entity_type: str, *, identity_field: str, identity_value: str
+) -> list[dict]:
+    """Return matching entity rows from the canonical Neotoma read route."""
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning("[finalize] no bearer token — entity query skipped")
+        return []
+    try:
+        response = httpx.post(
+            f"{NEOTOMA_BASE_URL}/entities/query",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json={
+                "entity_type": entity_type,
+                "snapshot_filters": {
+                    identity_field: {"op": "eq", "value": identity_value}
+                },
+                "limit": 25,
+                "include_snapshots": True,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json().get("entities", [])
+    except Exception as exc:  # noqa: BLE001 — recovery retries on the next sweep
+        log.warning("[finalize] %s query failed: %s", entity_type, exc)
+        return []
+
+
+def _row_snapshot(row: dict) -> dict:
+    """Unwrap the snapshot shapes returned by ``/entities/query``."""
+    snapshot = row.get("snapshot")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("snapshot"), dict):
+        return snapshot["snapshot"]
+    if isinstance(snapshot, dict):
+        return snapshot
+    return row
+
+
+def recover_run_session(
+    *, task_id: str, native_session_id: str
+) -> RunSession | None:
+    """Find and verify an already-created run without creating another one.
+
+    Recovery is deliberately exact: the native session identity must belong to
+    ``task_id``, exactly one conversation and one agent session must match, and
+    all three provenance relationships created before execution must still read
+    back. Ambiguity leaves the task in its non-dispatchable verified state.
+    """
+    if not native_session_id.startswith(f"{task_id}:"):
+        log.warning(
+            "[finalize] run identity %r does not belong to task %s",
+            native_session_id,
+            task_id,
+        )
+        return None
+
+    session_matches: list[tuple[str, dict]] = []
+    for row in _query_entity_rows(
+        "agent_session",
+        identity_field="native_session_id",
+        identity_value=native_session_id,
+    ):
+        snapshot = _row_snapshot(row)
+        entity_id = row.get("entity_id") or row.get("id")
+        if (
+            entity_id
+            and snapshot.get("harness") == "ateles-swarm"
+            and snapshot.get("native_session_id") == native_session_id
+        ):
+            session_matches.append((entity_id, snapshot))
+
+    conversation_matches: list[tuple[str, dict]] = []
+    for row in _query_entity_rows(
+        "conversation",
+        identity_field="conversation_id",
+        identity_value=native_session_id,
+    ):
+        snapshot = _row_snapshot(row)
+        entity_id = row.get("entity_id") or row.get("id")
+        if (
+            entity_id
+            and snapshot.get("conversation_id") == native_session_id
+            and snapshot.get("session_id") == native_session_id
+        ):
+            conversation_matches.append((entity_id, snapshot))
+
+    if len(session_matches) != 1 or len(conversation_matches) != 1:
+        log.warning(
+            "[finalize] run recovery is ambiguous for %s: sessions=%d conversations=%d",
+            native_session_id,
+            len(session_matches),
+            len(conversation_matches),
+        )
+        return None
+
+    agent_session_id, _ = session_matches[0]
+    conversation_id, _ = conversation_matches[0]
+    if not _entity_readback_matches(
+        conversation_id,
+        entity_type="conversation",
+        required_fields={
+            "conversation_id": native_session_id,
+            "session_id": native_session_id,
+        },
+    ):
+        return None
+    if not _entity_readback_matches(
+        agent_session_id,
+        entity_type="agent_session",
+        required_fields={
+            "harness": "ateles-swarm",
+            "native_session_id": native_session_id,
+        },
+    ):
+        return None
+    for source_entity_id, target_entity_id in (
+        (conversation_id, task_id),
+        (agent_session_id, task_id),
+        (conversation_id, agent_session_id),
+    ):
+        if not _relationship_readback_matches(
+            source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type="REFERS_TO",
+        ):
+            return None
+    return RunSession(
+        conversation_id=conversation_id,
+        agent_session_id=agent_session_id,
+        native_session_id=native_session_id,
+    )
+
+
+def update_run_session_status(run: RunSession, *, status: str) -> bool:
+    """Record and verify a run's terminal lifecycle state."""
+    data = _post_store({
+        "entities": [{
+            "entity_type": "agent_session",
+            "harness": "ateles-swarm",
+            "native_session_id": run.native_session_id,
+            "status": status,
+            "last_activity_at": datetime.now(timezone.utc).isoformat(),
+        }],
+        "observation_source": "workflow_state",
+        "idempotency_key": f"run-session-{run.native_session_id}-{status}",
+    })
+    if not data:
+        return False
+    return _entity_readback_matches(
+        run.agent_session_id,
+        entity_type="agent_session",
+        required_fields={
+            "harness": "ateles-swarm",
+            "native_session_id": run.native_session_id,
+            "status": status,
+        },
+    )
 
 
 def append_turn(

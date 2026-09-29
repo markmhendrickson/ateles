@@ -36,15 +36,23 @@ USAGE
         --role cicada \\
         --task "Report the current git branch and HEAD sha." \\
         [--provider codex] \\
+        [--work-class rebase] \\
         [--cwd /path/to/worktree] \\
         [--timeout 600] \\
         [--task-entity-id ent_...] \\
+        [--github-delivery] \\
+        [--github-token-env ATELES_AGENT_PAT] \\
         [--json]
 
 ``--provider`` pins the run to one adapter, bypassing weighted selection but
 NOT the eligibility rules (headroom floor, cooldowns, binary presence). The
 operator wants this while automatic balancing is still being trusted. Without
 it, ``harness_router`` chooses using the headroom file.
+
+``--work-class`` names the kind of work. A mechanical class
+(``local_provider.MECHANICAL_WORK_CLASSES``) that the ``claude-local``
+config enables runs on the local model first, with the frontier providers as
+the fallback; ``--provider claude-local`` pins the local model outright.
 
 Exit codes: 0 on a successful run, non-zero on any failure. The agent's stdout
 goes to this process's stdout; diagnostics go to stderr, so the caller can pipe
@@ -173,6 +181,13 @@ from harness_router import (  # noqa: E402
     configured_headroom,
     configured_providers,
     cooling_providers,
+    live_headroom,
+)
+from local_provider import (  # noqa: E402
+    LOCAL_PROVIDER,
+    MECHANICAL_WORK_CLASSES,
+    config_path as local_config_path,
+    load_config as load_local_config,
 )
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
@@ -207,6 +222,9 @@ async def dispatch(
     cwd: str | None = None,
     timeout: int | None = None,
     task_entity_id: str = "",
+    work_class: str | None = None,
+    github_delivery: bool = False,
+    github_token: str | None = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -218,7 +236,18 @@ async def dispatch(
     subagent happens inside run_skill: identity, allowlist, provider routing,
     credential stripping, and the harness_event rows. This function's only job
     is to hand it a well-formed request.
+
+    ``github_delivery`` states that this task must commit, push, or open a pull
+    request. It reuses ``run_skill``'s existing GitHub-contract path, which both
+    injects the delivery contract and enables Codex network for this dispatch.
+    Such a run must also supply ``github_token`` explicitly; the shared runner
+    refuses omitted or empty bindings instead of inheriting the daemon's ambient
+    GitHub identity. The default stays False so read-only and filesystem-only
+    work remains under the sandbox's network denial.
     """
+    # work_class reaches run_skill's local-first routing AND (via
+    # _run_skill_once) the lean-prompt/post-condition path — see
+    # local_provider.build_lean_prompt / verify_postcondition.
     return await run_skill(
         role,
         task,
@@ -227,6 +256,9 @@ async def dispatch(
         timeout=timeout,
         cwd=cwd,
         provider=provider,
+        work_class=work_class,
+        github_token=github_token,
+        include_github_contract=github_delivery,
     )
 
 
@@ -249,7 +281,13 @@ def _preflight(role: str, *, provider: str | None) -> str | None:
             f"unknown role {role!r}. Roles with a SKILL.md in {ATELES_REPO}: "
             + ", ".join(roles)
         )
-    if provider is not None and provider not in configured_providers():
+    if provider == LOCAL_PROVIDER:
+        if load_local_config() is None:
+            return (
+                f"provider {LOCAL_PROVIDER!r} is not configured: no valid, "
+                f"enabled config at {local_config_path()}"
+            )
+    elif provider is not None and provider not in configured_providers():
         return (
             f"provider {provider!r} is not in the configured order "
             f"({', '.join(configured_providers())}); "
@@ -278,6 +316,9 @@ def _headroom_note() -> str:
         source = "env APIS_HARNESS_HEADROOM"
     else:
         source = "defaults (all 1.0)"
+    live = [p for p in configured_providers() if live_headroom(p) is not None]
+    if live:
+        source += f"; live usage for {', '.join(live)}"
     values = configured_headroom()
     rendered = ", ".join(f"{p}={values[p]:g}" for p in configured_providers())
     cooling = ", ".join(sorted(cooling_providers())) or "none"
@@ -424,10 +465,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--provider",
-        choices=["claude", "codex", "cursor"],
+        choices=["claude", "codex", "cursor", LOCAL_PROVIDER],
         help=(
             "Force one provider, bypassing weighted selection (eligibility "
             "rules still apply). Omit to let the router choose on headroom."
+        ),
+    )
+    parser.add_argument(
+        "--work-class",
+        choices=sorted(MECHANICAL_WORK_CLASSES),
+        help=(
+            "Mechanical work class. When the claude-local config enables it, "
+            "the local model runs first and the frontier providers are the "
+            "fallback."
         ),
     )
     parser.add_argument(
@@ -445,6 +495,24 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Neotoma task entity id to record on the harness_event rows. "
             "Optional — a one-off dispatch need not have one."
+        ),
+    )
+    parser.add_argument(
+        "--github-delivery",
+        action="store_true",
+        help=(
+            "Task must commit, push, or open a pull request. Injects the shared "
+            "GitHub delivery contract and enables scoped Codex network access "
+            "for this dispatch only."
+        ),
+    )
+    parser.add_argument(
+        "--github-token-env",
+        help=(
+            "Environment variable containing the scoped token for this GitHub "
+            "delivery invocation. The value is never accepted on argv or "
+            "included in output. Required with --github-delivery until a "
+            "named non-token identity mechanism is established for this path."
         ),
     )
     parser.add_argument(
@@ -519,6 +587,31 @@ def main(argv: list[str] | None = None) -> int:
         emitter.emit_failure(reason)
         return 1
 
+    github_token: str | None = None
+    if args.github_token_env:
+        if not args.github_delivery:
+            return _usage_failure(
+                emitter, "--github-token-env requires --github-delivery"
+            )
+        if not args.github_token_env.isidentifier():
+            return _usage_failure(
+                emitter, "--github-token-env must name a valid environment variable"
+            )
+        github_token = os.environ.get(args.github_token_env, "")
+    elif args.github_delivery:
+        # Caught here as a fast, structured usage error — same shape as every
+        # other CLI misuse below — rather than left to surface deep inside
+        # skill_runner's credential-boundary refusal (ateles#590 security
+        # repair) as an unstructured "dispatch raised" error. Both paths
+        # ultimately refuse the same run; this one is knowable from the
+        # parsed arguments alone and should say so immediately.
+        return _usage_failure(
+            emitter,
+            "--github-delivery requires --github-token-env (a network-enabled "
+            "GitHub delivery run must bind an explicit scoped credential; "
+            "omitting it would otherwise be refused deeper in the dispatch)",
+        )
+
     refusal = _preflight(role, provider=args.provider)
     if refusal:
         print(f"dispatch_role: {refusal}", file=sys.stderr)
@@ -564,6 +657,9 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 timeout=args.timeout,
                 task_entity_id=args.task_entity_id,
+                work_class=args.work_class,
+                github_delivery=args.github_delivery,
+                github_token=github_token,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above

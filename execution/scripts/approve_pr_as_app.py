@@ -37,13 +37,13 @@ it was silently read as deciding who is even LOOKED AT. Fix, two parts:
     the approval if this ever finds anything, independent of whether every
     required lens itself passed.
   - `--panel {required,all}` (`all` is the default while bootstrap mode is
-    on, see `_panel_all_default`): `all` folds every one of the six lenses
-    into the required set up front, so the gap above can never open at
-    all — a lens has to clear or it is a required-lens FAILURE, not merely
-    a "non-required block" the second layer has to catch. `required` is
-    the pre-#1293 behaviour (derived floor only). The non-required-block
-    check above stays on regardless of `--panel`, as defense in depth for
-    when `required` is explicitly chosen.
+    on, see `_panel_all_default`): `all` folds every one of the five lenses
+    in the bootstrap roster into the required set up front, so the gap
+    above can never open at all — a lens has to clear or it is a
+    required-lens FAILURE, not merely a "non-required block" the second
+    layer has to catch. `required` is the pre-#1293 behaviour (derived
+    floor only). The non-required-block check above stays on regardless of
+    `--panel`, as defense in depth for when `required` is explicitly chosen.
 
 Reuse, not rebuild:
   - Lens verdict parsing: `swarm_dispatch.lens_own_verdict` /
@@ -89,13 +89,19 @@ Usage:
 `--lenses` ADDS to the derived floor; it can never remove a lens the panel
 logic would itself require for this diff/issue. `--panel all` (the default
 while bootstrap mode is on — see `_panel_all_default` and
-ATELES_APPROVE_PANEL_REQUIRED_ONLY below) additionally requires the six
-lenses in `BOOTSTRAP_PANEL_LENSES` (pm, arch, ux, qa, security, content —
-the panel bootstrap mode actually dispatches; `legal` is deliberately NOT
-in this set and joins the floor only when `review_panel.select_panel`
-itself derives it for the diff) to have signed off on the current head;
-`--panel required` uses the diff-derived floor alone, as before
-ateles#1293's fix. Either way, a live REQUEST_CHANGES/`[BLOCKING]`
+ATELES_APPROVE_PANEL_REQUIRED_ONLY below) additionally requires the five
+lenses in `BOOTSTRAP_PANEL_LENSES` (pm, arch, ux, qa, security — the
+bootstrap roster; NEITHER `legal` NOR `content`/Corvus is in this set)
+to have signed off on the current head; `legal` joins the floor only when
+`review_panel.select_panel` itself derives it for the diff, and
+`content`/Corvus is excluded from bootstrap mode outright (operator
+ruling 2026-09-26, agent_policy `ent_d0f1a840e549b3b299f62397`) — it is
+never required under `--panel all`, and `resolve_lenses` actively strips
+it even if `select_panel` would otherwise have derived it into the floor
+for a non-trivial diff (see `resolve_lenses`). `--panel required` uses the
+diff-derived floor alone, as before ateles#1293's fix — `content` CAN
+still appear there, since that floor mirrors the normal non-bootstrap
+pipeline exactly. Either way, a live REQUEST_CHANGES/`[BLOCKING]`
 verdict from ANY lens on the current head refuses the approval, whether or
 not that lens is in the required set. Without --apply this is always a dry
 run: it prints the derived-lens rationale, the per-lens table, the non-
@@ -168,11 +174,10 @@ LENS_AGENTS: dict[str, str] = {
     "content": "corvus",
 }
 
-# The six lenses bootstrap mode's own panel actually dispatches (agent_policy
+# The five lenses bootstrap mode's own panel actually dispatches (agent_policy
 # `ent_d0f1a840e549b3b299f62397`, "Software work runs in bootstrap mode":
 # "Pavo pm, Waxwing arch, Falco security, Phoenicurus qa, Accipiter ux when
-# UI changes" — plus Corvus content, which the same review round confirmed
-# is part of the live bootstrap roster).
+# UI changes").
 #
 # NOT `list(LENS_AGENTS)` — that is a documented incident, not a typo. PR
 # #1303 round 1 shipped `--panel all` unioning in literally every entry of
@@ -191,9 +196,31 @@ LENS_AGENTS: dict[str, str] = {
 # licensing diff) regardless of what `--panel` is set to. `--panel all`
 # only widens the FLOOR to this bootstrap roster; it never narrows what
 # `select_panel` would otherwise require.
+#
+# `content`/Corvus is likewise NOT in this set, but for a different reason
+# than `legal`: operator ruling 2026-09-26 excludes Corvus from bootstrap
+# review dispatch and the bootstrap approval gate OUTRIGHT — unlike
+# `legal`, `content` must never join the bootstrap floor even when this
+# PR's own diff would otherwise cause `review_panel.select_panel` to
+# select it (its `forward_looking=True`/`min_changed_files=5` opt-in path
+# on a >=5-file diff). `resolve_lenses` enforces this by stripping
+# `content` out of the diff-derived floor whenever `panel_all` is set —
+# see its docstring. `content` remains fully available to the normal
+# non-bootstrap pipeline (`swarm_dispatch.py`'s canary-lane dispatch),
+# which calls `review_panel.select_panel` directly and never goes through
+# this tool or `BOOTSTRAP_PANEL_LENSES`.
 BOOTSTRAP_PANEL_LENSES: frozenset[str] = frozenset(
-    {"pm", "arch", "ux", "qa", "security", "content"}
+    {"pm", "arch", "ux", "qa", "security"}
 )
+
+# Lenses bootstrap mode excludes outright, even when review_panel.select_panel
+# would otherwise derive them into a PR's floor for this diff (ateles#1317,
+# operator ruling 2026-09-26). Currently just Corvus/content — see the
+# BOOTSTRAP_PANEL_LENSES comment above. Kept as a separate named constant
+# (rather than inlined into resolve_lenses) so a future bootstrap-only
+# exclusion has an obvious place to be added, and so tests can pin the exact
+# set the way TestBootstrapPanelLensesConstant already pins the roster.
+BOOTSTRAP_EXCLUDED_LENSES: frozenset[str] = frozenset({"content"})
 
 _FAILING_CHECK_CONCLUSIONS = ("failure", "timed_out", "cancelled", "action_required")
 
@@ -1189,13 +1216,21 @@ async def submit_app_approval(
     return readback
 
 
-def _print_derived_lenses(required: list[RequiredLens], extra: list[str]) -> None:
+def _print_derived_lenses(
+    required: list[RequiredLens], extra: list[str], *, excluded: list[str] | None = None
+) -> None:
     print()
     print("required lenses (derived from review_panel.select_panel for this diff/issue):")
     for r in required:
         print(f"  - {r.lens}: {r.reason}")
     if extra:
         print(f"added on top of the derived floor (--lenses and/or --panel all): {', '.join(extra)}")
+    if excluded:
+        print(
+            "excluded from bootstrap mode outright (operator ruling 2026-09-26, "
+            f"BOOTSTRAP_EXCLUDED_LENSES) — never evaluated or required despite "
+            f"select_panel deriving it for this diff: {', '.join(excluded)}"
+        )
     print()
 
 
@@ -1230,7 +1265,7 @@ async def resolve_lenses(
     pr_body: str,
     extra_lenses: list[str],
     panel_all: bool = False,
-) -> tuple[list[str], list[RequiredLens]]:
+) -> tuple[list[str], list[RequiredLens], list[str]]:
     """The lens set the tool will require: the derived floor plus `--lenses`
     additions, and — with `panel_all` — the bootstrap-mode panel
     (`BOOTSTRAP_PANEL_LENSES`) rather than only the derived floor.
@@ -1239,26 +1274,53 @@ async def resolve_lenses(
     used to shrink it, so a caller can never accidentally (or deliberately)
     drop a lens `review_panel.select_panel` itself would require for this
     diff/issue. `panel_all` is a separate, stronger union: bootstrap mode
-    (agent_policy `ent_d0f1a840e549b3b299f62397`) requires the six lenses
-    the bootstrap panel actually dispatches — pm, arch, ux, qa, security,
-    content — to have signed off on the current head, regardless of what
-    this diff's panel-assembly logic would have seated. This is
-    `BOOTSTRAP_PANEL_LENSES`, NOT `list(LENS_AGENTS)`: the latter also
-    contains `legal`, which bootstrap mode's own roster never dispatches for
-    an ordinary diff (round-1 review on this PR: requiring it unconditionally
-    made `--apply` unable to ever pass). `legal` still joins the floor for a
-    diff that genuinely needs it — via `derive_required_lenses` calling
+    (agent_policy `ent_d0f1a840e549b3b299f62397`) requires the five lenses
+    the bootstrap panel actually dispatches — pm, arch, ux, qa, security —
+    to have signed off on the current head, regardless of what this diff's
+    panel-assembly logic would have seated. This is `BOOTSTRAP_PANEL_LENSES`,
+    NOT `list(LENS_AGENTS)`: the latter also contains `legal`, which
+    bootstrap mode's own roster never dispatches for an ordinary diff
+    (round-1 review on this PR: requiring it unconditionally made `--apply`
+    unable to ever pass). `legal` still joins the floor for a diff that
+    genuinely needs it — via `derive_required_lenses` calling
     `review_panel.select_panel`, unaffected by `panel_all` — this only
-    changes what the BOOTSTRAP DEFAULT widens the floor to. The reasons for
-    the derived floor are still computed and reported (`required`), so the
-    dry-run table still explains WHY each lens was in the diff-derived floor;
-    the panel_all additions are reported as additions, exactly like
-    `--lenses`.
+    changes what the BOOTSTRAP DEFAULT widens the floor to.
+
+    `content`/Corvus is handled differently from `legal`: it is not merely
+    absent from `BOOTSTRAP_PANEL_LENSES` (so `panel_all` never ADDS it) — it
+    is actively EXCLUDED (`BOOTSTRAP_EXCLUDED_LENSES`) from the diff-derived
+    floor itself whenever `panel_all` is set, even though
+    `derive_required_lenses` calls the SAME `review_panel.select_panel` that
+    can independently select `content` as a forward-looking lens for a
+    >=5-file diff (`Lens.min_changed_files=5`). Operator ruling 2026-09-26
+    (ateles#1317): while bootstrap mode is active, Corvus/content must never
+    be required, including by a diff that would normally pull it in. This is
+    a bootstrap-only exclusion — `derive_required_lenses` itself is
+    unaffected, so `--panel required` (the non-bootstrap-default path) can
+    still surface `content` in `required` exactly as `review_panel.py`
+    intends for the normal swarm pipeline (e.g. the swarm-canary lane, which
+    never calls this tool at all and so never sees this filter).
+
+    The reasons for the derived floor are still computed and reported
+    (`required`) even for an excluded lens, so the dry-run table still
+    explains WHY `select_panel` would have seated it; the panel_all
+    additions are reported as additions, exactly like `--lenses`.
+
+    Returns a third element, `actually_excluded`: the lenses this call
+    stripped for being in `BOOTSTRAP_EXCLUDED_LENSES` — from the
+    diff-derived floor, from `extra_lenses`, or both — so the caller can
+    report an explicit `--lenses content`-style request was dropped rather
+    than silently discarding it (round-2 self-review finding: an operator
+    passing `--lenses content` under `--panel all` previously got no
+    indication their addition was ignored).
     """
     required = await derive_required_lenses(client, repo=repo, pr=pr, pr_body=pr_body)
-    floor = [r.lens for r in required]
+    excluded = BOOTSTRAP_EXCLUDED_LENSES if panel_all else frozenset()
+    floor = [r.lens for r in required if r.lens not in excluded]
     all_lenses = sorted(BOOTSTRAP_PANEL_LENSES) if panel_all else []
-    added = [lens for lens in (*extra_lenses, *all_lenses) if lens not in floor]
+    added = [
+        lens for lens in (*extra_lenses, *all_lenses) if lens not in floor and lens not in excluded
+    ]
     # De-duplicate `added` while preserving first-seen order (extra_lenses
     # before the panel_all union), since `--lenses` and panel_all can name
     # the same lens.
@@ -1268,7 +1330,12 @@ async def resolve_lenses(
         if lens not in seen:
             seen.add(lens)
             deduped_added.append(lens)
-    return floor + deduped_added, required
+
+    actually_excluded = sorted(
+        {r.lens for r in required if r.lens in excluded}
+        | {lens for lens in extra_lenses if lens in excluded}
+    )
+    return floor + deduped_added, required, actually_excluded
 
 
 async def run(
@@ -1288,7 +1355,7 @@ async def run(
         pr_body = pr_data.get("body") or ""
 
         try:
-            lenses, required = await resolve_lenses(
+            lenses, required, excluded = await resolve_lenses(
                 client,
                 repo=repo,
                 pr=pr,
@@ -1320,7 +1387,7 @@ async def run(
 
         floor_names = {r.lens for r in required}
         added = [lens for lens in lenses if lens not in floor_names]
-        _print_derived_lenses(required, added)
+        _print_derived_lenses(required, added, excluded=excluded)
 
         comments = await _fetch_issue_comments(client, repo, pr)
 
@@ -1414,14 +1481,17 @@ def main() -> int:
             "head. The required-lens floor is derived from "
             "review_panel.select_panel for this PR's diff and linked issue; "
             "--lenses can only ADD to that floor. --panel all additionally "
-            "requires the six lenses bootstrap mode actually dispatches "
-            "(pm, arch, ux, qa, security, content — BOOTSTRAP_PANEL_LENSES; "
-            "legal is NOT in this set and joins the floor only when "
-            "select_panel derives it for the diff) to have signed off — "
-            "the bootstrap-mode default (agent_policy "
-            "ent_d0f1a840e549b3b299f62397); pass --panel required to use "
-            "the diff-derived floor alone, or set "
-            "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default."
+            "requires the five lenses bootstrap mode actually dispatches "
+            "(pm, arch, ux, qa, security — BOOTSTRAP_PANEL_LENSES; legal is "
+            "NOT in this set and joins the floor only when select_panel "
+            "derives it for the diff; content/Corvus is excluded from "
+            "bootstrap mode outright, per operator ruling, and is stripped "
+            "from the floor even if select_panel would have derived it for "
+            "this diff) to have signed off — the bootstrap-mode default "
+            "(agent_policy ent_d0f1a840e549b3b299f62397); pass --panel "
+            "required to use the diff-derived floor alone (where content "
+            "can still appear), or set ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 "
+            "to change the default."
         )
     )
     parser.add_argument("--repo", required=True, help="owner/name")
@@ -1440,11 +1510,13 @@ def main() -> int:
         default="all" if panel_all_default else "required",
         help=(
             "'all' (default while bootstrap mode is on, see "
-            "ATELES_APPROVE_PANEL_REQUIRED_ONLY) requires every one of the six "
-            "review lenses to have signed off on the current head; 'required' "
+            "ATELES_APPROVE_PANEL_REQUIRED_ONLY) requires every one of the "
+            "five bootstrap-roster review lenses to have signed off on the "
+            "current head, and excludes content/Corvus outright; 'required' "
             "uses only the diff-derived floor from review_panel.select_panel "
-            "(plus --lenses additions). Either way, a live blocking verdict "
-            "from ANY lens — required or not — always refuses the approval."
+            "(plus --lenses additions, where content can still appear). "
+            "Either way, a live blocking verdict from ANY lens — required "
+            "or not — always refuses the approval."
         ),
     )
     parser.add_argument(

@@ -6,13 +6,26 @@
 
 ## Problem
 
-Today every PR to `main` is reviewed by a single generic agent, **Loxia**
-(`loxia-pr-review.yml` → `loxia_review.py`). Loxia applies one fixed checklist
-(scope, secrets, gitleaks, linting, T3 pattern consistency, docs) regardless of
-what the PR touches. That is the right *baseline* — every PR should get the
-secrets/scope/style pass — but it means a finance change and a health change get
-the same reviewer with no domain expertise, unlike the neotoma repo where review
-is routed to the relevant owning agent.
+**Update, 2026-09-26:** Loxia no longer runs on every PR. Bootstrap mode
+(agent_policy `ent_d0f1a840e549b3b299f62397`) routes ordinary software work
+through the operator/lens review path; only the `swarm-canary` lane still
+goes through the swarm pipeline end to end. Loxia re-reviewing every push
+duplicated that bootstrap review and consumed the same Claude subscription
+quota bootstrap needed, so `loxia-pr-review.yml` now gates its `review` job
+on a `swarm-canary` label (on the PR or its linked parent issue) via
+`execution/scripts/loxia_canary_gate.py`. The design below (per-domain
+fan-out) was written when Loxia ran universally and still describes the
+target design for the canary lane; "every PR" in the text that follows means
+"every PR in the swarm-canary lane," not literally every PR to `main`.
+
+Before the gate, every PR to `main` was reviewed by a single generic agent,
+**Loxia** (`loxia-pr-review.yml` → `loxia_review.py`). Loxia applies one fixed
+checklist (scope, secrets, gitleaks, linting, T3 pattern consistency, docs)
+regardless of what the PR touches. That is the right *baseline* — every
+canary-lane PR should get the secrets/scope/style pass — but it means a
+finance change and a health change get the same reviewer with no domain
+expertise, unlike the neotoma repo where review is routed to the relevant
+owning agent.
 
 ## Goal
 
