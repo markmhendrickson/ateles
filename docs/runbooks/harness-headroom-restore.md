@@ -191,3 +191,64 @@ Pass `--task-entity-id ent_...` on the real (non-dry-run) command, then query
 module docstring, USAGE section, for the exact `retrieve_entities` call. No
 access to this script's own process or stdout is needed to see whether the
 dispatch started, completed, or failed.
+
+## Usage gate: a refused frontier dispatch is not exhaustion
+
+Claude dispatch is also gated on the usage snapshot itself
+(`harness_router.usage_gate`, Phase A3). A dispatch is refused, with its own
+message, when:
+
+- **`usage reading stale since <time>`** (or `missing` / `malformed`): the
+  reading is older than `APIS_USAGE_STALE_SECONDS` (default 1800), absent, or not
+  a valid set of windows. The dispatcher refreshes it itself before selecting
+  when it is older than `APIS_USAGE_REFRESH_SECONDS` (default 600), by running one
+  minimal `claude` probe whose `rate_limit_event` carries the plan's five-hour and
+  weekly windows; a refusal means that probe also failed (not logged in, CLI
+  missing). Run the same refresh by hand and read the verdict:
+
+  ```sh
+  python3 execution/scripts/harness_usage.py refresh
+  python3 execution/scripts/harness_usage.py show
+  ```
+
+  Verify: `show` lists `usage_gate.snapshot_age_seconds` near 0 and
+  `dispatch_allowed`. Do not edit the headroom file to get past a stale refusal;
+  it does not affect the gate.
+- **`weekly usage N% is at or above the pace line ...`**: swarm use is ahead of
+  `APIS_USAGE_WEEKLY_CEILING_PERCENT` (60) x the elapsed fraction of the week +
+  `APIS_USAGE_PACE_BURST_PERCENT` (10). The message states when capacity returns
+  if nothing more is used. Note the weekly percent is the whole account, so the
+  operator's own sessions count toward it. Local/mechanical work is never gated;
+  Codex and Cursor have no automatic live source and are not gated.
+
+Every stale, missing or malformed refusal already carries the refresh command
+above and, when the last automatic refresh failed, the CLI's own reason (for
+example "Not logged in"): `show` prints the same as `last_refresh_failure`. Read
+it before anything else; it tells login trouble from a missing binary from a
+changed report shape.
+
+After a failed automatic refresh the daemon does not probe again for
+`APIS_USAGE_PROBE_BACKOFF_SECONDS` (default 300), however many dispatches (one per
+lens) arrive; the refusal says when the next automatic attempt is due. The
+refresh runs in a worker thread, never on the Apis event loop. A hand `refresh`
+ignores the backoff but runs under **your** login and environment, so it can
+succeed while the daemon's own refresh, under its launchd environment, still
+fails: after the next dispatch, check `show` for `last_refresh_failure`.
+
+An account whose report has **no weekly window** cannot be paced, so it is
+refused as malformed on every dispatch; the only way past that is the valve
+below.
+
+**The valve, and where to set it.** `APIS_USAGE_GATE=off` disables the gate (an
+emergency valve, not a fix) and `APIS_USAGE_PROBE=off` disables only the
+automatic probe. The Apis daemon reads them from its own environment: add the
+variable under `EnvironmentVariables` in `~/Library/LaunchAgents/com.ateles.apis.plist`,
+then unload and load that plist and confirm the new process picked it up. A
+shell `export` changes what `harness_usage.py show` reports in that shell but
+does NOT change what the running daemon does. Remove the variable and restart
+again once the reading is fed.
+
+**What the meter costs.** The probe is one small haiku call at most every
+`APIS_USAGE_REFRESH_SECONDS` (600) while dispatches are running, and it counts
+toward the window it measures. It is skipped while Claude is cooling and when
+the reading is fresh.

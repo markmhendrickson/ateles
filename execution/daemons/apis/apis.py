@@ -41,6 +41,20 @@ Environment variables:
   APIS_HARNESS_MIN_HEADROOM   Hold out providers at/below this score (default: .05).
   APIS_HARNESS_COOLDOWN_SECONDS
                               Hold-out after quota/auth/launch failure (default: 3600).
+  APIS_USAGE_GATE             "off" disables the usage gate (default on): a Claude
+                              reading that is missing, malformed or older than
+                              APIS_USAGE_STALE_SECONDS (1800) refuses new frontier
+                              dispatch, as does weekly use at/above the pace line
+                              (APIS_USAGE_WEEKLY_CEILING_PERCENT=60 x elapsed
+                              fraction of the week + APIS_USAGE_PACE_BURST_PERCENT=10).
+                              Local/mechanical work is never gated.
+  APIS_USAGE_REFRESH_SECONDS  Age at which a dispatch first refreshes Claude's
+                              reading via a minimal probe run (default: 600).
+  APIS_USAGE_PROBE_BACKOFF_SECONDS
+                              No automatic probe for this long after a failed one
+                              (default: 300).
+  APIS_USAGE_PROBE            "off" disables that probe (then keep the reading fed
+                              with `harness_usage.py refresh`).
   APIS_CLAUDE_BIN             Claude CLI path (default: autodetect on PATH).
   APIS_CODEX_BIN              Codex CLI path (defaults to ChatGPT app, then PATH).
   APIS_CURSOR_BIN             Cursor Agent CLI path (default: cursor-agent on PATH).

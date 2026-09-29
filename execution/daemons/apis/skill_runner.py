@@ -78,8 +78,10 @@ from harness_router import (  # noqa: E402
     record_cooling,
     render_wall,
     usable_provider_names,
+    usage_gate_refusals_all,
 )
 from limit_reset import parse_refusal  # noqa: E402
+from usage_probe import refresh_usage_if_stale  # noqa: E402
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -1475,6 +1477,29 @@ def _cool_after_capacity_failure(provider: str, result: "SkillResult") -> None:
         record_cooling(provider, until, reason=reason, observed_at=now)
     except Exception as exc:  # noqa: BLE001 — persistence must never break failover
         log.error(f"[apis] could not persist {provider} cooling window: {exc}")
+
+
+def _refresh_usage_snapshot(binaries: dict[str, str | None]) -> None:
+    """Refresh the usage snapshot under the subscription-only child environment."""
+    try:
+        refresh_usage_if_stale(binaries, env=_subscription_only_env())
+    except Exception as exc:  # noqa: BLE001 - feeding must never break dispatch
+        log.error(f"[apis] usage snapshot refresh failed: {exc}")
+
+
+def _usage_gate_message(gates: dict) -> tuple[str, str]:
+    """The distinct "usage gate refused frontier dispatch" text and retry time.
+
+    Names WHICH gate refused (stale reading vs weekly pace) so the operator is
+    never told a stale meter is exhaustion, and says when to expect capacity.
+    """
+    retry_at = render_wall(min(float(g.returns_at) for g in gates.values()))
+    detail = "; ".join(f"{name}: {g.message}" for name, g in sorted(gates.items()))
+    return (
+        f"frontier dispatch refused by the usage gate ({detail}); "
+        f"local/mechanical work is unaffected; retry after {retry_at}",
+        retry_at,
+    )
 
 
 def _cooled_message(windows: dict[str, dict[str, object]]) -> tuple[str, str]:
@@ -3054,7 +3079,36 @@ def usable_providers() -> set[str]:
     honored, so that pinning never turns into "the lens silently did not run"
     (review_panel.resolve_lens_provider).
     """
-    return usable_provider_names(_provider_binaries())
+    binaries = _provider_binaries()
+    # The usage gate is part of "usable": refresh a stale reading first, or a
+    # provider that would be usable after the refresh looks excluded.  The probe
+    # blocks (a file lock plus a CLI run), so it is never run from a thread that
+    # hosts an event loop: async code must call `usable_providers_async`.
+    if _on_event_loop():
+        log.debug("[apis] usable_providers() called on the event loop; usage refresh skipped")
+    else:
+        _refresh_usage_snapshot(binaries)
+    return usable_provider_names(binaries)
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+async def usable_providers_async() -> set[str]:
+    """`usable_providers` for async callers: refreshes the usage reading off the loop.
+
+    Refresh-before-selection still holds (the refresh completes before the gate is
+    read), but the probe runs in a worker thread so the Apis event loop never
+    stalls for its duration.
+    """
+    binaries = _provider_binaries()
+    await asyncio.to_thread(_refresh_usage_snapshot, binaries)
+    return usable_provider_names(binaries)
 
 
 async def run_skill(
@@ -3159,6 +3213,14 @@ async def run_skill(
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and the claude-only routing.
     deny_correct = owns_pending_gate or seated_reviewer
+
+    # Refresh the usage snapshot BEFORE anything reads provider selection:
+    # `_tier_bound_binaries` below consults the usage gate through
+    # `usable_provider_names`, so a refresh that ran later (inside
+    # `_run_provider_attempts`) would let a stale reading exclude claude here and
+    # send the tier filter's fallback to providers with no model bound.
+    if provider in (None, "claude"):
+        await asyncio.to_thread(_refresh_usage_snapshot, _provider_binaries())
 
     precomputed_tier: model_tiering.ResolvedTier | None = None
     if model is None and action_class is not None:
@@ -3432,6 +3494,12 @@ async def _run_provider_attempts(
         binaries = {"claude": binaries.get("claude")}
         preferred_provider = None
 
+    if provider in (None, "claude"):
+        # Callers that enter here directly (run_review_prompt) refresh here;
+        # `run_skill` already did, ahead of its own selection reads, so this is
+        # then a cheap "fresh" check.  Never raises; a failed refresh leaves the
+        # reading to age out and the gate refuses on it.
+        await asyncio.to_thread(_refresh_usage_snapshot, binaries)
     candidates = provider_candidates(
         binaries, preferred=provider, local_first=local_first and not owns_pending_gate
     )
@@ -3454,6 +3522,13 @@ async def _run_provider_attempts(
             log.warning(f"[apis] {skill} not dispatched — {msg}")
             return SkillResult(
                 skill, False, None, "", "", error=msg, cooled_until=earliest,
+            )
+        gated = usage_gate_refusals_all(scope)
+        if gated:
+            msg, retry_at = _usage_gate_message(gated)
+            log.warning(f"[apis] {skill} not dispatched — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, cooled_until=retry_at,
             )
         if owns_pending_gate and provider is None:
             reason = provider_exclusion_reason("claude", binaries) or "not eligible"
