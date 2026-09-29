@@ -325,7 +325,40 @@ BASH_BLOCK = [
     # tokenizer change can't silently reopen it.
     (
         "awk getline reads the file via its program string",
-        f'awk \'BEGIN{{while((getline line < "{ENV}") > 0) print line}}\'',
+        f"awk 'BEGIN{{while((getline line < \"{ENV}\") > 0) print line}}'",
+    ),
+    # Neotoma task ent_32394756032dd7a59e9311b6: `env -u NAME <command>` is
+    # now allowed after a credential source (see BASH_ALLOW), so each env
+    # shape that still prints the environment must stay refused.
+    ("env with only -u after source", f"set -a && source {ENV} && set +a && env -u X"),
+    (
+        "env -i after source with no program",
+        f"set -a && source {ENV} && set +a && env -i",
+    ),
+    ("env running a bare env after source", f"source {ENV}; env -u X env"),
+    ("env running a bare env, no source", "env -u X env"),
+    ("env running printenv after source", f"source {ENV}; env -u X printenv"),
+    (
+        "env -u dump inside command substitution",
+        f'source {ENV}; echo "$(env -u X) trailing"',
+    ),
+    ("env -u dump inside shell wrapper", f"source {ENV}; sh -c 'env -u X'"),
+    # Self-review findings on the same change: a redirection is not a
+    # program operand, `--` does not end assignment parsing, and a program
+    # that can print its inherited environment is still a dump after source.
+    ("env -u with stderr redirect after source", f"source {ENV}; env -u X 2>/dev/null"),
+    ("env with fd-dup redirect after source", f"source {ENV}; env >&2"),
+    ("env with spaced file redirect after source", f"source {ENV}; env > /tmp/o.txt"),
+    ("bare env with stderr redirect", "env 2>/dev/null"),
+    ("env -- assignment only after source", f"source {ENV}; env -- A=1"),
+    ("env -u running bash -c set after source", f"source {ENV}; env -u X bash -c set"),
+    (
+        "env -u running awk over ENVIRON after source",
+        f"source {ENV}; env -u X awk 'BEGIN{{for(k in ENVIRON)print k}}'",
+    ),
+    (
+        "env -u running python3 -c after source",
+        f"source {ENV}; env -u X python3 -c 'import os; print(os.environ)'",
     ),
 ]
 
@@ -432,6 +465,36 @@ BASH_ALLOW = [
     (
         "fly ssh console with a case statement printing only a label",
         'fly ssh console -C "case \\"$ENVIRONMENT\\" in prod) echo PROD;; *) echo OTHER;; esac"',
+    ),
+    # Neotoma task ent_32394756032dd7a59e9311b6: `env` with -u/-i/VAR=value
+    # and a program operand runs that program and prints nothing itself.
+    # Both shapes below were refused on 2026-09-29.
+    (
+        "env -u running a command after source (swarm approve-as-App form)",
+        f"set -a && source {ENV} && set +a && "
+        "export GITHUB_TOKEN=$(env -u GITHUB_TOKEN -u GH_TOKEN gh auth token)",
+    ),
+    (
+        "env -u running gh directly after source",
+        f"set -a && source {ENV} && set +a && env -u GITHUB_TOKEN gh pr list",
+    ),
+    (
+        "env -i running a program after source",
+        f"source {ENV}; env -i python3 script.py",
+    ),
+    (
+        "env -u running a command with a quoted trailing argument",
+        "env -u GITHUB_TOKEN -u GH_TOKEN gh pr view 1 --json files "
+        "-q '.updatedAt, .files[].path'",
+    ),
+    (
+        "env -u in a shell wrapper running a command",
+        'sh -c "env -u GITHUB_TOKEN gh pr list"',
+    ),
+    (
+        "sourced variable used as a request header, response discarded",
+        f"set -a && source {ENV} && set +a && curl -s -o /dev/null "
+        "-w '%{http_code}' -H \"x-api-key: $API_KEY\" https://example.test/v1",
     ),
 ]
 
@@ -784,7 +847,7 @@ def test_awk_getline_bypass_has_a_real_canary_effect_then_is_blocked():
     change can't silently reopen this call shape even though _SED_AWK_RE
     already matches bare `awk`."""
     canary = "fake_test_token_not_real_0000"
-    command = f'awk \'BEGIN{{while((getline line < "{ENV}") > 0) print line}}\''
+    command = f"awk 'BEGIN{{while((getline line < \"{ENV}\") > 0) print line}}'"
 
     unguarded = subprocess.run(
         ["bash", "-c", command], capture_output=True, text=True, check=True

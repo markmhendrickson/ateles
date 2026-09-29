@@ -36,7 +36,9 @@ WHAT IS REFUSED (would put file content into context):
     credential path. Also `env`,
     `printenv`, a bare `set` dump, or `declare -p`/`export -p`/`typeset -p`
     AFTER sourcing one (a source alone does not print anything; the dump
-    does). Also base64/xxd/od/hexdump/strings against a credential path —
+    does). `env` counts as a dump only when no program operand follows its
+    options and assignments: `env -u NAME <command>` runs the command and
+    prints nothing. Also base64/xxd/od/hexdump/strings against a credential path —
     encoding the bytes is still exfiltrating them into context. Also an
     interpreter's inline program (`python3 -c`, `perl -e`, `ruby -e`,
     `node -e`) whose source text NAMES a credential path — this hook cannot
@@ -525,46 +527,137 @@ def _pgrep_reads_full_command(segment: str) -> bool:
 
 
 def _env_dumps_ambient(segment: str) -> bool:
-    """True when `env` has no program operand and therefore prints values."""
-    match = _ENV_RE.search(segment)
-    if not match:
-        return False
-    tail = segment[match.end() :].lstrip()
+    """True when ANY `env` invocation in `segment` has no program operand
+    and therefore prints values.
+
+    `env -u NAME <command>`, `env -i <command>`, and `env VAR=1 <command>`
+    run the command and print nothing themselves, so they are not dumps
+    (the swarm's standard `env -u GITHUB_TOKEN -u GH_TOKEN gh ...` form).
+    Every occurrence is checked, not only the first: `env -u X env` runs a
+    second, bare `env` as its program, and that one dumps."""
+    return any(
+        _env_program(segment[match.end() :]) is None
+        for match in _ENV_RE.finditer(segment)
+    )
+
+
+# Programs that can print the environment they inherit when `env` hands it
+# to them: a second `env`/`printenv`, awk (its program is positional and can
+# walk ENVIRON), or a shell/interpreter given an inline program. After a
+# credential source, `env -u X <one of these>` is refused even though env
+# itself prints nothing; before the ent_32394756032dd7a59e9311b6 fix every
+# post-source `env` was refused, and these shapes must not become reachable
+# through the narrowing (self-review finding, `env -u X bash -c set`).
+_ENV_DUMPING_PROGRAMS = frozenset({"env", "printenv", "awk", "gawk", "mawk", "nawk"})
+_INLINE_PROGRAM_INTERPRETERS = re.compile(
+    r"^(?:sh|bash|zsh|dash|ksh|python[0-9.]*|perl|ruby|node|nodejs)$"
+)
+_INLINE_PROGRAM_FLAGS = frozenset({"-c", "-e", "-pe", "-ne"})
+
+
+def _env_dumps_after_source(segment: str) -> bool:
+    """Stricter than `_env_dumps_ambient`, for a segment that follows a
+    credential source: also refuse an `env` whose program can itself print
+    the inherited environment (see `_ENV_DUMPING_PROGRAMS`)."""
+    for match in _ENV_RE.finditer(segment):
+        program = _env_program(segment[match.end() :])
+        if program is None:
+            return True
+        name = program[0].rsplit("/", 1)[-1]
+        if name in _ENV_DUMPING_PROGRAMS:
+            return True
+        if _INLINE_PROGRAM_INTERPRETERS.match(name) and (
+            _INLINE_PROGRAM_FLAGS & set(program[1:])
+        ):
+            return True
+    return False
+
+
+def _shlex_words(tail: str):
+    """Split an `env` invocation's tail into words, or None if it cannot be
+    parsed. The tail is tried as-is first: stripping quotes up front turned
+    `env -u X gh pr view -q '.a, .b'` into an unbalanced string, and an
+    unparseable tail fails closed, so a harmless command was refused. Only
+    when the raw tail does not parse is a trailing quote dropped, which is
+    the closing quote of a wrapper such as `sh -c "env -u X cmd"`."""
+    for candidate in (tail, tail.rstrip("'\"")):
+        try:
+            return shlex.split(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+# A shell redirection word: `2>/dev/null`, `>&2`, `>>log`, `<in`, or a bare
+# operator (`>`, `2>`, `>>`) whose target is the NEXT word. Neither is a
+# program operand: `env -u X 2>/dev/null` runs nothing and prints the
+# environment (self-review finding on this change).
+_REDIRECTION_RE = re.compile(r"^[0-9]*(?:>>?|<<?|>&|<&)(.*)$")
+
+
+def _env_program(tail: str):
+    """Return the words of the program `env` runs (the program first), or
+    None when this `env` invocation runs no program and so prints the
+    environment. Unparseable input returns None: this is a fail-closed
+    decision about whether values reach context."""
+    tail = tail.lstrip()
     if not tail:
-        return True
+        return None
     # A closing shell delimiter ends the nested invocation; anything after
     # it belongs to the outer command, not to `env` as a program operand.
     # This is the distinction missed by parsing `echo "$(env)" trailing` as
     # though `trailing` were the program run by env.
     if tail[0] in ")]}'\"`":
-        return True
-    tail = tail.strip().strip("'\"")
-    try:
-        words = shlex.split(tail)
-    except ValueError:
-        return True
+        return None
+    words = _shlex_words(tail.strip())
+    if words is None:
+        return None
+    # A `)` or backtick closes the command substitution `env` runs inside,
+    # so words after it are the OUTER command's, never env's program:
+    # `echo "$(env -u X) trailing"` dumps, whatever `trailing` is.
+    for position, word in enumerate(words):
+        cut = min((word.find(c) for c in ")`" if c in word), default=-1)
+        if cut >= 0:
+            words = words[:position] + ([word[:cut]] if word[:cut] else [])
+            break
+    operands = []
     index = 0
+    while index < len(words):
+        redirection = _REDIRECTION_RE.match(words[index])
+        if redirection:
+            # A bare operator's target is the following word.
+            index += 1 if redirection.group(1) else 2
+            continue
+        operands.append(words[index])
+        index += 1
+    index = 0
+    options_ended = False
     no_argument_options = {"-i", "--ignore-environment", "-0", "--null"}
     argument_options = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
-    while index < len(words):
-        word = words[index]
-        if word == "--":
-            return index + 1 >= len(words)
-        if word in no_argument_options:
-            index += 1
-            continue
-        if word in argument_options:
-            index += 2
-            if index > len(words):
-                return True
-            continue
+    while index < len(operands):
+        word = operands[index]
+        # `env -- A=1` still reads A=1 as an assignment and runs nothing, so
+        # `--` ends option parsing only, never assignment parsing.
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
             index += 1
             continue
-        if word.startswith("-"):
-            return True
-        return False
-    return True
+        if not options_ended:
+            if word == "--":
+                options_ended = True
+                index += 1
+                continue
+            if word in no_argument_options:
+                index += 1
+                continue
+            if word in argument_options:
+                index += 2
+                if index > len(operands):
+                    return None
+                continue
+            if word.startswith("-"):
+                return None
+        return operands[index:]
+    return None
 
 
 def _ambient_process_or_service_hit(segment: str) -> str | None:
@@ -1097,8 +1190,16 @@ def check_bash(command: str):
         # the sanctioned idiom) does not match `_VAR_PRINT_RE` at all, since
         # that pattern requires echo/printf/cat<<< specifically — a plain
         # program invocation with no such leader is unaffected.
+        #
+        # `env` is judged by its program operand, not a bare word match:
+        # `env -u NAME <command>` runs a command and prints nothing, and the
+        # word match refused it after every credential source (the swarm's
+        # standard `export GITHUB_TOKEN=$(env -u GITHUB_TOKEN -u GH_TOKEN gh
+        # auth token)` form, 2026-09-29). `_env_dumps_after_source` still
+        # refuses an env whose program can itself print the environment.
         if sourced_a_credential and (
-            _ENV_DUMP_RE.search(normalized)
+            _PRINTENV_RE.search(normalized)
+            or _env_dumps_after_source(normalized)
             or _BARE_SET_DUMP_RE.search(normalized)
             or _DECLARE_DUMP_RE.search(normalized)
             or _VAR_PRINT_RE.search(normalized)
