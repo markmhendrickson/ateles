@@ -447,7 +447,14 @@ def launched_in_print_mode(max_depth: int = 6, row=_process_row) -> bool:
         ppid_s, _, command = out.partition(" ")
         argv = command.split()
         if argv and os.path.basename(argv[0]) == "claude":
-            return "--print" in argv or "-p" in argv
+            headless = "--print" in argv or "-p" in argv
+            # A permission-prompt tool means a host is relaying prompts to a
+            # person, so the session is attended even if it runs in print
+            # mode. (Verified 2026-09-29: the desktop app's Code sessions run
+            # with --permission-prompt-tool and stream-json I/O, not --print.)
+            attended = any(a == "--permission-prompt-tool" or a.startswith("--permission-prompt-tool=")
+                           for a in argv)
+            return headless and not attended
         try:
             pid = int(ppid_s)
         except ValueError:

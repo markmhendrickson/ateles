@@ -24,6 +24,21 @@ import decision_shape_gate as dsg
 import _session_integrity as si
 
 
+_REAL_LAUNCHED_IN_PRINT_MODE = dsg.launched_in_print_mode
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_process_ancestry(monkeypatch):
+    """Every test sees an interactive session unless it says otherwise.
+
+    `launched_in_print_mode()` reads the real process tree, so without this the
+    suite's result would depend on who runs it (an operator shell vs a
+    dispatched `claude --print` child). Tests that exercise the detector call
+    `_REAL_LAUNCHED_IN_PRINT_MODE` with an injected `row`.
+    """
+    monkeypatch.setattr(dsg, "launched_in_print_mode", lambda *a, **k: False)
+
+
 def _no_emit(monkeypatch):
     """Block the real HTTP emission path for the duration of a test."""
     calls = []
@@ -738,25 +753,37 @@ class TestCheck4ScopedToInteractiveSessions:
         monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
         rows = {300: "200 /bin/sh -c python3 hook.py",
                 200: "100 /opt/homebrew/bin/claude --print --model x"}
-        assert dsg.launched_in_print_mode(row=self._rows(rows)) is True
+        assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows(rows)) is True
 
     def test_claude_short_p_flag_is_headless(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 200)
-        assert dsg.launched_in_print_mode(row=self._rows({200: "1 claude -p"})) is True
+        assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows({200: "1 claude -p"})) is True
 
     def test_interactive_claude_is_not_headless(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
         rows = {300: "200 /bin/sh -c python3 hook.py", 200: "100 claude --resume abc"}
-        assert dsg.launched_in_print_mode(row=self._rows(rows)) is False
+        assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows(rows)) is False
 
     def test_lookup_failure_keeps_the_check_on(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
-        assert dsg.launched_in_print_mode(row=self._rows({})) is False
+        assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows({})) is False
 
     def test_no_claude_ancestor_keeps_the_check_on(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
         rows = {300: "200 bash", 200: "1 login"}
-        assert dsg.launched_in_print_mode(row=self._rows(rows)) is False
+        assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows(rows)) is False
+
+    def test_attended_print_mode_host_is_not_headless(self, monkeypatch):
+        # A host relaying permission prompts to a person is attended even in
+        # print mode (UX finding on #1344).
+        monkeypatch.setattr(dsg.os, "getppid", lambda: 200)
+        rows = {200: "1 claude --print --permission-prompt-tool mcp__host__approve"}
+        assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows(rows)) is False
+
+    def test_desktop_style_stream_session_is_not_headless(self, monkeypatch):
+        monkeypatch.setattr(dsg.os, "getppid", lambda: 200)
+        rows = {200: "1 claude --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio"}
+        assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows(rows)) is False
 
     def _prose_decision_transcript(self, tmp_path):
         row = {"type": "assistant", "message": {"role": "assistant",
