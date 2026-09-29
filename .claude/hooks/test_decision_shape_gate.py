@@ -580,6 +580,11 @@ class TestDecisionPosedAsProse:
             "(b) no cap. I recommend (a).\n```\n\nIt is working on it now.",
             "The agent was told:\n\n> Decisions for you: (a) cap reviews; (b) "
             "no cap. I recommend (a).\n\nIt is working on it now.",
+            # The standard empty decisions section beside a recommendation.
+            "No open decisions right now. I recommend we let the canary run "
+            "overnight.",
+            "Nothing needs your decision this turn. I recommend leaving the "
+            "sweep to finish.",
         ],
     )
     def test_false_positive_probes(self, text):
@@ -616,6 +621,23 @@ class TestTurnUsedQuestionTool:
     def test_tool_result_row_does_not_start_a_new_turn(self, tmp_path):
         path = _write_turn(
             tmp_path, [_user("go"), _ask_tool_use(), _tool_result()]
+        )
+        assert dsg.turn_used_question_tool(path) is True
+
+    @pytest.mark.parametrize(
+        "injected",
+        [
+            {"type": "user", "isMeta": True, "message": {"role": "user", "content": [
+                {"type": "text", "text": "Base directory for this skill: /x"}]}},
+            {"type": "user", "message": {"role": "user", "content":
+                "<task-notification>agent finished</task-notification>"}},
+        ],
+    )
+    def test_harness_injected_rows_do_not_start_a_new_turn(self, tmp_path, injected):
+        path = _write_turn(
+            tmp_path,
+            [_user("go"), _ask_tool_use(), _tool_result(), injected,
+             _assistant_text(PLANTED_RED)],
         )
         assert dsg.turn_used_question_tool(path) is True
 

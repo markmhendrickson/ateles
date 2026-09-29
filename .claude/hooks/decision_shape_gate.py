@@ -146,6 +146,8 @@ RECOMMEND_CUE_RE = re.compile(
     r"|default if unanswered|if unanswered|absent an answer)",
     re.I,
 )
+# Words that, just before a decision cue on the same line, empty it.
+NEGATED_CUE_RE = re.compile(r"\b(?:no|zero|nothing|none|without)\b[^.\n?!]{0,20}$", re.I)
 UNPOSED_MARKER = "[decisions-unposed]"
 QUESTION_TOOL_NAME = "AskUserQuestion"
 
@@ -162,7 +164,17 @@ def poses_decision_in_prose(tail: str) -> bool:
     """
     if not RECOMMEND_CUE_RE.search(tail):
         return False
-    return len(OPTION_MARKER_RE.findall(tail)) >= 2 or bool(DECISION_CUE_RE.search(tail))
+    if len(OPTION_MARKER_RE.findall(tail)) >= 2:
+        return True
+    # A decision cue counts only when it is not negated: "No open decisions"
+    # and "Nothing needs your decision" are the standard empty decisions
+    # section, and a recommendation elsewhere in the tail must not turn them
+    # into a finding.
+    for m in DECISION_CUE_RE.finditer(tail):
+        before = tail[max(0, m.start() - 25):m.start()]
+        if not NEGATED_CUE_RE.search(before):
+            return True
+    return False
 
 # ONE definition of "a sentence ends here", used for BOTH ends of the scoping
 # window in `findings()`. The two ends were written as two separate
@@ -235,12 +247,27 @@ def _is_operator_prompt(row: dict) -> bool:
     msg = row.get("message") or {}
     if row.get("type") != "user" and msg.get("role") != "user":
         return False
+    # Harness-injected rows (a skill's "Base directory for this skill", an
+    # image caption, a message from another session) are marked isMeta; a
+    # background-task notification is not the operator speaking either. None
+    # starts a turn, or a skill loaded after an AskUserQuestion call would
+    # erase it and the gate would block a turn that followed the rule.
+    if row.get("isMeta"):
+        return False
     content = msg.get("content")
     if isinstance(content, str):
-        return bool(content.strip())
+        return bool(content.strip()) and not content.lstrip().startswith(
+            "<task-notification>"
+        )
     if isinstance(content, list):
         kinds = {b.get("type") for b in content if isinstance(b, dict)}
-        return "tool_result" not in kinds and bool(kinds)
+        if "tool_result" in kinds or not kinds:
+            return False
+        first = next(
+            (b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"),
+            "",
+        )
+        return not str(first).lstrip().startswith("<task-notification>")
     return False
 
 
