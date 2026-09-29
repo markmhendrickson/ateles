@@ -401,6 +401,21 @@ BASH_BLOCK = [
     ("quoted expansion prefix on env", '"$D"/env'),
     ("timeout running a pathed env after source", f"source {ENV}; timeout 5 /x/env"),
     ("if-condition running a relative printenv", "if ./printenv; then :; fi"),
+    # Self-review of the round-2 change: each of these was allowed by its
+    # first version. Secret-injecting wrappers run a program that inherits
+    # the injected secrets; `elif` starts a command; a quoted operand must
+    # not hide the runner before it.
+    ("op run running a pathed printenv", "op run -- /opt/homebrew/bin/printenv"),
+    (
+        "sops exec-env running a pathed printenv",
+        "sops exec-env s.enc /opt/homebrew/bin/printenv",
+    ),
+    (
+        "elif-condition running a pathed env",
+        "if false; then :; elif /opt/x/env; then :; fi",
+    ),
+    ("quoted paren hiding the runner", 'sudo -u "a(b" /opt/x/env'),
+    ("quoted semicolon hiding the runner", 'sudo -u "a;b" /opt/x/env'),
     (
         "env -u running perl -pe after source",
         f"source {ENV}; env -u X perl -pe 1",
@@ -554,6 +569,8 @@ BASH_ALLOW = [
     ("mkdir a path ending in printenv", "mkdir -p tmp/printenv"),
     ("ls an expansion-prefixed path ending in env", "ls $(pwd)/env"),
     ("env -u running ls on a path ending in env", "env -u X ls config/env"),
+    ("ls a quoted path ending in env", 'ls "config/env"'),
+    ("quoted parens before a path ending in env", 'git log --grep "x (y)" -- src/env'),
     ("ls a path ending in env after source", f"source {ENV}; ls config/env"),
     (
         "git diff a path ending in env after source",

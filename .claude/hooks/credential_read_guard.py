@@ -481,21 +481,63 @@ _OPERAND_RUNNERS = frozenset(
         "arch", "script", "sh", "bash", "zsh", "dash", "ksh", "fish", "csh",
         "tcsh", "ssh", "fly", "flyctl",
         "kubectl", "docker", "podman", "nix-shell", "direnv", "npx", "npm",
-        "pnpm", "yarn", "uv", "uvx", "poetry", "pipx", "then", "do", "else",
-        "if", "while", "until", "!",
+        "pnpm", "yarn", "uv", "uvx", "poetry", "pipx", "pkexec", "op", "sops",
+        "aws-vault", "doppler", "dotenv", "infisical", "chamber", "teller",
+        "then", "do", "else", "elif", "if", "while", "until", "!",
     }
 )  # fmt: skip
+# Secret-injecting wrappers (`op run --`, `sops exec-env`, `aws-vault exec`,
+# `doppler run`) are listed because the program they run inherits the very
+# secrets they inject (self-review of this change).
+_COMMAND_BOUNDARY_CHARS = frozenset(";&|(){}`\n")
+
+
+def _last_command_boundary(text: str) -> int:
+    """Index of the last command boundary in `text` that is not inside
+    quotes, or -1. Splitting on `;`/`(`/`|` inside a quoted argument let a
+    quoted operand hide the runner before it: `sudo -u "a(b" /x/env` read
+    as a path argument (self-review of this change). A `$(` or backtick
+    starts a command even inside double quotes."""
+    last = -1
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+        elif quote == '"':
+            if char == '"':
+                quote = ""
+            elif char == "`" or (char == "(" and text[index - 1 : index] == "$"):
+                last = index
+        elif char in "'\"":
+            quote = char
+        elif char in _COMMAND_BOUNDARY_CHARS:
+            last = index
+        index += 1
+    return last
 
 
 def _shlex_prefix_words(text: str):
-    """Split the text before a match into words. The text may end inside an
-    open quote (`sh -c "`), so a closing quote is tried when the raw text
-    does not parse. None means it could not be parsed at all."""
-    for candidate in (text, text + '"', text + "'"):
+    """Split the text before a match into words, or None when it cannot be
+    parsed. The one unbalanced shape accepted is a quote that opens the
+    matched word itself (`ls "`, `sh -c "`), which becomes an empty last
+    word. Any other unbalanced quote means the segment began inside a quoted
+    string (the segment splitter cuts on `;` even there), so the words are
+    not trustworthy and the caller fails closed."""
+    try:
+        return shlex.split(text)
+    except ValueError:
+        pass
+    if text and text[-1] in "'\"":
         try:
-            return shlex.split(candidate)
+            return shlex.split(text[:-1]) + [""]
         except ValueError:
-            continue
+            return None
     return None
 
 
@@ -508,8 +550,7 @@ def _in_command_position(segment: str, start: int) -> bool:
     # A completed expansion is a word, not a command boundary: `ls
     # $(pwd)/env` and `ls ${D}/env` pass a path argument to `ls`.
     pre = re.sub(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`", "X", pre)
-    cut = max(pre.rfind(c) for c in ";&|(){}`\n")
-    text = pre[cut + 1 :]
+    text = pre[_last_command_boundary(pre) + 1 :]
     words = _shlex_prefix_words(text)
     if words is None:
         return True
