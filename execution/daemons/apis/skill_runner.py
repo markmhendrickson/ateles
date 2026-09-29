@@ -794,6 +794,14 @@ def _write_harness_event(
         entity["session_id"] = agent_session_id
     if input_summary:
         entity["input_summary"] = input_summary[:500]
+    if resolved_tier is not None:
+        # Prefixed (not appended) so the 500-char truncation below can never
+        # cut it: the marker survives even where the server drops the
+        # dedicated tier fields as undeclared on this schema.
+        tier_marker = f"tiering={resolved_tier.tier}({resolved_tier.source})"
+        output_summary = (
+            f"{tier_marker} {output_summary}" if output_summary else tier_marker
+        )
     if output_summary:
         entity["output_summary"] = output_summary[:500]
     if duration_ms is not None:
@@ -807,10 +815,10 @@ def _write_harness_event(
     if resolved_tier is not None:
         # Additive, same posture as `usage` above: an undeclared field on an
         # unrecognized schema is dropped server-side, never rejected. The
-        # `tiering=` marker is ALSO folded into output_summary (by every
-        # caller of this function, before truncation) so the requested tier
-        # survives even where the dedicated field does not — the same
-        # durability strategy #567 established for `usage`'s model marker.
+        # `tiering=` marker is ALSO prefixed onto output_summary above, so
+        # the requested tier survives even where the dedicated field does
+        # not — the same durability strategy #567 established for `usage`'s
+        # model marker.
         entity["requested_tier"] = resolved_tier.tier
         entity["tier_action_class"] = resolved_tier.action_class
         entity["tier_source"] = resolved_tier.source
@@ -1365,9 +1373,9 @@ def _provider_command(
     when non-empty, pins this dispatch to a named model instead of the
     provider's ambient default, on all three providers. ``None`` (the
     default) reproduces exact prior behaviour — no flag is added — which
-    matters for ``claude``: the module docstring in ``model_tiering.py``
-    explains why an UNBOUND claude tier stays on the ambient session model
-    rather than guessing an alias.
+    matters for ``claude``: ``model_tiering.model_for_tier`` returns ``None``
+    only when no vendor_binding is configured at all, and this module never
+    guesses a model alias in that case.
     """
     if provider == "claude":
         return (

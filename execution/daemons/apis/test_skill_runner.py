@@ -4734,6 +4734,7 @@ class TestModelTieringDispatch:
         assert entity["tier_action_class"] == "build"
         assert entity["tier_source"] == "policy"
         assert "model=claude-sonnet-5" in entity.get("output_summary", "")
+        assert entity["output_summary"].startswith("tiering=mid(policy) ")
 
     @patch("skill_runner.AgentLoader")
     def test_failover_carries_the_same_action_class_to_the_next_provider(
