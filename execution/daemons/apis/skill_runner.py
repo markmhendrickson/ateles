@@ -62,6 +62,7 @@ from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
     foundation_contract,
 )
+import local_provider  # noqa: E402
 from harness_router import (  # noqa: E402
     cool_down,
     cooling_providers,
@@ -336,6 +337,16 @@ def _load_agent_def(role: str) -> AgentDefinition:
     return _agent_def_cache[role]
 
 
+def _load_active_policy_prompt(role: str) -> str:
+    """Render the role's live Neotoma policy without caching it locally."""
+    try:
+        rendered = AgentLoader(role).render_policy_prompt()
+        return rendered if isinstance(rendered, str) else ""
+    except Exception as exc:  # noqa: BLE001 — policy outage must not kill dispatch
+        log.warning(f"[apis] live policy unavailable for role {role!r}: {exc}")
+        return ""
+
+
 # ── Review-verdict vocabulary (ateles#938 — one source, defined once) ─────────
 # THE single authoritative list of bold verdict tokens a swarm agent may emit as
 # its one-line GitHub verdict. Every other place that needs this vocabulary —
@@ -448,6 +459,20 @@ header, and everything else goes after the verdict line. A first line that is no
 header, a second line that is not your verdict, a second header, or a second verdict \
 line anywhere leaves the gate pending. Never reproduce an earlier comment's header \
 or verdict line, quoted or not.
+
+**A gate-verdict comment's attribution (header, or avatar on a dedicated account) is \
+already its attribution — omit the generic harness footer on it.** Your harness may \
+separately instruct you to close every reply with a "Generated with…" / \
+`Co-Authored-By:` trailer. \
+That trailer exists to mark AI-authored content when nothing else on the comment does, \
+and on a comment carrying a `<!-- review:<lens> commit=<sha> -->` marker something else \
+already does that job — the attribution header above on a shared account, or the \
+dedicated account's own avatar per the ateles#109 carve-out just above. Either way, do \
+not also append the generic trailer to that comment (ateles#1326: on a shared account \
+the trailer repeats the header's robot emoji, which reads to the dispatcher as a second \
+header on an otherwise valid sign-off). This never leaves a gate-verdict comment with NO \
+attribution at all — it always has one of the two. This applies only to gate-verdict \
+comments; a commit message or PR description still gets the generic trailer as normal.
 
 ### Verdict line — exact, verbatim form
 
@@ -628,6 +653,7 @@ def build_system_prompt(
     agent_def: AgentDefinition,
     skill_md: str,
     include_github_contract: bool = False,
+    policy_prompt: str = "",
 ) -> tuple[str, bool]:
     """
     Build the composite system prompt for a role dispatch.
@@ -660,7 +686,18 @@ def build_system_prompt(
     so absent — on a checkout with no docs/foundation/conformance.md, so the
     prompt only ever names a reading list the agent can open; the day a kernel
     document lands, the injected text changes to name it.
+
+    ``policy_prompt`` is the live, role-scoped agent_policy rendering from
+    Neotoma. It follows the stable definition and skill layers so conditional
+    rules are delivered through the same provider-neutral prompt carrier. An
+    empty rendering preserves the pre-policy prompt byte-for-byte.
     """
+    def with_policy(prompt: str) -> str:
+        rendered_policy = policy_prompt.strip()
+        if not rendered_policy:
+            return prompt
+        return f"{prompt}\n\n---\n\n{rendered_policy}"
+
     contracts = ""
     if include_github_contract:
         contracts = f"{SWARM_GITHUB_CONTRACT}\n\n---\n\n{SWARM_PRIOR_ART_CONTRACT}"
@@ -670,22 +707,18 @@ def build_system_prompt(
     definition_prompt = (agent_def.prompt_markdown or "").strip()
     if definition_prompt:
         if include_github_contract:
-            return (
+            return with_policy(
                 f"{definition_prompt}\n\n"
                 "---\n\n"
                 f"{contracts}\n\n"
                 "---\n\n"
-                f"{skill_md}",
-                False,
-            )
-        return (
-            f"{definition_prompt}\n\n---\n\n{skill_md}",
-            False,
-        )
+                f"{skill_md}"
+            ), False
+        return with_policy(f"{definition_prompt}\n\n---\n\n{skill_md}"), False
     # Degraded: no definition_prompt.
     if include_github_contract:
-        return f"{contracts}\n\n---\n\n{skill_md}", True
-    return skill_md, True
+        return with_policy(f"{contracts}\n\n---\n\n{skill_md}"), True
+    return with_policy(skill_md), True
 
 
 # ── Neotoma harness_event writer ───────────────────────────────────────────────
@@ -699,6 +732,7 @@ def _write_harness_event(
     event_type: str,
     tool_name: str,
     success: str,
+    agent_session_id: str = "",
     input_summary: str = "",
     output_summary: str = "",
     duration_ms: int | None = None,
@@ -733,10 +767,9 @@ def _write_harness_event(
         return
 
     event_at = datetime.now(timezone.utc).isoformat()
-    # canonical_name_fields per schema: session_id, event_type, event_at
-    # session_id is not available at dispatch time; use role+task+event_at as a
-    # stable-enough dedup key without it.
-    idempotency_key = f"harness-event-{role}-{task_entity_id}-{event_type}-{event_at}"
+    # canonical_name_fields per schema: session_id, event_type, event_at.
+    session_key = agent_session_id or f"{role}:{task_entity_id}"
+    idempotency_key = f"harness-event-{session_key}-{event_type}-{event_at}"
 
     entity: dict = {
         "entity_type": "harness_event",
@@ -747,6 +780,8 @@ def _write_harness_event(
         "success": success,
         "task_entity_id": task_entity_id,
     }
+    if agent_session_id:
+        entity["session_id"] = agent_session_id
     if input_summary:
         entity["input_summary"] = input_summary[:500]
     if output_summary:
@@ -765,6 +800,21 @@ def _write_harness_event(
         "observation_source": "workflow_state",
         "entities": [entity],
     }
+    relationships = []
+    if task_entity_id:
+        relationships.append({
+            "source_index": 0,
+            "target_entity_id": task_entity_id,
+            "relationship_type": "REFERS_TO",
+        })
+    if agent_session_id:
+        relationships.append({
+            "source_index": 0,
+            "target_entity_id": agent_session_id,
+            "relationship_type": "REFERS_TO",
+        })
+    if relationships:
+        payload["relationships"] = relationships
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{base_url}/store",
@@ -778,8 +828,53 @@ def _write_harness_event(
     )
     req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     try:
-        with urllib.request.urlopen(req, timeout=5.0):
-            pass
+        with urllib.request.urlopen(req, timeout=5.0) as response:
+            raw = response.read()
+        stored = json.loads(raw) if raw else {}
+        event_id = next((
+            row.get("entity_id")
+            for row in stored.get("entities", [])
+            if row.get("entity_type") == "harness_event"
+        ), None)
+        if event_id:
+            readback_req = urllib.request.Request(
+                f"{base_url}/entities/{event_id}", method="GET",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+            readback_req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+            with urllib.request.urlopen(readback_req, timeout=5.0) as response:
+                readback = json.loads(response.read())
+            snapshot = readback.get("snapshot") or {}
+            if isinstance(snapshot.get("snapshot"), dict):
+                snapshot = snapshot["snapshot"]
+            expected = {
+                "task_entity_id": task_entity_id,
+                **({"session_id": agent_session_id} if agent_session_id else {}),
+            }
+            if any(snapshot.get(field) != value for field, value in expected.items()):
+                log.warning(
+                    "[apis] harness_event readback mismatch "
+                    f"(entity_id={event_id}, task_entity_id={task_entity_id})"
+                )
+            relationships_req = urllib.request.Request(
+                f"{base_url}/entities/{event_id}/relationships", method="GET",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+            relationships_req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+            with urllib.request.urlopen(relationships_req, timeout=5.0) as response:
+                stored_relationships = json.loads(response.read()).get("relationships", [])
+            expected_targets = {target for target in (task_entity_id, agent_session_id) if target}
+            actual_targets = {
+                rel.get("target_entity_id")
+                for rel in stored_relationships
+                if rel.get("source_entity_id") == event_id
+                and rel.get("relationship_type") == "REFERS_TO"
+            }
+            if not expected_targets.issubset(actual_targets):
+                log.warning(
+                    "[apis] harness_event relationship readback mismatch "
+                    f"(entity_id={event_id}, task_entity_id={task_entity_id})"
+                )
     except Exception as exc:
         log.debug(f"[apis] harness_event write failed (non-fatal): {exc}")
 
@@ -1074,6 +1169,11 @@ def _provider_binaries() -> dict[str, str | None]:
         "claude": CLAUDE_BIN,
         "codex": CODEX_BIN,
         "cursor": CURSOR_BIN,
+        # The claude CLI against a local model; absent unless configured
+        # (local_provider.load_config), so an unconfigured host never sees it.
+        local_provider.LOCAL_PROVIDER: (
+            CLAUDE_BIN if local_provider.load_config() is not None else None
+        ),
     }
 
 
@@ -1353,6 +1453,7 @@ async def _run_skill_once(
     provider: str,
     role: str | None = None,
     task_entity_id: str = "",
+    agent_session_id: str = "",
     timeout: int | None = None,
     env_extra: dict[str, str] | None = None,
     notifier=None,  # lib.notify.Notifier | None — kept optional to avoid hard dep
@@ -1360,13 +1461,15 @@ async def _run_skill_once(
     include_github_contract: bool = False,
     cwd: str | None = None,
     owns_pending_gate: bool = False,
+    work_class: str | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
 
-    Stage 1: loads the role's agent_definition (role defaults to skill when not
-    passed — skill name == role name in this codebase). Prepends the definition's
-    prompt_markdown to SKILL.md; applies the tool allowlist when restricted.
+    Stage 1: loads the role's agent_definition and live agent_policy (role
+    defaults to skill when not passed — skill name == role name in this
+    codebase). Prepends the definition's prompt_markdown to SKILL.md, appends
+    the policy rendering, and applies the tool allowlist when restricted.
 
     Stage 2: writes harness_event entities to Neotoma at start, completion, and
     failure.
@@ -1375,22 +1478,39 @@ async def _run_skill_once(
     sends a notifier alert (when a notifier is supplied), and records a
     degraded_generic_subagent harness_event. Dispatch still proceeds.
 
-    ``github_token`` (#109 — per-agent GitHub identity): when supplied, the token
-    is injected into subprocess_env as both ``GITHUB_TOKEN`` and ``GH_TOKEN`` so
-    the spawned agent's ``gh`` calls authenticate as the correct identity.  When
-    not supplied, the child inherits the daemon's ambient env unchanged (current
-    behaviour for all callers that predate #109).  Only GitHub-triggered pipeline
-    call sites pass this; SSE task-path dispatches leave it unset.
+    ``github_token`` (#109 — per-agent GitHub identity): when supplied and
+    non-empty, the token is injected into subprocess_env as both
+    ``GITHUB_TOKEN`` and ``GH_TOKEN`` so the spawned agent's ``gh`` calls
+    authenticate as the correct identity. When not supplied (``None``) on a
+    dispatch that does NOT set ``include_github_contract``, the child inherits
+    the daemon's ambient env unchanged (current behaviour for all callers that
+    predate #109). An explicitly empty string is a distinct, refused case —
+    see below.
 
     ``include_github_contract`` (Phase 1 / Layer A): when True, SWARM_GITHUB_CONTRACT
-    is injected into the system prompt between the agent_definition and the SKILL.md.
-    Pass True ONLY from GitHub-trigger call sites in swarm_dispatch.py; leave as
-    False (the default) for all SSE/non-GitHub task dispatches so the contract never
-    appears in payment, health, finance, or other non-GitHub work.
+    is injected into the system prompt between the agent_definition and the SKILL.md,
+    AND (ateles#590) this dispatch is network-enabled (see ``network=`` on the
+    ``_provider_command`` call below). Pass True from GitHub-trigger call sites in
+    swarm_dispatch.py, or from a manual/programmatic dispatch (dispatch_role.py)
+    whose task must commit, push, or open a pull request; leave as False (the
+    default) for all other dispatches so the contract never appears in payment,
+    health, finance, or other non-GitHub work.
+
+    Credential-boundary contract (ateles#590 security repair, PR #1334): a
+    network-enabled dispatch (``include_github_contract=True``) REQUIRES a
+    non-empty ``github_token`` — omitted or empty both return a failed
+    ``SkillResult`` before any child is spawned, rather than falling back to
+    the daemon's ambient GitHub identity. On any dispatch, an explicitly empty
+    ``github_token`` (requested but resolved to ``""``) is refused the same
+    way, since that shape means a caller tried to resolve a per-agent PAT and
+    failed — silently falling back to the ambient identity there is exactly
+    what let a PR land under the operator's own account instead of the
+    agent's (ateles#109's original incident).
 
     Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
-    to the Claude adapter. Codex and Cursor receive the same system + skill
-    instructions as a composite prompt and use their ambient configured tools.
+    to the Claude adapter. Claude, Codex, and Cursor receive the same definition
+    + skill + live-policy instructions through their provider prompt carriers
+    and use their ambient configured tools.
 
     ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
     child subprocess runs with this working directory instead of inheriting the
@@ -1398,6 +1518,19 @@ async def _run_skill_once(
     of a PR branch so it can author an eval fixture, run ``eval:tier1``, commit,
     and push. When None (every call site that predates QE3), the child inherits
     the daemon's directory unchanged — exact current behaviour, no regression.
+
+    ``work_class`` (ateles task ent_71387d9c1d1d3d1eef9ecc01 — lean local
+    prompt): when ``provider == local_provider.LOCAL_PROVIDER``, this replaces
+    the full agent_definition + live-policy system prompt with
+    ``local_provider.build_lean_prompt`` — role summary, the work class's own
+    hard rules, and the task's SKILL.md, nothing else. This keeps the local
+    prompt well under the local context ceiling regardless of how large the
+    frontier prompt (agent_definition + agent_policy) grows. It has no effect
+    on any other provider: a Claude/Codex/Cursor dispatch is built exactly as
+    before, full stop, whether or not ``work_class`` is passed. After a local
+    run, ``local_provider.verify_postcondition`` checks the work class's
+    ground truth (where one exists) and fails the result over to a frontier
+    provider rather than accepting a wrong local answer as ``ok``.
     """
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
@@ -1454,6 +1587,64 @@ async def _run_skill_once(
         log.error(f"[apis] {skill} dispatch refused — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
+    # ateles#590 security repair (PR #1334): a network-enabled dispatch must
+    # never silently keep the daemon's ambient GitHub identity. Before #109,
+    # `github_token=None` (the default for every call site) left
+    # GITHUB_TOKEN/GH_TOKEN exactly as `_subscription_only_env` copied them
+    # from `os.environ`. That was harmless while `include_github_contract`
+    # (which also opens Codex network — see `network=include_github_contract`
+    # below) was reachable ONLY from GitHub-triggered call sites in
+    # swarm_dispatch.py, and every one of those already resolves and passes a
+    # `github_token` string (possibly "") via `_token_for_agent_on_repo`. But
+    # `dispatch_role.py`'s manual/programmatic entrypoint (#590) can request
+    # `include_github_contract=True` on its own, and can omit `github_token`
+    # entirely — reaching exactly the silent-inherit path this refusal closes.
+    #
+    # This is a PREFLIGHT refusal — checked and returned here, BEFORE the
+    # Stage 2 "dispatch start" harness_event write and before any subprocess
+    # command is built — for the same reason the owns_pending_gate refusal
+    # above is: a refused dispatch must leave no audit trail suggesting work
+    # was attempted, and every caller of run_skill/`_run_skill_once` expects a
+    # `SkillResult` on failure, never an exception (see this module's own
+    # docstring on failures never raising, and `_run_provider_attempts`'s
+    # `await attempt(selected)` call, which has no try/except around it).
+    if include_github_contract and not github_token:
+        msg = (
+            "include_github_contract=True (network-enabled GitHub delivery) "
+            "requires an explicit GitHub credential binding via github_token, "
+            "and none was supplied "
+            f"({'omitted' if github_token is None else 'resolved to an EMPTY string'}). "
+            "Refusing to spawn a network-enabled child with no scoped "
+            "identity — that silent fallback to the daemon's ambient "
+            "GITHUB_TOKEN/GH_TOKEN is exactly what let a PR land under the "
+            "operator's own account instead of the agent's. Provision a "
+            "scoped PAT for this dispatch before retrying; never proceed "
+            "unauthenticated or on keyring fallback."
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ateles#109 — per-agent GitHub identity on a NON-network-enabled
+    # dispatch (e.g. a Neotoma-only task that still wants `gh` calls
+    # attributed correctly under the requesting agent). Same
+    # explicit-empty-fails-closed contract as above: a caller that passes
+    # github_token="" (requested but resolved EMPTY, distinct from not
+    # requested at all — see the subprocess_env block below) must not fall
+    # through to the daemon's ambient identity either.
+    if not include_github_contract and github_token == "":
+        msg = (
+            "github_token was explicitly requested for this dispatch but "
+            "resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
+            "ATELES_AGENT_PAT, NEOTOMA_AGENT_PAT, or GITHUB_TOKEN configured "
+            "for this agent/repo). Refusing to spawn the child with the "
+            "daemon's ambient GitHub identity — that silent fallback is "
+            "exactly what let a PR land under the operator's own account "
+            "instead of the agent's. Provision the missing PAT before "
+            "retrying; never proceed unauthenticated or on keyring fallback."
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
     # ateles#795 amended ADR — this preflight refusal is RELAXED, not removed.
     #
     # It used to hard-block a gate owner from launching at all when it had no
@@ -1498,16 +1689,40 @@ async def _run_skill_once(
         )
 
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
-    system_prompt, degraded = build_system_prompt(
-        agent_def, skill_md, include_github_contract=include_github_contract
-    )
+    # claude-local gets the LEAN prompt (role + work-class hard rules + task),
+    # never the full agent_definition + live-policy rendering: that full
+    # prompt is sized for a frontier context window and does not fit a local
+    # one (ateles task ent_71387d9c1d1d3d1eef9ecc01). Every other provider is
+    # built exactly as before — this branch changes nothing for them.
+    if provider == local_provider.LOCAL_PROVIDER:
+        system_prompt = local_provider.build_lean_prompt(work_class)
+        # `degraded` must reflect whether agent_def actually loaded (a stub
+        # from AgentLoader's load-failure fallback has empty prompt_markdown
+        # — see lib/daemon_runtime/agent_loader.py's `_stub()`), the same
+        # condition build_system_prompt uses below, NOT whether the lean
+        # prompt happens to omit prompt_markdown by design. Getting this
+        # wrong would silently skip the undefined-role alerting AND let a
+        # stub's synthesized aauth_sub receive AAuth signing-key injection
+        # further down (`if not degraded and agent_def.aauth_sub:`).
+        degraded = not (agent_def.prompt_markdown or "").strip()
+    else:
+        # Fetch policy at dispatch time: unlike the stable agent definition,
+        # active rules may change between tasks and must not inherit the
+        # definition cache.
+        policy_prompt = await asyncio.to_thread(_load_active_policy_prompt, _role)
+        system_prompt, degraded = build_system_prompt(
+            agent_def,
+            skill_md,
+            include_github_contract=include_github_contract,
+            policy_prompt=policy_prompt,
+        )
 
     if degraded:
         _title_hint = prompt[:80].replace("\n", " ")
         warn_msg = (
             f"Role {_role!r} ran DEGRADED (no agent_definition loaded) "
             f"for task {task_entity_id or '(unknown)'!r}. "
-            "Dispatching with SKILL.md only."
+            "Dispatching with SKILL.md and any available live policy."
         )
         log.warning(f"[apis] {warn_msg}")
         # A role with no agent_definition is ONE fact about that ROLE, not one
@@ -1543,6 +1758,7 @@ async def _run_skill_once(
             await asyncio.to_thread(
                 _write_harness_event,
                 task_entity_id=task_entity_id,
+                agent_session_id=agent_session_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
                 event_type="subprocess",
@@ -1558,14 +1774,63 @@ async def _run_skill_once(
     # A dispatch carrying the GitHub contract is one whose task involves
     # commit/push/PR — the delivery path #590 is about. Everything else runs
     # with the sandbox's default network denial.
-    cmd, stdin_payload = _provider_command(
-        provider,
-        binary,
-        system_prompt,
-        prompt,
-        cwd=cwd,
-        network=include_github_contract,
-    )
+    local_cfg = None
+    if provider == local_provider.LOCAL_PROVIDER:
+        # claude-local: refuse before launch when the prompt cannot fit the
+        # local window or the guard hooks cannot be bound. Either refusal is a
+        # launch failure, so `_run_provider_attempts` falls over to frontier.
+        local_cfg = local_provider.load_config()
+        refusal = (
+            local_provider.ceiling_refusal(system_prompt, prompt, local_cfg)
+            if local_cfg is not None
+            else f"{provider} is not configured"
+        )
+        guards_path = ""
+        if refusal is None:
+            # ATELES_REPO_PATH unset means ATELES_REPO (module-level,
+            # resolved once at import) silently fell back to ~/repos/ateles —
+            # the shared interactive clone, not the deployment checkout the
+            # daemon actually runs from. Reading guards from ATELES_REPO in
+            # that case would bind the launch to whatever state that clone
+            # happens to be in and proceed on unverified guards rather than
+            # refuse. Building guards_repo from the env var read here (not
+            # from the separately-resolved ATELES_REPO) keeps the refuse/
+            # proceed decision and the path guards are actually read from as
+            # one value instead of two independent reads of the same var.
+            repo_path_env = os.environ.get("ATELES_REPO_PATH", "").strip()
+            if not repo_path_env:
+                refusal = (
+                    f"{local_provider.FAILURE_GUARDS}: ATELES_REPO_PATH is not "
+                    "set — refusing to read guards from the ATELES_REPO "
+                    f"fallback ({ATELES_REPO}); set ATELES_REPO_PATH to the "
+                    "checkout whose guards this dispatch must bind"
+                )
+            else:
+                log.info(
+                    f"[apis] {skill} claude-local guards read from "
+                    f"ATELES_REPO_PATH={repo_path_env}"
+                )
+                try:
+                    guards_path = local_provider.write_guards_file(Path(repo_path_env))
+                except (local_provider.LocalProviderError, OSError) as exc:
+                    refusal = f"{local_provider.FAILURE_GUARDS}: {exc}"
+        if refusal is not None:
+            msg = f"{provider} launch failed: {refusal}"
+            log.warning(f"[apis] {skill} dispatch skipped — {msg}")
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+        cmd = local_provider.build_command(
+            binary, system_prompt, agent_def.tools, local_cfg, guards_path
+        )
+        stdin_payload = None
+    else:
+        cmd, stdin_payload = _provider_command(
+            provider,
+            binary,
+            system_prompt,
+            prompt,
+            cwd=cwd,
+            network=include_github_contract,
+        )
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
     # Dispatched `claude --print` children inherit the ambient Claude MCP config,
@@ -1749,6 +2014,7 @@ async def _run_skill_once(
         await asyncio.to_thread(
             _write_harness_event,
             task_entity_id=task_entity_id,
+            agent_session_id=agent_session_id,
             role=_role,
             agent_sub=agent_def.aauth_sub,
             event_type="subprocess",
@@ -1763,38 +2029,24 @@ async def _run_skill_once(
     # subscription auth by default. API-key credentials are removed so a capped
     # plan queues/fails over instead of silently spending metered tokens.
     subprocess_env = _subscription_only_env(env_extra)
+    if local_cfg is not None:
+        # Local inference: point the CLI at the loopback proxy and strip any
+        # frontier OAuth credential so it cannot be sent there.
+        local_provider.apply_env(subprocess_env, local_cfg)
 
-    # ateles#109 — per-agent GitHub identity: when the caller resolved a
-    # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),
-    # override both GITHUB_TOKEN and GH_TOKEN so the child's `gh` calls
-    # authenticate as that agent's own account.  When github_token is None
-    # (all SSE task-path and non-GitHub call sites), this block is skipped and
-    # the child inherits the daemon's ambient tokens unchanged — exact
-    # current behaviour, no regression.
-    #
-    # github_token == "" (requested but resolved EMPTY) is a distinct, more
-    # dangerous case and must NOT take the same silent-skip path as None.
-    # `_token_for_agent_on_repo`/`_token_for_repo` return "" (not None) when
-    # every configured PAT env var is unset — and a truthiness check here
-    # (`if github_token:`) previously treated "" identically to "not
-    # requested", so the child silently inherited the daemon's AMBIENT
-    # environment instead. On a host where `gh` has an active keyring
-    # session, that ambient identity is the operator's own personal GitHub
-    # account, not the agent's — this produced a PR opened as
-    # markmhendrickson instead of the intended agent identity, with no error
-    # anywhere in the path. Fail loudly instead of falling back.
-    if github_token is not None:
-        if not github_token:
-            raise RuntimeError(
-                "[apis] github_token was explicitly requested for this dispatch "
-                "but resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
-                "ATELES_AGENT_PAT, NEOTOMA_AGENT_PAT, or GITHUB_TOKEN configured "
-                "for this agent/repo). Refusing to spawn the child with the "
-                "daemon's ambient GitHub identity — that silent fallback is "
-                "exactly what let a PR land under the operator's own account "
-                "instead of the agent's. Provision the missing PAT before "
-                "retrying; never proceed unauthenticated or on keyring fallback."
-            )
+    # ateles#109 / ateles#590 (PR #1334): inject the resolved per-agent GitHub
+    # identity, if any. The fail-closed refusals for a network-enabled
+    # dispatch with no token, and for an explicitly-empty token on any
+    # dispatch, already returned a SkillResult in the preflight block above —
+    # by this point github_token is either None (not requested; ambient env
+    # passes through unchanged, exact pre-#109 behaviour) or a non-empty
+    # scoped string to inject. When include_github_contract is True, the
+    # ambient GITHUB_TOKEN/GH_TOKEN are stripped first so no path leaves the
+    # daemon's own identity in a network-enabled child's env.
+    if include_github_contract:
+        subprocess_env.pop("GITHUB_TOKEN", None)
+        subprocess_env.pop("GH_TOKEN", None)
+    if github_token:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 
@@ -1875,6 +2127,7 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -1942,6 +2195,24 @@ async def _run_skill_once(
                 f"deliver: {_delivery_denial}"
             )
 
+        # ── Local post-condition check (ateles task ent_71387d9c1d1d3d1eef9ecc01) ──
+        # A local run that exits 0 with a syntactically fine reply is not
+        # necessarily a CORRECT one — the regression this exists to catch was
+        # exactly that: rc=0, plausible prose, and a wrong count. Checked only
+        # for claude-local, only for a work class with a real ground truth
+        # (local_provider._POSTCONDITION_CHECKS); every other provider and
+        # every other work class is unaffected.
+        _postcondition_failure = (
+            local_provider.verify_postcondition(work_class, _stdout_text, cwd=cwd)
+            if provider == local_provider.LOCAL_PROVIDER
+            else None
+        )
+        if _postcondition_failure:
+            log.error(
+                f"[apis] {skill} dispatch via {provider} exited 0 but failed "
+                f"its post-condition check: {_postcondition_failure}"
+            )
+
         # ── Per-dispatch usage attribution ───────────────────────────────────────
         # Parsed from what the harness already emitted; never estimated. Under
         # the swarm's text-mode invocations most harnesses report no token
@@ -1956,7 +2227,11 @@ async def _run_skill_once(
 
         result = SkillResult(
             skill=skill,
-            ok=proc.returncode == 0 and _delivery_denial is None,
+            ok=(
+                proc.returncode == 0
+                and _delivery_denial is None
+                and _postcondition_failure is None
+            ),
             returncode=proc.returncode,
             stdout=_stdout_text,
             stderr=_stderr_text,
@@ -1964,7 +2239,7 @@ async def _run_skill_once(
             error=(
                 _delivery_denial
                 if (_delivery_denial and proc.returncode == 0)
-                else ""
+                else (_postcondition_failure or "")
             ),
             usage=_usage,
         )
@@ -1995,6 +2270,7 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -2037,6 +2313,7 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -2099,6 +2376,7 @@ async def run_skill(
     *,
     role: str | None = None,
     task_entity_id: str = "",
+    agent_session_id: str = "",
     timeout: int | None = None,
     env_extra: dict[str, str] | None = None,
     notifier=None,
@@ -2109,6 +2387,7 @@ async def run_skill(
     preferred_provider: str | None = None,
     owns_pending_gate: bool = False,
     seated_reviewer: bool = False,
+    work_class: str | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -2145,6 +2424,12 @@ async def run_skill(
     `correct` on the CLI deny list, and claude-only routing, since no other
     adapter here can deny a single MCP tool. No seated lens needs `correct`
     for anything but gate state: they file findings through `store`.
+
+    ``work_class`` names the kind of work (``local_provider.MECHANICAL_WORK_CLASSES``).
+    When it is a configured mechanical class and the run is unpinned and not a
+    seated reviewer, ``claude-local`` is tried first and the frontier
+    providers follow as the fallback. Any other value, or None, leaves routing
+    exactly as before.
     """
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
@@ -2155,22 +2440,77 @@ async def run_skill(
         return await _run_skill_once(
             skill, prompt, provider=selected, role=role,
             task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
+            agent_session_id=agent_session_id,
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
-            owns_pending_gate=deny_correct,
+            owns_pending_gate=deny_correct, work_class=work_class,
         )
 
+    local_first = (
+        provider is None
+        and not deny_correct
+        # A GitHub-delivery dispatch (commit/push/PR) must never route
+        # local-first: local_provider.build_lean_prompt deliberately omits
+        # SWARM_GITHUB_CONTRACT/SWARM_PRIOR_ART_CONTRACT (they don't fit the
+        # local window either), so a local child given this work would have
+        # no attribution-header/verdict-vocabulary contract and no prior-art
+        # check — neither of which any `_LEAN_HARD_RULES` entry covers. Every
+        # work class this could combine with today is mechanical
+        # (ci_log_triage is the live example, swarm_dispatch.py's CI-fix
+        # path), so this only removes local eligibility, never frontier
+        # eligibility.
+        and not include_github_contract
+        and local_provider.is_eligible(work_class, local_provider.load_config())
+    )
     return await _run_provider_attempts(
         skill, attempt, binaries=_provider_binaries(), provider=provider,
         role=role, task_entity_id=task_entity_id, notifier=notifier,
         preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
+        local_first=local_first,
     )
+
+
+def _record_local_failover(
+    *,
+    skill: str,
+    role: str,
+    task_entity_id: str,
+    reason: str,
+    next_provider: str | None,
+    detail: str,
+) -> None:
+    """harness_event row naming a claude-local failure and where the run went next."""
+    cfg = local_provider.load_config()
+    try:
+        agent_sub = _load_agent_def(role).aauth_sub
+    except Exception:  # noqa: BLE001 — provenance must not block the fallback
+        agent_sub = ""
+    try:
+        _write_harness_event(
+            task_entity_id=task_entity_id,
+            role=role,
+            agent_sub=agent_sub,
+            event_type="provider_failover",
+            tool_name=f"{local_provider.LOCAL_PROVIDER}:{skill}",
+            success="false",
+            output_summary=(
+                f"provider={local_provider.LOCAL_PROVIDER} failover_reason={reason} "
+                f"next_provider={next_provider or 'none'} {detail}"
+            ),
+            usage=DispatchUsage(
+                provider=local_provider.LOCAL_PROVIDER,
+                model=cfg.model if cfg else None,
+                model_source="requested" if cfg else None,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"[apis] failover harness_event write failed: {exc}")
 
 
 async def _run_provider_attempts(
     skill, attempt, *, binaries, provider=None, role=None, task_entity_id="",
     notifier=None, retry_safe=False, preferred_provider=None,
-    owns_pending_gate: bool = False,
+    owns_pending_gate: bool = False, local_first: bool = False,
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
 
@@ -2212,9 +2552,15 @@ async def _run_provider_attempts(
         binaries = {"claude": binaries.get("claude")}
         preferred_provider = None
 
-    candidates = provider_candidates(binaries, preferred=provider)
+    candidates = provider_candidates(
+        binaries, preferred=provider, local_first=local_first and not owns_pending_gate
+    )
     if preferred_provider in candidates and provider is None:
-        candidates = [preferred_provider, *[p for p in candidates if p != preferred_provider]]
+        # A lens preference reorders the frontier providers; a local-first
+        # claude-local stays ahead of them.
+        head = [p for p in candidates[:1] if p == local_provider.LOCAL_PROVIDER]
+        rest = [p for p in candidates if p not in head and p != preferred_provider]
+        candidates = [*head, preferred_provider, *rest]
     if not candidates:
         if owns_pending_gate and provider is None:
             reason = provider_exclusion_reason("claude", binaries) or "not eligible"
@@ -2264,6 +2610,35 @@ async def _run_provider_attempts(
 
         if result.ok and failure_kind is None:
             return result
+        if selected == local_provider.LOCAL_PROVIDER:
+            # Local inference failed: record why, and fall over to frontier.
+            # Local-first routing is limited to mechanical work classes, which
+            # are safe to re-run from the start (rebase, regeneration, triage).
+            reason = local_provider.classify_failure(
+                result.error, result.stderr, result.stdout
+            )
+            if reason in local_provider.COOLDOWN_FAILURES:
+                # Only an unusable local path is held out; a too-long prompt
+                # or an ordinary task failure says nothing about its health.
+                cool_down(selected)
+            last_result = result
+            next_provider = next(
+                (p for p in candidates[len(attempted):]), None
+            )
+            log.warning(
+                f"[apis] {skill}: {selected} failed ({reason}); "
+                f"falling over to {next_provider or 'nothing'}"
+            )
+            await asyncio.to_thread(
+                _record_local_failover,
+                skill=skill,
+                role=(role or skill).lower(),
+                task_entity_id=task_entity_id,
+                reason=reason,
+                next_provider=next_provider,
+                detail=result.error or result.stderr[:200],
+            )
+            continue
         retryable_prompt_failure = retry_safe and (
             not result.ok or failure_kind is not None
         )

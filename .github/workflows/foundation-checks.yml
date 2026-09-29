@@ -169,13 +169,25 @@ jobs:
           python3 "$f" --check
 
       # Decision state: the committed docs/foundation/decision_state.md held
-      # equal to a fresh render of origin/main ALONE (ateles#1138). The
-      # committed file is a pure projection of the commit it is checked out
-      # at -- it never reads any other branch -- so this step's verdict does
-      # not move when an unrelated branch moves. The separate cross-branch
-      # "ruled on a branch but not yet merged" view is a report only
-      # (`render_decision_state.py --branches`, printed to stdout), never
-      # committed and never part of this check.
+      # equal to a fresh render of ONE source (ateles#1138). The committed
+      # file is a pure projection of that source -- it never reads any other
+      # branch -- so this step's verdict does not move when an unrelated
+      # branch moves. The separate cross-branch "ruled on a branch but not yet
+      # merged" view is a report only (`render_decision_state.py --branches`,
+      # printed to stdout), never committed and never part of this check.
+      #
+      # --source worktree (the default; named explicitly here) reads
+      # docs/foundation/conformance.md as checked out rather than re-fetching
+      # origin/main. On this job's `pull_request` trigger, `actions/checkout`
+      # has already materialized base-plus-PR as the working tree (GitHub's
+      # own refs/pull/N/merge commit), so a PR that adds or rules a register
+      # row sees that row here and can regenerate decision_state.md correctly
+      # BEFORE it merges -- reading origin/main alone could never see a row
+      # the PR itself is adding, so that render was mechanically incapable of
+      # matching what main needs once the PR lands (ateles#1138 round two,
+      # ateles#1300). On this job's `push`-to-main trigger the working tree
+      # IS that push's own commit, so the source choice makes no difference
+      # there; --source worktree is still named for consistency.
       #
       # Runs on every pull_request in this job's paths filter above AND on
       # every push to main with NO paths filter (ateles#1138): the committed
@@ -198,7 +210,7 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           git rev-parse --verify --quiet origin/main >/dev/null || {
             echo "::notice::origin/main not fetchable — decision state skipped"; exit 0; }
-          python3 "$f" --check
+          python3 "$f" --check --source worktree
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
       # register row; nothing read the narrative around the table, so the prose
@@ -230,6 +242,34 @@ jobs:
         if: always() && steps.corpus.outputs.present == 'true'
         run: |
           f=execution/scripts/check_foundation_decision_101.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Decision 117: when register row 117 is ruled, authority_model.md#grants
+      # must carry the widened capability tuple (relationship_types[] beside
+      # entity_types[], default-deny-on-absent/empty), refuse the legacy
+      # entity-types-by-repositories tuple with no relationship-type term, and
+      # the corpus must place principal_binding/delegation_edge/ownership_grant
+      # on the closed governance list or state the entity-only deferral naming
+      # the widened tuple as the alternate mechanism, plus the bootstrap
+      # step-3 admission sentence. Prevents ruled-without-registration drift
+      # (pm/qa REQUEST_CHANGES on ateles#1088, carrying ateles#925's own
+      # Engineering build checklist).
+      - name: Decision 117 — ruled relationship-type grant shape in authority_model
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_117.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Decision 119: a ruled commissioning design must carry its authority,
+      # dependency frontier, completion evidence, recovery, and planted
+      # negatives into the canonical corpus. Prevents a mutable status or a
+      # task-only dependency model from surviving the ruling.
+      - name: Decision 119 — commissioned planning execution corpus
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_119.py
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 

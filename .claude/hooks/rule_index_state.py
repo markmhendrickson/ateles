@@ -92,10 +92,29 @@ def hash_signature(sig: dict[str, str]) -> str:
 
 def record_delivery(state: dict, rows: list[dict]) -> dict:
     """Mutates `state[STATE_KEY]` to the signature/hash of `rows` and returns
-    the same `state` dict for convenient chaining into `save_state`."""
+    the same `state` dict for convenient chaining into `save_state`.
+
+    Callers that only rendered a SUBSET of `rows` this turn (a budget-bound
+    delta, or the no-baseline full-index path when even that degrades to
+    tier C) must pre-filter `rows` down to that subset before calling this —
+    see `record_delivered_subset` for the common case of filtering by a set
+    of entity ids. Recording a row here that was not actually rendered with
+    at least a one-line mention is the exact defect this module exists to
+    prevent (task ent_3f5bc7138628cf5b4116d569).
+    """
     sig = row_signature(rows)
     state[STATE_KEY] = {"hash": hash_signature(sig), "rows": sig}
     return state
+
+
+def record_delivered_subset(state: dict, rows: list[dict], delivered_ids: set[str]) -> dict:
+    """Like `record_delivery`, but only for the rows in `rows` whose entity
+    id is in `delivered_ids` — the rest are simply absent from the recorded
+    signature, so a later prompt (or the next SessionStart) treats them as
+    still-undelivered and retries them, rather than permanently exempting a
+    row that was fetched but never actually rendered to the session."""
+    subset = [r for r in rows if _entity_id(r) in delivered_ids]
+    return record_delivery(state, subset)
 
 
 def last_delivered(state: dict) -> tuple[str | None, dict[str, str]]:
@@ -103,3 +122,22 @@ def last_delivered(state: dict) -> tuple[str | None, dict[str, str]]:
     when this session has never recorded a delivery."""
     delivered = state.get(STATE_KEY) or {}
     return delivered.get("hash"), (delivered.get("rows") or {})
+
+
+# NOTE (ateles#1323 follow-up, Falco security review, task
+# ent_bd3fcf561449b6ebbabc36ca): an earlier revision of this module offered
+# `rendered_entity_ids(text)`, a regex scan for a trailing `[entity_id]`
+# bracket, as the way to decide "what did the session actually see." It was
+# removed. `policy_skill_renderer.py` guarantees a mandatory row's `body`
+# (the raw `agent_policy.rule` text) is NEVER sanitized for index rendering,
+# and this repo's own rule bodies routinely cite other entity ids in prose —
+# so a bracket inside one row's OWN body reads to a text scanner exactly
+# like a different row's real index line, marking that other row delivered
+# even when it was the one actually omitted for budget. Falco reproduced
+# this directly. The fix is structural, not textual: both
+# `policy_skill_renderer.render_index_text_with_ids` and
+# `session_rule_delivery.py`'s own `_render_delta` now return the exact set
+# of entity ids whose OWN line/block was included in the list the render
+# loop kept — built from the `PolicySkill` objects themselves, never by
+# reading a row's rendered text back out. Use `record_delivered_subset`
+# with that structurally-produced id set; do not reintroduce a text scan.

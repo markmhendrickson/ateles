@@ -34,7 +34,9 @@ its own failure mode; keep this to what compaction actually eats.
 
 Fail-open: stdlib only, any error exits 0. Never block a session resume.
 """
+
 import sys
+
 
 REMINDER = """\
 [working-method] Context was just compacted. Standing instructions from the \
@@ -59,7 +61,8 @@ in the issue, PR or commit message.
 4. NAME AND LINK THE TASKS. Name the `task` entities any work corresponds to \
 and link each by id into the Ateles app, so the operator can open them.
 5. PROCEED ON YOUR RECOMMENDATION rather than stopping to ask. If you asked \
-something and it went unanswered, re-surface it each turn until answered.
+something and it went unanswered, re-surface it in each reply to the operator \
+until answered.
 
 Full role definition: `.claude/skills/ateles/SKILL.md`. Repo-wide constraints \
 are in CLAUDE.md, which Claude Code re-injects from disk on its own."""

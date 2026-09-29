@@ -946,6 +946,58 @@ _POSTED_ACK_LINE_RE = re.compile(
 # veto, never to find the verdict itself.
 _LINE_DECORATION_RE = re.compile(r"^(?:\s|>|\||<[^>\n]*>)*")
 
+# ateles#1326: the harness's own standard attribution footer — appended AFTER
+# a lens has already written its contract-shaped reply, by an instruction
+# layer `SWARM_GITHUB_CONTRACT` does not control — repeats `_HEADER_EMOJI`
+# and so reads as a second header to the count at the bottom of
+# `lens_own_verdict`. `SWARM_GITHUB_CONTRACT` now tells a gate-verdict
+# comment to omit this footer (composition is the primary fix); this pattern
+# is the parser-side backstop for the harness round that still adds it
+# anyway, per Waxwing's ADR (`ent_4db525509391992dfc5efc03`, PR #1320 comment
+# 5856317530): bounded to the ONE real terminal shape, never a general
+# "trailing content is fine" rule.
+#
+# `\Z`-anchored (whole-string end, never mid-body) so it strips ONLY the true
+# tail: a footer-shaped string a lens typed into its own prose, or a forged
+# second header placed BEFORE the real footer, both leave the header-emoji
+# count untouched by this strip and still fail the check that follows it.
+# The `Co-Authored-By:` line is optional (some sessions' harness footer is
+# the "Generated with" line alone). Its label is bounded to "Claude
+# <ModelName> <Version>" rather than arbitrary prose: the model name varies
+# release to release (e.g. "Claude Sonnet 5", "Claude Opus 5.5") so the
+# version token is left open, but the label may NOT itself contain the
+# header emoji or another `**...**`-bold span — an unconstrained `[^\n<]+`
+# would let a forged second header hide inside this one optional field and
+# be stripped away along with the real footer, defeating the very
+# exactly-once check this helper feeds (self-review finding on this PR).
+#
+# This pattern is applied to text ALREADY run through
+# `_normalize_for_blocking_scan` (never to the raw reply): that pass's
+# bracketed-spaced-run collapse (`_SPACED_LETTER_RUN_RE`) turns the real
+# footer's `[Claude Code]` link text into `[ClaudeCode]` before this ever
+# sees it, so the pattern must match the POST-normalization shape, not the
+# literal characters a lens's harness appends.
+_KNOWN_TERMINAL_FOOTER_RE = re.compile(
+    r"\n{1,2}\U0001f916\s*Generated with \[ClaudeCode\]"
+    r"\(https://claude\.com/claude-code\)"
+    r"(?:\n{1,2}Co-Authored-By:\s*Claude\s+[A-Za-z]+(?:\s+[A-Za-z0-9.]+)?"
+    r"\s*<noreply@anthropic\.com>)?"
+    r"\n?\s*\Z"
+)
+
+
+def _strip_known_terminal_footer(normalized_text: str) -> str:
+    """*normalized_text* with exactly one known, real, terminal attribution
+    footer removed from its true end — otherwise *normalized_text* unchanged.
+
+    Takes text already passed through `_normalize_for_blocking_scan` — see
+    that pattern's comment for why. Used ONLY to compute the header-emoji
+    count in `lens_own_verdict` (ateles#1326). Never applied to the header/
+    verdict fixed-position reads, the blocking-token scan, or
+    `_VERDICT_LIKE_RE` — those still see the reply exactly as posted.
+    """
+    return _KNOWN_TERMINAL_FOOTER_RE.sub("", normalized_text)
+
 
 def _split_lines_keeping_breaks(text: str) -> list[tuple[str, str]]:
     """``(line, break)`` pairs, splitting on every `_LINE_BREAK_RE` break.
@@ -1043,7 +1095,9 @@ def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
         line up to and including the verdict line ends in `\\n`, `\\r\\n` or
         `\\r`, never U+2028, U+2029, U+0085, a form feed or another separator;
       - the reply carries no other header (the header emoji appears exactly
-        once) and no other line that reads as a verdict statement
+        once, AFTER stripping the one known, real, terminal harness
+        attribution footer if present — `_strip_known_terminal_footer`,
+        ateles#1326) and no other line that reads as a verdict statement
         (`Verdict: COMMENT`, `**COMMENT** — …`, `__COMMENT__`,
         `<td>**APPROVE**</td>`, …).
 
@@ -1089,7 +1143,8 @@ def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
     verdict = _VERDICT_LINE_RE.match(_normalize_for_blocking_scan(raw_verdict).strip())
     if not verdict:
         return None
-    if _normalize_for_blocking_scan(stdout or "").count(_HEADER_EMOJI) != 1:
+    scanned = _strip_known_terminal_footer(_normalize_for_blocking_scan(stdout or ""))
+    if scanned.count(_HEADER_EMOJI) != 1:
         return None
     for i, (line, _) in enumerate(lines):
         if i == verdict_at:
@@ -7719,6 +7774,71 @@ class SwarmDispatcher:
             )
         return state
 
+    async def _live_blocking_verdict_outside_panel(
+        self, trigger: SwarmTrigger, *, reviewed_head: str, panel_lenses: set[str]
+    ) -> str | None:
+        """A lens NOT in `panel_lenses` whose own verdict on `reviewed_head`
+        reads as a live block, or None.
+
+        ateles#1293 / PR #1303's `find_non_required_blocks` closed this gap
+        for `approve_pr_as_app.py`: a lens outside the diff-derived required
+        floor can post a live REQUEST_CHANGES/[BLOCKING] verdict that the
+        tool never reads because it only evaluates the required set. Waxwing's
+        arch review on PR #1303 (task `ent_296de91107a9051d809ebb22`)
+        identified the SAME shape here: `_gate_merge_readiness`'s auto-merge
+        branch trusts `binding_receipt.proves_approval` — which checks only
+        that a formal GitHub APPROVE review exists at the exact head — and
+        Vanellus's own aggregation is built from `_vanellus_prompt`'s inline
+        review text for `panel` (the required floor) ALONE, explicitly told
+        not to fetch PR comments itself. A non-required lens's live block is
+        invisible to both.
+
+        This reads every lens in `LENSES` (the same registry
+        `approve_pr_as_app.LENS_AGENTS` mirrors) that is NOT in
+        `panel_lenses`, for its OWN latest head-scoped comment
+        (`compose_lens_review_marker`), and applies the identical
+        `lens_own_verdict`/`sign_off_is_warranted` fixed-position parser
+        `evaluate_lens` in `approve_pr_as_app.py` already trusts for required
+        lenses — one predicate, two callers, per the same "one source, not
+        two" principle already applied to the checkout-root duplication in
+        #1293's sibling PR. A lens with no comment on this head, or whose
+        latest comment clears, is not a block.
+
+        Fails CLOSED on any read error: an unreadable comment list must never
+        be silently treated as "nothing objects" on a path that can merge.
+        """
+        head = _normalise_full_sha(reviewed_head)
+        if not head:
+            return "unreadable reviewed head — refusing to auto-merge blind"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception as exc:
+            return f"could not read PR comments to check for a live block: {exc}"
+
+        for lens_def in LENSES:
+            lens = lens_def.lens
+            if lens in panel_lenses:
+                continue  # judged by the panel's own required-floor path
+            marker = compose_lens_review_marker(lens, head)
+            comment = None
+            for c in reversed(comments):
+                if marker in (c.get("body") or ""):
+                    comment = c
+                    break
+            if comment is None:
+                continue
+            body = comment.get("body") or ""
+            if sign_off_is_warranted(body, lens_agent=lens_def.agent):
+                continue
+            return (
+                f"{lens} ({lens_def.agent}) has a live blocking verdict on "
+                f"this head — {comment.get('html_url', '(no url)')}"
+            )
+        return None
+
     async def _gate_merge_readiness(
         self,
         trigger: SwarmTrigger,
@@ -7766,6 +7886,32 @@ class SwarmDispatcher:
                 log.error(
                     f"[{DAEMON_NAME}] {ref}: auto-merge held without a verified "
                     "distinct exact-head APPROVED receipt"
+                )
+                return
+
+            # ateles#1293 / PR #1303, extended here per Waxwing's arch review
+            # (task ent_296de91107a9051d809ebb22): a lens OUTSIDE this PR's
+            # diff-derived panel can still have posted a live blocking verdict
+            # on the exact head about to be merged. `proves_approval` above
+            # only confirms A formal APPROVE review exists; it has no notion
+            # of a non-required lens's objection, and Vanellus's own
+            # aggregation was built from `panel` alone. Refuse rather than
+            # merge past an objection this receipt cannot see.
+            panel_lenses = {lens.lens for lens in panel}
+            block_reason = await self._live_blocking_verdict_outside_panel(
+                trigger, reviewed_head=expected_head, panel_lenses=panel_lenses
+            )
+            if block_reason:
+                log.error(
+                    f"[{DAEMON_NAME}] {ref}: auto-merge held — {block_reason}"
+                )
+                self.notifier.send(
+                    f"PR {ref}: auto-merge HELD — {block_reason}. The formal "
+                    "approval exists but a lens outside the reviewed panel "
+                    "has not cleared. Resolve the finding or ask that lens "
+                    "to re-review, then push or re-request review.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
                 )
                 return
 
@@ -8053,6 +8199,10 @@ class SwarmDispatcher:
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
+            # Reading failing-check logs and fixing the reported cause is
+            # mechanical triage, not review judgement — eligible for
+            # claude-local per local_provider.MECHANICAL_WORK_CLASSES.
+            work_class="ci_log_triage",
         )
         if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
             await self._handle_panel_auth_failure(trigger, "cicada")

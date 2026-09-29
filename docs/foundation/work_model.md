@@ -11,7 +11,7 @@ during review), and the operator's 2026-09-05 12:52 memo (revision 21: workflows
 for changing the swarm's own operation), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
-completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
+completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36), and the operator's 2026-09-25 ruling on dynamic workflows (revision 125, decision 116: a task no declaration fits is carried by one declared for it, and never held for similar tasks). Supersedes `docs/archive/task_execution_loop.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 Amendment history: `revisions.md#work_modelmd`.
 ## Purpose
@@ -31,7 +31,7 @@ written through the gate, and never keyed on the work model's own records.
 ## Scope
 
 The task path: a task claimed and executed by an agent. The other two execution mechanisms are named
-below; steps and gates are `gates_and_workflows.md`; core workflows (including intake) are `workflows.md`
+below; steps and gates are `gates_and_workflows.md`; reference workflows and intake, the one core workflow, are `workflows.md`
 (authored companion, not inlined into review prompts); authority is `authority_model.md`; terms are
 `vocabulary.md`; the record is `data_model.md`. Walkthroughs: `scenarios.md`.
 
@@ -154,7 +154,10 @@ names, a record in the record and an external one alike, and nothing on relevanc
 beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
 Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
-intake's declared fast path and never skips intake.
+intake's declared fast path and never skips intake. `route` names a declaration that fits the task, holds
+it on one amendment where a declaration nearly fits, or opens the authoring of one for it, and never holds
+the task for similar tasks to appear
+(`#a-task-no-declaration-fits-is-carried-by-one-declared-for-it-and-no-task-waits-for-similar-tasks`).
 
 **What a task being assembled looks like is open (decision 84, 2026-09-07, on the operator's question).**
 Registered in `conformance.md#the-register-of-open-design-decisions`, argued below.
@@ -699,6 +702,61 @@ and an `enabled` field on it is the maintained state invariant 11 forbids
 edge or the absence of a proving record, and this ruling does not choose between them. What it does settle
 is that the choice is between those two and not between them and a flag.
 
+### A task no declaration fits is carried by one declared for it, and no task waits for similar tasks
+
+**Ruled (decision 116, 2026-09-25, the operator's).** Registered in
+`conformance.md#the-register-of-open-design-decisions`, and argued with its rules in
+`workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`.
+Every task is executed by a workflow as soon as possible; when no declaration fits, one is created for that
+task, and when one nearly fits, it is amended for that task first. This section states what the ruling means
+for the work model; the rules for fit, authoring, approval, amendment, naming, retirement, and promotion to
+core are stated once, in `workflows.md` (principle 9).
+
+**No task waits for other tasks to exist.** The batch rules above already make a batch of one a batch and
+forbid a sweeper grouping tasks by a predicate over the record
+(`#how-a-batch-is-formed-and-what-chooses-its-workflow`), so holding a task until similar tasks appear was
+never a formation rule; the ruling makes it a stated prohibition at the one place it could have been
+introduced, `route`. A task's intake closes on its own properties, and its successor batch opens with the
+tasks that verdict carried, one or many.
+
+**The one wait the ruling admits is on the task's own declaration, and it is decision 14's.** Where a
+declaration nearly fits, `route` creates the task whose work is the amendment; where none fits, the task
+whose work is a new declaration. Either way the intake batch records a dependency on that one task
+(`#a-batch-may-depend-on-a-task-it-created`), bounded by `route`'s `hold_bound`, because `route`'s verdict
+would be false without it. The hold waits on one change made for this task and on nothing another task does,
+so it is not the wait for similar tasks the ruling forbids. The change is a change to the swarm and is
+executed as one (`#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): it enters its
+own intake, sits `PART_OF` the originating task's plan — intake's `classify` places the originating task
+under a plan before `route` can open authoring, and where no plan fits, authoring goes operator-only — goes
+through a workflow — the planning workflow once
+that workflow's draft declaration is active, whose `amend` step carries the declaration write, and
+operator-only until then — and its declaration write is a governance write the action gate evaluates. The
+swarm approves it where every step it adds is low-blast, with an approver distinct from the proposer, and the
+operator where it adds a consent point, an `operator_only` action, or a high-blast action, or removes or
+weakens a consent point, a review step, or a closing condition, since losing a protection is treated as
+adding risk: decision 18's reservation, granted for the low tier of the `workflow` class and kept for the
+rest. Above
+decision 100's tier the declaration is proven first
+(`#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`). When the declaration lands
+and is read back, the dependency ends and `route` signs naming it.
+
+**Every batch may improve the declaration it ran under, and the batch does not wait for the improvement.**
+A step owner who finds that the task's context shows the declaration could serve its class better records a
+standing finding where the declaration fell short, or an [improvement proposal](vocabulary.md#improvement-proposal)
+where it did not — an entity of its own, `PART_OF` the verdict and `REFERS_TO` the batch, as a finding is —
+scoped to the step or the workflow; the change reaches the declaration through the task
+decision 17 describes, never as a write the proposing batch makes
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+The ruling ranks this path with the authoring path: improving existing workflows is as important as creating
+new ones.
+
+**What this does not change.** The workflow is still chosen once, by the verdict that names the successor,
+and a batch still goes through one workflow for its whole life; a declaration amended while a batch runs
+under it binds the next batch, not this one. The bootstrapping limitation is unchanged: the first
+declaration for a declaration scope is an operator act
+(`#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`), and until the planning
+workflow's draft declaration is active, every authoring task is routed to operator-only.
+
 ### What goes through a workflow is a batch of tasks
 
 Tasks go through a workflow in a batch: one or more tasks together, and the record of that. A single task
@@ -915,6 +973,16 @@ state principle 11 forbids — it asserts a dependency that some process must cl
 and it is invisible to a reader walking the record's edges — where a `DEPENDS_ON` edge is read from either
 end: the batch's open dependencies, and every batch a task is holding up.
 
+**The same edge orders commissioned planning work without changing this hold.** A task or planning record
+may `DEPENDS_ON` a task or planning record. A planning-record source applies the dependency to every task
+on its descendant frontier; a planning-record target satisfies it only when that record has the completion
+proof `planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier` requires.
+This extension does not alter a batch's stronger mid-flight rule: a batch still points to the task it
+created, still refuses its verdict while that edge is open, and still ends the edge explicitly. A task or
+planning record with an unsatisfied dependency is absent from the commissioned frontier rather than given
+a stored `blocked_by` value. The existing cycle refusal applies across the combined `PART_OF` and
+`DEPENDS_ON` walk, so a planning dependency is not a second dependency primitive.
+
 **What binds.** The verdict on the step that recorded the dependency is refused at submission while any
 `DEPENDS_ON` edge from the batch to a non-terminal task is unended — the same shape as a conclusion
 contradicting its own findings, which is refused rather than swallowed
@@ -1010,9 +1078,11 @@ a live one. Work needing two workflows at once is split into child tasks, one pe
 
 ### Parent and child tasks
 
-Children `PART_OF` a parent (at most one parent). Parent completion is derived from children's terminal
-states. Children go through workflows independently. A parent never enters a workflow — it is a
-grouping, and a batch carries tasks that are executed, which a parent never is.
+Children `PART_OF` a parent (at most one parent). Children go through workflows independently. A parent
+never enters a workflow — it is a grouping, and a batch carries tasks that are executed, which a parent
+never is. Parent completion is derived: every child is terminal and landed, and where the parent is under a
+planning record its effect evidence satisfies the applicable `completion_criteria[]`. A terminal child
+count alone therefore cannot close its parent.
 
 **A task's one `PART_OF` edge targets its parent task or a planning record, and the records above it are
 its ascent.** The same edge, with the same one-parent rule, relates a task to the plan it is under and a
@@ -1022,8 +1092,9 @@ read, distinct from the chain, and what a step reads of it is declared and resol
 `planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`). A task with
 no planning record above it is unplanned, a derived read and never a status, and it is admitted through
 intake like any task. Completion at every level above the task is the parent's rule applied again: derived
-from the descendants' terminal states, never stored
-(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`).
+from descendant terminal-and-landed state plus the planning record's criterion evidence, never stored
+(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`,
+`planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`).
 
 ### A recurring task is one live instance, and its completion creates the next
 

@@ -18,7 +18,7 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 | Projected document | Rules | Chars | Against `MAX_DOC_CHARS` |
 |---|---|---|---|
 | `adapters.md` | 43 | 10,334 | under |
-| `authority_model.md` | 21 | 4,099 | under |
+| `authority_model.md` | 28 | 6,780 | under |
 | `calendar.md` | 8 | 2,687 | under |
 | `conformance.md` | 8 | 7,776 | under |
 | `conformance_suite.md` | — | 522 | under |
@@ -27,14 +27,14 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 | `gates_and_workflows.md` | 58 | 10,209 | under |
 | `github.md` | 19 | 4,728 | under |
 | `gmail.md` | 11 | 3,504 | under |
-| `lenses.md` | — | 4,194 | n/a — an index, never a selected reading |
+| `lenses.md` | — | 4,278 | n/a — an index, never a selected reading |
 | `migration.md` | 13 | 6,134 | under |
 | `payments.md` | 17 | 6,117 | under |
-| `planning_model.md` | 12 | 3,982 | under |
+| `planning_model.md` | 17 | 5,065 | under |
 | `principles.md` | 11 | 3,017 | under |
 | `telegram.md` | 17 | 4,779 | under |
 | `vocabulary.md` | 4 | 939 | under |
 | `work_model.md` | 53 | 10,151 | under |
 | `workflows.md` | 26 | 5,880 | under |
 
-374 rules projected, 92,242 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
+386 rules projected, 96,006 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.

@@ -40,6 +40,7 @@ holds, and what it calls them, is the instance's (`#which-levels-an-instance-dec
 - [Upward context is a declared read, resolved along the ascent at hydration](#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration).
 - [Downward state is derived; upward content is authored, as entities](#downward-state-is-derived-upward-content-is-authored-as-entities).
 - [Maintenance is work: the `planning` workflow](#maintenance-is-work-the-planning-workflow).
+- [Commissioning a planning record drives one dependency-ready frontier](#commissioning-a-planning-record-drives-one-dependency-ready-frontier).
 - [Authority per level: an amendment is an action, and its class is the level's](#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels).
 - [Binding dissolves: a task's ascent is its binding](#binding-dissolves-a-tasks-ascent-is-its-binding).
 - [The mechanism against cross-record collision is the subject](#the-mechanism-against-cross-record-collision-is-the-subject).
@@ -140,9 +141,11 @@ work is priority.
 ### Downward state is derived; upward content is authored, as entities
 
 **Every field of a planning record that describes the state of the work beneath it is a derived read, and
-none is stored.** Completion — every descendant task terminal — is the parent task's rule
-(`work_model.md#parent-and-child-tasks`) applied one level up and then at every level: a plan is complete
-when its tasks are, a project when its plans are, and so on to the root. The open and terminal counts, the
+none is stored.** Completion is the parent task's rule (`work_model.md#parent-and-child-tasks`) applied one
+level up and then at every level, strengthened by the record's authored `completion_criteria[]`: every
+descendant task is terminal and landed, and the `planning` workflow's `judge` verdict carries the evidence
+that each criterion is met. A plan is complete when that proof exists; a project when the proof exists for
+its statement and every subordinate record, and so on to the root. The open and terminal counts, the
 descendants held by an open checkpoint (the plan's *blockers*), the most recent activity on any descendant,
 the fraction of descendants whose chains ended under a declaration that permits the ending (the plan's
 *landed* work — `work_model.md#a-task-is-executed-only-through-a-workflow`), and the open descendants in
@@ -260,6 +263,93 @@ findings on the record (`gates_and_workflows.md#declaration-batch-projection`); 
 a concern is a blocking finding, which `amend` cannot sign around; a verdict is a verdict. The
 `plan_contribution` type the instance holds is the retired shape of exactly this, and the migration carries
 it as the gate-model table carries the other contribution records.
+
+### Commissioning a planning record drives one dependency-ready frontier
+
+**The rules in this section.**
+
+- [Control is an action and its durable result is a decision, not a status](#commissioning-a-planning-record-drives-one-dependency-ready-frontier).
+- [The frontier is derived from dependencies and the controls above each leaf](#commissioning-a-planning-record-drives-one-dependency-ready-frontier).
+- [Continuous planning is not forever-recurring delivery work](#commissioning-a-planning-record-drives-one-dependency-ready-frontier).
+- [Completion is a proof over descendant effects, not a checkpoint or a count](#commissioning-a-planning-record-drives-one-dependency-ready-frontier).
+- [Discovered work is admitted through the statement before it joins execution](#commissioning-a-planning-record-drives-one-dependency-ready-frontier).
+- [Recovery re-derives the frontier, and the commission has two stop conditions](#commissioning-a-planning-record-drives-one-dependency-ready-frontier).
+
+**Control is an action and its durable result is a decision, not a status.** An authorized operator or
+agent commissions, pauses, resumes, or cancels one planning record through an action class named for the
+level: for a plan, `commission_plan`, `pause_plan`, `resume_plan`, and `cancel_plan`; for a project the
+same four verbs end in `_project`; every other registered level follows the same form. The proposer needs
+a grant that admits the action and the engine's write, the `action_policy` assigns its blast tier and any
+`ownership_grant` on the record supplies the required checkpoint seat. The engine acts only after the
+existing action gate permits the action and its read-back confirms the effect. That effect is a `decision`
+entity `PART_OF` the record, linked by `REFERS_TO` from the action and by `SUPERSEDES` to the prior control
+decision. The latest unsuperseded control decision on the one chain derives whether the record is
+commissioned, paused, or cancelled; there is no `commission_status`, execution record, cursor, or second
+orchestration store. Two unsuperseded control decisions are a conflict that holds at a checkpoint rather
+than a state the swarm guesses between. Commissioning a parent reaches every descendant through
+`PART_OF`; a pause or cancellation anywhere on a leaf's ascent is the more restrictive control.
+
+**The frontier is derived from dependencies and the controls above each leaf.** `DEPENDS_ON` may run from
+a task or planning record to a task or planning record; a dependency on a planning record is satisfied
+only by that record's proved completion, never by its cancellation. The **dependency-ready frontier** of
+a commissioned record is the set of non-terminal, non-parent task leaves beneath it that are otherwise
+claimable, whose own outbound dependencies and every dependency on their ascent are satisfied, and whose
+ascent contains no pause or cancellation. A dependency from a planning record blocks that record's whole
+subtree. The live `planning` task is the control loop and is excluded from the delivery frontier. The
+**maximum safe parallelism** is the largest subset of that frontier whose simultaneous claims satisfy the
+existing lease exclusivity, assignment, grants, action-policy `metered_resources[]`, and attenuated grant
+budgets and parameter constraints. It is a derived read, not a concurrency field: independent children
+with no shared constraint may all be claimed, while a blocked dependency never enters the frontier.
+Cycles remain refused by the existing cycle checks; commissioning creates no exception.
+
+**Continuous planning is not forever-recurring delivery work.** A commission pulls the record's one live
+`planning` task due now and keeps that recurring control loop surveying, judging, and amending while the
+commission is active; descendant closes already pull it forward, and its cadence remains the backstop.
+That maintenance recurrence never prevents delivery completion because it is outside the delivery
+frontier. A forever-recurring delivery obligation is different: it keeps producing in-scope task
+occurrences and therefore prevents terminal completion until its recurrence rule has a declared end and
+the final occurrence is terminal and landed. Each occurrence remains a task linked by `FOLLOWS`; no
+commission mutates or reopens it.
+
+**Completion is a proof over descendant effects, not a checkpoint or a count.** Terminal descendants are
+necessary and not sufficient. The planning `judge` closes a commissioned record as complete only when
+every in-scope descendant is terminal and landed, every authored `completion_criteria[]` item is paired
+with descendant effect evidence in an as-of verdict or confirmed action read-back, every subordinate
+planning record has the same proof, and no blocking finding or unresolved scope admission remains. A
+checkpoint resolves authority, missing input, or a choice; it is never completion evidence and cannot
+substitute for the effect it allowed. A completion decision attempted with any unmet criterion is refused.
+Cancellation is a terminal disposition of the commission, not completion of the record or satisfaction
+of a `DEPENDS_ON` edge; withdrawing such an edge is a separate recorded act. Once the completion proof is
+written, the commission stops and later work enters through closed-work intake rather than reopening the
+proof.
+
+**Discovered work is admitted through the statement before it joins execution.** Newly discovered work
+that is already within the statement's scope and needed by an existing criterion is created as a task
+`PART_OF` the record by `amend`, enters intake, and joins the frontier only after its dependencies are
+written. Work that would change the scope, exclusions, or `completion_criteria[]` first requires the
+existing `amend_<level>` action and a confirmed planning decision; until that amendment lands, the task is
+not admitted beneath the record. Thus discovery can change the plan continuously without silent scope
+expansion, and a finding that cannot be classified either way holds the planning task at a checkpoint
+rather than entering delivery by default.
+
+**Recovery re-derives the frontier, and the commission has two stop conditions.** After a runner,
+daemon, or host interruption, the engine reads the latest control decision, descendant verdicts and
+actions, open dependencies, held or lapsed leases, action confirmations, and idempotency keys, then
+**re-derives** the frontier. Resume does the same after a pause and never replays a confirmed effect or
+continues from a local cursor. A pause admits no new **delivery** descendant claim, delivery step opening,
+or delivery action; holders reach a declared safe interruption boundary and return their leases, or the
+leases lapse, and pause is confirmed only by read-back that no delivery descendant lease or action remains
+live. The record's one live `planning` task is control work, not delivery work: while paused it remains
+reachable only to evaluate and take `resume_<level>` or `cancel_<level>` through the same proposer grant,
+`action_policy`, `ownership_grant` checkpoint seat, action gate, and confirmed effect read-back required
+before the pause. It cannot admit or execute delivery work while the pause stands. After an interruption
+in the paused state, the engine rehydrates that control path from the record and the action's idempotency
+key; a confirmed `resume_plan` writes and reads back its superseding control decision before the delivery
+frontier is re-derived, without replaying the pause or any earlier effect. A cancellation uses the same
+quiescence rule and leaves descendants and their evidence intact. The **stop condition** is either proved
+completion or confirmed cancellation; pause is suspension. If the frontier is empty while criteria remain
+unmet, the planning loop must admit in-scope work or hold on the existing checkpoint protocol — it may not
+infer completion from the empty frontier.
 
 ### Authority per level: an amendment is an action, and its class is the level's
 
