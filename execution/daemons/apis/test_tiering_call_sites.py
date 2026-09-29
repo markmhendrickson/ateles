@@ -78,7 +78,7 @@ def world(monkeypatch, tmp_path) -> _World:
 
     w.changed_files_stub = files
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", files)
-    monkeypatch.setattr(SwarmDispatcher, "_diff_lines_changed", lines)
+    monkeypatch.setattr(SwarmDispatcher, "_diff_lines_changed", lines, raising=False)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", rounds)
     monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", noop)
     monkeypatch.setattr(
