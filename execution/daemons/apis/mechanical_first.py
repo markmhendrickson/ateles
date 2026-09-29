@@ -38,10 +38,10 @@ MODE_MERGE = "merge"
 MODES = (MODE_REBASE, MODE_MERGE)
 
 # Outcome statuses.
-DONE = "done"            # finished and verified; no model needed
+DONE = "done"  # finished and verified; no model needed
 CONFLICTS = "conflicts"  # stopped on conflicts; operation left in progress
-REFUSED = "refused"      # preconditions not met; nothing was changed
-ERROR = "error"          # git or the generator failed for a non-conflict reason
+REFUSED = "refused"  # preconditions not met; nothing was changed
+ERROR = "error"  # git or the generator failed for a non-conflict reason
 
 # Characters of conflicted hunk text put in a model brief. The local window is
 # small, so the brief is bounded; the model can `sed -n` the rest of a file.
@@ -64,7 +64,9 @@ class Outcome:
     changed_files: list[str] = field(default_factory=list)
 
 
-def _git(cwd: str, *args: str, timeout: int = _GIT_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+def _git(
+    cwd: str, *args: str, timeout: int = _GIT_TIMEOUT_SECONDS
+) -> subprocess.CompletedProcess:
     """Run git non-interactively: no editor, no credential prompt."""
     child = {
         **os.environ,
@@ -73,7 +75,12 @@ def _git(cwd: str, *args: str, timeout: int = _GIT_TIMEOUT_SECONDS) -> subproces
         "GIT_TERMINAL_PROMPT": "0",
     }
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout, env=child
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=child,
     )
 
 
@@ -88,7 +95,11 @@ def _tail(text: str, limit: int = _OUTPUT_TAIL_CHARS) -> str:
 
 def operation_in_progress(cwd: str) -> str:
     """'rebase', 'merge', or '' — whichever integration git is mid-way through."""
-    for name, kind in (("rebase-merge", "rebase"), ("rebase-apply", "rebase"), ("MERGE_HEAD", "merge")):
+    for name, kind in (
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("MERGE_HEAD", "merge"),
+    ):
         proc = _git(cwd, "rev-parse", "--git-path", name)
         if proc.returncode == 0:
             path = _out(proc)
@@ -167,7 +178,10 @@ def _conflict_hunks(path: str, budget: int) -> tuple[str, int]:
             blocks.append((start, idx))
             start = None
     if not blocks:
-        return "  (no conflict markers: a delete/rename or binary conflict; inspect with `git status`)\n", 0
+        return (
+            "  (no conflict markers: a delete/rename or binary conflict; inspect with `git status`)\n",
+            0,
+        )
     shown: list[str] = []
     used = 0
     omitted = 0
@@ -180,17 +194,26 @@ def _conflict_hunks(path: str, budget: int) -> tuple[str, int]:
         shown.append(f"  lines {first + 1}-{last + 1}:\n{text}\n")
         used += len(text)
     if omitted:
-        shown.append(f"  ({omitted} more conflict block(s) in this file not shown; read the file)\n")
+        shown.append(
+            f"  ({omitted} more conflict block(s) in this file not shown; read the file)\n"
+        )
     return "".join(shown), used
 
 
 def conflict_brief(
-    cwd: str, base: str, base_sha: str, mode: str, files: list[str],
-    *, budget: int = DEFAULT_BRIEF_BUDGET_CHARS,
+    cwd: str,
+    base: str,
+    base_sha: str,
+    mode: str,
+    files: list[str],
+    *,
+    budget: int = DEFAULT_BRIEF_BUDGET_CHARS,
 ) -> str:
     """The model's task after a deterministic integration stopped on conflicts."""
     branch = _out(_git(cwd, "symbolic-ref", "--short", "-q", "HEAD")) or "(detached)"
-    method = "a rebase" if mode == MODE_REBASE else "a merge commit (`git merge --no-ff`)"
+    method = (
+        "a rebase" if mode == MODE_REBASE else "a merge commit (`git merge --no-ff`)"
+    )
     finish = (
         "`GIT_EDITOR=true git rebase --continue`"
         if mode == MODE_REBASE
@@ -218,8 +241,11 @@ def conflict_brief(
 
 
 def attempt_integration(
-    cwd: str, base: str, mode: str = MODE_REBASE,
-    *, brief_budget: int = DEFAULT_BRIEF_BUDGET_CHARS,
+    cwd: str,
+    base: str,
+    mode: str = MODE_REBASE,
+    *,
+    brief_budget: int = DEFAULT_BRIEF_BUDGET_CHARS,
 ) -> Outcome:
     """Integrate ``base`` into the current branch with git alone.
 
@@ -230,20 +256,31 @@ def attempt_integration(
     operation is aborted so the worktree is left as it was found).
     """
     if mode not in MODES:
-        return Outcome(REFUSED, f"unknown integration mode {mode!r} (expected rebase or merge)")
+        return Outcome(
+            REFUSED, f"unknown integration mode {mode!r} (expected rebase or merge)"
+        )
     if not base or base.startswith("-"):
         return Outcome(REFUSED, f"invalid base ref {base!r}")
     if _git(cwd, "rev-parse", "--is-inside-work-tree").returncode != 0:
         return Outcome(REFUSED, f"{cwd} is not a git worktree")
     resolved = _git(cwd, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
     if resolved.returncode != 0:
-        return Outcome(REFUSED, f"base ref {base!r} does not resolve to a commit here (fetch it first?)")
+        return Outcome(
+            REFUSED,
+            f"base ref {base!r} does not resolve to a commit here (fetch it first?)",
+        )
     base_sha = _out(resolved)
     pending = operation_in_progress(cwd)
     if pending:
-        return Outcome(REFUSED, f"a {pending} is already in progress in this worktree", base_sha)
+        return Outcome(
+            REFUSED, f"a {pending} is already in progress in this worktree", base_sha
+        )
     if _git(cwd, "symbolic-ref", "-q", "HEAD").returncode != 0:
-        return Outcome(REFUSED, "HEAD is detached; check out the branch to integrate first", base_sha)
+        return Outcome(
+            REFUSED,
+            "HEAD is detached; check out the branch to integrate first",
+            base_sha,
+        )
     dirty = _dirty_tracked(cwd)
     if dirty:
         return Outcome(
@@ -267,7 +304,11 @@ def attempt_integration(
     if proc.returncode == 0:
         problem = verify_integration(cwd, base_sha, mode)
         if problem:
-            return Outcome(ERROR, f"git reported success but verification failed: {problem}", base_sha)
+            return Outcome(
+                ERROR,
+                f"git reported success but verification failed: {problem}",
+                base_sha,
+            )
         return Outcome(
             DONE,
             f"{mode} of {base} ({base_sha[:12]}) finished cleanly; HEAD is now {_head_sha(cwd)[:12]}",
@@ -317,14 +358,18 @@ def run_generators(
         try:
             argv = shlex.split(command)
         except ValueError as exc:
-            return Outcome(REFUSED, f"cannot parse generator command {command!r}: {exc}")
+            return Outcome(
+                REFUSED, f"cannot parse generator command {command!r}: {exc}"
+            )
         refusal = _generator_refusal(argv)
         if refusal:
             return Outcome(REFUSED, refusal)
     for command in commands:
         argv = shlex.split(command)
         try:
-            proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+            proc = subprocess.run(
+                argv, cwd=cwd, capture_output=True, text=True, timeout=timeout
+            )
         except FileNotFoundError:
             return Outcome(ERROR, f"generator not found: {argv[0]}")
         except subprocess.TimeoutExpired:
