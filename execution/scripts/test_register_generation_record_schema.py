@@ -23,18 +23,41 @@ def test_dry_run_makes_no_request(monkeypatch, capsys):
     def boom(*a, **k):
         raise AssertionError("dry run must not touch the network")
 
-    monkeypatch.setattr(reg, "_default_requester", boom)
+    monkeypatch.setattr(reg.neotoma_http, "request_json", boom)
     assert reg.main([]) == 0
 
 
-def test_apply_without_a_token_refuses(monkeypatch):
+def test_apply_without_a_token_or_host_refuses_with_a_remedy(monkeypatch, capsys):
     monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
-    try:
-        reg.main(["--apply"])
-    except SystemExit as exc:
-        assert "NEOTOMA_BEARER_TOKEN" in str(exc)
-    else:
-        raise AssertionError("expected refusal")
+    monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+    assert reg.main(["--apply"]) == 2
+    err = capsys.readouterr().err
+    assert "NEOTOMA_BASE_URL" in err and "source them without printing" in err
+
+
+def test_apply_prints_the_target_host_and_never_the_token(monkeypatch, capsys):
+    token = "tok" + "-abcdef-123456"
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.net")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", token)
+    monkeypatch.setattr(reg, "apply", lambda: 0)
+    assert reg.main(["--apply"]) == 0
+    out = capsys.readouterr()
+    assert "https://neotoma.example.net" in out.out and token not in out.out + out.err
+
+
+def test_http_failure_shows_the_server_error_body_and_says_rerun_is_safe(capsys):
+    def reject(method, path, body):
+        raise reg.neotoma_http.NeotomaRequestError(400, '{"error":"SCHEMA_VALIDATION_FAILED: bad field"}')
+
+    assert reg.apply(reject) == 1
+    err = capsys.readouterr().err
+    assert "SCHEMA_VALIDATION_FAILED: bad field" in err and "re-running is safe" in err
+
+
+def test_help_lists_the_environment_variables():
+    proc = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True, timeout=30)
+    assert "NEOTOMA_BASE_URL" in proc.stdout and "NEOTOMA_BEARER_TOKEN" in proc.stdout
+    assert "Safe to re-run" in proc.stdout
 
 
 def test_payload_fields_come_from_the_single_record_source():
@@ -57,6 +80,8 @@ def test_apply_reads_back_and_fails_on_a_missing_field():
 
     assert reg.apply(ok) == 0 and calls == [("POST", "/register_schema"), ("GET", "/schemas/generation_record")]
 
+    wrong_type = {**full, "schema_definition": {"fields": {**full["schema_definition"]["fields"], "cost_usd": {"type": "string"}}}}
+    assert reg.apply(lambda m, p, b: wrong_type if m == "GET" else {}) == 1
     partial = {"active": True, "schema_definition": {"fields": {"slot": {}}}}
     assert reg.apply(lambda m, p, b: partial if m == "GET" else {}) == 1
     assert reg.apply(lambda m, p, b: {**full, "active": False} if m == "GET" else {}) == 1

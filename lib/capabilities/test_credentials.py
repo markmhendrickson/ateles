@@ -38,7 +38,6 @@ def _resolve(path, **kw):
         credential_location=kw.pop("loc", "GEMINI_API_KEY"),
         allowed_names=NAMES,
         credential_file=path,
-        process_values=kw.pop("process_values", {}),
     )
 
 
@@ -52,14 +51,29 @@ def test_reads_key_from_file_without_touching_the_process_environment(cred_dir):
     assert "GEMINI_API_KEY" not in os.environ
 
 
-def test_file_wins_over_process_value(cred_dir):
-    path = _file(cred_dir, line("from_the_file_1234"))
-    assert _resolve(path, process_values={"GEMINI_API_KEY": "from_process_9999"}).reveal() == "from_the_file_1234"
-
-
-def test_falls_back_to_client_process_value(cred_dir):
+def test_there_is_no_fallback_to_the_process_environment(cred_dir, monkeypatch):
+    """One place a key can live: the named file. A key in the client's own
+    environment is ignored, never read."""
+    monkeypatch.setenv(KEYNAME, "from_process_9999")
     path = _file(cred_dir, "SOMETHING_ELSE=1\n")
-    assert _resolve(path, process_values={"GEMINI_API_KEY": "from_process_9999"}).reveal() == "from_process_9999"
+    with pytest.raises(GenerationRefused) as exc:
+        _resolve(path)
+    assert exc.value.code == CREDENTIAL_UNRESOLVED
+    with pytest.raises(GenerationRefused):
+        resolve_credential(SLOT, credential_location=KEYNAME, allowed_names=NAMES, credential_file=None)
+
+
+def test_refusals_name_the_key_and_the_path_and_give_the_chmod_command(cred_dir):
+    loose = _file(cred_dir, line(), mode=0o644)
+    with pytest.raises(GenerationRefused) as perm:
+        _resolve(loose)
+    assert f"chmod 600 {os.path.realpath(loose)}" in perm.value.hint
+    empty = _file(cred_dir, line(""))
+    with pytest.raises(GenerationRefused) as missing:
+        _resolve(empty)
+    assert KEYNAME in missing.value.message and "generation.env" in missing.value.message
+    for err in (perm.value, missing.value):
+        assert FAKE not in str(err)
 
 
 @pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o660])
@@ -105,7 +119,7 @@ def test_missing_file_and_missing_key_are_unresolved(cred_dir):
 def test_binding_cannot_redirect_the_client_to_an_unrelated_secret(cred_dir, loc):
     path = _file(cred_dir, line("leaky_leaky_1234", "NEOTOMA_BEARER_TOKEN") + line("oai_oai_oai_1", "OPENAI_API_KEY"))
     with pytest.raises(GenerationRefused) as exc:
-        _resolve(path, loc=loc, process_values={"NEOTOMA_BEARER_TOKEN": "leaky_leaky_1234"})
+        _resolve(path, loc=loc)
     assert exc.value.code == CREDENTIAL_UNRESOLVED
 
 

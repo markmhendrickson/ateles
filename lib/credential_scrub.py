@@ -1,7 +1,11 @@
 """Names of generation vendor credentials, defined once.
 
 Two consumers must agree on this list, so it lives in one import-light module
-(principle 9: one source, defined once):
+outside the ``lib.capabilities`` package (principle 9: one source, defined
+once). It is deliberately NOT inside the package: importing a package member
+runs the package ``__init__``, which loads the whole client, and the Apis
+dispatch process (``skill_runner``) must not depend on the client to scrub an
+environment. Nothing here imports anything.
 
 * vendor adapters, which read ONLY the names they are allowed to read;
 * ``skill_runner._subscription_only_env``, which strips these names, and any

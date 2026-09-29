@@ -27,6 +27,14 @@ def _client(make_client, constraints, cost=1.0):
     return make_client([binding_row(SLOT, constraints=constraints)], adapters={"stub": stub}), stub
 
 
+def _manifest(ledger):
+    """Write a valid manifest so a test exercises the row/permission cause it
+    names, not the missing-manifest guard."""
+    (ledger.root / "manifest.json").write_text(
+        json.dumps({"files": [f"{SLOT}/{ledger.month()}.jsonl"]})
+    )
+
+
 def _raise_code(client, code):
     with pytest.raises(GenerationRefused) as exc:
         client.generate(SLOT, "p")
@@ -59,6 +67,7 @@ def test_cap_unreadable_ledger_io_error_refuses_without_vendor_call(make_client,
     slot_dir = ledger.root / SLOT
     slot_dir.mkdir(parents=True)
     # A directory where the month file should be: reading it raises OSError.
+    _manifest(ledger)
     (slot_dir / f"{ledger.month()}.jsonl").mkdir()
     _raise_code(client, CAP_UNREADABLE)
     assert stub.calls == 0
@@ -68,6 +77,7 @@ def test_cap_unreadable_corrupt_ledger_row_refuses(make_client, ledger):
     client, stub = _client(make_client, {"monthly_cap_usd": 10})
     slot_dir = ledger.root / SLOT
     slot_dir.mkdir(parents=True)
+    _manifest(ledger)
     (slot_dir / f"{ledger.month()}.jsonl").write_text("{garbage\n")
     _raise_code(client, CAP_UNREADABLE)
     assert stub.calls == 0
@@ -77,6 +87,7 @@ def test_world_writable_ledger_is_treated_as_tampered(make_client, ledger):
     client, stub = _client(make_client, {"monthly_cap_usd": 10})
     slot_dir = ledger.root / SLOT
     slot_dir.mkdir(parents=True)
+    _manifest(ledger)
     path = slot_dir / f"{ledger.month()}.jsonl"
     path.write_text("")
     path.chmod(0o666)

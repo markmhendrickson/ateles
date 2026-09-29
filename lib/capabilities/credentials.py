@@ -10,6 +10,8 @@ Rules this module enforces
   into a local dict. Nothing is written to the process environment and
   nothing is exported to a subprocess. There is no code path in this package
   that starts a subprocess with the credential in its environment.
+* The file is the ONLY source. There is no fallback to the client's own process
+  environment: one place a key can live, one place to audit.
 * The file must live under the operator's Ateles credential directory
   (``~/.config/ateles`` unless ``ATELES_GENERATION_CREDENTIAL_DIR`` says
   otherwise) and must not be readable by group or other (mode 0600). A binding
@@ -30,7 +32,6 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Mapping
 
 from .errors import CREDENTIAL_UNRESOLVED, GenerationRefused
 
@@ -98,24 +99,24 @@ def _refuse(slot: str, message: str, hint: str) -> GenerationRefused:
     return GenerationRefused(CREDENTIAL_UNRESOLVED, slot, message, hint)
 
 
-def _load_file(slot: str, credential_file: str) -> dict[str, str]:
+def _load_file(slot: str, credential_file: str, key_name: str) -> dict[str, str]:
     path = Path(credential_file).expanduser()
     try:
         resolved = path.resolve(strict=True)
     except OSError:
         raise _refuse(
             slot,
-            "credential file named by the binding does not exist",
-            "Operator: materialize the generation credentials on the host that "
-            "runs the capability client (see docs/dev/generation_capability_client.md). "
+            f"credential file {path} does not exist (looking for key {key_name})",
+            f"Operator: materialize the generation credentials to {path} on the host "
+            "that runs the capability client (see "
+            "docs/dev/generation_capability_client.md). "
             "Agents never hold this key; they call the capability client.",
         ) from None
     base = credential_dir()
     if base != resolved and base not in resolved.parents:
         raise _refuse(
             slot,
-            "credential file named by the binding is outside the Ateles "
-            "credential directory",
+            f"credential file {resolved} is outside the Ateles credential directory {base}",
             "Operator: correct the binding's credential_env_file to a path under "
             f"the credential directory ({CREDENTIAL_DIR_ENV} overrides the default).",
         )
@@ -123,15 +124,15 @@ def _load_file(slot: str, credential_file: str) -> dict[str, str]:
     if mode & 0o077:
         raise _refuse(
             slot,
-            "credential file is accessible to group or other",
-            "Operator: restrict the file to its owner (mode 0600) and retry.",
+            f"credential file {resolved} is accessible to group or other (mode {mode:04o})",
+            f"Operator: run `chmod 600 {resolved}` and retry.",
         )
     try:
         return parse_env_file(resolved)
     except (OSError, UnicodeDecodeError):
         raise _refuse(
             slot,
-            "credential file could not be read",
+            f"credential file {resolved} could not be read",
             "Operator: fix the file's permissions or encoding and retry.",
         ) from None
 
@@ -142,14 +143,13 @@ def resolve_credential(
     credential_location: str,
     allowed_names: tuple[str, ...],
     credential_file: str | None = None,
-    process_values: Mapping[str, str] | None = None,
 ) -> Secret:
     """Return the credential as a ``Secret`` or raise ``CREDENTIAL_UNRESOLVED``.
 
-    ``allowed_names`` is the adapter's allowlist of key names.
-    ``process_values`` is a read-only view of the CLIENT process's own values
-    (defaults to the process environment; injected in tests). It is consulted
-    only after the credential file and is never modified.
+    ``allowed_names`` is the adapter's allowlist of key names. The ONLY source
+    is the credential file the binding names; the client does not fall back to
+    its own process environment, so there is one place a key can live and one
+    place to audit.
     """
     location = (credential_location or "").strip()
     if not location or location.startswith("oauth:") or " " in location:
@@ -158,7 +158,7 @@ def resolve_credential(
             "the binding's credential route is not a key the client can read "
             "(it is an OAuth/subscription route, or unset)",
             "This route has no host-held API key. Operator: bind an API-key "
-            "route, or wait for the OAuth adapter (tracked as a follow-up).",
+            "route, or wait for the OAuth adapter (#1352).",
         )
     if not _KEY_NAME_RE.match(location):
         raise _refuse(
@@ -169,24 +169,23 @@ def resolve_credential(
     if location not in allowed_names:
         raise _refuse(
             slot,
-            "the binding names a credential key this vendor adapter may not read",
-            "Operator: correct credential_location to one of the vendor's own "
-            "key names.",
+            f"the binding names credential key {location}, which this vendor adapter may not read",
+            "Operator: correct credential_location to one of: " + ", ".join(allowed_names) + ".",
         )
-
-    value: str | None = None
-    if credential_file:
-        value = _load_file(slot, credential_file).get(location)
-    if not value:
-        source = os.environ if process_values is None else process_values
-        value = source.get(location)
-    value = (value or "").strip()
+    if not credential_file:
+        raise _refuse(
+            slot,
+            f"the binding names no credential_env_file, so key {location} cannot be located",
+            "Operator: add credential_env_file (a path under the Ateles credential "
+            "directory) to the binding's constraints.",
+        )
+    value = (_load_file(slot, credential_file, location).get(location) or "").strip()
     if not value:
         raise _refuse(
             slot,
-            "credential is missing or empty at the location the binding names",
-            "Operator: place the key in the credential file the binding points "
-            "at (see docs/dev/generation_capability_client.md). Agents must "
-            "call the capability client; they never hold this key.",
+            f"key {location} is missing or empty in {Path(credential_file).expanduser()}",
+            f"Operator: add a {location}=... line to that file (see "
+            "docs/dev/generation_capability_client.md). Agents must call the "
+            "capability client; they never hold this key.",
         )
     return Secret(value)

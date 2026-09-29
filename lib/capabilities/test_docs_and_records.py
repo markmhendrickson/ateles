@@ -38,7 +38,12 @@ def test_error_codes_match_the_ux_table_exactly():
         "BINDING_MISSING", "CAP_UNSET", "CAP_UNREADABLE", "CAP_EXHAUSTED",
         "CREDENTIAL_UNRESOLVED", "VENDOR_ERROR", "FALLBACK_EXHAUSTED",
         "EMPTY_RESULT", "CRITIQUE_ROUND_LIMIT",
+        # raised AFTER a paid call; never retry blindly
+        "SPENT_UNRECORDED", "ARTIFACT_UNSAVED",
     }
+    assert errors.POST_SPEND_CODES == ("SPENT_UNRECORDED", "ARTIFACT_UNSAVED")
+    # the "before any vendor request" group must never contain a post-spend code
+    assert not set(errors.REFUSE_BEFORE_VENDOR) & set(errors.POST_SPEND_CODES)
     with pytest.raises(ValueError):
         errors.GenerationRefused("MADE_UP", "s", "m", "h")
 
@@ -69,7 +74,7 @@ def test_no_credential_refusal_hint_advises_exporting_a_key(tmp_path, monkeypatc
     for case in cases:
         with pytest.raises(errors.GenerationRefused) as exc:
             credentials.resolve_credential(
-                "image_generation", allowed_names=("GEMINI_API_KEY",), process_values={}, **case
+                "image_generation", allowed_names=("GEMINI_API_KEY",), **case
             )
         text = (exc.value.hint + exc.value.message).lower()
         assert "export" not in text, case
@@ -79,13 +84,16 @@ def test_record_fields_are_the_spec_fields_and_carry_no_secret():
     assert set(records.GENERATION_RECORD_FIELDS) == {
         "generation_id", "slot", "prompt", "vendor", "model_tier", "cost_usd",
         "artifact_ref", "binding_entity_id", "created_at", "visibility",
+        "requested_vendor", "fallback_used", "billing_slot", "cap_group", "remaining_cap_usd",
     }
     assert not any("key" in f or "secret" in f or "token" in f for f in records.GENERATION_RECORD_FIELDS)
 
 
 def test_build_record_rejects_undeclared_fields_and_forces_private():
     base = dict(generation_id="g", slot="s", prompt="p", vendor="v", model_tier="m",
-                cost_usd=1.0, artifact_ref="a", binding_entity_id="b", created_at="t")
+                cost_usd=1.0, artifact_ref="a", binding_entity_id="b", created_at="t",
+                requested_vendor="v", fallback_used=False, billing_slot="s", cap_group="",
+                remaining_cap_usd=1.0)
     assert records.build_generation_record(**base, visibility="public")["visibility"] == "private"
     with pytest.raises(ValueError):
         records.build_generation_record(**base, api_key="nope")

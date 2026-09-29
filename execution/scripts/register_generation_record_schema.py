@@ -15,18 +15,15 @@ operator-run; this script never runs on its own.
   python3 execution/scripts/register_generation_record_schema.py            # print
   python3 execution/scripts/register_generation_record_schema.py --apply     # write + verify
 
-``--apply`` reads NEOTOMA_BEARER_TOKEN (and optional NEOTOMA_BASE_URL) from
-this process's environment; it never prints either.
+``--apply`` needs NEOTOMA_BASE_URL and NEOTOMA_BEARER_TOKEN in this process's
+environment (no default host); it prints the target host and never the token.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,9 +31,16 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from lib.capabilities import records  # noqa: E402
+from lib.capabilities import neotoma_http, records  # noqa: E402
 
-_USER_AGENT = "ateles-register-schema/1.0"  # Cloudflare 1010-blocks urllib's default
+EPILOG = """\
+environment (needed only for --apply):
+  NEOTOMA_BASE_URL      https URL of the Neotoma instance to write to (no default)
+  NEOTOMA_BEARER_TOKEN  bearer token for that instance (never printed)
+
+Safe to re-run: registering the same schema version again is idempotent, and a
+failed read-back leaves nothing half-applied that a second run cannot repair.
+"""
 
 
 def build_payload() -> dict[str, Any]:
@@ -53,47 +57,36 @@ def build_payload() -> dict[str, Any]:
 Requester = Callable[[str, str, "dict[str, Any] | None"], "dict[str, Any]"]
 
 
-def _default_requester(method: str, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
-    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
-    if not token:
-        raise SystemExit("NEOTOMA_BEARER_TOKEN is not set; refusing to apply")
-    base = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com").rstrip("/")
-    req = urllib.request.Request(
-        f"{base}{path}",
-        data=json.dumps(body).encode() if body is not None else None,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": _USER_AGENT,
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
-            return json.load(resp)
-    except urllib.error.HTTPError as exc:
-        raise SystemExit(f"{method} {path} failed: HTTP {exc.code}") from None
-
-
 def verify(schema: dict[str, Any]) -> list[str]:
     """Problems found reading the registered schema back (empty means good)."""
     problems = []
-    fields = ((schema.get("schema_definition") or {}).get("fields")) or {}
-    for name in records.GENERATION_RECORD_FIELDS:
+    definition = schema.get("schema_definition") or {}
+    fields = definition.get("fields") or {}
+    for name, (ftype, _desc) in records.GENERATION_RECORD_FIELDS.items():
         if name not in fields:
             problems.append(f"field {name!r} missing from the registered schema")
+        elif isinstance(fields[name], dict) and fields[name].get("type") not in (None, ftype):
+            problems.append(f"field {name!r} has type {fields[name].get('type')!r}, expected {ftype!r}")
+    if definition.get("canonical_name_fields") not in (None, records.CANONICAL_NAME_FIELDS):
+        problems.append("canonical_name_fields differ from the expected identity")
     if schema.get("active") is not True:
         problems.append("schema is not active")
     return problems
 
 
 def apply(requester: Requester | None = None) -> int:
-    request = requester or _default_requester
-    request("POST", "/register_schema", build_payload())
-    registered = request("GET", f"/schemas/{records.GENERATION_RECORD_ENTITY_TYPE}", None)
+    request = requester or neotoma_http.request_json
+    try:
+        request("POST", "/register_schema", build_payload())
+        registered = request("GET", f"/schemas/{records.GENERATION_RECORD_ENTITY_TYPE}", None)
+    except neotoma_http.NeotomaRequestError as exc:
+        print(f"FAILED: HTTP {exc.status}. Server said: {exc.body}", file=sys.stderr)
+        print("Nothing else was written. Fix the cause above and re-run; re-running is safe.", file=sys.stderr)
+        return 1
     problems = verify(registered)
     if problems:
         print("READ-BACK FAILED:", *problems, sep="\n  ", file=sys.stderr)
+        print("Re-running is safe.", file=sys.stderr)
         return 1
     print(f"registered and verified: {records.GENERATION_RECORD_ENTITY_TYPE} "
           f"v{registered.get('schema_version')}")
@@ -101,7 +94,11 @@ def apply(requester: Requester | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(
+        description="Register the generation_record Neotoma schema (dry run unless --apply).",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--apply", action="store_true",
                         help="POST the schema to Neotoma and verify (default: dry run)")
     args = parser.parse_args(argv)
@@ -110,6 +107,16 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(build_payload(), indent=2, sort_keys=True))
         print("\nRe-run with --apply to register it.")
         return 0
+    try:
+        host = neotoma_http.base_url()
+        neotoma_http.bearer_token()
+    except neotoma_http.NeotomaConfigError as exc:
+        print(f"Refusing to apply: {exc}.", file=sys.stderr)
+        print("Set NEOTOMA_BASE_URL to your Neotoma instance URL and NEOTOMA_BEARER_TOKEN to "
+              "its token in this process (source them without printing), then re-run.",
+              file=sys.stderr)
+        return 2
+    print(f"Registering {records.GENERATION_RECORD_ENTITY_TYPE} on {host} ...")
     return apply()
 
 

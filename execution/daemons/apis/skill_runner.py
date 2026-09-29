@@ -56,7 +56,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from lib.capabilities.credential_names import (  # noqa: E402
+from lib.credential_scrub import (  # noqa: E402
     AGENT_CHILD_MARKER_ENV,
     is_generation_credential,
 )
@@ -1578,7 +1578,7 @@ def _subscription_only_env(
     * The harness metered keys (``_METERED_CREDENTIALS``) are stripped unless
       ``APIS_ALLOW_METERED_HARNESS=1`` explicitly allows them.
     * Media-generation vendor credentials are ALWAYS stripped, by name and by
-      prefix (``lib.capabilities.credential_names``), and the override above
+      prefix (``lib.credential_scrub``), and the override above
       never releases them. They belong to the host-side capability client only
       (ateles#1189); a dispatched agent must never hold one. The child is also
       marked so the capability client refuses to run inside it.

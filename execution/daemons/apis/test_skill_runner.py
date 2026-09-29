@@ -2889,7 +2889,7 @@ class TestCrossHarnessRouting:
     def test_dispatched_child_is_marked_so_the_capability_client_refuses(
         self, monkeypatch
     ) -> None:
-        from lib.capabilities.credential_names import AGENT_CHILD_MARKER_ENV
+        from lib.credential_scrub import AGENT_CHILD_MARKER_ENV
 
         monkeypatch.delenv(AGENT_CHILD_MARKER_ENV, raising=False)
         assert skill_runner._subscription_only_env()[AGENT_CHILD_MARKER_ENV] == "1"

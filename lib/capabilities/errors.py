@@ -21,6 +21,9 @@ VENDOR_ERROR = "VENDOR_ERROR"
 FALLBACK_EXHAUSTED = "FALLBACK_EXHAUSTED"
 EMPTY_RESULT = "EMPTY_RESULT"
 CRITIQUE_ROUND_LIMIT = "CRITIQUE_ROUND_LIMIT"
+# Raised AFTER a paid call: money was spent, so a blind retry double-charges.
+SPENT_UNRECORDED = "SPENT_UNRECORDED"
+ARTIFACT_UNSAVED = "ARTIFACT_UNSAVED"
 
 CODES: tuple[str, ...] = (
     BINDING_MISSING,
@@ -32,6 +35,8 @@ CODES: tuple[str, ...] = (
     FALLBACK_EXHAUSTED,
     EMPTY_RESULT,
     CRITIQUE_ROUND_LIMIT,
+    SPENT_UNRECORDED,
+    ARTIFACT_UNSAVED,
 )
 
 # Codes raised before any vendor request can be made. A test asserts that the
@@ -43,6 +48,12 @@ REFUSE_BEFORE_VENDOR: tuple[str, ...] = (
     CAP_EXHAUSTED,
     CREDENTIAL_UNRESOLVED,
 )
+
+# Codes that mean money MAY have moved. Never retry blindly on these: the
+# estimate is already held against the cap, and a retry can bill again.
+# ``VENDOR_ERROR`` and ``EMPTY_RESULT`` join this group only when the refusal
+# carries ``retryable=False`` and a populated ``spent_usd`` (a held call).
+POST_SPEND_CODES: tuple[str, ...] = (SPENT_UNRECORDED, ARTIFACT_UNSAVED)
 
 
 class CapabilityError(Exception):
@@ -64,6 +75,8 @@ class GenerationRefused(CapabilityError):
         remaining_usd: float | None = None,
         vendors_tried: tuple[str, ...] = (),
         retryable: bool | None = None,
+        generation_id: str | None = None,
+        artifact_ref: str | None = None,
     ) -> None:
         if code not in CODES:
             raise ValueError(f"unknown GenerationRefused code: {code!r}")
@@ -76,6 +89,8 @@ class GenerationRefused(CapabilityError):
         self.remaining_usd = remaining_usd
         self.vendors_tried = tuple(vendors_tried)
         self.retryable = retryable
+        self.generation_id = generation_id
+        self.artifact_ref = artifact_ref
         super().__init__(self.render())
 
     def render(self) -> str:
@@ -93,20 +108,38 @@ class VendorFailure(CapabilityError):
     """Raised by a vendor adapter for an upstream failure after authorization.
 
     ``http_status`` is the upstream status when there was one; ``None`` means a
-    transport failure (timeout, connection reset). ``generate`` converts this
-    into ``GenerationRefused(VENDOR_ERROR)`` with a retryable/operator-fix
-    classification.
+    transport failure. ``generate`` converts this into
+    ``GenerationRefused(VENDOR_ERROR)``.
+
+    ``no_charge`` says whether the vendor DEFINITIVELY did not bill: a 4xx
+    rejection (other than 408) before any job existed, or a connection that
+    never reached the vendor. Anything else is treated as possibly billed:
+    the estimate stays held against the cap, the fallback vendor is not tried,
+    and the caller is not told to retry. Unknown is not free.
     """
 
-    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        no_charge: bool | None = None,
+    ) -> None:
         self.http_status = http_status
+        if no_charge is None:
+            no_charge = (
+                http_status is not None and 400 <= http_status < 500 and http_status != 408
+            )
+        self.no_charge = bool(no_charge)
         super().__init__(message)
 
     @property
     def retryable(self) -> bool:
-        if self.http_status is None:
-            return True
-        return self.http_status in (408, 429) or self.http_status >= 500
+        """Safe to retry: only when the vendor definitively did not bill and
+        the failure is transient (rate limit or connection)."""
+        if not self.no_charge:
+            return False
+        return self.http_status is None or self.http_status == 429
 
 
 class EmptyArtifact(CapabilityError):

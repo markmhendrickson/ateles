@@ -98,12 +98,18 @@ def test_image_http_errors_are_classified_and_never_echo_the_key():
     t = Fake(HttpResponse(403, body))
     with pytest.raises(VendorFailure) as exc:
         GoogleImageAdapter(t).generate(prompt="p", model="gemini-3-pro-image", opts={}, credential=KEY)
-    assert exc.value.http_status == 403 and not exc.value.retryable
+    assert exc.value.http_status == 403 and exc.value.no_charge and not exc.value.retryable
     assert KEY.reveal() not in str(exc.value)
+    # 429 is a rejection before generation: no charge, retryable
+    t = Fake(HttpResponse(429, b"{}"))
+    with pytest.raises(VendorFailure) as exc:
+        GoogleImageAdapter(t).generate(prompt="p", model="gemini-3-pro-image", opts={}, credential=KEY)
+    assert exc.value.no_charge and exc.value.retryable
+    # 503 may or may not have generated: possibly billed, so held and not retryable
     t = Fake(HttpResponse(503, b"{}"))
     with pytest.raises(VendorFailure) as exc:
         GoogleImageAdapter(t).generate(prompt="p", model="gemini-3-pro-image", opts={}, credential=KEY)
-    assert exc.value.retryable
+    assert not exc.value.no_charge and not exc.value.retryable
 
 
 def test_model_id_cannot_inject_into_the_url():
@@ -186,13 +192,13 @@ def test_veo_never_sends_the_key_to_a_host_the_response_names():
     assert len(t.requests) == 2  # no download request was made
 
 
-def test_veo_timeout_is_a_retryable_vendor_failure():
+def test_veo_timeout_after_acceptance_is_possibly_billed_not_retryable():
     ticks = iter(range(0, 10_000, 400))
     t = Fake(ok({"name": "operations/o"}), ok({"done": False}), ok({"done": False}), ok({"done": False}))
     a = VeoAdapter(t, sleep=lambda s: None, clock=lambda: next(ticks), timeout_s=600, ffmpeg="/x")
     with pytest.raises(VendorFailure) as exc:
         a.generate(prompt="p", model="veo-3.1-fast-generate-preview", opts={}, credential=KEY)
-    assert exc.value.retryable
+    assert not exc.value.no_charge and not exc.value.retryable
 
 
 def test_veo_operation_error_and_empty_samples():
@@ -252,7 +258,7 @@ def test_recraft_refuses_with_credential_unresolved_and_makes_no_request(make_cl
     assert "export" not in exc.value.hint.lower()
 
 
-def test_recraft_does_not_fall_through_to_a_paid_google_raster(make_client):
+def test_recraft_does_not_fall_through_to_a_paid_google_raster(make_client, cred_file):
     """Real binding shape: vector fallback is google_image. A missing OAuth
     route must not silently spend on a raster."""
     called = []
@@ -261,11 +267,11 @@ def test_recraft_does_not_fall_through_to_a_paid_google_raster(make_client):
         binding_row(slots.VECTOR_MARK_GENERATION, "recraft", constraints={"model_tier": "r", "monthly_cap_usd": 16},
                     credential_location="oauth:recraft-mcp", fallback="google_image"),
         binding_row(slots.IMAGE_GENERATION, "google_image",
-                    constraints={"model_tier": "gemini-3-pro-image", "monthly_cap_usd": 50},
+                    constraints={"model_tier": "gemini-3-pro-image", "monthly_cap_usd": 50,
+                                 "credential_env_file": cred_file("GEMINI_API_KEY", "k" * 20)},
                     credential_location="GEMINI_API_KEY"),
     ]
-    client = make_client(rows, adapters={"recraft": RecraftAdapter(), "google_image": google},
-                         process_values={"GEMINI_API_KEY": "k" * 20})
+    client = make_client(rows, adapters={"recraft": RecraftAdapter(), "google_image": google})
     with pytest.raises(GenerationRefused) as exc:
         client.generate(slots.VECTOR_MARK_GENERATION, "mark")
     assert exc.value.code == CREDENTIAL_UNRESOLVED and called == []
@@ -278,14 +284,15 @@ def test_default_adapters_cover_the_three_vendor_ids():
 # --- end-to-end through the client with the real Google adapter ----------------
 
 
-def test_client_with_google_adapter_records_priced_spend(make_client, sink):
+def test_client_with_google_adapter_records_priced_spend(make_client, sink, cred_file):
     t = Fake(_image_response())
+    path = cred_file("GEMINI_API_KEY", "fake-google-key-000111")
     rows = [binding_row(slots.IMAGE_GENERATION, "google_image",
                         constraints={"model_tier": "gemini-3-pro-image", "monthly_cap_usd": 50,
-                                     "cap_group": "google_generation", "cap_group_total_usd": 50},
+                                     "cap_group": "google_generation", "cap_group_total_usd": 50,
+                                     "credential_env_file": path},
                         credential_location="GEMINI_API_KEY", fallback="None by design")]
-    client = make_client(rows, adapters={"google_image": GoogleImageAdapter(t)},
-                         process_values={"GEMINI_API_KEY": "fake-google-key-000111"})
+    client = make_client(rows, adapters={"google_image": GoogleImageAdapter(t)})
     result = client.generate(slots.IMAGE_GENERATION, "a fox")
     assert result.cost_usd == 0.24 and result.remaining_cap_usd == 49.76
     assert t.requests[0][2]["x-goog-api-key"] == "fake-google-key-000111"

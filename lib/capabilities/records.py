@@ -26,10 +26,14 @@ GENERATION_RECORD_FIELDS: dict[str, tuple[str, str]] = {
     "artifact_ref": ("string", "Operator-local path of the stored artifact"),
     "binding_entity_id": ("string", "vendor_binding entity that authorized the call"),
     "created_at": ("string", "ISO 8601 UTC timestamp"),
+    "requested_vendor": ("string", "Vendor the binding asked for (differs from vendor on fallback)"),
+    "fallback_used": ("boolean", "True when the fallback vendor produced the artifact"),
+    "billing_slot": ("string", "Slot whose cap the call was billed against"),
+    "cap_group": ("string", "Cap group the call counted toward, empty when none"),
+    "remaining_cap_usd": ("number", "Remaining budget (tighter of slot and group) after the call"),
     "visibility": ("string", "Always 'private'"),
 }
 CANONICAL_NAME_FIELDS = ["generation_id"]
-REQUIRED_ON_STORE = tuple(k for k in GENERATION_RECORD_FIELDS)
 
 
 def build_generation_record(**values: Any) -> dict[str, Any]:

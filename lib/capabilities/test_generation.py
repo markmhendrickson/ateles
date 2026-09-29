@@ -6,8 +6,9 @@ import pytest
 
 from lib.capabilities import generation as gen_mod
 from lib.capabilities import slots
-from lib.capabilities.credential_names import AGENT_CHILD_MARKER_ENV
+from lib.credential_scrub import AGENT_CHILD_MARKER_ENV
 from lib.capabilities.errors import (
+    SPENT_UNRECORDED,
     BINDING_MISSING,
     CAP_UNREADABLE,
     CREDENTIAL_UNRESOLVED,
@@ -27,6 +28,21 @@ SLOT = slots.IMAGE_GENERATION
 CAP = {"model_tier": "stub-model", "monthly_cap_usd": 10}
 
 
+def _rows(ledger):
+    path = ledger.root / SLOT / f"{ledger.month()}.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+
+def _spent(ledger):
+    """Spend as the ledger counts it: last row per id, voided counts zero."""
+    last = {}
+    for r in _rows(ledger):
+        last[r["generation_id"]] = r
+    return sum(0.0 if r["state"] == "voided" else r["cost_usd"] for r in last.values())
+
+
 def test_stub_generate_persists_prompt_and_cost(make_client, sink, ledger):
     stub = StubVendor(cost_usd=0.75)
     client = make_client([binding_row(SLOT, constraints=CAP)], adapters={"stub": stub})
@@ -39,11 +55,12 @@ def test_stub_generate_persists_prompt_and_cost(make_client, sink, ledger):
     assert result.remaining_cap_usd == 10 - (prior + 0.75)
     assert Path(result.artifact_ref).read_bytes() == stub.data
 
-    # ledger row
-    line = (ledger.root / SLOT / f"{ledger.month()}.jsonl").read_text().strip()
-    row = json.loads(line)
-    assert row["generation_id"] == result.generation_id
-    assert row["cost_usd"] == 0.75 and row["vendor"] == "stub"
+    # ledger: a PENDING row at the estimate, then the completed row
+    lines = (ledger.root / SLOT / f"{ledger.month()}.jsonl").read_text().strip().splitlines()
+    rows = [json.loads(l) for l in lines]
+    assert [r["state"] for r in rows] == ["pending", "completed"]
+    assert all(r["generation_id"] == result.generation_id for r in rows)
+    assert rows[-1]["cost_usd"] == 0.75 and rows[-1]["vendor"] == "stub"
 
     # generation_record: each field individually
     (record, key), = sink.stored
@@ -58,19 +75,24 @@ def test_stub_generate_persists_prompt_and_cost(make_client, sink, ledger):
     assert record["binding_entity_id"] == f"ent_{SLOT}"
     assert record["created_at"]
     assert record["visibility"] == "private"
+    assert record["requested_vendor"] == "stub" and record["fallback_used"] is False
+    assert record["billing_slot"] == SLOT and record["cap_group"] == ""
+    assert record["remaining_cap_usd"] == result.remaining_cap_usd == 9.25
     assert key == f"generation-{result.generation_id}"
     assert result.record_persisted and result.record_entity_id == "ent_rec_1"
 
 
-def test_record_carries_no_secret_field(make_client, sink):
+def test_record_carries_no_secret_field(make_client, sink, cred_file):
+    secret = "stub-" + "secret-value-123"
+    path = cred_file("STUB_KEY", secret)
     client = make_client(
-        [binding_row(SLOT, constraints=CAP)],
+        [binding_row(SLOT, constraints={**CAP, "credential_env_file": path})],
         adapters={"stub": StubVendor(credential_names=("STUB_KEY",))},
     )
     result = client.generate(SLOT, "p")
     (record, _), = sink.stored
     blob = json.dumps(record) + repr(result)
-    assert "stub-secret-value-123" not in blob
+    assert secret not in blob
 
 
 def test_generation_id_precedes_vendor_call(make_client):
@@ -90,7 +112,7 @@ def test_generation_id_precedes_vendor_call(make_client):
 
 
 def test_fallback_vendor_named_in_result(make_client):
-    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=503))
+    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=429))
     backup = StubVendor("backup", default_slot=slots.VIDEO_GENERATION, cost_usd=1.0)
     rows = [
         binding_row(SLOT, "primary", constraints=CAP, fallback="backup"),
@@ -105,7 +127,7 @@ def test_fallback_vendor_named_in_result(make_client):
 
 
 def test_fallback_not_attempted_when_disabled(make_client):
-    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=503))
+    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=429))
     backup = StubVendor("backup", default_slot=slots.VIDEO_GENERATION)
     rows = [
         binding_row(SLOT, "primary", constraints=CAP, fallback="backup"),
@@ -120,8 +142,8 @@ def test_fallback_not_attempted_when_disabled(make_client):
 
 def test_fallback_exhausted_vs_vendor_error_are_distinguished(make_client):
     # both fail -> FALLBACK_EXHAUSTED
-    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=500))
-    backup = StubVendor("backup", default_slot=slots.VIDEO_GENERATION, fail_with=VendorFailure("boom2", http_status=500))
+    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=429))
+    backup = StubVendor("backup", default_slot=slots.VIDEO_GENERATION, fail_with=VendorFailure("boom2", http_status=429))
     rows = [
         binding_row(SLOT, "primary", constraints=CAP, fallback="backup"),
         binding_row(slots.VIDEO_GENERATION, "backup", constraints=CAP),
@@ -133,7 +155,7 @@ def test_fallback_exhausted_vs_vendor_error_are_distinguished(make_client):
     assert both.value.vendors_tried == ("primary", "backup")
 
     # no fallback configured -> VENDOR_ERROR
-    lone = StubVendor("primary", fail_with=VendorFailure("boom", http_status=500))
+    lone = StubVendor("primary", fail_with=VendorFailure("boom", http_status=429))
     client = make_client(
         [binding_row(SLOT, "primary", constraints=CAP, fallback="None by design")],
         adapters={"primary": lone},
@@ -145,7 +167,7 @@ def test_fallback_exhausted_vs_vendor_error_are_distinguished(make_client):
 
 
 def test_fallback_configured_but_unbound_is_fallback_exhausted(make_client):
-    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=500))
+    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=429))
     client = make_client(
         [binding_row(SLOT, "primary", constraints=CAP, fallback="ghost")],
         adapters={"primary": primary},
@@ -156,7 +178,7 @@ def test_fallback_configured_but_unbound_is_fallback_exhausted(make_client):
 
 
 def test_fallback_does_not_bypass_its_own_cap(make_client):
-    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=500))
+    primary = StubVendor("primary", fail_with=VendorFailure("boom", http_status=429))
     backup = StubVendor("backup", default_slot=slots.VIDEO_GENERATION, cost_usd=5.0)
     rows = [
         binding_row(SLOT, "primary", constraints=CAP, fallback="backup"),
@@ -183,23 +205,27 @@ def test_cap_refusal_on_primary_never_falls_back_to_another_paid_vendor(make_cli
     assert primary.calls == 0 and backup.calls == 0
 
 
-def test_empty_artifact_is_empty_result(make_client, sink, ledger):
-    stub = StubVendor(data=b"")
+def test_empty_artifact_is_empty_result_and_the_estimate_stays_held(make_client, sink, ledger):
+    """A 200 with no bytes may still have been billed: EMPTY_RESULT, not
+    retryable, and the estimate keeps counting against the cap."""
+    stub = StubVendor(data=b"", cost_usd=1.0)
     client = make_client([binding_row(SLOT, constraints=CAP)], adapters={"stub": stub})
     with pytest.raises(GenerationRefused) as exc:
         client.generate(SLOT, "p")
-    assert exc.value.code == EMPTY_RESULT
+    assert exc.value.code == EMPTY_RESULT and exc.value.retryable is False
+    assert exc.value.spent_usd == 1.0 and "held" in exc.value.message
     assert sink.stored == []
-    assert not (ledger.root / SLOT).exists()  # no spend recorded
+    assert [r["state"] for r in _rows(ledger)] == ["pending", "accepted_unfinished"]
 
 
-def test_adapter_reported_empty_is_empty_result_and_records_nothing(make_client, sink, ledger):
-    stub = StubVendor(fail_with=EmptyArtifact("nothing"))
+def test_adapter_reported_empty_is_held_not_free(make_client, sink, ledger):
+    stub = StubVendor(fail_with=EmptyArtifact("nothing"), cost_usd=1.0)
     client = make_client([binding_row(SLOT, constraints=CAP)], adapters={"stub": stub})
     with pytest.raises(GenerationRefused) as exc:
         client.generate(SLOT, "p")
-    assert exc.value.code == EMPTY_RESULT
-    assert sink.stored == [] and not (ledger.root / SLOT).exists()
+    assert exc.value.code == EMPTY_RESULT and exc.value.retryable is False
+    assert sink.stored == []
+    assert _spent(ledger) == 1.0
 
 
 def test_non_svg_payload_for_svg_media_type_is_empty_result(make_client, sink):
@@ -211,53 +237,70 @@ def test_non_svg_payload_for_svg_media_type_is_empty_result(make_client, sink):
 
 
 @pytest.mark.parametrize(
-    "status, retryable",
-    [(400, False), (403, False), (429, True), (503, True), (None, True)],
+    "status, no_charge, retryable",
+    [(400, True, False), (403, True, False), (429, True, True), (None, False, False),
+     (500, False, False), (503, False, False), (408, False, False)],
 )
-def test_vendor_error_includes_classification(make_client, status, retryable):
-    stub = StubVendor(fail_with=VendorFailure("upstream said no", http_status=status))
+def test_vendor_error_includes_classification(make_client, ledger, status, no_charge, retryable):
+    stub = StubVendor(fail_with=VendorFailure("upstream said no", http_status=status), cost_usd=1.0)
     client = make_client([binding_row(SLOT, constraints=CAP)], adapters={"stub": stub})
     with pytest.raises(GenerationRefused) as exc:
         client.generate(SLOT, "p")
     err = exc.value
     assert err.code == VENDOR_ERROR and err.retryable is retryable
-    assert ("Retryable" in err.hint) is retryable
-    assert ("Operator-fix" in err.hint) is (not retryable)
+    if no_charge:
+        assert _spent(ledger) == 0.0                    # voided: definitive no charge
+        assert ("Retryable" in err.hint) is retryable
+        assert ("Operator-fix" in err.hint) is (not retryable)
+    else:
+        assert _spent(ledger) == 1.0                    # possibly billed: held
+        assert "Do not retry" in err.hint and "held" in err.message
+        assert "Retryable" not in err.hint
     assert ("HTTP" in err.message) is (status is not None)
 
 
-def test_vendor_error_records_no_spend(make_client, ledger, sink):
-    stub = StubVendor(fail_with=VendorFailure("x", http_status=500))
-    client = make_client([binding_row(SLOT, constraints=CAP)], adapters={"stub": stub})
-    with pytest.raises(GenerationRefused):
-        client.generate(SLOT, "p")
-    assert not (ledger.root / SLOT).exists() and sink.stored == []
+def test_definitive_no_charge_failure_voids_the_row(make_client, ledger, sink):
+    stub = StubVendor(fail_with=VendorFailure("bad request", http_status=400), cost_usd=1.0)
+    client = make_client([binding_row(SLOT, constraints={"model_tier": "m", "monthly_cap_usd": 1.0})],
+                         adapters={"stub": stub})
+    for _ in range(3):  # never accumulates, so never exhausts
+        with pytest.raises(GenerationRefused) as exc:
+            client.generate(SLOT, "p")
+        assert exc.value.code == VENDOR_ERROR
+    assert stub.calls == 3 and sink.stored == []
+    assert [r["state"] for r in _rows(ledger)] == ["pending", "voided"] * 3
 
 
-def test_credential_unresolved_refuses(make_client):
+def test_credential_unresolved_refuses(make_client, cred_file):
     stub = StubVendor(credential_names=("STUB_KEY",))
-    for values in ({}, {"STUB_KEY": ""}, {"STUB_KEY": "   "}):
-        client = make_client(
-            [binding_row(SLOT, constraints=CAP)],
-            adapters={"stub": stub},
-            process_values=values,
-        )
+    good = cred_file("OTHER_NAME", "x" * 20)                    # file lacks STUB_KEY
+    for constraints in (
+        {**CAP, "credential_env_file": good},
+        {**CAP, "credential_env_file": good + ".missing"},
+        CAP,                                                     # no credential_env_file at all
+    ):
+        client = make_client([binding_row(SLOT, constraints=constraints)], adapters={"stub": stub})
         with pytest.raises(GenerationRefused) as exc:
             client.generate(SLOT, "p")
         assert exc.value.code == CREDENTIAL_UNRESOLVED
         text = exc.value.hint.lower()
         assert "export" not in text
-        assert "agent" in text  # it names the client, not the agent env, as the home
+        assert "agent" in text or "credential_env_file" in text
     assert stub.calls == 0
 
 
-def test_credential_reaches_only_the_adapter_and_never_the_result(make_client):
+def test_credential_reaches_only_the_adapter_and_never_the_result(make_client, cred_file):
+    secret = "stub-" + "secret-value-123"
+    path = cred_file("STUB_KEY", secret)
     stub = StubVendor(credential_names=("STUB_KEY",))
-    client = make_client([binding_row(SLOT, constraints=CAP)], adapters={"stub": stub})
+    client = make_client([binding_row(SLOT, constraints={**CAP, "credential_env_file": path})],
+                         adapters={"stub": stub})
     result = client.generate(SLOT, "p")
-    assert stub.last_credential.reveal() == "stub-secret-value-123"
-    assert "stub-secret-value-123" not in repr(stub.last_credential)
-    assert "stub-secret-value-123" not in repr(result)
+    assert stub.last_credential.reveal() == secret
+    assert secret not in repr(stub.last_credential)
+    assert secret not in repr(result)
+    import os
+    assert "STUB_KEY" not in os.environ
 
 
 def test_unknown_vendor_id_refuses_before_any_call(make_client):
@@ -316,19 +359,34 @@ def test_refuses_inside_a_dispatched_agent_child(make_client):
     assert exc.value.code == CREDENTIAL_UNRESOLVED and stub.calls == 0
 
 
-def test_ledger_write_failure_after_spend_is_loud_and_names_the_artifact(make_client, ledger, monkeypatch):
-    stub = StubVendor()
-    client = make_client([binding_row(SLOT, constraints=CAP)], adapters={"stub": stub})
+def test_final_ledger_write_failure_is_spent_unrecorded_and_still_counts(make_client, ledger, monkeypatch):
+    """A paid call whose final ledger row cannot be written: SPENT_UNRECORDED,
+    non-retryable, names the artifact and generation_id; the PENDING row keeps
+    the estimate counted so the cap still advances."""
+    stub = StubVendor(cost_usd=1.0)
+    client = make_client([binding_row(SLOT, constraints={"model_tier": "m", "monthly_cap_usd": 1.5})],
+                         adapters={"stub": stub})
     from lib.capabilities import spend
 
-    def broken(self, row, billing_slot):
-        raise GenerationRefused(CAP_UNREADABLE, SLOT, "disk full", "fix it")
+    real = spend.LockedLedger.record
 
-    monkeypatch.setattr(spend.LockedLedger, "record", broken)
+    def fail_on_completed(self, row, billing_slot, month=None):
+        if row["state"] == "completed":
+            raise spend.LedgerWriteError("OSError")
+        return real(self, row, billing_slot, month)
+
+    monkeypatch.setattr(spend.LockedLedger, "record", fail_on_completed)
     with pytest.raises(GenerationRefused) as exc:
         client.generate(SLOT, "p")
-    assert exc.value.code == CAP_UNREADABLE
-    assert "saved at" in exc.value.message
+    err = exc.value
+    assert err.code == SPENT_UNRECORDED and err.retryable is False
+    assert err.generation_id and Path(err.artifact_ref).exists()
+    assert err.generation_id in err.hint and "Do NOT retry" in err.hint
+    monkeypatch.setattr(spend.LockedLedger, "record", real)
+    with pytest.raises(GenerationRefused) as again:
+        client.generate(SLOT, "p")
+    assert again.value.code == "CAP_EXHAUSTED"     # the estimate is still counted
+    assert stub.calls == 1
 
 
 def test_record_store_failure_keeps_the_artifact_and_warns(make_client):
@@ -395,7 +453,8 @@ def _record():
     return records.build_generation_record(
         generation_id="gen_1", slot=SLOT, prompt="p", vendor="v", model_tier="m",
         cost_usd=0.5, artifact_ref="/tmp/a", binding_entity_id="ent_b",
-        created_at="2026-09-15T12:00:00+00:00",
+        created_at="2026-09-15T12:00:00+00:00", requested_vendor="v", fallback_used=False,
+        billing_slot=SLOT, cap_group="", remaining_cap_usd=9.5,
     )
 
 

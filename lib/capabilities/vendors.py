@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -35,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
-from .credential_names import GOOGLE_KEY_NAMES, RECRAFT_KEY_NAMES
+from lib.credential_scrub import GOOGLE_KEY_NAMES, RECRAFT_KEY_NAMES
 from .credentials import Secret, redact
 from .errors import CapabilityError, EmptyArtifact, VendorFailure
 from .slots import IMAGE_GENERATION, VECTOR_MARK_GENERATION, VIDEO_GENERATION
@@ -101,7 +102,13 @@ def urllib_transport(
             return HttpResponse(resp.status, resp.read(), dict(resp.headers))
     except urllib.error.HTTPError as exc:
         return HttpResponse(exc.code, exc.read() or b"", dict(exc.headers or {}))
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except urllib.error.URLError as exc:
+        # Only a failure that provably never reached the vendor is "no charge".
+        never_sent = isinstance(exc.reason, (socket.gaierror, ConnectionRefusedError))
+        raise VendorFailure(
+            f"transport failure: {type(exc.reason).__name__}", no_charge=never_sent
+        ) from None
+    except (TimeoutError, OSError) as exc:
         raise VendorFailure(f"transport failure: {type(exc).__name__}") from None
 
 
@@ -409,15 +416,31 @@ class VeoAdapter:
 
     def _download(self, uri: str, credential: Secret) -> bytes:
         parsed = urllib.parse.urlparse(uri)
-        if parsed.scheme != "https" or parsed.hostname != _GOOGLE_HOST:
+        try:
+            explicit_port = parsed.port
+        except ValueError:
+            explicit_port = -1
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != _GOOGLE_HOST
+            or parsed.username is not None
+            or parsed.password is not None
+            or explicit_port is not None
+            or "\\" in uri
+            or "@" in parsed.netloc
+        ):
             # The response is untrusted data: never send the key to a host the
-            # adapter did not choose.
-            raise VendorFailure("vendor returned a download URI on an unexpected host")
+            # adapter did not choose. Userinfo, backslashes and explicit ports
+            # are refused outright rather than reasoned about.
+            raise VendorFailure("vendor returned a download URI that is not the plain API host")
         resp = self._t(
             "GET", uri, headers=_google_headers(credential, json_body=False), body=None, timeout=180.0
         )
-        if resp.status >= 400:
+        if not 200 <= resp.status < 300:
             raise VendorFailure(f"video download returned HTTP {resp.status}", http_status=resp.status)
+        declared = resp.headers.get("Content-Length") or resp.headers.get("content-length")
+        if declared is not None and str(declared).isdigit() and int(declared) != len(resp.body):
+            raise VendorFailure("video download was truncated")
         return resp.body
 
     def generate(
@@ -454,41 +477,47 @@ class VeoAdapter:
             timeout=60.0,
         )
         name = _json(start, credential, "video generation start").get("name")
-        if not isinstance(name, str) or not re.match(r"^[A-Za-z0-9/_.-]+$", name):
-            raise VendorFailure("video generation did not return an operation name")
-        t0 = self._clock()
-        while True:
-            self._sleep(self._poll)
-            op = _json(
-                self._t(
-                    "GET",
-                    f"{GOOGLE_API_BASE}/{name}",
-                    headers=_google_headers(credential, json_body=False),
-                    body=None,
-                    timeout=60.0,
-                ),
-                credential,
-                "video generation poll",
+        # From here the vendor has answered 2xx: the job may exist and be
+        # billable, so no failure below may be classified as 'did not bill'.
+        try:
+            if not isinstance(name, str) or not re.match(r"^[A-Za-z0-9/_.-]+$", name):
+                raise VendorFailure("video generation did not return an operation name")
+            t0 = self._clock()
+            while True:
+                self._sleep(self._poll)
+                op = _json(
+                    self._t(
+                        "GET",
+                        f"{GOOGLE_API_BASE}/{name}",
+                        headers=_google_headers(credential, json_body=False),
+                        body=None,
+                        timeout=60.0,
+                    ),
+                    credential,
+                    "video generation poll",
+                )
+                if op.get("done"):
+                    break
+                if self._clock() - t0 > self._deadline:
+                    raise VendorFailure("video generation timed out while polling")
+            if "error" in op:
+                detail = redact(json.dumps(op["error"])[:300], credential)
+                raise VendorFailure(f"video generation failed: {detail}", http_status=400)
+            samples = (
+                (op.get("response") or {}).get("generateVideoResponse", {}).get("generatedSamples") or []
             )
-            if op.get("done"):
-                break
-            if self._clock() - t0 > self._deadline:
-                raise VendorFailure("video generation timed out while polling")
-        if "error" in op:
-            detail = redact(json.dumps(op["error"])[:300], credential)
-            raise VendorFailure(f"video generation failed: {detail}", http_status=400)
-        samples = (
-            (op.get("response") or {}).get("generateVideoResponse", {}).get("generatedSamples") or []
-        )
-        uri = ((samples[0] if samples else {}).get("video") or {}).get("uri")
-        if not uri:
-            raise EmptyArtifact("vendor finished but returned no video sample")
-        data = self._download(uri, credential)
-        if not data:
-            raise EmptyArtifact("vendor returned an empty video")
-        warnings: tuple[str, ...] = ()
-        if opts.get("strip_audio", True):
-            data, warnings = self._strip_audio(data)
+            uri = ((samples[0] if samples else {}).get("video") or {}).get("uri")
+            if not uri:
+                raise EmptyArtifact("vendor finished but returned no video sample")
+            data = self._download(uri, credential)
+            if not data:
+                raise EmptyArtifact("vendor returned an empty video")
+            warnings: tuple[str, ...] = ()
+            if opts.get("strip_audio", True):
+                data, warnings = self._strip_audio(data)
+        except VendorFailure as failure:
+            failure.no_charge = False
+            raise
         return VendorOutput(data, "video/mp4", cost, model, self.vendor_id, warnings)
 
 

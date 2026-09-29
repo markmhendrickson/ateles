@@ -78,6 +78,26 @@ class MemorySink:
 
 
 @pytest.fixture
+def cred_file(tmp_path, monkeypatch):
+    """Factory: cred_file(name, value) -> path of a 0600 file under a temp
+    credential directory. Built at runtime so no secret-shaped literal sits in
+    the source."""
+    from lib.capabilities import credentials
+
+    directory = tmp_path / "ateles-credentials"
+    directory.mkdir()
+    monkeypatch.setenv(credentials.CREDENTIAL_DIR_ENV, str(directory))
+
+    def make(name, value):
+        path = directory / "generation.env"
+        path.write_text(name + "=" + value + "\n")
+        path.chmod(0o600)
+        return str(path)
+
+    return make
+
+
+@pytest.fixture
 def now():
     return FIXED_NOW
 
@@ -104,7 +124,7 @@ def make_client(tmp_path, ledger, sink):
             adapters=adapters if adapters is not None else {"stub": stub},
             sink=sink,
             artifact_root=tmp_path / "artifacts",
-            process_values={"STUB_KEY": "stub-secret-value-123"},
+            process_values={},
         )
         kwargs.update(overrides)
         return CapabilityClient(**kwargs)

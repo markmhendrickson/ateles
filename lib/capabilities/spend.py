@@ -17,18 +17,30 @@ The cap comes from the ``vendor_binding.constraints`` JSON string:
 Ledger
 ------
 Append-only JSONL at ``<root>/<billing_slot>/<YYYY-MM>.jsonl`` (UTC month),
-root ``$ATELES_GENERATION_SPEND_PATH`` or ``~/.cache/ateles/generation_spend``.
+root ``$ATELES_GENERATION_SPEND_PATH`` or ``$XDG_STATE_HOME/ateles/generation_spend``
+(default ``~/.local/state/...``: state, not a cache a cleaner may empty).
 Directories are created 0700 and files 0600; a ledger location that is
-group- or world-writable is treated as tampered and refuses. The ledger makes
-no network call. Each row is keyed by ``generation_id``; rows are deduplicated
-by that id before summing, so a replayed write cannot double-count.
+group- or world-writable, or reached through a symlink, is treated as tampered
+and refuses. The ledger makes no network call.
 
-Spend is recorded only after the artifact is received (never a reservation
-that must be unwound). To keep two callers from both authorizing against the
-same remaining balance, ``SpendLedger.locked()`` takes an exclusive advisory
-lock that the caller holds from authorization through recording. That
-serializes generation per ledger root, which is deliberate: a second call
-sees the first call's recorded spend.
+Each row carries a ``state``: ``pending`` (written under the lock BEFORE the
+vendor request, at the estimate), ``completed`` (finalized with the final
+cost), ``accepted_unfinished`` (the vendor may have billed but no usable
+artifact came back; the estimate STAYS spent), or ``voided`` (the vendor
+definitively did not bill; counts 0). Later rows for the same ``generation_id``
+supersede earlier ones. Every state except ``voided`` counts toward the cap, so
+a crash between the request and the finalize row still leaves the estimate
+counted: the failure direction is "too much spent", never "nothing spent".
+
+To keep two callers from both authorizing against the same remaining balance,
+``SpendLedger.locked()`` takes an exclusive advisory lock that the caller holds
+from authorization through the final row.
+
+A small manifest (``manifest.json`` in the root) lists every ledger file that
+has been written. A file the manifest lists that is now missing, or ledger
+files with no manifest, refuse ``CAP_UNREADABLE``: a deleted ledger must not
+read as zero spend. Deleting the whole root, manifest included, is not
+detectable from local state (tracked in #1353).
 
 Money is compared in integer micro-dollars so a cap boundary is not decided by
 floating-point noise. ``spent + estimate == cap`` authorizes; only ``>``
@@ -39,6 +51,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import math
 import os
 import stat
@@ -51,6 +64,7 @@ from typing import Any, Callable, Iterator
 
 from .errors import (
     CAP_EXHAUSTED,
+    CapabilityError,
     CAP_UNREADABLE,
     CAP_UNSET,
     GenerationRefused,
@@ -71,11 +85,33 @@ def from_micro(micro: int) -> float:
     return micro / _MICRO
 
 
+log = logging.getLogger(__name__)
+
+STATE_PENDING = "pending"
+STATE_COMPLETED = "completed"
+STATE_ACCEPTED_UNFINISHED = "accepted_unfinished"
+STATE_VOIDED = "voided"
+STATES = (STATE_PENDING, STATE_COMPLETED, STATE_ACCEPTED_UNFINISHED, STATE_VOIDED)
+MANIFEST_NAME = "manifest.json"
+
+
 def default_root() -> Path:
     override = os.environ.get(SPEND_PATH_ENV)
     if override:
         return Path(override).expanduser()
-    return Path.home() / ".cache" / "ateles" / "generation_spend"
+    state_home = os.environ.get("XDG_STATE_HOME")
+    base = Path(state_home).expanduser() if state_home else Path.home() / ".local" / "state"
+    return base / "ateles" / "generation_spend"
+
+
+def write_all(fd: int, data: bytes) -> None:
+    """``os.write`` may write less than asked; loop until all bytes are out."""
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write")
+        view = view[written:]
 
 
 @dataclass(frozen=True)
@@ -168,9 +204,14 @@ def _unreadable(slot: str, why: str) -> GenerationRefused:
         CAP_UNREADABLE,
         slot,
         f"the spend ledger could not be read ({why})",
-        "Operator: repair the ledger location (permissions, corruption, or "
-        f"{SPEND_PATH_ENV}) so spent totals can be verified. Nothing was spent.",
+        "Operator: repair the ledger location (permissions, corruption, a "
+        f"missing file the manifest lists, or {SPEND_PATH_ENV}) so spent totals "
+        "can be verified. Nothing was spent by this call.",
     )
+
+
+class LedgerWriteError(CapabilityError):
+    """A ledger append failed. Not a refusal by itself: see ``record``."""
 
 
 class SpendLedger:
@@ -197,7 +238,9 @@ class SpendLedger:
     def locked(self, slot: str) -> Iterator["LockedLedger"]:
         try:
             self._ensure_dir(self.root)
-            fd = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+            fd = os.open(
+                self.root / ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+            )
         except OSError as exc:
             raise _unreadable(slot, type(exc).__name__) from None
         try:
@@ -221,9 +264,22 @@ class SpendLedger:
 
     @staticmethod
     def _ensure_dir(path: Path) -> None:
+        if path.is_symlink():
+            raise OSError("ledger path is a symlink")
         os.makedirs(path, mode=0o700, exist_ok=True)
+        if path.is_symlink():
+            raise OSError("ledger path is a symlink")
         if stat.S_IMODE(path.stat().st_mode) & 0o022:
             raise OSError("ledger directory is group- or world-writable")
+
+
+def _read_nofollow(path: Path) -> str:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        st = os.fstat(fh.fileno())
+        if stat.S_IMODE(st.st_mode) & 0o022:
+            raise OSError("ledger file is group- or world-writable")
+        return fh.read()
 
 
 class LockedLedger:
@@ -239,63 +295,108 @@ class LockedLedger:
     def _file(self, billing_slot: str, month: str) -> Path:
         return self._l.root / billing_slot / f"{month}.jsonl"
 
+    @staticmethod
+    def _rel(billing_slot: str, month: str) -> str:
+        return f"{billing_slot}/{month}.jsonl"
+
+    def _manifest(self) -> dict[str, Any] | None:
+        path = self._l.root / MANIFEST_NAME
+        if not path.exists() and not path.is_symlink():
+            return None
+        data = json.loads(_read_nofollow(path))
+        files = data["files"]
+        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+            raise ValueError("manifest files list is malformed")
+        return {"files": files}
+
+    def _write_manifest(self, files: list[str]) -> None:
+        tmp = self._l.root / (MANIFEST_NAME + ".tmp")
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            write_all(fd, json.dumps({"files": sorted(set(files))}).encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, self._l.root / MANIFEST_NAME)
+
+    def _check_manifest_for_missing(self, rel: str) -> None:
+        manifest = self._manifest()
+        if manifest is None:
+            # No manifest. Fine on a fresh install; not fine if ledger data exists.
+            existing = [
+                p for p in self._l.root.glob("*/*.jsonl") if p.is_file() or p.is_symlink()
+            ]
+            if existing:
+                raise ValueError("ledger files exist but the manifest is missing")
+            return
+        if rel in manifest["files"]:
+            raise ValueError("a ledger file the manifest lists is missing")
+
     def _rows(self, billing_slot: str, month: str) -> list[dict[str, Any]]:
         path = self._file(billing_slot, month)
+        rel = self._rel(billing_slot, month)
         try:
-            if not path.exists():
+            if not path.exists() and not path.is_symlink():
+                self._check_manifest_for_missing(rel)
                 return []
-            if stat.S_IMODE(path.stat().st_mode) & 0o022:
-                raise OSError("ledger file is group- or world-writable")
+            if self._manifest() is None:
+                raise ValueError("ledger files exist but the manifest is missing")
             rows: dict[str, dict[str, Any]] = {}
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in _read_nofollow(path).splitlines():
                 if not line.strip():
                     continue
                 row = json.loads(line)
                 gid = row["generation_id"]
                 if not isinstance(gid, str) or not gid:
                     raise ValueError("row without generation_id")
-                cost = _number(row["cost_usd"])
-                if cost is None:
+                if _number(row["cost_usd"]) is None:
                     raise ValueError("row without a valid cost_usd")
-                rows.setdefault(gid, row)  # dedupe by generation_id
+                if row["state"] not in STATES:
+                    raise ValueError("row with an unknown state")
+                rows[gid] = row  # a later row for the same id supersedes an earlier one
             return list(rows.values())
         except (OSError, ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
             raise _unreadable(self._slot, type(exc).__name__) from None
 
+    @staticmethod
+    def _micro(row: dict[str, Any]) -> int:
+        return 0 if row["state"] == STATE_VOIDED else to_micro(row["cost_usd"])
+
     def slot_spent_micro(self, billing_slot: str, month: str) -> int:
-        return sum(to_micro(r["cost_usd"]) for r in self._rows(billing_slot, month))
+        return sum(self._micro(r) for r in self._rows(billing_slot, month))
 
     def group_spent_micro(self, group: str, month: str) -> int:
         total = 0
         for slot in SLOTS:
             for row in self._rows(slot, month):
                 if row.get("cap_group") == group:
-                    total += to_micro(row["cost_usd"])
+                    total += self._micro(row)
         return total
+
+    def budget(self, policy: CapPolicy) -> tuple[float, float, float]:
+        """(spent, cap, remaining) of the TIGHTER of the slot and group budgets."""
+        spent, cap, remaining, _ = self._budget(policy)
+        return from_micro(spent), from_micro(cap), from_micro(remaining)
+
+    def _budget(self, policy: CapPolicy) -> tuple[int, int, int, bool]:
+        month = self._l.month()
+        slot_cap = to_micro(policy.cap_usd)
+        slot_spent = self.slot_spent_micro(policy.slot, month)
+        slot_remaining = slot_cap - slot_spent
+        if policy.group is not None and policy.group_total_usd is not None:
+            group_total = to_micro(policy.group_total_usd)
+            group_spent = self.group_spent_micro(policy.group, month)
+            group_remaining = group_total - group_spent
+            if group_remaining < slot_remaining:
+                return group_spent, group_total, group_remaining, True
+        return slot_spent, slot_cap, slot_remaining, False
 
     def authorize(self, policy: CapPolicy, estimate_usd: float) -> Authorization:
         """Raise ``CAP_EXHAUSTED`` unless the call fits the slot AND group cap."""
         month = self._l.month()
         est = to_micro(estimate_usd)
-        slot_cap = to_micro(policy.cap_usd)
-        slot_spent = self.slot_spent_micro(policy.slot, month)
-        slot_remaining = slot_cap - slot_spent
-        group_spent = group_total = group_remaining = None
-        if policy.group is not None and policy.group_total_usd is not None:
-            group_total = to_micro(policy.group_total_usd)
-            group_spent = self.group_spent_micro(policy.group, month)
-            group_remaining = group_total - group_spent
-
-        group_binds = group_remaining is not None and group_remaining < slot_remaining
-        if group_binds:
-            binding_cap, binding_spent, binding_remaining = (
-                group_total, group_spent, group_remaining,
-            )
-        else:
-            binding_cap, binding_spent, binding_remaining = (
-                slot_cap, slot_spent, slot_remaining,
-            )
-        if est > slot_remaining or (group_remaining is not None and est > group_remaining):
+        spent, cap, remaining, group_binds = self._budget(policy)
+        if est > remaining:
             scope = "combined cap group" if group_binds else "slot"
             raise GenerationRefused(
                 CAP_EXHAUSTED,
@@ -304,37 +405,48 @@ class LockedLedger:
                 f"monthly budget for the {scope}",
                 "Stop, wait for the next UTC month, or ask the operator to raise "
                 "the cap in the binding's constraints.",
-                spent_usd=from_micro(binding_spent),
-                cap_usd=from_micro(binding_cap),
-                remaining_usd=from_micro(binding_remaining),
+                spent_usd=from_micro(spent),
+                cap_usd=from_micro(cap),
+                remaining_usd=from_micro(remaining),
             )
+        slot_spent = self.slot_spent_micro(policy.slot, month)
         return Authorization(
             billing_slot=policy.slot,
             month=month,
             spent_usd=from_micro(slot_spent),
             cap_usd=policy.cap_usd,
-            remaining_usd=from_micro(slot_remaining),
+            remaining_usd=from_micro(to_micro(policy.cap_usd) - slot_spent),
             estimate_usd=estimate_usd,
             cap_group=policy.group,
-            group_spent_usd=None if group_spent is None else from_micro(group_spent),
+            group_spent_usd=None,
             group_total_usd=policy.group_total_usd,
         )
 
-    def record(self, row: dict[str, Any], billing_slot: str) -> None:
-        """Append one row, after the artifact has been received."""
-        month = self._l.month()
+    def record(self, row: dict[str, Any], billing_slot: str, month: str | None = None) -> None:
+        """Append one row (pending before the vendor call, then its final state).
+
+        ``month`` pins the file to the month the call was authorized in, so a
+        call that straddles midnight on the last day of a month keeps all its
+        rows in one file. Raises ``LedgerWriteError``; the caller decides what
+        that means (before the vendor call: nothing spent; after: SPENT_UNRECORDED).
+        """
+        month = month or self._l.month()
         path = self._file(billing_slot, month)
+        rel = self._rel(billing_slot, month)
         try:
             SpendLedger._ensure_dir(path.parent)
+            manifest = self._manifest() or {"files": []}
+            if rel not in manifest["files"]:
+                self._write_manifest([*manifest["files"], rel])
             payload = (json.dumps(row, sort_keys=True) + "\n").encode()
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600)
             try:
-                os.write(fd, payload)
+                write_all(fd, payload)
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        except OSError as exc:
-            raise _unreadable(self._slot, f"write failed: {type(exc).__name__}") from None
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise LedgerWriteError(type(exc).__name__) from None
 
     def remaining_after(self, policy: CapPolicy) -> float:
         """Remaining budget (the tighter of slot and group) after recording."""

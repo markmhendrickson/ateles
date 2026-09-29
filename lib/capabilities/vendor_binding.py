@@ -14,17 +14,14 @@ Neotoma unreachable, unauthenticated, or returning no match all resolve to
 from __future__ import annotations
 
 import json
-import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import neotoma_http
 from .errors import BINDING_MISSING, GenerationRefused
 from .slots import SLOTS
 
 BINDING_ENTITY_TYPE = "vendor_binding"
-NEOTOMA_USER_AGENT = "ateles-capabilities/1.0"  # Cloudflare 1010-blocks urllib's default
 NONE_BY_DESIGN = "none by design"
 _PAGE = 100
 _MAX_PAGES = 10
@@ -52,15 +49,6 @@ class VendorBinding:
         return not (self.constraints_raw or "").strip()
 
 
-def _neotoma_base() -> str:
-    return os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com").rstrip("/")
-
-
-def neotoma_token() -> str | None:
-    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
-    return token or None
-
-
 def _snapshot_of(row: dict[str, Any]) -> dict[str, Any]:
     outer = row.get("snapshot") or {}
     inner = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
@@ -69,31 +57,18 @@ def _snapshot_of(row: dict[str, Any]) -> dict[str, Any]:
 
 def default_fetcher(entity_type: str) -> "list[dict[str, Any]]":
     """Page through ``POST /entities/query`` for one entity type."""
-    token = neotoma_token()
-    if not token:
-        raise RuntimeError("no Neotoma credential available to the capability client")
     rows: list[dict[str, Any]] = []
     for page in range(_MAX_PAGES):
-        body = json.dumps(
+        data = neotoma_http.request_json(
+            "POST",
+            "/entities/query",
             {
                 "entity_type": entity_type,
                 "limit": _PAGE,
                 "offset": page * _PAGE,
                 "include_snapshots": True,
-            }
-        ).encode()
-        req = urllib.request.Request(
-            f"{_neotoma_base()}/entities/query",
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "User-Agent": NEOTOMA_USER_AGENT,
             },
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
-            data = json.load(resp)
         batch = data.get("entities") or []
         rows.extend(batch)
         if len(batch) < _PAGE:
@@ -156,13 +131,32 @@ def resolve_vendor_binding(slot: str, *, fetch: Fetcher | None = None) -> Vendor
     fetcher = fetch or default_fetcher
     try:
         rows = fetcher(BINDING_ENTITY_TYPE)
+    except neotoma_http.NeotomaConfigError as exc:
+        raise GenerationRefused(
+            BINDING_MISSING,
+            slot,
+            f"the binding store cannot be reached from this process: {exc}",
+            "This is a client configuration problem, not a missing binding. Run "
+            "the client in a process that has NEOTOMA_BASE_URL and "
+            "NEOTOMA_BEARER_TOKEN available (see "
+            "docs/dev/generation_capability_client.md). Nothing was spent.",
+        ) from None
+    except neotoma_http.NeotomaRequestError as exc:
+        raise GenerationRefused(
+            BINDING_MISSING,
+            slot,
+            f"the binding store rejected the read ({exc})",
+            "HTTP 401/403 usually means the bearer token is stale or scoped to "
+            "another owner; fix the token, not the binding. Nothing was spent.",
+        ) from None
     except Exception as exc:  # noqa: BLE001 - any read failure fails closed
         raise GenerationRefused(
             BINDING_MISSING,
             slot,
             f"vendor_binding could not be read ({type(exc).__name__})",
-            "The binding store was unreachable or rejected the read; nothing was "
-            "spent. Check the host's Neotoma connection and retry.",
+            "The binding store was unreachable (network or store outage), not "
+            "necessarily missing the binding. Check connectivity and the "
+            "token, then retry. Nothing was spent.",
         ) from None
     matches = [
         b
