@@ -470,22 +470,24 @@ _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 # `$R` holding `sudo`); every program not listed here, including one named
 # through a variable or substitution, puts the path in command position and
 # refuses (self-review of this change). Programs that print their operands
-# (`ls`, `realpath`) are safe here because a pipe into a runner is refused
-# separately (`_pipes_into_runner`). `git` and `python3` are admitted only in
-# their argument-only forms (`_git_is_argument_only`, `python3 -m venv`).
+# (`ls`, `realpath`) are safe here because handing their output to anything
+# but a pure consumer is refused separately (`_pathed_env_output_may_run`).
+# `git` and `python3` are admitted only in their argument-only forms (`_git_is_argument_only`, `python3 -m venv`),
+# and `rg` only without `--pre`/`--hostname-bin`. Programs with an option
+# that runs a separate-word operand (`tar --use-compress-program`, `zip
+# -TT`, `git grep -O`) are left out (third self-review of this change).
 _ARGUMENT_ONLY_PROGRAMS = frozenset(
     {
         "ls", "cd", "pushd", "rm", "rmdir", "mkdir", "cp", "mv", "ln", "touch",
-        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "du",
-        "tree", "chmod", "chown", "chgrp", "realpath", "readlink", "grep",
-        "egrep", "fgrep", "rg", "ag", "diff", "cmp", "tar", "zip", "unzip",
-        "open", "code", "vim", "vi", "nano", "trash",
+        "cat", "head", "tail", "wc", "stat", "file", "du", "tree", "chmod",
+        "chown", "chgrp", "realpath", "readlink", "grep", "egrep", "fgrep",
+        "diff", "cmp", "unzip", "code", "vim", "vi", "nano", "trash",
     }
 )  # fmt: skip
 _GIT_ARGUMENT_ONLY_SUBCOMMANDS = frozenset(
     {
         "add", "rm", "mv", "diff", "log", "show", "status", "restore",
-        "checkout", "switch", "ls-files", "blame", "grep", "commit", "reset",
+        "checkout", "switch", "ls-files", "blame", "commit", "reset",
     }
 )  # fmt: skip
 _GIT_OPTIONS_WITH_ARGUMENT = frozenset({"-C", "-c", "--git-dir", "--work-tree"})
@@ -600,6 +602,11 @@ def _in_command_position(segment: str, start: int) -> bool:
             return False
         if name == "git":
             return not _git_is_argument_only(words[1:])
+        if name == "rg":
+            return any(
+                word.split("=", 1)[0] in ("--pre", "--hostname-bin")
+                for word in words[1:]
+            )
         if re.fullmatch(r"python[0-9.]*", name):
             return words[1:3] != ["-m", "venv"]
         return True
@@ -620,25 +627,39 @@ def _printenv_invoked(segment: str) -> bool:
     return next(_env_word_matches(_PRINTENV_RE, segment), None) is not None
 
 
-# A later pipeline stage that runs what it reads: `ls ./env | xargs -I{} {}`
-# and `echo ./env | sh` execute a path an earlier stage only printed. Each
-# segment is judged alone, so this is checked across the whole command.
-_PIPES_INTO_RUNNER_RE = re.compile(
-    r"\|(?!\|)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?"
-    r"(?:xargs|parallel|sh|bash|zsh|dash|ksh|fish|eval|source|while|\.)(?=\s|$)"
+# A later pipeline stage, or a file written and then run, can execute a
+# path an earlier stage only printed: `ls ./env | xargs -I{} {}`, `ls ./env
+# |& sh`, `ls ./env > x; sh x`. Each segment is judged alone, so this is
+# checked across the whole command. Like the argument allowlist, it lists
+# what is SAFE: every stage after a pipe must start with a pure consumer
+# (a runner list missed `| nice sh`, `| { sh; }` and `| awk
+# '{system($0)}'`, third self-review of this change).
+_PIPE_CONSUMERS = frozenset(
+    {"wc", "head", "tail", "grep", "egrep", "fgrep", "sort", "uniq", "cut", "tr"}
 )
+_PIPE_STAGE_RE = re.compile(r"(?<!\|)\|&?(?!\|)\s*([^|;&\n)]*)")
+_STDOUT_TO_FILE_RE = re.compile(r">>?\s*(?!&|/dev/null(?![^\s;&|)]))\S")
 
 
-def _pipes_into_runner(command: str) -> bool:
-    """True when `command` pipes into a runner AND names a non-canonical
-    `env`/`printenv` path anywhere, which a pipe could hand to it."""
-    if not _PIPES_INTO_RUNNER_RE.search(command):
-        return False
-    return any(
+def _pathed_env_output_may_run(command: str) -> bool:
+    """True when `command` names a non-canonical `env`/`printenv` path and
+    also pipes into a stage that is not a pure consumer, or writes stdout to
+    a file."""
+    if not any(
         not _CANONICAL_ENV_WORD_RE.fullmatch(match.group(0))
         for pattern in (_ENV_RE, _PRINTENV_RE)
         for match in pattern.finditer(command)
-    )
+    ):
+        return False
+    if _STDOUT_TO_FILE_RE.search(command):
+        return True
+    for stage in _PIPE_STAGE_RE.finditer(command):
+        words = _shlex_prefix_words(stage.group(1)) or [""]
+        while len(words) > 1 and _ASSIGNMENT_WORD_RE.fullmatch(words[0]):
+            words = words[1:]
+        if words[0].rsplit("/", 1)[-1] not in _PIPE_CONSUMERS:
+            return True
+    return False
 
 
 _SERVICE_ENV_RE = re.compile(
@@ -1398,7 +1419,7 @@ def check_bash(command: str):
         if hit:
             return hit
 
-    if _pipes_into_runner(joined):
+    if _pathed_env_output_may_run(joined):
         return "ambient environment dump"
 
     for segment in _split_segments(command):

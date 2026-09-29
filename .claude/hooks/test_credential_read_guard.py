@@ -429,6 +429,17 @@ BASH_BLOCK = [
     ("substitution output run as a command", "$(ls ./env)"),
     ("git bisect run on a pathed env", "git bisect run ./env"),
     ("git rebase -x on a pathed env", "git rebase -x ./env"),
+    # Third self-review: argument-only programs with an option that runs an
+    # operand, and later pipe stages or files that run printed output. The
+    # reviewed head refused all of these; the runner-list pipe check did not.
+    ("tar compress program", "tar -c --use-compress-program ./env -f - f"),
+    ("rg preprocessor", "rg --pre ./env '' f"),
+    ("git grep pager", "git grep -O./env -e x"),
+    ("pipe with stderr into a shell", "ls ./env |& sh"),
+    ("pipe into a wrapped shell", "ls ./env | nice sh"),
+    ("pipe into a brace group", "ls ./env | { sh; }"),
+    ("pipe into awk system", "ls ./env | awk '{system($0)}'"),
+    ("output written to a file then run", "ls ./env > /tmp/x; sh /tmp/x"),
     (
         "env -u running perl -pe after source",
         f"source {ENV}; env -u X perl -pe 1",
@@ -585,6 +596,8 @@ BASH_ALLOW = [
     ("ls a quoted path ending in env", 'ls "config/env"'),
     ("git -C diff a path ending in env", "git -C repo diff -- src/env"),
     ("ls piped to a non-runner", "ls config/env | wc -l"),
+    ("rg on a path ending in env", "rg foo docker/env"),
+    ("ls a path ending in env, stderr discarded", "ls config/env 2>/dev/null"),
     ("quoted parens before a path ending in env", 'git log --grep "x (y)" -- src/env'),
     ("ls a path ending in env after source", f"source {ENV}; ls config/env"),
     (
