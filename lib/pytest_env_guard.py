@@ -51,6 +51,7 @@ from typing import Any, Iterable, Mapping
 import pytest
 
 MIN_SECRET_LEN = 12
+MAX_DEPTH = 12
 
 # Host variables whose values are never credentials. Kept out of the redaction
 # set so ordinary paths in a failure message stay readable, and kept in the
@@ -178,7 +179,7 @@ def scrub_text(text: str, secrets: Mapping[str, str] | None = None) -> str:
 
 def _scrub_obj(obj: Any, secrets: Mapping[str, str], depth: int = 0) -> Any:
     """Scrub strings inside a pytest report body, returning the cleaned object."""
-    if depth > 12:
+    if depth > MAX_DEPTH:
         return obj
     if isinstance(obj, str):
         return scrub_text(obj, secrets)
@@ -267,3 +268,8 @@ def hermetic_env(monkeypatch):
     the outcome, and cannot be captured by a child-process stub."""
     clear_host_env(monkeypatch)
     return monkeypatch
+
+
+# Every hook this module provides. Conftests import exactly these names; a test
+# asserts they do, so a hook added here cannot silently go unwired.
+HOOK_NAMES = ("pytest_runtest_makereport", "pytest_collection_finish")
