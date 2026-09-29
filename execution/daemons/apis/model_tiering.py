@@ -36,6 +36,13 @@ never again run un-tiered by accident (that is the incident this policy
 exists to close), so "config is missing" and "config says be careful" resolve
 to the same runner behaviour.
 
+Example config: ``docs/examples/model-tiering/`` holds a committed,
+operator-neutral ``action-policy.json`` (kept equal to
+``DEFAULT_ACTION_POLICY_HINT`` by a test) and ``vendor-binding.json``.
+Validate any live file before installing it with
+``python3 execution/daemons/apis/model_tiering.py --check <file> [<file>]``.
+``execution/scripts/harness_usage.py tiers`` reports dispatches per tier.
+
 Escalation signals (below) can only RAISE the resolved tier, never lower it —
 they are cheap, deterministic, measured facts about the dispatch (diff size,
 a security-sensitive path, a prior blocking finding, a repeated round, a
