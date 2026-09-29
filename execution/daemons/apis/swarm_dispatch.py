@@ -2442,7 +2442,9 @@ def detect_auth_failure(*texts: str) -> bool:
 
 def review_failure_class(result: SkillResult) -> str:
     """Return a public-safe reason for one incomplete review invocation."""
-    if detect_session_limit(result.stdout, result.stderr, result.error):
+    if getattr(result, "cooled_until", "") or detect_session_limit(
+        result.stdout, result.stderr, result.error
+    ):
         return "usage limit"
     if "no subscription-backed harness provider" in (result.error or ""):
         return "provider exhaustion"

@@ -87,3 +87,25 @@ def test_tiers_command_on_a_missing_ledger_is_an_empty_report(capsys, monkeypatc
     monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "absent.jsonl"))
     assert harness_usage.main(["tiers"]) == 0
     assert json.loads(capsys.readouterr().out)["total"] == 0
+
+
+def test_show_surfaces_a_spent_session_window(capsys) -> None:
+    """Weekly headroom reads healthy while the 5-hour window is spent."""
+    until = time.time() + 2 * 3600
+    harness_router.record_usage("claude", [{"name": "weekly", "used_percent": 35}])
+    harness_router.record_cooling("claude", until, reason="session_limit")
+
+    assert harness_usage.main(["show"]) == 0
+    claude = json.loads(capsys.readouterr().out)["claude"]
+
+    assert claude["headroom"] == pytest.approx(0.65)
+    assert claude["cooling"]["reason"] == "session_limit"
+    assert claude["cooling"]["until"] == harness_router._iso_from_wall(until)
+    assert 7100 < claude["cooling"]["remaining_seconds"] <= 7200
+    assert claude["windows"][0]["name"] == "weekly"
+
+
+def test_show_reports_no_cooling_once_the_window_has_passed(capsys) -> None:
+    harness_router.record_cooling("claude", time.time() - 10, reason="session_limit")
+    assert harness_usage.main(["show"]) == 0
+    assert json.loads(capsys.readouterr().out)["claude"]["cooling"] is None
