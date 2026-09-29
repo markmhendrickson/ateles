@@ -335,7 +335,7 @@ def test_rereview_of_arch_and_security_stays_top(klass) -> None:
 
 
 def test_round_still_escalates_a_class_that_is_not_round_tolerant() -> None:
-    resolved = _resolve("carry_forward_check", review_round=2)
+    resolved = _resolve("lens_review:arch", review_round=2)
     assert resolved.tier == "top"
     assert resolved.escalation_reasons == ("review_round=2",)
 
@@ -370,3 +370,107 @@ def test_round_tolerance_does_not_apply_to_an_unmapped_class() -> None:
         signals=model_tiering.EscalationSignals(review_round=2), policy=_policy(),
     )
     assert resolved.tier == "top"
+
+
+# ── round-defined classes: no escalation on the signals that define them ────
+
+
+@pytest.mark.parametrize("klass", ["carry_forward_check", "repair_diagnosed"])
+def test_a_round_defined_class_does_not_escalate_on_the_round_it_is_defined_by(klass):
+    policy = {"carry_forward_check": "mid", "repair_diagnosed": "mid"}
+    resolved = model_tiering.resolve_tier(
+        klass,
+        signals=model_tiering.EscalationSignals(
+            review_round=3, prior_blocking_finding=True
+        ),
+        policy=policy,
+    )
+    assert (resolved.tier, resolved.source) == ("mid", "policy")
+    assert resolved.escalation_reasons == ()
+
+
+@pytest.mark.parametrize("klass", ["carry_forward_check", "repair_diagnosed"])
+@pytest.mark.parametrize(
+    "signals,reason",
+    [
+        ({"prior_attempt_failed": True}, "prior_attempt_failed"),
+        ({"changed_files": (".claude/hooks/x.py",)}, "touches_security_sensitive_path"),
+        ({"diff_lines_changed": 401}, "diff_lines_changed=401>400"),
+        ({"diff_unreadable": True}, "diff_unreadable"),
+        ({"new_blocking_finding": True}, "new_blocking_finding"),
+    ],
+)
+def test_a_round_defined_class_still_escalates_on_every_other_signal(
+    klass, signals, reason
+):
+    resolved = model_tiering.resolve_tier(
+        klass,
+        signals=model_tiering.EscalationSignals(
+            review_round=3, prior_blocking_finding=True, **signals
+        ),
+        policy={"carry_forward_check": "mid", "repair_diagnosed": "mid"},
+    )
+    assert resolved.tier == "top"
+    assert resolved.escalation_reasons == (reason,)
+
+
+def test_a_security_fix_is_not_round_defined_and_stays_top():
+    """`security_fix` is exempt from nothing: even mapped below top, the round
+    signals raise it, and mapped at top (the ruling) it stays there."""
+    signals = model_tiering.EscalationSignals(review_round=2, prior_blocking_finding=True)
+    assert model_tiering.resolve_tier(
+        "security_fix", signals=signals, policy={"security_fix": "mid"}
+    ).tier == "top"
+    assert model_tiering.resolve_tier(
+        "security_fix", signals=signals, policy={"security_fix": "top"}
+    ).tier == "top"
+
+
+# ── the ledger's escalation reasons ─────────────────────────────────────────
+
+
+def test_tier_counts_reports_escalation_reasons_when_asked(tmp_path, monkeypatch):
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "ledger.jsonl"))
+    for klass, reasons in (
+        ("lens_review:pm", ["diff_lines_changed=1054>400", "new_blocking_finding"]),
+        ("lens_review:qa", ["diff_lines_changed=1824>400"]),
+        ("lens_review:arch", ["review_round=2", "review_round=2"]),
+        ("lens_review:ux", []),
+    ):
+        model_tiering.record_dispatch(
+            skill="x", provider="claude", model="m",
+            resolved=model_tiering.ResolvedTier(
+                "top" if reasons else "mid", "escalated" if reasons else "policy",
+                klass, tuple(reasons),
+            ),
+        )
+    plain = model_tiering.tier_counts()
+    assert "by_reason" not in plain
+    report = model_tiering.tier_counts(with_reasons=True)
+    assert report["total"] == plain["total"] == 4
+    assert report["by_reason"] == {
+        "diff_lines_changed": {
+            "total": 2, "by_class": {"lens_review:pm": 1, "lens_review:qa": 1},
+        },
+        "new_blocking_finding": {"total": 1, "by_class": {"lens_review:pm": 1}},
+        # One dispatch names a signal once however many times it was listed.
+        "review_round": {"total": 1, "by_class": {"lens_review:arch": 1}},
+    }
+
+
+def test_reason_name_drops_the_measurement():
+    assert model_tiering.reason_name("diff_lines_changed=1054>400") == "diff_lines_changed"
+    assert model_tiering.reason_name("review_round=2") == "review_round"
+    assert model_tiering.reason_name("diff_unreadable") == "diff_unreadable"
+
+
+def test_tier_counts_reasons_tolerate_rows_without_them(tmp_path, monkeypatch):
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+    ledger.write_text(
+        json.dumps({"ts": "2026-09-29T10:00:00+00:00", "tier": "top",
+                    "action_class": "build"}) + "\n"
+        + json.dumps({"ts": "2026-09-29T10:00:00+00:00", "tier": "top",
+                      "action_class": "build", "escalation_reasons": "oops"}) + "\n"
+    )
+    assert model_tiering.tier_counts(with_reasons=True)["by_reason"] == {}

@@ -109,3 +109,24 @@ def test_show_reports_no_cooling_once_the_window_has_passed(capsys) -> None:
     harness_router.record_cooling("claude", time.time() - 10, reason="session_limit")
     assert harness_usage.main(["show"]) == 0
     assert json.loads(capsys.readouterr().out)["claude"]["cooling"] is None
+
+
+def test_tiers_reasons_flag_reports_why_dispatches_were_raised(capsys, monkeypatch, tmp_path) -> None:
+    """`--reasons` is how a change to the escalation signals is measured."""
+    import model_tiering
+
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "ledger.jsonl"))
+    model_tiering.record_dispatch(
+        skill="x", provider="claude", model="m",
+        resolved=model_tiering.ResolvedTier(
+            "top", "escalated", "lens_review:pm", ("diff_lines_changed=1054>400",)
+        ),
+    )
+    assert harness_usage.main(["tiers"]) == 0
+    assert "by_reason" not in json.loads(capsys.readouterr().out)
+
+    assert harness_usage.main(["tiers", "--reasons"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["by_reason"] == {
+        "diff_lines_changed": {"total": 1, "by_class": {"lens_review:pm": 1}}
+    }

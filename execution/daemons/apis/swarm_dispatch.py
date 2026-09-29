@@ -52,6 +52,7 @@ import shutil
 import sys
 import tempfile
 import unicodedata
+from urllib.parse import quote
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -100,6 +101,7 @@ from review_panel import (
     select_panel,
 )
 import model_tiering
+import review_delta
 from skill_runner import (
     GATE_OWNER_TOOL_DENY_UNAVAILABLE,
     GATE_VERDICT_POSITION_RULE,
@@ -2870,16 +2872,19 @@ def _finding_fingerprint(lens: str, finding) -> tuple[str, str, str]:
     )
 
 
-def has_new_blocking_finding(comments: list[dict]) -> bool:
-    """Whether the most recent reviewed head's blocking findings include one no
-    earlier head raised (ruling `small_rereview_rounds_run_mid`).
+def _reviewed_head_blockers(
+    comments: list[dict], exclude_head: str = ""
+) -> tuple[list[str], dict[str, set[tuple[str, str, str]]]]:
+    """Reviewed heads (in order of first lens comment) and each head's blockers.
 
     Lens comments carry `<!-- review:<lens> commit=<sha> -->` and keep their
     body when later superseded, so each head's blockers can be rebuilt from the
-    thread. Heads are ordered by first appearance. One head (or none) has
-    nothing to be new against. A reworded finding reads as new, which fails
-    toward `top`.
+    thread. `exclude_head` drops the head being reviewed right now: a head is a
+    REVIEWED round only once its review is done, and this dispatch is the
+    review of that head, so lens comments already posted against it (an earlier
+    attempt, another lens) are not an earlier round to compare with.
     """
+    exclude = _normalise_full_sha(exclude_head)
     order: list[str] = []
     by_head: dict[str, set[tuple[str, str, str]]] = {}
     for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
@@ -2888,6 +2893,8 @@ def has_new_blocking_finding(comments: list[dict]) -> bool:
         if not marker:
             continue
         sha = marker.group("sha").lower()
+        if exclude and sha == exclude:
+            continue
         lens = marker.group("lens").lower()
         if sha not in by_head:
             order.append(sha)
@@ -2895,6 +2902,27 @@ def has_new_blocking_finding(comments: list[dict]) -> bool:
         for finding in parse_findings(body, lens=lens):
             if finding.blocking:
                 by_head[sha].add(_finding_fingerprint(lens, finding))
+    return order, by_head
+
+
+def last_reviewed_head(comments: list[dict], exclude_head: str = "") -> str:
+    """The head SHA of the most recent completed review round, or "" when the
+    thread holds none (a first round has nothing to have been reviewed yet)."""
+    order, _ = _reviewed_head_blockers(comments, exclude_head)
+    return order[-1] if order else ""
+
+
+def has_new_blocking_finding(comments: list[dict], current_head: str = "") -> bool:
+    """Whether the latest reviewed round raised a blocking finding no earlier
+    round did (ruling `small_rereview_rounds_run_mid`).
+
+    That needs at least two reviewed heads, so the first re-round can never be
+    "new": its only earlier round is the one whose findings it is verifying.
+    `current_head` is the head being reviewed now and is not itself a reviewed
+    round (see `_reviewed_head_blockers`). Heads are ordered by first
+    appearance. A reworded finding reads as new, which fails toward `top`.
+    """
+    order, by_head = _reviewed_head_blockers(comments, current_head)
     if len(order) < 2:
         return False
     earlier: set[tuple[str, str, str]] = set()
@@ -11545,6 +11573,7 @@ class SwarmDispatcher:
         """Did the last review round raise a blocking finding no earlier round
         had? Unreadable comments answer True (fail-closed: unknown escalates)."""
         try:
+            head = await self._review_head(trigger)
             async with httpx.AsyncClient(timeout=30) as client:
                 comments = await self._all_issue_comments(
                     trigger.repository, trigger.number, client
@@ -11556,7 +11585,72 @@ class SwarmDispatcher:
                 "it as a new blocking finding and escalates"
             )
             return True
-        return has_new_blocking_finding(comments)
+        return has_new_blocking_finding(comments, current_head=head)
+
+    async def _review_head(self, trigger: SwarmTrigger) -> str:
+        """The full head SHA being reviewed, "" when it cannot be established
+        (the trigger's own SHA first, then a live read)."""
+        head = _normalise_full_sha(trigger.head_sha or "")
+        if head:
+            return head
+        return _normalise_full_sha(await self._pr_head_sha(trigger) or "")
+
+    async def _review_delta(
+        self, trigger: SwarmTrigger
+    ) -> review_delta.Delta | None:
+        """The PR's OWN change since the last reviewed head, or None.
+
+        None means "measure the whole diff": there is no earlier reviewed head,
+        or the delta could not be read. It is the caller's fail-up path, so
+        every failure here returns None rather than a smaller number.
+
+        The delta is the interdiff of the PR's diff at the last reviewed head
+        and at the current head, each taken against its own merge-base with the
+        base branch (three-dot compares), so what a merge of the base branch
+        brought in cancels and is never measured (see `review_delta`).
+        """
+        try:
+            head = await self._review_head(trigger)
+            if not head:
+                return None
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    trigger.repository, trigger.number, client
+                )
+                previous = last_reviewed_head(comments, exclude_head=head)
+                if not previous:
+                    return None
+                base_ref = trigger.base_ref
+                if not base_ref:
+                    resp = await client.get(
+                        f"https://api.github.com/repos/{trigger.repository}/pulls/"
+                        f"{trigger.number}",
+                        headers=self._github_headers(trigger.repository),
+                    )
+                    resp.raise_for_status()
+                    base_ref = str((resp.json().get("base") or {}).get("ref") or "")
+                if not base_ref:
+                    return None
+                sides: list[list[dict]] = []
+                for sha in (previous, head):
+                    resp = await client.get(
+                        f"https://api.github.com/repos/{trigger.repository}/"
+                        f"compare/{quote(base_ref, safe='/')}...{sha}",
+                        headers=self._github_headers(trigger.repository),
+                    )
+                    resp.raise_for_status()
+                    files = review_delta.compare_files(resp.json())
+                    if files is None:
+                        return None
+                    sides.append(files)
+            return review_delta.interdiff(sides[0], sides[1])
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] delta read failed for "
+                f"{trigger.repository}#{trigger.number}: {exc} — tiering "
+                "measures the whole diff instead"
+            )
+            return None
 
     async def _diff_lines_changed(self, t: SwarmTrigger) -> int | None:
         """Added + deleted lines of the PR, or None when GitHub could not say.
@@ -11591,6 +11685,7 @@ class SwarmDispatcher:
         prior_attempt_failed: bool = False,
         changed_files: list[str] | None = None,
         measure_diff: bool = True,
+        delta: review_delta.Delta | None = None,
     ) -> model_tiering.EscalationSignals:
         """Escalation signals for one PR dispatch (operator ruling 2026-09-29).
 
@@ -11599,11 +11694,21 @@ class SwarmDispatcher:
         `measure_diff=False` is for dispatches whose work does not read the
         diff (Lanius's gate bookkeeping); it skips the two GitHub reads rather
         than reporting an unmeasured diff as unreadable.
+
+        `delta` is a re-review round's own change since the last reviewed head
+        (`_review_delta`). When given, IT is what size and security paths are
+        judged on: the round reviews the delta, not the PR. Absent, the whole
+        PR is measured, so round 1 and every unreadable delta keep the whole
+        diff. `changed_files` is the whole-PR list and is never substituted
+        for a delta.
         """
         files: tuple[str, ...] = ()
         lines = 0
         unreadable = False
-        if measure_diff:
+        if measure_diff and delta is not None:
+            files = delta.files
+            lines = delta.lines
+        elif measure_diff:
             fetched = (
                 changed_files
                 if changed_files is not None
@@ -11640,6 +11745,8 @@ class SwarmDispatcher:
 
         A NEW blocking finding is read from the PR's lens comments, and only
         when a repeat round exists (round 1 has nothing to be new against).
+        Size and security paths of a repeat round come from its delta since
+        the last reviewed head, not the whole PR (`_review_delta`).
         """
         prior_fix_rounds = await self._fix_round_count(trigger)
         new_finding = (
@@ -11647,12 +11754,21 @@ class SwarmDispatcher:
             and prior_fix_rounds > 0
             and await self._new_blocking_finding(trigger)
         )
+        # A re-round (round >= 2) is judged on its own delta since the last
+        # reviewed head; round 1, and any delta that cannot be read, on the
+        # whole diff.
+        delta = (
+            await self._review_delta(trigger)
+            if measure_diff and prior_fix_rounds > 0
+            else None
+        )
         signals = await self._tier_signals(
             trigger,
             review_round=prior_fix_rounds + 1,
             prior_blocking_finding=prior_fix_rounds > 0,
             changed_files=changed_files,
             measure_diff=measure_diff,
+            delta=delta,
         )
         return dataclasses.replace(signals, new_blocking_finding=bool(new_finding))
 
