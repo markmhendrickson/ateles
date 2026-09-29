@@ -2227,6 +2227,19 @@ async def _run_skill_once(
             f"timeout={timeout}s"
         )
 
+    # ── Tier observability (operator ruling 2026-09-29) ────────────────────────
+    # One log line and one ledger row per dispatch attempt: the tier, why, and
+    # the model actually requested. An un-tiered dispatch is logged as such
+    # (`tiering=untiered(no_action_class)`), never omitted, so a call site that
+    # forgot to name an action class shows up here instead of hiding.
+    log.info(
+        f"[apis] {skill} via {provider}: "
+        + model_tiering.record_dispatch(
+            skill=skill, provider=provider, resolved=resolved_tier,
+            model=resolved_model,
+        )
+    )
+
     # ── Stage 2: harness_event at dispatch start ───────────────────────────────
     try:
         await asyncio.to_thread(

@@ -159,6 +159,47 @@ def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
     assert seen["model"] is None
 
 
+def test_cli_escalation_flags_reach_run_skill_and_raise_the_tier(
+    monkeypatch, tmp_path
+) -> None:
+    """The bootstrap review runner passes measured facts as flags; they must
+    arrive as `EscalationSignals` on run_skill and resolve as the ruling says:
+    a small pm re-review stays mid, anything else measured raises it to top."""
+    import model_tiering
+
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"lens_review:pm": "mid", "lens_review:arch": "top"}')
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(policy))
+    seen: list[dict] = []
+
+    async def _capture(skill, prompt, **kwargs):
+        seen.append(kwargs)
+        return SkillResult(skill, True, 0, "out", "", provider="claude")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+    monkeypatch.setattr(dispatch_role, "_preflight", lambda *a, **k: None)
+
+    def tier(klass, *flags):
+        dispatch_role.main(["--role", "r", "--task", "review", "--action-class", klass, *flags])
+        return model_tiering.resolve_tier(klass, signals=seen[-1]["escalation_signals"])
+
+    pm = "lens_review:pm"
+    dispatch_role.main(["--role", "r", "--task", "t", "--action-class", pm])
+    assert seen[-1]["escalation_signals"] is None
+    assert tier(pm).tier == "mid"
+    # Ruling `small_rereview_rounds_run_mid`: a small pm re-review stays mid,
+    # even after an earlier blocking finding.
+    assert tier(pm, "--review-round", "2", "--prior-blocking-finding").tier == "mid"
+    # arch re-rounds stay top.
+    assert tier("lens_review:arch", "--review-round", "2").tier == "top"
+    # Everything else measured raises it.
+    assert tier(pm, "--review-round", "2", "--new-blocking-finding").tier == "top"
+    assert tier(pm, "--review-round", "2", "--diff-lines", "900").tier == "top"
+    resolved = tier(pm, "--review-round", "2", "--changed-file", "execution/hooks/x.py")
+    assert "touches_security_sensitive_path" in resolved.escalation_reasons
+    assert tier(pm, "--prior-attempt-failed").tier == "top"
+
+
 @pytest.fixture
 def captured_codex_dispatches(fake_repo, monkeypatch):
     """Capture real ``run_skill`` subprocess boundaries without launching Codex."""

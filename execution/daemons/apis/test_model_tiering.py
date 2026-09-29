@@ -305,3 +305,68 @@ def test_tiers_are_ordered_weakest_to_strongest() -> None:
 
 def test_default_tier_is_the_strongest() -> None:
     assert model_tiering.DEFAULT_TIER == model_tiering.TIERS[-1]
+
+
+# ── ruling `small_rereview_rounds_run_mid` (2026-09-29) ─────────────────────
+
+
+def _policy():
+    return {"lens_review:pm": "mid", "lens_review:qa": "mid", "lens_review:ux": "mid",
+            "lens_review:arch": "top", "lens_review:security": "top",
+            "carry_forward_check": "mid"}
+
+
+def _resolve(klass, **signal_kwargs):
+    return model_tiering.resolve_tier(
+        klass, signals=model_tiering.EscalationSignals(**signal_kwargs), policy=_policy()
+    )
+
+
+@pytest.mark.parametrize("klass", ["lens_review:pm", "lens_review:qa", "lens_review:ux"])
+def test_small_rereview_of_a_round_tolerant_lens_stays_mid(klass) -> None:
+    resolved = _resolve(klass, review_round=3, prior_blocking_finding=True,
+                        diff_lines_changed=120, changed_files=("src/a.py",))
+    assert (resolved.tier, resolved.source) == ("mid", "policy")
+
+
+@pytest.mark.parametrize("klass", ["lens_review:arch", "lens_review:security"])
+def test_rereview_of_arch_and_security_stays_top(klass) -> None:
+    assert _resolve(klass, review_round=2).tier == "top"
+
+
+def test_round_still_escalates_a_class_that_is_not_round_tolerant() -> None:
+    resolved = _resolve("carry_forward_check", review_round=2)
+    assert resolved.tier == "top"
+    assert resolved.escalation_reasons == ("review_round=2",)
+
+
+@pytest.mark.parametrize(
+    "signals,reason",
+    [
+        ({"diff_lines_changed": 401}, "diff_lines_changed=401>400"),
+        ({"changed_files": (".claude/hooks/x.py",)}, "touches_security_sensitive_path"),
+        ({"new_blocking_finding": True}, "new_blocking_finding"),
+        ({"prior_attempt_failed": True}, "prior_attempt_failed"),
+        ({"diff_unreadable": True}, "diff_unreadable"),
+    ],
+)
+def test_every_other_signal_still_raises_a_round_tolerant_lens(signals, reason) -> None:
+    resolved = _resolve("lens_review:pm", review_round=2, **signals)
+    assert resolved.tier == "top"
+    assert reason in resolved.escalation_reasons
+
+
+def test_a_diff_at_exactly_the_threshold_is_still_small() -> None:
+    assert _resolve("lens_review:qa", review_round=2, diff_lines_changed=400).tier == "mid"
+
+
+def test_new_blocking_finding_raises_any_class() -> None:
+    assert _resolve("carry_forward_check", new_blocking_finding=True).tier == "top"
+
+
+def test_round_tolerance_does_not_apply_to_an_unmapped_class() -> None:
+    resolved = model_tiering.resolve_tier(
+        "lens_review:legal",
+        signals=model_tiering.EscalationSignals(review_round=2), policy=_policy(),
+    )
+    assert resolved.tier == "top"
