@@ -497,6 +497,31 @@ def test_mechanical_work_runs_local_with_guards_and_provenance(tmp_path, monkeyp
     assert fields["provider"] == LOCAL and fields["model"] == "qwen3-coder-ollama"
 
 
+def test_tiered_mechanical_work_still_runs_local(tmp_path, monkeypatch):
+    """Model tiering must not push mechanical work off claude-local: a
+    vendor_binding with no claude-local entry (claude-local takes its model
+    from its own config, not vendor_binding) must neither refuse the local
+    attempt nor replace the local model with a frontier one. The frontier claude
+    fallback is bound, so a refusal would show up as a failover to it."""
+    _write_config(tmp_path)
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"rebase": "mechanical"}')
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "no-policy.json"))
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING", '{"claude": {"mechanical": "claude-haiku-4-5"}}'
+    )
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "no-binding.json"))
+    spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
+    result = _run(spawns, events, work_class="rebase", action_class="rebase")
+
+    assert result.ok and result.provider == LOCAL
+    assert result.attempted_providers == (LOCAL,)
+    (cmd, _), = spawns.calls
+    assert cmd[cmd.index("--model") + 1] == "qwen3-coder-ollama"
+    assert "claude-haiku-4-5" not in cmd
+    done = [e for e in events if e["event_type"] == "subprocess" and e["success"] == "true"]
+    assert done and done[0]["resolved_tier"].tier == "mechanical"
+
+
 def test_local_dispatch_uses_the_lean_prompt_not_agent_def_or_policy(tmp_path, monkeypatch):
     """The regression this whole change exists to fix: a claude-local dispatch
     must carry the tiny lean prompt (role + work-class hard rules) as its

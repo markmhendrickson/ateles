@@ -1652,6 +1652,16 @@ async def _run_skill_once(
             resolved_tier = model_tiering.resolve_tier(
                 action_class, signals=escalation_signals
             )
+    # claude-local runs the model its own local_provider config names (its
+    # command is built separately and takes no --model), so vendor_binding
+    # has nothing to resolve for it: the tier is still recorded on its events,
+    # but a missing binding must not refuse the local attempt and push
+    # mechanical work onto a frontier provider.
+    if (
+        resolved_model is None
+        and resolved_tier is not None
+        and provider != local_provider.LOCAL_PROVIDER
+    ):
         try:
             resolved_model = model_tiering.model_for_tier(provider, resolved_tier.tier)
         except model_tiering.UnboundTierError as exc:
@@ -2616,11 +2626,51 @@ async def run_skill(
         and local_provider.is_eligible(work_class, local_provider.load_config())
     )
     return await _run_provider_attempts(
-        skill, attempt, binaries=_provider_binaries(), provider=provider,
+        skill, attempt,
+        binaries=_tier_bound_binaries(_provider_binaries(), precomputed_tier, provider),
+        provider=provider,
         role=role, task_entity_id=task_entity_id, notifier=notifier,
         preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
         local_first=local_first,
     )
+
+
+def _tier_bound_binaries(
+    binaries: dict[str, str | None],
+    tier: "model_tiering.ResolvedTier | None",
+    pinned_provider: str | None,
+) -> dict[str, str | None]:
+    """Drop frontier providers with no model bound for ``tier`` before selection.
+
+    Same shape as the #1181 fix in ``_run_provider_attempts``: the in-attempt
+    ``UnboundTierError`` refusal is neither a classified ``failure_kind`` nor a
+    launch failure, so on its own it would stop the dispatch at the first
+    unbound provider instead of failing over to a bound one. Filtering here
+    means an unbound provider is simply never a candidate.
+
+    Left unfiltered (so the in-attempt refusal stays the backstop and names
+    the missing binding) when: no tier was resolved, no vendor_binding is
+    configured at all, the caller pinned a provider, or no frontier provider
+    would remain. ``claude-local`` is never filtered — it runs its own
+    configured model and takes no vendor_binding.
+    """
+    if tier is None or pinned_provider is not None:
+        return binaries
+    binding = model_tiering.configured_vendor_binding()
+    if not binding:
+        return binaries
+    filtered = {
+        name: path
+        for name, path in binaries.items()
+        if name == local_provider.LOCAL_PROVIDER
+        or tier.tier in binding.get(name, {})
+    }
+    if not any(
+        path for name, path in filtered.items()
+        if name != local_provider.LOCAL_PROVIDER
+    ):
+        return binaries
+    return filtered
 
 
 def _record_local_failover(

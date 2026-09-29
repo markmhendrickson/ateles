@@ -4806,6 +4806,57 @@ class TestModelTieringDispatch:
         assert seen_precomputed_tiers[0].tier == "mid"
 
     @patch("skill_runner.AgentLoader")
+    def test_provider_without_a_bound_tier_is_skipped_not_fatal(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """vendor_binding binds the tier only on codex; cursor would otherwise
+        be tried first. The unbound provider must never be attempted — its
+        in-attempt UnboundTierError refusal is not a failover signal, so
+        reaching it would end the dispatch instead of running on codex."""
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM", '{"cursor": 1.0, "codex": 1.0}'
+        )
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
+        )
+        harness_router.reset_state()
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING", '{"codex": {"mid": "codex-mid-model"}}'
+        )
+        captured: dict = {}
+
+        with (
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing(captured),
+            ),
+            patch("os.path.exists", return_value=False),
+            patch("skill_runner._write_harness_event"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada",
+                    task_entity_id="ent_abc", action_class="build",
+                )
+            )
+
+        assert result.ok, result.error
+        assert result.provider == "codex"
+        assert result.attempted_providers == ("codex",)
+        cmd = captured["cmd"]
+        assert cmd[cmd.index("--model") + 1] == "codex-mid-model"
+
+    @patch("skill_runner.AgentLoader")
     def test_failover_tier_is_pinned_even_if_policy_changes_mid_failover(
         self, MockLoader, monkeypatch, tmp_path
     ) -> None:
