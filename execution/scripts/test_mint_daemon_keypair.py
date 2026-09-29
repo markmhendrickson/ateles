@@ -24,10 +24,12 @@ _SCRIPT = _REPO_ROOT / "execution" / "scripts" / "mint_daemon_keypair.py"
 
 sys.path.insert(0, str(_REPO_ROOT / "execution" / "scripts"))
 
+sys.path.insert(0, str(_REPO_ROOT / "lib"))
+from daemon_runtime.aauth_httpsig import jwk_thumbprint, public_part_of  # noqa: E402
+
 import mint_daemon_keypair  # noqa: E402
 from mint_daemon_keypair import (  # noqa: E402
     UnsafeKeyTargetError,
-    jwk_thumbprint,
     key_file_thumbprint,
     mint,
     validate_name,
@@ -391,11 +393,11 @@ class TestCliMessages:
         ).stdout
         assert "ROTATED" in out and "destroyed" in out
         assert "Keypair written to:" not in out
-        # The existing grant still applies, so a rotation must not tell the
-        # operator to register one; it says to re-verify, restart, and
-        # re-register only if the sub or capabilities changed.
-        assert "createAgentGrant" not in out.split("Rotation next steps")[0]
-        assert out.index("Re-verify") < out.index("Restart the daemon")
+        # The old grant does not admit the new key: the rotation advice is a
+        # second pinned grant, restart, then revoke the old grant (detailed in
+        # TestThumbprint).
+        assert "does not admit this one" in out
+        assert out.index("SECOND grant") < out.index("Restart the daemon")
 
     def test_force_with_no_existing_key_is_a_first_mint_message(
         self, keys_dir: Path
@@ -518,7 +520,7 @@ class TestThumbprint:
         assert "admits nothing on current Neotoma" in out
         assert f"listAgentGrants --query '{{\"q\": \"{tp}\"" in out
 
-    def test_rotation_hint_says_the_old_grant_does_not_admit_the_new_key(
+    def test_rotation_hint_recommends_a_second_pinned_grant_then_restart_then_revoke(
         self, keys_dir: Path
     ) -> None:
         self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
@@ -526,10 +528,111 @@ class TestThumbprint:
         out = self._run("--name", "accipiter", "--keys-dir", str(keys_dir), "--force").stdout
         new_tp = key_file_thumbprint(keys_dir / "accipiter.jwk.json")
         assert new_tp != old_tp
-        assert "updateAgentGrant" in out and f'"match_thumbprint": "{new_tp}"' in out
-        assert "revokeAgentGrant" in out
-        assert "not admitted" in out
+        assert "does not admit this one" in out
+        # The fail-closed window is stated, and the in-place update is NOT the advice.
+        assert "refused until the new key is pinned" in out
+        assert "SECOND grant" in out and f'"match_thumbprint": "{new_tp}"' in out
+        assert "updateAgentGrant" not in out
+        assert "Revoke the OLD grant" in out and 'docs/aauth/keys.md, "Rotation"' in out
         assert old_tp not in out
-        # pin, check, re-verify, restart -- in that order
-        order = [out.index(m) for m in ("updateAgentGrant", "listAgentGrants", "Re-verify", "Restart the daemon")]
+        # create second grant, check pin, restart + re-verify, then revoke the old one
+        order = [
+            out.index(m)
+            for m in ("SECOND grant", "listAgentGrants", "Restart the daemon", "Revoke the OLD grant")
+        ]
         assert order == sorted(order)
+        # The verify step uses the path the script printed, not a hardcoded one.
+        assert f"--jwk {keys_dir / 'accipiter.jwk.json'} --live" in out
+        assert "~/repos/ateles-private" not in out
+        assert "have not been run against a live instance" in out
+
+    def test_first_mint_hint_is_numbered_from_step_two_and_notes_match_iss(
+        self, keys_dir: Path
+    ) -> None:
+        out = self._run("--name", "accipiter", "--keys-dir", str(keys_dir)).stdout
+        assert "Step 1 (mint) is done" in out
+        assert "match_iss is optional" in out and "NEOTOMA_AAUTH_ISS" in out
+        assert "have not been run against a live instance" in out
+        assert f"--jwk {keys_dir / 'accipiter.jwk.json'} --live" in out
+
+
+class TestThumbprintReuse:
+    """One implementation of the value the pin flow depends on."""
+
+    def test_printed_value_equals_the_dispatchers_helper(self, keys_dir: Path) -> None:
+        """`gate_waive._lens_key_thumbprint` computes the read-back value with
+        aauth_httpsig.jwk_thumbprint(public_part_of(jwk)); the script must print
+        exactly that."""
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT), "--name", "accipiter", "--keys-dir", str(keys_dir)],
+            capture_output=True, text=True, timeout=30,
+        )
+        jwk = json.loads((keys_dir / "accipiter.jwk.json").read_text())
+        expected = jwk_thumbprint(public_part_of(jwk))
+        assert f"thumbprint (RFC 7638, public): {expected}" in result.stdout
+        assert key_file_thumbprint(keys_dir / "accipiter.jwk.json") == expected
+
+    def test_script_defines_no_second_thumbprint_algorithm(self) -> None:
+        """Goes red if the duplicate implementation comes back."""
+        src = _SCRIPT.read_text()
+        assert "def jwk_thumbprint" not in src
+        assert "hashlib" not in src and "sha256" not in src.lower()
+        assert "aauth_httpsig" in src
+
+    def test_the_helper_is_imported_lazily(self) -> None:
+        """Importing the script must not import cryptography-dependent modules,
+        so a missing cryptography still gets mint()'s friendly message."""
+        code = (
+            "import sys; sys.path.insert(0, %r); import mint_daemon_keypair; "
+            "print('daemon_runtime.aauth_httpsig' in sys.modules)"
+        ) % str(_REPO_ROOT / "execution" / "scripts")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+        assert out.stdout.strip() == "False", out.stderr
+
+
+class TestPrintThumbprintMode:
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_SCRIPT), *args],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_prints_only_the_public_thumbprint_and_writes_nothing(
+        self, keys_dir: Path
+    ) -> None:
+        self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
+        target = keys_dir / "accipiter.jwk.json"
+        before = (target.read_bytes(), target.stat().st_mtime_ns, sorted(keys_dir.iterdir()))
+        result = self._run("--name", "accipiter", "--keys-dir", str(keys_dir), "--print-thumbprint")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == key_file_thumbprint(target)
+        assert len(result.stdout.strip().splitlines()) == 1
+        jwk = json.loads(target.read_text())
+        for secret in (jwk["d"], jwk["x"], jwk["y"]):
+            assert secret not in result.stdout + result.stderr
+        after = (target.read_bytes(), target.stat().st_mtime_ns, sorted(keys_dir.iterdir()))
+        assert before == after, "print-thumbprint changed the key directory"
+
+    def test_missing_key_fails_and_creates_nothing(self, tmp_path: Path) -> None:
+        keys = tmp_path / "does-not-exist"
+        result = self._run("--name", "accipiter", "--keys-dir", str(keys), "--print-thumbprint")
+        assert result.returncode != 0 and "no key at" in result.stderr
+        assert not keys.exists(), "created the keys directory"
+
+    def test_cannot_be_combined_with_force(self, keys_dir: Path) -> None:
+        self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
+        before = (keys_dir / "accipiter.jwk.json").read_bytes()
+        result = self._run(
+            "--name", "accipiter", "--keys-dir", str(keys_dir), "--print-thumbprint", "--force"
+        )
+        assert result.returncode != 0 and "read-only" in result.stderr
+        assert (keys_dir / "accipiter.jwk.json").read_bytes() == before
+
+    def test_refuses_a_symlinked_key(self, keys_dir: Path, tmp_path: Path) -> None:
+        keys_dir.mkdir()
+        real = tmp_path / "elsewhere.jwk.json"
+        real.write_text("{}")
+        (keys_dir / "accipiter.jwk.json").symlink_to(real)
+        result = self._run("--name", "accipiter", "--keys-dir", str(keys_dir), "--print-thumbprint")
+        assert result.returncode != 0 and "symlink" in result.stderr
+

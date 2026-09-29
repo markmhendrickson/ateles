@@ -79,8 +79,14 @@ python execution/scripts/mint_daemon_keypair.py --name <daemon-name>
   old key survives a failed rotation, and the replacement is a new inode so a
   looser mode on the old file (e.g. 0644) is not inherited;
 - never prints the private scalar `d` or the public coordinates; it does print the
-  key's RFC 7638 **thumbprint** (a SHA-256 hash of the public key, public
-  information), which is the value a grant pins.
+  key's RFC 7638 **thumbprint** (a hash of the public key, public information),
+  which is the value a grant pins. The thumbprint is computed by
+  `aauth_httpsig.jwk_thumbprint(public_part_of(jwk))`, the same helper the
+  dispatcher uses; the script has no algorithm of its own.
+- `--print-thumbprint --name <name>` is a read-only mode: it prints only the
+  thumbprint of an existing key and writes nothing (it does not even create the
+  keys directory). The key file itself contains `d`; the printed value is a hash of
+  the public members and is public. It cannot be combined with `--force`.
 
 ### Order of steps
 
@@ -99,7 +105,7 @@ exact commands:
 
 ```bash
 python execution/scripts/verify_aauth_signer.py \
-    --jwk ~/repos/ateles-private/keys/<name>.jwk.json --live <neotoma-base-url>
+    --jwk <the key path the mint script printed> --live <neotoma-base-url>
 ```
 
 Prints only `status`, `signature_present`, `signature_verified`, an error code,
@@ -152,30 +158,55 @@ rotation (see below), because `agent_identity()` reads only `<name>.jwk.json`.
 
 ## Rotation
 
-0. **Only if you may need the old key** (for example, to roll back), copy the
-   existing `<name>.jwk.json` aside first, to a mode-0600 file outside any git
-   repo and outside any cloud-synced folder, and delete the copy once the new
-   key is confirmed. For example:
-   `(umask 077; cp -p ~/repos/ateles-private/keys/<name>.jwk.json <private-dir>/<name>.jwk.json.old)`
-   or `install -m 600 ~/repos/ateles-private/keys/<name>.jwk.json <private-dir>/<name>.jwk.json.old`.
+0. **Before minting**, note the OLD key's thumbprint (you will need it to find the
+   old grant): `python execution/scripts/mint_daemon_keypair.py --name <daemon>
+   --print-thumbprint`. **Only if you may need the old key** (for example, to roll
+   back), also copy the existing `<name>.jwk.json` aside first, to a mode-0600 file
+   outside any git repo and outside any cloud-synced folder, and delete the copy
+   once the new key is confirmed. For example:
+   `(umask 077; cp -p <keys-dir>/<name>.jwk.json <private-dir>/<name>.jwk.json.old)`
+   or `install -m 600 <keys-dir>/<name>.jwk.json <private-dir>/<name>.jwk.json.old`.
    `--force` destroys the old private key irrecoverably; there is no undo.
-1. Run `mint_daemon_keypair.py --name <daemon>` — this writes `<name>.jwk.json`.
-   If a `<name>.jwk.json` already exists (rotating a canonical key), add
-   `--force`. **A rotation needs a grant update.** Admission is key-bound (see
-   "What each grant shape admits" in `docs/aauth.md`): the existing grant pins the
-   OLD key's thumbprint, so it does not admit the new key, and signed writes as
-   this role are refused until a grant pins the new thumbprint. Either update the
-   existing grant (`updateAgentGrant`, body `{"match_thumbprint": "<new
-   thumbprint>"}`, path `id` from `listAgentGrants`) or create a new pinned grant
-   and revoke the old one. The script's closing hint prints both. Then run the
-   pin check (step 3 of the order above) and the verify step.
-2. JWKS: **nothing to do today.** No JWKS is published for daemon keys and
+1. Run `mint_daemon_keypair.py --name <daemon> --force` (plain, without `--force`,
+   for a role that has no `<name>.jwk.json` yet). **A rotation needs a grant
+   change, and there is a fail-closed window.** Admission is key-bound (see "What
+   each grant shape admits" in `docs/aauth.md`): the existing grant pins the OLD
+   key's thumbprint and does not admit the new key. The mint replaces the key file
+   at once, so anything that reads the file on every call (the dispatcher's gate
+   write-back, via `neotoma_signed.signed_request`) signs with the NEW key
+   immediately and is refused until the new key is pinned, while a long-running
+   daemon that loaded the old key at startup keeps signing with it (still admitted
+   by the old grant) until it restarts.
+2. **Create a SECOND grant pinning the new key, and leave the old grant in place**:
+   `neotoma request --operation createAgentGrant --body '{"label": "<name>",
+   "match_sub": "<name>@ateles-swarm", "match_thumbprint": "<new thumbprint>",
+   "capabilities": [<the same ops and entity types as the old grant>]}'`
+   (`match_iss` is optional: the issuer your deployment signs with, i.e.
+   `NEOTOMA_AAUTH_ISS`, or leave it out). Check it with `listAgentGrants` (q = the
+   new thumbprint). Do **not** `updateAgentGrant` the old grant in place while a
+   daemon is still running on the old key: that swaps the pin and refuses the
+   still-running old key too, lengthening the outage. (Updating in place is fine
+   only if the daemon is stopped first: `updateAgentGrant`, path `id` from
+   `listAgentGrants`, body `{"match_thumbprint": "<new thumbprint>"}`.)
+3. **Restart the daemon** so it signs with the new key, then run the verify step
+   above and confirm signed writes are admitted.
+4. **Revoke the OLD grant** now that nothing signs with the old key: find it with
+   `listAgentGrants` (q = the old thumbprint you noted in step 0), then
+   `neotoma request --operation revokeAgentGrant --path '{"id": "<grant_id>"}'`.
+   The old private key is already destroyed, but revoking removes the stale pin.
+
+*Caveat:* the `neotoma request` shapes for `createAgentGrant`, `updateAgentGrant`,
+`listAgentGrants` and `revokeAgentGrant` are read from the Neotoma CLI source and
+`openapi.yaml` and have not been run against a live instance from this repo, so
+try them on a non-critical grant first.
+
+5. JWKS: **nothing to do today.** No JWKS is published for daemon keys and
    Neotoma verifies from the inline key, so there is nothing to add. Once daemon
    keys are published to a JWKS, add the new `kid` here.
-3. Restart the daemon. `aauth_signer.py` probes `<name>.jwk.json` first so the
-   new key is picked up automatically.
-4. After confirming the daemon signs correctly, delete the old `<name>.json`.
-5. Once daemon keys are published to a JWKS, remove the old `kid` after the
+6. `aauth_signer.py` probes `<name>.jwk.json` first, so once the daemon restarts
+   (step 3) the new key is picked up automatically.
+7. After confirming the daemon signs correctly, delete the old `<name>.json`.
+8. Once daemon keys are published to a JWKS, remove the old `kid` after the
    observation expiry window (5 min). Until then there is nothing to remove.
 
 Rotate keypairs at least quarterly or immediately on suspected compromise.
@@ -191,11 +222,10 @@ admitting it:
    (each result has a `grant_id`), then revoke it with the `revokeAgentGrant`
    operation, whose path parameter is `id`. CLI shape:
    `neotoma request --operation revokeAgentGrant --path '{"id": "<grant_id>"}'`.
-   (Shape taken from the CLI source and `openapi.yaml`, not run against a live
-   instance, so check it on a non-critical grant first.)
+   (Shapes taken from the CLI source and `openapi.yaml`, not run against a live
+   instance, so check them on a non-critical grant first.)
 2. **Then register a grant pinning the fresh key** (mint with `--force`, then
-   `createAgentGrant` with the new thumbprint, or `updateAgentGrant` on a grant
-   you have not revoked).
+   `createAgentGrant` with the new thumbprint).
 3. **Between steps 1 and 2 signed writes as this role fail closed** (they are
    refused as unadmitted). That is the safe direction: finish step 2 promptly.
 4. **The old key still verifies.** Revoking the grant stops admission, not

@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
 import os
 import re
@@ -65,24 +64,33 @@ def _int_to_b64url(n: int, byte_length: int = 32) -> str:
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 
-def jwk_thumbprint(jwk: dict) -> str:
-    """RFC 7638 JWK thumbprint (SHA-256, base64url, no padding) of an EC public key.
+def _httpsig():
+    """Import `lib/daemon_runtime/aauth_httpsig` lazily.
 
-    Computed from the four required public members only, `crv`, `kty`, `x`, `y`,
-    serialized with members in lexicographic order and no whitespace. It reads
-    nothing else from *jwk*: the private scalar `d` never enters the hash, so the
-    result is public information and safe to print. This is the value Neotoma
-    matches against a grant's `match_thumbprint`.
+    The RFC 7638 thumbprint has ONE implementation, `aauth_httpsig.jwk_thumbprint`
+    (also what `gate_waive._lens_key_thumbprint` uses to compare an observation's
+    `agent_thumbprint`), so the value printed here cannot drift from the value the
+    dispatcher computes. The import is lazy so a missing `cryptography` still
+    produces `mint()`'s friendly message rather than an import traceback at load.
     """
-    members = {k: jwk[k] for k in ("crv", "kty", "x", "y")}
-    canonical = json.dumps(members, separators=(",", ":"), sort_keys=True)
-    digest = hashlib.sha256(canonical.encode("ascii")).digest()
-    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    lib = str(Path(__file__).resolve().parent.parent.parent / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    from daemon_runtime import aauth_httpsig
+
+    return aauth_httpsig
 
 
 def key_file_thumbprint(path: Path) -> str:
-    """Thumbprint of the public half of a minted key file (never returns `d`)."""
-    return jwk_thumbprint(json.loads(Path(path).read_text()))
+    """Thumbprint of the public half of a key file: a thin wrapper, no algorithm here.
+
+    The file contains the private scalar `d`; only its public members reach the
+    hash (`public_part_of` drops `d`), and only the resulting public thumbprint
+    is returned.
+    """
+    h = _httpsig()
+    jwk = json.loads(Path(path).read_text())
+    return h.jwk_thumbprint(h.public_part_of(jwk))
 
 
 class UnsafeKeyTargetError(OSError):
@@ -237,6 +245,22 @@ def mint(name: str, keys_dir: Path, *, force: bool = False) -> Path:
     return out_path
 
 
+def _print_thumbprint(name: str, keys_dir: Path) -> None:
+    """Read-only: print the public thumbprint of an existing key and nothing else.
+
+    Writes nothing and creates nothing (not even the keys directory). The file
+    contains the private scalar `d`; only the thumbprint of its public members is
+    printed, and that value is public.
+    """
+    try:
+        path = keys_dir / f"{validate_name(name)}.jwk.json"
+        if not _check_target(path):
+            sys.exit(f"ERROR: no key at {path}")
+        print(key_file_thumbprint(path))
+    except (ValueError, OSError) as exc:
+        sys.exit(f"ERROR: {exc}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mint an AAuth keypair for a daemon.")
     parser.add_argument("--name", required=True, help="Role name (e.g. monedula); the key's sub becomes <name>@ateles-swarm")
@@ -251,7 +275,26 @@ def main() -> None:
         action="store_true",
         help="Rotate: replace an existing key. This destroys the old private key irrecoverably; without the flag an existing key is left untouched.",
     )
+    parser.add_argument(
+        "--print-thumbprint",
+        action="store_true",
+        help="Read-only: print the RFC 7638 thumbprint (public) of an existing key for --name and exit. Writes nothing.",
+    )
     args = parser.parse_args()
+
+    try:
+        _httpsig()  # fail before any key is written if the helper cannot load
+    except ImportError as exc:
+        sys.exit(
+            f"ERROR: {exc.name or 'a dependency'} not installed. "
+            "Run: pip install cryptography pyjwt"
+        )
+
+    if args.print_thumbprint:
+        if args.force:
+            sys.exit("ERROR: --print-thumbprint is read-only and cannot be combined with --force")
+        _print_thumbprint(args.name, args.keys_dir)
+        return
 
     try:
         # Message-only: a --force over an existing key is a rotation, and must
@@ -287,37 +330,50 @@ def main() -> None:
         "neotoma request --operation listAgentGrants "
         f"--query '{{\"q\": \"{thumbprint}\", \"status\": \"active\"}}'"
     )
+    create_cmd = (
+        "neotoma request --operation createAgentGrant --body "
+        f"'{{\"label\": \"{name}\", \"match_sub\": \"{sub}\", "
+        f"\"match_thumbprint\": \"{thumbprint}\", "
+        "\"capabilities\": [<the ops and entity types this role needs>]}'"
+    )
+    iss_note = (
+        "match_iss is optional: use the issuer your deployment signs with "
+        "(NEOTOMA_AAUTH_ISS), or leave it out; the thumbprint is what admits."
+    )
+    shape_note = (
+        "(Command shapes are read from Neotoma's CLI source and openapi.yaml; "
+        "they have not been run against a live instance.)"
+    )
     if rotated:
-        # Admission is key-bound: a grant admits only the key its match_thumbprint
-        # names, so the old grant does NOT admit the new key. It must be updated
-        # to pin the new thumbprint (or replaced), or signed writes as this role
-        # are refused until it is.
-        print('Rotation next steps (details: docs/aauth.md, "Identity provisioning"):')
+        # Admission is key-bound: the old grant pins the OLD key and does NOT
+        # admit the new one. The dispatcher's gate write-back reads the key file on
+        # every call, so it signs with the new key immediately and is refused until
+        # the new key is pinned, while a long-running daemon keeps signing with the
+        # old key it loaded until restart. So: pin the new key with a SECOND grant
+        # (updating the old grant in place would refuse the still-running old key),
+        # restart, then revoke the old grant.
+        print("Rotation: the old grant pins the OLD key and does not admit this one.")
         print(
-            "  1. Pin the NEW key: neotoma request --operation updateAgentGrant "
-            "--path '{\"id\": \"<grant_id from listAgentGrants>\"}' "
-            f"--body '{{\"match_thumbprint\": \"{thumbprint}\"}}'"
+            f"Signed writes as {sub} that read the key file per call (the dispatcher's "
+            "gate write-back) are refused until the new key is pinned; a running daemon "
+            "keeps signing with the old key until it restarts."
         )
-        print(
-            "     (or createAgentGrant with this thumbprint and revoke the old "
-            "grant with revokeAgentGrant). Until the grant pins this thumbprint, "
-            f"signed writes as {sub} are not admitted."
-        )
+        print('In this order (exact update/revoke commands: docs/aauth/keys.md, "Rotation"):')
+        print(f"  1. Create a SECOND grant pinning the new key: {create_cmd}")
+        print(f"     {iss_note}")
         print(f"  2. Check the pin exists: {check_cmd}")
-        print(f"  3. Re-verify the signer: {verify_cmd}")
-        print("  4. Restart the daemon so it picks up the new keypair.")
+        print("  3. Restart the daemon so it signs with the new key, then re-verify:")
+        print(f"       {verify_cmd}")
+        print("  4. Revoke the OLD grant (find its grant_id with listAgentGrants).")
+        print(f"     {shape_note}")
     else:
         # Same order as docs/aauth.md "Identity provisioning": mint (done),
         # register the grant PINNING this key, check it, verify, restart.
-        print('Next, in this order (details: docs/aauth.md, "Identity provisioning"):')
-        print(
-            f"  2. Register the agent_grant for {sub}, pinning this key (operator): "
-            "neotoma request --operation createAgentGrant --body "
-            f"'{{\"label\": \"{name}\", \"match_sub\": \"{sub}\", "
-            f"\"match_thumbprint\": \"{thumbprint}\", "
-            "\"capabilities\": [<the ops and entity types this role needs>]}'"
-        )
+        print('Step 1 (mint) is done. Next, in this order (docs/aauth.md, "Identity provisioning"):')
+        print(f"  2. Register the agent_grant for {sub}, pinning this key (operator): {create_cmd}")
+        print(f"     {iss_note}")
         print("     Without match_thumbprint the grant admits nothing on current Neotoma.")
+        print(f"     {shape_note}")
         print(f"  3. Check the pin exists: {check_cmd}")
         print(f"  4. Verify the signer: {verify_cmd}")
         print("  5. Restart the daemon so it picks up the new keypair.")
@@ -325,6 +381,7 @@ def main() -> None:
         "Note: the dispatcher reads ATELES_AAUTH_KEYS_DIR; it must point at the "
         "same directory as this key."
     )
+
 
 if __name__ == "__main__":
     main()

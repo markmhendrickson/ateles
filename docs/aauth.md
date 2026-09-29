@@ -173,7 +173,7 @@ They must point at the **same directory**. If they diverge, the script mints int
 |---|---|
 | `execution/scripts/mint_daemon_keypair.py` | **Canonical** minting script for one T3/T4 role's ES256 P-256 keypair, written to `ateles-private/keys/<role>.jwk.json` (mode 0600, written that way from creation, no window at a looser mode) — the flavor `lib/daemon_runtime/aauth_httpsig.py` and `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` both consume. Never prints the private scalar or public coordinates. Does **not** touch `.creds/`, `jwks.json`, or `aauth-agent.json` — those belong to the separate Cursor-proxy flavor, which has no provisioning script on `main` today. Refuses to overwrite an existing key unless `--force` is passed (rotation, which atomically replaces the key via a same-directory temp file, so a failed rotation leaves the old key intact). Creation is `O_EXCL|O_NOFOLLOW` at 0600 (a symlink at the target is refused, never followed) and the keys directory is created 0700. `--name` must match `^[a-z][a-z0-9_-]{0,63}$`. Full layout and rotation procedure: `docs/aauth/keys.md`. There is deliberately only ONE script that writes this format — see that file's module docstring for the "extend, don't parallel" rule this follows. |
 
-**Canonical order (the same in every doc and in the script's closing hint after a first mint). After a `--force` rotation the old grant does NOT admit the new key: step 2 becomes "pin the new thumbprint on the grant" (see below), and the hint says so:**
+**Canonical order (the same in every doc and in the script's closing hint after a first mint). A `--force` rotation is different: the old grant pins the OLD key and does NOT admit the new one, so it has its own order (a second pinned grant, restart, then revoke the old grant; see `docs/aauth/keys.md`, "Rotation", for the exact commands and the fail-closed window):**
 
 1. **Mint** the key.
 2. **Register** the `agent_grant`, **pinning the new key's thumbprint** (operator).
@@ -186,11 +186,15 @@ They must point at the **same directory**. If they diverge, the script mints int
 #    --keys-dir <dir> overrides the default keys directory for this run.
 python3 execution/scripts/mint_daemon_keypair.py --name <role>
 #    The output ends with the key's RFC 7638 thumbprint (public; the private
-#    scalar is never printed). Use it as <thumbprint> below.
+#    scalar is never printed). Use it as <thumbprint> below. To print it again
+#    later, read-only: python3 execution/scripts/mint_daemon_keypair.py \
+#        --name <role> --print-thumbprint
 
 # 2. As the OPERATOR (own authenticated Neotoma session, not this script and
 #    not an unattended agent), register the agent_grant, PINNING the key. On
-#    current Neotoma a grant without match_thumbprint admits nothing:
+#    current Neotoma a grant without match_thumbprint admits nothing.
+#    match_iss is optional: use the issuer your deployment signs with
+#    (NEOTOMA_AAUTH_ISS), or delete that line; the thumbprint is what admits.
 neotoma request --operation createAgentGrant --body '{
   "label": "<role>",
   "match_sub": "<role>@ateles-swarm",
@@ -208,7 +212,7 @@ neotoma request --operation listAgentGrants \
 
 # 4. Verify the key signs in a way Neotoma accepts (prints no key material):
 python3 execution/scripts/verify_aauth_signer.py \
-    --jwk ~/repos/ateles-private/keys/<role>.jwk.json --live <neotoma-base-url>
+    --jwk <the key path the mint script printed> --live <neotoma-base-url>
 
 # 5. Restart the daemon so it picks up the new key.
 ```
@@ -221,15 +225,21 @@ mechanism. Provisioning the keypair is necessary but not sufficient: `sign_off` 
 thumbprint (plus the capabilities the write needs). Without that pin the signed write still verifies and is
 stamped with the claimed sub, but is refused as unadmitted (`grant_key_unbound` if a grant names only the sub).
 `NEOTOMA_STRICT_AAUTH_SUBS`, where an instance sets it, compares the request's `X-Agent-Label` with the
-`match_sub` of the active grant that pins the signing key: a label listed there must be signed by a key some
-grant pins under that sub, and the sub inside the agent token is not consulted. It does not admit anything by
+`match_sub` of the single active grant selected for the signing key (the one that pins it): a label listed there
+must be signed by a key that grant pins under that sub, and the sub inside the agent token is not consulted. It does not admit anything by
 itself and does not promote a tier.
 
-**Reading the thumbprint.** The script prints it on every mint and rotation. To read it later without the
-private key, compute the RFC 7638 thumbprint of the public members (`crv`, `kty`, `x`, `y`) of
-`<role>.jwk.json`; the script exposes this as `key_file_thumbprint()`. Neotoma also records the thumbprint of a
-verified request as `agent_thumbprint` (see its `docs/subsystems/aauth.md`), but this repo does not document a
-stable way to read that back over the API, so prefer the script's value.
+**Reading the thumbprint.** The script prints it on every mint and rotation, and `--print-thumbprint --name <role>`
+prints it again for an existing key: read-only, it writes nothing and prints only the thumbprint. The key file
+itself contains the private scalar `d`; the printed value is a hash of the public members only and is public. The
+computation is not duplicated here: it is `aauth_httpsig.jwk_thumbprint(public_part_of(jwk))`, the same helper
+`gate_waive._lens_key_thumbprint` uses for the dispatcher's `agent_thumbprint` read-back. Neotoma also records the
+thumbprint of a verified request as `agent_thumbprint` (see its `docs/subsystems/aauth.md`), but this repo does not
+document a stable way to read that back over the API, so prefer the script's value.
+
+**Caveat on the commands.** The `neotoma request` shapes for `createAgentGrant`, `listAgentGrants`,
+`updateAgentGrant` and `revokeAgentGrant` are read from the Neotoma CLI source and `openapi.yaml`; they have not
+been run against a live instance from this repo. Try them on a non-critical grant first.
 
 **What step 4 does and does not prove.** `verify_aauth_signer.py --live` prints only `status`,
 `signature_present`, `signature_verified`, an error code and `tier`, and exits non-zero unless
@@ -373,16 +383,16 @@ capabilities:
 
 Re-derived against **Neotoma `origin/main`** (`src/services/agent_grants.ts` `scanForGrant` / `lookupGrantForIdentity`, `src/services/aauth_admission.ts`, `src/middleware/aauth_verify.ts`), not against an older checkout.
 
-**Version state.** Key-bound admission landed in Neotoma as **#2506** (`4cb927a81`, "require a key binding for grant admission", 2026-09-25), with follow-ups #2512 (grants validated before they are stored) and #2513 (identity decisions and `NEOTOMA_STRICT_AAUTH_SUBS` keyed on the signing key; per-owner pin uniqueness). None of it is in `v0.23.1`. It is on `main` (package version `0.24.0`, release notes under `docs/releases/in_progress/v0.24.0/`), and the running production instance reported `git_sha` `cabd1eef5`, which includes it. Whether it has shipped in a published release is **unverified as of 2026-09-29**. **Releases up to and including `v0.23.1` also matched a grant on `match_sub` / `match_iss`**, so pinning the thumbprint on every grant is correct on both behaviours.
+**Version state.** Key-bound admission landed in Neotoma as **#2506** (`4cb927a81`, "require a key binding for grant admission", 2026-09-25), with follow-ups #2512 (grants validated before they are stored) and #2513 (identity decisions and `NEOTOMA_STRICT_AAUTH_SUBS` keyed on the signing key; per-owner pin uniqueness). None of it is in `v0.23.1`. **It ships in `v0.24.0`**: `git tag --contains` shows `v0.24.0` for all three commits, and the tag is at `5bd052d70` (2026-09-29). The GitHub release and npm package `0.24.0` were reported published on 2026-09-29 (operator check; not re-verified from this repo), and the running production instance reported `git_sha` `cabd1eef5`, which also includes it. **Releases up to and including `v0.23.1` also matched a grant on `match_sub` / `match_iss`**, so pinning the thumbprint on every grant is correct on both behaviours.
 
 `sub`, `iss` and the JWT they sit in are **self-asserted** (the JWT is decoded, not verified; the request signature only proves possession of the key the request carries). So admission cannot rest on them; on current Neotoma it rests on the key.
 
-| Grant fields | Admits (current Neotoma) | Older releases (<= v0.23.1) |
+| Grant fields | Admits (v0.24.0 and later) | Older releases (<= v0.23.1) |
 |---|---|---|
-| `match_sub` only | **Nothing.** Refused as `grant_key_unbound` (the operator is told to pin the thumbprint) | any key claiming that sub |
+| `match_sub` only | **Nothing.** Refused as `grant_key_unbound` (the operator is told to pin the thumbprint) | any key claiming that sub (any iss) |
 | `match_sub` + `match_iss` | **Nothing** (`grant_key_unbound`) | any key claiming that sub and iss |
 | `match_thumbprint` only | **Only** the key with that RFC 7638 thumbprint, under whatever sub and iss it claims | the same key |
-| `match_sub` (+ `match_iss`) **and** `match_thumbprint` | **Only** the pinned key: the pin restricts. The grant's `match_sub` / `match_iss` are descriptive (they are what `NEOTOMA_STRICT_AAUTH_SUBS` and the operator-attested allowlists read); the sub the request claims is **not** compared | the pinned key, **or** any key claiming the sub (the sub route was not restricted by the pin) |
+| `match_sub` (+ `match_iss`) **and** `match_thumbprint` | **Only** the pinned key: the pin restricts. The grant's `match_sub` / `match_iss` are descriptive (they are what `NEOTOMA_STRICT_AAUTH_SUBS` and the operator-attested allowlists read); admission does **not** compare the sub the request claims. (Operator-attested **tier** promotion does: it reads the pinning grant's recorded `match_iss` / `match_sub`, and drops the promotion if the request's claimed iss or sub contradicts them.) | the pinned key, **or** any key claiming the sub (and the grant's iss, when it set one); the sub route was not restricted by the pin |
 | `match_iss` without `match_sub` | Rejected at creation (`match_iss requires match_sub`) | same |
 
 Further rules on current Neotoma:
@@ -400,8 +410,7 @@ Further rules on current Neotoma:
 
 Entity-level grants gate Neotoma operations. **Tool-level grants** extend the
 same `agent_grant` entity to gate arbitrary MCP tool calls — across any MCP
-server, not just Neotoma. This is what stops a Monedula invocation
-from calling `github_harness` tools even if that server is connected at dispatch, provided the call is made by the key the Monedula grant pins. On current Neotoma another key claiming the Monedula sub is not admitted at all (see "What each grant shape admits"; on releases up to `v0.23.1` a grant without a thumbprint pin would have admitted it).
+server, not just Neotoma. Two different enforcement points read those grants, and they do not key on the same thing: **Neotoma-side admission is key-bound** (a request is admitted only via a grant pinning the signing key), whereas the **local tool proxy** (`GrantChecker` in `lib/daemon_runtime/grant_checker.py`, plus `mcp_tool_grant_proxy`) looks grants up by the daemon's `aauth_sub` using the operator bearer token, is **advisory** (permissive when Neotoma is unreachable), and is not bound to any key. The intent is that a Monedula invocation cannot call `github_harness` tools even if that server is connected at dispatch. Treat that as a Neotoma-side guarantee only for calls made with the key the Monedula grant pins (another key claiming the Monedula sub is not admitted on v0.24.0 and later; on releases up to `v0.23.1` a grant without a thumbprint pin would have admitted it), and as an advisory check, not a guarantee, at the local proxy.
 
 ### Grant shape
 
