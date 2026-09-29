@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from enum import Enum
 
 import httpx
@@ -326,6 +327,132 @@ def set_task_status(
             idempotency_key=f"taskremediation-{handler}-{task_entity_id}{suffix}",
         )
     return ok
+
+
+@dataclass(frozen=True)
+class CompletionOutcome:
+    """What ``complete_task_with_result`` actually proved.
+
+    Truthy only when the terminal state was READ BACK as claimed. ``stage``
+    names the first step that did not hold, so the caller's reason tells the
+    operator whether the result never landed, landed as something else, or the
+    terminal status did not stick.
+    """
+
+    ok: bool
+    stage: str  # done | result_write | result_readback | status_write | status_readback
+    detail: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _clip(value, limit: int = 120) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _read_snapshot(fetch_snapshot, task_entity_id: str) -> dict | None:
+    """Fetch through the injected reader; a raise is a failed read, not a crash."""
+    try:
+        snap = fetch_snapshot(task_entity_id)
+    except Exception as exc:  # noqa: BLE001 — fail closed on the read, never raise
+        log.warning(
+            "[lifecycle] read-back fetch failed for task %s: %s", task_entity_id, exc
+        )
+        return None
+    return snap if isinstance(snap, dict) else None
+
+
+def complete_task_with_result(
+    task_entity_id: str,
+    *,
+    handler: str,
+    result: str,
+    fetch_snapshot,
+    from_status: str | None = None,
+    key_suffix: str = "",
+    artifact_identity: str = "",
+) -> CompletionOutcome:
+    """Persist ``result`` BEFORE status=DONE, and prove both by reading them back.
+
+    Two invariants (ateles#1155):
+
+    1. Order. ``result`` lands before ``status``; a crash between the writes must
+       not leave a terminal task with no artifact reference.
+    2. Read-back. ``_correct`` reports HTTP success, and HTTP success is not
+       evidence the field holds the value written (an idempotency-key replay, a
+       dropped undeclared field, or a stale earlier write all return 2xx). So:
+       after the ``result`` write the snapshot's ``result`` must equal ``result``
+       exactly BEFORE ``status=DONE`` is written, and after the status write the
+       snapshot must read ``done`` (still carrying that ``result``) before the
+       caller may claim the task finished.
+
+    ``fetch_snapshot`` is a required reader (``task_entity_id -> dict | None``)
+    rather than a default, so a caller cannot opt out of the read-back by
+    omission. Idempotency keys include handler, task, trigger suffix, and the
+    canonical artifact identity so replay of one attempt is stable while a
+    genuine retry (new key_suffix) is a new mutation.
+    """
+    value = TaskStatus.DONE.value
+    if from_status is not None and not can_transition(from_status, value):
+        log.info(
+            "[lifecycle] unusual transition %s→%s for task %s (writing anyway)",
+            normalize(from_status), value, task_entity_id,
+        )
+    suffix = f"-{key_suffix}" if key_suffix else ""
+    art = f"-{artifact_identity}" if artifact_identity else ""
+
+    if not _correct(
+        task_entity_id,
+        "result",
+        result,
+        idempotency_key=f"taskresult-{handler}-{task_entity_id}-{value}{suffix}{art}",
+    ):
+        log.warning(
+            "[lifecycle] refusing DONE for task %s — result write failed "
+            "(artifact must land before terminal status)",
+            task_entity_id,
+        )
+        return CompletionOutcome(False, "result_write", "result write was not accepted")
+
+    snap = _read_snapshot(fetch_snapshot, task_entity_id)
+    if snap is None or snap.get("result") != result:
+        observed = "unreadable" if snap is None else _clip(snap.get("result"))
+        log.warning(
+            "[lifecycle] refusing DONE for task %s — result did not read back "
+            "as written (observed %s)", task_entity_id, observed,
+        )
+        return CompletionOutcome(
+            False, "result_readback",
+            f"result did not read back as written (observed {observed})",
+        )
+
+    if not _correct(
+        task_entity_id,
+        "status",
+        value,
+        idempotency_key=f"taskstatus-{handler}-{task_entity_id}-{value}{suffix}{art}",
+    ):
+        return CompletionOutcome(False, "status_write", "status write was not accepted")
+
+    snap = _read_snapshot(fetch_snapshot, task_entity_id)
+    observed_status = None if snap is None else normalize(snap.get("status"))
+    if snap is None or observed_status != value or snap.get("result") != result:
+        observed = (
+            "unreadable" if snap is None
+            else f"status={observed_status!r} result={_clip(snap.get('result'))}"
+        )
+        log.warning(
+            "[lifecycle] task %s terminal state did not read back as done "
+            "with the artifact (observed %s)", task_entity_id, observed,
+        )
+        return CompletionOutcome(
+            False, "status_readback",
+            f"terminal status did not read back as done with the artifact "
+            f"(observed {observed})",
+        )
+    return CompletionOutcome(True, "done")
 
 
 # ── Self-test (pure logic; run once the model/classifier outage clears) ───────

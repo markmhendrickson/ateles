@@ -5944,3 +5944,28 @@ class TestModelTieringDispatch:
         cmd = captured["cmd"]
         assert "--model" in cmd
         assert cmd[cmd.index("--model") + 1] == "codex-mid"
+
+
+# ── redaction covers per-agent PAT variables ─────────────────────────────────
+
+
+def test_redact_secrets_covers_every_per_agent_pat_variable(monkeypatch):
+    """Agent PATs are `<ROLE>_AGENT_PAT` (plus ATELES_AGENT_PAT): found by suffix,
+    so a new agent's PAT is redacted without editing the fixed list."""
+    import skill_runner as sr
+
+    values = {
+        "ATELES_AGENT_PAT": "FAKE-TEST-PAT-VALUE-ATELES-0001",
+        "NEOTOMA_AGENT_PAT": "FAKE-TEST-PAT-VALUE-NEOTOMA-0002",
+        "BRANDNEWROLE_AGENT_PAT": "FAKE-TEST-PAT-VALUE-NEWROLE-0003",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    text = " | ".join(f"saw {v}" for v in values.values())
+    out = sr._redact_secrets(text)
+    for name, value in values.items():
+        assert value not in out, f"{name} leaked"
+        assert f"<redacted:{name}>" in out
+    # Short values are left alone (not a credential, and would corrupt output).
+    monkeypatch.setenv("SHORTROLE_AGENT_PAT", "abc")
+    assert sr._redact_secrets("abc stays") == "abc stays"

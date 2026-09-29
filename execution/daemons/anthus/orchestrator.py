@@ -25,8 +25,19 @@ import json
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
+
+# Shared artifact contracts (ateles#1155) — one source with Apis.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from lib.daemon_runtime.artifact_contract import (  # noqa: E402
+    gate_satisfaction_rules,
+    parse_artifact_header,
+)
 
 import httpx
 
@@ -213,44 +224,11 @@ def _comment_from_agent(comments: list[dict], agent_sub: str) -> dict | None:
     return None
 
 
-GATE_SATISFACTION_RULES: dict[str, str] = {
-    # Maps gate_name → required artifact_type produced in a comment header.
-    # The comment body is expected to begin with "[<agent>] <artifact_type>:".
-    #
-    # Two gate-name vocabularies coexist and BOTH must resolve, or the
-    # orchestrator stalls forever at phase 1 (gate_name absent from this
-    # map → _gate_satisfied_by_comment returns None → gate never satisfies):
-    #   • short names — used by the ateles|* and swarm-smoke|*
-    #     workflow_definitions (pm, ux, copy)
-    #   • verbose names — used by the harness-sandbox
-    #     smoke_test_full_lifecycle workflow (pm_scope, ux_design,
-    #     growth_announce, social_draft, devrel_docs)
-    # ── short names (ateles|*, swarm-smoke|*) ──
-    "pm": "acceptance_criteria",
-    "ux": "copy_and_ux_flow",
-    "copy": "copy_and_ux_flow",
-    # ── verbose names (harness-sandbox smoke_test_full_lifecycle) ──
-    "pm_scope": "acceptance_criteria",
-    "ux_design": "copy_and_ux_flow",
-    "growth_announce": "launch_brief",
-    "social_draft": "social_post_draft",
-    "devrel_docs": "docs_diff_or_no_change_note",
-    # ── shared names (identical in both vocabularies) ──
-    "arch": "schema_or_api_proposal",
-    "impl": "pull_request_link",
-    "qa": "test_plan",
-    "legal": "compliance_review",
-    "compliance_supervisor": "compliance_verdict",
-    "pr_review": "merge_decision",
-    "release": "release_note",
-    # ── ateles|social_content (ent_38ab0119e528d021c51d46a1) ──
-    # All four were absent, so this workflow could never leave phase 1
-    # (ateles#568). Each rule below demands an artifact the gate's own work
-    # actually produces — none is satisfiable by merely commenting.
-    "draft": "social_post_draft",
-    "draft_lint": "lint_report",
-    "post": "published_post_link",
-}
+# Derived from lib/daemon_runtime/artifact_contract.ARTIFACT_CONTRACTS
+# (ateles#1155). Do not hand-edit — extend ARTIFACT_CONTRACTS instead.
+# Two gate-name vocabularies (short + verbose) coexist; both must resolve
+# or the orchestrator stalls at phase 1.
+GATE_SATISFACTION_RULES: dict[str, str] = gate_satisfaction_rules()
 
 
 # Gates that only a human can satisfy. These are deliberately NOT in
@@ -316,19 +294,19 @@ def _gate_satisfied_by_comment(gate: Gate, comments: list[dict]) -> str | None:
 
     agent_name = gate.owner_agent.lower()
 
-    # 1. Canonical header — preferred.
-    header_re = re.compile(
-        rf"^\s*\[{re.escape(agent_name)}\]\s+{re.escape(expected_artifact)}\s*:",
-        re.IGNORECASE | re.MULTILINE,
-    )
+    # 1. Canonical header — preferred (shared grammar with Apis, ateles#1155).
     for c in comments:
         body = str(c.get("body", ""))
-        if header_re.search(body):
+        header = parse_artifact_header(
+            body, agent=agent_name, artifact_kind=expected_artifact
+        )
+        if header is not None:
             return str(c.get("url") or c.get("id") or "")
 
     # 2. Author-only fallback. Match `cicada`, `cicada-agent`, `cicada-bot`,
     #    `ateles-cicada`, etc. Avoid false positives by requiring the agent
     #    name to be a whole-word match in the author string.
+    #    Anthus-local this PR — do not invent a second header grammar.
     author_re = re.compile(rf"\b{re.escape(agent_name)}\b", re.IGNORECASE)
     for c in comments:
         author = str(c.get("author", ""))
