@@ -13,18 +13,21 @@ rebuilt as a real site later.
 
 This script does the minimum: build the requested product's site (via
 build_site.py, so the preview is always a fresh build — never stale output
-reviewed by accident) and serve it with Python's stdlib http.server, bound to
-0.0.0.0 so a phone on the same network can open it, not just localhost.
+reviewed by accident) and serve it with Python's stdlib http.server. It binds
+127.0.0.1 by default; `--lan` binds 0.0.0.0 so a phone on the same network
+can open it. The generated site includes an internal `/brand/` route holding
+competitive research and rejected creative alternatives, and the server has
+no authentication, so a LAN bind is an explicit choice, never the default.
 
 HARD REQUIREMENTS this script satisfies:
   - No live domain touched. ateles.co has no DNS records; neotoma.io serves
     an existing static build (a different, larger Vite/React/Playwright
     pipeline this generator does not replace) that must not be disturbed.
     This server only ever reads dist/site/<product>/ on the local machine.
-  - Openable from a phone. Binding 0.0.0.0 (not 127.0.0.1) means a device on
-    the same Wi-Fi can open http://<this-machine's-LAN-IP>:<port>/ directly —
-    the script prints that URL, not just localhost, so it doesn't have to be
-    worked out by hand.
+  - Openable from a phone on request. With `--lan` the server binds 0.0.0.0, so
+    a device on the same Wi-Fi can open http://<this-machine's-LAN-IP>:<port>/
+    directly — the script prints that URL so it doesn't have to be worked out
+    by hand. Without `--lan` it binds loopback only and prints no LAN URL.
 
 WHAT THIS DOES NOT REPLACE: a Neotoma rendered_page still gives a
 shareable, hosted guest-token URL that works over the public internet with
@@ -36,7 +39,7 @@ tradeoff stated explicitly, so it is the operator's call whether to keep
 draft-rendered-page's guest-link path around for that use case.
 
 Usage:
-    preview_server.py <product> [--port 8143]
+    preview_server.py <product> [--port 8143] [--lan]
 
 Prefer running this through Claude Code's `preview_start` mechanism
 (.claude/launch.json entry "site-preview") rather than invoking directly, so
@@ -73,6 +76,15 @@ def _lan_ip() -> str:
         s.close()
 
 
+LOOPBACK_HOST = "127.0.0.1"
+LAN_HOST = "0.0.0.0"  # noqa: S104 — only reachable through the explicit --lan flag
+
+
+def bind_host(lan: bool) -> str:
+    """Loopback unless the caller explicitly asked for a LAN bind."""
+    return LAN_HOST if lan else LOOPBACK_HOST
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -84,6 +96,15 @@ def main() -> int:
         help="product to build and preview (default: ateles)",
     )
     parser.add_argument("--port", type=int, default=8143)
+    parser.add_argument(
+        "--lan",
+        action="store_true",
+        help=(
+            "bind 0.0.0.0 so other devices on the network can open the preview "
+            "(default: 127.0.0.1 only). The preview has no authentication and "
+            "includes the internal /brand/ route."
+        ),
+    )
     parser.add_argument(
         "--no-build",
         action="store_true",
@@ -112,14 +133,19 @@ def main() -> int:
     handler = functools.partial(
         http.server.SimpleHTTPRequestHandler, directory=str(site_dir)
     )
-    httpd = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), handler)  # noqa: S104 — deliberate LAN bind, see module docstring
+    host = bind_host(args.lan)
+    httpd = http.server.ThreadingHTTPServer((host, args.port), handler)
 
-    lan_ip = _lan_ip()
     print(f"serving {site_dir.relative_to(REPO_ROOT)} at:")
     print(f"  http://localhost:{args.port}/")
-    print(
-        f"  http://{lan_ip}:{args.port}/   <- open this on a phone on the same network"
-    )
+    if args.lan:
+        print(
+            f"  http://{_lan_ip()}:{args.port}/   <- open this on a phone on the same network"
+        )
+        print(
+            "  WARNING: --lan exposes this preview, including the internal /brand/ "
+            "route, to every device on the network. There is no authentication."
+        )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

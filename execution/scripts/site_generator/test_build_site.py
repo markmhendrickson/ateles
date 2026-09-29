@@ -634,3 +634,37 @@ def test_token_error_surfaces_as_build_blocker(tmp_repo):
     _write_inventory(gen_dir, [{"slug": "index", "title": "T", "sections": []}])
     with pytest.raises(build_site.BuildBlocker):
         build_site.render_site("testproduct")
+
+
+# ---------------------------------------------------------------------------
+# Preview server bind address. The default must be loopback: the served tree
+# includes the internal /brand/ route and the server has no authentication.
+# ---------------------------------------------------------------------------
+
+
+class _StopServing(Exception):
+    pass
+
+
+def _capture_bind(monkeypatch, tmp_path, argv):
+    (tmp_path / "dist" / "site" / "testproduct").mkdir(parents=True)
+    monkeypatch.setattr(preview_server, "REPO_ROOT", tmp_path)
+    seen = {}
+
+    def fake_server(address, handler):
+        seen["address"] = address
+        raise _StopServing
+
+    monkeypatch.setattr(preview_server.http.server, "ThreadingHTTPServer", fake_server)
+    monkeypatch.setattr(sys, "argv", ["preview_server.py", "testproduct", "--no-build", *argv])
+    with pytest.raises(_StopServing):
+        preview_server.main()
+    return seen["address"]
+
+
+def test_preview_server_binds_loopback_by_default(monkeypatch, tmp_path):
+    assert _capture_bind(monkeypatch, tmp_path, ["--port", "8199"]) == ("127.0.0.1", 8199)
+
+
+def test_preview_server_binds_all_interfaces_only_with_lan_flag(monkeypatch, tmp_path):
+    assert _capture_bind(monkeypatch, tmp_path, ["--port", "8199", "--lan"]) == ("0.0.0.0", 8199)
