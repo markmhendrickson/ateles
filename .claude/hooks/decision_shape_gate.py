@@ -25,6 +25,19 @@ WHAT IT CHECKS, all string-detectable in the assistant's own final message:
    run something and contains no fenced shell block. `CLAUDE.md`: operator-only
    means Mark runs it, not that he works out what to run.
 
+4. A DECISION POSED AS PROSE. The closing section presents the operator a
+   choice between options (two or more option markers, or a decision heading,
+   together with a recommendation or a stated default if unanswered), while
+   the turn made no AskUserQuestion call and carries no `[decisions-unposed]`
+   marker. agent_policy ent_985436c69e2170aeba3287de: every open decision goes
+   through the harness questions tool; a prose list is allowed only through
+   the explicit `[decisions-unposed]` fallback when the tool is unavailable.
+   On 2026-09-28/29 a session presented decisions as a numbered prose list for
+   about ten consecutive turns with the tool available, and checks 1-3 said
+   nothing, because each item was well-formed prose. Operator-only ACTIONS
+   remain prose plus a runnable command block; they are not choices, so a
+   command block alone never fires this check.
+
 MODE: BLOCK, set by the operator 2026-09-11 via ATELES_DECISION_SHAPE_ENFORCE=1
 in .claude/settings.json.
 
@@ -106,6 +119,51 @@ OPERATOR_ONLY_RE = re.compile(
 
 FENCED_SHELL_RE = re.compile(r"```(?:bash|sh|shell|console)\b")
 
+# Check 4 — a choice between options handed to the operator in prose.
+#
+# An option marker is a line-leading "(a)", "a)", "A.", "Option A:", or an
+# inline "(a) ... (b)" pair. Letters only, and only a-f: numbered lists are
+# how every status report is written, so "1." is not an option marker — the
+# numbered list in the failing pattern is caught through its per-item
+# "(a)/(b)" options and recommendation instead.
+OPTION_MARKER_RE = re.compile(
+    r"(?:^|\n)\s*(?:[-*]\s+)?(?:\*\*)?(?:option\s+[a-f1-9]\b|\(?[a-f]\)|[a-f][.:]\s)"
+    r"|\(\s*[a-f]\s*\)",
+    re.I,
+)
+# The choice is being put to the operator, not narrated.
+DECISION_CUE_RE = re.compile(
+    r"\b(decisions? (?:for|that need|needing|waiting on|awaiting) (?:you|mark|the operator)"
+    r"|(?:open|pending) decisions?|your (?:call|decision)|needs? your (?:decision|call)"
+    r"|decide (?:between|whether|which))\b",
+    re.I,
+)
+# A recommendation or a default-if-unanswered: the shape of a posed decision.
+RECOMMEND_CUE_RE = re.compile(
+    r"\b(i recommend|i'd recommend|i would recommend|my recommendation|recommendation:"
+    r"|recommended:|recommend (?:option\s+)?\(?[a-f]\b"
+    r"|if you (?:don't|do not) (?:answer|reply|respond|decide)|if you say nothing"
+    r"|default if unanswered|if unanswered|absent an answer)",
+    re.I,
+)
+UNPOSED_MARKER = "[decisions-unposed]"
+QUESTION_TOOL_NAME = "AskUserQuestion"
+
+
+def poses_decision_in_prose(tail: str) -> bool:
+    """True when the (quote-stripped) closing section presents a choice for
+    the operator: a recommendation/default cue together with either two or
+    more option markers or an explicit decision cue.
+
+    A recommendation alone is not a choice ("I recommend we keep watching"),
+    and options alone are narration ("Mark chose (a) yesterday"); both halves
+    are required, which is what keeps a past decision's narrative mention and
+    a status report's advice out of scope.
+    """
+    if not RECOMMEND_CUE_RE.search(tail):
+        return False
+    return len(OPTION_MARKER_RE.findall(tail)) >= 2 or bool(DECISION_CUE_RE.search(tail))
+
 # ONE definition of "a sentence ends here", used for BOTH ends of the scoping
 # window in `findings()`. The two ends were written as two separate
 # expressions, and they drifted: the END was widened to `[.?!]\s|\n` to close
@@ -169,6 +227,65 @@ def last_assistant_text(transcript_path: str | None) -> str:
     except Exception:
         return ""
     return last
+
+
+def _is_operator_prompt(row: dict) -> bool:
+    """A user row that is a real prompt, not a tool_result the harness files
+    under role "user". The turn starts at the last such row."""
+    msg = row.get("message") or {}
+    if row.get("type") != "user" and msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        kinds = {b.get("type") for b in content if isinstance(b, dict)}
+        return "tool_result" not in kinds and bool(kinds)
+    return False
+
+
+def turn_used_question_tool(transcript_path: str | None) -> bool:
+    """True when the current turn — everything after the last operator
+    prompt — contains an AskUserQuestion tool_use.
+
+    Unreadable or absent transcripts return True: the check this feeds must
+    fail OPEN, and "cannot tell whether the tool was used" is not evidence
+    that it was not.
+    """
+    if not transcript_path:
+        return True
+    p = Path(transcript_path)
+    if not p.exists():
+        return True
+    used = False
+    try:
+        with p.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if _is_operator_prompt(row):
+                    used = False  # a new turn starts; earlier calls don't count
+                    continue
+                content = (row.get("message") or {}).get("content")
+                if not isinstance(content, list):
+                    continue
+                for b in content:
+                    if (
+                        isinstance(b, dict)
+                        and b.get("type") == "tool_use"
+                        and str(b.get("name", "")).endswith(QUESTION_TOOL_NAME)
+                    ):
+                        used = True
+    except Exception:
+        return True
+    return used
 
 
 # Contexts that QUOTE prose rather than assert it. ateles#1105: both observed
@@ -245,7 +362,14 @@ def closing_section(text: str) -> str:
     return tail[-CLOSING_BLOCK_MAX:] if len(tail) > CLOSING_BLOCK_MAX else tail
 
 
-def findings(text: str) -> list[str]:
+def findings(text: str, asked_via_tool: bool = True) -> list[str]:
+    """Standing-rule findings on the turn's closing section.
+
+    `asked_via_tool` is whether this turn called AskUserQuestion. It defaults
+    to True so a caller that has no transcript to consult (and every
+    text-only probe) cannot trip check 4 by omission; `main()` passes the
+    value read from the transcript.
+    """
     out: list[str] = []
     if not text.strip():
         return out
@@ -311,6 +435,22 @@ def findings(text: str) -> list[str]:
             "what to run — give the exact command and what to verify after."
         )
 
+    # Check 4. The marker is looked for in the RAW text, since it is often
+    # written inside backticks, which `closing_section` strips.
+    if (
+        not asked_via_tool
+        and UNPOSED_MARKER not in text
+        and poses_decision_in_prose(tail)
+    ):
+        out.append(
+            "an operator decision is posed as prose, with no AskUserQuestion call "
+            "this turn. agent_policy ent_985436c69e2170aeba3287de: pose every open "
+            "decision through the questions tool (options, what each implies, "
+            "what is settled, a recommendation). Only if the tool is unavailable, "
+            "print [decisions-unposed] and each question's full text. Operator-only "
+            "actions stay prose plus a runnable command block."
+        )
+
     return out
 
 
@@ -340,8 +480,9 @@ def main() -> int:
         return 0
 
     try:
-        text = last_assistant_text(ev.get("transcript_path"))
-        found = findings(text)
+        transcript = ev.get("transcript_path")
+        text = last_assistant_text(transcript)
+        found = findings(text, asked_via_tool=turn_used_question_tool(transcript))
     except Exception:
         return 0
 
