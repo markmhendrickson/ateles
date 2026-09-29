@@ -43,3 +43,14 @@ def _isolate_harness_usage_snapshot(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "APIS_HARNESS_USAGE_FILE", str(tmp_path / "isolated-harness-usage.json")
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tier_ledger(monkeypatch, tmp_path):
+    """Never let a test append to the operator's real tier-dispatch ledger.
+
+    Every dispatch appends a row (model_tiering.record_dispatch); an unisolated
+    test run would pollute the per-tier counts the operator paces the weekly
+    budget against. Tests that read the ledger set their own path.
+    """
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "isolated-tier-dispatch.jsonl"))

@@ -189,6 +189,7 @@ from local_provider import (  # noqa: E402
     config_path as local_config_path,
     load_config as load_local_config,
 )
+import model_tiering  # noqa: E402
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
     SkillResult,
@@ -227,6 +228,7 @@ async def dispatch(
     github_token: str | None = None,
     action_class: str | None = None,
     model: str | None = None,
+    escalation_signals: "model_tiering.EscalationSignals | None" = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -268,7 +270,29 @@ async def dispatch(
         github_token=github_token,
         include_github_contract=github_delivery,
         action_class=action_class,
+        escalation_signals=escalation_signals,
         model=model,
+    )
+
+
+def _signals_from_args(args: argparse.Namespace) -> "model_tiering.EscalationSignals | None":
+    """Build escalation signals from the CLI's measured-fact flags, or None
+    when none was given (so an untouched invocation resolves exactly as the
+    policy alone says)."""
+    if not (
+        args.review_round > 1
+        or args.prior_blocking_finding
+        or args.prior_attempt_failed
+        or args.diff_lines
+        or args.changed_file
+    ):
+        return None
+    return model_tiering.EscalationSignals(
+        changed_files=tuple(args.changed_file or ()),
+        diff_lines_changed=args.diff_lines or 0,
+        prior_blocking_finding=args.prior_blocking_finding,
+        review_round=args.review_round,
+        prior_attempt_failed=args.prior_attempt_failed,
     )
 
 
@@ -503,6 +527,29 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--review-round", type=int, default=1,
+        help="Review round number for tier escalation; 2 or later raises to top.",
+    )
+    parser.add_argument(
+        "--prior-blocking-finding", action="store_true",
+        help="An earlier round raised a blocking finding; raises the tier to top.",
+    )
+    parser.add_argument(
+        "--prior-attempt-failed", action="store_true",
+        help="A previous attempt at this work failed; raises the tier to top.",
+    )
+    parser.add_argument(
+        "--diff-lines", type=int, default=0,
+        help="Added + deleted lines in the change; over 400 raises the tier to top.",
+    )
+    parser.add_argument(
+        "--changed-file", action="append", metavar="PATH",
+        help=(
+            "A file the change touches (repeatable); a security-sensitive path "
+            "raises the tier to top."
+        ),
+    )
+    parser.add_argument(
         "--model",
         help=(
             "Explicit model id, overriding any --action-class tier "
@@ -691,6 +738,7 @@ def main(argv: list[str] | None = None) -> int:
                 github_delivery=args.github_delivery,
                 github_token=github_token,
                 action_class=args.action_class,
+                escalation_signals=_signals_from_args(args),
                 model=args.model,
             )
         )

@@ -357,10 +357,14 @@ ACTION_TASK_DISPATCH_FALLBACK = "task_dispatch"  # queue task with no action_typ
 
 LENS_REVIEW_PREFIX = "lens_review:"
 
-# Lenses ``review_panel.LENSES`` seats today. ``legal`` and ``content`` have no
-# entry in the ruling, so ``lens_review:legal`` / ``lens_review:content`` are
-# left unmapped and run at ``top``.
-KNOWN_LENSES: tuple[str, ...] = ("pm", "arch", "ux", "legal", "qa", "security", "content")
+# Lenses ``review_panel.LENSES`` seats today, plus ``eng`` (an issue-spec
+# section). ``legal``, ``content`` and ``eng`` have no entry in the ruling, so
+# their ``lens_review:`` classes are left unmapped and run at ``top``.
+KNOWN_LENSES: tuple[str, ...] = (
+    "pm", "arch", "ux", "legal", "qa", "security", "content",
+    # Issue-spec sections only: Cicada authors the Engineering section.
+    "eng",
+)
 
 # Every class an Apis call site passes, for ``--check`` to warn about classes a
 # config leaves unmapped (which then resolve to ``top``).

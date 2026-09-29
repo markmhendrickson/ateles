@@ -16,6 +16,9 @@ at its reported reset without a hand edit of the headroom file.
 
     # What selection will use now:
     harness_usage.py show
+
+    # Dispatches per model tier (from the tier ledger every dispatch writes):
+    harness_usage.py tiers --since-hours 24
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ if str(_APIS_DIR) not in sys.path:
     sys.path.insert(0, str(_APIS_DIR))
 
 import harness_router  # noqa: E402
+import model_tiering  # noqa: E402
 
 
 def _parse_window(raw: str) -> dict[str, object]:
@@ -72,7 +76,21 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("show", help="print the headroom selection would use now")
 
+    tiers = sub.add_parser(
+        "tiers", help="print dispatch counts per model tier from the tier ledger"
+    )
+    tiers.add_argument(
+        "--since-hours", type=float, default=None,
+        help="only count dispatches from the last N hours (default: all)",
+    )
+
     args = parser.parse_args(argv)
+    if args.command == "tiers":
+        print(json.dumps(
+            model_tiering.tier_counts(since_hours=args.since_hours), indent=2,
+            sort_keys=True,
+        ))
+        return 0
     if args.command == "usage":
         harness_router.record_usage(args.provider, args.window)
     elif args.command == "exhausted":
