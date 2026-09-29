@@ -11930,10 +11930,18 @@ class SwarmDispatcher:
                     )
                 reading_given = True
             header = attribution_header(lens.agent, f"{lens.lens} lens panelist")
+            # The run is launched as the first lens's agent, so its own prompt is
+            # already the system prompt: inlining it again would double ~20 KB.
+            own_prompt = (
+                f"This lens's own agent prompt is your system prompt ({lens.agent}).\n\n"
+                if lens is lenses[0]
+                else "This lens's own agent prompt:\n"
+                f"<<<AGENT_PROMPT {lens.agent}\n{self._lens_agent_prompt(lens.agent)}"
+                "\nAGENT_PROMPT>>>\n\n"
+            )
             sections.append(
                 f"######## LENS `{lens.lens}` (agent `{lens.agent}`) ########\n"
-                f"This lens's own agent prompt:\n<<<AGENT_PROMPT {lens.agent}\n"
-                f"{self._lens_agent_prompt(lens.agent)}\nAGENT_PROMPT>>>\n\n"
+                f"{own_prompt}"
                 f"Review ONLY through your `{lens.lens}` lens: {lens.checks}\n"
                 f"{expectation_block}\n\n{blocking_rules}"
                 f"{checkoff_block}{gate_block}{foundation_block}\n\n"

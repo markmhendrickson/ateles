@@ -217,11 +217,58 @@ class TestSelection:
             ("docs/guide/how_to.md", {"ux"}),
             ("docs/foundation/principles.md", {"arch", "ux"}),
             ("execution/scripts/test_thing.py", {"qa"}),
-            ("CHANGELOG.md", {"pm"}),
+            ("CHANGELOG.md", {"pm", "ux"}),
+            ("docs/releases/v1.md", {"pm", "ux"}),
+            ("docs/release/v1.md", {"pm", "ux"}),
+            ("docs/guide/how_to.md", {"ux"}),
+            ("docs/archive/old.md", {"ux"}),
         ],
     )
     def test_only_the_explicit_allowlist_narrows(self, path, lenses):
         assert review_carry.lenses_for_path(path) == lenses
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # arch-owned contract and instruction docs (arch review of ateles#1368)
+            "docs/architecture/openapi_contract_flow.md",
+            "docs/subsystems/errors.md",
+            "docs/NEOTOMA_MANIFEST.md",
+            "docs/specs/thing.md",
+            "docs/developer/cli_agent_instructions.md",
+            "docs/developer/mcp/instructions.md",
+            "docs/agents/pavo.md",
+            "docs/setup.md",
+        ],
+    )
+    def test_docs_outside_the_prose_directories_keep_every_lens(self, path):
+        assert review_carry.lenses_for_path(path) == review_carry.ALL_LENSES
+
+    # One real path per allowlist row. A row that never fires (shadowed by an
+    # earlier one, or a dead regex) fails here, and so does a new row with no
+    # example: the release-note row was dead behind the general docs row.
+    ROW_EXAMPLES = {
+        r"^docs/agents/": ("docs/agents/pavo.md", review_carry.ALL_LENSES),
+        r"(^|/)CHANGELOG[^/]*\.md$|^docs/releases?/.*\.md$": (
+            "docs/releases/v1.md", frozenset({"pm", "ux"}),
+        ),
+        r"^docs/foundation/.*\.md$": ("docs/foundation/x.md", frozenset({"arch", "ux"})),
+        r"^docs/(guide|archive|plans|private)/.*\.md$": (
+            "docs/guide/x.md", frozenset({"ux"}),
+        ),
+        r"(^|/)(test_[^/]*|[^/]*_test)\.py$": ("a/test_x.py", frozenset({"qa"})),
+    }
+
+    def test_every_allowlist_row_has_an_example_that_reaches_it(self):
+        rows = {pattern.pattern: lenses for pattern, lenses in review_carry._ALLOWLIST}
+        assert set(rows) == set(self.ROW_EXAMPLES), "add an example for a new row"
+        for pattern, (path, lenses) in self.ROW_EXAMPLES.items():
+            assert rows[pattern] == lenses
+            first = next(
+                p.pattern for p, _ in review_carry._ALLOWLIST if p.search(path)
+            )
+            assert first == pattern, f"{path} is shadowed by {first}"
+            assert review_carry.lenses_for_path(path) == lenses
 
 
 # ── the combined pm / qa / ux pass ──────────────────────────────────────────
@@ -273,11 +320,24 @@ class TestCombinedPass:
         twice = reply + "\n" + reply
         assert review_carry.split_combined_reply(twice, ["pm", "qa", "ux"]) == {}
 
+    def test_a_trailing_footer_or_stray_header_is_stripped_from_the_last_block(self):
+        reply = _combined_reply({"pm": "SIGNED_OFF", "qa": "SIGNED_OFF", "ux": "SIGNED_OFF"})
+        reply += (
+            "\n\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)\n"
+            "\n**\U0001f916 Pavo — Ateles swarm, pm lens panelist**\n"
+        )
+        blocks = review_carry.split_combined_reply(reply, ["pm", "qa", "ux"])
+        assert "Generated with" not in blocks["ux"]
+        assert "Pavo" not in blocks["ux"]
+        assert sd.sign_off_is_warranted(blocks["ux"], lens_agent="accipiter")
+        # the lens's own header and verdict at the top are never touched
+        assert blocks["ux"].startswith("**\U0001f916 Accipiter")
+
     def test_a_block_carrying_another_lens_header_is_not_a_clear(self):
         reply = _combined_reply({"pm": "SIGNED_OFF", "qa": "SIGNED_OFF", "ux": "SIGNED_OFF"})
         reply = reply.replace(
             "Looks right.\n\n" + review_carry.combined_delimiter("qa"),
-            "Looks right.\n**\U0001f916 Waxwing — Ateles swarm, arch lens panelist**\n\n"
+            "Looks right.\n**\U0001f916 Waxwing — Ateles swarm, arch lens panelist**\nmore text\n\n"
             + review_carry.combined_delimiter("qa"),
             1,
         )
@@ -457,13 +517,17 @@ class TestCombinedPromptKeepsEachLensDuties:
             t, panel, expectations or {}, NEW, 80, self.FILES
         )
 
-    def test_each_lens_own_agent_prompt_is_in_it(self):
+    def test_each_lens_own_agent_prompt_reaches_the_run_once(self):
         _, prompt = self._prompt()
         d = _dispatcher()
-        for agent in ("pavo", "phoenicurus", "accipiter"):
+        # pm is first, so its prompt is the run's system prompt and is not
+        # inlined again (~20 KB); the other two lenses' prompts are inlined.
+        assert d._lens_agent_prompt("pavo") not in prompt
+        assert "own agent prompt is your system prompt (pavo)" in prompt
+        for agent in ("phoenicurus", "accipiter"):
             own = d._lens_agent_prompt(agent)
             assert own.strip(), agent
-            assert own in prompt, agent
+            assert prompt.count(own) == 1, agent
 
     def test_pm_gets_the_design_basis_check_and_every_lens_the_reading_list(self):
         t, prompt = self._prompt()
@@ -507,18 +571,36 @@ class TestCombinedPromptKeepsEachLensDuties:
 
     @pytest.mark.asyncio
     async def test_a_lens_whose_own_prompt_cannot_load_is_not_reviewed_in_the_pass(self, monkeypatch):
-        async def boom(*a, **k):
-            raise AssertionError("no dispatch expected")
+        """Observable outcome, not a swallowed assertion: the run returns a VALID
+        three-block reply, so only the guard can make the result empty and keep
+        the dispatch from happening."""
+        dispatched: list[str] = []
 
-        monkeypatch.setattr(sd, "run_skill", boom)
-        monkeypatch.setattr(sd.SwarmDispatcher, "_lens_agent_prompt", staticmethod(lambda a: ""))
+        async def fake_run_skill(agent, prompt, **kwargs):
+            dispatched.append(agent)
+            return SkillResult(
+                "pavo", True, 0,
+                _combined_reply({"pm": "SIGNED_OFF", "qa": "SIGNED_OFF", "ux": "SIGNED_OFF"}),
+                "",
+            )
+
+        client = _PostClient()
+        monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+        monkeypatch.setattr(sd, "usable_providers", lambda: set())
+        monkeypatch.setattr(
+            sd.SwarmDispatcher, "_lens_agent_prompt",
+            staticmethod(lambda a: "" if a == "accipiter" else "x"),
+        )
         from test_gate_sign_off_dispatch import _trigger
 
         panel = [lens_by_name(x) for x in ("pm", "qa", "ux")]
-        assert await _dispatcher()._run_combined_pass(
-            _trigger(), panel, {}, 80, NEW, self.FILES,
+        out = await _dispatcher()._run_combined_pass(
+            _trigger(head_sha=NEW), panel, {}, 80, NEW, self.FILES,
             pending_gates=set(), live_gates={}, signals=None,
-        ) == {}
+        )
+        assert out == {}
+        assert dispatched == [] and client.bodies == []
 
 
 # ── partial failures of the combined pass ────────────────────────────────────

@@ -1415,6 +1415,10 @@ def _wire(monkeypatch, world, *, combined: bool, narrow: bool) -> tuple[SwarmDis
         w.worktrees.append(agent)
         return None
 
+    async def expectations(self, repo, number):
+        return {"pavo": "- [ ] the scope matches the issue"}
+
+    monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", expectations)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_worktree)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
@@ -1425,12 +1429,26 @@ def _wire(monkeypatch, world, *, combined: bool, narrow: bool) -> tuple[SwarmDis
 def test_handle_pr_runs_pm_and_qa_in_one_pass_and_posts_their_comments_before_aggregating(
     monkeypatch, world
 ):
+    # A path keyed to a foundation document, so the reading list differs from the
+    # kernel-only list a call with no changed files would give.
+    world.files = ["execution/daemons/apis/swarm_dispatch.py"]
     d, w = _wire(monkeypatch, world, combined=True, narrow=False)
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert w.events.count("skill:pavo") == 1, "one dispatch for the combined lenses"
     assert "skill:phoenicurus" not in w.events, "qa has no separate dispatch"
     assert "phoenicurus" not in w.worktrees, "no qa checkout for the combined lens"
     assert "post:pm" in w.events and "post:qa" in w.events
+    # `changed_files` and `parent` reach the composed prompt through both hops
+    # (`_handle_pr` -> `_run_combined_pass` -> `_combined_prompt`): the foundation
+    # reading list keyed to the changed paths, the pm design-basis check, and the
+    # check-off on the parent issue all vanish if either hop drops them.
+    prompt = w.prompts["pavo"]
+    readings = swarm_dispatch.reading_block(list(world.files))
+    assert readings and readings != swarm_dispatch.reading_block([])
+    assert readings in prompt
+    assert "Design basis" in prompt
+    assert "issues/80/comments" in prompt
+    assert "the scope matches the issue" in prompt
     vanellus_at = w.events.index("skill:vanellus")
     assert w.events.index("post:pm") < vanellus_at
     assert w.events.index("post:qa") < vanellus_at

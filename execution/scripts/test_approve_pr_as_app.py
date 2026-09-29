@@ -2312,7 +2312,17 @@ class TestCarriedSignOffs:
         sides = _fix_sides(SECURITY_FIX_FILE)
         del sides[OLD_HEAD]
         await self._run(monkeypatch, _fix_round_comments(), sides, apply=False)
-        assert "unreadable" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "unreadable" in out
+        assert "re-run this lens on the current head, then run the gate again" in out
+
+    async def test_an_empty_delta_says_what_to_do_next(self, monkeypatch, capsys):
+        same = [_pr_file("a_random_file.txt")]
+        comments = _fix_round_comments(blocked=(), reran=())
+        await self._run(monkeypatch, comments, {OLD_HEAD: same, HEAD: same}, apply=False)
+        out = capsys.readouterr().out
+        assert "is empty although the head moved" in out
+        assert "re-run this lens on the current head, then run the gate again" in out
 
 
 def test_help_documents_carrying_and_no_carry(monkeypatch, capsys):

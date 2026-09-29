@@ -62,20 +62,28 @@ COMBINED_LENSES: tuple[str, ...] = ("pm", "qa", "ux")
 # read in reverse as "owned by this lens alone". They appear here only to
 # widen: a path that is security-sensitive keeps every lens.
 #
-# The allowlist is deliberately narrow and written out, not derived:
-#   * prose docs under `docs/` (not the foundation docs, not agent prompts);
-#   * foundation docs under `docs/foundation/` (design: arch and ux);
-#   * test modules, `test_*.py` and `*_test.py` (not `conftest.py`, which
-#     configures the run);
-#   * release notes in markdown.
+# The allowlist is deliberately narrow and written out, not derived. Rows are
+# tried in order and the FIRST match wins, so a specific row must come before a
+# general one it overlaps (a release-note row behind a general docs row never
+# fires, ateles#1368 round 2):
+#   * agent prompts under `docs/agents/` are behaviour: every lens;
+#   * release notes (`CHANGELOG*.md`, `docs/release(s)/`): pm, and ux for prose;
+#   * foundation docs under `docs/foundation/` (design): arch and ux;
+#   * prose-only doc directories (`guide`, `archive`, `plans`, `private`): ux.
+#     Other `docs/` directories are NOT allowlisted: architecture, subsystems,
+#     specs, developer and manifest docs are the interface rules arch gates on,
+#     and instruction docs ship to every client, so an unlisted doc keeps every
+#     lens (arch review of ateles#1368);
+#   * test modules, `test_*.py` and `*_test.py` (not `conftest.py`): qa.
 # Anything else, and above all code, workflows, dependency manifests, agent
-# prompts and security paths, keeps every lens.
+# prompts and security paths, keeps every lens. The test module pins one real
+# path per row, so a row that never fires fails a test.
 _ALLOWLIST: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
+    (re.compile(r"^docs/agents/"), ALL_LENSES),
+    (re.compile(r"(^|/)CHANGELOG[^/]*\.md$|^docs/releases?/.*\.md$"), frozenset({"pm", "ux"})),
     (re.compile(r"^docs/foundation/.*\.md$"), frozenset({"arch", "ux"})),
-    (re.compile(r"^docs/agents/"), ALL_LENSES),  # agent prompts are behaviour
-    (re.compile(r"^docs/.*\.md$"), frozenset({"ux"})),
+    (re.compile(r"^docs/(guide|archive|plans|private)/.*\.md$"), frozenset({"ux"})),
     (re.compile(r"(^|/)(test_[^/]*|[^/]*_test)\.py$"), frozenset({"qa"})),
-    (re.compile(r"(^|/)CHANGELOG[^/]*\.md$|^docs/releases?/.*\.md$"), frozenset({"pm"})),
 )
 
 # Paths that keep every lens whatever the allowlist says: workflows, dependency
@@ -222,13 +230,20 @@ def select_rerun(
         delta = deltas.get(cand.head)
         if delta is None:
             rerun.add(lens)
-            reasons[lens] = f"delta since {cand.head[:7]} unreadable"
+            reasons[lens] = (
+                f"delta since {cand.head[:7]} unreadable; re-run this lens on the "
+                "current head, then run the gate again"
+            )
             continue
         if not delta.files:
             # The head moved, so "no changed file" is a measurement that found
             # nothing, not proof of nothing: unknown, and unknown carries nothing.
             rerun.add(lens)
-            reasons[lens] = f"delta since {cand.head[:7]} is empty although the head moved"
+            reasons[lens] = (
+                f"delta since {cand.head[:7]} is empty although the head moved, so "
+                "the change is unknown; re-run this lens on the current head, then "
+                "run the gate again"
+            )
             continue
         touched = lenses_touched(delta.files)
         if lens in touched:
@@ -283,6 +298,26 @@ def combined_delimiter(lens: str) -> str:
     return f"=====REVIEW:{lens}====="
 
 
+_TRAILING_ARTIFACT_RES = (
+    re.compile(r"^\s*\U0001f916\s*Generated with \[Claude Code\]\(https://claude\.com/claude-code\)\s*$"),
+    re.compile(r"^\s*Co-Authored-By:.*<noreply@anthropic\.com>\s*$", re.I),
+    re.compile(r"^\s*\*\*\U0001f916[^\n]*Ateles swarm[^\n]*\*\*\s*$"),
+)
+
+
+def strip_trailing_artifact(block: str) -> str:
+    """*block* without trailing attribution or artifact lines the model added
+    after its findings (a harness footer, or a header line of its own). Only
+    whole trailing lines are removed; the header and verdict lines at the top
+    of a block are never touched."""
+    lines = block.rstrip("\n").split("\n")
+    while len(lines) > 2 and (
+        not lines[-1].strip() or any(r.match(lines[-1]) for r in _TRAILING_ARTIFACT_RES)
+    ):
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
 def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str, str]:
     """Each lens's own block from a combined reply; a lens whose block is
     missing or duplicated is absent from the result (the caller runs it alone).
@@ -306,7 +341,7 @@ def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str,
         if line_end < 0:
             continue
         end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
-        blocks[lens] = text[line_end + 1 : end].strip("\n") + "\n"
+        blocks[lens] = strip_trailing_artifact(text[line_end + 1 : end].strip("\n") + "\n")
     return blocks
 
 
