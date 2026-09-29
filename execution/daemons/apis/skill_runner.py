@@ -1161,6 +1161,11 @@ class SkillResult:
     # Per-dispatch model + token attribution (dispatch_usage.py). None when the
     # dispatch never reached a harness (missing binary, unreadable SKILL.md).
     usage: DispatchUsage | None = None
+    # Why a claude-local attempt failed (`kind` or `kind:reason`, see
+    # local_provider.describe_failure). Set whenever local ran or was skipped and
+    # failed, even when a later provider then succeeded — so a run that cost
+    # frontier spend is never indistinguishable from one that stayed local.
+    local_failure: str = ""
 
 
 # ── Harness adapters + capacity detection ─────────────────────────────────────
@@ -2660,9 +2665,13 @@ async def run_skill(
 
     ``work_class`` names the kind of work (``local_provider.MECHANICAL_WORK_CLASSES``).
     When it is a configured mechanical class and the run is unpinned and not a
-    seated reviewer, ``claude-local`` is tried first and the frontier
-    providers follow as the fallback. Any other value, or None, leaves routing
-    exactly as before.
+    seated reviewer, ``claude-local`` is tried first. A local failure falls over
+    ONLY to a frontier provider with a model bound to the cheapest frontier tier
+    (``LOCAL_FALLBACK_TIER``) in the ``vendor_binding``, pinned to that model;
+    with none bound the run is refused and recorded as a local failure, never
+    replayed on a provider's ambient default. An explicit ``model`` is the
+    caller's own choice and is used for the fallback as given. Any other value,
+    or None, leaves routing exactly as before.
 
     ``action_class``/``escalation_signals``/``model`` (operator ruling
     2026-09-29, model_tiering.py): the TIER is resolved exactly ONCE here
@@ -2690,7 +2699,7 @@ async def run_skill(
             action_class, signals=escalation_signals
         )
 
-    async def attempt(selected: str) -> SkillResult:
+    async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
         return await _run_skill_once(
             skill, prompt, provider=selected, role=role,
             task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
@@ -2699,7 +2708,7 @@ async def run_skill(
             include_github_contract=include_github_contract, cwd=cwd,
             owns_pending_gate=deny_correct, work_class=work_class,
             action_class=action_class, escalation_signals=escalation_signals,
-            model=model, precomputed_tier=precomputed_tier,
+            model=fallback_model or model, precomputed_tier=precomputed_tier,
         )
 
     local_first = (
@@ -2720,6 +2729,9 @@ async def run_skill(
     )
     return await _run_provider_attempts(
         skill, attempt,
+        fallback_models_for=(
+            (lambda names: {name: model for name in names}) if model else None
+        ),
         binaries=_tier_bound_binaries(
             _provider_binaries(), precomputed_tier, provider,
             restricted_to_claude=deny_correct,
@@ -2772,6 +2784,75 @@ def _tier_bound_binaries(
         return binaries
     return filtered
 
+# The cheapest tier a frontier provider can run: the one just above "local" in
+# model_tiering.TIERS. Pinned by a test so a change to the ladder cannot move the
+# fallback silently.
+LOCAL_FALLBACK_TIER = "mechanical"
+
+
+def _local_fallback_models(providers: list[str]) -> dict[str, str]:
+    """Provider -> model for the providers a failed local run may fall over to.
+
+    A provider appears only when the vendor_binding names a model for
+    ``LOCAL_FALLBACK_TIER``. No binding at all, a provider absent from it, or one
+    lacking that tier means "no fallback", never the provider's ambient default
+    (which ``model_tiering.model_for_tier`` would otherwise return as ``None``
+    for an unconfigured deployment, and which is exactly the spend this refuses).
+    """
+    models: dict[str, str] = {}
+    for name in providers:
+        try:
+            model = model_tiering.model_for_tier(name, LOCAL_FALLBACK_TIER)
+        except model_tiering.UnboundTierError:
+            continue
+        if model:
+            models[name] = model
+    return models
+
+
+def _refuse_local_fallback(
+    skill: str,
+    role: str | None,
+    task_entity_id: str,
+    notifier,
+    reason: str,
+    *,
+    remaining: list[str],
+    last_result: "SkillResult | None",
+    attempted: list[str],
+) -> SkillResult:
+    """The failed result for a local-first run that may not fall over to frontier.
+
+    Never ok, and carrying the local failure, so a refused run is reported as a
+    failure rather than dropped or replayed on a provider's default model.
+    """
+    named = ", ".join(remaining) or "any provider"
+    error = (
+        f"{local_provider.LOCAL_PROVIDER} failed ({reason}) and the frontier "
+        f"fallback was refused: the vendor_binding binds no "
+        f"{LOCAL_FALLBACK_TIER!r}-tier model for {named}. Bind one to allow a "
+        "cheapest-tier fallback: add e.g. {\"claude\": {\"mechanical\": \"haiku\"}} to "
+        "~/.config/ateles/vendor-binding.json (or the file named by APIS_VENDOR_BINDING_FILE)."
+    )
+    log.error(f"[apis] {skill} dispatch refused — {error}")
+    if last_result is None:
+        result = SkillResult(skill, False, None, "", "", error=error)
+    else:
+        result = last_result
+        result.ok = False
+        result.error = error
+    result.local_failure = reason
+    result.attempted_providers = tuple(attempted)
+    notify_dispatch_failure(
+        notifier,
+        skill=skill,
+        role=(role or skill).lower(),
+        returncode=result.returncode,
+        stderr=error,
+        task_entity_id=task_entity_id,
+    )
+    return result
+
 
 def _record_local_failover(
     *,
@@ -2814,8 +2895,14 @@ async def _run_provider_attempts(
     skill, attempt, *, binaries, provider=None, role=None, task_entity_id="",
     notifier=None, retry_safe=False, preferred_provider=None,
     owns_pending_gate: bool = False, local_first: bool = False,
+    fallback_models_for=None,
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
+
+    ``fallback_models_for`` (local-first runs only): maps the providers a failed
+    or unavailable claude-local may fall over to onto the model each is pinned
+    to; a provider missing from the result is not a fallback. Defaults to the
+    cheapest-tier binding (``_local_fallback_models``).
 
     ``retry_safe`` is reserved for tool-free inference: only those calls can
     safely repeat after a timeout/outage without duplicating external effects.
@@ -2910,10 +2997,43 @@ async def _run_provider_attempts(
 
     attempted: list[str] = []
     last_result: SkillResult | None = None
-    for selected in candidates:
+    # Local-first work has no silent frontier path. `fallback_models` is None
+    # while claude-local is still ahead in the queue; once local has failed (or
+    # was never launchable) it holds the providers the operator explicitly
+    # allowed as a cheapest-tier fallback, each with the model to pin.
+    fallback_for = fallback_models_for or _local_fallback_models
+    local_failure = ""
+    fallback_models: dict[str, str] | None = None
+    pending = list(candidates)
+    if (
+        local_first
+        and provider is None
+        and not owns_pending_gate
+        and local_provider.LOCAL_PROVIDER not in pending
+    ):
+        # Requested local-first but claude-local is not launchable right now
+        # (cooling down, binary gone). That is a local failure too, and takes
+        # the same policy: frontier only where a fallback model is named.
+        local_failure = local_provider.FAILURE_ENDPOINT + ":claude-local_unavailable"
+        fallback_models = fallback_for(list(pending))
+        pending = [p for p in pending if p in fallback_models]
+        if not pending:
+            return _refuse_local_fallback(
+                skill, role, task_entity_id, notifier, local_failure,
+                remaining=[p for p in candidates], last_result=None, attempted=[],
+            )
+    index = 0
+    while index < len(pending):
+        selected = pending[index]
+        index += 1
         attempted.append(selected)
-        result = await attempt(selected)
+        pinned = (fallback_models or {}).get(selected)
+        result = await (
+            attempt(selected, fallback_model=pinned) if pinned else attempt(selected)
+        )
         result.attempted_providers = tuple(attempted)
+        if local_failure and selected != local_provider.LOCAL_PROVIDER:
+            result.local_failure = local_failure
         # A successful agent may legitimately discuss "usage limits" in its
         # answer. Only inspect stdout when the process itself failed; stderr and
         # explicit runner errors remain diagnostic on every result.
@@ -2930,20 +3050,30 @@ async def _run_provider_attempts(
             # Local inference failed: record why, and fall over to frontier.
             # Local-first routing is limited to mechanical work classes, which
             # are safe to re-run from the start (rebase, regeneration, triage).
-            reason = local_provider.classify_failure(
+            kind = local_provider.classify_failure(
                 result.error, result.stderr, result.stdout
             )
-            if reason in local_provider.COOLDOWN_FAILURES:
+            reason = local_provider.describe_failure(
+                result.error, result.stderr, result.stdout
+            )
+            if kind in local_provider.COOLDOWN_FAILURES:
                 # Only an unusable local path is held out; a too-long prompt
                 # or an ordinary task failure says nothing about its health.
                 cool_down(selected)
             last_result = result
-            next_provider = next(
-                (p for p in candidates[len(attempted):]), None
-            )
+            local_failure = reason
+            result.local_failure = reason
+            remaining = pending[index:]
+            fallback_models = fallback_for(list(remaining))
+            allowed = [p for p in remaining if p in fallback_models]
+            next_provider = allowed[0] if allowed else None
             log.warning(
                 f"[apis] {skill}: {selected} failed ({reason}); "
-                f"falling over to {next_provider or 'nothing'}"
+                + (
+                    f"falling over to {next_provider} on {fallback_models[next_provider]}"
+                    if next_provider
+                    else "no cheapest-tier model bound for a frontier provider — refusing"
+                )
             )
             await asyncio.to_thread(
                 _record_local_failover,
@@ -2952,8 +3082,17 @@ async def _run_provider_attempts(
                 task_entity_id=task_entity_id,
                 reason=reason,
                 next_provider=next_provider,
-                detail=result.error or result.stderr[:200],
+                detail=(
+                    ("" if next_provider else "frontier_fallback=refused ")
+                    + (result.error or result.stderr[:200])
+                ),
             )
+            if not allowed:
+                return _refuse_local_fallback(
+                    skill, role, task_entity_id, notifier, reason,
+                    remaining=remaining, last_result=result, attempted=attempted,
+                )
+            pending = pending[:index] + allowed
             continue
         retryable_prompt_failure = retry_safe and (
             not result.ok or failure_kind is not None

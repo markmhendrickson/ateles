@@ -37,6 +37,8 @@ USAGE
         --task "Report the current git branch and HEAD sha." \\
         [--provider codex] \\
         [--work-class rebase] \\
+        [--rebase-onto origin/main [--integration rebase|merge]] \\
+        [--regenerate-cmd "python3 scripts/gen.py"] \\
         [--cwd /path/to/worktree] \\
         [--timeout 600] \\
         [--task-entity-id ent_...] \\
@@ -51,8 +53,26 @@ it, ``harness_router`` chooses using the headroom file.
 
 ``--work-class`` names the kind of work. A mechanical class
 (``local_provider.MECHANICAL_WORK_CLASSES``) that the ``claude-local``
-config enables runs on the local model first, with the frontier providers as
-the fallback; ``--provider claude-local`` pins the local model outright.
+config enables runs on the local model first; ``--provider claude-local`` pins
+the local model outright. A failed local run falls over only to a frontier
+provider with a model bound to the cheapest frontier tier in the vendor_binding
+(pinned to it); with none bound the dispatch fails and says why. It is never
+replayed on a provider's default model.
+
+DETERMINISTIC FIRST (mechanical_first.py)
+-----------------------------------------
+``--work-class rebase --rebase-onto BASE`` integrates BASE with git before any
+model is considered. ``--integration rebase`` (default) rebases; ``--integration
+merge`` makes a merge commit, which is the right method for a branch that is
+already pushed and reviewed. A clean result is verified against the repository
+and reported with NO model call. Only when git stops on conflicts is a model
+invoked, with a brief scoped to the conflicted hunks; its result is verified the
+same way, and a failed run is undone so the worktree is left as it was found. Both
+refuse anything but a dedicated linked worktree (never a shared main clone), and
+verification proves the branch's own work survived, not only that the base is in
+HEAD. ``--work-class regenerate_generated_files --regenerate-cmd CMD`` (repeatable)
+runs the named generator directly and reports the changed files, also with no
+model call. Without those flags the class runs on the model path as before.
 
 Exit codes: 0 on a successful run, non-zero on any failure. The agent's stdout
 goes to this process's stdout; diagnostics go to stderr, so the caller can pipe
@@ -96,6 +116,7 @@ import signal
 import sys
 from pathlib import Path
 
+
 # ── Env bootstrap ─────────────────────────────────────────────────────────────
 # An orchestrating session's shell does not necessarily carry the daemon env,
 # and skill_runner hard-requires NEOTOMA_BASE_URL (no localhost default by
@@ -108,7 +129,11 @@ from pathlib import Path
 # materialized dotenv carries operator-behaviour switches (e.g.
 # ATELES_SWARM_REQUIRE_LABEL) that must not silently reach a test process.
 def _dotenv_should_load() -> bool:
-    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         return False
     if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
         return False
@@ -190,12 +215,18 @@ from local_provider import (  # noqa: E402
     load_config as load_local_config,
 )
 import model_tiering  # noqa: E402
+import mechanical_first  # noqa: E402
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
     SkillResult,
     _load_agent_def,
     run_skill,
 )
+
+# A pseudo-provider for runs that made no model call: it spends nothing, so a
+# per-provider budget or cooldown consumer must treat it as "no spend", not as an
+# unknown provider.
+DETERMINISTIC_PROVIDER = "deterministic"
 
 
 def available_roles() -> list[str]:
@@ -210,9 +241,7 @@ def available_roles() -> list[str]:
     skills_dir = ATELES_REPO / ".claude" / "skills"
     if not skills_dir.is_dir():
         return []
-    return sorted(
-        p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file()
-    )
+    return sorted(p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file())
 
 
 async def dispatch(
@@ -229,6 +258,9 @@ async def dispatch(
     action_class: str | None = None,
     model: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
+    integration_base: str | None = None,
+    integration_mode: str = mechanical_first.MODE_REBASE,
+    regenerate_commands: list[str] | None = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -254,13 +286,13 @@ async def dispatch(
     the live action_policy/vendor_binding config; ``model`` overrides that
     resolution outright. Neither is required — an orchestrating session's
     one-off dispatch that names no ``action_class`` runs exactly as before.
+
+    ``integration_base`` / ``integration_mode`` (work class ``rebase``) and
+    ``regenerate_commands`` (work class ``regenerate_generated_files``) opt the
+    dispatch into the deterministic-first path: see ``mechanical_first``. Without
+    them every class runs on the model path exactly as before.
     """
-    # work_class reaches run_skill's local-first routing AND (via
-    # _run_skill_once) the lean-prompt/post-condition path — see
-    # local_provider.build_lean_prompt / verify_postcondition.
-    return await run_skill(
-        role,
-        task,
+    run_kwargs = dict(
         role=role,
         task_entity_id=task_entity_id,
         timeout=timeout,
@@ -273,6 +305,130 @@ async def dispatch(
         escalation_signals=escalation_signals,
         model=model,
     )
+    if work_class == "rebase" and integration_base:
+        return await _integrate_then_model(
+            role,
+            task,
+            base=integration_base,
+            mode=integration_mode,
+            workdir=cwd or os.getcwd(),
+            run_kwargs=run_kwargs,
+        )
+    if work_class == "regenerate_generated_files" and regenerate_commands:
+        outcome = await asyncio.to_thread(
+            mechanical_first.run_generators, cwd or os.getcwd(), regenerate_commands
+        )
+        return _deterministic_result(role, task_entity_id, work_class, outcome)
+    # work_class reaches run_skill's local-first routing AND (via
+    # _run_skill_once) the lean-prompt/post-condition path — see
+    # local_provider.build_lean_prompt / verify_postcondition.
+    return await run_skill(role, task, **run_kwargs)
+
+
+def _record_deterministic(
+    role: str, task_entity_id: str, work_class: str, ok: bool, summary: str
+) -> None:
+    """Best-effort harness_event for a run that finished without a model."""
+    try:
+        from skill_runner import DispatchUsage, _write_harness_event
+
+        _write_harness_event(
+            task_entity_id=task_entity_id,
+            role=role,
+            agent_sub="",
+            event_type="subprocess",
+            tool_name=f"{DETERMINISTIC_PROVIDER}:{work_class}",
+            success="true" if ok else "false",
+            output_summary=f"no model call: {summary}"[:500],
+            usage=DispatchUsage(provider=DETERMINISTIC_PROVIDER),
+        )
+    except Exception as exc:  # noqa: BLE001 — provenance must not fail the run
+        print(f"dispatch_role: harness_event not written: {exc}", file=sys.stderr)
+
+
+def _deterministic_result(
+    role: str, task_entity_id: str, work_class: str, outcome: "mechanical_first.Outcome"
+) -> SkillResult:
+    """The SkillResult for a mechanical run that ended without a model call."""
+    ok = outcome.status == mechanical_first.DONE
+    summary = outcome.summary
+    if ok and outcome.changed_files:
+        summary += ": " + ", ".join(outcome.changed_files[:50])
+    _record_deterministic(role, task_entity_id, work_class, ok, summary)
+    return SkillResult(
+        role,
+        ok,
+        0 if ok else 1,
+        f"deterministic {work_class}: {summary}\n" if ok else "",
+        "",
+        error="" if ok else f"deterministic {work_class} {outcome.status}: {summary}",
+        provider=DETERMINISTIC_PROVIDER,
+        attempted_providers=(DETERMINISTIC_PROVIDER,),
+    )
+
+
+async def _integrate_then_model(
+    role: str, task: str, *, base: str, mode: str, workdir: str, run_kwargs: dict
+) -> SkillResult:
+    """Integrate with git first; call a model only for conflicts, and verify it."""
+    outcome = await asyncio.to_thread(
+        mechanical_first.attempt_integration, workdir, base, mode
+    )
+    if outcome.status != mechanical_first.CONFLICTS:
+        return _deterministic_result(
+            role, run_kwargs["task_entity_id"], "rebase", outcome
+        )
+    print(
+        f"dispatch_role: {outcome.summary}; invoking a model on the conflicted hunks only",
+        file=sys.stderr,
+    )
+    prompt = (
+        outcome.brief
+        + "\n\n---\nThe caller's original task, for context only (the brief above is "
+        + "authoritative):\n"
+        + task[:2000]
+    )
+    try:
+        result = await run_skill(role, prompt, **run_kwargs)
+    except BaseException:
+        # A crash or cancellation mid-run must not leave the integration open.
+        restored = await asyncio.to_thread(
+            mechanical_first.restore_original,
+            workdir,
+            outcome.orig_head,
+            outcome.orig_ref,
+        )
+        if restored.problem:
+            print(f"dispatch_role: RESTORE FAILED: {restored.problem}", file=sys.stderr)
+        raise
+    if result.ok:
+        problem = await asyncio.to_thread(
+            mechanical_first.verify_integration,
+            workdir,
+            outcome.base_sha,
+            mode,
+            outcome.orig_head,
+        )
+        if problem:
+            result.ok = False
+            result.error = f"the model reported success but the integration did not verify: {problem}"
+    if not result.ok:
+        restored = await asyncio.to_thread(
+            mechanical_first.restore_original,
+            workdir,
+            outcome.orig_head,
+            outcome.orig_ref,
+        )
+        detail = result.error or "dispatch failed"
+        if restored.problem:
+            print(f"dispatch_role: RESTORE FAILED: {restored.problem}", file=sys.stderr)
+            result.error = f"{detail} (RESTORE FAILED: {restored.problem})"
+        elif restored.undone:
+            result.error = (
+                f"{detail} (undid {restored.undone}; the worktree is as it was found)"
+            )
+    result.attempted_providers = (DETERMINISTIC_PROVIDER, *result.attempted_providers)
+    return result
 
 
 def _signals_from_args(args: argparse.Namespace) -> "model_tiering.EscalationSignals | None":
@@ -439,6 +595,7 @@ def _install_signal_envelope(emitter: _Emitter) -> None:
     than a laundered exit 0 — a caller checking only the exit code must not be
     told a killed dispatch succeeded.
     """
+
     def _handler(signum, _frame):  # pragma: no cover - exercised as a subprocess
         name = signal.Signals(signum).name
         emitter.emit_failure(
@@ -573,6 +730,36 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--rebase-onto",
+        metavar="BASE",
+        help=(
+            "With --work-class rebase: integrate this base ref into the current "
+            "branch with git BEFORE any model. A clean result is verified and "
+            "reported with no model call; only conflicts invoke a model, on the "
+            "conflicted hunks alone. The base must already resolve locally."
+        ),
+    )
+    parser.add_argument(
+        "--integration",
+        choices=list(mechanical_first.MODES),
+        default=None,
+        help=(
+            "How --rebase-onto integrates: 'rebase' (default) or 'merge' for a "
+            "merge commit — use merge for a branch that is already pushed and "
+            "reviewed, since a rebase rewrites its published history."
+        ),
+    )
+    parser.add_argument(
+        "--regenerate-cmd",
+        action="append",
+        metavar="CMD",
+        help=(
+            "With --work-class regenerate_generated_files: a generator command to "
+            "run directly (no shell), repeatable, in order. Reports the changed "
+            "files with no model call; a failing generator fails the dispatch."
+        ),
+    )
+    parser.add_argument(
         "--cwd",
         help="Working directory for the dispatched child (e.g. a worktree).",
     )
@@ -679,6 +866,23 @@ def main(argv: list[str] | None = None) -> int:
         emitter.emit_failure(reason)
         return 1
 
+    if args.rebase_onto and args.work_class != "rebase":
+        return _usage_failure(emitter, "--rebase-onto requires --work-class rebase")
+    if args.regenerate_cmd and args.work_class != "regenerate_generated_files":
+        return _usage_failure(
+            emitter, "--regenerate-cmd requires --work-class regenerate_generated_files"
+        )
+    if args.integration and not args.rebase_onto:
+        return _usage_failure(emitter, "--integration requires --rebase-onto")
+    if args.rebase_onto and not args.cwd:
+        return _usage_failure(
+            emitter, "--rebase-onto requires --cwd (the worktree to integrate in)"
+        )
+    if args.regenerate_cmd and not args.cwd:
+        return _usage_failure(
+            emitter, "--regenerate-cmd requires --cwd (the worktree to regenerate in)"
+        )
+
     github_token: str | None = None
     if args.github_token_env:
         if not args.github_delivery:
@@ -755,6 +959,9 @@ def main(argv: list[str] | None = None) -> int:
                 action_class=args.action_class,
                 escalation_signals=_signals_from_args(args),
                 model=args.model,
+                integration_base=args.rebase_onto,
+                integration_mode=args.integration or mechanical_first.MODE_REBASE,
+                regenerate_commands=args.regenerate_cmd,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above
@@ -774,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
             "attempted_providers": list(result.attempted_providers),
             "returncode": result.returncode,
             "error": result.error,
+            "local_failure": result.local_failure,
             "stdout": result.stdout,
             "stderr": result.stderr,
             **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
@@ -788,6 +996,12 @@ def main(argv: list[str] | None = None) -> int:
         f"rc={result.returncode}",
         file=sys.stderr,
     )
+    if result.local_failure:
+        print(
+            f"dispatch_role: claude-local failed ({result.local_failure})"
+            + ("; the run then ran on " + result.provider if result.ok else ""),
+            file=sys.stderr,
+        )
     if not result.ok:
         if result.error:
             print(f"dispatch_role: error: {result.error}", file=sys.stderr)
