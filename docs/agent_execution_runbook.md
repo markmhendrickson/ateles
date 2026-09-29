@@ -343,12 +343,24 @@ a body that has already failed a cheaper check.
 1. Look up the contract for the dispatched role — a **miss** takes the legacy
    path unchanged (see below)
 2. Parse the header — stdout is authoritative, stderr consulted only when
-   stdout carries no match; the **last** match in the text wins
+   stdout carries no match; the **last** match in the text wins. Parsing is
+   linear-time (no `\s` gaps that span lines) and scans at most the last
+   1,000,000 characters
 3. Classify the body — `BLOCKED` / empty / valid
-4. Check the body shape against this dispatch mode
+4. Check the body shape against this dispatch mode. Only a contract that
+   **narrows** shapes refuses on shape: Cicada's direct dispatch accepts only a
+   PR or commit ref. A contract that accepts `prose` accepts any body, because a
+   docs note that links its PR is still a valid note. A bare `ENG_SPEC_SECTION`
+   with nothing after it names no section and is refused as `empty_body`
 5. Canonicalize the ref and resolve it out of process (`gh` via argv, never
    `shell=True`, never an HTTP URL probe) — only for contracts whose
-   `resolver_policy` is `github_ref`
+   `resolver_policy` is `github_ref` (today, Cicada only). A full PR URL must
+   name the **task's own repo**: with no `repo` on the task snapshot (or a
+   malformed one) a URL is refused exactly as a bare `#N` is, because there is
+   nothing to check it against. A commit must be a full 40-character SHA; an
+   abbreviated one is refused rather than resolved
+   The stored header (and a retained BLOCKED body) is passed through the secret
+   redactor first.
 6. Write `result` (the agent's exact matched header line), **read it back**,
    **then** write `status: done`, **read that back**, and only then record the
    run as done and claim `job.finished` — `complete_task_with_result` fixes that
@@ -360,6 +372,18 @@ a body that has already failed a cheaper check.
    finished claim. The reader is a required argument, so a caller cannot skip the
    check by omission.
 
+### Which roles are opted in
+
+The seeded `ARTIFACT_CONTRACTS` table opts in **15 roles**: Cicada plus **14
+non-Cicada roles**. Twelve of the 14 are roster agents Apis can dispatch (Pavo,
+Accipiter, Manucode, Waxwing, Phoenicurus, Buteo, Robin, Vanellus, Struthio,
+Ciconia, Corvus, Regulus); the other two (`draft_lint_runner`,
+`social_publisher`) are function-named producers Apis cannot dispatch. Every
+non-Cicada contract accepts `prose` and has no resolver, so for those roles the
+gate only requires the header and a non-empty, non-BLOCKED body. Before this
+change those roles went DONE on process success alone; now a missing header
+FAILS the task and pages the operator.
+
 ### Registry miss is the legacy path, deliberately
 
 A role absent from `ARTIFACT_CONTRACTS` completes exactly as before, manufactured
@@ -370,25 +394,30 @@ what opts a role in.
 
 ### Cause codes (`[ARTIFACT_GATE] <code> role=… kind=…`)
 
-| Code | Task status | Meaning |
-|---|---|---|
-| `missing_header` | FAILED | Required header absent from both streams. The reason carries a secret-redacted 2KB tail of stdout so the operator can see what the agent did say |
-| `empty_body` | FAILED | Header present, nothing after the colon |
-| `blocked` | BLOCKED | Agent wrote `BLOCKED` / `BLOCKED — …`; the reason retains the body verbatim, because it names what the agent needs |
-| `wrong_body_for_dispatch` | FAILED | The body answers a different question, e.g. `ENG_SPEC_SECTION` on a generic Cicada direct-impl. Refused before any resolve |
-| `invalid_ref_shape` | FAILED | Foreign host, cross-repo against `dispatch_repo`, shell metacharacters, or an ambiguous bare `#N` / short SHA with no `dispatch_repo` to anchor it. Refused before any resolve |
-| `unresolvable_ref` | FAILED | Shape is sound but the resolve returned false — the ref names nothing reachable |
-| `unresolvable_ref` with `kind=persist_result_write` / `persist_result_readback` / `persist_status_write` / `persist_status_readback` | BLOCKED | The deliverable was accepted, but its durable record did not hold (write refused, or the snapshot did not read back as written). BLOCKED, not FAILED, so the watchdog does not re-run the agent's whole job (a second PR) to repair a bookkeeping write |
+Each reason has a grep-stable head, then plain wording, then a `Next:` line. The
+wording lives in `CAUSE_HINTS` / `CAUSE_NEXT_STEPS` in
+`lib/daemon_runtime/artifact_contract.py`, and a test binds every code to both.
+
+| Code | Task status | Meaning | What to do |
+|---|---|---|---|
+| `missing_header` | FAILED | Required header absent from both streams. The reason carries a secret-redacted 2KB tail of stdout | Read the tail; re-dispatch only if the work was not done |
+| `empty_body` | FAILED | Header present, nothing after the colon (or a bare `ENG_SPEC_SECTION`) | Re-dispatch, or ask the agent to state its deliverable |
+| `blocked` | BLOCKED | The agent wrote `BLOCKED` / `BLOCKED — …`; the reason keeps its words (redacted, capped at 800 chars). **Not a gate failure**: the alert says the agent is asking for something | Give the agent what it says it needs, then reopen the task |
+| `wrong_body_for_dispatch` | FAILED | The body answers a different question, e.g. `ENG_SPEC_SECTION` or prose on a generic Cicada direct-impl. Refused before any resolve | Re-dispatch in the right mode, or correct the body by hand |
+| `invalid_ref_shape` | FAILED | Foreign host, another repo, no `repo` on the task to check a URL / bare `#N` / SHA against, abbreviated SHA, or shell metacharacters. Refused before any resolve | Fix the ref (full URL for this repo, or a full 40-character SHA) and make sure the task carries its repo, then re-dispatch |
+| `unresolvable_ref` | FAILED | Shape is sound but the resolve returned false: GitHub cannot find it | Check the ref exists; re-dispatch only if it does not |
+| `record_not_saved` | BLOCKED | The deliverable **was accepted** (the ref resolved), but the task record did not save: the `result` or `status` write did not read back. The reason and alert carry the accepted ref and which step failed | **Do not re-dispatch** (it would open a second PR). Record the ref on the task and mark it done by hand |
 
 `BLOCKED` is a status, not a failure: FAILED is the stall watchdog's
 retry-with-backoff lane, and retrying an agent that has just stated what it is
 missing burns harness capacity and changes nothing. BLOCKED is the state
-operator remediation reopens.
+operator remediation reopens. `record_not_saved` is BLOCKED for a different
+reason: the work is done, and FAILED would re-run all of it.
 
-Operator-facing hint text is not written yet; reasons carry placeholders for it
-— `[COPY: hint missing_header]`, `[COPY: hint empty_body]`,
-`[COPY: hint blocked]`, `[COPY: hint wrong_body_for_dispatch]`,
-`[COPY: hint invalid_ref_shape]`, `[COPY: hint unresolvable_ref]`.
+The operator alert is worded per situation so the three never read alike:
+`… ARTIFACT GATE FAILED …` (a check failed), `… reports it is BLOCKED … (not a
+gate failure)` (the agent is asking for something), and `… deliverable ACCEPTED
+but the task record did NOT save …` (do not re-dispatch).
 
 ### Examples
 
@@ -409,6 +438,9 @@ Refused:
   dispatch → `failed`, `wrong_body_for_dispatch`
 - `[cicada] pull_request_link: https://evil.example/o/r/pull/1` → `failed`,
   `invalid_ref_shape`, and the resolver is never called
+- `[cicada] pull_request_link: https://github.com/<other-org>/<other-repo>/pull/7`
+  on a task with no `repo` → `failed`, `invalid_ref_shape` (nothing to check the
+  URL against), resolver never called
 
 `dispatch_repo` is read from the task snapshot, first present of `repo`,
 `dispatch_repo`, `github_repo`, `repository`; `dispatch_mode` from

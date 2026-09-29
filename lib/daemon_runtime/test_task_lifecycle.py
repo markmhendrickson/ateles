@@ -253,3 +253,30 @@ def test_complete_fail_open_without_token(monkeypatch):
         "ent_t", handler="apis", result="x", fetch_snapshot=lambda _id: {},
     )
     assert not outcome and outcome.stage == "result_write"
+
+
+def test_complete_is_not_ok_when_the_result_changes_after_the_status_write(monkeypatch):
+    """Pins the `result` clause of the terminal read-back.
+
+    The status write lands (`done`), but the entity's `result` no longer equals
+    the artifact the completion rests on (a concurrent or replayed write). A
+    DONE task whose result is not the header is exactly the false completion
+    this gate exists to stop, so the outcome must not be ok. Goes RED if the
+    `result` comparison is dropped from the post-status read-back.
+    """
+    store = _FakeTaskStore()
+    real_post = store.post
+
+    def post_then_clobber_result(url, headers=None, json=None, timeout=None):
+        resp = real_post(url, headers=headers, json=json, timeout=timeout)
+        if json["field"] == "status":
+            store.fields["result"] = "cicada completed (trigger=created)"
+        return resp
+
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tl.httpx, "post", post_then_clobber_result)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert not outcome and outcome.stage == "status_readback"
+    assert store.fields["status"] == "done"

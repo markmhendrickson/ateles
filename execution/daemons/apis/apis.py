@@ -257,6 +257,7 @@ from lib.daemon_runtime.artifact_contract import (  # noqa: E402
     artifact_gate_reason,
     body_shape_for_dispatch,
     classify_artifact_body,
+    eng_spec_has_content,
     infer_body_shape,
     parse_artifact_header,
     parse_github_ref,
@@ -1286,8 +1287,16 @@ async def dispatch_task(
             stage: str,
             fail_session: bool = True,
             from_status: str = TaskStatus.EXECUTING.value,
+            alert: str = "gate",
         ) -> None:
-            """Record a gate refusal: run thread, session, task status + reason, page."""
+            """Record a gate refusal: run thread, session, task status + reason, page.
+
+            ``alert`` picks the operator-facing wording so three different
+            situations never read alike: ``gate`` (the deliverable failed a
+            check), ``agent_blocked`` (the agent honestly said it is blocked),
+            ``record_not_saved`` (the deliverable was accepted, only the task
+            record failed to save, so the operator must NOT re-dispatch).
+            """
             _run_stage("assistant", reason, stage=stage)
             if run_session and fail_session:
                 update_run_session_status(run_session, status="failed")
@@ -1296,8 +1305,20 @@ async def dispatch_task(
                 from_status=from_status, reason=reason,
                 key_suffix=trigger,
             )
+            heads = {
+                "gate": f"{skill} ARTIFACT GATE FAILED on {entity_id}",
+                "agent_blocked": (
+                    f"{skill} reports it is BLOCKED on {entity_id} "
+                    "(the agent asking for something; not a gate failure)"
+                ),
+                "record_not_saved": (
+                    f"{skill} deliverable ACCEPTED but the task record did NOT "
+                    f"save on {entity_id}"
+                ),
+            }
+            shown = reason if len(reason) <= 1400 else reason[:1400] + "…"
             notifier.send(
-                f"{skill} artifact gate on {entity_id}: {reason[:200]}",
+                f"{heads[alert]}: {shown}",
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
             )
@@ -1361,9 +1382,10 @@ async def dispatch_task(
                     TaskStatus.BLOCKED,
                     artifact_gate_reason(
                         "blocked", role=contract.role, kind=contract.artifact_kind,
-                        verbatim_body=header.body,
+                        verbatim_body=_redact_secrets(header.body)[:800],
                     ),
                     stage="blocked",
+                    alert="agent_blocked",
                 )
                 return None
 
@@ -1388,9 +1410,27 @@ async def dispatch_task(
                 )
                 return None
 
-            if shape != "pr_or_commit":
-                # prose / eng_spec_section — the header IS the deliverable.
-                return header, header.matched_line[:80], f"{shape} ok"
+            # The stored result is the header line as redacted, and the read-back
+            # compares against that same string.
+            stored_line = _redact_secrets(header.matched_line)
+
+            if shape == "eng_spec_section" and not eng_spec_has_content(header.body):
+                # A bare token names no authored section.
+                _artifact_fail(
+                    TaskStatus.FAILED,
+                    artifact_gate_reason(
+                        "empty_body", role=contract.role, kind=contract.artifact_kind,
+                        extra="bare ENG_SPEC_SECTION with no content",
+                    ),
+                    stage="failed",
+                )
+                return None
+
+            if contract.resolver_policy != "github_ref" or shape != "pr_or_commit":
+                # prose / eng_spec_section, or a role with no resolver (every
+                # contract but Cicada's): the header IS the deliverable, even if
+                # it happens to contain a link. Nothing to look up.
+                return header, stored_line[:80], f"{shape} ok", stored_line
 
             dispatch_repo = _dispatch_repo_from_snapshot(snapshot)
             parsed = parse_github_ref(header.body, dispatch_repo=dispatch_repo)
@@ -1418,7 +1458,12 @@ async def dispatch_task(
                     stage="failed",
                 )
                 return None
-            return header, parsed.canonical or header.matched_line[:80], "artifact ok"
+            return (
+                header,
+                parsed.canonical or stored_line[:80],
+                "artifact ok",
+                stored_line,
+            )
 
         artifact = None
         contract = role_required_artifact().get(skill) or role_required_artifact().get(
@@ -1436,7 +1481,7 @@ async def dispatch_task(
             # completion for a role whose artifact nobody has declared would
             # stall live work.
             base_result = (
-                artifact[0].matched_line
+                artifact[3]
                 if artifact is not None
                 else f"{skill} completed (trigger={trigger})"
             )
@@ -1491,7 +1536,7 @@ async def dispatch_task(
                 TaskStatus.VERIFIED.value if run_session else TaskStatus.EXECUTING.value
             )
             if artifact is not None:
-                header, identity, note = artifact
+                header, identity, note, stored_line = artifact
                 # `complete_task_with_result` writes `result` before `status`
                 # AND reads both back: the exact header line must be the stored
                 # result before DONE is written, and the terminal status must
@@ -1499,7 +1544,7 @@ async def dispatch_task(
                 # claims the task finished. A 2xx from `/correct` is not that
                 # evidence.
                 outcome = complete_task_with_result(
-                    entity_id, handler=DAEMON_NAME, result=header.matched_line,
+                    entity_id, handler=DAEMON_NAME, result=stored_line,
                     fetch_snapshot=fetch_task_snapshot,
                     from_status=done_from, key_suffix=trigger,
                     artifact_identity=identity,
@@ -1513,17 +1558,18 @@ async def dispatch_task(
                     _artifact_fail(
                         TaskStatus.BLOCKED,
                         artifact_gate_reason(
-                            "unresolvable_ref",
+                            "record_not_saved",
                             role=skill or "unknown",
-                            kind=f"persist_{outcome.stage}",
-                            extra=outcome.detail,
+                            kind=contract.artifact_kind,
+                            extra=f"ref={identity} failed_at={outcome.stage} ({outcome.detail})",
                         ),
                         stage="blocked",
                         fail_session=False,
                         from_status=done_from,
+                        alert="record_not_saved",
                     )
                     return
-                _run_stage("assistant", header.matched_line, stage="done")
+                _run_stage("assistant", stored_line, stage="done")
                 job.finished(
                     f"task {entity_id} dispatched → {skill} "
                     f"(gate: {_gate_label}; {note})"

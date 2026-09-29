@@ -138,6 +138,7 @@ def release_store(monkeypatch, tmp_path):
                 "status": "awaiting_approval",
                 "blocked_reason": "waiting for operator approval",
                 "assigned_to": "cicada",
+                "repo": "markmhendrickson/ateles",
                 "title": "Implement the bounded change",
                 "body": "Engineering work in the dispatcher.",
                 "user_id": "tenant-a",

@@ -154,6 +154,7 @@ async def test_dispatch_persists_one_session_across_spawn_turns_and_completion(
         {
             "title": "Implement it",
             "assigned_to": "cicada",
+            "repo": "markmhendrickson/ateles",
             "status": "awaiting_approval",
             "attempt": 2,
         },
@@ -271,6 +272,7 @@ async def test_dispatch_refuses_to_spawn_without_verified_session_provenance(
         {
             "title": "Implement it",
             "assigned_to": "cicada",
+            "repo": "markmhendrickson/ateles",
             "status": "awaiting_approval",
             "attempt": 2,
         },
@@ -327,6 +329,7 @@ async def test_dispatch_holds_verified_when_terminal_state_is_unverified(
         {
             "title": "Implement it",
             "assigned_to": "cicada",
+            "repo": "markmhendrickson/ateles",
             "status": "awaiting_approval",
             "attempt": 2,
         },
@@ -354,6 +357,7 @@ async def test_watchdog_reconciles_terminal_provenance_without_repeating_effect(
     snapshot = {
         "title": "Implement it",
         "assigned_to": "cicada",
+        "repo": "markmhendrickson/ateles",
         "status": "awaiting_approval",
         "attempt": 2,
     }

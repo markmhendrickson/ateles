@@ -21,6 +21,7 @@ CauseCode = Literal[
     "unresolvable_ref",
     "invalid_ref_shape",
     "wrong_body_for_dispatch",
+    "record_not_saved",
 ]
 
 BodyShape = Literal["pr_or_commit", "eng_spec_section", "prose"]
@@ -42,21 +43,65 @@ _PR_SHORTHAND_RE = re.compile(
     re.IGNORECASE,
 )
 _SHA_RE = re.compile(r"^(?P<sha>[0-9a-f]{40})\s*$", re.IGNORECASE)
-# An abbreviated SHA is recognized as a ref SHAPE so it is rejected as an
-# ambiguous ref rather than mis-read as prose. Distinguishing the two matters:
-# prose from Cicada is `wrong_body_for_dispatch` (the agent answered the wrong
-# question), while a short SHA is `invalid_ref_shape` (it answered the right
-# one, unverifiably).
+# An abbreviated SHA (7-39 hex) is recognized as a ref SHAPE so it is refused as
+# `invalid_ref_shape` ("give the full 40-character SHA") rather than mis-read as
+# prose (`wrong_body_for_dispatch`): it answered the right question, but a
+# prefix can be ambiguous, so this gate never resolves one. Only a full 40-char
+# SHA is accepted as a commit ref.
 _SHORT_SHA_RE = re.compile(r"^(?P<sha>[0-9a-f]{7,39})\s*$", re.IGNORECASE)
 _ENG_SPEC_RE = re.compile(r"^ENG_SPEC_SECTION\b", re.IGNORECASE)
 
-_COPY_HINTS: dict[CauseCode, str] = {
-    "missing_header": "[COPY: hint missing_header]",
-    "empty_body": "[COPY: hint empty_body]",
-    "blocked": "[COPY: hint blocked]",
-    "unresolvable_ref": "[COPY: hint unresolvable_ref]",
-    "invalid_ref_shape": "[COPY: hint invalid_ref_shape]",
-    "wrong_body_for_dispatch": "[COPY: hint wrong_body_for_dispatch]",
+# Plain-language wording for each cause: what happened, and what the operator
+# should do next. Kept beside the codes so the runbook table cannot drift from
+# what the alert says (test_artifact_contract.py binds every code to both).
+CAUSE_HINTS: dict[CauseCode, str] = {
+    "missing_header": (
+        "The agent finished but did not end with the required header line, so no "
+        "deliverable was recorded."
+    ),
+    "empty_body": "The header line was present but named nothing after the colon.",
+    "blocked": (
+        "The agent reported that it is blocked, in its own words below. This is the "
+        "agent asking for something, not a gate failure."
+    ),
+    "unresolvable_ref": (
+        "The PR or commit reference is well-formed but GitHub could not find it."
+    ),
+    "invalid_ref_shape": (
+        "The reference is not a PR or commit link this gate can check: a link to "
+        "another repo or host, a bare #N or SHA with no repo on the task, an "
+        "abbreviated SHA, or malformed text."
+    ),
+    "wrong_body_for_dispatch": (
+        "The agent answered a different question than this dispatch asked."
+    ),
+    "record_not_saved": (
+        "The agent's deliverable was accepted, but the task record did not save "
+        "(the result or status write did not read back)."
+    ),
+}
+
+CAUSE_NEXT_STEPS: dict[CauseCode, str] = {
+    "missing_header": (
+        "Read the stdout tail; re-dispatch only if the work was not done."
+    ),
+    "empty_body": "Re-dispatch, or ask the agent to state its deliverable.",
+    "blocked": "Give the agent what it says it needs, then reopen the task.",
+    "unresolvable_ref": (
+        "Check the reference exists; re-dispatch only if it does not."
+    ),
+    "invalid_ref_shape": (
+        "Fix the reference (full PR URL for this repo, or a full 40-character "
+        "SHA), and make sure the task carries its repo, then re-dispatch."
+    ),
+    "wrong_body_for_dispatch": (
+        "Re-dispatch in the right mode, or correct the body by hand."
+    ),
+    "record_not_saved": (
+        "The PR exists; the task record did not save. Do not re-dispatch (that "
+        "would open a second PR). Record the reference on the task and mark it "
+        "done by hand."
+    ),
 }
 
 
@@ -248,18 +293,32 @@ def gate_satisfaction_rules() -> dict[str, str]:
     return out
 
 
+# Only the tail of very large output is scanned: the LAST match wins and a
+# deliverable header is the agent's closing line, so an earlier megabyte of
+# noise cannot change the answer but could cost time.
+_MAX_SCAN_CHARS = 1_000_000
+
+
 def parse_artifact_header(
     text: str,
     *,
     agent: str,
     artifact_kind: str,
 ) -> ArtifactHeader | None:
-    """Last MULTILINE match of ``[agent] kind: body``; exact matched line returned."""
+    """Last MULTILINE match of ``[agent] kind: body``; exact matched line returned.
+
+    Linear in the scanned text: every gap is `[ \\t]*` and the body is `[^\\n]*`,
+    never `\\s`, so a run of newlines or spaces cannot make the engine retry the
+    same span from every line start.
+    """
     if not text:
         return None
+    if len(text) > _MAX_SCAN_CHARS:
+        text = text[-_MAX_SCAN_CHARS:]
+        text = text.split("\n", 1)[1] if "\n" in text else text
     pattern = re.compile(
-        rf"^(\s*\[(?P<agent>{re.escape(agent)})\]\s+"
-        rf"(?P<kind>{re.escape(artifact_kind)})\s*:\s*(?P<body>.*?)\s*)$",
+        rf"^(?P<line>[ \t]*\[(?P<agent>{re.escape(agent)})\][ \t]+"
+        rf"(?P<kind>{re.escape(artifact_kind)})[ \t]*:[ \t]*(?P<body>[^\n]*))$",
         re.IGNORECASE | re.MULTILINE,
     )
     matches = list(pattern.finditer(text))
@@ -270,7 +329,7 @@ def parse_artifact_header(
         agent=m.group("agent"),
         kind=m.group("kind"),
         body=(m.group("body") or "").strip(),
-        matched_line=m.group(1).strip(),
+        matched_line=m.group("line").strip(),
     )
 
 
@@ -312,6 +371,12 @@ def looks_like_pr_or_commit_ref(body: str) -> bool:
     return False
 
 
+def eng_spec_has_content(body: str) -> bool:
+    """False for a bare ``ENG_SPEC_SECTION`` token with nothing authored after it."""
+    rest = _ENG_SPEC_RE.sub("", (body or "").strip(), count=1)
+    return bool(rest.strip(" \t:—–-"))
+
+
 def infer_body_shape(body: str) -> BodyShape:
     """Label a valid body's shape so the caller can test it against a contract.
 
@@ -343,7 +408,15 @@ def body_shape_for_dispatch(*, role: str, dispatch_mode: str | None) -> frozense
         if mode in {"ordered_spec", "eng_lens"}:
             return frozenset({"pr_or_commit", "eng_spec_section"})
         return frozenset({"pr_or_commit"})
-    return frozenset(contract.accepted_body_shapes)
+    accepted = frozenset(contract.accepted_body_shapes)
+    if "prose" in accepted:
+        # Prose is the floor: a contract that accepts prose accepts a URL, a
+        # ref-looking token, or a spec section too, because all of those are
+        # text and the role's deliverable may legitimately contain any of them
+        # (e.g. a docs note that links its PR). Only a contract that NARROWS
+        # the shapes (Cicada, above) turns a shape into a refusal.
+        return frozenset({"prose", "pr_or_commit", "eng_spec_section"})
+    return accepted
 
 
 def _split_dispatch_repo(dispatch_repo: str | None) -> tuple[str, str] | None:
@@ -388,7 +461,20 @@ def parse_github_ref(
             )
         owner, repo, number = m.group("owner"), m.group("repo"), int(m.group("number"))
         expected = _split_dispatch_repo(dispatch_repo)
-        if expected and (owner.lower(), repo.lower()) != (
+        if expected is None:
+            # Same rule as a bare #N or SHA: with no expected repo there is
+            # nothing to check the URL against, and a full PR URL for ANY
+            # public repo would resolve and close the task.
+            return InvalidRef(
+                code="invalid_ref_shape",
+                reason=(
+                    "PR URL without a known dispatch_repo to check it against"
+                    if not dispatch_repo
+                    else "malformed dispatch_repo for PR URL"
+                ),
+                body=stripped,
+            )
+        if (owner.lower(), repo.lower()) != (
             expected[0].lower(),
             expected[1].lower(),
         ):
@@ -405,7 +491,14 @@ def parse_github_ref(
             canonical=f"{owner}/{repo}#{number}",
         )
 
-    sha_m = _SHA_RE.match(stripped) or _SHORT_SHA_RE.match(stripped)
+    if _SHORT_SHA_RE.match(stripped) and not _SHA_RE.match(stripped):
+        return InvalidRef(
+            code="invalid_ref_shape",
+            reason="abbreviated SHA; give the full 40-character SHA",
+            body=stripped,
+        )
+
+    sha_m = _SHA_RE.match(stripped)
     if sha_m:
         if not dispatch_repo:
             return InvalidRef(
@@ -468,19 +561,22 @@ def artifact_gate_reason(
     extra: str = "",
     verbatim_body: str | None = None,
 ) -> str:
-    """Build a grep-stable ``[ARTIFACT_GATE] <code> …`` reason string."""
+    """Build a grep-stable ``[ARTIFACT_GATE] <code> …`` reason string.
+
+    The head (`[ARTIFACT_GATE] <code> role=… kind=… extra`) is grep-stable; what
+    follows is plain wording for the operator: what happened, any verbatim agent
+    text, and a `Next:` line saying what to do.
+    """
     parts = [f"{ARTIFACT_GATE_PREFIX} {code}", f"role={role}"]
     if kind is not None:
         parts.append(f"kind={kind}")
     if extra:
         parts.append(extra)
     head = " ".join(parts)
-    hint = _COPY_HINTS.get(code, "")
-    tail_bits = [hint] if hint else []
+    tail_bits = [CAUSE_HINTS[code]]
     if verbatim_body is not None:
         tail_bits.append(verbatim_body)
-    if not tail_bits:
-        return head
+    tail_bits.append(f"Next: {CAUSE_NEXT_STEPS[code]}")
     return f"{head} — " + " ".join(tail_bits)
 
 

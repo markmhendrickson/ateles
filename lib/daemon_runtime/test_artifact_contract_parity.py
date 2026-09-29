@@ -53,6 +53,39 @@ def test_gate_satisfaction_rules_match_anthus_consumer():
         assert derived.get(gate) == kind, f"missing/wrong gate {gate}"
 
 
+def test_both_consumers_equal_the_frozen_pre_1155_baseline():
+    """Compare against something other than the table itself.
+
+    `derived == orchestrator...` compares one view of `ARTIFACT_CONTRACTS` to
+    another view of it, so a wrong edit to the table passes it. The frozen
+    baseline (every gate the pre-#1155 Anthus map carried, verbatim) is
+    independent: a gate added, dropped, or re-kinded fails here.
+    """
+    assert gate_satisfaction_rules() == _EXPECTED_GATES
+    assert orchestrator.GATE_SATISFACTION_RULES == _EXPECTED_GATES
+
+
+def test_expected_artifact_headers_match_the_smoke_test_runbook():
+    """The runbook's expected-agent table is a second, independent source."""
+    import re
+
+    text = (_REPO / "docs" / "smoke_test_runbook.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\|[^|]*\|\s*(\w+)\s*\|[^|]*\|\s*`\[(\w+)\]\s+(\w+):", text, re.M)
+    assert len(rows) >= 12, rows
+    by_gate = gate_satisfaction_rules()
+    for gate, _agent, kind in rows:
+        assert by_gate.get(gate) == kind, f"runbook says {gate} -> {kind}"
+    # Roster roles that the runbook names as producers must have a contract
+    # whose kind matches, except growth_announce (the runbook names a role that
+    # already carries another kind; the shared table records the gate->kind map,
+    # which is identical either way — see the comment on the ciconia contract).
+    contracts = role_required_artifact()
+    for gate, agent, kind in rows:
+        if gate == "growth_announce":
+            continue
+        assert contracts[agent].artifact_kind == kind, f"{agent} -> {kind}"
+
+
 def test_cicada_role_kind_is_pull_request_link():
     contract = role_required_artifact()["cicada"]
     assert contract.artifact_kind == "pull_request_link"

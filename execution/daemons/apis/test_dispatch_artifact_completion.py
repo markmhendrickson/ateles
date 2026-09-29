@@ -607,8 +607,16 @@ def test_result_the_store_drops_is_neither_done_nor_finished(
     assert "done" not in stages, f"run thread recorded done: {stages}"
     blocked = _with_status(status_writes, "blocked")
     assert blocked, f"expected a BLOCKED write, got {status_writes}"
-    assert "kind=persist_result_readback" in blocked[-1]["reason"]
-    assert notifier.sent
+    reason = blocked[-1]["reason"]
+    assert "[ARTIFACT_GATE] record_not_saved" in reason
+    assert "failed_at=result_readback" in reason
+    # The accepted ref and a plain next step, so the operator does not read this
+    # as "the PR does not resolve" and re-dispatch into a second PR.
+    assert "ref=markmhendrickson/ateles#999" in reason
+    assert "Do not re-dispatch" in reason and "PR exists" in reason
+    assert "unresolvable_ref" not in reason and "[COPY" not in reason
+    assert notifier.sent and "ACCEPTED" in notifier.sent[-1]
+    assert "ref=markmhendrickson/ateles#999" in notifier.sent[-1]
 
 
 def test_status_the_store_drops_is_never_claimed_finished(
@@ -630,8 +638,10 @@ def test_status_the_store_drops_is_never_claimed_finished(
     assert job.failed_events
     assert "done" not in stages
     blocked = _with_status(status_writes, "blocked")
-    assert blocked and "kind=persist_status_readback" in blocked[-1]["reason"]
-    assert notifier.sent
+    assert blocked and "[ARTIFACT_GATE] record_not_saved" in blocked[-1]["reason"]
+    assert "failed_at=status_readback" in blocked[-1]["reason"]
+    assert "ref=markmhendrickson/ateles#999" in blocked[-1]["reason"]
+    assert notifier.sent and "did NOT save" in notifier.sent[-1]
 
 
 def test_legacy_role_completion_is_untouched_by_the_read_back(
@@ -647,3 +657,163 @@ def test_legacy_role_completion_is_untouched_by_the_read_back(
     assert ent.writes == [], "legacy path went through the artifact completion"
     assert [w for w in status_writes if _status_of(w) == "done"]
     assert len(job.finished_events) == 1
+
+
+# ── Round-2 review findings (security, qa, ux) ───────────────────────────────
+#
+# What these looked like RED (each against the code before its fix):
+#
+#     test_foreign_pr_url_with_no_repo_on_the_task_is_never_done
+#         AssertionError: accepted a PR URL for a repo the task never named:
+#         [{'fn': 'complete_task_with_result', ... 'result': '[cicada]
+#         pull_request_link: https://github.com/other-org/other-repo/pull/7'}]
+#
+#     test_non_cicada_role_whose_deliverable_is_a_url_is_done
+#         AssertionError: expected DONE for a prose-contract role whose note
+#         links its PR; got FAILED [ARTIFACT_GATE] wrong_body_for_dispatch
+#
+#     test_bare_eng_spec_section_in_ordered_spec_mode_is_empty_body
+#         AssertionError: a bare ENG_SPEC_SECTION with no content was accepted
+
+
+def test_foreign_pr_url_with_no_repo_on_the_task_is_never_done(
+    writes, spawn, monkeypatch
+):
+    """Security: with no `repo` on the snapshot a full URL for ANY repo passed."""
+    resolves: list[tuple] = []
+    monkeypatch.setattr(
+        apis, "resolve_artifact_ref", lambda *a, **k: resolves.append((a, k)) or True
+    )
+    spawn.result = _SpawnResult(
+        stdout="[cicada] pull_request_link: https://github.com/other-org/other-repo/pull/7\n"
+    )
+    snapshot = _cicada_task()
+    snapshot.pop("repo")
+    notifier = _Notifier()
+    _dispatch("ent_foreign_1", snapshot, notifier=notifier)
+
+    assert resolves == [], "handed the resolver a URL there was no repo to check against"
+    _assert_not_done(writes, "accepted a PR URL for a repo the task never named")
+    failed = _with_status(writes, "failed")
+    assert failed and "[ARTIFACT_GATE] invalid_ref_shape" in failed[-1]["reason"]
+    assert "dispatch_repo" in failed[-1]["reason"]
+    assert notifier.sent
+
+
+def test_pr_url_for_the_tasks_own_repo_is_still_done(writes, spawn, monkeypatch):
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_own_repo_1", _cicada_task())
+    assert [w for w in writes if w.get("fn") == "complete_task_with_result"]
+
+
+def test_non_cicada_role_whose_deliverable_is_a_url_is_done(
+    writes, spawn, job, monkeypatch
+):
+    """QA: a prose-contract role that LINKS its PR was refused as wrong_body."""
+    monkeypatch.setattr(apis, "_resolve_skill", lambda *a, **k: "regulus")
+    monkeypatch.setattr(apis, "_resolve_role", lambda *a, **k: "regulus")
+    resolves: list[tuple] = []
+    monkeypatch.setattr(
+        apis, "resolve_artifact_ref", lambda *a, **k: resolves.append((a, k)) or True
+    )
+    line = f"[regulus] docs_diff_or_no_change_note: {_PR_URL}"
+    spawn.result = _SpawnResult(stdout=line + "\n", skill="regulus")
+    _dispatch("ent_url_prose_1", _cicada_task())
+
+    done = [w for w in writes if w.get("fn") == "complete_task_with_result"]
+    assert done and done[-1]["result"] == line, f"refused a valid deliverable: {writes}"
+    assert not _with_status(writes, "failed")
+    assert resolves == [], "resolved a link for a role with no resolver"
+    assert len(job.finished_events) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [_PR_URL, "https://example.com/report", "a1b2c3d4e5f6", "#42", "ENG_SPEC_SECTION x"],
+)
+def test_non_cicada_role_accepts_any_body_shape(writes, spawn, monkeypatch, body):
+    monkeypatch.setattr(apis, "_resolve_skill", lambda *a, **k: "pavo")
+    monkeypatch.setattr(apis, "_resolve_role", lambda *a, **k: "pavo")
+    line = f"[pavo] acceptance_criteria: {body}"
+    spawn.result = _SpawnResult(stdout=line + "\n", skill="pavo")
+    _dispatch("ent_shape_1", _cicada_task())
+    done = [w for w in writes if w.get("fn") == "complete_task_with_result"]
+    assert done and done[-1]["result"] == line
+
+
+def test_cicada_prose_body_is_still_wrong_body_for_dispatch(writes, spawn):
+    """Cicada keeps its narrowed contract: a sentence is not a PR."""
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: I finished the work\n")
+    _dispatch("ent_cicada_prose_1", _cicada_task())
+    _assert_not_done(writes, "Cicada prose was accepted as a pull request link")
+    failed = _with_status(writes, "failed")
+    assert failed and "wrong_body_for_dispatch" in failed[-1]["reason"]
+
+
+def test_bare_eng_spec_section_in_ordered_spec_mode_is_empty_body(writes, spawn):
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: ENG_SPEC_SECTION\n")
+    _dispatch("ent_bare_spec_1", _cicada_task(dispatch_mode="ordered_spec"))
+    _assert_not_done(writes, "a bare ENG_SPEC_SECTION with no content was accepted")
+    failed = _with_status(writes, "failed")
+    assert failed and "[ARTIFACT_GATE] empty_body" in failed[-1]["reason"]
+
+
+def test_abbreviated_sha_is_refused_even_with_a_repo(writes, spawn, monkeypatch):
+    resolves: list[tuple] = []
+    monkeypatch.setattr(
+        apis, "resolve_artifact_ref", lambda *a, **k: resolves.append((a, k)) or True
+    )
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: a1b2c3d\n")
+    _dispatch("ent_short_sha_1", _cicada_task())
+    assert resolves == []
+    failed = _with_status(writes, "failed")
+    assert failed and "invalid_ref_shape" in failed[-1]["reason"]
+    assert "40-character" in failed[-1]["reason"]
+
+
+def test_full_sha_with_a_repo_is_done(writes, spawn, monkeypatch):
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {'ab' * 20}\n")
+    _dispatch("ent_full_sha_1", _cicada_task())
+    assert [w for w in writes if w.get("fn") == "complete_task_with_result"]
+
+
+def test_agent_blocked_alert_reads_differently_from_a_gate_failure(spawn):
+    blocked_notifier, gate_notifier = _Notifier(), _Notifier()
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: BLOCKED — need repo access\n")
+    _dispatch("ent_alert_1", _cicada_task(), notifier=blocked_notifier)
+    spawn.result = _SpawnResult(stdout="no header at all\n")
+    _dispatch("ent_alert_2", _cicada_task(), notifier=gate_notifier)
+
+    blocked_msg, gate_msg = blocked_notifier.sent[-1], gate_notifier.sent[-1]
+    assert "reports it is BLOCKED" in blocked_msg and "not a gate failure" in blocked_msg
+    assert "need repo access" in blocked_msg
+    assert "ARTIFACT GATE FAILED" not in blocked_msg
+    assert "ARTIFACT GATE FAILED" in gate_msg and "BLOCKED" not in gate_msg
+    assert "Next:" in blocked_msg and "Next:" in gate_msg
+
+
+def test_secrets_in_the_header_and_blocked_body_are_redacted(
+    writes, spawn, monkeypatch
+):
+    """The stored header (and the retained BLOCKED body) is agent output too."""
+    fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+    monkeypatch.setenv("GITHUB_TOKEN", fake_value)
+    monkeypatch.setattr(apis, "_resolve_skill", lambda *a, **k: "regulus")
+    monkeypatch.setattr(apis, "_resolve_role", lambda *a, **k: "regulus")
+    spawn.result = _SpawnResult(
+        stdout=f"[regulus] docs_diff_or_no_change_note: fixed docs, used {fake_value}\n",
+        skill="regulus",
+    )
+    _dispatch("ent_redact_1", _cicada_task())
+    done = [w for w in writes if w.get("fn") == "complete_task_with_result"]
+    assert done and fake_value not in done[-1]["result"], "stored an unredacted header"
+
+    spawn.result = _SpawnResult(
+        stdout=f"[regulus] docs_diff_or_no_change_note: BLOCKED — need {fake_value}\n",
+        skill="regulus",
+    )
+    _dispatch("ent_redact_2", _cicada_task())
+    blocked = _with_status(writes, "blocked")
+    assert blocked and fake_value not in blocked[-1]["reason"], "leaked into BLOCKED reason"
