@@ -1,0 +1,46 @@
+name: pytest env guard
+
+# The guard that keeps host environment values out of pytest output
+# (lib/pytest_env_guard.py, wired from the repo-root conftest.py) is the control
+# for the 2026-09-29 incident, when a failing env-capturing test printed a real
+# host secret into an agent transcript. A control that nothing fails on is
+# documentation, so this lane runs its effect tests:
+#
+#  - on EVERY pull request (no path filter: a change to pytest, to any conftest
+#    or to the guard itself can silently disarm it, and a path list would miss
+#    the change that does), and
+#  - on every push to main, so a guard that broke on main is noticed there too.
+#
+# lib/test_pytest_env_guard.py runs child pytest processes carrying dummy
+# credentials and asserts they never reach the output, including escaped forms,
+# collection errors, warnings and live logging, and asserts the repo-root
+# conftest.py and the apis conftest import every hook the guard provides. The
+# same test file also runs in the `pytest` job of ateles-tests.yml.
+#
+# Required-check registration is a repo-settings action the operator owns; the
+# check name to register is "guard tests" (job below).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: guard tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Run pytest env guard tests
+        run: >-
+          uv run --extra dev python -m pytest
+          lib/test_pytest_env_guard.py
+          execution/scripts/test_run_pytest_hermetic.py
+          -q

@@ -362,9 +362,23 @@ def _child(tmp_path: Path, files: dict, *, with_guard: bool, args=()) -> str:
         MULTI_NAME: MULTI_VALUE,
     }
     done = subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--rootdir", str(tmp_path),
-         "-q", *args, *[str(tmp_path / n) for n in files if n.startswith("test_")]],
-        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=120,
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "--rootdir",
+            str(tmp_path),
+            "-q",
+            *args,
+            *[str(tmp_path / n) for n in files if n.startswith("test_")],
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        timeout=120,
     )
     return done.stdout + done.stderr
 
@@ -377,34 +391,64 @@ def _assert_no_multiline_forms(out: str) -> None:
 
 
 def test_control_escaped_forms_do_leak_without_the_guard(tmp_path):
-    out = _child(tmp_path, {"test_esc.py": _ESCAPE_LEAKS}, with_guard=False, args=("--tb=short", "-vv"))
+    out = _child(
+        tmp_path,
+        {"test_esc.py": _ESCAPE_LEAKS},
+        with_guard=False,
+        args=("--tb=short", "-vv"),
+    )
     assert MULTI_LINES[1] in out or _forms(MULTI_VALUE)["repr_body"] in out
 
 
 def test_guard_redacts_escaped_forms_of_a_multiline_value(tmp_path):
-    out = _child(tmp_path, {"test_esc.py": _ESCAPE_LEAKS}, with_guard=True, args=("--tb=long", "-l", "-vv"))
+    out = _child(
+        tmp_path,
+        {"test_esc.py": _ESCAPE_LEAKS},
+        with_guard=True,
+        args=("--tb=long", "-l", "-vv"),
+    )
     _assert_no_multiline_forms(out)
     assert "3 failed" in out
 
 
 def test_control_collection_errors_do_leak_without_the_guard(tmp_path):
-    out = _child(tmp_path, {"test_collect.py": _COLLECTION_LEAK}, with_guard=False, args=("--tb=short", "-vv"))
+    out = _child(
+        tmp_path,
+        {"test_collect.py": _COLLECTION_LEAK},
+        with_guard=False,
+        args=("--tb=short", "-vv"),
+    )
     assert DUMMY_VALUE in out
 
 
 def test_guard_redacts_collection_errors(tmp_path):
-    out = _child(tmp_path, {"test_collect.py": _COLLECTION_LEAK}, with_guard=True, args=("--tb=long", "-l", "-vv"))
+    out = _child(
+        tmp_path,
+        {"test_collect.py": _COLLECTION_LEAK},
+        with_guard=True,
+        args=("--tb=long", "-l", "-vv"),
+    )
     assert DUMMY_VALUE not in out
     assert "error" in out.lower()
 
 
 def test_control_warnings_and_live_logs_do_leak_without_the_guard(tmp_path):
-    out = _child(tmp_path, {"test_wl.py": _WARNING_AND_LOG_LEAKS}, with_guard=False, args=("--log-cli-level=INFO",))
+    out = _child(
+        tmp_path,
+        {"test_wl.py": _WARNING_AND_LOG_LEAKS},
+        with_guard=False,
+        args=("--log-cli-level=INFO",),
+    )
     assert out.count(DUMMY_VALUE) >= 2
 
 
 def test_guard_redacts_warnings_summary_and_live_logging(tmp_path):
-    out = _child(tmp_path, {"test_wl.py": _WARNING_AND_LOG_LEAKS}, with_guard=True, args=("--log-cli-level=INFO",))
+    out = _child(
+        tmp_path,
+        {"test_wl.py": _WARNING_AND_LOG_LEAKS},
+        with_guard=True,
+        args=("--log-cli-level=INFO",),
+    )
     assert DUMMY_VALUE not in out
     assert "2 passed" in out
 
@@ -451,13 +495,17 @@ def test_withheld_message_names_the_exception_type_but_no_value(monkeypatch):
     assert "KeyError" in report.longrepr and DUMMY_VALUE not in report.longrepr
 
 
-@pytest.mark.parametrize("key", ["author", "authored_by", "oauth_state", "private_repo", "keyword"])
+@pytest.mark.parametrize(
+    "key", ["author", "authored_by", "oauth_state", "private_repo", "keyword"]
+)
 def test_non_credential_keys_are_not_redacted(key):
     text = "{'%s': 'plain-value'}" % key
     assert guard.scrub_text(text, {}) == text
 
 
-@pytest.mark.parametrize("key", ["apiKey", "accessToken", "client_secret", "GH_TOKEN", "api-key", "PAT"])
+@pytest.mark.parametrize(
+    "key", ["apiKey", "accessToken", "client_secret", "GH_TOKEN", "api-key", "PAT"]
+)
 def test_credential_keys_are_redacted_in_quoted_pairs(key):
     out = guard.scrub_text("{'%s': 'plain-value'}" % key, {})
     assert "plain-value" not in out
@@ -476,7 +524,9 @@ def test_unquoted_form_leaves_ordinary_assignments_alone():
 
 
 def _module_from_path(path: Path):
-    spec = importlib.util.spec_from_file_location("_conftest_under_test_" + path.parent.name, path)
+    spec = importlib.util.spec_from_file_location(
+        "_conftest_under_test_" + path.parent.name, path
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -485,20 +535,45 @@ def _module_from_path(path: Path):
 @pytest.mark.parametrize("rel", ["conftest.py", "execution/daemons/apis/conftest.py"])
 def test_conftests_import_every_hook_the_guard_provides(rel):
     mod = _module_from_path(_REPO_ROOT / rel)
-    missing = [n for n in guard.HOOK_NAMES if getattr(mod, n, None) is not getattr(guard, n)]
+    missing = [
+        n for n in guard.HOOK_NAMES if getattr(mod, n, None) is not getattr(guard, n)
+    ]
     assert missing == []
 
 
 def test_the_repo_root_conftest_really_redacts_in_a_child_run():
     """Binding check for the path CI takes: a probe test placed inside the repo
     tree is redacted by the root conftest alone."""
-    with tempfile.TemporaryDirectory(dir=str(_REPO_ROOT / "lib"), prefix="_probe_guard_") as d:
+    with tempfile.TemporaryDirectory(
+        dir=str(_REPO_ROOT / "lib"), prefix="_probe_guard_"
+    ) as d:
         probe = Path(d) / "test_probe.py"
-        probe.write_text("import os\n\ndef test_leaky():\n    assert 'nope' in dict(os.environ)\n")
-        env = {"PATH": "/usr/bin:/bin:/opt/homebrew/bin", "HOME": d, "TMPDIR": d, DUMMY_NAME: DUMMY_VALUE}
+        probe.write_text(
+            "import os\n\ndef test_leaky():\n    assert 'nope' in dict(os.environ)\n"
+        )
+        env = {
+            "PATH": "/usr/bin:/bin:/opt/homebrew/bin",
+            "HOME": d,
+            "TMPDIR": d,
+            DUMMY_NAME: DUMMY_VALUE,
+        }
         done = subprocess.run(
-            [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--tb=long", "-vv", "-q", str(probe)],
-            env=env, capture_output=True, text=True, cwd=str(_REPO_ROOT), timeout=120,
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                "--tb=long",
+                "-vv",
+                "-q",
+                str(probe),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=str(_REPO_ROOT),
+            timeout=120,
         )
     out = done.stdout + done.stderr
     assert done.returncode == 1 and "1 failed" in out

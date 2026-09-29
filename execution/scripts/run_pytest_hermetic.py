@@ -43,6 +43,13 @@ def main(argv) -> int:
         args.append("--tb=line")
     cmd = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args]
     repo_root = Path(__file__).resolve().parents[2]
+    # Say how many host variables were withheld (a COUNT, never names or
+    # values), so a test that fails only because it needed one is diagnosable.
+    dropped = sum(1 for name in os.environ if name not in build_env())
+    print(
+        "run_pytest_hermetic: %d host variables not passed to pytest" % dropped,
+        file=sys.stderr,
+    )
     return subprocess.call(cmd, env=build_env(), cwd=repo_root)
 
 

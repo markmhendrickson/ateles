@@ -20,7 +20,10 @@ for p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 from lib.pytest_env_guard import (  # noqa: E402,F401
     clear_host_env,
     pytest_collection_finish,
+    pytest_configure,
+    pytest_make_collect_report,
     pytest_runtest_makereport,
+    pytest_warning_recorded,
 )
 
 

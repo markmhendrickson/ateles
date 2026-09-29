@@ -32,6 +32,13 @@ on:
       - "execution/daemons/turdus/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
+      # The guard that keeps host environment values out of pytest output, its
+      # effect tests, the repo-root conftest that loads it, and the activity lib
+      # (whose env-bootstrap test was edited with it and had no lane).
+      - "conftest.py"
+      - "lib/pytest_env_guard.py"
+      - "lib/test_pytest_env_guard.py"
+      - "lib/activity/**"
       - "lib/approval/**"
       - "lib/capabilities/**"
       - "lib/transcript_clarity.py"
@@ -78,6 +85,11 @@ jobs:
       # agent that does not exist, for seven weeks, with every test green.
       - name: Check agent roster (no retired agent names)
         run: python3 scripts/linters/check_agent_roster.py
+
+      # The guard for the 2026-09-29 secret-in-transcript incident: runs before
+      # the rest so a broken guard is named first, not buried in a daemon lane.
+      - name: Run pytest env guard tests
+        run: uv run --extra dev python -m pytest lib/test_pytest_env_guard.py lib/activity/ -q
 
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q

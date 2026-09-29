@@ -1858,7 +1858,7 @@ class TestGithubDeliveryCredentialBoundary:
 
         assert result.ok is False
         assert "explicit GitHub credential" in (result.error or "")
-        assert captured_env == {}, "no child process may be spawned on refusal"
+        assert len(captured_env) == 0, "no child process may be spawned on refusal"
         # This is a PREFLIGHT refusal: it must return before the Stage 2
         # "dispatch start" harness_event write, or a refused dispatch leaves
         # an audit row claiming a subprocess started that never did — a
@@ -1900,7 +1900,7 @@ class TestGithubDeliveryCredentialBoundary:
 
         assert result.ok is False
         assert "explicit GitHub credential" in (result.error or "")
-        assert captured_env == {}, "no child process may be spawned on refusal"
+        assert len(captured_env) == 0, "no child process may be spawned on refusal"
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
