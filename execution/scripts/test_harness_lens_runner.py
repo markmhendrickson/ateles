@@ -3685,3 +3685,16 @@ def test_lens_target_task_entity_id_defaults_to_empty_string():
     and skill_runner's idempotency-key string formatting."""
     target = hlr.LensTarget(repo="o/r", pr=1, head=SAMPLE_HEAD, lens="pm", agent="pavo")
     assert target.task_entity_id == ""
+
+
+def test_cli_help_states_dry_run_exit_trap_and_brief_reason(capsys):
+    """The CLI's own --help carries the two facts a caller needs without the
+    runbook or source: a --dry-run refusal exits 0 (so callers must read
+    "ok"), and --brief has no default for a stated reason."""
+    with pytest.raises(SystemExit) as exc:
+        hlr.main(["--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert 'Exits 0 even when the preflight refuses: require "ok": true' in help_text
+    assert "no canonical copy of the brief is checked in" in help_text
+    assert "LENS_BRIEF_PATH comment" not in help_text

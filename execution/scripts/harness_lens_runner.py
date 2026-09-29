@@ -2610,8 +2610,9 @@ def main(argv: list[str] | None = None) -> int:
         "--brief",
         required=True,
         help=(
-            "Path to the shared lens brief markdown file. No default: see "
-            "the LENS_BRIEF_PATH comment above main()'s definitions for why."
+            "Path to the shared lens brief markdown file. Required, with no "
+            "default: no canonical copy of the brief is checked in, and a guessed "
+            "default would silently run a stale or wrong brief."
         ),
     )
     parser.add_argument("--timeout", type=int, default=None)
@@ -2631,7 +2632,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the exact command and prompt size; make no model call.",
+        help=(
+            "Print the exact command and prompt size; make no model call. "
+            "Exits 0 even when the preflight refuses: require \"ok\": true "
+            "in the --json output, not the exit status."
+        ),
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
