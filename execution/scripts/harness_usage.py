@@ -14,7 +14,9 @@ at its reported reset without a hand edit of the headroom file.
     # Codex CLI said "usage limit ... try again at 2026-10-03 20:12":
     harness_usage.py exhausted codex --until 2026-10-03T20:12:00+02:00
 
-    # What selection will use now:
+    # What selection will use now, including any session-window cooling
+    # (a provider that refused with "You've hit your session limit ... resets
+    # 12:30pm" is held out until that reset, whatever its weekly headroom):
     harness_usage.py show
 """
 
@@ -23,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 _APIS_DIR = Path(__file__).resolve().parents[1] / "daemons" / "apis"
@@ -50,6 +53,23 @@ def _parse_window(raw: str) -> dict[str, object]:
             raise argparse.ArgumentTypeError(f"unparseable resets_at in {raw!r}")
         window["resets_at"] = resets_at.strip()
     return window
+
+
+def _cooling_view(provider: str) -> dict[str, object] | None:
+    """The provider's live cooling window, or None when it is not cooled.
+
+    Weekly headroom can read healthy while the 5-hour session window is spent;
+    this is what tells pacing the provider cannot take work until the reset.
+    """
+    cooling = harness_router.persisted_cooling(provider)
+    if cooling is None:
+        return None
+    return {
+        "until": cooling["until_iso"],
+        "until_local": harness_router.render_wall(float(cooling["until"])),
+        "reason": cooling["reason"],
+        "remaining_seconds": max(0, int(float(cooling["until"]) - time.time())),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -87,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
                 provider: {
                     "headroom": values[provider],
                     "live": harness_router.live_headroom(provider),
+                    "cooling": _cooling_view(provider),
+                    "windows": harness_router.usage_windows(provider),
                 }
                 for provider in harness_router.configured_providers()
             },

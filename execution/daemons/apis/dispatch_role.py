@@ -921,6 +921,7 @@ def main(argv: list[str] | None = None) -> int:
             "local_failure": result.local_failure,
             "stdout": result.stdout,
             "stderr": result.stderr,
+            **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
         }
     )
     if not args.json and result.stdout:

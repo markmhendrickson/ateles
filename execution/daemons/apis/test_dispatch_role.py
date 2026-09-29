@@ -957,3 +957,35 @@ def test_fatal_signal_writes_an_envelope_and_dies_by_that_signal(
     env_obj = _json.loads(stdout)
     assert env_obj["ok"] is False
     assert signame in env_obj["reason"]
+
+
+def test_headroom_note_names_a_persisted_cooling_window(tmp_path, monkeypatch) -> None:
+    """The 2026-09-29 log said "cooling: none" while claude's session was spent."""
+    import time
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "absent.json"))
+    harness_router.reset_state()
+    harness_router.record_cooling("claude", time.time() + 3600, reason="session_limit")
+    assert "cooling: claude" in dispatch_role._headroom_note()
+
+
+def test_a_cooled_result_envelope_carries_cooled_until(
+    fake_repo, monkeypatch, capsys
+) -> None:
+    async def _cooled(skill, prompt, **kwargs):
+        return SkillResult(
+            skill, False, None, "", "",
+            error="all eligible subscription-backed harness providers are cooled until 2026-09-29T12:30+02:00",
+            cooled_until="2026-09-29T12:30+02:00",
+        )
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _cooled)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(["--role", "cicada", "--task", "x", "--json"])
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["cooled_until"] == "2026-09-29T12:30+02:00"
+    assert "cooled until" in env["reason"]
