@@ -681,6 +681,7 @@ def main(argv: list[str] | None = None) -> int:
             "error": result.error,
             "stdout": result.stdout,
             "stderr": result.stderr,
+            **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
         }
     )
     if not args.json and result.stdout:

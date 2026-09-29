@@ -43,6 +43,14 @@ without restarting Apis:
     ``APIS_HARNESS_USAGE_MAX_AGE_SECONDS`` (default 21600) whose windows have
     not reset carries no opinion.
 
+    A provider that refused with a session/usage-limit message is also held out
+    by a per-provider ``cooling`` object in the same file, written by
+    ``record_cooling`` (``{"until": ISO, "reason": str, "observed_at": ISO}``).
+    Unlike the process-local ``cool_down`` timer, it survives across the
+    short-lived ``dispatch_role`` processes, and ends at the reset the refusal
+    stated rather than after a flat hour.  It expires on its own; a fresh usage
+    observation or exhaustion report leaves it in force.
+
 ``APIS_HARNESS_MIN_HEADROOM``
     Providers at or below this value are held out.  Default: 0.05.
 
@@ -298,8 +306,18 @@ def configured_headroom(*, now_wall: float | None = None) -> dict[str, float]:
     return result
 
 
-def _write_usage_entry(provider: str, entry: Mapping[str, object]) -> None:
+def _write_usage_entry(
+    provider: str,
+    entry: Mapping[str, object] | None = None,
+    *,
+    update: Mapping[str, object] | None = None,
+) -> None:
     """Read-merge-write one provider's usage entry atomically.
+
+    ``entry`` replaces the provider's observation (usage windows / exhaustion)
+    but keeps its ``cooling`` window, which is a separate fact with its own
+    expiry; ``update`` instead merges keys into the existing entry, leaving the
+    rest as recorded.
 
     Serialized on a sibling lock file so two concurrent recorders cannot each
     read the old snapshot and drop the other's entry; the replace itself is
@@ -310,7 +328,15 @@ def _write_usage_entry(provider: str, entry: Mapping[str, object]) -> None:
     with open(path.with_name(f".{path.name}.lock"), "a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         existing = _read_json_object(path)
-        existing[provider] = dict(entry)
+        current = existing.get(provider)
+        current = current if isinstance(current, dict) else {}
+        if update is not None:
+            merged = {**current, **dict(update)}
+        else:
+            merged = dict(entry or {})
+            if "cooling" in current:
+                merged.setdefault("cooling", current["cooling"])
+        existing[provider] = merged
         fd, tmp_name = tempfile.mkstemp(
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
         )
@@ -391,6 +417,62 @@ def record_exhausted(
     )
 
 
+def record_cooling(
+    provider: str,
+    until: float,
+    *,
+    reason: str,
+    observed_at: float | None = None,
+) -> None:
+    """Persist a cooling window: hold ``provider`` out until wall time ``until``.
+
+    Read by every later selection in any process, so a session-limit refusal in
+    one ``dispatch_role`` run stops the next from spawning the same dead CLI.
+    Other usage facts for the provider (windows, exhaustion) are untouched.
+    """
+    normalized = provider.strip().lower()
+    if normalized not in PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider!r}")
+    _write_usage_entry(
+        normalized,
+        update={
+            "cooling": {
+                "until": _iso_from_wall(until),
+                "reason": reason,
+                "observed_at": _iso_from_wall(
+                    time.time() if observed_at is None else observed_at
+                ),
+            }
+        },
+    )
+
+
+def cooled_until_all(
+    available: Mapping[str, str | None], *, now_wall: float | None = None
+) -> dict[str, dict[str, object]] | None:
+    """Return each provider's cooling window when cooling is why nothing can run.
+
+    ``None`` unless at least one configured provider is otherwise eligible
+    (binary present, headroom above the floor) and EVERY such provider is inside
+    a persisted cooling window.  A provider with no binary or no headroom is not
+    "eligible" and does not turn a cooled-everywhere state into a generic
+    exhaustion; conversely one merely uncooled provider means selection has an
+    answer and this is not the case.
+    """
+    moment = time.time() if now_wall is None else now_wall
+    headroom = configured_headroom(now_wall=moment)
+    minimum = minimum_headroom()
+    windows: dict[str, dict[str, object]] = {}
+    for provider in configured_providers():
+        if not available.get(provider) or headroom[provider] <= minimum:
+            continue
+        cooling = persisted_cooling(provider, now_wall=moment)
+        if cooling is None:
+            return None
+        windows[provider] = cooling
+    return windows or None
+
+
 def minimum_headroom() -> float:
     """Return the configured eligibility floor, normalized to ``0.0..1.0``."""
     try:
@@ -402,6 +484,45 @@ def minimum_headroom() -> float:
         return 0.05
 
 
+COOLED_UNTIL = "cooled until"
+
+
+def persisted_cooling(
+    provider: str, *, now_wall: float | None = None
+) -> dict[str, object] | None:
+    """Return the provider's live cooling window from the usage file, or ``None``.
+
+    A window is live while its ``until`` is in the future; an expired, absent or
+    malformed one is no opinion, so a provider comes back at the reset without
+    any edit.  Keys: ``until`` (epoch), ``until_iso``, ``reason``.
+    """
+    moment = time.time() if now_wall is None else now_wall
+    entry = _read_json_object(_usage_path()).get(provider)
+    cooling = entry.get("cooling") if isinstance(entry, dict) else None
+    if not isinstance(cooling, dict):
+        return None
+    until = _wall_from_iso(cooling.get("until"))
+    if until is None or until <= moment:
+        return None
+    return {
+        "until": until,
+        "until_iso": cooling["until"],
+        "reason": str(cooling.get("reason") or "capacity"),
+    }
+
+
+def usage_windows(provider: str) -> list[dict[str, object]]:
+    """Return the recorded usage windows (session, weekly, ...) for a provider."""
+    entry = _read_json_object(_usage_path()).get(provider)
+    windows = entry.get("windows") if isinstance(entry, dict) else None
+    return [dict(w) for w in windows if isinstance(w, dict)] if isinstance(windows, list) else []
+
+
+def render_wall(wall: float) -> str:
+    """Local-zone ISO-8601 with offset, for messages an operator reads."""
+    return datetime.fromtimestamp(wall).astimezone().isoformat(timespec="minutes")
+
+
 def _provider_exclusion_reason(
     provider: str,
     available: Mapping[str, str | None],
@@ -409,12 +530,16 @@ def _provider_exclusion_reason(
     headroom: Mapping[str, float],
     minimum: float,
     moment: float,
+    moment_wall: float | None = None,
 ) -> str | None:
     """Return why one supported provider is ineligible, or ``None``."""
     if not available.get(provider):
         return "binary unavailable"
     if headroom[provider] <= minimum:
         return f"headroom={headroom[provider]:.3f} is at or below minimum={minimum:.3f}"
+    cooling = persisted_cooling(provider, now_wall=moment_wall)
+    if cooling is not None:
+        return f"{COOLED_UNTIL} {render_wall(float(cooling['until']))} ({cooling['reason']})"
     if _cooldown_until.get(provider, 0.0) > moment:
         return "cooling down"
     return None
@@ -425,6 +550,7 @@ def provider_exclusion_reason(
     available: Mapping[str, str | None],
     *,
     now: float | None = None,
+    now_wall: float | None = None,
 ) -> str | None:
     """Explain why a hard-pinned provider cannot run right now."""
     normalized = provider.strip().lower()
@@ -436,11 +562,15 @@ def provider_exclusion_reason(
         headroom=configured_headroom(),
         minimum=minimum_headroom(),
         moment=time.monotonic() if now is None else now,
+        moment_wall=now_wall,
     )
 
 
 def usable_provider_names(
-    available: Mapping[str, str | None], *, now: float | None = None
+    available: Mapping[str, str | None],
+    *,
+    now: float | None = None,
+    now_wall: float | None = None,
 ) -> set[str]:
     """Return configured providers passing the router's eligibility predicate."""
     moment = time.monotonic() if now is None else now
@@ -455,13 +585,19 @@ def usable_provider_names(
             headroom=headroom,
             minimum=minimum,
             moment=moment,
+            moment_wall=now_wall,
         )
         is None
     }
 
 
 def cool_down(provider: str, *, now: float | None = None) -> None:
-    """Temporarily remove a provider after a cap/auth/launch failure."""
+    """Temporarily remove a provider after a cap/auth/launch failure.
+
+    Process-local: it lasts only as long as this interpreter.  A capacity
+    refusal that states its reset should ALSO be recorded with
+    ``record_cooling`` so the window outlives the process.
+    """
     try:
         duration = max(
             0.0, float(os.environ.get("APIS_HARNESS_COOLDOWN_SECONDS", "3600"))
@@ -477,6 +613,7 @@ def provider_candidates(
     preferred: str | None = None,
     now: float | None = None,
     local_first: bool = False,
+    now_wall: float | None = None,
 ) -> list[str]:
     """Return providers in attempt order, with a smooth weighted first choice.
 
@@ -507,6 +644,7 @@ def provider_candidates(
             headroom=headroom,
             minimum=minimum,
             moment=moment,
+            moment_wall=now_wall,
         )
         is None
     ]
@@ -521,6 +659,7 @@ def provider_candidates(
             headroom=headroom,
             minimum=minimum,
             moment=moment,
+            moment_wall=now_wall,
         )
         is None
     ]
@@ -559,7 +698,17 @@ def reset_state() -> None:
     _cooldown_until.clear()
 
 
-def cooling_providers(*, now: float | None = None) -> set[str]:
-    """Expose active cooldowns for diagnostics without leaking timestamps."""
+def cooling_providers(
+    *, now: float | None = None, now_wall: float | None = None
+) -> set[str]:
+    """Expose active cooldowns (process-local and persisted) for diagnostics."""
     moment = time.monotonic() if now is None else now
-    return {provider for provider, until in _cooldown_until.items() if until > moment}
+    cooling = {
+        provider for provider, until in _cooldown_until.items() if until > moment
+    }
+    cooling.update(
+        provider
+        for provider in PROVIDERS
+        if persisted_cooling(provider, now_wall=now_wall) is not None
+    )
+    return cooling
