@@ -240,6 +240,21 @@ _STARTUP_ENVIRON: dict = dict(os.environ)
 ENV_CHANGED_DURING_COLLECTION: frozenset = frozenset()
 
 
+def discard_startup_env(*names: str) -> None:
+    """Remove ``names`` from the process environment BEFORE the code under test
+    is imported, and from the startup snapshot so ``changed_during_collection``
+    does not mistake the removal for an import-time change.
+
+    For operator-behaviour switches that production code reads at import time
+    (for example a dataclass default evaluated in a class body): a per-test
+    fixture runs too late to keep a host shell's value out of them. Call it
+    from a ``conftest.py`` at import, i.e. before collection imports the code.
+    """
+    for name in names:
+        os.environ.pop(name, None)
+        _STARTUP_ENVIRON.pop(name, None)
+
+
 def changed_during_collection(name: str) -> bool:
     """True if importing the code under test added, removed or altered ``name``
     in the process environment. This is what "did the module-level dotenv

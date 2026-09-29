@@ -19,12 +19,21 @@ for p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 # `pytest_*` name into a conftest registers it as a hook.
 from lib.pytest_env_guard import (  # noqa: E402,F401
     clear_host_env,
+    discard_startup_env,
     pytest_collection_finish,
     pytest_configure,
     pytest_make_collect_report,
     pytest_runtest_makereport,
     pytest_warning_recorded,
 )
+
+
+# Import-time reads: `SwarmDispatcher.require_label` is a dataclass default
+# evaluated when swarm_dispatch is imported (a class-body call to
+# label_gate.required_label()), so a host shell that exports the label-gate
+# switch turns the gate on for every dispatcher a test builds and the per-test
+# fixture below is too late. Drop it before collection imports the daemon.
+discard_startup_env("ATELES_SWARM_REQUIRE_LABEL")
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +90,9 @@ def _isolate_tier_ledger(monkeypatch, tmp_path):
     test run would pollute the per-tier counts the operator paces the weekly
     budget against. Tests that read the ledger set their own path.
     """
-    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "isolated-tier-dispatch.jsonl"))
+    monkeypatch.setenv(
+        "APIS_TIER_LEDGER_FILE", str(tmp_path / "isolated-tier-dispatch.jsonl")
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -95,5 +106,9 @@ def _isolate_tiering_config(monkeypatch, tmp_path):
     exactly this way on the host after the config was installed. Point both at
     absent files; tests that exercise config set their own.
     """
-    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "isolated-action-policy.json"))
-    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "isolated-vendor-binding.json"))
+    monkeypatch.setenv(
+        "APIS_ACTION_POLICY_FILE", str(tmp_path / "isolated-action-policy.json")
+    )
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING_FILE", str(tmp_path / "isolated-vendor-binding.json")
+    )

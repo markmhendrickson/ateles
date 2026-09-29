@@ -578,3 +578,55 @@ def test_the_repo_root_conftest_really_redacts_in_a_child_run():
     out = done.stdout + done.stderr
     assert done.returncode == 1 and "1 failed" in out
     assert DUMMY_VALUE not in out
+
+
+def test_discard_startup_env_keeps_a_host_switch_out_of_import_time_reads(tmp_path):
+    """A conftest that drops a host switch at import: code imported afterwards
+    does not see it, and the drop is not reported as an import-time change."""
+    (tmp_path / "conftest.py").write_text(
+        "import sys\n"
+        "sys.path.insert(0, %r)\n"
+        "from lib.pytest_env_guard import discard_startup_env, pytest_collection_finish  # noqa: F401\n"
+        "discard_startup_env('HOST_SWITCH')\n" % str(_REPO_ROOT)
+    )
+    (tmp_path / "test_probe.py").write_text(
+        textwrap.dedent(
+            """
+            import os
+            from lib.pytest_env_guard import changed_during_collection
+
+            SEEN_AT_IMPORT = os.environ.get("HOST_SWITCH")
+
+            def test_import_time_read_did_not_see_the_host_value():
+                assert SEEN_AT_IMPORT is None
+
+            def test_the_drop_is_not_an_import_time_change():
+                assert not changed_during_collection("HOST_SWITCH")
+            """
+        )
+    )
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "--rootdir",
+            str(tmp_path),
+            "--tb=line",
+            "-q",
+            str(tmp_path / "test_probe.py"),
+        ],
+        env={
+            "PATH": "/usr/bin:/bin:/opt/homebrew/bin",
+            "HOME": str(tmp_path),
+            "TMPDIR": str(tmp_path),
+            "HOST_SWITCH": "exported-by-host-shell",
+        },
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        timeout=120,
+    )
+    assert done.returncode == 0 and "2 passed" in done.stdout
