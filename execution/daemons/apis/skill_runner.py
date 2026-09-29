@@ -3537,15 +3537,18 @@ async def _run_provider_attempts(
             return result
         if local_failure and selected != local_provider.LOCAL_PROVIDER:
             result.local_failure = local_failure
-        # A successful zero-exit harness may carry its prompt, transcript, or
-        # verdict on stderr. Once the adapter has established success and the
-        # delivery checks above found no denial, those streams are result
-        # content rather than provider diagnostics. Genuine provider failures
-        # remain classified from every stream on the non-success path.
-        failure_kind = _provider_failure_kind(
-            result.error,
-            result.stderr,
-            result.stdout if not result.ok else "",
+        # ONE success-path rule: a zero-exit result is never stream-classified.
+        # A successful harness may carry its prompt, transcript, or verdict on
+        # stderr (a Codex review always does), and that prose can legitimately
+        # quote "usage limit" or "quota exceeded". Once the adapter has
+        # established success and the delivery checks above found no denial,
+        # those streams are result content rather than provider diagnostics.
+        # On the non-success path every stream (error, stderr, stdout) is
+        # classified, as before.
+        failure_kind = (
+            None
+            if result.ok
+            else _provider_failure_kind(result.error, result.stderr, result.stdout)
         )
         launch_failure = result.error.startswith(f"{selected} launch failed:")
 

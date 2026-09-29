@@ -12,19 +12,35 @@ Covers only the headroom-restore step for `execution/daemons/apis/harness_router
 read it (`dispatch_role.py`, `execution/scripts/harness_lens_runner.py`). It does not cover provisioning new
 provider credentials, changing `APIS_HARNESS_PROVIDERS`, or any other harness configuration.
 
-## What this file governs
+## What this file governs (and what outranks it)
 
-`execution/daemons/apis/harness_router.py` reads headroom through
-`configured_headroom()` to decide whether Claude, Codex, or Cursor is eligible
-for the NEXT dispatch — including a lens review run through
+`execution/daemons/apis/harness_router.py` resolves each provider's headroom
+through `configured_headroom()` to decide whether Claude, Codex, or Cursor is
+eligible for the NEXT dispatch — including a lens review run through
 `execution/scripts/harness_lens_runner.py` and
-`execution/daemons/apis/dispatch_role.py`. A valid configured file is the first
-source; `APIS_HARNESS_HEADROOM` is consulted only when that file is absent,
-unreadable, malformed, or not a JSON object. The default file is
-`~/.config/ateles/harness-headroom.json`, and
-`APIS_HARNESS_HEADROOM_FILE` selects a different file path.
+`execution/daemons/apis/dispatch_role.py`. The value is NOT read from this file
+alone. Per provider, the first of these that applies wins:
 
-Each provider value must be a bare JSON number from `0.0` through `1.0`:
+1. **A manual or dated override object** in the file (or
+   `APIS_HARNESS_HEADROOM`): an entry with `"cooldown_reason": "manual"`, or
+   with a `cooldown_until` still in the future. It beats everything below,
+   including the live usage snapshot.
+2. **The live usage snapshot** (`~/.config/ateles/harness-usage.json`, or
+   `APIS_HARNESS_USAGE_FILE`), when it has an opinion. A live `0.0` (the
+   provider reported exhausted) is never outvoted by a hand-set number. A live
+   reading also supersedes an undated override that was written before the
+   snapshot's observation.
+3. **An undated override**: a bare JSON number, or an object without
+   `cooldown_until`. The file is the first source; `APIS_HARNESS_HEADROOM` is
+   consulted only when the file is absent, unreadable, malformed, or not a JSON
+   object.
+4. **The default `1.0`.**
+
+An override whose `cooldown_until` has passed is ignored. The default file is
+`~/.config/ateles/harness-headroom.json`, and `APIS_HARNESS_HEADROOM_FILE`
+selects a different file path.
+
+Bare numbers from `0.0` through `1.0` are the normal form:
 
 ```json
 {
@@ -34,11 +50,19 @@ Each provider value must be a bare JSON number from `0.0` through `1.0`:
 }
 ```
 
-Missing or non-numeric provider values — including objects with a nested
-`headroom` field — resolve to the default `1.0`; object-shaped cooldown records
-are not part of this file's contract. `harness_lens_runner.check_headroom()`
-refuses a dispatch outright when the resolved value is exactly `0.0`, which is
-the operator-reset signal this runbook is about.
+Non-numeric provider values resolve to `1.0`. Object entries with a nested
+`headroom` field are read (rule 1 or 3 above, depending on their
+`cooldown_reason` / `cooldown_until`).
+
+**What a bare `1.0` edit can and cannot do.** Editing a bare number to `1.0`
+overrides an older undated `0.0` and the default. It CANNOT override (a) a
+manual or future-dated override object still present for that provider, or (b)
+a live usage snapshot that still reports the provider exhausted. When either
+applies, the edit takes no effect and the refusal will say which source won.
+
+`harness_lens_runner.check_headroom()` refuses a dispatch outright when the
+resolved value is exactly `0.0`, which is the operator-reset signal this
+runbook is about, and its refusal names the source that produced the zero.
 
 ## Hard rule: this PR does not touch the file
 
@@ -101,15 +125,33 @@ cat ~/.config/ateles/harness-headroom.json
 python3 -c "
 import sys
 sys.path.insert(0, 'execution/daemons/apis')
-from harness_router import configured_headroom
-print(configured_headroom())
+from harness_router import headroom_resolution
+for provider, (value, source) in headroom_resolution().items():
+    print(provider, value, source)
 "
 ```
 
-`configured_headroom()` must report the restored values. It takes the first
-valid JSON object from (file, environment), in that order, so a valid file
-overrides `APIS_HARNESS_HEADROOM`; the environment is only a fallback. See
-`dispatch_role._headroom_note()`, which names the source that won.
+Each line prints the resolved value AND the source that produced it:
+`manual_override`, `dated_cooldown_override`, `live_usage_snapshot`,
+`undated_override`, or `default`. After restoring Codex the Codex line must
+show `1.0` with source `undated_override` (or `default`, if you removed its
+entry). A `0.0` with any other source means the edit did not take: go to
+"Refusal survives the edit" below. `dispatch_role._headroom_note()` prints the
+resolved values, and which files are in play, at the start of every dispatch.
+
+## Refusal survives the edit
+
+The refusal from `harness_lens_runner.py` names the winning source. Match it:
+
+| Source named | Why the edit did not take | What clears it |
+|---|---|---|
+| `LIVE USAGE SNAPSHOT` | The usage snapshot still records the provider as exhausted, and a live `0.0` is never outvoted by a hand-set number. | Nothing in the headroom file. The provider's reported reset must pass and a fresh usage observation must be recorded. Diagnose with `python3 -c "import sys; sys.path.insert(0, 'execution/daemons/apis'); import harness_router as h; print(h.live_headroom('codex'))"` (`None` means the snapshot has no opinion; `0.0` means it does). |
+| `MANUAL override object` | An entry with `"cooldown_reason": "manual"` is still in the file (or `APIS_HARNESS_HEADROOM`). | The operator removes or replaces that whole entry; changing a nearby number is not enough. |
+| `override object with a FUTURE cooldown_until` | A dated cooldown is still in force. | It expires on its own at that time, or the operator removes or replaces the entry. |
+| the override file or `APIS_HARNESS_HEADROOM` | An undated zero is still there, or the file you edited is not the one in use (`APIS_HARNESS_HEADROOM_FILE` selects another path; an invalid file falls through to the variable). | Edit the named source. |
+
+Never loop on re-editing the file when the refusal names the live snapshot or
+an override object.
 
 ## After restoring: the first live test
 
@@ -130,8 +172,9 @@ python3 execution/scripts/harness_lens_runner.py \
 when the lens is in that registry; pass it explicitly only for a lens outside
 it.)
 
-A `HeadroomExhausted` refusal here means the file was not actually restored
-(or the selected file path differs from the one edited) — fix that before
+A `HeadroomExhausted` refusal here names the source that produced the zero
+(see "Refusal survives the edit" above): it may be the file, but it may equally
+be the live usage snapshot or an override object — fix that source before
 spending the first real model call. Authentication and sandbox-guard refusals
 use the same JSON contract: `"ok": false` with a concrete `"reason"`. The CLI
 intentionally exits zero for a cleanly reported `--dry-run` refusal, so

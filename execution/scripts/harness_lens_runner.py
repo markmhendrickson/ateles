@@ -248,6 +248,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -263,7 +264,8 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
 
 # noqa: E402 — path bootstrap above must run first
 import dispatch_role  # noqa: E402
-from harness_router import configured_headroom  # noqa: E402
+import harness_router  # noqa: E402
+from harness_router import headroom_resolution  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
@@ -299,6 +301,107 @@ _RECOVERABLE_LOCAL_VERDICT_DELIVERY_DENIALS = frozenset(
 )
 _POST_VERDICT_ATTEMPTS = 3
 
+# A lens verdict is a few KiB of markdown. The cap bounds what an untrusted
+# child can make the unsandboxed parent read into memory and print.
+MAX_VERDICT_BYTES = 256 * 1024
+
+
+# ── Reading the child-writable verdict path ------------------------------------
+
+
+@dataclass(frozen=True)
+class LocalVerdictRead:
+    """Outcome of reading the local verdict file.
+
+    ``text is None and not refusal`` means the file is absent (the caller may
+    fall back to the child's stdout). ``refusal`` non-empty means something
+    was there and was NOT a trustworthy verdict file; the run must refuse.
+    """
+
+    text: str | None
+    refusal: str = ""
+
+
+def read_local_verdict(
+    path: Path, *, max_bytes: int = MAX_VERDICT_BYTES
+) -> LocalVerdictRead:
+    """Read the verdict file the sandboxed child was allowed to write.
+
+    The verdict path is the one path the sandbox profile lets the child write,
+    and this parent runs UNSANDBOXED, so a plain ``read_text`` is a confused
+    deputy: a child that plants a symlink there makes the parent read a file
+    the child itself is denied. Open with ``O_NOFOLLOW`` (a symlink, dangling
+    or not, is refused), then judge the OPEN descriptor (no path re-resolution
+    between check and read): it must be a regular file, owned by this user,
+    with a single link (a hard link to a protected file is refused), and no
+    larger than ``max_bytes``. ``O_NONBLOCK`` keeps a planted FIFO from
+    blocking the open. Content must be strict UTF-8.
+    """
+    flags = (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | os.O_NONBLOCK
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return LocalVerdictRead(None)
+    except OSError as exc:
+        return LocalVerdictRead(
+            None,
+            f"local verdict path {path} could not be opened safely "
+            f"({type(exc).__name__}: {exc.strerror or exc}); a symlink or "
+            "special file at that path is refused",
+        )
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return LocalVerdictRead(
+                None, f"local verdict path {path} is not a regular file"
+            )
+        if info.st_nlink != 1:
+            return LocalVerdictRead(
+                None,
+                f"local verdict path {path} has {info.st_nlink} hard links; "
+                "expected exactly one",
+            )
+        if info.st_uid != os.geteuid():
+            return LocalVerdictRead(
+                None, f"local verdict path {path} is not owned by this user"
+            )
+        if info.st_size > max_bytes:
+            return LocalVerdictRead(
+                None,
+                f"local verdict file is {info.st_size} bytes, over the "
+                f"{max_bytes}-byte cap",
+            )
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+    except OSError as exc:
+        return LocalVerdictRead(
+            None, f"local verdict file could not be read: {exc}"
+        )
+    finally:
+        os.close(fd)
+    if len(data) > max_bytes:
+        return LocalVerdictRead(
+            None, f"local verdict file exceeds the {max_bytes}-byte cap"
+        )
+    try:
+        return LocalVerdictRead(data.decode("utf-8"))
+    except UnicodeDecodeError:
+        return LocalVerdictRead(
+            None, "local verdict file is not valid UTF-8; refusing to parse it"
+        )
+
 
 # ── Headroom -------------------------------------------------------------------
 
@@ -307,28 +410,82 @@ class HeadroomExhausted(RuntimeError):
     """Raised when the requested provider's configured headroom is 0."""
 
 
+def _headroom_refusal(provider: str, value: float, source: str) -> str:
+    """Refusal text that names the headroom source that WON, and its remedy.
+
+    ``harness_router.headroom_resolution`` resolves precedence (manual or dated
+    override, then the live usage snapshot, then an undated override, then
+    1.0). A ``0.0`` can come from any of them, and only the undated override is
+    fixed by editing the headroom file, so the message must say which one it
+    was rather than always sending the operator back to the file.
+    """
+    head = f"provider {provider!r} has headroom={value:g} — refusing to dispatch."
+    override_file = harness_router._headroom_path()
+    usage_file = harness_router._usage_path()
+    origin = harness_router.headroom_override_origin()
+    where = (
+        f"the override file {override_file}"
+        if origin != "env"
+        else "the APIS_HARNESS_HEADROOM variable (no valid "
+        f"override file at {override_file})"
+    )
+    if source == harness_router.HEADROOM_SOURCE_LIVE_USAGE:
+        return (
+            f"{head} Source: the LIVE USAGE SNAPSHOT ({usage_file}), which "
+            "reports this provider exhausted. A hand-set value in "
+            f"{where} cannot override a live 0.0, so editing it will not "
+            "restore this provider. Wait for the provider's reported reset "
+            "(the snapshot refreshes on the next usage observation), then "
+            "re-run. To see the snapshot's opinion, run: python3 -c "
+            "\"import sys; sys.path.insert(0, 'execution/daemons/apis'); "
+            f"import harness_router as h; print(h.live_headroom('{provider}'))\""
+            ". See docs/runbooks/harness-headroom-restore.md, 'Refusal "
+            "survives the edit'."
+        )
+    if source == harness_router.HEADROOM_SOURCE_MANUAL_OVERRIDE:
+        return (
+            f"{head} Source: a MANUAL override object "
+            '(cooldown_reason "manual") for this provider in '
+            f"{where}. It stays in force until that entry is removed or "
+            "replaced; a bare number is not enough while the object is "
+            "present. Operator-owned; this script never edits it."
+        )
+    if source == harness_router.HEADROOM_SOURCE_DATED_OVERRIDE:
+        return (
+            f"{head} Source: an override object with a FUTURE cooldown_until "
+            f"in {where}. It stops blocking at that time on its own; to "
+            "restore earlier, the operator removes or replaces that entry. "
+            "This script never edits it."
+        )
+    return (
+        f"{head} Source: {where}. This is the operator-reset gate: headroom "
+        "is restored by editing that source to a non-zero value "
+        "(operator- or session-owned, see the PR body's 'Headroom' section), "
+        "never by this script. If the value there is already non-zero and "
+        "this still refuses, another source won: see "
+        "docs/runbooks/harness-headroom-restore.md, 'Refusal survives the "
+        "edit'."
+    )
+
+
 def check_headroom(provider: str) -> float:
     """Return the provider's configured headroom, raising if it is exactly 0.
 
-    Reads the SAME file/env precedence ``harness_router.configured_headroom``
-    already implements (file beats env; see that module's docstring) — this
-    function adds no second source of truth, it only turns "0.0" into a loud,
-    named refusal instead of a routing failure discovered three steps later.
-    A provider sitting above 0 but below ``APIS_HARNESS_MIN_HEADROOM`` is left
-    to the router's own eligibility check (``harness_router.provider_candidates``),
+    Uses ``harness_router.headroom_resolution`` — the SAME precedence the router
+    applies to dispatch (override object, live usage snapshot, undated
+    override, default) — so this function adds no second source of truth. It
+    only turns "0.0" into a loud, named refusal that says WHICH source won,
+    instead of a routing failure discovered three steps later. A provider
+    sitting above 0 but below ``APIS_HARNESS_MIN_HEADROOM`` is left to the
+    router's own eligibility check (``harness_router.provider_candidates``),
     which already refuses it with a specific reason; this function only
     special-cases the exact-zero operator-reset signal named in the task.
     """
-    headroom = configured_headroom()
-    value = headroom.get(provider, 1.0)
+    value, source = headroom_resolution().get(
+        provider, (1.0, harness_router.HEADROOM_SOURCE_DEFAULT)
+    )
     if value <= 0.0:
-        raise HeadroomExhausted(
-            f"provider {provider!r} has headroom={value:g} — refusing to "
-            "dispatch. This is the operator-reset gate: headroom is restored "
-            "by editing ~/.config/ateles/harness-headroom.json (operator- or "
-            "session-owned, see the PR body's 'Headroom' section), never by "
-            "this script."
-        )
+        raise HeadroomExhausted(_headroom_refusal(provider, value, source))
     return value
 
 
@@ -1772,6 +1929,9 @@ _REVIEW_MARKER_RE = re.compile(
 )
 
 
+_ECHO_LINE_CAP = 300
+
+
 @dataclass
 class VerdictCheck:
     """Result of validating a captured verdict file before any post."""
@@ -1798,13 +1958,28 @@ def validate_verdict(
     weaker parallel check this script invents.
     """
     lines = verdict_text.splitlines()
+    marker = _REVIEW_MARKER_RE.fullmatch(lines[0]) if lines else None
+
+    def _echo(index: int) -> str:
+        """Echo a leading line back into the report only when it is safe.
+
+        The verdict file is child-written, untrusted text, and this report is
+        printed to the invoking session. Nothing is echoed unless line 1 is a
+        strict review marker (a fixed-shape line that cannot carry arbitrary
+        content); lines 2 and 3 are then echoed capped, so the operator can
+        still see why the reader rejected a well-formed-looking verdict.
+        """
+        line = lines[index] if len(lines) > index else ""
+        if marker is None and line:
+            return f"<withheld: {len(line)} chars, verdict marker not valid>"
+        return line[:_ECHO_LINE_CAP]
+
     pre_post = {
-        "line1": lines[0] if len(lines) > 0 else "",
-        "line2": lines[1] if len(lines) > 1 else "",
-        "line3": lines[2] if len(lines) > 2 else "",
+        "line1": _echo(0),
+        "line2": _echo(1),
+        "line3": _echo(2),
         "blocking_count": verdict_text.count("[BLOCKING]"),
     }
-    marker = _REVIEW_MARKER_RE.fullmatch(pre_post["line1"])
     observed = {
         "marker": pre_post["line1"],
         "lens": marker.group("lens") if marker else None,
@@ -2379,8 +2554,26 @@ async def run_one(
                 "posted": False,
             }
 
+        # Read the child-writable verdict path ONCE, through the hardened
+        # reader (no symlink follow, regular file we own, single link, size
+        # cap, strict UTF-8). Anything else at that path is refused, on the
+        # recovery path and the ordinary path alike.
+        local_verdict = read_local_verdict(verdict_path)
+        if local_verdict.refusal:
+            reason = local_verdict.refusal
+            return {
+                "ok": False,
+                "provider": provider,
+                "reason": reason,
+                "refusal_reason": reason,
+                "attempted_providers": list(result.attempted_providers),
+                "stderr": result.stderr,
+                "dispatch_diagnostics": _dispatch_diagnostics(result),
+                "posted": False,
+            }
+
         if not result.ok:
-            if not verdict_path.is_file():
+            if local_verdict.text is None:
                 reason = (
                     f"{result.error}; expected local verdict file was not produced "
                     f"at {verdict_path} — refusing network-delivery recovery"
@@ -2397,24 +2590,9 @@ async def run_one(
                 }
             delivery_denial_recovered = True
 
-        try:
-            verdict_text = (
-                verdict_path.read_text(encoding="utf-8")
-                if verdict_path.is_file()
-                else result.stdout
-            )
-        except (OSError, UnicodeError) as exc:
-            reason = f"local verdict file could not be read: {exc}"
-            return {
-                "ok": False,
-                "provider": provider,
-                "reason": reason,
-                "refusal_reason": reason,
-                "attempted_providers": list(result.attempted_providers),
-                "stderr": result.stderr,
-                "dispatch_diagnostics": _dispatch_diagnostics(result),
-                "posted": False,
-            }
+        verdict_text = (
+            local_verdict.text if local_verdict.text is not None else result.stdout
+        )
         check = validate_verdict(
             verdict_text,
             lens_agent=target.agent,
@@ -2431,7 +2609,12 @@ async def run_one(
             "sign_off_warranted": check.sign_off_warranted,
             "pre_post": check.pre_post,
             "artifact_binding": check.artifact_binding,
-            "verdict_text": verdict_text,
+            # Unvalidated child output is never echoed: this report is printed
+            # to the invoking session, and a verdict that fails validation is
+            # untrusted text (it may carry anything the child could read).
+            "verdict_text": verdict_text if check.ok else "",
+            "verdict_text_withheld": not check.ok,
+            "verdict_chars": len(verdict_text),
             "posted": False,
             "comment_url": "",
             "delivery_status": "not_attempted",

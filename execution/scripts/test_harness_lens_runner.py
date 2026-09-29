@@ -263,7 +263,99 @@ def test_check_headroom_refuses_at_exact_zero(monkeypatch):
     with pytest.raises(hlr.HeadroomExhausted) as exc:
         hlr.check_headroom("codex")
     assert "codex" in str(exc.value)
-    assert "harness-headroom.json" in str(exc.value)
+    # Source is the env layer (no valid file), and the message says so.
+    assert "APIS_HARNESS_HEADROOM" in str(exc.value)
+    assert "override file" in str(exc.value) or "variable" in str(exc.value)
+
+
+def _write_json(path, payload):
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _iso(offset_seconds: float) -> str:
+    import datetime as _dt
+
+    return (
+        _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=offset_seconds)
+    ).isoformat()
+
+
+def test_refusal_names_live_usage_snapshot_when_it_outvotes_a_file_edit(
+    monkeypatch, tmp_path
+):
+    """The operator sets codex to 1.0 in the file, but the live usage snapshot
+    still records Codex as exhausted: a live 0.0 is never outvoted by a
+    hand-set number. The refusal must name the SNAPSHOT as the winner and must
+    NOT send the operator back to edit the file (that edit cannot take
+    effect)."""
+    headroom_file = _write_json(
+        tmp_path / "harness-headroom.json", {"codex": 1.0}
+    )
+    usage_file = _write_json(
+        tmp_path / "harness-usage.json",
+        {
+            "codex": {
+                "exhausted_until": _iso(3600),
+                "observed_at": _iso(60),
+            }
+        },
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(headroom_file))
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(usage_file))
+    with pytest.raises(hlr.HeadroomExhausted) as exc:
+        hlr.check_headroom("codex")
+    message = str(exc.value)
+    assert "LIVE USAGE SNAPSHOT" in message
+    assert str(usage_file) in message
+    assert "cannot override a live 0.0" in message
+    assert "live_headroom('codex')" in message
+    assert "operator-reset gate" not in message
+
+
+def test_refusal_names_manual_override_object(monkeypatch, tmp_path):
+    headroom_file = _write_json(
+        tmp_path / "harness-headroom.json",
+        {"codex": {"headroom": 0.0, "cooldown_reason": "manual"}},
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(headroom_file))
+    with pytest.raises(hlr.HeadroomExhausted) as exc:
+        hlr.check_headroom("codex")
+    message = str(exc.value)
+    assert "MANUAL override object" in message
+    assert "a bare number is not enough" in message
+    assert str(headroom_file) in message
+
+
+def test_refusal_names_dated_cooldown_override(monkeypatch, tmp_path):
+    headroom_file = _write_json(
+        tmp_path / "harness-headroom.json",
+        {"codex": {"headroom": 0.0, "cooldown_until": _iso(3600)}},
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(headroom_file))
+    with pytest.raises(hlr.HeadroomExhausted) as exc:
+        hlr.check_headroom("codex")
+    assert "FUTURE cooldown_until" in str(exc.value)
+
+
+def test_refusal_for_undated_file_zero_names_the_file(monkeypatch, tmp_path):
+    headroom_file = _write_json(tmp_path / "harness-headroom.json", {"codex": 0.0})
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(headroom_file))
+    with pytest.raises(hlr.HeadroomExhausted) as exc:
+        hlr.check_headroom("codex")
+    message = str(exc.value)
+    assert f"the override file {headroom_file}" in message
+    assert "operator-reset gate" in message
+
+
+def test_restoring_the_file_clears_the_refusal_when_no_live_zero(
+    monkeypatch, tmp_path
+):
+    """The other half of the contract: with no live exhaustion, a 1.0 file edit
+    is honoured (the runbook's happy path still works)."""
+    headroom_file = _write_json(tmp_path / "harness-headroom.json", {"codex": 1.0})
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(headroom_file))
+    assert hlr.check_headroom("codex") == 1.0
 
 
 def test_run_one_refuses_before_any_worktree_when_headroom_zero(
@@ -1736,6 +1828,160 @@ def test_network_delivery_denial_with_valid_local_verdict_reaches_parent_gate(
     assert report["delivery_denial_recovered"] is True
     assert report["lens_verdict"] == "signed_off"
     assert head_checks == [{"repo": target.repo, "pr": target.pr}]
+
+
+# ── Confused-deputy read of the child-writable verdict path ------------------------
+#
+# The verdict path is the one path the sandbox lets the child write; the
+# unsandboxed parent then reads it. A child (or a prompt-injected model) can
+# plant a symlink, hard link, FIFO, or an enormous file there. The parent must
+# refuse anything that is not a small regular file it owns, and must never put
+# unvalidated verdict text into the report it prints.
+
+CANARY = "FIXTURE-CANARY-NOT-A-REAL-SECRET-7f3a"
+
+
+def _run_with_planted_verdict(
+    monkeypatch, tmp_path, target, brief_file, plant, *, recoverable=False
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    secret = tmp_path / "outside_secret.txt"
+    secret.write_text(CANARY + "\n", encoding="utf-8")
+
+    async def _dispatch(role, task, **kwargs):
+        verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
+        plant(verdict_path, secret)
+        if recoverable:
+            return await _delivery_denied_dispatch(target, verdict_text=None)(
+                role, task, **kwargs
+            )
+        return SkillResult(role, True, 0, "", "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+
+    import asyncio
+
+    return asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+
+def _plant_symlink(verdict_path, secret):
+    verdict_path.symlink_to(secret)
+
+
+def _plant_dangling_symlink(verdict_path, secret):
+    verdict_path.symlink_to(secret.parent / "does-not-exist")
+
+
+def _plant_hardlink(verdict_path, secret):
+    os.link(secret, verdict_path)
+
+
+def _plant_fifo(verdict_path, secret):
+    os.mkfifo(verdict_path)
+
+
+def _plant_oversized(verdict_path, secret):
+    verdict_path.write_text(
+        CANARY + "\n" + "x" * (hlr.MAX_VERDICT_BYTES + 1), encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("recoverable", [False, True])
+@pytest.mark.parametrize(
+    "plant",
+    [
+        _plant_symlink,
+        _plant_dangling_symlink,
+        _plant_hardlink,
+        _plant_fifo,
+        _plant_oversized,
+    ],
+    ids=["symlink", "dangling_symlink", "hardlink", "fifo", "oversized"],
+)
+def test_planted_verdict_path_is_refused_and_never_reaches_the_report(
+    monkeypatch,
+    tmp_path,
+    target,
+    brief_file,
+    mock_ready_sandbox,
+    plant,
+    recoverable,
+):
+    report = _run_with_planted_verdict(
+        monkeypatch, tmp_path, target, brief_file, plant, recoverable=recoverable
+    )
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert report.get("refusal_reason")
+    assert CANARY not in json.dumps(report, default=str)
+
+
+def test_regular_verdict_still_read_after_hardening(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    def _plant(verdict_path, secret):
+        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
+
+    report = _run_with_planted_verdict(
+        monkeypatch, tmp_path, target, brief_file, _plant
+    )
+    assert report["ok"] is True
+    assert report["verdict_text"] == SIGNED_OFF_VERDICT
+
+
+def test_read_local_verdict_reports_absent_without_error(tmp_path):
+    read = hlr.read_local_verdict(tmp_path / "missing.md")
+    assert read.text is None
+    assert read.refusal == ""
+
+
+def test_read_local_verdict_refuses_a_file_we_do_not_own(monkeypatch, tmp_path):
+    path = tmp_path / "verdict.md"
+    path.write_text("body\n", encoding="utf-8")
+    real_uid = os.geteuid()
+    monkeypatch.setattr(hlr.os, "geteuid", lambda: real_uid + 1)
+    read = hlr.read_local_verdict(path)
+    assert read.text is None
+    assert "owned" in read.refusal
+
+
+def test_read_local_verdict_refuses_invalid_utf8(tmp_path):
+    path = tmp_path / "verdict.md"
+    path.write_bytes(b"\xff\xfe\xfa not utf8")
+    read = hlr.read_local_verdict(path)
+    assert read.text is None
+    assert "UTF-8" in read.refusal
+
+
+def test_invalid_verdict_text_is_withheld_from_the_report(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    """A regular file that fails validation is untrusted child output: it must
+    not be echoed to stdout via the report."""
+
+    def _plant(verdict_path, secret):
+        verdict_path.write_text(f"not a verdict {CANARY}\n", encoding="utf-8")
+
+    report = _run_with_planted_verdict(
+        monkeypatch, tmp_path, target, brief_file, _plant
+    )
+    assert report["ok"] is False
+    assert report.get("refusal_reason")
+    assert CANARY not in json.dumps(report, default=str)
+    assert report["verdict_text"] == ""
+    assert report["verdict_text_withheld"] is True
 
 
 def test_router_preserved_delivery_denial_reaches_parent_gate(

@@ -150,11 +150,23 @@ def _read_json_object(path: Path) -> dict[str, object]:
 
 
 def _override_values() -> tuple[Mapping[str, object], float | None]:
-    """Return the operator override layer and the file's write time.
+    """Return the operator override layer and the file's write time."""
+    overrides, written_at, _origin = _override_layer()
+    return overrides, written_at
+
+
+def headroom_override_origin() -> str:
+    """Which override source is in force: ``"file"``, ``"env"``, or ``"none"``."""
+    return _override_layer()[2]
+
+
+def _override_layer() -> tuple[Mapping[str, object], float | None, str]:
+    """Return the operator override layer, the file's write time, and its origin.
 
     File first, then ``APIS_HARNESS_HEADROOM``: the first that parses wins, as
     before.  The write time is ``None`` for the env source, which no live
-    observation supersedes.
+    observation supersedes.  The origin is ``"file"``, ``"env"``, or ``"none"``
+    (no override layer parsed), so a refusal can name where a value came from.
     """
     headroom_path = _headroom_path()
     file_raw = ""
@@ -166,7 +178,10 @@ def _override_values() -> tuple[Mapping[str, object], float | None]:
         except OSError:
             pass
     env_raw = os.environ.get("APIS_HARNESS_HEADROOM", "").strip()
-    for raw, written_at in ((file_raw, file_mtime), (env_raw, None)):
+    for raw, written_at, origin in (
+        (file_raw, file_mtime, "file"),
+        (env_raw, None, "env"),
+    ):
         if not raw:
             continue
         try:
@@ -174,8 +189,8 @@ def _override_values() -> tuple[Mapping[str, object], float | None]:
         except (TypeError, ValueError):
             continue
         if isinstance(parsed, dict):
-            return parsed, written_at
-    return {}, None
+            return parsed, written_at, origin
+    return {}, None, "none"
 
 
 def live_headroom(provider: str, *, now_wall: float | None = None) -> float | None:
@@ -239,29 +254,34 @@ def _live_observed_at(provider: str) -> float | None:
     return _wall_from_iso(entry.get("observed_at"))
 
 
-def configured_headroom(*, now_wall: float | None = None) -> dict[str, float]:
-    """Return normalized per-provider bundled-plan headroom estimates.
+# Where a provider's resolved headroom came from.  These name the four
+# precedence tiers ``configured_headroom`` documents, so a caller that refuses
+# on a ``0.0`` can point the operator at the source that actually won instead
+# of guessing (the override file is not always the winner).
+HEADROOM_SOURCE_MANUAL_OVERRIDE = "manual_override"
+HEADROOM_SOURCE_DATED_OVERRIDE = "dated_cooldown_override"
+HEADROOM_SOURCE_LIVE_USAGE = "live_usage_snapshot"
+HEADROOM_SOURCE_UNDATED_OVERRIDE = "undated_override"
+HEADROOM_SOURCE_DEFAULT = "default"
 
-    Precedence per provider:
 
-    1. An override object with ``cooldown_reason: "manual"``, or with a
-       ``cooldown_until`` still in the future.
-    2. The live usage snapshot (``live_headroom``), when it has an opinion and
-       any undated override was written before that observation.
-    3. An undated override (bare number, or object without
-       ``cooldown_until``) from the file or ``APIS_HARNESS_HEADROOM``.
-    4. ``1.0``.
+def headroom_resolution(
+    *, now_wall: float | None = None
+) -> dict[str, tuple[float, str]]:
+    """Return ``{provider: (headroom, source)}`` for every provider.
 
-    An override whose ``cooldown_until`` has passed is ignored, so a zero set
-    at exhaustion stops blocking at the provider's reset.
+    This is the single implementation of the precedence; ``configured_headroom``
+    is its value-only projection.  ``source`` is one of the
+    ``HEADROOM_SOURCE_*`` constants and names the tier that produced the value.
     """
     moment = time.time() if now_wall is None else now_wall
     overrides, written_at = _override_values()
 
-    result: dict[str, float] = {}
+    result: dict[str, tuple[float, str]] = {}
     for provider in PROVIDERS:
         raw = overrides.get(provider)
         dated: float | None = None
+        dated_source = HEADROOM_SOURCE_DATED_OVERRIDE
         undated: float | None = None
         if isinstance(raw, dict):
             value = _clamp(raw.get("headroom"))
@@ -269,6 +289,7 @@ def configured_headroom(*, now_wall: float | None = None) -> dict[str, float]:
             if value is not None:
                 if raw.get("cooldown_reason") == "manual":
                     dated = value
+                    dated_source = HEADROOM_SOURCE_MANUAL_OVERRIDE
                 elif until is not None:
                     if until > moment:
                         dated = value
@@ -280,7 +301,7 @@ def configured_headroom(*, now_wall: float | None = None) -> dict[str, float]:
                 undated = 1.0
 
         if dated is not None:
-            result[provider] = dated
+            result[provider] = (dated, dated_source)
             continue
         live = live_headroom(provider, now_wall=moment)
         if live is not None:
@@ -300,10 +321,38 @@ def configured_headroom(*, now_wall: float | None = None) -> dict[str, float]:
                 )
             )
             if superseded:
-                result[provider] = live
+                result[provider] = (live, HEADROOM_SOURCE_LIVE_USAGE)
                 continue
-        result[provider] = 1.0 if undated is None else undated
+        if undated is None:
+            result[provider] = (1.0, HEADROOM_SOURCE_DEFAULT)
+        else:
+            result[provider] = (undated, HEADROOM_SOURCE_UNDATED_OVERRIDE)
     return result
+
+
+def configured_headroom(*, now_wall: float | None = None) -> dict[str, float]:
+    """Return normalized per-provider bundled-plan headroom estimates.
+
+    Precedence per provider (see ``headroom_resolution`` for the source label):
+
+    1. An override object with ``cooldown_reason: "manual"``, or with a
+       ``cooldown_until`` still in the future.
+    2. The live usage snapshot (``live_headroom``), when it has an opinion and
+       any undated override was written before that observation.  A live
+       ``0.0`` is never outvoted by a hand-set undated number.
+    3. An undated override (bare number, or object without
+       ``cooldown_until``) from the file or ``APIS_HARNESS_HEADROOM``.
+    4. ``1.0``.
+
+    An override whose ``cooldown_until`` has passed is ignored, so a zero set
+    at exhaustion stops blocking at the provider's reset.
+    """
+    return {
+        provider: value
+        for provider, (value, _source) in headroom_resolution(
+            now_wall=now_wall
+        ).items()
+    }
 
 
 def _write_usage_entry(
