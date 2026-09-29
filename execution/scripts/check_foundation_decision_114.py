@@ -1,41 +1,43 @@
 #!/usr/bin/env python3
 """Check that decision 114's ruled shape is registered where a reader meets it.
 
-Decision 114 rules that ``agent_policy`` is the home for a rule binding every
-agent's behaviour, and that an agent-specific row is tied to the agent(s) it
-governs by a `GOVERNS` graph edge, resolved by traversal — superseding the
-`scope`/`agent_sub` field pair, which is read nowhere once the edge resolves
-(`conformance.md#the-register-of-open-design-decisions`, row 114;
-`migration.md#gaps-and-contradictions-the-mapping-exposed`, G34;
-`vocabulary.md#rule`).
+Decision 114 rules that a rule binding an agent's behaviour is tied to the agent(s) it governs by a
+`GOVERNS` graph edge, resolved by traversal — superseding the `scope`/`agent_sub` field pair, which is
+read nowhere once the edge resolves (`conformance.md#the-register-of-open-design-decisions`, row 114;
+`migration.md#gaps-and-contradictions-the-mapping-exposed`, G34; `vocabulary.md#rule`). Decision 120
+later moved the rule to the core `rule` type and kept 114's binding, so the row this reads is still the
+concepts table's *agent behavioural rule* row, whatever its entity-type cell names.
 
-Marking the register row **ruled** without `data_model.md#concepts`'s
-`agent_policy` row actually carrying the `GOVERNS` edge is false readiness: a
-reader (or the daemon loader and session rule index the ruling names as the
-two consumers, `migration.md` G34) finds the concepts table still describing
-the pre-114 shape — a rule reaching its agent by `scope`/`agent_sub` alone,
-with no edge, and no note that those fields are superseded. That is exactly
-the corpus state this task's own notes found: the ruling is fully argued in
-`conformance.md` and `migration.md`, and `vocabulary.md`'s new `rule` entry
-states the edge, but `data_model.md#concepts` — the one table a reader
-consults for what fields and edges a type actually carries — still lists only
-`scope`/`agent_sub` for `agent_policy`, with the edge column silent on
-`GOVERNS` entirely.
+Marking the register row **ruled** without that row carrying the edge is false readiness: a reader (or the
+daemon loader and session rule index the ruling names as its two consumers) finds the concepts table still
+describing the pre-114 shape.
 
 This binds three things:
 
 1. Register row 114 is **ruled**.
-2. `data_model.md#concepts`'s `agent_policy` row's edges column names a
-   `GOVERNS` edge to the `agent` it binds.
-3. The same row states that `scope`/`agent_sub` is superseded by the edge for
-   an agent-specific rule (the row may still document the two fields as
-   historical/legacy, but not as the live resolution mechanism with no
-   superseding note).
+2. The row's edges column carries a `GOVERNS` → `agent` entry whose own parenthetical is, verbatim, one of
+   ``APPROVED_GOVERNS_AGENT_TEXTS``.
+3. The row's `scope` and `agent_sub` field descriptions are, verbatim, one of
+   ``APPROVED_SCOPE_TEXTS`` and ``APPROVED_AGENT_SUB_TEXTS`` respectively.
 
-This is a corpus-shape check, the same kind `check_foundation_decision_101.py`
-and `check_foundation_decision_117.py` already are: it takes on no traversal
-or loader-implementation scope (that is G34's remaining half, which the
-ruling text itself says stays open beyond the `agent_policy` case).
+**Why exact text and not a reading of the prose.** Seven review rounds on PR #1321 each found a new way to
+deny the claim in ordinary English — a negation word the list lacked, a negation too far from the claim,
+a copula or hedge adverb ("seems", "arguably", "supposedly") in front of it, a future tense ("will be
+superseded"), a pending-review aside — and each fix grew a denylist that the next round was one synonym
+ahead of. There is no finite list of ways to deny a sentence, so a checker that reads free prose for a
+denial cannot be complete. This one does not read the prose at all: the claim-bearing spans must be the
+approved sentences exactly (whitespace-normalized), so no hedge, denial, or aside can be added to them
+without the check going red. Changing the wording means changing the approved text in this file in the
+same PR, which puts the new wording in front of review rather than past it.
+
+**What it does not verify.** Prose elsewhere in the row — another field's description, another edge's
+parenthetical, the derived-reads column — is not read. A contradiction written there is review's to
+catch, not this check's; the check guarantees that the three spans that carry the ruled claim say
+exactly what was ruled. It also requires every edges-column entry to be edge-shaped
+(`` `TYPE` → target ``), so a bare prose entry cannot sit in the edge list.
+
+This is a corpus-shape check, the same kind `check_foundation_decision_101.py` and
+`check_foundation_decision_117.py` already are: it takes on no traversal or loader-implementation scope.
 
 Stdlib only; registered in ``conformance.md#mechanical-checks-on-this-directory``.
 """
@@ -51,20 +53,33 @@ FOUNDATION_DIR = Path("docs/foundation")
 
 _DECISION_ROW_RE = re.compile(r"^\|\s*114\s*\|")
 
+# The approved claim sentences. Each tuple is closed: a span passes only by equalling one entry after
+# whitespace normalization. Add an entry (or replace one) in the same PR that changes the row's wording.
+APPROVED_GOVERNS_AGENT_TEXTS = (
+    "the agent this rule binds, resolved by traversal in the daemon loader and the session rule index "
+    "— decision 114, ruled 2026-09-25, `migration.md#gaps-and-contradictions-the-mapping-exposed`, G34",
+)
+APPROVED_SCOPE_TEXTS = (
+    "legacy, **closed**: `global`, `swarm`, or `agent` — superseded by the `GOVERNS` edge, decision "
+    "114, and read nowhere once the edge resolves",
+)
+APPROVED_AGENT_SUB_TEXTS = (
+    "legacy, superseded the same way: the agent a rule binds is the `GOVERNS` edge's target",
+)
+
+
+def _normalize(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _approved(text: str, approved: tuple[str, ...]) -> bool:
+    return _normalize(text) in {_normalize(a) for a in approved}
+
 
 def _extract_balanced_paren(text: str, open_at: int) -> str | None:
-    """Return the content between a balanced ``(...)`` starting at
-    ``text[open_at]`` (which must be ``"("``), or ``None`` if unbalanced.
+    """Return the content between a balanced ``(...)`` starting at ``text[open_at]``, or ``None``.
 
-    Handles arbitrary nesting depth, unlike a fixed-depth regex group. A
-    prior revision used ``(?:\\s*\\(((?:[^()]|\\([^()]*\\))*)\\))?`` for this,
-    which only balances ONE level of nesting: two levels of nested
-    parentheses (a caveat bolted onto a caveat — an idiomatic pattern in this
-    corpus's own prose style) makes the whole optional group fail to match,
-    silently returning ``None`` and leaving the parenthetical's content never
-    checked at all — a code-review finding on this fix (harness code-review,
-    high effort, this PR). An unbounded balanced scan has no depth limit to
-    exceed.
+    Handles arbitrary nesting depth, unlike a fixed-depth regex group.
     """
     assert text[open_at] == "("
     depth = 0
@@ -78,327 +93,88 @@ def _extract_balanced_paren(text: str, open_at: int) -> str | None:
     return None
 
 
-# The concepts table row for the agent behavioural rule type. Matched on the
-# leading cell (the concept name) rather than the entity-type cell, since the
-# concept name is the stable, human-readable anchor and the entity type
-# (`` `agent_policy` ``) appears identically in several rows' prose.
+def _split_top_level(cell: str, sep: str = ";") -> list[str]:
+    """Split ``cell`` on ``sep`` outside any parentheses."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(cell):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif ch == sep and depth == 0:
+            parts.append(cell[start:i])
+            start = i + 1
+    parts.append(cell[start:])
+    return parts
+
+
+# The concepts table row for the agent behavioural rule type, matched on the leading cell (the concept
+# name): the stable anchor, since the entity-type cell changed from `agent_policy` to `rule` (decision 120).
 _AGENT_POLICY_ROW_RE = re.compile(
     r"^\|\s*agent behavioural rule\s*\|(?P<entity_type>[^|]*)\|(?P<fields>[^|]*)\|"
     r"(?P<edges>[^|]*)\|"
 )
 
-# --- Affirmative-shape requirements (not a negation denylist) --------------
-#
-# A prior revision of this checker matched *any* mention of the required
-# claim and then scanned a fixed character window around it for a hardcoded
-# list of negation words ("never", "not", "no", ...). Falco (PR #1321 review,
-# comment 5856297532) demonstrated that denylist is bypassed by any denial
-# phrased with a synonym outside the list — "without", "lacking", "fails to"
-# all pass a sentence like "this row functions without any `GOVERNS` ->
-# `agent` edge" as a genuine claim, because the substring a genuine claim
-# would contain is *also* present in the prose denying it. Waxwing's
-# follow-up review found the same class one level narrower: a negation more
-# than ~40 characters from the claim (a longer qualifying clause) was missed
-# by the fixed-width window even for a listed word.
-#
-# Both gaps share one root cause: matching "the concept is mentioned, and no
-# denial-shaped text sits nearby" can never be complete against free-form
-# English, because there is no finite list of ways to deny a claim. The fix
-# is to stop trying to recognize every denial and instead require the
-# *specific affirmative shape* the corpus is supposed to carry — text that
-# cannot be produced by casually negating a sentence, because it isn't
-# freeform prose being scanned for a substring; it's a structural position in
-# the table that only a genuine, correctly-directed claim occupies.
-#
-# 1. GOVERNS edge (edges column): the concepts table's edges column is a
-#    ``;``-separated list of ``EDGE_TYPE -> target (...)`` entries. A
-#    genuine edge is always list-entry-shaped: it starts the cell or follows
-#    a ``;``, with nothing but whitespace before the edge-type token. Prose
-#    *about* an edge ("this row functions without any `GOVERNS` -> `agent`
-#    edge") has words before the edge-type token that are not list-entry
-#    syntax, so it can never match this anchor — not because "without" is on
-#    a list, but because a denial is grammatically prose, not a list item.
-#
-#    List-entry shape alone is NOT sufficient, though: Falco's third-round
-#    review (PR #1321, comment 5856636444) demonstrated that a genuinely
-#    list-entry-shaped GOVERNS edge can still carry a denial in its own
-#    trailing parenthetical — "`GOVERNS` -> `agent` (this edge was proposed
-#    but never actually implemented; ... no traversal honors it)" — which the
-#    structural check alone waved through because it never read past the
-#    `agent` token. The entry's own parenthetical is exactly the kind of
-#    author-owned span `_has_affirmative_superseded_claim` already scans for
-#    the fields column; the fix here is the same shape, applied to the edge
-#    entry's own trailing parenthetical instead of the field's.
-#
-#    This regex matches only up through the edge-type token; the trailing
-#    parenthetical (if any) is extracted separately by
-#    `_extract_balanced_paren`, not by a fixed-depth group in this regex —
-#    see that function's docstring for why a fixed-depth group is unsafe
-#    here.
-#
-#    The target token itself needs a right-hand boundary: Phoenicurus's
-#    review (PR #1321 comment 5856295835) demonstrated that `` `?agent`? ``
-#    with no boundary after the literal is a substring match, so
-#    `` `GOVERNS` -> `agent_sub` `` — an edge pointed at the WRONG target,
-#    the pre-114 field this decision retires — satisfies it. `(?!\w)` after
-#    the token rejects any trailing word character (`_sub`, `_policy`,
-#    `_definition`, ...) while still allowing the genuine closing backtick,
-#    whitespace, `(`, `;`, or end of cell.
-_GOVERNS_EDGE_ENTRY_RE = re.compile(
-    r"(?:^|;)\s*`?GOVERNS`?\s*(?:→|->)\s*`?agent`?(?!\w)", re.I
-)
+# An edges-column entry: a backticked relationship type, an arrow, then the target.
+_EDGE_ENTRY_RE = re.compile(r"^\s*`[A-Z_]+`\s*(?:→|->|←|<-)\s*\S")
 
-# 2. Superseded claim (fields column): this table's convention is
-#    ``field-name` (parenthetical description of that field)`` — the
-#    parenthetical immediately following `scope` or `agent_sub` is that
-#    field's *own* description, authored by whoever wrote the row, not
-#    arbitrary row prose. Requiring the supersession claim to live inside
-#    that field's own parenthetical (rather than anywhere in the row) is
-#    itself an affirmative-shape requirement: a sentence merely mentioning
-#    "scope/agent_sub" and "superseded" elsewhere in the row — including in
-#    a denial bolted onto some other field's description — cannot satisfy it.
-# Matches only up through the field's opening paren; the balanced content is
-# extracted separately by `_extract_balanced_paren` for the same
-# arbitrary-nesting-depth reason `_GOVERNS_EDGE_ENTRY_RE` does, above.
-_FIELD_OWN_PAREN_RE = re.compile(r"`(?:scope|agent_sub)`\s*(\()", re.I)
+# The GOVERNS → agent entry. `(?!\w)` after the target rejects `agent_sub` and any other longer
+# identifier, while allowing the closing backtick, whitespace, or `(`.
+_GOVERNS_AGENT_RE = re.compile(r"^\s*`GOVERNS`\s*(?:→|->)\s*`?agent`?(?!\w)")
 
-# Defense in depth, not a closed structural guarantee: even inside a claim's
-# own author-owned parenthetical, reject a hedge/denial word. This list
-# cannot be complete against free-form English (Falco's root-cause finding,
-# PR #1321 comment 5856636444: "unimplemented", "in practice"/"only in
-# theory", "reverted", "rejected", and a parenthetical bluntly stating "(this
-# claim is false...)" all denied the claim they sat beside while using no
-# word from an earlier revision of this list) — kept intentionally broad, and
-# grown each time a new denial shape is demonstrated, rather than trusted as
-# closed. A gap found here is the same class of finding this checker exists
-# to catch in the corpus it reads, not a design defect in the idea of
-# scoping to the owning span.
-#
-# Split into two tiers, scanned over two different scopes, because a single
-# whole-parenthetical scan produces a false positive on the live corpus: the
-# real `agent_policy` GOVERNS gloss is long, and after its first clause goes
-# on to correctly document the no-edge fallback case for a DIFFERENT row
-# shape ("a row carrying none reaches every agent...; when `scope` is
-# `agent` and the row carries no `GOVERNS` edge, it names no target...") —
-# legitimate policy prose that uses the word "no" while asserting nothing
-# false about the edge this entry itself carries. Scanning the whole
-# parenthetical for "no"/"not"/"without" made that real, correct row fail
-# (caught by re-running this check against the live corpus while building
-# this fix, before it was committed).
-#
-# - _STRONG_HEDGE_RE: vocabulary that is a denial in essentially every
-#   reading, never ordinary hedge-quantifier language about a different
-#   case ("false", "fictional", "rejected", "proposed but", "unimplemented",
-#   "reverted", "hypothetical", "illustration", "if it existed", ...).
-#   Scanned over the WHOLE parenthetical, since these words don't show up in
-#   legitimate fallback-case prose. The counterfactual-conditional entries
-#   ("hypothetical", "illustration", "if it existed") close a QA finding (PR
-#   #1321 comment 5856295835): an entry can be list-entry-shaped with an
-#   attached parenthetical that is honest about being counterfactual —
-#   "this is only a hypothetical illustration of what the edge would look
-#   like if it existed" — without using any word this list already had.
-# - _WEAK_HEDGE_RE: "not"/"no"/"without"/"lacking" — ordinary negation words
-#   that also appear in the edge entry's legitimate no-edge fallback. Scanned
-#   over every ``;``-delimited clause except the one exact fallback contract
-#   admitted by _LEGITIMATE_NO_EDGE_FALLBACK_RE. A code-review pass on an
-#   earlier revision of this fix
-#   (which scanned only the first `;`-clause) found that scoping too narrow:
-#   a denial using only weak vocabulary, placed after the first `;` without
-#   a generic/conditional opener ("...resolved by traversal; there is no
-#   edge here for this row"), evaded it entirely. Scanning every
-#   non-generic-opener clause closes that while still sparing the real
-#   corpus's legitimate fallback prose, which does open generically.
-#
-#   That generic-opener carve-out was itself then found too broad by a
-#   second code-review pass: gating it on any clause starting with a bare
-#   "a"/"an"/"any"/"when" also exempted an ordinary-English denial that
-#   happens to start with one of those words for unrelated reasons ("any
-#   reader should know this claim is not accurate"). It was narrowed to
-#   require "row" or "`scope`" to appear as the clause's subject instead of
-#   a bare indefinite article — and a THIRD pass (harness code-review,
-#   self-review before this PR's fourth commit) found that narrowing was
-#   still exploitable: "a row exactly like this one carries no such edge" is
-#   grammatically "a row ..." but is a flat, present-tense denial of THIS
-#   entry, not a description of a different row's fallback behaviour, and
-#   still slipped the weak-hedge scan.
-#
-#   The current-head UX review then demonstrated that even ``when scope is``
-#   is only a prefix, not proof of the fallback: both "this row has no such
-#   edge" and "this field is not superseded" can follow it. The exception is
-#   now available only while checking an edge entry, never a field claim, and
-#   only when the complete clause states the live restrictive fallback:
-#   agent scope + no edge means no target and therefore no bound agent.
-#
-#   A subsequent QA pass (PR #1321 comment 5877900885) demonstrated a
-#   narrower residual gap in the same family: a single word carrying its
-#   negation morphologically (an "un-" prefix, or a free-standing antonym)
-#   rather than as a separate negation token — "unsuperseded," "unbound,"
-#   "edgeless," "unaffected," "authoritative" — is neither "not"/"no"/
-#   "without"/"lacking" (so `_WEAK_HEDGE_RE` misses it) nor already on the
-#   strong-hedge word list (so only the identical, already-listed
-#   "unimplement*" stem was ever caught). `_MORPHOLOGICAL_NEGATION_RE` closes
-#   the demonstrated instances: a general "un-" + relevant-stem pattern for
-#   any future coinage on the same two stems this checker cares about
-#   (superseded, bound/affected), plus the free-standing antonyms QA's
-#   report named by hand. This remains, like the rest of this list, a
-#   defensive enumeration rather than a closed guarantee — the code comment
-#   above already states that trade-off for `_STRONG_HEDGE_RE` and it holds
-#   here too.
-#
-#   Security's sixth-round review (PR #1321 comment on this exact head,
-#   `58838afa`) found the vocabulary list still missing several ordinary
-#   denial idioms — "superseded by nothing", "on paper only", "notionally",
-#   "hardly" (a rhetorical-question denial), "functionally inert" — and,
-#   more importantly, named the structural root cause every round has shared:
-#   a *denylist* of denial words is one synonym behind by construction, no
-#   matter how many rounds grow it. The words below close the specific
-#   instances demonstrated (still a defensive enumeration, not a closed
-#   guarantee); `_has_affirmative_superseded_claim`'s new clause-position
-#   requirement below is the structural half of the fix security recommended
-#   — it stops relying on the *absence* of a denial word and instead
-#   requires the claim to occupy the *position* a genuine affirmative
-#   statement occupies (immediately after the field's own opening
-#   parenthesis, or immediately after a `;`/`,` clause boundary, with no
-#   copula or hedge-adverb sitting between that boundary and the claim word).
-#   Every one of security's six bypass strings works by inserting a copula
-#   ("is", "remains", "stays") or a hedge-adverb ("notionally", "hardly") in
-#   exactly that gap, so closing the gap closes the class those constructions
-#   share — not merely the six words demonstrated.
-_STRONG_HEDGE_RE = re.compile(
-    r"\b(?:never|isn't|aren't|doesn't|don't|n't|fail(?:s|ed)?\s+to|absent|"
-    r"nor|neither|unimplement\w*|(?:in\s+practice|only\s+in\s+theory)|"
-    r"revert\w*|false|fictional|aspirational|placeholder|"
-    r"proposed\s+but|rejected|no\s+traversal|not\s+(?:actually|really|yet)|"
-    r"kept\s+for\s+historical|does\s+not\s+(?:actually\s+)?(?:honor|carry)|"
-    r"hypothetical\w*|illustration\w*|if\s+it\s+existed|in\s+name\s+only|"
-    r"nominal(?:ly)?|notional(?:ly)?|hardly|on\s+paper\s+only|"
-    r"functionally\s+inert|supersed\w*\s+by\s+nothing|"
-    r"un\w*(?:supersed\w*|bound|affected|resolved|traversed)|"
-    r"edgeless|authoritative)\b",
-    re.I,
-)
-_WEAK_HEDGE_RE = re.compile(r"\b(?:not|no|without|lack(?:s|ing)?)\b", re.I)
-
-# Structural companion to the hedge scan above, for the fields-column claim
-# only (`_has_affirmative_superseded_claim`). A hedge/negation *denylist* can
-# always be evaded by a denial word the list hasn't seen yet — security's
-# sixth-round finding demonstrated four such words ("nothing", "on paper
-# only", "notionally", "hardly") inside a single review pass. Rather than
-# grow the list a seventh time, this requires the claim to sit in the
-# grammatical *position* an affirmative statement occupies: immediately after
-# a clause boundary (the field's own opening parenthesis, a `;`, or a `,`),
-# with nothing but whitespace between that boundary and the claim word. A
-# denial construction needs a subject and a copula or hedge-adverb between
-# the boundary and the word ("is NOT superseded", "remains ... superseded",
-# "notionally superseded", "superseded? hardly") — inserting that copula/
-# adverb is exactly what makes those six constructions denials rather than
-# affirmations, and it is exactly what this position check excludes. A
-# trailing "?" immediately after the claim word (the rhetorical-question
-# shape, "superseded by the edge? hardly") is rejected for the same reason:
-# a genuine affirmative statement is never phrased as a question.
-_CLAIM_PRECEDING_HEDGE_RE = re.compile(
-    r"\b(?:is|was|remains?|stays?|notionally|nominally|technically)\s*\w*\s*$",
-    re.I,
-)
-_LEGITIMATE_NO_EDGE_FALLBACK_RE = re.compile(
-    r"^\s*when\s+`?scope`?\s+is\s+`?agent`?\s+and\s+the\s+row\s+carries\s+"
-    r"no\s+`?GOVERNS`?\s+edge,\s+it\s+names\s+no\s+target\s+and\s+so\s+"
-    r"binds\s+no\s+agent\s+—\s+the\s+restrictive\s+branch"
-    r"(?:,\s+matching\s+what\s+`agent_loader\.py`\s+and\s+"
-    r"`policy_skill_renderer\.py`\s+already\s+enforce,\s+since\s+a\s+rule\s+"
-    r"whose\s+reach\s+is\s+unstated\s+is\s+one\s+no\s+reader\s+may\s+widen,\s+"
-    r"principle\s+5)?\s*$",
-    re.I,
-)
+_FIELD_OWN_PAREN_RE = re.compile(r"`(scope|agent_sub)`\s*(\()")
 
 
-def _is_hedged(
-    parenthetical: str, *, allow_legitimate_no_edge_fallback: bool = False
-) -> bool:
-    """True when ``parenthetical`` denies the claim it appears to make.
-
-    See the tier comment above for why this is two regexes over two scopes
-    rather than one regex over the whole text.
-    """
-    if _STRONG_HEDGE_RE.search(parenthetical):
-        return True
-    for clause in parenthetical.split(";"):
-        if allow_legitimate_no_edge_fallback and (
-            _LEGITIMATE_NO_EDGE_FALLBACK_RE.fullmatch(clause)
-        ):
-            continue
-        if _WEAK_HEDGE_RE.search(clause):
-            return True
-    return False
+def _malformed_edge_entries(edges_cell: str) -> list[str]:
+    return [
+        entry.strip()
+        for entry in _split_top_level(edges_cell)
+        if entry.strip() and not _EDGE_ENTRY_RE.match(entry)
+    ]
 
 
 def _has_governs_edge_entry(edges_cell: str) -> bool:
-    """True when the edges cell contains a genuine, unnegated ``GOVERNS ->
-    agent`` entry.
+    """True when the edges cell carries ``GOVERNS`` → ``agent`` with an approved parenthetical.
 
-    Structural, not purely lexical: the match must be list-entry-shaped
-    (cell-start or after ``;``, then the edge-type token) — prose describing
-    or denying an edge is never list-entry-shaped, so it cannot satisfy this
-    regardless of what words it uses. But list-entry shape only proves the
-    edge is *asserted*, not that the assertion is affirmative: Falco's
-    third-round review (PR #1321, comment 5856636444) demonstrated a
-    genuinely list-entry-shaped GOVERNS edge can still carry a denial in its
-    own trailing parenthetical — "`GOVERNS` -> `agent` (this edge was
-    proposed but never actually implemented; ... no traversal honors it)" —
-    which the structural check alone waved through because it never read
-    past the `agent` token. The entry's own parenthetical is exactly the
-    kind of author-owned span `_has_affirmative_superseded_claim` already
-    scans for the fields column; ``_is_hedged`` applies the same two-tier
-    check to it here.
+    The entry must be exactly the edge, then one parenthetical equal to an approved text, then nothing.
     """
-    for match in _GOVERNS_EDGE_ENTRY_RE.finditer(edges_cell):
-        open_paren_idx = match.end()
-        # Skip whitespace to see whether a trailing parenthetical follows.
-        i = open_paren_idx
-        while i < len(edges_cell) and edges_cell[i].isspace():
-            i += 1
-        if i < len(edges_cell) and edges_cell[i] == "(":
-            own_paren = _extract_balanced_paren(edges_cell, i)
-            if own_paren is None or _is_hedged(
-                own_paren, allow_legitimate_no_edge_fallback=True
-            ):
-                continue
-        return True
+    for entry in _split_top_level(edges_cell):
+        match = _GOVERNS_AGENT_RE.match(entry)
+        if not match:
+            continue
+        rest = entry[match.end():].strip()
+        if not rest.startswith("("):
+            continue
+        own_paren = _extract_balanced_paren(rest, 0)
+        if own_paren is None or rest[len(own_paren) + 2:].strip():
+            continue
+        if _approved(own_paren, APPROVED_GOVERNS_AGENT_TEXTS):
+            return True
     return False
+
+
+def _field_descriptions(fields_cell: str) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {"scope": [], "agent_sub": []}
+    for match in _FIELD_OWN_PAREN_RE.finditer(fields_cell):
+        description = _extract_balanced_paren(fields_cell, match.start(2))
+        if description is not None:
+            out[match.group(1)].append(description)
+    return out
 
 
 def _has_affirmative_superseded_claim(fields_cell: str) -> bool:
-    """True when ``scope``'s or ``agent_sub``'s own parenthetical affirms
-    that it is superseded, with no hedge/denial word in that parenthetical
-    AND the claim word itself sits in affirmative position.
-
-    Two independent requirements, not one: the whole-parenthetical hedge scan
-    (``_is_hedged``, defense in depth against denial vocabulary anywhere in
-    the span) and this function's own structural requirement — that at least
-    one occurrence of "supersed*" is not preceded by a copula/hedge-adverb
-    (``_CLAIM_PRECEDING_HEDGE_RE``) and not immediately followed by a "?".
-    Security's sixth-round review demonstrated the hedge scan alone still
-    passes constructions like "is NOT superseded", "remains ... without ...
-    superseded", "notionally superseded", and "superseded? hardly" — each
-    inserts its negation or doubt-marker in the copula/adverb slot between a
-    clause boundary and the claim word, which the position check rejects
-    regardless of which word fills that slot.
-    """
-    for match in _FIELD_OWN_PAREN_RE.finditer(fields_cell):
-        description = _extract_balanced_paren(fields_cell, match.start(1))
-        if description is None:
-            continue
-        if _is_hedged(description):
-            continue
-        for claim in re.finditer(r"supersed\w*", description, re.I):
-            preceding = description[: claim.start()]
-            if _CLAIM_PRECEDING_HEDGE_RE.search(preceding[-40:]):
-                continue
-            following = description[claim.end() : claim.end() + 5]
-            if "?" in following:
-                continue
-            return True
-    return False
+    """True when every `scope` and `agent_sub` description in the cell is an approved text, and both
+    fields carry one. A second, unapproved description of either field fails it too, so a denial cannot
+    ride beside the approved sentence as another mention of the same field."""
+    found = _field_descriptions(fields_cell)
+    return (
+        bool(found["scope"])
+        and bool(found["agent_sub"])
+        and all(_approved(d, APPROVED_SCOPE_TEXTS) for d in found["scope"])
+        and all(_approved(d, APPROVED_AGENT_SUB_TEXTS) for d in found["agent_sub"])
+    )
 
 
 class CorpusProblem(Exception):
@@ -468,22 +244,26 @@ def check_concepts_row(
     path: Path, row_no: int, fields_cell: str, edges_cell: str
 ) -> list[str]:
     problems: list[str] = []
+    for entry in _malformed_edge_entries(edges_cell):
+        problems.append(
+            f"{path}:{row_no}: decision-114-data-model — agent behavioural rule row's edges column "
+            f"has an entry that is not an edge (`` `TYPE` → target (...) ``): {entry[:80]!r}"
+        )
     if not _has_governs_edge_entry(edges_cell):
         problems.append(
-            f"{path}:{row_no}: decision-114-data-model — `agent_policy` "
-            "concepts row's edges column is missing a `GOVERNS` → `agent` "
-            "edge while register row 114 is **ruled** (a mention of GOVERNS "
-            "in prose does not count — the edges column must carry it as a "
-            "`;`-separated edge-list entry, e.g. '`GOVERNS` -> `agent` (...)')"
+            f"{path}:{row_no}: decision-114-data-model — agent behavioural rule row's edges column "
+            "does not carry `GOVERNS` → `agent` with an approved parenthetical while register row 114 "
+            "is **ruled**. The entry's parenthetical must equal one of APPROVED_GOVERNS_AGENT_TEXTS in "
+            "execution/scripts/check_foundation_decision_114.py; to reword it, change the approved "
+            "text there in the same PR"
         )
     if not _has_affirmative_superseded_claim(fields_cell):
         problems.append(
-            f"{path}:{row_no}: decision-114-data-model — `agent_policy` "
-            "concepts row's `scope`/`agent_sub` field description does not "
-            "affirmatively state that it is superseded by the `GOVERNS` "
-            "edge for an agent-specific rule (the claim must live inside "
-            "that field's own parenthetical description, with no hedge or "
-            "denial word in it)"
+            f"{path}:{row_no}: decision-114-data-model — agent behavioural rule row's `scope` and "
+            "`agent_sub` descriptions are not the approved statements that they are superseded by the "
+            "`GOVERNS` edge. Each must equal one of APPROVED_SCOPE_TEXTS / APPROVED_AGENT_SUB_TEXTS in "
+            "execution/scripts/check_foundation_decision_114.py; to reword it, change the approved "
+            "text there in the same PR"
         )
     return problems
 
@@ -520,7 +300,7 @@ def check(root: Path) -> list[str]:
     if concepts_row is None:
         return [
             f"{data_model_path}:1: decision-114-data-model — no concepts-table "
-            "row for `agent behavioural rule` (`agent_policy`) while register "
+            "row for `agent behavioural rule` while register "
             "row 114 is **ruled**"
         ]
 

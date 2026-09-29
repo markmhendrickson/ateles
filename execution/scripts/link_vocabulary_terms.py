@@ -25,7 +25,7 @@ re-runs whenever a term is added.
 
 **What it deliberately does not link.** Some terms are ordinary English words that this vocabulary
 also binds to a specific sense — `status`, `active`, `held`, `created`, `condition`, `chain`, `stage`,
-`coverage`, `delivery`, `event`, `grant`, `approval`, `initiative`, `mapping`, `record`, `subject`, and the
+`coverage`, `delivery`, `event`, `grant`, `approval`, `initiative`, `mapping`, `policy`, `record`, `subject`, and the
 two verb entries `execute (a task)` and `take (an action)`. Linking their first occurrence mislabels the ordinary use:
 "bans are held as regular expressions" is not the lease state, "the owner takes a view" is not the action
 verb, "the record a step owner writes" is not the store, and a calendar event or "the code host's event
@@ -76,6 +76,7 @@ GENERIC = frozenset(
         "held",
         "initiative",
         "mapping",
+        "policy",
         "record",
         "stage",
         "subject",

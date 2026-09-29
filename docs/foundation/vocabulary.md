@@ -433,7 +433,7 @@ skill file is on the mirror side of the direction of truth
 (`conformance.md#direction-of-truth-per-class-of-record`), so a skill is where the swarm's knowledge of how
 work gets done is written **today, under a harness's shapes**, and the design's question for any skill is
 which target it already has: an [agent](#agent), a `workflow` declaration, a step of one, an
-[adapter](#adapter)'s operation, a `task_policy`, an `agent_policy`, or — for a file that only tells a
+[adapter](#adapter)'s operation, a `task_policy`, a `rule`, or — for a file that only tells a
 harness how to reach the record or a tool — **none, which is correct and not a gap**.
 **A skill is not a [principal](#principal), holds no [authority](#authority), and is [granted](#grant)
 nothing.** A capability attaches to a principal matched on its [credential](#credential); a skill has no
@@ -469,7 +469,7 @@ for an [artifact](#artifact) or for anything the swarm wrote into the record.
 ### procedure
 **Definition:** how one piece of recurring work is done — the content a [skill](#skill) file carries, targeted
 at a [workflow](#workflow) declaration, a [step](#step) of one, an [adapter](#adapter)'s operation, or a
-[policy](#policy), and never a design type of its own.
+[rule](#rule) that points to it, and never a design type of its own.
 A procedure is content; a skill is the harness's [carrier](#carrier) for it (`migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes`
 calls the same content a "procedure skill" precisely because the two are distinguishable — what recurring
 work consists of, versus the file a harness loads it from). Two skills may carry the same procedure
@@ -844,7 +844,7 @@ detach); a successor named by anything but the closing verdict.
 **Not for:** gate for a step or a stage.
 
 ### action gate
-**Definition:** the decision, taken by a [principal](#principal) evaluating one [action](#action) against the action [policy](#policy),
+**Definition:** the decision, taken by a [principal](#principal) evaluating one [action](#action) against the action policy,
 whether that action is taken or [checkpointed](#checkpoint).
 Inputs are the action's class, [blast radius](#blast-radius), [confidence](#confidence), and successful recurrences; no PR, [issue](#issue), or
 repository.
@@ -853,7 +853,7 @@ repository.
 **Not for:** "merge gate" for the action gate (merge is one boundary among several).
 
 ### action_policy
-**Definition:** the [policy](#policy) a [principal](#principal) evaluates the [action gate](#action-gate) against, listing the low- and high-blast
+**Definition:** the policy a [principal](#principal) evaluates the [action gate](#action-gate) against, listing the low- and high-blast
 [action](#action) classes, the [confidence](#confidence) threshold, the recurrence count that graduates a series, the
 always-checkpoint boundaries, the [permission scope](#permission-scope), and the consent tolerance per action class — the change
 to an action's consented figures that may be taken without a new [checkpoint](#checkpoint), zero where the
@@ -960,7 +960,7 @@ Values include `build`, `docs`, `publish`, `external_api_write` (a write to an
 `merge_pr`, and `operator_only`; a declared but unclassified value fails closed.
 The set of values is `action_policy` data and has no list in the foundation: each [adapter](#adapter)'s
 document tables the classes its [outbound](#outbound) operations carry, every class an adapter can produce is listed in
-the [policy](#policy) (`adapters.md#the-admission-contract`, obligation 6), and the values named here are examples.
+the policy (`adapters.md#the-admission-contract`, obligation 6), and the values named here are examples.
 **No individual class carries an entry of its own**, for the same reason the set has no list: a class is
 policy data, its [blast radius](#blast-radius) is the policy's to resolve, and an entry per class would be
 a second home for a value the policy already declares (principle 9). Where one class's boundary against
@@ -983,13 +983,13 @@ another is load-bearing — the same calendar write being `external_api_write` o
 **Not for:** "severity" for a tier.
 
 ### confidence
-**Definition:** the proposing [agent](#agent)'s score that an [action](#action) is right, compared with the [policy](#policy)'s threshold.
+**Definition:** the proposing [agent](#agent)'s score that an [action](#action) is right, compared with the policy's threshold.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** —
 **Not for:** a default of zero standing in for a score.
 
 ### action series
-**Definition:** a series of successfully taken [actions](#action) of one class that, on reaching the [policy](#policy)'s
+**Definition:** a series of successfully taken [actions](#action) of one class that, on reaching the policy's
 count, graduates that class from [checkpointing](#checkpoint) to being taken without one.
 Named for what the series is made of: the members are actions, and the class they share is what graduates.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
@@ -1001,7 +1001,7 @@ graduating (retired: see [Retired names](#retired-names)). The swarm's sense onl
 
 ### operator_only
 **Definition:** the [action_type](#action_type) marking an effect an [agent](#agent) structurally cannot carry out, which resolves to
-`NEVER` ahead of any [policy](#policy).
+`NEVER` ahead of any policy.
 The [task](#task) that carries it is still [claimable](#claimable), by the [operator-facing agent](#operator-facing-agent).
 A [step](#step) of any [workflow](#workflow) whose [action](#action) carries it stays in that workflow: the step carries the
 [checkpoint](#checkpoint), holds for the [action confirmation](#action-confirmation), and closes on it — never on
@@ -1020,7 +1020,7 @@ resumes differs and is read from the subject [edge](#edge), not from a second te
 its subject, carrying a [reason class](#reason-class), the needed input, the options, whom it awaits, and who resolved it,
 and ending in a terminal approval. To checkpoint a subject is to write one and hold. The reason classes
 — `gate_hold` for a held action, and the classes a task is [escalated](#escalate) under — are enumerated once, each
-with what raises it, in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; a [policy](#policy) may
+with what raises it, in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; a policy may
 declare more. "Brief" described its content, not its identity, and is
 retired from the name for the same reason as `_record` and `_definition`.
 **See:** [`gates_and_workflows.md#the-checkpoint`](gates_and_workflows.md#the-checkpoint),
@@ -1437,7 +1437,7 @@ batch for a planning record; a matter or a case for one (that is what work conce
 the five decision 57 registers — an [ascent](#ascent) mark a [task](#task) reaches along `PART_OF`, read
 for justification and for relative standing.
 It is a [planning record](#planning-record) and nothing more: it owns its own statement, its own `planning`
-[batch](#batch), and the child records its `amend` [step](#step) creates, and it owns no [policy](#policy), no
+[batch](#batch), and the child records its `amend` [step](#step) creates, and it owns no policy, no
 [workflow](#workflow) declaration, and no roster. Which declaration a [batch](#batch) runs under is the
 [declaration scope](#declaration-scope), a different term the design distinguishes (decision 70, [ruled](#rule)
 2026-09-06).
@@ -1814,7 +1814,7 @@ of the classes this term names).
 **Definition:** the [reason class](#reason-class) raised on a [task](#task) whose [lease](#lease) has
 [lapsed](#lapsed) as many times as the instance's [`action_policy`](#action_policy) declares in `lapse_cap`.
 Raised by the [watchdog](#watchdog), carrying the count and the last lease holders; an undeclared
-`lapse_cap` raises none, and the absence is visible in the [policy](#policy) rather than defaulted at runtime. It
+`lapse_cap` raises none, and the absence is visible in the policy rather than defaulted at runtime. It
 holds the task from [claim](#claim), because a re-claim would restart the condition it exists to stop.
 **See:** [`failure_posture.md#repeated-lapse-raises-a-checkpoint`](failure_posture.md#repeated-lapse-raises-a-checkpoint).
 **Never:** —
@@ -1932,65 +1932,84 @@ projection for a [fast path](#fast-path) (a declared skip of steps).
 ## Governance and delivery (`data_model.md`, `harness_carriers.md`, `principles.md`)
 
 ### rule
-**Definition:** one atomic piece of normative content — what an [agent](#agent) is to do or not do — carried
-in the imperative on an `agent_policy` row's `rule` field
-(`data_model.md#concepts`, the agent behavioural rule row).
-A rule is content, never a record: the record that carries it is `agent_policy`, in code font because it
-names the entity type, and one row carries one rule (`data_model.md#concepts`'s field list gives `rule` no
-plural and no list structure). A rule [binds](#control) an [agent](#agent) or does not, stated by its
-`rule_kind` (**closed**: `mandatory` or `advisory`, absence reading `mandatory` — principle 5); it reaches
-an agent by `GOVERNS` [edge](#edge) to that [agent](#agent)'s row, or by carrying none and reaching every agent its
-`scope` names (decision 114, ruled 2026-09-25, closing gap G34 in `migration.md#gaps-and-contradictions-the-mapping-exposed`);
-the `scope`/`agent_sub` field pair this superseded is read nowhere once the edge resolves. A rule's end is a
-date on `effective_until`, or, where the end is a real-world condition rather than a date, a `REFERS_TO`
-edge to the [task](#task) whose closing retires it (decision 111,
-`data_model.md#whether-a-rules-end-is-a-date-a-condition-or-a-task`) — never a condition written into
-`scope`, which the closed three-value vocabulary does not admit.
-**Cardinality is settled, not open.** `agent_policy`'s one-rule-per-row shape is the design as ruled, not an
-implementation default standing in for an undecided envelope: an agent bound by several rules holds several
-`agent_policy` rows, each one atomic rule, each independently scoped by its own `GOVERNS` edge or `scope`
-value, each independently superseded (`SUPERSEDES` → `agent_policy`) and independently retired. Nothing
-about that shape is a "bundle" needing composition or precedence machinery of its own: two rules in force at
-one scope stating the same subject and disagreeing on `rule_kind` is not a precedence question for a reader
-to resolve — it is a **conflict**, refused at the write and surfaced as a contradiction (`data_model.md#concepts`,
-"whether two rules in force at one scope state the same subject and disagree on `rule_kind`"; live instance
-ateles#1114/#1115). A design that let a later or higher-priority rule silently override an earlier one on
-the same subject would let a `mandatory` safety rule be quietly demoted by an `advisory` sibling nobody
-reviewed as a supersession — exactly the fail-open principle 5 forbids. Where a rule is genuinely replaced,
-the record is `SUPERSEDES`, an edge a reader can follow, never a precedence score a reader must compute.
+**Definition:** one atomic piece of normative content — what an [agent](#agent), or a member's sessions, is to do or
+not do — held as its own record of the core `rule` type, which carries its own `rule_kind`
+(`data_model.md#concepts`, the agent behavioural rule row; decision 120, ruled 2026-09-29).
+One record carries one rule. Its fields: `rule` (the imperative text a reader applies); `title` (the one
+line an index renders — the live spelling is `index_line`); `rule_kind` (**closed**: `mandatory` or
+`advisory`; a missing or unknown value reads as `mandatory` — principle 5, since a rule whose bindingness is
+unstated is one no reader may weaken); `applies_when` (the condition under which it is delivered; `always`
+places it in the preamble tier every session receives); `domain` (the subject it is about, never an agent
+identifier); `rationale`; `status` (`proposed`, `approved`, `provisional`, or `retired`); `effective_from`
+and `effective_until` (dates); and an optional `predicate`, a condition the server can evaluate at a write,
+which is what makes a machine-checkable write requirement — require provenance, a maximum sensitivity
+class — a rule like any other, with its own kind, rather than a switch on some container.
+**Where it binds is an edge, not a field.** A rule with no `GOVERNS` [edge](#edge) binds the whole instance; a rule
+that `GOVERNS` a member binds that member's sessions; a rule that `GOVERNS` an agent binds that agent
+(decision 114, ruled 2026-09-25, closing gap G34 in `migration.md#gaps-and-contradictions-the-mapping-exposed`,
+with the scopes named by decision 120). A member's rules only tighten the instance's: a member rule that
+conflicts with an instance rule is refused at the write, never resolved by precedence. A person's own
+preferences stay on that person's own instance. The `scope`/`agent_sub` field pair the edge superseded is
+read nowhere once the edge resolves, and a legacy row whose `scope` is `agent` with no edge binds no agent
+— the restrictive branch — rather than the whole instance its missing edge would otherwise mean.
+**What a rule points at.** `REFERS_TO` → [skill](#skill) names a skill the rule directs a reader to, and a policy
+delivers the skills its member rules name; `REFERS_TO` → [task](#task) names the task whose closing ends a rule bound
+to a real-world condition rather than a date (decision 111,
+`data_model.md#whether-a-rules-end-is-a-date-a-condition-or-a-task`); `SUPERSEDES` → rule names the rule it
+replaces; `PART_OF` → policy names each grouping it belongs to.
+**Proposed is not binding.** On a shared instance any member may propose a rule; it binds only once
+approved. A `proposed` rule renders labelled as proposed, is never enforced, and its `rule_kind` has no
+effect. Who approves a proposed rule is open (decision 121).
+**Cardinality is settled, not open.** One rule per record is the design as ruled: an agent bound by several
+rules is bound by several records, each independently scoped by its own `GOVERNS` edges, independently
+superseded, and independently retired. Two rules in force for one reader stating the same subject and
+disagreeing on `rule_kind` is not a precedence question — it is a **conflict**, refused at the write and
+surfaced as a contradiction (`data_model.md#concepts`; live instance ateles#1114/#1115). A design that let a
+later or higher-priority rule silently override an earlier one would let a `mandatory` safety rule be quietly
+demoted by an `advisory` sibling nobody reviewed as a supersession — the fail-open principle 5 forbids. Where
+a rule is genuinely replaced, the record is `SUPERSEDES`, an edge a reader can follow.
 **See:** [`data_model.md#concepts`](data_model.md#concepts) (the agent behavioural rule row),
 [`harness_carriers.md#payloads`](harness_carriers.md#payloads) (the Rules row),
+[`migration.md#the-rule-and-policy-types-and-their-live-names`](migration.md#the-rule-and-policy-types-and-their-live-names),
 [`principles.md#5-fail-closed-on-the-field-that-carries-the-safety-meaning`](principles.md#5-fail-closed-on-the-field-that-carries-the-safety-meaning).
-**Never:** a rule bundled with others on one row as a list or a prose block; a rule's precedence over
-another computed from anything but [`SUPERSEDES`](#governance-write); an agent identifier written into
-`domain` (that is `domain`'s subject field misused — the agent a rule binds is the `GOVERNS` edge's target,
-never a string in `domain` or the retired `agent_sub` reading).
+**Never:** a rule bundled with others on one record as a list or a prose block; a rule held inline as prose
+inside a policy record; a rule's precedence over another computed from anything but
+[`SUPERSEDES`](#governance-write); an agent identifier written into `domain`; a `proposed` rule enforced or
+its kind honoured; a container-wide enforcement mode standing in for each rule's own kind.
 **Not for:** [`intake rule`](#intake-rule) for this sense (a different governance type entirely — an
-intake rule turns a change into a task, and carries no `rule_kind`, no `agent_sub`, and no behavioural
-content); a rule for the `agent_policy` row that carries it (the row is the record; the rule is one field of
-it, the same distinction [`conclusion`](#conclusion) draws from [`verdict`](#verdict)); "guideline",
-"policy", or "directive" for a rule (see [policy](#policy), below, for why none of the three earns its own
-entry).
+intake rule turns a change into a task, and carries no `rule_kind` and no behavioural content); a rule for
+the record that carries it (the record is `rule`; the rule is its `rule` field, the same distinction
+[`conclusion`](#conclusion) draws from [`verdict`](#verdict)); "guideline" or "directive" for a rule.
 
 ### policy
-**Definition:** not a term of its own; always the qualified compound that names which governance record is
-meant — `agent_policy` (a [rule](#rule)), `action_policy`, `task_policy`, `hook_policy`, `instance_policy`,
-`conformance_policy`, or `insurance_policy` — each a distinct registered type with its own row in
-`data_model.md#concepts`.
-This is the same [finding](#finding) [`#scope`](#scope) states for `scope`'s own bare form ("Bare 'scope' is not one of
-these eighteen and carries no entry of its own"), applied to a second word with the identical shape: bare
-"policy" in this corpus's own prose is
-overwhelmingly anaphora — "the policy" a sentence uses two lines after naming `action_policy` — never a
-fifth, unifying concept the anaphora is short for. The swap test, applied against the corpus's own uses of
-bare "policy", fails to turn up one sentence that means something none of the six named types already means;
-where a sentence needs the general sense of "a stated, governing rule set," it is describing one of the six
-and should name which. **"Guideline" and "directive" are not needed either**, for a sharper reason than
-policy's: neither word is used anywhere in this corpus to mean anything a `rule`, an `action_policy`, or a
-`task_policy` does not already name, so principle 12's "no fewer" floor is not met — a term earns its place
-only when a rule turns on it, and no rule turns on either.
-**See:** [`#scope`](#scope) (the parallel case, bare "scope"), [`action_policy`](#action_policy), [`rule`](#rule).
-**Never:** —
-**Not for:** —
+**Definition:** a named grouping of [rule](#rule) records, linked by `PART_OF` from each member rule — a
+package delivered to an instance, a member, or an [agent](#agent) — with **no precedence power** over its members
+(decision 120, ruled 2026-09-29).
+A policy never overrides or demotes a member rule: each rule keeps its own `rule_kind`, a conflict between
+rules is still refused at the write, and replacement is still `SUPERSEDES`. The policy record carries only
+its `policy_id` and a description. It delivers the [skills](#skill) its member rules name through their
+`REFERS_TO` [edges](#edge); a skill never joins a policy directly. A rule may be a member of several policies. What
+is *not* on the policy record: admission settings such as whether anonymous writes are admitted, which are
+server configuration; and the fail-closed behaviour when a rule set cannot be read, which is server
+behaviour. Rendered, a policy is one heading with its member rules under it, each rule's kind shown and the
+`mandatory` rules first; over a delivery budget the `advisory` rules are left out before any `mandatory`
+one; a rule in two policies renders once, marked "also in" the other.
+**The other `*_policy` names.** `action_policy`, `task_policy`, `hook_policy`, `conformance_policy`, and
+`insurance_policy` are registered types named by their compound, each with its own row in
+`data_model.md#concepts` — not groupings of rules, and not "policies" in this entry's sense; a sentence
+meaning one of them names it. `agent_policy` is the live name of the `rule` type, and the rules
+`instance_policy` holds inline as prose migrate to rule records grouped by a policy
+(`migration.md#the-rule-and-policy-types-and-their-live-names`). **"Guideline" and "directive" are not
+needed**: neither is used anywhere in this corpus to mean anything a rule, a policy, or one of the compound
+types does not already name, so principle 12's "no fewer" floor is not met.
+**See:** [`data_model.md#concepts`](data_model.md#concepts) (the rule grouping row), [`rule`](#rule),
+[`action_policy`](#action_policy),
+[`migration.md#the-rule-and-policy-types-and-their-live-names`](migration.md#the-rule-and-policy-types-and-their-live-names).
+**Never:** a precedence, override, or enforcement-mode field on a policy; a rule's text held on the policy
+record; a skill linked to a policy directly.
+**Not for:** one of the compound types (`action_policy`, `task_policy`, …), which a sentence names by its
+compound, since the corpus's bare use of the word is usually anaphora for one of them; "guideline" or "directive"
+for a policy.
 
 ### instruction
 **Definition:** the point-in-time rendering a harness places in a model's context — the [rules](#rule) in
@@ -2048,8 +2067,8 @@ distinction principle 12 itself draws when it declines to state the autonomy goa
 invariant is a property every change must hold true, and this one is a test applied to a particular return."
 **See:** [`principles.md#the-invariants`](principles.md#the-invariants).
 **Never:** —
-**Not for:** [rule](#rule) for an invariant (a rule binds an agent's behaviour and is written on
-`agent_policy`; an invariant binds the design itself and is written in `principles.md`, enforced by review
+**Not for:** [rule](#rule) for an invariant (a rule binds an agent's behaviour and is written as a
+`rule` record; an invariant binds the design itself and is written in `principles.md`, enforced by review
 and by whatever mechanical control each invariant's own "Enforced by" names).
 
 ### control
@@ -2117,8 +2136,8 @@ that a check exists on disk and runs somewhere, tracked whether or not it is wir
 are read as prose").
 Bare "contract" names no fifth, unifying concept: the swap test applied to this corpus's own uses turns up no sentence
 meaning something none of the four compounds — or an [invariant](#invariant), a [control](#control), or a [grant](#grant) —
-already names. This is the same [finding](#finding) [`policy`](#policy) states for bare "policy" and [`#scope`](#scope) states for bare
-"scope", applied to a third word with the identical shape: a compound already exists everywhere the corpus needs the
+already names. This is the same [finding](#finding) [`#scope`](#scope) states for bare
+"scope", applied to a second word with the identical shape: a compound already exists everywhere the corpus needs the
 sense, so the bare word is left to the author as ordinary English, the same as the eighteen terms `#scope`'s own section
 lists.
 **A contract is never itself a control.** `conformance.md`'s own distinction — a check existing on disk (a document contract)
@@ -2132,7 +2151,7 @@ wires it.
 **Never:** —
 **Not for:** bare "contract" for a canonical concept (name the qualified compound the sentence means, or, where none of
 the four fits, name the [invariant](#invariant), [control](#control), or [grant](#grant) the sentence actually means);
-"directive" or "guideline" as a synonym for a contract, a [rule](#rule), or a [policy](#policy) (neither word is used
+"directive" or "guideline" as a synonym for a contract, a [rule](#rule), or a policy (neither word is used
 anywhere in this corpus to mean anything those already name, retired alongside "guideline" in [`policy`](#policy), above);
 [control](#control) for a contract with no consuming failure path (a document contract not yet wired is reporting, tracked
 as such in `status.md`, never asserted as enforcement).
@@ -2149,8 +2168,9 @@ definition — where this table and an entry's own prose differ, the entry gover
 
 | Concept class | Canonical term | Carried as / by | Argued in |
 |---|---|---|---|
-| Normative content, imperative, one per row | [rule](#rule) | `agent_policy.rule` | [`rule`](#rule) |
-| Scoped, typed governance record | [policy](#policy) — always qualified: `agent_policy`, `action_policy`, `task_policy`, `hook_policy`, `instance_policy`, `conformance_policy`, `insurance_policy` | one registered entity type per compound | [`policy`](#policy) |
+| Normative content, imperative, one per record, with its own kind | [rule](#rule) | the core `rule` record (live name `agent_policy`) | [`rule`](#rule) |
+| Named grouping of rule records, delivered as a package, with no precedence power | [policy](#policy) | a `policy` record; each member rule `PART_OF` it | [`policy`](#policy) |
+| Typed governance record named by its compound | the compound itself: `action_policy`, `task_policy`, `hook_policy`, `conformance_policy`, `insurance_policy` | one registered entity type per compound | [`policy`](#policy) |
 | Point-in-time model-context rendering | [instruction](#instruction) | assembled at delivery by a [carrier](#carrier); never a second home for the content | [`instruction`](#instruction) |
 | Pre-action refusal mechanism | [guard](#guard) | harness plumbing bound to a hook | [`guard`](#guard) |
 | Design-wide property, argued once | [invariant](#invariant) | `principles.md`'s twelve | [`invariant`](#invariant) |
@@ -2162,11 +2182,11 @@ definition — where this table and an entry's own prose differ, the entry gover
 | Field allowlist on a write grant | [parameter constraint](#parameter-constraint) | `agent_grant.param_constraints` | [`parameter constraint`](#parameter-constraint) |
 | Interface obligation set an existing mechanism carries | [contract](#contract) — always qualified: admission contract, write contract, record-usage contract, document contract | the mechanism each compound names; no record of its own | [`contract`](#contract) |
 | Decision point evaluating an action against a policy | [gate](#gate) (`action gate`) | `action_policy`, evaluated per action | [`gate`](#gate) |
-| — (rejected; names nothing the six `*_policy` types don't) | ~~guideline~~, ~~directive~~ | — | [`policy`](#policy) |
+| — (rejected; names nothing a rule, a policy, or a compound type doesn't) | ~~guideline~~, ~~directive~~ | — | [`policy`](#policy) |
 
 **Foundation → Ateles → Neotoma, per row above.** The design (this file, `data_model.md`) states the
 concept; `docs/agents/*.md` and `.claude/skills/*/SKILL.md` are Ateles' rendered mirror of the `agent`
-and `agent_policy` rows a harness reads (`conformance.md#direction-of-truth-per-class-of-record`); Neotoma
+and `rule` records a harness reads (`conformance.md#direction-of-truth-per-class-of-record`); Neotoma
 is the record the entity types above are registered schemas on. A design term is never inferred backward
 from a live schema or field name — `migration.md` is where an intentional implementation mapping or a
 legacy alias is recorded, and this file never renames a design concept to match what a checkout happens to
@@ -2175,10 +2195,11 @@ to agent names).
 
 | Design term (this file) | Ateles carrier | Neotoma schema / field | Notes |
 |---|---|---|---|
-| [rule](#rule) | rendered into `docs/agents/*.md` / `.claude/skills/*/SKILL.md`, and the session rule index | `agent_policy.rule`, `.rule_kind`, `.scope`, `.agent_sub` (legacy; superseded — see [`rule`](#rule)) | one row, one rule; no bundle field |
-| [policy](#policy) compounds | agent-loader / dispatcher reads | `agent_policy`, `action_policy`, `task_policy`, `hook_policy`, `instance_policy`, `conformance_policy`, `insurance_policy` — seven registered schemas | `standing_rule` and `rule_update`, where an instance still carries them, are pre-114 aliases of `agent_policy`'s class, not a second design type |
+| [rule](#rule) | rendered into `docs/agents/*.md` / `.claude/skills/*/SKILL.md`, and the session rule index | today `agent_policy.rule`, `.rule_kind`, `.index_line`, `.applies_when`, and the legacy `.scope`/`.agent_sub` (superseded — see [`rule`](#rule)); the core `rule` type after the migration | one record, one rule; no bundle field; `standing_rule` and `rule_update`, where an instance still carries them, are pre-114 aliases of the same class |
+| [policy](#policy) | one heading per policy in the rendered rule set | a `policy` record, not yet registered; today `instance_policy` holds its rules inline as prose | the inline rules become `rule` records `PART_OF` a policy (`migration.md#the-rule-and-policy-types-and-their-live-names`) |
+| the `*_policy` compounds | agent-loader / dispatcher reads | `action_policy`, `task_policy`, `hook_policy`, `conformance_policy`, `insurance_policy` — registered schemas | not groupings of rules; each named by its compound |
 | [instruction](#instruction) | session-start hook payload, per-prompt rule index, subagent brief | not a stored entity — assembled at delivery from the types above | never a Neotoma row of its own; storing a rendering would be a second home for the content |
-| [guard](#guard) | `.claude/hooks/*.py` (PreToolUse etc.) | none — the rule it enforces is the `agent_policy` row; the guard is code | a guard with no wired hook is an [instruction](#instruction), not a control |
+| [guard](#guard) | `.claude/hooks/*.py` (PreToolUse etc.) | none — the rule it enforces is a `rule` record; the guard is code | a guard with no wired hook is an [instruction](#instruction), not a control |
 | [carrier](#carrier) | harness capability matrix (`harness_carriers.md#capability-matrix`) | none — a carrier is a delivery vehicle, not a record | — |
 | [contract](#contract) | `adapters.md`'s admission contract, `scripts/lint.sh` / CI checks | none — see [`control`](#control) for when a contract becomes enforcement | a document contract with no CI wiring is tracked in `status.md`, never asserted as bound |
 

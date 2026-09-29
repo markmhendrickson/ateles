@@ -228,7 +228,7 @@ retroactively reshape or minimize what these rows already hold; it declares the 
 | `agent_definition` (retired name) | re-type | `agent` | the design's fields — `name`, `prompt_markdown`, `context_entity_types[]`, version — carry over. The credential field becomes the credential's binding to the `agent` (gap G17: no edge type for a credential binding is named). A status of planned on the source is a declaration-time fact the design already checks: a role the roster resolves to an agent with no runner raises `unspawnable_assignee` at declaration (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`). The tool allowlist, the write-set field, the tier, the harness preferences, and the model tier have no design field (gap G19) and ride in the interpretation as declared-but-unmodelled, never in `raw_fragments`. The coarse grant label is retired: the real grant is the `agent_grant` entity. Undeclared fields already sitting in the source's `raw_fragments` are read out per entity and either declared or dropped with a note before the merge, because a merge carries them nowhere (`data_model.md#record-conventions`) |
 | the swarm's roster | keep; correct | the roster the design names as the role resolver | one of the governance types (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`); its role-to-agent map is what inverts the retired declarations' agent names into roles (stage 4) and what every `owner_role` resolves through at claim time. Every role must resolve to an `agent` with a credential before any workflow is declared against it; roles that resolve to a planned agent are named in the read-back (stage 3). The design gives it no row in `data_model.md` (gap G21) and says it binds per declaration scope where the instance's is one global map (gap G20) |
 | `agent_grant` | keep; correct | `agent_grant` | the design's fields (`sub`, `iss`, `capabilities[]`, `param_constraints`, `expires_at`) and the source's (`match_sub`, `match_iss`, and a linked host login on the grant) are a tolerant-reader case. Two corrections are governance writes: every capability naming a retired type is widened to name the new type **alongside** the old, before the holder's first write of the new type, and narrowed to the new type only after the holder is redeployed — the staged, dual-admit form `authority_model.md#grants` requires of a rotation, applied to a type name (gap G23: the design never says a type rename re-keys the grants that name it). And the human-device grants that carry wildcards are the fail-open shape the design forbids for a human; narrowing them is the operator's own act. The host login recorded on a grant is a credential binding living on the wrong entity (G17) |
-| `agent_policy` | keep | `agent_policy` | the design names it as the authoritative home of skill bodies and agent behavioural rules, and as one target of a standing finding. Prompts and skills rendered from it still carry retired words; the correction is to the entities, then a re-render (`conformance.md#direction-of-truth-per-class-of-record`) |
+| `agent_policy` | re-type (decision 120) | `rule` | the design names the `rule` type as the authoritative home of agent behavioural rules, one record per rule, and as one target of a standing finding; the mapping, and what the re-type must not widen, is `#the-rule-and-policy-types-and-their-live-names`. Prompts and skills rendered from it still carry retired words; the correction is to the entities, then a re-render (`conformance.md#direction-of-truth-per-class-of-record`) |
 | `agent_strategy` | keep | — | outside the four models. Each names an agent by credential rather than by role, which population's phase 1 will want to read; not migrated |
 | `operator_profile` | keep | `operator_profile`, descriptive | the design keeps it descriptive and hangs no authority edge on it (`authority_model.md#principals`) |
 | `operator` (the human principal), `principal_binding`, `ownership_grant`, `delegation_edge` | introduce | themselves | the one `operator` entity is the first write of the bootstrap and the first operator act. Each `agent` then carries a `principal_binding` to it; each registered type carries one `ownership_grant` to it. Credentials (a store identity, a host login, an address, a chat identity) bind to it many-to-one — through an edge the design has not named (G17) |
@@ -867,6 +867,38 @@ where a reader needs to write it into a query; the design's word for the concept
 claim names appear only in the two places the pair is being matched or the two credential systems joined,
 and both are cited above. This is the same discipline the [principal](vocabulary.md#principal) entry
 already states in its ban on "user for a principal (the store's authenticated credential)".
+
+## The rule and policy types and their live names
+
+**Ruled (decision 120, 2026-09-29, the operator's).** A rule is one record of the core `rule` type,
+carrying its own `rule_kind`; a policy is a named grouping of rule records, each member linked `PART_OF`
+it, with no precedence power over them (`vocabulary.md#rule`, `vocabulary.md#policy`). This amends the
+naming decision 114 ruled — `agent_policy` was named the home of a behavioural rule, and the home is now the
+`rule` type — and keeps 114's binding: a rule reaches what it governs by a `GOVERNS` edge. The design uses
+the new names from this ruling on; the live record keeps the old ones until the migration runs, and this
+section is where the two are mapped. The migration itself is not performed here: planning it — the
+retyping, every reader that selects a rule by type, and a window in which readers accept both names — is
+Neotoma task `ent_f9930006ca11de6d72c6162b`.
+
+| Live name | Design name | What moves, and what the migration must not do |
+|---|---|---|
+| `agent_policy` | `rule` | re-type by the merge form decision 31 rules (`#how-a-registered-entity-type-is-renamed-on-a-live-record`). Through the transition window every reader accepts both type names, and a reader must never drop a `mandatory` rule because its type name is the one it did not expect |
+| `standing_rule` | `rule` | decision 114 already carries these rows into `agent_policy`'s class; they re-type straight to `rule` rather than through a second rename |
+| `agent_policy.index_line` | `rule.title` | the one line an index renders; a tolerant-reader case |
+| `agent_policy.status` `active` | `rule.status` `approved` | `proposed` is new and binds nothing; `provisional` and `retired` carry over |
+| `agent_policy.scope`, `.agent_sub` | the `GOVERNS` edge (none: the whole instance; → a member: that member's sessions; → an agent: that agent) | superseded by decision 114. A legacy row whose `scope` is `agent` and that carries no `GOVERNS` edge must **not** become an edge-less `rule`: an edge-less rule binds the whole instance, so migrating it that way would widen a rule meant for one agent to everyone. Such a row is surfaced for its missing edge, and binds no agent until it has one |
+| `instance_policy`'s rules held inline as prose | one `rule` record each, `PART_OF` a `policy` | each inline rule becomes its own record with its own `rule_kind`. Which of the record's remaining values are genuinely instance-wide settings is still being mapped |
+| `instance_policy`'s single enforcement mode | each rule's own `rule_kind` | no container-wide enforcement switch survives. A machine-checkable write requirement — require provenance, require a lawful basis, a maximum sensitivity class, a type allow or deny list — becomes a `rule` with a server-evaluable `predicate` and its own kind |
+| `instance_policy`'s admission settings (e.g. whether anonymous writes are admitted) | server configuration | not on any record |
+
+### Who approves a proposed rule on a shared instance
+
+**Open (decision 121).** On a shared instance any member may propose a rule, and a proposed rule binds only
+once approved: until then it renders labelled as proposed, is never enforced, and its `rule_kind` has no
+effect (`vocabulary.md#rule`). Who may approve it — and so turn a member's proposal into something binding
+every other member's sessions — is not ruled. It is an authority question (`authority_model.md`), and the
+answer decides whether one member can bind another; nothing in the mapping above assumes one, and until it
+is ruled no proposed rule on a shared instance is treated as approved by any reader.
 
 ## Gaps and contradictions the mapping exposed
 
