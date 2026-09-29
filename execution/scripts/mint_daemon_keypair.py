@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -62,6 +63,26 @@ def _int_to_b64url(n: int, byte_length: int = 32) -> str:
 
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def jwk_thumbprint(jwk: dict) -> str:
+    """RFC 7638 JWK thumbprint (SHA-256, base64url, no padding) of an EC public key.
+
+    Computed from the four required public members only, `crv`, `kty`, `x`, `y`,
+    serialized with members in lexicographic order and no whitespace. It reads
+    nothing else from *jwk*: the private scalar `d` never enters the hash, so the
+    result is public information and safe to print. This is the value Neotoma
+    matches against a grant's `match_thumbprint`.
+    """
+    members = {k: jwk[k] for k in ("crv", "kty", "x", "y")}
+    canonical = json.dumps(members, separators=(",", ":"), sort_keys=True)
+    digest = hashlib.sha256(canonical.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def key_file_thumbprint(path: Path) -> str:
+    """Thumbprint of the public half of a minted key file (never returns `d`)."""
+    return jwk_thumbprint(json.loads(Path(path).read_text()))
 
 
 class UnsafeKeyTargetError(OSError):
@@ -245,7 +266,9 @@ def main() -> None:
     name = validate_name(args.name)
     sub = f"{name}@ateles-swarm"
     # Non-secret metadata only — never the private scalar (d) or the public
-    # coordinates (x/y).
+    # coordinates (x/y). The RFC 7638 thumbprint is a hash of the public key: it
+    # is what a grant pins, and it is public.
+    thumbprint = key_file_thumbprint(out_path)
     if rotated:
         print(f"Keypair ROTATED at: {out_path}")
         print("  the previous private key has been destroyed and cannot be recovered")
@@ -254,31 +277,48 @@ def main() -> None:
     print(f"  sub: {sub}")
     print(f"  format: canonical JWK (ES256 P-256)")
     print(f"  mode: {stat.S_IMODE(out_path.stat().st_mode):04o}")
+    print(f"  thumbprint (RFC 7638, public): {thumbprint}")
     print()
     verify_cmd = (
         "python3 execution/scripts/verify_aauth_signer.py "
         f"--jwk {out_path} --live <neotoma-base-url>"
     )
+    check_cmd = (
+        "neotoma request --operation listAgentGrants "
+        f"--query '{{\"q\": \"{thumbprint}\", \"status\": \"active\"}}'"
+    )
     if rotated:
-        # The existing agent_grant matches (sub, iss) with no thumbprint pin, so
-        # it still applies to the new key; do not tell the operator to register
-        # a new one.
+        # Admission is key-bound: a grant admits only the key its match_thumbprint
+        # names, so the old grant does NOT admit the new key. It must be updated
+        # to pin the new thumbprint (or replaced), or signed writes as this role
+        # are refused until it is.
         print('Rotation next steps (details: docs/aauth.md, "Identity provisioning"):')
-        print(f"  1. Re-verify the signer: {verify_cmd}")
-        print("  2. Restart the daemon so it picks up the new keypair.")
         print(
-            f"  Re-register the agent_grant for {sub} only if its sub or capabilities "
-            "changed (then check it with neotoma request --operation listAgentGrants)."
+            "  1. Pin the NEW key: neotoma request --operation updateAgentGrant "
+            "--path '{\"id\": \"<grant_id from listAgentGrants>\"}' "
+            f"--body '{{\"match_thumbprint\": \"{thumbprint}\"}}'"
         )
+        print(
+            "     (or createAgentGrant with this thumbprint and revoke the old "
+            "grant with revokeAgentGrant). Until the grant pins this thumbprint, "
+            f"signed writes as {sub} are not admitted."
+        )
+        print(f"  2. Check the pin exists: {check_cmd}")
+        print(f"  3. Re-verify the signer: {verify_cmd}")
+        print("  4. Restart the daemon so it picks up the new keypair.")
     else:
         # Same order as docs/aauth.md "Identity provisioning": mint (done),
-        # register the grant, check it, verify, restart.
+        # register the grant PINNING this key, check it, verify, restart.
         print('Next, in this order (details: docs/aauth.md, "Identity provisioning"):')
-        print(f"  2. Register the agent_grant for {sub} (operator: neotoma request --operation createAgentGrant).")
         print(
-            "  3. Check it exists: neotoma request --operation listAgentGrants "
-            f"--query '{{\"q\": \"{sub}\", \"status\": \"active\"}}'"
+            f"  2. Register the agent_grant for {sub}, pinning this key (operator): "
+            "neotoma request --operation createAgentGrant --body "
+            f"'{{\"label\": \"{name}\", \"match_sub\": \"{sub}\", "
+            f"\"match_thumbprint\": \"{thumbprint}\", "
+            "\"capabilities\": [<the ops and entity types this role needs>]}'"
         )
+        print("     Without match_thumbprint the grant admits nothing on current Neotoma.")
+        print(f"  3. Check the pin exists: {check_cmd}")
         print(f"  4. Verify the signer: {verify_cmd}")
         print("  5. Restart the daemon so it picks up the new keypair.")
     print(

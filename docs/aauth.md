@@ -10,7 +10,7 @@ Covers the AAuth-related files in this repo (`execution/scripts/mint_daemon_keyp
 
 ---
 
-AAuth is the agent authentication protocol Ateles uses to attribute every daemon and invocable agent's requests to a named agent (a `sub` the request claims, backed by proof of possession of a key; see "What AAuth does here" below). This document maps where AAuth is used across the repo, how each component fits together, and what still needs to be done before the full trust chain is active.
+AAuth is the agent authentication protocol Ateles uses to attribute every daemon and invocable agent's requests to a named agent (a `sub` the request claims, backed by proof of possession of a key; see "What AAuth does here" below). This document maps where AAuth is used across the repo, how each component fits together, and what still needs to be done before every daemon signs as itself and is admitted by a grant that pins its key.
 
 ---
 
@@ -18,9 +18,9 @@ AAuth is the agent authentication protocol Ateles uses to attribute every daemon
 
 AAuth solves two intertwined problems:
 
-1. **Attribution — which agent wrote this observation?** Without AAuth, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, a daemon that signs its requests on the RFC 9421 path with its own EC keypair has its key possession verified by Neotoma, which then records the claimed `agent_sub` (for example `anthus@ateles-swarm`, or `cursor@markmhendrickson.com` for IDE sessions) on the observations from that verified request. That `sub` is a **self-asserted claim on a request whose key possession was proven**, not a proven individual agent: it narrows attribution from "the operator" to "a holder of an admitted key that claimed this sub" (see "What each grant shape admits" for when a key is actually bound). A daemon that only sends the lighter `X-AAuth-Token` JWT (`lib/daemon_runtime/aauth_signer.py`) is **not** verified by Neotoma today (nothing in Neotoma consumes that header), so it gets no `agent_sub` from it.
+1. **Attribution — which agent wrote this observation?** Without AAuth, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, a daemon that signs its requests on the RFC 9421 path with its own EC keypair has its key possession verified by Neotoma, which then stamps the claimed `agent_sub` (for example `anthus@ateles-swarm`, or `cursor@markmhendrickson.com` for IDE sessions) on the observations from that request. `agent_sub` is stamped from **any request whose signature verified, whether or not a grant admits it**: it is a **self-asserted claim on a request whose key possession was proven** ("the holder of some key that verified claimed this sub"), not a proven individual agent, and admission is a separate step. Admission binds the key, not the sub (see "What each grant shape admits"). A daemon that only sends the lighter `X-AAuth-Token` JWT (`lib/daemon_runtime/aauth_signer.py`) is **not** verified by Neotoma today (nothing in Neotoma consumes that header), so it gets no `agent_sub` from it.
 
-2. **Authorization — what is this agent allowed to do, and to which entities and tools?** The `(sub, iss)` a verified request presents is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
+2. **Authorization — what is this agent allowed to do, and to which entities and tools?** The signing key of a verified request is matched (by thumbprint) against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
    - by **operation** (`store_structured`, `create_relationship`, `correct`, `retrieve`, …)
    - by **entity type** (`store_structured: ["agent_action_observation", "participation_record"]` instead of `*`)
    - by **field, scope, or external resource** (e.g. `github_harness:write` scoped to specific repos for Cicada/Vanellus)
@@ -28,12 +28,12 @@ AAuth solves two intertwined problems:
 
    The grant is the per-agent policy boundary. Monedula's grant lets it write `transaction` and `payment_profile` but not `agent_definition`; Cicada's lets it write `agent_action_observation` but not `business_strategy`; a future read-only auditor agent could have a grant that allows `retrieve: *` and nothing else. Wrong-capability writes fail at admission, before any side effect — the boundary lives in Neotoma, not in agent code.
 
-So AAuth is both **who the request claims to be** (a signed, self-asserted identity) and **what that claimed identity is allowed to touch** (grant-driven capability scope). The two halves are inseparable, but signature verification does not prove who the agent is. It proves the sender holds the private key matching the public key the request itself carries (`cnf.jwk`). The `sub` and `iss` inside that request are **self-asserted**: Neotoma decodes the agent-token JWT without checking the JWT's own signature (the key is taken from the JWT's `cnf.jwk`), and matches grants on `(sub, iss)`. `match_thumbprint` is optional on a grant, and a grant ties admission to a specific key only in one shape (thumbprint-only, no `match_sub`); every other shape admits any key that claims the matching sub, as the table under "What each grant shape admits" spells out. Grant admission then decides whether that claimed `(sub, iss)` or thumbprint may perform this specific operation on this specific entity type or call this specific tool. Today only Cursor, Cicada, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
+So AAuth is both **who the request claims to be** (a signed, self-asserted identity) and **what that claimed identity is allowed to touch** (grant-driven capability scope). The two halves are inseparable, but signature verification does not prove who the agent is. It proves the sender holds the private key matching the public key the request itself carries (`cnf.jwk`). The `sub` and `iss` inside that request are **self-asserted**: Neotoma decodes the agent-token JWT without checking the JWT's own signature (the key is taken from the JWT's `cnf.jwk`). Releases up to `v0.23.1` matched grants on `(sub, iss)`, which made the claim itself admit; on current Neotoma a grant admits a request only if it pins the signing key's thumbprint (`match_thumbprint`), and `match_sub` / `match_iss` are descriptive and never admit on their own (see "What each grant shape admits"). Grant admission then decides whether that pinned key may perform this specific operation on this specific entity type or call this specific tool. The May 2026 record was that only Cursor, Cicada, and Vanellus had grants populated (check the live set, and that each pins a thumbprint, with `listAgentGrants`), and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
 
 Neotoma's AAuth pipeline:
 1. **Signature verification** — checks the RFC 9421 HTTP Message Signature
 2. **Tier resolution** — ES256 software key → `tier=software`; FIDO2-attested key → `tier=hardware`
-3. **Grant admission** — matches the request's claimed `(sub, iss)`, or the key's thumbprint, against an `agent_grant` entity (see "What each grant shape admits"); checks requested operation against `capabilities`; gates `eligible_for_trusted_writes`
+3. **Grant admission** — looks up an active `agent_grant` whose `match_thumbprint` equals the signing key's RFC 7638 thumbprint (see "What each grant shape admits"); checks requested operation against `capabilities`; gates `eligible_for_trusted_writes`
 
 ---
 
@@ -49,7 +49,7 @@ The repo currently has **three key envelopes** across two signing contexts (Curs
 
 2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by some T3 daemons (e.g. `a2a_executor.py`, `a2a_gateway.py`) via `lib/daemon_runtime/aauth_signer.py`, which produces a lighter `X-AAuth-Token` JWT (not full RFC 9421). `docs/aauth/keys.md` calls this the "legacy" format, still supported but superseded by (3) below on next rotation. `lib/daemon_runtime/aauth_signer.py` probes `<daemon>.jwk.json` first and falls back to this `<daemon>.json`, so it reads both (2) and (3).
 
-3. **JWK format, T3/T4 flavor (canonical)** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`), and also loaded by `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` for the dispatcher-signed gate-writeback path (see below). **`agent_identity()` loads ONLY `<agent>.jwk.json` — it has no fallback to the legacy `<agent>.json`**, so a role that has only a legacy PEM key has no identity for that path (`agent_identity()` returns None and the signed write fails closed). **Not published to JWKS, and it does not need to be for Neotoma:** an RFC 9421 request carries the public key inline (the `Signature-Key` header holds an `aa-agent+jwt` whose `cnf.jwk` binds the signing key) and Neotoma verifies against that embedded key. Neotoma does not read `ateles-private/keys`. Verification is separate from admission, which still needs an active `agent_grant`. Provisioned by `execution/scripts/mint_daemon_keypair.py --name <role>` (see below and `docs/aauth/keys.md`, the canonical doc for this format's layout and rotation).
+3. **JWK format, T3/T4 flavor (canonical)** (`ateles-private/keys/<role>.jwk.json`) — used via `lib/daemon_runtime/aauth_httpsig.py`, a full RFC 9421 signer that matches Neotoma's `aauthVerify` wire format (verified end-to-end in `execution/scripts/verify_aauth_signer.py`), and also loaded by `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` for the dispatcher-signed gate-writeback path (see below). **`agent_identity()` loads ONLY `<agent>.jwk.json` — it has no fallback to the legacy `<agent>.json`**, so a role that has only a legacy PEM key has no identity for that path (`agent_identity()` returns None and the signed write fails closed). **Not published to JWKS, and it does not need to be for Neotoma:** an RFC 9421 request carries the public key inline (the `Signature-Key` header holds an `aa-agent+jwt` whose `cnf.jwk` binds the signing key) and Neotoma verifies against that embedded key. Neotoma does not read `ateles-private/keys`. Verification is separate from admission, which needs an active `agent_grant` that pins this key's thumbprint. Provisioned by `execution/scripts/mint_daemon_keypair.py --name <role>` (see below and `docs/aauth/keys.md`, the canonical doc for this format's layout and rotation).
 
 Unifying these formats and publishing all public keys to the same JWKS is on the to-do list below.
 
@@ -95,8 +95,9 @@ So `<ROLE>_NEOTOMA_TOKEN` and the dispatched child's `--mcp-config` `Authorizati
 always were — a bearer credential Neotoma resolves to a human `user_id`, never to an agent `sub`, per
 `src/services/mcp_auth.ts` on the Neotoma side — and they are now **entirely uninvolved** in gate
 attribution. The credential that matters for a gate write is the `ateles-private/keys/<role>.jwk.json`
-keypair this doc's provisioning script mints (plus an active `agent_grant` for the role's sub), consumed by the DISPATCHER's `sign_off` call, not by anything
-the dispatched child itself presents over its own MCP session.
+keypair this doc's provisioning script mints, together with an active `agent_grant` that pins that key's
+thumbprint, consumed by the DISPATCHER's `sign_off` call, not by anything the dispatched child itself
+presents over its own MCP session.
 
 **Residual, tracked separately, not fixed by #1181 or this doc:** `sign_off`'s signed write still competes
 with the underlying admission condition it works around — any process holding the shared bearer plus
@@ -131,10 +132,10 @@ AAuth-signed, authorized principal may write `gate_status.<gate>`. That is filed
 
 ### What "active" means per row
 
-- **Keypair on disk + JWKS publish + agent_grant** → fully active: signed, admitted, and attributed as the claimed sub (the sub remains a self-asserted claim on a request whose key possession was proven). Only Cursor reaches this today. (JWKS publication is not what makes Neotoma verify: an RFC 9421 request carries its public key inline.)
-- **Keypair on disk only, RFC 9421-signed** → Neotoma verifies the signature from the inline key but does not admit without a matching active `agent_grant`: "verified but unadmitted".
+- **Keypair on disk + a grant pinning its thumbprint** → signed and admitted; requests are stamped with the claimed sub, which stays a self-asserted claim on a request whose key possession was proven. JWKS publication is not what makes Neotoma verify (an RFC 9421 request carries its public key inline). Check that the pin exists with `listAgentGrants`; this doc's table cannot tell you.
+- **Keypair on disk only, RFC 9421-signed** → Neotoma verifies the signature from the inline key and stamps the claimed sub, but no grant pins the key, so the request is **not admitted** ("verified but unadmitted").
 - **Keypair on disk only, `X-AAuth-Token` JWT only** (the `lib/daemon_runtime/aauth_signer.py` path) → Neotoma has no consumer for that header, so the request is **not verified at all**; it is attribution metadata sent alongside the operator bearer token. This is the case for the daemons recorded with legacy PEM keys (Apus, Formica, Monedula, neotoma-agent, Sylvia, Ateles).
-- **Keypair + grant** → admission needs both an RFC 9421-signed request and an active matching `agent_grant`. Cicada and Vanellus have grants.
+- **Keypair + grant** → admission needs an RFC 9421-signed request **and** an active grant whose `match_thumbprint` equals that key's thumbprint. A grant that names only a sub (with or without an iss) does not admit on current Neotoma (`grant_key_unbound`). Cicada and Vanellus are recorded as having grants; whether each pins the current key is checked with `listAgentGrants`.
 - **No keypair** → daemon falls back to stub mode (logs a warning, sends no AAuth headers, attribution defaults to operator-scoped auth).
 
 The JWKS and `aauth-agent.json` files are served from the website, whose source is **not in this checkout** (no `execution/website/` on `main`).
@@ -172,11 +173,11 @@ They must point at the **same directory**. If they diverge, the script mints int
 |---|---|
 | `execution/scripts/mint_daemon_keypair.py` | **Canonical** minting script for one T3/T4 role's ES256 P-256 keypair, written to `ateles-private/keys/<role>.jwk.json` (mode 0600, written that way from creation, no window at a looser mode) — the flavor `lib/daemon_runtime/aauth_httpsig.py` and `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity()` both consume. Never prints the private scalar or public coordinates. Does **not** touch `.creds/`, `jwks.json`, or `aauth-agent.json` — those belong to the separate Cursor-proxy flavor, which has no provisioning script on `main` today. Refuses to overwrite an existing key unless `--force` is passed (rotation, which atomically replaces the key via a same-directory temp file, so a failed rotation leaves the old key intact). Creation is `O_EXCL|O_NOFOLLOW` at 0600 (a symlink at the target is refused, never followed) and the keys directory is created 0700. `--name` must match `^[a-z][a-z0-9_-]{0,63}$`. Full layout and rotation procedure: `docs/aauth/keys.md`. There is deliberately only ONE script that writes this format — see that file's module docstring for the "extend, don't parallel" rule this follows. |
 
-**Canonical order (the same in every doc and in the script's closing hint after a first mint; after a `--force` rotation the existing grant still applies, so the hint says to re-verify and restart, and to re-register only if the sub or capabilities changed):**
+**Canonical order (the same in every doc and in the script's closing hint after a first mint). After a `--force` rotation the old grant does NOT admit the new key: step 2 becomes "pin the new thumbprint on the grant" (see below), and the hint says so:**
 
 1. **Mint** the key.
-2. **Register** the `agent_grant` (operator).
-3. **Check** the grant exists.
+2. **Register** the `agent_grant`, **pinning the new key's thumbprint** (operator).
+3. **Check** the pin exists.
 4. **Verify** the signer.
 5. **Restart** the daemon.
 
@@ -184,24 +185,26 @@ They must point at the **same directory**. If they diverge, the script mints int
 # 1. Mint (or rotate with --force; read docs/aauth/keys.md before rotating).
 #    --keys-dir <dir> overrides the default keys directory for this run.
 python3 execution/scripts/mint_daemon_keypair.py --name <role>
+#    The output ends with the key's RFC 7638 thumbprint (public; the private
+#    scalar is never printed). Use it as <thumbprint> below.
 
 # 2. As the OPERATOR (own authenticated Neotoma session, not this script and
-#    not an unattended agent), register the matching agent_grant. This shape
-#    (match_sub + match_iss) admits any key claiming this sub and iss; see
-#    "What each grant shape admits" before choosing:
+#    not an unattended agent), register the agent_grant, PINNING the key. On
+#    current Neotoma a grant without match_thumbprint admits nothing:
 neotoma request --operation createAgentGrant --body '{
   "label": "<role>",
   "match_sub": "<role>@ateles-swarm",
-  "match_iss": "https://markmhendrickson.com",
+  "match_iss": "<issuer>",
+  "match_thumbprint": "<thumbprint>",
   "capabilities": [
     {"op": "retrieve", "entity_types": ["issue"]},
     {"op": "correct", "entity_types": ["issue"]}
   ]
 }'
 
-# 3. Confirm it exists and is active (expect one grant whose match_sub is the role's sub):
+# 3. Confirm the pin exists and is active (expect one grant whose match_thumbprint is yours):
 neotoma request --operation listAgentGrants \
-    --query '{"q": "<role>@ateles-swarm", "status": "active"}'
+    --query '{"q": "<thumbprint>", "status": "active"}'
 
 # 4. Verify the key signs in a way Neotoma accepts (prints no key material):
 python3 execution/scripts/verify_aauth_signer.py \
@@ -213,20 +216,28 @@ python3 execution/scripts/verify_aauth_signer.py \
 This keypair is what `execution/daemons/apis/gate_waive.py`'s `IssueGateStore.sign_off` loads (via
 `lib/daemon_runtime/neotoma_signed.py`'s `agent_identity(lens_agent, sub=...)`) to sign a gate verdict as
 this role — see "The dispatched child's MCP session does NOT carry gate attribution" above for the full
-mechanism. Provisioning the keypair is necessary but not sufficient: `sign_off` also needs the resolved
-`sub` to be admitted server-side, which means an active `agent_grant` matching `<role>@ateles-swarm`
-with the needed capabilities. `NEOTOMA_STRICT_AAUTH_SUBS`, where an instance sets it, does not bind a sub to a key
-(it makes the server refuse an unsigned request claiming a listed sub via `X-Agent-Label`; it does not
-admit anything and does not promote a tier); without an active `agent_grant` the signed write still lands as an
-unadmitted signature.
+mechanism. Provisioning the keypair is necessary but not sufficient: `sign_off` also needs the write to be
+**admitted**, which on current Neotoma means an active `agent_grant` whose `match_thumbprint` is this key's
+thumbprint (plus the capabilities the write needs). Without that pin the signed write still verifies and is
+stamped with the claimed sub, but is refused as unadmitted (`grant_key_unbound` if a grant names only the sub).
+`NEOTOMA_STRICT_AAUTH_SUBS`, where an instance sets it, compares the request's `X-Agent-Label` with the
+`match_sub` of the active grant that pins the signing key: a label listed there must be signed by a key some
+grant pins under that sub, and the sub inside the agent token is not consulted. It does not admit anything by
+itself and does not promote a tier.
+
+**Reading the thumbprint.** The script prints it on every mint and rotation. To read it later without the
+private key, compute the RFC 7638 thumbprint of the public members (`crv`, `kty`, `x`, `y`) of
+`<role>.jwk.json`; the script exposes this as `key_file_thumbprint()`. Neotoma also records the thumbprint of a
+verified request as `agent_thumbprint` (see its `docs/subsystems/aauth.md`), but this repo does not document a
+stable way to read that back over the API, so prefer the script's value.
 
 **What step 4 does and does not prove.** `verify_aauth_signer.py --live` prints only `status`,
 `signature_present`, `signature_verified`, an error code and `tier`, and exits non-zero unless
 `signature_verified` is true. It proves that the **Python signer** (`HttpSigSigner`, signing with `iss`
 set to the role's `sub`) produces a signature Neotoma verifies with this key. It does **not** prove that
-a grant matches, and it does not exercise the path the dispatcher uses: gate write-back signs through the
+a grant pins this key, and it does not exercise the path the dispatcher uses: gate write-back signs through the
 node helper in `signed_request`, with the issuer taken from `NEOTOMA_AAUTH_ISS` (or the Neotoma CLI's configured
-issuer), not from the Python signer. Step 3 is what shows a grant exists, and the first real gate write-back is the
+issuer), not from the Python signer. Step 3 is what shows the pin exists, and the first real gate write-back is the
 end-to-end proof.
 
 ### Proxy layer (Cursor IDE → Neotoma)
@@ -292,7 +303,7 @@ Daemon status as recorded in May 2026 (a snapshot; the topology table above carr
 
 "Stub" means the daemon runs without per-agent signing — Neotoma attributes its observations to the operator-scoped auth instead. "No JWKS publish" means the public key is not available at a well-known endpoint for other verifiers. It does not stop Neotoma verifying an RFC 9421 request, because that request carries its public key inline; Neotoma does not read `ateles-private/keys`.
 
-Only the Cursor IDE proxy is **fully end-to-end active** (RFC 9421-signed, JWKS published, and a grant):
+The Cursor IDE proxy is the example of a fully admitted client (RFC 9421-signed, JWKS published, and a grant pinning its key); a verified and admitted request looks like:
 
 ```
 GET /session → {
@@ -343,7 +354,7 @@ The `cnf.jwk` is the public key Neotoma verifies the signature against; the requ
 
 ## Neotoma grant entity
 
-One `agent_grant` entity gates admission:
+An `agent_grant` entity gates admission. As documented in May 2026 the Cursor grant was:
 
 ```
 entity_id:   ent_36b1ccf3efe5905bd75aca3c
@@ -356,27 +367,32 @@ capabilities:
   retrieve:           *
 ```
 
-(Shown as shorthand. The stored and `createAgentGrant` shape is an array of `{"op": ..., "entity_types": [...]}` entries, as in the examples below.)
+(Shown as shorthand. The stored and `createAgentGrant` shape is an array of `{"op": ..., "entity_types": [...]}` entries, as in the examples below.) That listing has no `match_thumbprint`; on current Neotoma such a grant is refused (`grant_key_unbound`), so a live grant must also carry one. Check the live state with `listAgentGrants`, not this snapshot.
 
 ### What each grant shape admits
 
-Read from `src/services/agent_grants.ts` (`scanForGrant`, `validateIdentityMatch`) in the Neotoma repo. `sub`, `iss` and the JWT they sit in are **self-asserted** (the JWT is decoded, not verified; the request signature only proves possession of the key the request carries), so what a grant admits is decided by which of those fields it matches on. Only active grants admit.
+Re-derived against **Neotoma `origin/main`** (`src/services/agent_grants.ts` `scanForGrant` / `lookupGrantForIdentity`, `src/services/aauth_admission.ts`, `src/middleware/aauth_verify.ts`), not against an older checkout.
 
-| Grant fields | Admits |
-|---|---|
-| `match_sub` only | **Any key** whose request claims that sub (any `iss`) |
-| `match_sub` + `match_iss` | **Any key** whose request claims that sub **and** that iss |
-| `match_thumbprint` only (no `match_sub`) | **Only** the key with that RFC 7638 thumbprint, under whatever sub and iss it claims. This is the only shape that binds admission to a specific key |
-| `match_sub` (+ `match_iss`) **and** `match_thumbprint` | **Either** the pinned key (under any sub) **or** any key claiming the sub (and iss). The thumbprint adds an admission route; it does **not** restrict the sub route |
-| `match_iss` without `match_sub` | Rejected at creation (`match_iss requires match_sub`) |
+**Version state.** Key-bound admission landed in Neotoma as **#2506** (`4cb927a81`, "require a key binding for grant admission", 2026-09-25), with follow-ups #2512 (grants validated before they are stored) and #2513 (identity decisions and `NEOTOMA_STRICT_AAUTH_SUBS` keyed on the signing key; per-owner pin uniqueness). None of it is in `v0.23.1`. It is on `main` (package version `0.24.0`, release notes under `docs/releases/in_progress/v0.24.0/`), and the running production instance reported `git_sha` `cabd1eef5`, which includes it. Whether it has shipped in a published release is **unverified as of 2026-09-29**. **Releases up to and including `v0.23.1` also matched a grant on `match_sub` / `match_iss`**, so pinning the thumbprint on every grant is correct on both behaviours.
 
-If several grants match one request, the thumbprint match wins, then sub + iss, then sub only; ties go to the most recently updated grant. Consequences:
+`sub`, `iss` and the JWT they sit in are **self-asserted** (the JWT is decoded, not verified; the request signature only proves possession of the key the request carries). So admission cannot rest on them; on current Neotoma it rests on the key.
 
-- Any grant with `match_sub` (alone, with `match_iss`, or together with a `match_thumbprint`) admits a party holding *any* ES256 key that claims the sub. It lets software and hardware keys rotate without updating the grant, and it is also the reason a stolen or copied key, or a fresh key, is admitted as that sub.
-- `capabilities` limit *what* an admitted sub may do; they do not limit *who* may claim the sub, unless the grant is thumbprint-only.
-- Whether to pin grants (and to which shape) is an operator policy call and is not changed by this document.
+| Grant fields | Admits (current Neotoma) | Older releases (<= v0.23.1) |
+|---|---|---|
+| `match_sub` only | **Nothing.** Refused as `grant_key_unbound` (the operator is told to pin the thumbprint) | any key claiming that sub |
+| `match_sub` + `match_iss` | **Nothing** (`grant_key_unbound`) | any key claiming that sub and iss |
+| `match_thumbprint` only | **Only** the key with that RFC 7638 thumbprint, under whatever sub and iss it claims | the same key |
+| `match_sub` (+ `match_iss`) **and** `match_thumbprint` | **Only** the pinned key: the pin restricts. The grant's `match_sub` / `match_iss` are descriptive (they are what `NEOTOMA_STRICT_AAUTH_SUBS` and the operator-attested allowlists read); the sub the request claims is **not** compared | the pinned key, **or** any key claiming the sub (the sub route was not restricted by the pin) |
+| `match_iss` without `match_sub` | Rejected at creation (`match_iss requires match_sub`) | same |
 
-The grant above (`match_sub` + `match_iss`, no thumbprint) is the "sub + iss" row.
+Further rules on current Neotoma:
+
+- Only **active** grants admit. A grant pinning the key but `suspended` / `revoked` reports `grant_suspended` / `grant_revoked`.
+- A key thumbprint can be pinned by grants under **one owner only** (#2513). A second owner pinning it is refused at write time; if active grants under more than one owner already pin it, admission fails closed (`grant_pin_conflict`). Several grants under the same owner may pin one key; the most recently observed wins.
+- A pinned grant whose stored capabilities fail validation fails visibly (`grant_invalid`), not as "no match".
+- `capabilities` limit *what* the admitted key may do. Because the key is what is bound, they do limit *who*.
+- A verified request that no grant admits is still **stamped** with its claimed `agent_sub` as unadmitted attribution (see "What AAuth does here"). That includes a key you rotated away from or a grant you revoked, as long as the old private key still signs.
+- The Cursor grant above was the "sub + iss" row on paper; treat it as needing a pin.
 
 ---
 
@@ -385,7 +401,7 @@ The grant above (`match_sub` + `match_iss`, no thumbprint) is the "sub + iss" ro
 Entity-level grants gate Neotoma operations. **Tool-level grants** extend the
 same `agent_grant` entity to gate arbitrary MCP tool calls — across any MCP
 server, not just Neotoma. This is what stops a Monedula invocation
-from calling `github_harness` tools even if that server is connected at dispatch, provided the call is made as the admitted Monedula sub. It does not hold against a party using another key and claiming that sub (unless the grant is thumbprint-only; see "What each grant shape admits").
+from calling `github_harness` tools even if that server is connected at dispatch, provided the call is made by the key the Monedula grant pins. On current Neotoma another key claiming the Monedula sub is not admitted at all (see "What each grant shape admits"; on releases up to `v0.23.1` a grant without a thumbprint pin would have admitted it).
 
 ### Grant shape
 
@@ -396,7 +412,8 @@ map:
 ```jsonc
 {
   "match_sub": "monedula@ateles-swarm",
-  "match_iss": "https://markmhendrickson.com",
+  "match_iss": "<issuer>",
+  "match_thumbprint": "<thumbprint of the key this grant pins>",
   "status": "active",
   "capabilities": [
     { "op": "store_structured", "entity_types": ["transaction", "payment_profile"] },
@@ -407,7 +424,7 @@ map:
     { "op": "tool:btc-wallet:btc_send_transfer",
       "param_constraints": { "max_amount_sats": 500000, "to_allowlist": true } },
     { "op": "tool:btc-wallet:btc_wallet_get_balance" }
-    // github_harness: explicitly absent → Monedula cannot touch GitHub
+    // github_harness: explicitly absent → the key this grant pins cannot touch GitHub
   ]
 }
 ```
@@ -479,13 +496,14 @@ proxy is a different identity and has its own, currently unimplemented, provisio
 
 ### 2. Create `agent_grant` entities for remaining subs
 
-Today only Cursor, Cicada, and Vanellus have grants. Apus, Formica, Monedula, neotoma-agent, and Ateles hold keys but are not admitted — Neotoma attributes their writes at operator level. Create one grant per sub, scoped to the operations that daemon needs, via the operator's own authenticated Neotoma CLI session (`agent_grant` is a protected entity type — see `docs/subsystems/aauth.md` on the Neotoma side — so it is created through the `createAgentGrant` operation, not the generic `store` verb):
+The May 2026 record was that only Cursor, Cicada, and Vanellus had grants, and that Apus, Formica, Monedula, neotoma-agent, and Ateles held keys but were not admitted (Neotoma attributes their writes at operator level). Confirm the live state with `listAgentGrants`; an admitted client needs an active grant that **pins its key's thumbprint**. Create one grant per sub, scoped to the operations that daemon needs, via the operator's own authenticated Neotoma CLI session (`agent_grant` is a protected entity type — see `docs/subsystems/aauth.md` on the Neotoma side — so it is created through the `createAgentGrant` operation, not the generic `store` verb):
 
 ```bash
 neotoma request --operation createAgentGrant --body '{
   "label": "apus",
   "match_sub": "apus@ateles-swarm",
-  "match_iss": "https://markmhendrickson.com",
+  "match_iss": "<issuer>",
+  "match_thumbprint": "<thumbprint printed by mint_daemon_keypair.py>",
   "capabilities": [
     {"op": "store_structured", "entity_types": ["*"]},
     {"op": "create_relationship", "entity_types": ["*"]}
@@ -497,18 +515,19 @@ neotoma request --operation createAgentGrant --body '{
 
 Today `https://markmhendrickson.com/.well-known/jwks.json` serves `sw-cursor-1` only. To make daemon public keys available to verifiers other than Neotoma (Neotoma itself does not need this for RFC 9421 requests), each daemon's public PEM needs to be converted to JWK form and merged into the website's `.well-known/jwks.json` (website source is not in this checkout), then the website redeployed. Subjects also need to be added to `aauth-agent.json` `subjects_supported`.
 
-### 4. Reconcile the two keypair formats
+### 4. Reconcile the three key envelopes
 
-The split between `.creds/*.jwk` and `ateles-private/keys/*.json` is incidental — both encode the same EC P-256 keypair in different envelopes. Picking one (likely JWK, since that's what the JWKS endpoint serves natively) and updating both signers to consume it would simplify the system and remove the conversion step in (3).
+The "Three key envelopes" above are the `.creds/*.jwk` Cursor-proxy key, the legacy PEM `ateles-private/keys/<name>.json`, and the canonical `ateles-private/keys/<name>.jwk.json`. They encode EC P-256 keys in different envelopes. The dispatcher's signed write reads only the canonical file (`agent_identity()`), and `lib/daemon_runtime/aauth_signer.py` reads the canonical file first and the legacy one as a fallback. Consolidating on the canonical `<role>.jwk.json` (and retiring the legacy PEM files as each role is re-minted) removes the split; the `.creds` key belongs to the Cursor proxy and is a separate identity.
 
 ### 5. Tighten grants to per-entity-type capabilities (and per-tool — see [ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
 
-Today all populated grants use `*` for `store_structured` and `correct` capabilities — meaning any admitted sub can write any entity type. The grant schema already supports finer-grained allowlists:
+Today all populated grants use `*` for `store_structured` and `correct` capabilities — meaning any key a grant pins can write any entity type. The grant schema already supports finer-grained allowlists:
 
 ```jsonc
 {
   "match_sub": "monedula@ateles-swarm",
-  "match_iss": "https://markmhendrickson.com",
+  "match_iss": "<issuer>",
+  "match_thumbprint": "<thumbprint of the key this grant pins>",
   "capabilities": [
     { "op": "store_structured",    "entity_types": ["transaction", "payment_profile", "daemon_report"] },
     { "op": "correct",             "entity_types": ["payment_profile"] },
@@ -518,7 +537,7 @@ Today all populated grants use `*` for `store_structured` and `correct` capabili
 }
 ```
 
-Per-agent allowlists turn the AAuth admission gate into a real policy layer: Monedula, when admitted as its own sub, cannot write an `agent_definition` even if its prompt is hijacked. That containment does not hold against a party using another key and claiming the Monedula sub, unless the grant is thumbprint-only (see "What each grant shape admits"). This is where AAuth shifts from "attribution-only" to "attribution + capability containment."
+Per-agent allowlists turn the AAuth admission gate into a real policy layer: Monedula, signing with the key its grant pins, cannot write an `agent_definition` even if its prompt is hijacked. The containment is bound to that key: on current Neotoma a different key claiming the Monedula sub is not admitted, and it holds only while the grant pins a thumbprint (see "What each grant shape admits"). This is where AAuth shifts from "attribution-only" to "attribution + capability containment."
 
 Mapping work needed:
 - Per agent, list the entity types it legitimately reads (from `context_entity_types` on `agent_definition`)
@@ -530,7 +549,7 @@ The same grant entity will also carry a `tools` capability map covering MCP tool
 
 ### 6. YubiKey hardware tier (Phase 6) — multiple agents
 
-Hardware-attested keys produce `tier=hardware` in Neotoma rather than `tier=software`. Any agent that touches money, mutates global state, or speaks on the operator's behalf in public is a candidate. Same `(sub, iss)` as the software keypair, second `kid`, `cnf.attestation` from a WebAuthn ceremony, no grant update needed for grants that match on the sub (they admit any key claiming the matched `(sub, iss)`, see "What each grant shape admits"; a thumbprint-only grant would need the new key's thumbprint).
+Hardware-attested keys produce `tier=hardware` in Neotoma rather than `tier=software`. Any agent that touches money, mutates global state, or speaks on the operator's behalf in public is a candidate. Same `(sub, iss)` as the software keypair, second `kid`, `cnf.attestation` from a WebAuthn ceremony, **a grant update is needed**: admission is key-bound, so a grant pinning the software key's thumbprint does not admit the hardware key. Pin the hardware key's thumbprint (add a second grant, or update the grant if the software key is being retired); see "What each grant shape admits".
 
 Planned hardware-tier agents in priority order:
 
@@ -545,9 +564,9 @@ Planned hardware-tier agents in priority order:
 For T4 invocable agents (Cicada, Vanellus, Pavo, Corvus, etc.), hardware tier is less urgent — they're scoped by `agent_grant` to specific repos/operations, and they don't run as resident services that could be compromised long-term. Software tier remains appropriate for them.
 
 Hardware-tier rollout per agent:
-1. Mint a second keypair on a YubiKey via WebAuthn ceremony for the same `(sub, iss)`
+1. Mint a second keypair on a YubiKey via WebAuthn ceremony for the same `(sub, iss)`, and pin its thumbprint on a grant (a hardware key with no pin is verified but not admitted)
 2. Publish the FIDO2 attestation alongside the public key in JWKS
-3. Verify Neotoma admits with `tier=hardware`
+3. Verify Neotoma admits with `tier=hardware` (`listAgentGrants` shows the pin; the request's tier shows the promotion)
 4. Optionally: add `tier_required: hardware` to high-trust capabilities in `agent_grant` (e.g. Monedula's `store_structured: ["transaction"]` could require hardware while `retrieve: *` accepts software)
 
 ---

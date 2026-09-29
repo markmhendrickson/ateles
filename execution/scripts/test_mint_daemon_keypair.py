@@ -25,7 +25,13 @@ _SCRIPT = _REPO_ROOT / "execution" / "scripts" / "mint_daemon_keypair.py"
 sys.path.insert(0, str(_REPO_ROOT / "execution" / "scripts"))
 
 import mint_daemon_keypair  # noqa: E402
-from mint_daemon_keypair import UnsafeKeyTargetError, mint, validate_name  # noqa: E402
+from mint_daemon_keypair import (  # noqa: E402
+    UnsafeKeyTargetError,
+    jwk_thumbprint,
+    key_file_thumbprint,
+    mint,
+    validate_name,
+)
 
 
 @pytest.fixture()
@@ -388,9 +394,8 @@ class TestCliMessages:
         # The existing grant still applies, so a rotation must not tell the
         # operator to register one; it says to re-verify, restart, and
         # re-register only if the sub or capabilities changed.
-        assert "createAgentGrant" not in out
+        assert "createAgentGrant" not in out.split("Rotation next steps")[0]
         assert out.index("Re-verify") < out.index("Restart the daemon")
-        assert "only if its sub or capabilities changed" in out
 
     def test_force_with_no_existing_key_is_a_first_mint_message(
         self, keys_dir: Path
@@ -412,3 +417,119 @@ class TestCliMessages:
         assert positions == sorted(positions), out
         assert "accipiter@ateles-swarm" in out
         assert "ATELES_AAUTH_KEYS_DIR" in out
+
+
+class TestThumbprint:
+    """The RFC 7638 thumbprint is what a grant pins (`match_thumbprint`).
+
+    Neotoma (main, #2506) admits a signed request only when a grant's
+    `match_thumbprint` equals the signing key's RFC 7638 thumbprint, so the script
+    must print exactly that value, and only that (public) value.
+    """
+
+    # EC P-256 public key from RFC 7517 appendix A.1, and its RFC 7638 thumbprint
+    # as computed by an independent implementation (authlib).
+    _PUB = {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+        "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+    }
+    _EXPECTED = "oKIywvGUpTVTyxMQ3bwIIeQUudfr_CkLMjCE19ECD-U"
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_SCRIPT), *args],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_known_vector(self) -> None:
+        assert jwk_thumbprint(self._PUB) == self._EXPECTED
+
+    def test_matches_hand_computed_rfc7638_canonical_form(self) -> None:
+        import base64
+        import hashlib
+
+        canonical = (
+            '{"crv":"P-256","kty":"EC","x":"%s","y":"%s"}' % (self._PUB["x"], self._PUB["y"])
+        )
+        expected = base64.urlsafe_b64encode(
+            hashlib.sha256(canonical.encode()).digest()
+        ).rstrip(b"=").decode()
+        assert jwk_thumbprint(self._PUB) == expected
+
+    def test_ignores_private_scalar_and_extra_members(self) -> None:
+        with_secret = dict(self._PUB, d="SECRET-SCALAR", kid="k", sub="s@x", use="sig")
+        assert jwk_thumbprint(with_secret) == self._EXPECTED
+
+    def test_printed_thumbprint_equals_authlib_for_a_generated_key(
+        self, keys_dir: Path
+    ) -> None:
+        authlib = pytest.importorskip("authlib.jose")
+        result = self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
+        assert result.returncode == 0, result.stderr
+        jwk = json.loads((keys_dir / "accipiter.jwk.json").read_text())
+        independent = authlib.JsonWebKey.import_key(
+            {k: jwk[k] for k in ("kty", "crv", "x", "y")}
+        ).thumbprint()
+        assert f"thumbprint (RFC 7638, public): {independent}" in result.stdout
+
+    def test_printed_thumbprint_equals_the_library_neotoma_uses(
+        self, keys_dir: Path
+    ) -> None:
+        """Neotoma computes the pin with `jose`'s calculateJwkThumbprint."""
+        import shutil
+
+        rc = Path(os.environ.get("NEOTOMA_RC_DIR", str(Path.home() / "neotoma-rc-src")))
+        if not shutil.which("node") or not (rc / "node_modules" / "jose").exists():
+            pytest.skip("node + neotoma's jose not available")
+        result = self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
+        jwk = json.loads((keys_dir / "accipiter.jwk.json").read_text())
+        pub = {k: jwk[k] for k in ("kty", "crv", "x", "y")}
+        proc = subprocess.run(
+            ["node", "-e",
+             "const {calculateJwkThumbprint}=require(process.argv[1]);"
+             "calculateJwkThumbprint(JSON.parse(process.argv[2])).then(t=>console.log(t))",
+             str(rc / "node_modules" / "jose"), json.dumps(pub)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"node could not load jose: {proc.stderr[:120]}")
+        assert f": {proc.stdout.strip()}" in result.stdout
+
+    def test_output_never_contains_the_private_scalar_or_coordinates(
+        self, keys_dir: Path
+    ) -> None:
+        for extra in ((), ("--force",)):
+            result = self._run("--name", "accipiter", "--keys-dir", str(keys_dir), *extra)
+            assert result.returncode == 0, result.stderr
+            jwk = json.loads((keys_dir / "accipiter.jwk.json").read_text())
+            combined = result.stdout + result.stderr
+            for secret in (jwk["d"], jwk["x"], jwk["y"]):
+                assert secret not in combined
+            assert key_file_thumbprint(keys_dir / "accipiter.jwk.json") in combined
+
+    def test_first_mint_hint_pins_the_printed_thumbprint(self, keys_dir: Path) -> None:
+        out = self._run("--name", "accipiter", "--keys-dir", str(keys_dir)).stdout
+        tp = key_file_thumbprint(keys_dir / "accipiter.jwk.json")
+        body = out[out.index("createAgentGrant"):]
+        assert f'"match_thumbprint": "{tp}"' in body.split("\n")[0]
+        assert '"match_sub": "accipiter@ateles-swarm"' in body.split("\n")[0]
+        assert "admits nothing on current Neotoma" in out
+        assert f"listAgentGrants --query '{{\"q\": \"{tp}\"" in out
+
+    def test_rotation_hint_says_the_old_grant_does_not_admit_the_new_key(
+        self, keys_dir: Path
+    ) -> None:
+        self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
+        old_tp = key_file_thumbprint(keys_dir / "accipiter.jwk.json")
+        out = self._run("--name", "accipiter", "--keys-dir", str(keys_dir), "--force").stdout
+        new_tp = key_file_thumbprint(keys_dir / "accipiter.jwk.json")
+        assert new_tp != old_tp
+        assert "updateAgentGrant" in out and f'"match_thumbprint": "{new_tp}"' in out
+        assert "revokeAgentGrant" in out
+        assert "not admitted" in out
+        assert old_tp not in out
+        # pin, check, re-verify, restart -- in that order
+        order = [out.index(m) for m in ("updateAgentGrant", "listAgentGrants", "Re-verify", "Restart the daemon")]
+        assert order == sorted(order)
