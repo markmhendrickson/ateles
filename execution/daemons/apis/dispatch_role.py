@@ -225,6 +225,8 @@ async def dispatch(
     work_class: str | None = None,
     github_delivery: bool = False,
     github_token: str | None = None,
+    action_class: str | None = None,
+    model: str | None = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -244,6 +246,12 @@ async def dispatch(
     refuses omitted or empty bindings instead of inheriting the daemon's ambient
     GitHub identity. The default stays False so read-only and filesystem-only
     work remains under the sandbox's network denial.
+
+    ``action_class``/``model`` (operator ruling 2026-09-29, model_tiering.py):
+    forwarded unchanged to ``run_skill``. ``action_class`` resolves a tier from
+    the live action_policy/vendor_binding config; ``model`` overrides that
+    resolution outright. Neither is required — an orchestrating session's
+    one-off dispatch that names no ``action_class`` runs exactly as before.
     """
     # work_class reaches run_skill's local-first routing AND (via
     # _run_skill_once) the lean-prompt/post-condition path — see
@@ -259,6 +267,8 @@ async def dispatch(
         work_class=work_class,
         github_token=github_token,
         include_github_contract=github_delivery,
+        action_class=action_class,
+        model=model,
     )
 
 
@@ -481,6 +491,26 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--action-class",
+        help=(
+            "Action class for model tiering (operator ruling 2026-09-29, "
+            "model_tiering.py), e.g. 'build', 'lens_review:security', "
+            "'carry_forward_check'. Resolves a minimum tier from the live "
+            "action_policy config, escalated by measured signals, then a "
+            "model from the live vendor_binding config for the chosen "
+            "provider. Omit to leave model selection exactly as before "
+            "(the provider's ambient default)."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        help=(
+            "Explicit model id, overriding any --action-class tier "
+            "resolution outright. Passed as the provider's own --model flag "
+            "(claude/codex/cursor); has no effect on claude-local."
+        ),
+    )
+    parser.add_argument(
         "--cwd",
         help="Working directory for the dispatched child (e.g. a worktree).",
     )
@@ -660,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
                 work_class=args.work_class,
                 github_delivery=args.github_delivery,
                 github_token=github_token,
+                action_class=args.action_class,
+                model=args.model,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above

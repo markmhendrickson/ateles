@@ -63,6 +63,7 @@ from foundation import (  # noqa: E402
     foundation_contract,
 )
 import local_provider  # noqa: E402
+import model_tiering  # noqa: E402
 from harness_router import (  # noqa: E402
     cool_down,
     cooling_providers,
@@ -737,6 +738,7 @@ def _write_harness_event(
     output_summary: str = "",
     duration_ms: int | None = None,
     usage: "DispatchUsage | None" = None,
+    resolved_tier: "model_tiering.ResolvedTier | None" = None,
 ) -> None:
     """
     Best-effort write of a harness_event entity to Neotoma.
@@ -748,6 +750,14 @@ def _write_harness_event(
     dispatch_usage.py). Its fields are merged in only when actually reported —
     a harness that reports nothing adds no keys, so an absent field reads as
     "not reported" rather than as a measured zero.
+
+    ``resolved_tier`` (operator ruling 2026-09-29, model_tiering.py) records
+    the ACTION-CLASS tiering decision — which tier this dispatch was required
+    to run at and why (policy / unresolved-fail-closed / escalated) — which is
+    a distinct fact from ``usage.model``/``usage.model_source`` (what model
+    actually ran and how confidently that is known). Both are recorded so a
+    reader can ask "was this dispatch tiered correctly" independent of
+    whether the harness happened to report its own model.
     """
     base_url = _require_neotoma_base_url()
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
@@ -784,6 +794,14 @@ def _write_harness_event(
         entity["session_id"] = agent_session_id
     if input_summary:
         entity["input_summary"] = input_summary[:500]
+    if resolved_tier is not None:
+        # Prefixed (not appended) so the 500-char truncation below can never
+        # cut it: the marker survives even where the server drops the
+        # dedicated tier fields as undeclared on this schema.
+        tier_marker = f"tiering={resolved_tier.tier}({resolved_tier.source})"
+        output_summary = (
+            f"{tier_marker} {output_summary}" if output_summary else tier_marker
+        )
     if output_summary:
         entity["output_summary"] = output_summary[:500]
     if duration_ms is not None:
@@ -794,6 +812,18 @@ def _write_harness_event(
         # write and drops the undeclared keys — the pre-existing fields still
         # land, so this can never regress what was already recorded.
         entity.update(usage.as_event_fields())
+    if resolved_tier is not None:
+        # Additive, same posture as `usage` above: an undeclared field on an
+        # unrecognized schema is dropped server-side, never rejected. The
+        # `tiering=` marker is ALSO prefixed onto output_summary above, so
+        # the requested tier survives even where the dedicated field does
+        # not — the same durability strategy #567 established for `usage`'s
+        # model marker.
+        entity["requested_tier"] = resolved_tier.tier
+        entity["tier_action_class"] = resolved_tier.action_class
+        entity["tier_source"] = resolved_tier.source
+        if resolved_tier.escalation_reasons:
+            entity["tier_escalation_reasons"] = list(resolved_tier.escalation_reasons)
 
     payload = {
         "idempotency_key": idempotency_key,
@@ -1330,6 +1360,7 @@ def _provider_command(
     *,
     cwd: str | None,
     network: bool = False,
+    model: str | None = None,
 ) -> tuple[list[str], bytes | None]:
     """Build one provider's noninteractive command and initial stdin payload.
 
@@ -1337,9 +1368,26 @@ def _provider_command(
     #590 asks for it "without granting blanket network access to every
     dispatch", so it is off by default and the caller turns it on for the
     dispatches whose task actually involves GitHub delivery.
+
+    ``model`` (ateles#567 / operator ruling 2026-09-29, model_tiering.py):
+    when non-empty, pins this dispatch to a named model instead of the
+    provider's ambient default, on all three providers. ``None`` (the
+    default) reproduces exact prior behaviour — no flag is added — which
+    matters for ``claude``: ``model_tiering.model_for_tier`` returns ``None``
+    only when no vendor_binding is configured at all, and this module never
+    guesses a model alias in that case.
     """
     if provider == "claude":
-        return [binary, "--print", "--append-system-prompt", system_prompt], None
+        return (
+            [
+                binary,
+                "--print",
+                *(["--model", model] if model else []),
+                "--append-system-prompt",
+                system_prompt,
+            ],
+            None,
+        )
 
     composite_prompt = (
         f"{system_prompt}\n\n"
@@ -1372,6 +1420,7 @@ def _provider_command(
             [
                 binary,
                 "exec",
+                *(["--model", model] if model else []),
                 "--sandbox",
                 "workspace-write",
                 *network_flags,
@@ -1395,6 +1444,7 @@ def _provider_command(
                 "--approve-mcps",
                 "--output-format",
                 "text",
+                *(["--model", model] if model else []),
                 *(["--workspace", cwd] if cwd else []),
                 composite_prompt,
             ],
@@ -1462,6 +1512,10 @@ async def _run_skill_once(
     cwd: str | None = None,
     owns_pending_gate: bool = False,
     work_class: str | None = None,
+    action_class: str | None = None,
+    escalation_signals: "model_tiering.EscalationSignals | None" = None,
+    model: str | None = None,
+    precomputed_tier: "model_tiering.ResolvedTier | None" = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -1473,6 +1527,33 @@ async def _run_skill_once(
 
     Stage 2: writes harness_event entities to Neotoma at start, completion, and
     failure.
+
+    Model tiering (operator ruling 2026-09-29, model_tiering.py): when
+    ``action_class`` is supplied, the dispatch's tier is resolved from the
+    live ``action_policy`` config (escalated by ``escalation_signals``, when
+    given), and the tier is turned into a model via the live
+    ``vendor_binding`` config for ``provider``. ``model`` overrides both —
+    an explicit caller-supplied model wins outright, matching every other
+    override-beats-config precedent in this module (``env_extra``,
+    ``timeout``). ``action_class=None`` (every call site that predates this)
+    reproduces EXACT prior behaviour: no tier is resolved, no model is
+    requested, the provider's ambient default runs unchanged. An unreadable
+    or unbound policy/binding never falls back to the ambient default when
+    ``action_class`` WAS supplied — see ``model_tiering``'s module docstring
+    for why that asymmetry is deliberate (fail up to the strongest tier,
+    never down to silence).
+
+    ``precomputed_tier``: when supplied, THIS tier is used instead of
+    re-resolving from ``action_class``/``escalation_signals`` — only the
+    provider-specific ``model_for_tier`` lookup still runs. ``run_skill``
+    resolves the tier exactly ONCE per logical dispatch and passes it to
+    every provider attempt in its failover loop, so a config edit landing
+    mid-failover cannot retier the same dispatch differently across two
+    providers (the tier is a property of the work, not of when in the
+    failover sequence a provider happened to be tried). A direct caller of
+    this function (tests, `dispatch_role.py`'s single-attempt path) that
+    passes ``action_class`` with no ``precomputed_tier`` still gets a fresh
+    resolution, unchanged from before.
 
     Stage 5: when agent_definition carries empty prompt_markdown, logs a WARN,
     sends a notifier alert (when a notifier is supplied), and records a
@@ -1552,6 +1633,56 @@ async def _run_skill_once(
         msg = f"SKILL.md not found at {skill_path}"
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ── Model tiering (operator ruling 2026-09-29, model_tiering.py) ──────────
+    # Resolved AFTER the binary/SKILL.md checks above (so a genuinely missing
+    # binary or skill is diagnosed as that, not misdirected toward tiering
+    # config) but BEFORE the degraded-dispatch event below, so every
+    # harness_event path — degraded, start, success, failure, timeout —
+    # carries the same tiering decision for this dispatch. `model` (an
+    # explicit caller override) always wins; otherwise an `action_class`
+    # resolves a tier via the live action_policy (escalated by
+    # `escalation_signals`), and the tier resolves to a model via the live
+    # vendor_binding for THIS provider. No `action_class` at all reproduces
+    # exact prior behaviour (no tier resolved, no model requested).
+    resolved_tier: model_tiering.ResolvedTier | None = precomputed_tier
+    resolved_model = model
+    if resolved_model is None and (action_class is not None or resolved_tier is not None):
+        if resolved_tier is None:
+            resolved_tier = model_tiering.resolve_tier(
+                action_class, signals=escalation_signals
+            )
+    # claude-local runs the model its own local_provider config names (its
+    # command is built separately and takes no --model), so vendor_binding
+    # has nothing to resolve for it: the tier is still recorded on its events,
+    # but a missing binding must not refuse the local attempt and push
+    # mechanical work onto a frontier provider.
+    if (
+        resolved_model is None
+        and resolved_tier is not None
+        and provider != local_provider.LOCAL_PROVIDER
+    ):
+        try:
+            resolved_model = model_tiering.model_for_tier(provider, resolved_tier.tier)
+        except model_tiering.UnboundTierError as exc:
+            msg = str(exc)
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            try:
+                await asyncio.to_thread(
+                    _write_harness_event,
+                    task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
+                    role=_role,
+                    agent_sub=agent_def.aauth_sub,
+                    event_type="subprocess",
+                    tool_name=f"{provider}:{skill}",
+                    success="false",
+                    output_summary=msg[:500],
+                    resolved_tier=resolved_tier,
+                )
+            except Exception as write_exc:  # noqa: BLE001
+                log.debug(f"[apis] unbound-tier harness_event write failed: {write_exc}")
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     # ── Fail closed on providers that cannot deny a specific MCP tool ──────────
     # Falco's REQUEST_CHANGES on PR #1181: the `claude` adapter can put
@@ -1766,6 +1897,7 @@ async def _run_skill_once(
                 success="partial",
                 input_summary=_title_hint,
                 output_summary="degraded_generic_subagent",
+                resolved_tier=resolved_tier,
             )
         except Exception as exc:
             log.debug(f"[apis] degraded harness_event write failed: {exc}")
@@ -1830,6 +1962,7 @@ async def _run_skill_once(
             prompt,
             cwd=cwd,
             network=include_github_contract,
+            model=resolved_model,
         )
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
@@ -2021,6 +2154,7 @@ async def _run_skill_once(
             tool_name=f"{provider}:{skill}",
             success="partial",  # "partial" = in-flight / started
             input_summary=prompt[:200],
+            resolved_tier=resolved_tier,
         )
     except Exception as exc:
         log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
@@ -2146,6 +2280,7 @@ async def _run_skill_once(
                         "",
                         requested_model=_requested_model(provider, cmd),
                     ),
+                    resolved_tier=resolved_tier,
                 )
             except Exception as exc:
                 log.debug(f"[apis] timeout harness_event write failed: {exc}")
@@ -2282,6 +2417,7 @@ async def _run_skill_once(
                     ),
                     duration_ms=duration_ms,
                     usage=_usage,
+                    resolved_tier=resolved_tier,
                 )
             except Exception as exc:
                 log.debug(f"[apis] success harness_event write failed: {exc}")
@@ -2330,6 +2466,7 @@ async def _run_skill_once(
                     # on success would systematically under-count exactly the
                     # dispatches most likely to have burned a retry loop.
                     usage=_usage,
+                    resolved_tier=resolved_tier,
                 )
             except Exception as exc:
                 log.debug(f"[apis] failure harness_event write failed: {exc}")
@@ -2388,6 +2525,9 @@ async def run_skill(
     owns_pending_gate: bool = False,
     seated_reviewer: bool = False,
     work_class: str | None = None,
+    action_class: str | None = None,
+    escalation_signals: "model_tiering.EscalationSignals | None" = None,
+    model: str | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -2430,11 +2570,32 @@ async def run_skill(
     seated reviewer, ``claude-local`` is tried first and the frontier
     providers follow as the fallback. Any other value, or None, leaves routing
     exactly as before.
+
+    ``action_class``/``escalation_signals``/``model`` (operator ruling
+    2026-09-29, model_tiering.py): the TIER is resolved exactly ONCE here
+    (when ``model`` is not already an explicit override), before any provider
+    is attempted, and that same resolved tier is passed to every
+    ``_run_skill_once`` attempt in the failover loop — only the
+    provider-specific model-for-tier lookup runs per attempt. This closes a
+    race a per-attempt re-resolution would otherwise have: without pinning
+    the tier once, an action_policy/vendor_binding edit landing in the window
+    between a cursor attempt and a codex fallback could retier the SAME
+    logical dispatch differently across the two providers, even though the
+    tier is a property of the WORK, not of which provider happens to run it
+    or when in the failover sequence that happened. ``action_class=None``
+    (every call site that predates this) leaves routing and model selection
+    exactly as before.
     """
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and the claude-only routing.
     deny_correct = owns_pending_gate or seated_reviewer
+
+    precomputed_tier: model_tiering.ResolvedTier | None = None
+    if model is None and action_class is not None:
+        precomputed_tier = model_tiering.resolve_tier(
+            action_class, signals=escalation_signals
+        )
 
     async def attempt(selected: str) -> SkillResult:
         return await _run_skill_once(
@@ -2444,6 +2605,8 @@ async def run_skill(
             notifier=notifier, github_token=github_token,
             include_github_contract=include_github_contract, cwd=cwd,
             owns_pending_gate=deny_correct, work_class=work_class,
+            action_class=action_class, escalation_signals=escalation_signals,
+            model=model, precomputed_tier=precomputed_tier,
         )
 
     local_first = (
@@ -2463,11 +2626,58 @@ async def run_skill(
         and local_provider.is_eligible(work_class, local_provider.load_config())
     )
     return await _run_provider_attempts(
-        skill, attempt, binaries=_provider_binaries(), provider=provider,
+        skill, attempt,
+        binaries=_tier_bound_binaries(
+            _provider_binaries(), precomputed_tier, provider,
+            restricted_to_claude=deny_correct,
+        ),
+        provider=provider,
         role=role, task_entity_id=task_entity_id, notifier=notifier,
         preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
         local_first=local_first,
     )
+
+
+def _tier_bound_binaries(
+    binaries: dict[str, str | None],
+    tier: "model_tiering.ResolvedTier | None",
+    pinned_provider: str | None,
+    *,
+    restricted_to_claude: bool = False,
+) -> dict[str, str | None]:
+    """Drop frontier providers with no model bound for ``tier`` before selection.
+
+    Same shape as the #1181 fix in ``_run_provider_attempts``: the in-attempt
+    ``UnboundTierError`` refusal is neither a classified ``failure_kind`` nor a
+    launch failure, so on its own it would stop the dispatch at the first
+    unbound provider instead of failing over to a bound one. Filtering here
+    means an unbound provider is simply never a candidate.
+
+    Left unfiltered (so the in-attempt refusal stays the backstop and names
+    the missing binding) when: no tier was resolved, no vendor_binding is
+    configured at all, the caller pinned a provider, the run is a gate-owning
+    or seated-reviewer run (``_run_provider_attempts`` narrows those to
+    claude itself; filtering claude out first would misreport the cause as a
+    missing claude binary), or no router-eligible frontier provider would
+    remain (configured, headroom, not cooling — ``usable_provider_names``,
+    which unlike ``provider_candidates`` does not advance the round-robin).
+    ``claude-local`` is never filtered — it runs its own configured model and
+    takes no vendor_binding.
+    """
+    if tier is None or pinned_provider is not None or restricted_to_claude:
+        return binaries
+    binding = model_tiering.configured_vendor_binding()
+    if not binding:
+        return binaries
+    filtered = {
+        name: path
+        for name, path in binaries.items()
+        if name == local_provider.LOCAL_PROVIDER
+        or tier.tier in binding.get(name, {})
+    }
+    if not (usable_provider_names(filtered) - {local_provider.LOCAL_PROVIDER}):
+        return binaries
+    return filtered
 
 
 def _record_local_failover(
