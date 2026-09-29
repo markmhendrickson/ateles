@@ -63,12 +63,36 @@ def load_env() -> tuple[str, str]:
     return base_url.rstrip("/"), token
 
 
+class NeotomaHTTPError(SystemExit):
+    """A non-transient HTTP failure from Neotoma. Subclasses SystemExit so the
+    existing scripts still exit with the message unchanged; carries `status`
+    so a caller that can tolerate one specific status (e.g. a 404 on a cited
+    id) can catch it without parsing the message."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def request(url: str, token: str, payload: dict | None = None, retries: int = 5) -> dict:
-    """GET/POST against the Neotoma REST API, retrying transient network
-    errors. Matches render_agent_docs.py's retry behavior (5 attempts, 2s
-    backoff) since that is the more resilient of the two prior
-    implementations and there is no reason for a positioning render to be
-    more fragile than an agent-doc render."""
+    """GET/POST against the Neotoma REST API, retrying transient failures.
+
+    Matches render_agent_docs.py's retry behavior (5 attempts, 2s backoff)
+    since that is the more resilient of the two prior implementations and
+    there is no reason for a positioning render to be more fragile than an
+    agent-doc render.
+
+    Failures are classified so the message points at the real cause:
+
+    - `HTTPError` with a 4xx status (other than 408/429) is NOT transient — a
+      401/403 is a credentials problem and a 404 is a stale or deleted entity
+      id. It fails immediately, naming the status and URL, with no retry.
+      (`HTTPError` is a subclass of `URLError`, so it must be caught before
+      the network branch or it is retried and misreported as "unreachable".)
+    - `HTTPError` 5xx/408/429, `URLError` and `ConnectionError` are transient
+      and retried; if they persist the message says the server was
+      unreachable or erroring, with the last cause.
+    """
     last = None
     for _attempt in range(retries):
         try:
@@ -81,10 +105,34 @@ def request(url: str, token: str, payload: dict | None = None, retries: int = 5)
                 req.data = json.dumps(payload).encode()
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode())
-        except (urllib.error.URLError, ConnectionError) as exc:
+        except urllib.error.HTTPError as exc:
+            if 400 <= exc.code < 500 and exc.code not in (408, 429):
+                raise NeotomaHTTPError(exc.code, _http_failure_message(url, exc.code)) from exc
             last = exc
             time.sleep(2)
-    raise SystemExit(f"Neotoma unreachable after {retries} tries: {last}")
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+            last = exc
+            time.sleep(2)
+    raise SystemExit(f"Neotoma unreachable or erroring after {retries} tries: {last}")
+
+
+def _http_failure_message(url: str, status: int) -> str:
+    """Actionable message for a non-transient HTTP failure. Never includes the
+    token; the URL is a Neotoma entity/API path."""
+    if status in (401, 403):
+        hint = (
+            "credentials were rejected: check NEOTOMA_BEARER_TOKEN (env or "
+            "~/.config/neotoma/.env) is current and targets this instance"
+        )
+    elif status == 404:
+        hint = (
+            "not found: the entity id (or route) does not exist on this "
+            "instance; check for a deleted/merged entity or the wrong "
+            "NEOTOMA_BASE_URL"
+        )
+    else:
+        hint = "the request was rejected and will not succeed on retry"
+    return f"Neotoma returned HTTP {status} for {url}: {hint}"
 
 
 def unwrap_snapshot(entity: dict) -> tuple[dict, dict]:

@@ -17,18 +17,30 @@ Run with: pytest execution/scripts/test_render_positioning_docs.py -v
 
 from __future__ import annotations
 
+import io
 import re
 import sys
+import urllib.error
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "execution" / "scripts"))
 
 import render_positioning_docs as rpd  # noqa: E402
+import neotoma_mirror_lib as nml  # noqa: E402
 from neotoma_mirror_lib import observation_ids_block, yaml_scalar  # noqa: E402
 
 POSITIONING_DIR = _REPO_ROOT / "docs" / "positioning"
-OBS_ID_LINE_RE = re.compile(r"^\s+([a-zA-Z0-9_]+):\s+(unknown|[0-9a-f-]{8,})\s*$")
+OBS_ID_LINE_RE = re.compile(r"^\s+([a-zA-Z0-9_]+):\s+(unknown|[0-9a-f-]{8,}(?:,[0-9a-f-]{8,})*)\s*$")  # a field merged from several observations is a comma-joined list
+
+
+@pytest.fixture(autouse=True)
+def _clean_type_cache():
+    rpd._ENTITY_TYPE_CACHE.clear()
+    yield
+    rpd._ENTITY_TYPE_CACHE.clear()
 
 
 class TestObservationIdsBlock:
@@ -85,6 +97,180 @@ class TestEvaluatorPiiScrub:
     def test_unrelated_text_untouched(self) -> None:
         text = "LangGraph's Item class has no attribution field."
         assert rpd._scrub_evaluator_pii(text) == text
+
+
+UNLISTED_FEEDBACK_ID = "ent_" + "1" * 24  # not in _PII_ENTITY_IDS
+UNLISTED_ANALYSIS_ID = "ent_" + "2" * 24
+UNRESOLVED_ID = "ent_" + "3" * 24
+
+
+class TestEntityIdScrubFailsClosedByType:
+    """The scrub must not depend on a hand-maintained id list: an evaluator
+    record cited by a NEW id has to be scrubbed because of its TYPE. Before
+    this change the scrub was a pure allowlist of six ids and passed every
+    other id through, so the first three tests below were red."""
+
+    def test_unresolved_unknown_id_is_scrubbed(self) -> None:
+        out = rpd._scrub_evaluator_pii(f"see ({UNLISTED_FEEDBACK_ID}) for detail")
+        assert UNLISTED_FEEDBACK_ID not in out
+        assert "[restricted-record]" in out
+
+    def test_feedback_typed_id_is_scrubbed_when_resolved(self) -> None:
+        rpd._ENTITY_TYPE_CACHE[UNLISTED_FEEDBACK_ID] = "feedback"
+        out = rpd._scrub_evaluator_pii(f"evidence {UNLISTED_FEEDBACK_ID}")
+        assert UNLISTED_FEEDBACK_ID not in out
+
+    def test_safe_typed_id_is_kept(self) -> None:
+        rpd._ENTITY_TYPE_CACHE[UNLISTED_ANALYSIS_ID] = "analysis"
+        assert UNLISTED_ANALYSIS_ID in rpd._scrub_evaluator_pii(f"see {UNLISTED_ANALYSIS_ID}")
+
+    def test_registered_entity_id_is_kept(self) -> None:
+        registered = rpd.POSITIONING_ENTITIES["ateles"][0][0]
+        assert registered in rpd._scrub_evaluator_pii(f"see {registered}")
+
+    def test_hand_listed_pii_id_wins_even_if_typed_safe(self) -> None:
+        listed = next(iter(rpd._PII_ENTITY_IDS))
+        rpd._ENTITY_TYPE_CACHE[listed] = "analysis"
+        assert listed not in rpd._scrub_evaluator_pii(f"see {listed}")
+
+    def test_names_are_matched_case_insensitively(self) -> None:
+        # Before: `\bRebecca\b` had no IGNORECASE, so these survived.
+        out = rpd._scrub_evaluator_pii("rebecca and LARRY and rEbEcCa")
+        assert "rebecca" not in out.lower() and "larry" not in out.lower()
+
+    def test_resolve_cited_types_fills_cache_and_scrubs_new_feedback(self, monkeypatch) -> None:
+        reg_id, reg_type, _slug = rpd.POSITIONING_ENTITIES["ateles"][0]
+        snapshots = {reg_id: ({f: f"cites {UNLISTED_FEEDBACK_ID} and {UNLISTED_ANALYSIS_ID}" for f in rpd.STAMPED_FIELDS[reg_type]}, {})}
+        types = {UNLISTED_FEEDBACK_ID: "feedback", UNLISTED_ANALYSIS_ID: "analysis"}
+
+        def fake_request(url, token, payload=None, retries=5):
+            return {"entity_type": types[url.rsplit("/", 1)[1]]}
+
+        monkeypatch.setattr(rpd, "request", fake_request)
+        rpd.resolve_cited_types("http://x", "t", snapshots)
+        assert rpd._ENTITY_TYPE_CACHE == types
+        rendered = rpd._scrub_evaluator_pii(f"{UNLISTED_FEEDBACK_ID} {UNLISTED_ANALYSIS_ID}")
+        assert UNLISTED_FEEDBACK_ID not in rendered
+        assert UNLISTED_ANALYSIS_ID in rendered
+
+    def test_lookup_404_is_scrubbed_not_fatal(self, monkeypatch) -> None:
+        def fake_request(url, token, payload=None, retries=5):
+            raise nml.NeotomaHTTPError(404, "gone")
+
+        monkeypatch.setattr(rpd, "request", fake_request)
+        assert rpd.lookup_entity_type("http://x", "t", UNRESOLVED_ID) is None
+
+    def test_lookup_auth_failure_is_fatal_not_swallowed(self, monkeypatch) -> None:
+        def fake_request(url, token, payload=None, retries=5):
+            raise nml.NeotomaHTTPError(401, "denied")
+
+        monkeypatch.setattr(rpd, "request", fake_request)
+        with pytest.raises(nml.NeotomaHTTPError):
+            rpd.lookup_entity_type("http://x", "t", UNRESOLVED_ID)
+
+    def test_end_to_end_render_scrubs_new_feedback_citation(self, monkeypatch) -> None:
+        first = {p: es[:1] for p, es in list(rpd.POSITIONING_ENTITIES.items())[:1]}
+        monkeypatch.setattr(rpd, "POSITIONING_ENTITIES", first)
+        (product, [(eid, etype, slug)]) = next(iter(first.items()))
+        snap = {f: "" for f in rpd.STAMPED_FIELDS[etype]}
+        snap["name"] = "Persona"
+        snap["archetype"] = f"backed by {UNLISTED_FEEDBACK_ID}"
+        monkeypatch.setattr(rpd, "fetch_entity", lambda b, t, i: (snap, {}))
+        monkeypatch.setattr(rpd, "request", lambda url, token, payload=None, retries=5: {"entity_type": "feedback"})
+        targets, _ = rpd._targets_for_registry("http://x", "t")
+        (content,) = targets.values()
+        assert UNLISTED_FEEDBACK_ID not in content
+        assert "[restricted-record]" in content
+
+
+class TestUnknownNameSentinel:
+    """A newly-cited evaluator whose NAME is not in _EVALUATOR_NAME_MAP must
+    abort the render instead of leaking. Before this change nothing checked:
+    a live entity cited two such evaluators (name + record id) and both
+    rendered in plaintext."""
+
+    def test_unknown_name_before_citation_aborts(self) -> None:
+        with pytest.raises(rpd.UnscrubbedEvaluatorName):
+            rpd._scrub_evaluator_pii(f"Zed Quuxley ({UNLISTED_FEEDBACK_ID}) said it was slow")
+
+    def test_unknown_name_before_dash_citation_aborts(self) -> None:
+        with pytest.raises(rpd.UnscrubbedEvaluatorName):
+            rpd._scrub_evaluator_pii(f"an evaluator Zed Quuxley {UNLISTED_FEEDBACK_ID}")
+
+    def test_unknown_name_after_citation_aborts(self) -> None:
+        with pytest.raises(rpd.UnscrubbedEvaluatorName):
+            rpd._scrub_evaluator_pii(f"{UNLISTED_FEEDBACK_ID} (Zed Quuxley, ~1 month)")
+
+    def test_known_name_is_scrubbed_not_aborted(self) -> None:
+        out = rpd._scrub_evaluator_pii(f"Sidney Brown ({UNLISTED_FEEDBACK_ID})")
+        assert "Sidney" not in out and "Brown" not in out
+
+    def test_non_person_phrase_next_to_citation_is_allowed(self) -> None:
+        out = rpd._scrub_evaluator_pii(f"Claude Projects ({UNLISTED_FEEDBACK_ID})")
+        assert "Claude Projects" in out
+
+    def test_error_message_does_not_echo_the_name(self) -> None:
+        with pytest.raises(rpd.UnscrubbedEvaluatorName) as ei:
+            rpd._scrub_evaluator_pii(f"Zed Quuxley ({UNLISTED_FEEDBACK_ID})")
+        assert "Quuxley" not in str(ei.value)
+
+
+class TestGeneratedMarkerCoupling:
+    def test_header_contains_orphan_marker(self) -> None:
+        assert rpd.GENERATED_MARKER in rpd.HEADER
+
+
+class _FakeResp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestRequestErrorClassification:
+    """neotoma_mirror_lib.request(): HTTPError is a URLError subclass, so it
+    used to be retried 5x and reported as 'unreachable'. Before the fix,
+    test_401_fails_fast_without_retry saw 5 attempts."""
+
+    def _run(self, monkeypatch, exc):
+        calls = {"n": 0, "sleeps": 0}
+
+        def fake_urlopen(req, timeout=0):
+            calls["n"] += 1
+            raise exc
+
+        monkeypatch.setattr(nml.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(nml.time, "sleep", lambda s: calls.__setitem__("sleeps", calls["sleeps"] + 1))
+        return calls
+
+    def _http(self, code):
+        return urllib.error.HTTPError("http://x/e", code, "msg", {}, io.BytesIO(b""))
+
+    @pytest.mark.parametrize("code", [401, 403, 404])
+    def test_4xx_fails_fast_without_retry_and_names_status(self, monkeypatch, code) -> None:
+        calls = self._run(monkeypatch, self._http(code))
+        with pytest.raises(nml.NeotomaHTTPError) as ei:
+            nml.request("http://x/e", "tok")
+        assert calls["n"] == 1 and calls["sleeps"] == 0
+        assert ei.value.status == code
+        msg = str(ei.value)
+        assert f"HTTP {code}" in msg and "unreachable" not in msg
+        assert "tok" not in msg.replace("token", "")
+
+    def test_5xx_is_retried_then_reported(self, monkeypatch) -> None:
+        calls = self._run(monkeypatch, self._http(503))
+        with pytest.raises(SystemExit) as ei:
+            nml.request("http://x/e", "tok", retries=3)
+        assert calls["n"] == 3
+        assert "503" in str(ei.value)
+
+    def test_network_error_is_retried(self, monkeypatch) -> None:
+        calls = self._run(monkeypatch, urllib.error.URLError("boom"))
+        with pytest.raises(SystemExit) as ei:
+            nml.request("http://x/e", "tok", retries=3)
+        assert calls["n"] == 3
+        assert "unreachable" in str(ei.value)
 
 
 class TestRenderEntityFile:
