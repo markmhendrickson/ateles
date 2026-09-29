@@ -125,3 +125,51 @@ def test_implausibly_distant_or_past_dates_are_rejected() -> None:
     now = _wall(2026, 9, 29, 9, 0)
     assert limit_reset.parse_limit_reset("resets 2031-01-01 10:00", now_wall=now) is None
     assert limit_reset.parse_limit_reset("resets 2020-01-01 10:00", now_wall=now) is None
+
+
+# ── anchoring to the provider's own refusal ────────────────────────────────
+
+
+def test_refusal_is_read_from_the_tail_and_typed_by_kind() -> None:
+    now = _wall(2026, 9, 29, 9, 0)
+    out = limit_reset.parse_refusal(CLAUDE_REFUSAL, "", provider="claude", now_wall=now)
+    assert out is not None
+    assert out.kind == "session" and not out.clamped
+    assert out.until_wall == _wall(2026, 9, 29, 12, 30)
+
+
+def test_refusal_with_an_unreadable_reset_is_still_a_refusal() -> None:
+    out = limit_reset.parse_refusal(
+        "You've hit your session limit", "", now_wall=_wall(2026, 9, 29, 9, 0)
+    )
+    assert out is not None and out.until_wall is None and out.kind == "session"
+
+
+def test_a_limit_phrase_outside_the_tail_is_not_a_refusal() -> None:
+    text = "usage limit reached, resets in 2 hours\n" + "\n".join(
+        f"line {i}" for i in range(10)
+    )
+    assert limit_reset.parse_refusal(text, "", now_wall=_wall(2026, 9, 29, 9, 0)) is None
+
+
+def test_a_refusal_line_is_read_on_stderr_too() -> None:
+    now = _wall(2026, 9, 29, 9, 0)
+    out = limit_reset.parse_refusal(
+        "", "log\nYou've hit your usage limit. Try again in 3 hours", now_wall=now
+    )
+    assert out is not None and out.kind == "usage" and out.until_wall == now + 3 * 3600
+
+
+def test_reset_is_clamped_to_the_kind_of_window() -> None:
+    now = _wall(2026, 9, 29, 9, 0)
+    session = limit_reset.parse_refusal(
+        "You've hit your session limit · resets Oct 20 at 6pm (Europe/Madrid)",
+        "", now_wall=now,
+    )
+    assert session is not None and session.clamped
+    assert session.until_wall == now + limit_reset.KIND_CAP_SECONDS["session"]
+    weekly = limit_reset.parse_refusal(
+        "weekly limit reached, resets in 30 days", "", now_wall=now
+    )
+    assert weekly is not None and weekly.clamped
+    assert weekly.until_wall == now + limit_reset.KIND_CAP_SECONDS["weekly"]

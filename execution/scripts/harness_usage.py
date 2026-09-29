@@ -66,6 +66,7 @@ def _cooling_view(provider: str) -> dict[str, object] | None:
         return None
     return {
         "until": cooling["until_iso"],
+        "until_local": harness_router.render_wall(float(cooling["until"])),
         "reason": cooling["reason"],
         "remaining_seconds": max(0, int(float(cooling["until"]) - time.time())),
     }

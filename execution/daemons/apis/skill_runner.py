@@ -73,7 +73,7 @@ from harness_router import (  # noqa: E402
     render_wall,
     usable_provider_names,
 )
-from limit_reset import parse_limit_reset  # noqa: E402
+from limit_reset import parse_refusal  # noqa: E402
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -1192,20 +1192,37 @@ def _cool_after_capacity_failure(provider: str, result: "SkillResult") -> None:
     process, so a spent 5-hour session window was relaunched (and refused
     instantly) by every dispatch until the hour-long timer of some long-lived
     process happened to cover it.  The window is written where the router reads
-    selection state.  An unparseable reset gets the conservative default
-    (``APIS_HARNESS_COOLDOWN_SECONDS``, one hour) and says so.
+    selection state.
+
+    Persisting is a cross-process hold-out, so it trusts only the provider's own
+    refusal: the run must have FAILED (a successful run that merely discusses
+    limits never persists), the refusal must be a short limit line at the end of
+    its output (``limit_reset.parse_refusal``), and the stated reset is clamped
+    to the longest window that kind of limit can have.  Anything else keeps the
+    old in-process timer only.  An unreadable reset gets the conservative
+    default (``APIS_HARNESS_COOLDOWN_SECONDS``, one hour) and says so.
     """
     cool_down(provider)
+    if result.ok or result.returncode in (0, None):
+        return
     try:
-        parsed = parse_limit_reset(
-            result.stdout, result.stderr, result.error, provider=provider
-        )
-        now = time.time()
-        if parsed is not None:
-            until, reason = parsed.until_wall, "session_limit"
+        refusal = parse_refusal(result.stdout, result.stderr, provider=provider)
+        if refusal is None:
             log.warning(
-                f"[apis] {provider} refused with a usage limit; cooled until "
-                f"{render_wall(until)} (stated reset {parsed.matched!r} in {parsed.zone})"
+                f"[apis] {provider} was classified as a capacity failure but its "
+                "output does not end in a limit refusal; cooled in-process only"
+            )
+            return
+        now = time.time()
+        if refusal.until_wall is not None:
+            until = refusal.until_wall
+            reason = {"session": "session_limit", "weekly": "weekly_limit"}.get(
+                refusal.kind, "usage_limit"
+            )
+            log.warning(
+                f"[apis] {provider} refused with a {refusal.kind} limit; cooled until "
+                f"{render_wall(until)} (stated reset {refusal.matched!r} in "
+                f"{refusal.zone}{'; clamped' if refusal.clamped else ''})"
             )
         else:
             try:
@@ -2625,6 +2642,19 @@ async def _run_provider_attempts(
         rest = [p for p in candidates if p not in head and p != preferred_provider]
         candidates = [*head, preferred_provider, *rest]
     if not candidates:
+        # Cooling is checked FIRST, over exactly the providers this run could
+        # have used (the claude-only narrowing for a gate-owning run, the pinned
+        # provider for a pinned one): a live window is a self-clearing wait, not
+        # a capability refusal, and must carry cooled_until so the panel defers
+        # and resumes instead of paging the operator.
+        scope = {provider: binaries.get(provider)} if provider else binaries
+        windows = cooled_until_all(scope)
+        if windows:
+            msg, earliest = _cooled_message(windows)
+            log.warning(f"[apis] {skill} not dispatched — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, cooled_until=earliest,
+            )
         if owns_pending_gate and provider is None:
             reason = provider_exclusion_reason("claude", binaries) or "not eligible"
             msg = (
@@ -2645,13 +2675,6 @@ async def _run_provider_attempts(
                 f"ineligible: {reason or 'not selected'}"
             )
             return SkillResult(skill, False, None, "", "", error=msg)
-        windows = cooled_until_all(binaries)
-        if windows:
-            msg, earliest = _cooled_message(windows)
-            log.warning(f"[apis] {skill} not dispatched — {msg}")
-            return SkillResult(
-                skill, False, None, "", "", error=msg, cooled_until=earliest,
-            )
         configured = os.environ.get(
             "APIS_HARNESS_PROVIDERS", "claude,codex,cursor"
         )
@@ -2731,7 +2754,7 @@ async def _run_provider_attempts(
         "all eligible subscription-backed harness providers were exhausted "
         f"after attempts: {', '.join(attempted)}"
     )
-    windows = cooled_until_all(binaries)
+    windows = cooled_until_all({provider: binaries.get(provider)} if provider else binaries)
     if windows:
         # This dispatch's own refusals spent the last usable window: say when
         # one returns, not just that they were exhausted.

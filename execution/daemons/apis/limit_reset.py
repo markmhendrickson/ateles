@@ -227,3 +227,96 @@ def parse_limit_reset(
         )
         return None
     return ResetParse(until_wall=wall, matched=matched, zone=zone_name)
+
+
+# ── Anchoring to the provider's own refusal ───────────────────────────────────
+#
+# A persisted cooling window is a cross-process hold-out, so the text that sets
+# it must be the provider CLI's own refusal, not whatever a run happened to
+# print.  A harness child's output can carry text written by others (a quoted
+# PR body, a review thread, an agent explaining usage limits); codex echoes the
+# dispatched prompt to stderr.  Three limits keep that text from deciding:
+#
+# * the caller only asks for a parse when the run FAILED (nonzero exit);
+# * only the last ``REFUSAL_TAIL_LINES`` non-empty lines of each stream are
+#   read, and a line must itself carry a limit phrase AND be short — a real
+#   refusal is one short line at the end of the output;
+# * whatever it states is clamped to the longest window that KIND of limit can
+#   have, so even a forged reset costs hours, not weeks.
+
+REFUSAL_TAIL_LINES = 5
+MAX_REFUSAL_LINE_CHARS = 400
+
+# Longest hold-out per kind: the provider's window plus a little slack.
+KIND_CAP_SECONDS = {
+    "session": 5 * 3600 + 10 * 60,
+    "weekly": 7 * 86400 + 3600,
+    "monthly": 32 * 86400,
+    "usage": 7 * 86400 + 3600,  # kind not stated: the longest plan window seen
+}
+
+_LIMIT_PHRASE = re.compile(r"\blimit\b|\bquota\b|out of requests|no requests remaining")
+
+
+def limit_kind(line: str) -> str:
+    """Which window a refusal line says was spent (``usage`` when it doesn't say)."""
+    lowered = line.lower()
+    if re.search(r"\bsession\b|\b5[- ]?hour\b|\bfive[- ]?hour\b", lowered):
+        return "session"
+    if "week" in lowered:
+        return "weekly"
+    if "month" in lowered:
+        return "monthly"
+    return "usage"
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """The provider's own capacity refusal, as read from the tail of its output."""
+
+    kind: str  # session | weekly | monthly | usage
+    until_wall: float | None  # clamped to KIND_CAP_SECONDS; None: reset unreadable
+    matched: str
+    zone: str
+    clamped: bool
+
+
+def _tail_lines(text: str) -> list[str]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-REFUSAL_TAIL_LINES:]
+
+
+def parse_refusal(
+    stdout: str, stderr: str, *, provider: str | None = None, now_wall: float | None = None
+) -> Refusal | None:
+    """Return the capacity refusal at the end of a FAILED run's output, or ``None``.
+
+    ``None`` means no line in the tails of stdout/stderr is a short limit
+    refusal, so nothing should be persisted (the caller keeps its in-process
+    cooldown).  A refusal whose reset cannot be read comes back with
+    ``until_wall=None`` and the caller applies the default window.
+    """
+    import time
+
+    moment = time.time() if now_wall is None else now_wall
+    for stream in (stdout or "", stderr or ""):
+        for line in reversed(_tail_lines(stream)):
+            if len(line) > MAX_REFUSAL_LINE_CHARS or not _LIMIT_PHRASE.search(line.lower()):
+                continue
+            kind = limit_kind(line)
+            parsed = parse_limit_reset(line, provider=provider, now_wall=moment)
+            if parsed is None:
+                return Refusal(kind, None, line[:120], "", False)
+            cap = moment + KIND_CAP_SECONDS[kind]
+            clamped = parsed.until_wall > cap
+            if clamped:
+                log.warning(
+                    "[apis] %s limit refusal states a reset %.1f days out, longer than "
+                    "a %s window can be; clamping to %.1f hours",
+                    provider, (parsed.until_wall - moment) / 86400, kind,
+                    KIND_CAP_SECONDS[kind] / 3600,
+                )
+            return Refusal(
+                kind, min(parsed.until_wall, cap), parsed.matched, parsed.zone, clamped
+            )
+    return None

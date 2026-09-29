@@ -87,18 +87,20 @@ def _madrid(wall: float) -> datetime:
 # ── refusal -> persisted window ────────────────────────────────────────────
 
 
-def test_refusal_persists_a_window_ending_at_the_stated_reset() -> None:
+def test_refusal_persists_a_window_ending_at_the_stated_reset(monkeypatch) -> None:
+    now = datetime(2026, 9, 29, 9, 0, tzinfo=ZoneInfo("Europe/Madrid")).timestamp()
+    monkeypatch.setattr(time, "time", lambda: now)
     attempt, spawn = _spawning_attempt(REFUSAL)
     result = _run(attempt, BINARIES)
 
     assert not result.ok
     assert spawn.call_count == 1  # the one launch that discovered the refusal
-    cooling = harness_router.persisted_cooling("claude")
+    cooling = harness_router.persisted_cooling("claude", now_wall=now)
     assert cooling is not None
     assert cooling["reason"] == "session_limit"
-    until = _madrid(float(cooling["until"]))
-    assert (until.hour, until.minute) == (12, 30)
-    assert time.time() < float(cooling["until"]) <= time.time() + 24 * 3600 + 60
+    assert float(cooling["until"]) == datetime(
+        2026, 9, 29, 12, 30, tzinfo=ZoneInfo("Europe/Madrid")
+    ).timestamp()
 
 
 def test_the_window_outlives_the_process_that_recorded_it() -> None:
@@ -247,3 +249,138 @@ def test_auth_failure_is_not_persisted() -> None:
     attempt, _ = _spawning_attempt("Invalid authentication credentials")
     _run(attempt, BINARIES)
     assert harness_router.persisted_cooling("claude") is None
+
+
+# ── gate-owning and pinned runs (the incident's own population) ────────────
+
+
+def test_gate_owning_run_during_the_window_is_a_usage_limit() -> None:
+    import swarm_dispatch
+
+    harness_router.record_cooling("claude", time.time() + 3600, reason="session_limit")
+    attempt, spawn = _spawning_attempt(REFUSAL)
+
+    result = asyncio.run(
+        skill_runner._run_provider_attempts(
+            "pavo", attempt, binaries=ALL_BINARIES, owns_pending_gate=True
+        )
+    )
+
+    spawn.assert_not_called()
+    assert result.cooled_until
+    assert "cooled until" in result.error
+    assert swarm_dispatch.review_failure_class(result) == "usage limit"
+
+
+def test_pinned_provider_during_the_window_is_a_usage_limit() -> None:
+    import swarm_dispatch
+
+    harness_router.record_cooling("claude", time.time() + 3600, reason="session_limit")
+    attempt, spawn = _spawning_attempt(REFUSAL)
+
+    result = asyncio.run(
+        skill_runner._run_provider_attempts(
+            "cicada", attempt, binaries=ALL_BINARIES, provider="claude"
+        )
+    )
+
+    spawn.assert_not_called()
+    assert result.cooled_until
+    assert swarm_dispatch.review_failure_class(result) == "usage limit"
+
+
+def test_gate_owner_without_a_window_still_gets_the_tool_deny_refusal() -> None:
+    """The cooled path must not swallow the genuine capability refusal."""
+    attempt, spawn = _spawning_attempt(REFUSAL)
+    result = asyncio.run(
+        skill_runner._run_provider_attempts(
+            "pavo", attempt,
+            binaries={"claude": None, "codex": "/bin/codex", "cursor": None},
+            owns_pending_gate=True,
+        )
+    )
+    spawn.assert_not_called()
+    assert result.cooled_until == ""
+    assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
+
+
+# ── untrusted text must not decide a cross-process hold-out ────────────────
+
+FAR_QUOTE = "usage limit reached, resets 2026-10-25 09:00 (Europe/Madrid)"
+
+
+def _attempt_returning(**result_kwargs):
+    async def attempt(selected: str) -> SkillResult:
+        return SkillResult("cicada", provider=selected, **result_kwargs)
+
+    return attempt
+
+
+def test_a_successful_run_quoting_a_limit_message_records_nothing() -> None:
+    attempt = _attempt_returning(
+        ok=True, returncode=0, stdout="VERDICT: APPROVE",
+        stderr=f"echoed prompt: {FAR_QUOTE}",
+    )
+    _run(attempt, {"claude": None, "codex": "/bin/codex", "cursor": None})
+    assert harness_router.persisted_cooling("codex") is None
+
+
+def test_a_failed_run_quoting_a_limit_message_mid_output_records_nothing() -> None:
+    transcript = "\n".join(
+        ["reviewing PR body:", FAR_QUOTE]
+        + [f"working line {i}" for i in range(30)]
+        + ["error: tests failed"]
+    )
+    attempt = _attempt_returning(ok=False, returncode=1, stdout=transcript, stderr="")
+    _run(attempt, BINARIES)
+    assert harness_router.persisted_cooling("claude") is None
+
+
+def test_a_long_quoted_line_at_the_tail_records_nothing() -> None:
+    padded = FAR_QUOTE + " " + "x" * 600
+    attempt = _attempt_returning(ok=False, returncode=1, stdout=padded, stderr="")
+    _run(attempt, BINARIES)
+    assert harness_router.persisted_cooling("claude") is None
+
+
+def test_a_launch_failure_without_an_exit_code_records_nothing() -> None:
+    attempt = _attempt_returning(
+        ok=False, returncode=None, stdout=REFUSAL, stderr="",
+        error="claude launch failed: x",
+    )
+    _run(attempt, BINARIES)
+    assert harness_router.persisted_cooling("claude") is None
+
+
+def test_an_overlong_session_reset_is_clamped(caplog) -> None:
+    attempt, _ = _spawning_attempt(
+        "You've hit your session limit · resets 2026-10-25 09:00 (Europe/Madrid)"
+    )
+    now = time.time()
+    with caplog.at_level("WARNING"):
+        _run(attempt, BINARIES)
+    cooling = harness_router.persisted_cooling("claude")
+    assert cooling is not None
+    assert float(cooling["until"]) <= now + 5 * 3600 + 11 * 60
+    assert "clamping" in caplog.text
+
+
+def test_an_overlong_weekly_reset_is_clamped_to_a_week(caplog) -> None:
+    attempt, _ = _spawning_attempt("You've hit your weekly limit · resets in 30 days")
+    now = time.time()
+    with caplog.at_level("WARNING"):
+        _run(attempt, BINARIES)
+    cooling = harness_router.persisted_cooling("claude")
+    assert cooling is not None and cooling["reason"] == "weekly_limit"
+    assert now + 6 * 86400 < float(cooling["until"]) <= now + 7 * 86400 + 3601
+    assert "clamping" in caplog.text
+
+
+def test_a_within_bounds_weekly_reset_is_kept_exactly() -> None:
+    when = datetime.fromtimestamp(time.time() + 3 * 86400, ZoneInfo("Europe/Madrid"))
+    text = f"You've hit your weekly limit · resets {when:%Y-%m-%d %H:%M} (Europe/Madrid)"
+    attempt, _ = _spawning_attempt(text)
+    _run(attempt, BINARIES)
+    cooling = harness_router.persisted_cooling("claude")
+    assert cooling is not None
+    assert abs(float(cooling["until"]) - when.replace(second=0, microsecond=0).timestamp()) < 1
