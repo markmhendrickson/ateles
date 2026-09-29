@@ -390,6 +390,21 @@ BASH_BLOCK = [
         "env -u running node --eval after source",
         f"source {ENV}; env -u X node --eval 'console.log(process.env)'",
     ),
+    # Round 2 (ux and arch review of ateles#1346): a non-canonical path now
+    # counts only in command position. These pin that every way of RUNNING
+    # one stays refused: through a wrapper, as env's program, inside a shell
+    # string, after an assignment, or with an expansion prefix.
+    ("sudo running a pathed env", "sudo -u root /opt/homebrew/bin/env"),
+    ("env -u running a pathed env", "env -u X //usr/bin/env"),
+    ("shell string running a relative printenv", 'sh -c "./printenv"'),
+    ("assignment before a relative printenv", "A=1 ./printenv"),
+    ("quoted expansion prefix on env", '"$D"/env'),
+    ("timeout running a pathed env after source", f"source {ENV}; timeout 5 /x/env"),
+    ("if-condition running a relative printenv", "if ./printenv; then :; fi"),
+    (
+        "env -u running perl -pe after source",
+        f"source {ENV}; env -u X perl -pe 1",
+    ),
 ]
 
 BASH_ALLOW = [
@@ -527,6 +542,41 @@ BASH_ALLOW = [
     (
         "pathed env running a program after source",
         f"source {ENV}; /opt/homebrew/bin/env -u X gh pr list",
+    ),
+    # Round 2 (ux and arch review of ateles#1346): a path ARGUMENT whose
+    # last segment is env or printenv is not an invocation. The any-path
+    # match refused all of these as an ambient dump, with or without a
+    # source; main allowed them.
+    ("ls a path ending in env", "ls config/env"),
+    ("git diff a path ending in env", "git diff -- src/env"),
+    ("rm a path ending in env", "rm -rf build/env"),
+    ("python3 -m venv into a path ending in env", "python3 -m venv .venv/env"),
+    ("mkdir a path ending in printenv", "mkdir -p tmp/printenv"),
+    ("ls an expansion-prefixed path ending in env", "ls $(pwd)/env"),
+    ("env -u running ls on a path ending in env", "env -u X ls config/env"),
+    ("ls a path ending in env after source", f"source {ENV}; ls config/env"),
+    (
+        "git diff a path ending in env after source",
+        f"source {ENV}; git diff -- src/env",
+    ),
+    ("rm a path ending in env after source", f"source {ENV}; rm -rf build/env"),
+    # Round 2 (ux and qa non-blocking notes): an interpreter flag counts as
+    # an inline program only for that interpreter's own inline flags.
+    (
+        "env -u running python3 -E on a script after source",
+        f"source {ENV}; env -u X python3 -E script.py",
+    ),
+    (
+        "env -u running bash -p on a script after source",
+        f"source {ENV}; env -u X bash -p script.sh",
+    ),
+    (
+        "env -u running perl -Mstrict on a script after source",
+        f"source {ENV}; env -u X perl -Mstrict x.pl",
+    ),
+    (
+        "env -u running pytest with a -p plugin flag after source",
+        f"source {ENV}; env -u X python3 -m pytest -p no:cacheprovider",
     ),
     (
         "sourced variable used as a request header, response discarded",

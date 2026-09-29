@@ -455,6 +455,102 @@ _PATHED_COMMAND_START = r"(?<![A-Za-z0-9_./:-])"
 _ANY_PATH = r"(?:[^\s;&|<>()`'\"$:=]*/)?"
 _PRINTENV_RE = re.compile(rf"{_PATHED_COMMAND_START}{_ANY_PATH}printenv{_COMMAND_END}")
 _ENV_RE = re.compile(rf"{_PATHED_COMMAND_START}{_ANY_PATH}env{_COMMAND_END}")
+# The bare name and the two canonical bin paths count wherever they appear,
+# exactly as on main. Any OTHER path counts only in command position: the
+# any-prefix match above otherwise read an ordinary path ARGUMENT such as
+# `ls config/env` or `git diff -- src/env` as an `env` invocation and refused
+# it as an ambient dump with no credential source at all (ux and arch review
+# of ateles#1346, round 2).
+_CANONICAL_ENV_WORD_RE = re.compile(r"(?:/(?:usr/)?bin/)?(?:env|printenv)")
+_ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+# Programs that run (or may run) one of their operands as a command, plus
+# the shell keywords after which a command starts. A path after one of these
+# is treated as being in command position, which fails closed: `sudo -u root
+# /x/env` and `sh -c "./printenv"` stay refused, at the cost of also refusing
+# `sudo ls config/env`. `env` itself is not listed; its program operand is
+# parsed exactly by `_env_program`. Script interpreters (python, perl, ruby,
+# node) are deliberately absent: they read an operand as a script, so
+# `python3 -m venv .venv/env` passes a path, and cannot run the binary.
+_OPERAND_RUNNERS = frozenset(
+    {
+        "sudo", "doas", "su", "runuser", "nice", "ionice", "chrt", "taskset",
+        "nohup", "setsid", "stdbuf", "timeout", "gtimeout", "time", "command",
+        "builtin", "exec", "eval", "xargs", "parallel", "find", "busybox",
+        "toybox", "unbuffer", "caffeinate", "watch", "strace", "ltrace",
+        "flock", "chroot", "nsenter", "unshare", "firejail", "sandbox-exec",
+        "arch", "script", "sh", "bash", "zsh", "dash", "ksh", "fish", "csh",
+        "tcsh", "ssh", "fly", "flyctl",
+        "kubectl", "docker", "podman", "nix-shell", "direnv", "npx", "npm",
+        "pnpm", "yarn", "uv", "uvx", "poetry", "pipx", "then", "do", "else",
+        "if", "while", "until", "!",
+    }
+)  # fmt: skip
+
+
+def _shlex_prefix_words(text: str):
+    """Split the text before a match into words. The text may end inside an
+    open quote (`sh -c "`), so a closing quote is tried when the raw text
+    does not parse. None means it could not be parsed at all."""
+    for candidate in (text, text + '"', text + "'"):
+        try:
+            return shlex.split(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+def _in_command_position(segment: str, start: int) -> bool:
+    """True when the word starting at `start` is run as a command rather
+    than passed to one as an argument. Uncertain shapes return True, which
+    refuses: this only decides whether a non-canonical `env`/`printenv` path
+    is an invocation."""
+    pre = segment[:start]
+    # A completed expansion is a word, not a command boundary: `ls
+    # $(pwd)/env` and `ls ${D}/env` pass a path argument to `ls`.
+    pre = re.sub(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`", "X", pre)
+    cut = max(pre.rfind(c) for c in ";&|(){}`\n")
+    text = pre[cut + 1 :]
+    words = _shlex_prefix_words(text)
+    if words is None:
+        return True
+    # When the match is not preceded by whitespace, the last word is the
+    # start of the matched word itself (`"$D"/env`, `X/env`), not a program.
+    if words and text and not text[-1].isspace():
+        words = words[:-1]
+    while True:
+        while words and _ASSIGNMENT_WORD_RE.fullmatch(words[0]):
+            words = words[1:]
+        if not words:
+            return True
+        name = words[0].rsplit("/", 1)[-1]
+        if name == "env":
+            program = _env_program(shlex.join(words[1:]))
+            if program is None:
+                # env's program operand has not started before the match,
+                # so the match is that operand (or an option's argument).
+                return True
+            words = program
+            continue
+        if name in _OPERAND_RUNNERS:
+            return True
+        return False
+
+
+def _env_word_matches(pattern: re.Pattern, segment: str):
+    """Yield the matches of `_ENV_RE`/`_PRINTENV_RE` that are invocations:
+    every bare or canonical match, and a non-canonical path only when it is
+    in command position."""
+    for match in pattern.finditer(segment):
+        if _CANONICAL_ENV_WORD_RE.fullmatch(match.group(0)) or _in_command_position(
+            segment, match.start()
+        ):
+            yield match
+
+
+def _printenv_invoked(segment: str) -> bool:
+    return next(_env_word_matches(_PRINTENV_RE, segment), None) is not None
+
+
 _SERVICE_ENV_RE = re.compile(
     rf"{_COMMAND_START}{_BIN_PATH}launchctl\s+(?:print|getenv){_COMMAND_END}"
     rf"|{_COMMAND_START}{_BIN_PATH}systemctl\s+"
@@ -547,7 +643,7 @@ def _env_dumps_ambient(segment: str) -> bool:
     second, bare `env` as its program, and that one dumps."""
     return any(
         _env_program(segment[match.end() :]) is None
-        for match in _ENV_RE.finditer(segment)
+        for match in _env_word_matches(_ENV_RE, segment)
     )
 
 
@@ -568,28 +664,44 @@ _INLINE_PROGRAM_INTERPRETERS = re.compile(
     r"^(?:sh|bash|zsh|dash|ksh|python[0-9.]*|perl|ruby|node|nodejs)$"
 )
 _INLINE_PROGRAM_LONG_FLAGS = frozenset({"--command", "--eval", "--print"})
+# The short-flag letters that take an inline program, per interpreter, and
+# the flags whose attached argument must not be read as more letters
+# (`perl -Mstrict`, `python3 -Wignore`). Checking `c`/`e`/`E`/`p` for every
+# interpreter refused `python3 -E script.py` (which IGNORES the environment),
+# `bash -p script.sh` and `perl -Mstrict x.pl` (ux and qa review of
+# ateles#1346, round 2).
+_INLINE_PROGRAM_LETTERS = (
+    (re.compile(r"(?:sh|bash|zsh|dash|ksh)$"), "c", ""),
+    (re.compile(r"python[0-9.]*$"), "c", "WXQ"),
+    (re.compile(r"perl$"), "eE", "MImx"),
+    (re.compile(r"ruby$"), "e", "Ir"),
+    (re.compile(r"(?:node|nodejs)$"), "ep", "r"),
+)
 
 
-def _is_inline_program_flag(word: str) -> bool:
-    """True for a flag that hands an interpreter an inline program: the
+def _is_inline_program_flag(interpreter: str, word: str) -> bool:
+    """True for a flag that hands `interpreter` an inline program: the
     separate `-c`/`-e` forms, combined short flags (`bash -lc`, `sh -xc`,
-    `perl -pe`, `perl -E`, `node -p`), and node's long `--eval`/`--print`.
-    Matching exact words only let the combined forms through (qa and
-    security review of ateles#1346)."""
+    `perl -pe`, `perl -E`, `node -p`), and the long `--eval`/`--print`/
+    `--command` forms. Matching exact words only let the combined forms
+    through (qa and security review of ateles#1346, round 1)."""
     if word.split("=", 1)[0] in _INLINE_PROGRAM_LONG_FLAGS:
         return True
-    return (
-        word.startswith("-")
-        and not word.startswith("--")
-        and bool(set(word[1:]) & set("ceEp"))
-    )
+    if not word.startswith("-") or word.startswith("--") or len(word) < 2:
+        return False
+    for pattern, letters, attached_argument in _INLINE_PROGRAM_LETTERS:
+        if pattern.match(interpreter):
+            if word[1] in attached_argument:
+                return False
+            return bool(set(word[1:]) & set(letters))
+    return False
 
 
 def _env_dumps_after_source(segment: str) -> bool:
     """Stricter than `_env_dumps_ambient`, for a segment that follows a
     credential source: also refuse an `env` whose program can itself print
     the inherited environment (see `_ENV_DUMPING_PROGRAMS`)."""
-    for match in _ENV_RE.finditer(segment):
+    for match in _env_word_matches(_ENV_RE, segment):
         program = _env_program(segment[match.end() :])
         if program is None:
             return True
@@ -597,7 +709,7 @@ def _env_dumps_after_source(segment: str) -> bool:
         if name in _ENV_DUMPING_PROGRAMS:
             return True
         if _INLINE_PROGRAM_INTERPRETERS.match(name) and any(
-            _is_inline_program_flag(word) for word in program[1:]
+            _is_inline_program_flag(name, word) for word in program[1:]
         ):
             return True
     return False
@@ -692,7 +804,7 @@ def _env_program(tail: str):
 
 def _ambient_process_or_service_hit(segment: str) -> str | None:
     """Return the ambient-output entrance that could expose credentials."""
-    if _PRINTENV_RE.search(segment) or _env_dumps_ambient(segment):
+    if _printenv_invoked(segment) or _env_dumps_ambient(segment):
         return "ambient environment dump"
     if _SERVICE_ENV_RE.search(segment):
         return "service environment dump"
@@ -1228,7 +1340,7 @@ def check_bash(command: str):
         # auth token)` form, 2026-09-29). `_env_dumps_after_source` still
         # refuses an env whose program can itself print the environment.
         if sourced_a_credential and (
-            _PRINTENV_RE.search(normalized)
+            _printenv_invoked(normalized)
             or _env_dumps_after_source(normalized)
             or _BARE_SET_DUMP_RE.search(normalized)
             or _DECLARE_DUMP_RE.search(normalized)
