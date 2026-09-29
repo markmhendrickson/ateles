@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from lib import github_app_token as gat
+from lib.pytest_env_guard import assert_env_keys_absent, assert_env_keys_present
 
 PREFIX = gat.DEFAULT_APP_ENV_PREFIX
 _ENV = (
@@ -209,7 +210,8 @@ def test_gh_read_env_injects_app_token(configured, monkeypatch):
     env = gat.gh_read_env("o/r")
     assert env["GH_TOKEN"] == env["GITHUB_TOKEN"]
     assert env["GITHUB_TOKEN"].startswith("ghs_fake_")
-    assert "PATH" in env or not gat.os.environ.get("PATH")
+    if gat.os.environ.get("PATH"):
+        assert_env_keys_present(env, "PATH")
 
 
 def test_gh_read_env_unconfigured_is_ambient_env(monkeypatch):
@@ -217,7 +219,7 @@ def test_gh_read_env_unconfigured_is_ambient_env(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_ambient_pat")
     env = gat.gh_read_env("o/r")
     assert env["GITHUB_TOKEN"] == "ghp_ambient_pat"
-    assert "GH_TOKEN" not in env
+    assert_env_keys_absent(env, "GH_TOKEN")
 
 
 def test_unparseable_key_is_an_app_token_error_and_read_falls_back(monkeypatch):

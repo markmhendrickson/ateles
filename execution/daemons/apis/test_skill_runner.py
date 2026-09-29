@@ -27,6 +27,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib.daemon_runtime import AgentDefinition  # noqa: E402
+from lib.pytest_env_guard import assert_env_keys_absent  # noqa: E402
 
 # Import module-level objects so we can patch them in-place
 import skill_runner  # noqa: E402
@@ -650,6 +651,21 @@ class TestRoleSigningEnvInjection:
     def setup_method(self) -> None:
         skill_runner._agent_def_cache.clear()
 
+    @pytest.fixture(autouse=True)
+    def _host_signer_vars_do_not_exist(self, monkeypatch) -> None:
+        """These tests assert the code injects (or withholds) the signer vars.
+        A host shell that already exports them would make "must not be
+        injected" fail for the wrong reason and put the host env in the
+        failure output. The suite-wide autouse fixture already clears the
+        environment; naming the vars here keeps the test hermetic on its own."""
+        for name in (
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+            "NEOTOMA_AAUTH_SUB",
+            "NEOTOMA_AAUTH_ISS",
+            "NEOTOMA_AAUTH_ROLE",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
     def _run(self, coro):
         return asyncio.run(coro)
 
@@ -710,8 +726,8 @@ class TestRoleSigningEnvInjection:
         assert (
             captured_env.get("NEOTOMA_AAUTH_ISS") == "https://markmhendrickson.com"
         ), "Expected NEOTOMA_AAUTH_ISS default 'https://markmhendrickson.com'"
-        assert "NEOTOMA_AAUTH_ROLE" not in captured_env, (
-            "NEOTOMA_AAUTH_ROLE must not be present — it is superseded by the real signer vars"
+        assert_env_keys_absent(
+            captured_env, "NEOTOMA_AAUTH_ROLE", why="NEOTOMA_AAUTH_ROLE must not be present — it is superseded by the real signer vars"
         )
 
     @patch("skill_runner._write_harness_event")
@@ -759,14 +775,14 @@ class TestRoleSigningEnvInjection:
                 )
             )
 
-        assert "NEOTOMA_AAUTH_PRIVATE_JWK_PATH" not in captured_env, (
-            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH must not be injected when JWK file is absent"
+        assert_env_keys_absent(
+            captured_env, "NEOTOMA_AAUTH_PRIVATE_JWK_PATH", why="NEOTOMA_AAUTH_PRIVATE_JWK_PATH must not be injected when JWK file is absent"
         )
-        assert "NEOTOMA_AAUTH_SUB" not in captured_env, (
-            "NEOTOMA_AAUTH_SUB must not be injected when JWK file is absent"
+        assert_env_keys_absent(
+            captured_env, "NEOTOMA_AAUTH_SUB", why="NEOTOMA_AAUTH_SUB must not be injected when JWK file is absent"
         )
-        assert "NEOTOMA_AAUTH_ISS" not in captured_env, (
-            "NEOTOMA_AAUTH_ISS must not be injected when JWK file is absent"
+        assert_env_keys_absent(
+            captured_env, "NEOTOMA_AAUTH_ISS", why="NEOTOMA_AAUTH_ISS must not be injected when JWK file is absent"
         )
 
     @patch("skill_runner._write_harness_event")
@@ -812,17 +828,17 @@ class TestRoleSigningEnvInjection:
                 )
             )
 
-        assert "NEOTOMA_AAUTH_PRIVATE_JWK_PATH" not in captured_env, (
-            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH must not be injected when agent_def is degraded"
+        assert_env_keys_absent(
+            captured_env, "NEOTOMA_AAUTH_PRIVATE_JWK_PATH", why="NEOTOMA_AAUTH_PRIVATE_JWK_PATH must not be injected when agent_def is degraded"
         )
-        assert "NEOTOMA_AAUTH_SUB" not in captured_env, (
-            "NEOTOMA_AAUTH_SUB must not be injected when agent_def is degraded"
+        assert_env_keys_absent(
+            captured_env, "NEOTOMA_AAUTH_SUB", why="NEOTOMA_AAUTH_SUB must not be injected when agent_def is degraded"
         )
-        assert "NEOTOMA_AAUTH_ISS" not in captured_env, (
-            "NEOTOMA_AAUTH_ISS must not be injected when agent_def is degraded"
+        assert_env_keys_absent(
+            captured_env, "NEOTOMA_AAUTH_ISS", why="NEOTOMA_AAUTH_ISS must not be injected when agent_def is degraded"
         )
-        assert "NEOTOMA_AAUTH_ROLE" not in captured_env, (
-            "NEOTOMA_AAUTH_ROLE must not be injected (it is superseded and was never real)"
+        assert_env_keys_absent(
+            captured_env, "NEOTOMA_AAUTH_ROLE", why="NEOTOMA_AAUTH_ROLE must not be injected (it is superseded and was never real)"
         )
 
 
@@ -1496,7 +1512,7 @@ class TestGithubTokenInjection:
 
         # The subprocess must never have been spawned under the ambient
         # identity — the failure happens before exec, not after.
-        assert captured_envs == []
+        assert len(captured_envs) == 0
 
 
 # ── Phase 1 / Layer A: SWARM_GITHUB_CONTRACT injection ───────────────────────
@@ -2139,18 +2155,22 @@ class TestAnthropicAuthPrecedence:
             }
         )
         assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-oauth-xyz"
-        assert "ANTHROPIC_API_KEY" not in env, (
-            "ANTHROPIC_API_KEY must be removed when the subscription token is present, "
-            "else claude bills metered credits instead of the Max plan"
+        assert_env_keys_absent(
+            env,
+            "ANTHROPIC_API_KEY",
+            why="ANTHROPIC_API_KEY must be removed when the subscription token is present, "
+            "else claude bills metered credits instead of the Max plan",
         )
 
     def test_no_oauth_token_still_drops_api_key_by_default(self) -> None:
         env = self._spawn_and_capture_env(
             {"ANTHROPIC_API_KEY": "sk-ant-metered", "CLAUDE_CODE_OAUTH_TOKEN": ""}
         )
-        assert "ANTHROPIC_API_KEY" not in env, (
-            "Without subscription auth, dispatch must fail/queue instead of billing "
-            "metered Anthropic credits"
+        assert_env_keys_absent(
+            env,
+            "ANTHROPIC_API_KEY",
+            why="Without subscription auth, dispatch must fail/queue instead of billing "
+            "metered Anthropic credits",
         )
 
     def test_explicit_metered_override_keeps_api_key(self) -> None:
@@ -3661,8 +3681,7 @@ def test_prompt_review_quota_failover_preserves_role_prompt_and_cost_policy(monk
     assert len(attempts) == 2
     for cmd, kw in attempts:
         assert kw["input"] == b"EXACT ROLE AND HEAD REVIEW INPUT"
-        assert "ANTHROPIC_API_KEY" not in kw["env"]
-        assert "GITHUB_TOKEN" not in kw["env"]
+        assert_env_keys_absent(kw["env"], "ANTHROPIC_API_KEY", "GITHUB_TOKEN")
     assert "--tools" in attempts[0][0]
     assert "read-only" in attempts[1][0]
     assert "--ignore-user-config" in attempts[1][0]

@@ -26,6 +26,7 @@ if "config" not in sys.modules:
     sys.modules["config"] = _stub_config
 
 import live_transcript_tail as lt  # noqa: E402
+from lib.pytest_env_guard import assert_env_keys_absent  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -593,7 +594,9 @@ def test_build_subprocess_env_extracts_only_openai_key(tmp_path):
 )
 def test_build_subprocess_env_never_leaks_unrelated_secrets(tmp_path, leaked):
     env = lt.build_subprocess_env(materialized=_write_dotenv(tmp_path), base_env={})
-    assert leaked not in env, f"{leaked} must not reach the transcription subprocess"
+    assert_env_keys_absent(
+        env, leaked, why="must not reach the transcription subprocess"
+    )
 
 
 def test_build_subprocess_env_loads_no_key_outside_the_allowlist(tmp_path):

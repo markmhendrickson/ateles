@@ -22,6 +22,11 @@ class NeotomaSignedTest(unittest.TestCase):
         self.keys = Path(self._tmp.name) / "keys"
         self.keys.mkdir()
         self._saved_env = dict(os.environ)
+        # Hermetic: a host shell that already exports the AAuth signer vars
+        # (SUB, PRIVATE_JWK_PATH, ISS, ...) must not change what these tests
+        # observe, nor appear in an assertion message. tearDown restores them.
+        for name in [n for n in os.environ if n.startswith("NEOTOMA_AAUTH_")]:
+            del os.environ[name]
         self._saved_keys_dir = ns.AAUTH_KEYS_DIR
 
     def tearDown(self):

@@ -21,13 +21,12 @@ test writes and deletes.
 
 from __future__ import annotations
 
-import os
-
 from lib.daemon_runtime import (
     _dotenv_path,
     _dotenv_should_load,
     _load_dotenv_into_environ,
 )
+from lib.pytest_env_guard import changed_during_collection
 
 
 def test_should_load_true_outside_pytest_with_no_skip_flag():
@@ -136,12 +135,12 @@ def test_real_process_environ_unaffected_by_import(monkeypatch):
     prints that file's contents — it only asserts the var's absence unless
     this test process's own environment already carried it in before pytest
     started (which it does not, on CI or a clean shell)."""
-    # If the parent shell happened to export this for some other reason,
-    # this test cannot distinguish that from a leak — so only assert when
-    # it was not already present before this test ran.
-    if "ATELES_SWARM_REQUIRE_LABEL_PYTEST_PRECHECK" not in os.environ:
-        assert os.environ.get("ATELES_SWARM_REQUIRE_LABEL") in (None, ""), (
-            "ATELES_SWARM_REQUIRE_LABEL is set in the real test process "
-            "environment; the dotenv bootstrap in lib/daemon_runtime "
-            "may have loaded the operator's real dotenv despite pytest running"
-        )
+    # A host shell that exports this variable is not a leak, so compare
+    # against the environment as it was when pytest started, not against
+    # "absent": only a change made while the code under test was imported
+    # counts. Hermetic: the answer does not depend on the host's shell.
+    assert not changed_during_collection("ATELES_SWARM_REQUIRE_LABEL"), (
+        "ATELES_SWARM_REQUIRE_LABEL changed in the real test process "
+        "environment while lib/daemon_runtime was imported; the dotenv bootstrap "
+        "may have loaded the operator's real dotenv despite pytest running"
+    )

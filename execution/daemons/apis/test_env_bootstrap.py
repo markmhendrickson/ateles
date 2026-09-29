@@ -31,6 +31,7 @@ if str(_DAEMON_DIR) not in sys.path:
 
 import apis  # noqa: E402
 import dispatch_role  # noqa: E402
+from lib.pytest_env_guard import changed_during_collection  # noqa: E402
 
 
 def test_apis_should_not_load_dotenv_under_pytest(monkeypatch):
@@ -51,9 +52,10 @@ def test_apis_module_import_did_not_leak_canary_gate_var():
     """The module was already imported (at collection time, above). If its
     bootstrap had run unconditionally, and this machine's real dotenv sets
     ATELES_SWARM_REQUIRE_LABEL, it would be in os.environ right now."""
-    import os
-
-    assert os.environ.get("ATELES_SWARM_REQUIRE_LABEL") in (None, ""), (
+    # The suite's autouse fixture clears the environment at test time, so ask
+    # the collection-time record instead of reading it directly (see
+    # lib.pytest_env_guard.changed_during_collection).
+    assert not changed_during_collection("ATELES_SWARM_REQUIRE_LABEL"), (
         "apis.py's dotenv bootstrap appears to have run despite pytest "
         "running — the label-gate switch reached the real test process env"
     )
@@ -74,9 +76,7 @@ def test_dispatch_role_should_not_load_when_skip_flag_set(monkeypatch):
 
 
 def test_dispatch_role_module_import_did_not_leak_canary_gate_var():
-    import os
-
-    assert os.environ.get("ATELES_SWARM_REQUIRE_LABEL") in (None, ""), (
+    assert not changed_during_collection("ATELES_SWARM_REQUIRE_LABEL"), (
         "dispatch_role.py's dotenv bootstrap appears to have run despite "
         "pytest running — the label-gate switch reached the real test "
         "process env"
