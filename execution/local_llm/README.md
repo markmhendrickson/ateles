@@ -113,11 +113,42 @@ The provider is off until `~/.config/ateles/claude-local.json` (or the path in
 `APIS_CLAUDE_LOCAL_CONFIG`) holds a valid, enabled config. The docstring of
 `local_provider.py` gives the full schema. Only the mechanical work classes in
 `local_provider.MECHANICAL_WORK_CLASSES` can be enabled. A run with an eligible
-`work_class` tries `claude-local` first, and any local failure falls over to the
-frontier providers, with the reason recorded as a `provider_failover`
-harness_event.
+`work_class` tries `claude-local` first. A local failure falls over only to a
+frontier provider that has a model bound to the cheapest frontier tier
+(`mechanical`) in the `vendor_binding` (`~/.config/ateles/vendor-binding.json`, or
+the file named by `APIS_VENDOR_BINDING_FILE`), pinned to that model; the operator
+ruled 2026-09-29 that this is Claude Haiku (`{"claude": {"mechanical": "haiku"}}`); with none bound the
+run is refused, never replayed on a provider's default model. Either way the
+failure and its reason (for example `local_run_failed:autocompact_thrash`) are
+recorded as a `provider_failover` harness_event and on the result's
+`local_failure`, so a run that cost frontier spend is never read as a local one.
+
+The local child runs with compaction off and tool output capped
+(`tool_output_cap_tokens`, default a tenth of the window), because on a 32K
+window the CLI's own compaction refills within three turns and aborts with
+"Autocompact is thrashing".
+
+Mechanical classes try git or the named generator before any model
+(`execution/daemons/apis/mechanical_first.py`):
 
 ```bash
+# Integrate with git first; a model is called only if git stops on conflicts, and
+# then only with the conflicted hunks. --integration merge makes a merge commit,
+# the right method for a branch that is already pushed and reviewed.
 python3 execution/daemons/apis/dispatch_role.py --role cicada \
-  --work-class rebase --cwd <worktree> --task "Rebase this branch onto origin/main and push."
+  --work-class rebase --rebase-onto origin/main [--integration merge] \
+  --cwd <worktree> --task "Rebase this branch onto origin/main."
+
+# Run the generator directly; reports the changed files, no model call.
+python3 execution/daemons/apis/dispatch_role.py --role cicada \
+  --work-class regenerate_generated_files --regenerate-cmd "python3 scripts/gen.py" \
+  --cwd <worktree> --task "Regenerate the generated files."
 ```
+
+The deterministic path refuses anything but a dedicated linked worktree (never a
+shared main clone), because direct git bypasses the PreToolUse guards that
+protect model tool calls; it verifies that the branch's own work survived, not
+only that the base is in HEAD; and a `--regenerate-cmd` run refuses a worktree
+that already has changes, so its changed-file list is only the generator's.
+
+Without `--rebase-onto` / `--regenerate-cmd` the class runs on the model path.
