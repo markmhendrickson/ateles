@@ -378,7 +378,10 @@ BASH_BLOCK = [
     ("non-standard printenv path, no source", "/opt/homebrew/bin/printenv"),
     # Combined and long inline-program flags (qa and security non-blocking
     # notes on the same review).
-    ("env -u running bash -lc set after source", f"source {ENV}; env -u X bash -lc set"),
+    (
+        "env -u running bash -lc set after source",
+        f"source {ENV}; env -u X bash -lc set",
+    ),
     (
         "env -u running perl -E after source",
         f"source {ENV}; env -u X perl -E 'print %ENV'",
