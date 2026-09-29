@@ -359,10 +359,20 @@ a body that has already failed a cheaper check.
    `owner/name` (validated before it reaches `gh` argv). A URL, bare `#N` or SHA
    on a task with no repo (or a malformed one), a URL for a different repo, and
    an abbreviated SHA cannot be checked as offered, so they are **BLOCKED**
-   (`ref_unverifiable`), never FAILED. A commit must be a full 40-character SHA.
+   (`ref_unverifiable`), never FAILED. So is a **near miss**: a body that contains a
+   GitHub link but is not exactly one PR URL (a wrapper sentence such as "Opened
+   https://...", a `/files`, `#fragment` or `?query` suffix, an issue or commit
+   link); the agent very likely opened something A commit must be a full 40-character SHA.
    The resolver answers **tri-state**: exists / absent (GitHub said not found) /
    unavailable (rate limit, 5xx, auth, timeout, `OSError`, any non-zero exit that
-   is not a clear not-found). Unavailable is **BLOCKED** (`ref_check_unavailable`),
+   is not a clear not-found), and an "unavailable" answer is retried once in-call
+   (two attempts, a second apart) before the task is BLOCKED. A 404 is **not** a
+   clear not-found: on the commit lookup it means the repository is missing or
+   not visible to the token, which is byte-identical to a private repo, so it is
+   unavailable; only a 422 "no commit found" or a GraphQL "could not resolve to a
+   PullRequest" is absent. The PR number is bounded to 9 digits, and a parse error
+   or any exception inside the gate is caught into a lane (`gate_error` -> BLOCKED)
+   so a task is never left EXECUTING with no status The blocking `gh` call runs off the event loop (`asyncio.to_thread`) so the SSE loop keeps moving, and a 404 is not retried in-call (it cannot change on a second ask). Unavailable is **BLOCKED** (`ref_check_unavailable`),
    never FAILED, because FAILED is re-run automatically
    The stored header (and a retained BLOCKED body) is passed through the secret
    redactor first.
@@ -439,23 +449,50 @@ every code to both, and to its lane.
 | `wrong_body_for_dispatch` | FAILED | yes | The body answers a different question, e.g. prose or `ENG_SPEC_SECTION` on a generic Cicada direct-impl | Nothing needed; record the body by hand if it is the deliverable |
 | `invalid_ref_shape` | FAILED | yes | The agent offered a reference on another host, or malformed text or shell metacharacters | Nothing needed; if a real PR/commit exists, record it first |
 | `unresolvable_ref` | FAILED | yes | GitHub definitively answered that the PR/commit does not exist (a clear not-found, not a rate limit) | Nothing needed; record a real one first if it exists under another reference |
-| `ref_unverifiable` | BLOCKED | **no** | The reference cannot be checked as offered: the task has no `repo` (or a malformed one), the URL names a different repo, or the SHA is abbreviated. A PR/commit may already exist | **Do not re-dispatch.** Check the offered ref by hand, then record it and mark done (command below). A `repo` on the task (tracked in #1363) lets the gate check it |
-| `ref_check_unavailable` | BLOCKED | **no** | GitHub could not be asked (rate limit, 5xx, auth, timeout, network). The ref is neither confirmed nor refuted | **Do not re-dispatch.** When GitHub is reachable, check the ref by hand, then record it and mark done |
+| `ref_unverifiable` | BLOCKED | **no** | The reference cannot be checked as offered. One hint per situation: the task has **no repo** or a **malformed** one; the URL names a **different repo**; the SHA is **abbreviated**; or the body is a **near miss** (a GitHub link that is not exactly one PR URL). A PR/commit may already exist | **Do not re-dispatch.** The alert prints a `gh` check (`gh pr view <n> --repo <owner/name>`). If the ref is a full PR URL the recording commands are printed; otherwise find the real PR/commit and record its full URL. A `repo` on the task (tracked in #1363) lets the gate check it |
+| `ref_check_unavailable` | BLOCKED | **no** | GitHub could not be asked after one in-call retry (rate limit, 5xx, auth, timeout, network, or a 404 on the commit lookup). The ref is neither confirmed nor refuted | **Do not re-dispatch.** When GitHub is reachable, check the ref by hand (`Check it:` line), then record it and mark done (commands printed) |
 | `record_not_saved` | BLOCKED | **no** | The deliverable was accepted, but the `result` or `status` write did not read back. The reason and alert carry the accepted ref and the step that failed. Wording differs for a PR role (the PR exists; a retry would open a second one) and a prose role (the text is in the alert; a retry would redo the work) | **Do not re-dispatch.** Record the deliverable and mark done (command below) |
-| `blocked` | BLOCKED | **no** | The agent wrote `BLOCKED` in any of its separator forms (colon, dash, en/em dash, comma, full stop, parenthetical, or just a space) and its reason. **Not a gate failure**: the alert says the agent is asking for something. The words are redacted and capped at 800 chars | Give the agent what it says it needs, then reopen the task |
+| `gate_error` | BLOCKED | **no** | The gate itself raised while judging the deliverable (the error is in the `detail` field of the reason; the alert is headed `artifact gate ERROR`). Neither accepted nor judged wrong | **Do not re-dispatch.** Read the error and the dispatcher log for the task, then record or resolve the deliverable by hand |
+| `blocked` | BLOCKED | **no** | The agent wrote `BLOCKED` in any of its separator forms (colon, dash, en/em dash, comma, full stop, parenthetical, or just a space) and its reason. **Not a gate failure**: the alert says the agent is asking for something. The words are redacted and capped at 800 chars | Give the agent what it says it needs, then reopen the task by setting its status back to `routed` (the alert prints the command); the stall watchdog re-dispatches a routed task after its stall window |
 
-Recording a deliverable by hand (the reason prints this with the task id and ref
-filled in; shape from the Neotoma CLI, `result` and `status` are the task fields
-the dispatcher itself writes):
+### Recording a deliverable by hand
+
+Where there is a real value to record, the reason prints **three separate
+copy-ready commands** (one per line, indented), never a prose sentence, with the
+global `--api-only` flag. Without `--api-only` the Neotoma CLI defaults data
+commands to the in-process LOCAL store, so the correction and the read-back would
+both hit the wrong store and confirm falsely while the hosted task stays stuck.
 
 ```
-neotoma corrections create --entity-id <task_id> --entity-type task \
-    --field-name result --corrected-value '<the ref or text>'
-neotoma corrections create --entity-id <task_id> --entity-type task \
+neotoma --api-only corrections create --entity-id <task_id> --entity-type task \
+    --field-name result --corrected-value '<the full ref or text>'
+neotoma --api-only corrections create --entity-id <task_id> --entity-type task \
     --field-name status --corrected-value done
+neotoma --api-only entities get <task_id>
 ```
 
-Then read the task back: a correction can silently no-op.
+The third command is the read-back: confirm `status` is `done` and `result` is
+the value you recorded (a correction can silently no-op).
+
+**Operator shell requirements (once, no values here):** `--api-only` talks to the
+hosted instance, so the shell you run these in needs `NEOTOMA_BASE_URL` pointed at
+it and a valid bearer token (`NEOTOMA_BEARER_TOKEN`) in the environment. Without
+them the CLI either fails loudly or, without `--api-only`, would use the local store.
+
+**What to record as `result`:** for the `ref_*` codes (`ref_unverifiable`,
+`ref_check_unavailable`) the printed value is the **bare full reference** (a PR
+URL), because that is all the gate could establish. For `record_not_saved` it is
+the **exact header line** the system would have stored (`[role] kind: body`). Record
+exactly what the command prints. Rules the alert follows:
+a command is printed **only when the value is real** (a full PR URL, or the exact
+header line the system would have stored), never a placeholder, so pasting it
+unedited cannot record placeholder text; the value is **never truncated** (a
+deliverable longer than 500 characters gets no command, and the alert says to copy
+the full `[role] kind:` header line from the run's stdout); every argument is
+shell-quoted so the printed line splits back into the same argv. FAILED codes
+(auto-retried) print no command, because the value is not known yet: the words
+point here. To reopen a BLOCKED task after satisfying an honest agent, the alert
+prints one command that sets `status` to `routed`.
 
 The operator alert is worded per situation so they never read alike:
 `… ARTIFACT GATE FAILED … (task FAILED; the watchdog will retry it
@@ -467,7 +504,11 @@ gate" refusal).
 
 Status writes for gate outcomes carry the attempt in their idempotency key
 (`<trigger>-<attempt>`), because the watchdog re-dispatches with a constant
-trigger and would otherwise replay attempt 1's key on attempts 2 and 3. Before
+trigger and would otherwise replay attempt 1's key on attempts 2 and 3. **Known
+limit (#1355):** nothing in the tree writes `snapshot["attempt"]` /
+`attempt_count`, so today the attempt reads 0 and watchdog retries 2 and 3 still
+share `watchdog_retry-0`; the key change is correct and inert until the watchdog
+supplies a real attempt number. Before
 writing BLOCKED for a persistence miss the dispatcher reads the task once more,
 so a stale read-back never blocks (or overwrites) a task that is truly DONE.
 

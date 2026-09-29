@@ -110,6 +110,7 @@ def job(monkeypatch, tmp_path):
     # gate_override re-reads the lifecycle fields that authorize a spawn; that
     # is a network read, and not what these tests are about.
     monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *a, **k: True)
+    monkeypatch.setattr(apis, "_RESOLVE_RETRY_DELAY_SECONDS", 0)
 
     recording = _RecordingJob()
     monkeypatch.setattr(
@@ -615,7 +616,7 @@ def test_result_the_store_drops_is_neither_done_nor_finished(
     # The accepted ref and a plain next step, so the operator does not read this
     # as "the PR does not resolve" and re-dispatch into a second PR.
     assert "ref=markmhendrickson/ateles#999" in reason
-    assert "Do not re-dispatch" in reason and "PR exists" in reason
+    assert "Do not re-dispatch" in reason and "The PR or commit exists" in reason
     assert "unresolvable_ref" not in reason and "[COPY" not in reason
     assert notifier.sent and "ACCEPTED" in notifier.sent[-1]
     assert "ref=markmhendrickson/ateles#999" in notifier.sent[-1]
@@ -704,10 +705,11 @@ def test_foreign_pr_url_with_no_repo_on_the_task_is_never_done(
     assert blocked and "[ARTIFACT_GATE] ref_unverifiable" in blocked[-1]["reason"]
     reason = blocked[-1]["reason"]
     assert "https://github.com/other-org/other-repo/pull/7" in reason, "offered ref missing"
-    assert "expected_repo=none recorded on the task" in reason
-    assert "no repo to check it against" in reason
+    assert "expected_repo=(none recorded on the task)" in reason
+    assert "records no repo" in reason
     assert "NOT retried automatically" in reason and "Do not re-dispatch" in reason
-    assert "neotoma corrections create --entity-id ent_foreign_1" in reason
+    assert "neotoma --api-only corrections create --entity-id ent_foreign_1" in reason
+    assert "Check it: gh pr view 7 --repo other-org/other-repo" in reason
     assert notifier.sent and "NOT retried" in notifier.sent[-1]
 
 
@@ -905,7 +907,6 @@ def test_gh_rate_limit_is_blocked_not_failed(writes, spawn, monkeypatch, gh):
     "stderr",
     [
         "GraphQL: Could not resolve to a PullRequest with the number of 999. (repository.pullRequest)",
-        "gh: Not Found (HTTP 404)",
     ],
 )
 def test_definitive_not_found_is_failed(writes, spawn, monkeypatch, stderr):
@@ -982,19 +983,20 @@ def test_prose_role_record_not_saved_does_not_talk_about_a_pr(
     assert blocked, status_writes
     reason = blocked[-1]["reason"]
     assert "record_not_saved" in reason
-    assert "PR" not in reason.split("Next:")[0].split("—", 1)[1], reason
-    assert "second PR" not in reason and "The PR exists" not in reason
+    assert "second PR" not in reason and "The PR" not in reason, reason
     assert "redo the work" in reason and "Do not re-dispatch" in reason
-    assert "--corrected-value '" in reason and "<the PR" not in reason
+    assert "<the PR" not in reason
     assert ent.fields["status"] != "done"
     assert "did NOT save" in notifier.sent[-1]
     # Named for what happened, not as an artifact-gate refusal.
     assert job.failed_events and "task record not saved" in job.failed_events[-1][0]
     assert "artifact gate" not in job.failed_events[-1][0]
-    # The ref/identity is cut on a word boundary, not mid-word.
-    ref = reason.split("ref=", 1)[1].split(" failed_at=", 1)[0]
-    assert ref.endswith("…") and not ref[:-1].endswith(("sect", "instal")), ref
-    assert ref[:-1].split()[-1] in {"reworded", "the", "install", "section"}, ref
+    # The deliverable text is recorded IN FULL by the printed command (never a
+    # truncated value), and is not embedded in the reason head.
+    argv = _command_argv(reason)
+    result_cmd = next(a for a in argv if "result" in a)
+    assert result_cmd[-1] == line, "the recorded value must be the full deliverable line"
+    assert "ref=" not in reason.split("\n")[0], "agent text must not be in the head"
 
 
 def test_pr_role_record_not_saved_keeps_the_pr_wording(
@@ -1005,8 +1007,9 @@ def test_pr_role_record_not_saved_keeps_the_pr_wording(
     spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
     _dispatch("ent_pr_rns_1", _cicada_task())
     reason = _with_status(status_writes, "blocked")[-1]["reason"]
-    assert "The PR exists" in reason and "second PR" in reason
-    assert f"--corrected-value '{_REPO}#999'" in reason
+    assert "The PR or commit exists" in reason and "second one" in reason
+    result_cmd = next(a for a in _command_argv(reason) if "result" in a)
+    assert result_cmd[-1] == _PR_HEADER
 
 
 class _StaleEntity(_TaskEntity):
@@ -1137,6 +1140,537 @@ def test_task_with_no_known_repo_is_never_left_failed(writes, spawn, monkeypatch
     assert blocked, writes
     reason = blocked[-1]["reason"]
     assert "ref_unverifiable" in reason and f'offered="{body}"' in reason
-    assert "expected_repo=none recorded on the task" in reason
+    assert "expected_repo=(none recorded on the task)" in reason
     assert "may already exist" in reason and "Do not re-dispatch" in reason
     assert notifier.sent and "NOT retried" in notifier.sent[-1]
+
+
+# ── Round-4 review findings (security, arch, ux) ─────────────────────────────
+#
+# What these looked like RED (each against the code before its fix):
+#
+#     test_huge_pr_number_never_escapes_dispatch
+#         ValueError: Exceeds the limit (4300 digits) for integer string
+#         conversion -- raised out of dispatch_task, task left EXECUTING
+#
+#     test_secret_in_the_offered_ref_appears_in_no_channel
+#         AssertionError: token leaked into the operator notification
+#
+#     test_a_404_on_the_sha_path_is_unavailable_not_absent
+#         AssertionError: a 404 from the commit lookup was written FAILED
+#
+#     test_printed_recovery_commands_split_into_the_exact_argv
+#         (the printed line was one prose sentence whose value token was 'X,')
+
+import shlex  # noqa: E402
+
+
+def _command_argv(reason: str) -> list[list[str]]:
+    """The copy-ready command lines a reason prints, each split like a shell would."""
+    return [
+        shlex.split(line.strip())
+        for line in reason.splitlines()
+        if line.startswith("  neotoma ")
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["#" + "9" * 5000, f"https://github.com/{_REPO}/pull/" + "9" * 5000, "PR #" + "9" * 4400],
+)
+def test_huge_pr_number_never_escapes_dispatch(writes, spawn, monkeypatch, body):
+    """security: `int()` over thousands of digits raised ValueError out of dispatch."""
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: "exists")
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {body}\n")
+    notifier = _Notifier()
+    _dispatch("ent_huge_1", _cicada_task(), notifier=notifier)  # must not raise
+    _assert_not_done(writes, "completed on an absurd PR number")
+    assert _with_status(writes, "failed") or _with_status(writes, "blocked"), (
+        "left the task with no status"
+    )
+    assert notifier.sent, "no alert for an unparseable ref"
+
+
+def test_a_gate_exception_outside_the_parse_is_blocked(writes, spawn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("classifier exploded")
+
+    monkeypatch.setattr(apis, "classify_artifact_body", boom)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    notifier = _Notifier()
+    _dispatch("ent_boom_2", _cicada_task(), notifier=notifier)
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "[ARTIFACT_GATE] gate_error" in blocked[-1]["reason"]
+    assert "RuntimeError" in blocked[-1]["reason"] and notifier.sent
+    assert not [w for w in writes if w.get("fn") == "complete_task_with_result"]
+
+
+# Built at runtime from fragments, and named for what it is: a literal assigned to a
+# secret-shaped name is exactly what the secret scanner (rightly) flags.
+PLANTED = "-".join(["planted", "value", "1234", "abcd"])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"https://evil.example/{PLANTED}/pull/1",                # invalid_ref_shape
+        f"prose with {PLANTED} in it",                            # wrong_body_for_dispatch
+        f"https://github.com/other/repo/pull/1#{PLANTED}",        # near miss (unverifiable)
+        f"BLOCKED — need {PLANTED}",                              # honest agent
+    ],
+)
+def test_secret_in_the_offered_ref_appears_in_no_channel(spawn, monkeypatch, body):
+    """security: `offered=` is agent text; it must be redacted everywhere it lands."""
+    monkeypatch.setenv("GITHUB_TOKEN", PLANTED)
+    recorded: list[str] = []
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(
+        apis, "create_run_session",
+        lambda **kw: SimpleNamespace(
+            conversation_id="c", agent_session_id="s", native_session_id="n"
+        ),
+    )
+    monkeypatch.setattr(apis, "update_run_session_status", lambda r, *, status: True)
+    monkeypatch.setattr(apis, "append_turn", lambda **kw: recorded.append(str(kw)) or True)
+    reasons: list[str] = []
+
+    def _capture(entity_id, status, **kw):
+        reasons.append(str(kw.get("reason", "")))
+        return True
+
+    monkeypatch.setattr(apis, "set_task_status", _capture)
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {body}\n")
+    notifier = _Notifier()
+    _dispatch("ent_secret_ref", _cicada_task(), notifier=notifier)
+    channels = {
+        "task reason": reasons,
+        "operator notification": notifier.sent,
+        "run thread": recorded,
+    }
+    for name, values in channels.items():
+        assert values, f"{name} was never written"
+        assert not any(PLANTED in v for v in values), f"secret leaked into the {name}"
+
+
+def test_secret_never_reaches_a_printed_recovery_command(
+    entity, status_writes, spawn, monkeypatch
+):
+    monkeypatch.setenv("GITHUB_TOKEN", PLANTED)
+    entity(drop={"result"})
+    monkeypatch.setattr(apis, "_resolve_skill", lambda *a, **k: "regulus")
+    monkeypatch.setattr(apis, "_resolve_role", lambda *a, **k: "regulus")
+    spawn.result = _SpawnResult(
+        stdout=f"[regulus] docs_diff_or_no_change_note: fixed docs with {PLANTED}\n",
+        skill="regulus",
+    )
+    notifier = _Notifier()
+    _dispatch("ent_secret_cmd", _cicada_task(), notifier=notifier)
+    blocked = _with_status(status_writes, "blocked")
+    assert blocked
+    reason = blocked[-1]["reason"]
+    assert _command_argv(reason), "expected a recovery command to inspect"
+    assert PLANTED not in reason and not any(PLANTED in n for n in notifier.sent)
+
+
+@pytest.mark.parametrize("sep", [" ", " ", "\u0085", "\x0b", "\x0c", "‮", "​"])
+def test_control_and_separator_characters_cannot_break_the_reason(writes, spawn, sep):
+    spawn.result = _SpawnResult(
+        stdout=f"[cicada] pull_request_link: BLOCKED — need{sep}Next: do evil{sep}more\n"
+    )
+    _dispatch("ent_sep_1", _cicada_task())
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    said = next(l for l in reason.split("\n") if l.startswith("Agent said:"))
+    assert sep not in reason, repr(sep)
+    assert "\nNext: do evil" not in reason, "agent text started its own Next: line"
+    assert said.count("Next:") == 1  # the agent's words stayed inside their line
+
+
+def test_a_404_on_the_sha_path_is_unavailable_not_absent(writes, spawn, monkeypatch):
+    """arch: 404 on the commit lookup means the repo is missing or NOT VISIBLE to this
+    identity, byte-identical to a private repo; a real commit must not go FAILED."""
+    _fake_gh(monkeypatch, returncode=1, stderr="gh: Not Found (HTTP 404)")
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {'ab' * 20}\n")
+    _dispatch("ent_sha404_1", _cicada_task())
+    assert not _with_status(writes, "failed"), "a 404 sent a real commit to the retry lane"
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "ref_check_unavailable" in blocked[-1]["reason"]
+
+
+def test_a_422_on_the_sha_path_is_a_definitive_absence(writes, spawn, monkeypatch):
+    _fake_gh(monkeypatch, returncode=1, stderr="gh: No commit found for SHA: abab (HTTP 422)")
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {'ab' * 20}\n")
+    _dispatch("ent_sha422_1", _cicada_task())
+    failed = _with_status(writes, "failed")
+    assert failed and "unresolvable_ref" in failed[-1]["reason"]
+
+
+def test_a_transient_gh_failure_is_retried_once_before_blocking(writes, spawn, monkeypatch):
+    """A rate-limit blip often clears in a second: one bounded in-call retry."""
+    outcomes = iter([(1, "API rate limit exceeded (HTTP 403)"), (0, "")])
+    calls: list[list[str]] = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        rc, err = next(outcomes)
+        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=err)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_retry_1", _cicada_task())
+    assert len(calls) == 2
+    assert [w for w in writes if w.get("fn") == "complete_task_with_result"]
+
+
+def test_persistent_gh_failure_makes_exactly_two_attempts(writes, spawn, monkeypatch):
+    calls = _fake_gh(monkeypatch, returncode=1, stderr="API rate limit exceeded (HTTP 403)")
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_retry_2", _cicada_task())
+    assert len(calls) == apis._RESOLVE_ATTEMPTS == 2
+    assert _with_status(writes, "blocked")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"https://github.com/{_REPO}/pull/999/files",
+        f"https://github.com/{_REPO}/pull/999#issuecomment-1",
+        f"https://github.com/{_REPO}/pull/999?diff=split&w=1",
+        f"Opened https://github.com/{_REPO}/pull/999 for review",
+        f"https://github.com/{_REPO}/issues/999",
+    ],
+)
+def test_near_miss_github_links_are_blocked_not_retried(writes, spawn, monkeypatch, body):
+    """arch: a same-repo PR link with a suffix / wrapper sentence very likely means a PR
+    exists; FAILED would re-run the agent into a duplicate."""
+    resolves: list = []
+    monkeypatch.setattr(
+        apis, "resolve_artifact_ref", lambda *a, **k: resolves.append(a) or "exists"
+    )
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {body}\n")
+    _dispatch("ent_near_1", _cicada_task())
+    assert resolves == [], "handed a near-miss body to the resolver"
+    assert not _with_status(writes, "failed")
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "ref_unverifiable" in blocked[-1]["reason"]
+    assert "contains a GitHub link" in blocked[-1]["reason"]
+
+
+def test_printed_recovery_commands_split_into_the_exact_argv(writes, spawn, monkeypatch):
+    """ux: the printed commands must be pasteable: separate lines, `--api-only`, real
+    values, a read-back, and the argv a shell would produce."""
+    spawn.result = _SpawnResult(
+        stdout="[cicada] pull_request_link: https://github.com/some-org/some-repo/pull/7\n"
+    )
+    snapshot = _cicada_task()
+    snapshot.pop("repo")
+    _dispatch("ent_cmd_1", snapshot)
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    argv = _command_argv(reason)
+    base = ["neotoma", "--api-only", "corrections", "create", "--entity-id", "ent_cmd_1",
+            "--entity-type", "task"]
+    assert argv == [
+        base + ["--field-name", "result", "--corrected-value",
+                "https://github.com/some-org/some-repo/pull/7"],
+        base + ["--field-name", "status", "--corrected-value", "done"],
+        ["neotoma", "--api-only", "entities", "get", "ent_cmd_1"],
+    ]
+    assert "then the same with" not in reason, "recovery must not be a prose sentence"
+
+
+def test_no_command_carries_a_placeholder_value(writes, spawn):
+    """ux: pasting unedited must never record a placeholder as the result."""
+    for i, stdout in enumerate(
+        ["no header at all\n", "[cicada] pull_request_link:   \n",
+         "[cicada] pull_request_link: some prose\n",
+         "[cicada] pull_request_link: #42\n"]
+    ):
+        writes.clear()
+        snapshot = _cicada_task()
+        if "#42" in stdout:
+            snapshot.pop("repo")
+        spawn.result = _SpawnResult(stdout=stdout)
+        _dispatch(f"ent_ph_{i}", snapshot)
+        reasons = [w.get("reason", "") for w in writes if w.get("reason")]
+        assert reasons, stdout
+        for reason in reasons:
+            assert "<" not in "".join(
+                " ".join(a) for a in _command_argv(reason)
+            ), f"placeholder in a printed command: {reason}"
+            assert "corrected-value '<" not in reason
+
+
+def test_overlong_deliverable_is_never_truncated_into_a_command(
+    entity, status_writes, spawn, monkeypatch
+):
+    entity(drop={"result"})
+    monkeypatch.setattr(apis, "_resolve_skill", lambda *a, **k: "regulus")
+    monkeypatch.setattr(apis, "_resolve_role", lambda *a, **k: "regulus")
+    long_text = "word " * 400
+    spawn.result = _SpawnResult(
+        stdout=f"[regulus] docs_diff_or_no_change_note: {long_text}\n", skill="regulus"
+    )
+    _dispatch("ent_long_1", _cicada_task())
+    reason = _with_status(status_writes, "blocked")[-1]["reason"]
+    assert _command_argv(reason) == [], "emitted a command for a value that does not fit"
+    assert "too long to embed" in reason and "stdout" in reason
+    assert "…" not in reason.split("Next:")[1], "a truncated value would be recorded"
+
+
+def test_reopen_command_is_printed_for_an_honest_blocked_agent(writes, spawn):
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: BLOCKED — need repo access\n")
+    _dispatch("ent_reopen_1", _cicada_task())
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    assert _command_argv(reason) == [[
+        "neotoma", "--api-only", "corrections", "create", "--entity-id", "ent_reopen_1",
+        "--entity-type", "task", "--field-name", "status", "--corrected-value", "routed",
+    ]]
+    assert "routed" in reason and "stall window" in reason
+
+
+def test_record_not_saved_wording_follows_the_accepted_shape_not_the_role(
+    entity, status_writes, spawn, monkeypatch
+):
+    """A Cicada ordered_spec ENG_SPEC_SECTION deliverable is not a PR."""
+    entity(drop={"result"})
+    spawn.result = _SpawnResult(
+        stdout="[cicada] pull_request_link: ENG_SPEC_SECTION authored for ateles#1155\n"
+    )
+    _dispatch("ent_spec_rns", _cicada_task(dispatch_mode="ordered_spec"))
+    reason = _with_status(status_writes, "blocked")[-1]["reason"]
+    assert "record_not_saved" in reason
+    assert "The PR" not in reason and "second PR" not in reason
+    assert "redo the work" in reason
+
+
+def test_head_has_labelled_fields_not_a_run_together_sentence(writes, spawn):
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: #42\n")
+    snapshot = _cicada_task()
+    snapshot.pop("repo")
+    _dispatch("ent_head_1", snapshot)
+    head = _with_status(writes, "blocked")[-1]["reason"].split("\n")[0]
+    assert 'offered="#42" expected_repo=(none recorded on the task) detail="' in head
+    assert "task PR URL" not in head
+
+
+@pytest.mark.parametrize(
+    "body,expect",
+    [
+        ("https://github.com/some-org/some-repo/pull/7", "no repo"),           # no_repo
+        ("a1b2c3d", "abbreviated SHA"),                                          # short_sha
+        ("https://github.com/other/repo/pull/1", "different repo"),              # other_repo
+        (f"See https://github.com/{_REPO}/pull/9/files", "not exactly one PR URL"),  # near_miss
+    ],
+)
+def test_ref_unverifiable_has_a_hint_per_situation_and_a_gh_check(writes, spawn, body, expect):
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {body}\n")
+    snapshot = _cicada_task()
+    if "some-org" in body or body == "a1b2c3d":
+        snapshot.pop("repo")
+    _dispatch("ent_sit_1", snapshot)
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    assert expect in reason, reason
+    if "github.com/some-org" in body or "other/repo" in body:
+        assert "Check it: gh pr view" in reason
+    if body == "a1b2c3d":
+        assert "Check it:" not in reason, "no repo known: no placeholder command"
+
+
+def test_prose_identity_in_the_idempotency_key_is_a_hash_not_agent_text(
+    writes, spawn, monkeypatch
+):
+    monkeypatch.setattr(apis, "_resolve_skill", lambda *a, **k: "regulus")
+    monkeypatch.setattr(apis, "_resolve_role", lambda *a, **k: "regulus")
+    text = "agent-chosen words " * 8
+    spawn.result = _SpawnResult(
+        stdout=f"[regulus] docs_diff_or_no_change_note: {text}\n", skill="regulus"
+    )
+    _dispatch("ent_hash_1", _cicada_task())
+    done = [w for w in writes if w.get("fn") == "complete_task_with_result"][-1]
+    identity = done["artifact_identity"]
+    assert identity.startswith("text-") and len(identity) == len("text-") + 16
+    assert "agent-chosen" not in identity
+
+
+def test_exception_text_in_a_gate_error_is_redacted(writes, spawn, monkeypatch):
+    """The alias redacts every field, not only the header body the verdict redacts once."""
+    monkeypatch.setenv("GITHUB_TOKEN", PLANTED)
+
+    def boom(*a, **k):
+        raise RuntimeError(f"failed while holding {PLANTED}")
+
+    monkeypatch.setattr(apis, "classify_artifact_body", boom)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    notifier = _Notifier()
+    _dispatch("ent_boom_secret", _cicada_task(), notifier=notifier)
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "gate_error" in blocked[-1]["reason"]
+    assert PLANTED not in blocked[-1]["reason"]
+    assert not any(PLANTED in m for m in notifier.sent)
+
+
+# ── Round-5 items ────────────────────────────────────────────────────────────
+
+import threading  # noqa: E402
+
+
+@pytest.mark.parametrize("ch", ["​", "­", "⁠", "‎", "‮"])
+def test_invisible_character_inside_a_planted_token_is_still_redacted(spawn, monkeypatch, ch):
+    """One zero-width / soft-hyphen / bidi character spliced into a token must not defeat
+    redaction anywhere: task reason, alert, run thread."""
+    monkeypatch.setenv("GITHUB_TOKEN", PLANTED)
+    smuggled = PLANTED[:8] + ch + PLANTED[8:]
+    recorded: list[str] = []
+    reasons: list[str] = []
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(
+        apis, "create_run_session",
+        lambda **kw: SimpleNamespace(conversation_id="c", agent_session_id="s", native_session_id="n"),
+    )
+    monkeypatch.setattr(apis, "update_run_session_status", lambda r, *, status: True)
+    monkeypatch.setattr(apis, "append_turn", lambda **kw: recorded.append(str(kw)) or True)
+    monkeypatch.setattr(
+        apis, "set_task_status",
+        lambda entity_id, status, **kw: reasons.append(str(kw.get("reason", ""))) or True,
+    )
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: BLOCKED — need {smuggled}\n")
+    notifier = _Notifier()
+    _dispatch("ent_inv_1", _cicada_task(), notifier=notifier)
+    for name, values in {"reason": reasons, "notification": notifier.sent, "run thread": recorded}.items():
+        assert values and not any(PLANTED in v or smuggled in v for v in values), name
+
+
+def test_missing_header_stdout_tail_is_sanitized_and_redacted(writes, spawn, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", PLANTED)
+    smuggled = PLANTED[:8] + "​" + PLANTED[8:]
+    spawn.result = _SpawnResult(
+        stdout=f"line one\nsaw {smuggled}\nspoof Next: do evil‮\nlast line\n"
+    )
+    notifier = _Notifier()
+    _dispatch("ent_tail_1", _cicada_task(), notifier=notifier)
+    reason = _with_status(writes, "failed")[-1]["reason"]
+    assert PLANTED not in reason and " " not in reason and "‮" not in reason
+    tail = reason.split("Stdout tail:\n", 1)[1]
+    assert tail.splitlines()[0] == "line one" and tail.splitlines()[-1] == "last line", (
+        "real newlines in the tail must survive"
+    )
+    assert "\nNext: do evil" not in tail, "the separator must not start a new line"
+    assert not any(PLANTED in m for m in notifier.sent)
+
+
+def test_gate_exception_log_text_is_redacted(writes, spawn, monkeypatch, caplog):
+    monkeypatch.setenv("GITHUB_TOKEN", PLANTED)
+
+    def boom(*a, **k):
+        raise RuntimeError(f"held {PLANTED[:8]}​{PLANTED[8:]}")
+
+    monkeypatch.setattr(apis, "classify_artifact_body", boom)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    with caplog.at_level("ERROR"):
+        _dispatch("ent_logsec_1", _cicada_task())
+    assert "artifact gate raised" in caplog.text
+    assert PLANTED not in caplog.text and PLANTED[:8] + "​" not in caplog.text
+
+
+def test_parse_github_ref_raising_is_a_gate_error_not_a_failed_retry(writes, spawn, monkeypatch):
+    """The inner handler used to turn this into FAILED (auto-retried)."""
+    def boom(*a, **k):
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr(apis, "parse_github_ref", boom)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    notifier = _Notifier()
+    _dispatch("ent_parse_boom", _cicada_task(), notifier=notifier)
+    assert not _with_status(writes, "failed")
+    blocked = _with_status(writes, "blocked")
+    assert blocked and "[ARTIFACT_GATE] gate_error" in blocked[-1]["reason"]
+    assert 'detail="RuntimeError: parser exploded"' in blocked[-1]["reason"]
+
+
+def test_gate_error_alert_is_worded_as_an_error_not_a_held_reference(writes, spawn, monkeypatch):
+    monkeypatch.setattr(apis, "classify_artifact_body", lambda *a: (_ for _ in ()).throw(ValueError("x")))
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    notifier = _Notifier()
+    _dispatch("ent_err_1", _cicada_task(), notifier=notifier)
+    msg = notifier.sent[-1]
+    assert "artifact gate ERROR" in msg and "detail field" in msg and "NOT retried" in msg
+    assert "HELD" not in msg and "reference could not be checked" not in msg
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    assert "error below" not in reason and "detail field" in reason
+    assert "PR" not in reason.split("Next:")[0].split("—", 1)[1], "gate_error wording must suit prose roles"
+
+
+def test_no_repo_check_line_has_no_placeholder(writes, spawn):
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: #42\n")
+    snapshot = _cicada_task()
+    snapshot.pop("repo")
+    _dispatch("ent_chk_1", snapshot)
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    assert "Check it:" not in reason and "<owner" not in reason and "<name" not in reason
+    assert "find the real PR or commit" in reason
+
+
+def test_unavailable_check_on_a_pr_ref_carries_a_check_line_when_the_repo_is_known(
+    writes, spawn, monkeypatch
+):
+    _fake_gh(monkeypatch, returncode=1, stderr="API rate limit exceeded (HTTP 403)")
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_chk_2", _cicada_task())
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    assert f"Check it: gh pr view 999 --repo {_REPO}" in reason
+
+
+def test_the_resolver_runs_off_the_event_loop_thread(writes, spawn, monkeypatch):
+    """A blocking `gh` (30s, twice) must not stall the SSE loop."""
+    seen: dict[str, int] = {}
+
+    async def _spawn(*a, **k):
+        seen["loop"] = threading.get_ident()
+        return spawn.result
+
+    def resolver(*a, **k):
+        seen["resolver"] = threading.get_ident()
+        return "exists"
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _spawn)
+    monkeypatch.setattr(apis, "resolve_artifact_ref", resolver)
+    spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
+    _dispatch("ent_thread_1", _cicada_task())
+    assert seen["resolver"] != seen["loop"], "the resolver ran on the event loop thread"
+    assert [w for w in writes if w.get("fn") == "complete_task_with_result"]
+
+
+def test_a_404_is_not_retried_in_call(writes, spawn, monkeypatch):
+    calls = _fake_gh(monkeypatch, returncode=1, stderr="gh: Not Found (HTTP 404)")
+    spawn.result = _SpawnResult(stdout=f"[cicada] pull_request_link: {'ab' * 20}\n")
+    _dispatch("ent_404_once", _cicada_task())
+    assert len(calls) == 1, "a 404 cannot change on a second ask"
+    assert "ref_check_unavailable" in _with_status(writes, "blocked")[-1]["reason"]
+
+
+def test_abbreviated_sha_with_a_known_repo_gets_a_real_gh_api_check(writes, spawn):
+    spawn.result = _SpawnResult(stdout="[cicada] pull_request_link: a1b2c3d\n")
+    _dispatch("ent_sha_chk", _cicada_task())
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    assert f"Check it: gh api repos/{_REPO}/commits/a1b2c3d --jq .sha" in reason
+
+
+def test_alert_never_carries_a_partial_recovery_command(writes, spawn, monkeypatch):
+    """The alert is size-limited; a command block is kept whole or dropped whole."""
+    monkeypatch.setattr(apis, "_ALERT_LIMIT", 900)
+    spawn.result = _SpawnResult(
+        stdout="[cicada] pull_request_link: https://github.com/some-org/some-repo/pull/7\n"
+    )
+    snapshot = _cicada_task()
+    snapshot.pop("repo")
+    notifier = _Notifier()
+    _dispatch("ent_alertfit", snapshot, notifier=notifier)
+    message = notifier.sent[-1]
+    lines = [l for l in message.splitlines() if l.startswith("  neotoma ")]
+    reason = _with_status(writes, "blocked")[-1]["reason"]
+    assert len(reason) > 900, "fixture too small to exercise the limit"
+    if lines:
+        assert lines == [l for l in reason.splitlines() if l.startswith("  neotoma ")], (
+            "a command was cut or altered"
+        )
+    else:
+        assert "recovery commands omitted" in message

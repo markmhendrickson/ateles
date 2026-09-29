@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from artifact_contract import (
     InvalidRef,
     ParsedRef,
@@ -260,6 +262,7 @@ ALL_CODES = (
     "record_not_saved",
     "ref_unverifiable",
     "ref_check_unavailable",
+    "gate_error",
 )
 
 
@@ -299,30 +302,90 @@ def test_next_steps_state_which_lane_the_task_is_in():
     }
 
 
-def test_reasons_show_offered_ref_and_expected_repo_and_the_command():
+def test_reasons_show_offered_ref_and_expected_repo_with_labelled_fields():
     reason = artifact_gate_reason(
-        "invalid_ref_shape", role="cicada", kind="pull_request_link",
+        "ref_unverifiable", role="cicada", kind="pull_request_link",
         task_id="ent_t1", offered="https://github.com/o/r/pull/7", expected_repo=None,
+        extra="PR URL, and the task records no repo", situation="no_repo",
+        record_value="https://github.com/o/r/pull/7",
     )
-    assert 'offered="https://github.com/o/r/pull/7"' in reason
-    assert "expected_repo=none recorded on the task" in reason
-    assert (
-        "neotoma corrections create --entity-id ent_t1 --entity-type task "
-        "--field-name result --corrected-value 'https://github.com/o/r/pull/7'"
-    ) in reason
-    assert "--field-name status --corrected-value done" in reason
+    head = reason.split("\n")[0]
+    assert 'offered="https://github.com/o/r/pull/7" expected_repo=(none recorded on the task) detail="PR URL' in head
     with_repo = artifact_gate_reason(
         "invalid_ref_shape", role="cicada", offered="x", expected_repo="a/b"
     )
     assert "expected_repo=a/b" in with_repo
 
 
+def test_recovery_commands_are_three_separate_pasteable_lines():
+    """ux: never a prose sentence; `--api-only`; a read-back; real quoting."""
+    import shlex
+
+    value = "https://github.com/o/r/pull/7"
+    reason = artifact_gate_reason(
+        "ref_check_unavailable", role="cicada", task_id="ent_t1",
+        offered=value, record_value=value,
+    )
+    cmds = [shlex.split(l.strip()) for l in reason.splitlines() if l.startswith("  neotoma ")]
+    base = ["neotoma", "--api-only", "corrections", "create", "--entity-id", "ent_t1",
+            "--entity-type", "task"]
+    assert cmds == [
+        base + ["--field-name", "result", "--corrected-value", value],
+        base + ["--field-name", "status", "--corrected-value", "done"],
+        ["neotoma", "--api-only", "entities", "get", "ent_t1"],
+    ]
+    assert "then the same with" not in reason
+    # A value with quotes / spaces / shell characters survives a round trip.
+    nasty = "it's a \"deliverable\" with $VARS and ; semicolons"
+    r2 = artifact_gate_reason("record_not_saved", role="regulus", task_id="t",
+                              ref_based=False, record_value=nasty)
+    c2 = [shlex.split(l.strip()) for l in r2.splitlines() if l.startswith("  neotoma ")]
+    assert c2[0][-1] == nasty
+
+
+def test_no_command_is_printed_without_a_real_value():
+    for code in ("missing_header", "empty_body", "wrong_body_for_dispatch",
+                 "invalid_ref_shape", "unresolvable_ref", "gate_error"):
+        reason = artifact_gate_reason(code, role="cicada", task_id="t", offered="x")
+        assert not [l for l in reason.splitlines() if l.startswith("  neotoma ")], code
+    # ...and none for an unverifiable ref that is not complete enough to record.
+    r = artifact_gate_reason("ref_unverifiable", role="cicada", task_id="t",
+                             offered="#42", situation="no_repo")
+    assert "  neotoma " not in r and "find the real PR or commit" in r
+
+
+def test_overlong_values_are_withheld_not_truncated():
+    from artifact_contract import MAX_RECORD_VALUE_CHARS
+
+    ok = artifact_gate_reason("record_not_saved", role="r", task_id="t", ref_based=False,
+                              record_value="x" * MAX_RECORD_VALUE_CHARS)
+    assert "  neotoma " in ok
+    too_long = artifact_gate_reason("record_not_saved", role="r", task_id="t",
+                                    ref_based=False, record_value="x" * (MAX_RECORD_VALUE_CHARS + 1))
+    assert "  neotoma " not in too_long and "too long to embed" in too_long
+
+
+def test_redact_and_sanitize_apply_to_every_agent_controlled_field():
+    leak = "".join(["leak", "-", "marker", "-", "9"])
+    fn = lambda t: t.replace(leak, "<redacted>")
+    reason = artifact_gate_reason(
+        "ref_unverifiable", role="cicada", task_id="t", situation="near_miss",
+        offered=f"see {leak} link", verbatim_body=f"said {leak}", extra=f"detail {leak}",
+        record_value=f"https://github.com/o/r/pull/1?{leak}", redact=fn,
+    )
+    assert leak not in reason
+    nl = artifact_gate_reason("blocked", role="r", verbatim_body="a\u2028b\u202ec\x0bd")
+    assert "\u2028" not in nl and "\u202e" not in nl and "\x0b" not in nl
+    assert 'Agent said: "a b' in nl
+
+
 def test_record_not_saved_wording_is_role_shape_aware():
     """A prose deliverable has no PR: the PR wording would be false for it."""
     pr = artifact_gate_reason("record_not_saved", role="cicada", ref_based=True)
     prose = artifact_gate_reason("record_not_saved", role="regulus", ref_based=False)
-    assert "PR" in pr and "second PR" in pr
-    assert "PR" not in prose and "redo the work" in prose
+    assert "PR or commit exists" in pr and "second one" in pr
+    assert "PR or commit exists" not in prose and "second one" not in prose
+    assert "redo the work" in prose
     assert "Do not re-dispatch" in pr and "Do not re-dispatch" in prose
 
 
@@ -367,7 +430,10 @@ def test_gh_failure_classification_is_tri_state():
     # Definitive not-found: GitHub answered.
     assert c(1, "GraphQL: Could not resolve to a PullRequest with the number of 9. (repository.pullRequest)") == "absent"
     assert c(1, "no pull requests found for branch") == "absent"
-    assert c(1, "gh: Not Found (HTTP 404)") == "absent"
+    # A 404 is NOT a definitive absence: on the commit lookup it means the repo is
+    # missing or not visible to this identity (a private repo looks the same).
+    assert c(1, "gh: Not Found (HTTP 404)") == "unavailable"
+    assert c(1, "gh: Not Found (HTTP 404) https://api.github.com/repos/o/r/commits/abc") == "unavailable"
     assert c(1, "gh: No commit found for SHA: abc (HTTP 422)") == "absent"
     # Could not check: says nothing about the ref.
     for stderr in (
@@ -455,3 +521,78 @@ def test_mode_gated_shapes_come_from_the_table_not_a_role_special_case():
     # Every declared shape is reachable somewhere in the table's own terms.
     for c in ARTIFACT_CONTRACTS:
         assert c.mode_gated_shapes <= c.accepted_body_shapes, c.role
+
+
+# ── round 5: invisible characters, alert fitting, no placeholder check commands ──
+
+
+@pytest.mark.parametrize(
+    "ch",
+    ["​", "­", "⁠", "‎", "‏", "‍", "‮", "﻿"],
+    ids=["zwsp", "soft-hyphen", "word-joiner", "lrm", "rlm", "zwj", "bidi-override", "bom"],
+)
+def test_one_invisible_character_inside_a_token_cannot_defeat_redaction(ch):
+    """Sanitize BEFORE redacting: a plain substring redaction misses a token with a
+    zero-width / soft-hyphen / bidi character spliced into it."""
+    leak = "".join(["leak", "-", "marker", "-", "9"])
+    smuggled = leak[:6] + ch + leak[6:]
+    assert leak not in smuggled
+    reason = artifact_gate_reason(
+        "ref_unverifiable", role="cicada", task_id="t", situation="near_miss",
+        offered=f"see {smuggled} link", verbatim_body=f"said {smuggled}",
+        extra=f"detail {smuggled}", record_value=f"https://github.com/o/r/pull/1?{smuggled}",
+        redact=lambda t: t.replace(leak, "<redacted>"),
+    )
+    assert leak not in reason and ch not in reason
+
+
+def test_alert_text_never_cuts_a_command_mid_line():
+    from artifact_contract import alert_text
+
+    cmds = "\nRecord it by hand, then read it back (each line is one command):\n" + "\n".join(
+        f"  neotoma --api-only corrections create --entity-id ent_1 --field-name f{i} --corrected-value v"
+        for i in range(3)
+    )
+    short = "head " * 20 + cmds
+    assert alert_text(short, 1800) == short  # fits: unchanged
+
+    long_head = "x" * 1500
+    fits_after_trim = alert_text(long_head + cmds, 1800)
+    assert fits_after_trim.endswith(cmds), "commands must be kept whole"
+    assert all(l.startswith("  neotoma") and l.endswith("corrected-value v")
+               for l in fits_after_trim.splitlines() if l.startswith("  neotoma"))
+    assert len(fits_after_trim) <= 1800 + 1
+
+    huge_head = "y" * 5000
+    kept = alert_text(huge_head + cmds, 1800)
+    assert kept.endswith(cmds), "a command block that fits is kept whole even under a long head"
+    big_cmds = "\nRecord it by hand, then read it back (each line is one command):\n" + (
+        "  neotoma --api-only corrections create --entity-id ent_1 --corrected-value " + "v" * 1300
+    )
+    dropped = alert_text(huge_head + big_cmds, 1800)
+    assert "  neotoma" not in dropped, "no partial command may survive"
+    assert "recovery commands omitted" in dropped and len(dropped) <= 1800
+
+    no_cmds = alert_text("z" * 5000, 1800)
+    assert len(no_cmds) <= 1801
+
+
+def test_check_commands_are_real_or_absent_never_placeholders():
+    from artifact_contract import gh_check_command
+
+    assert gh_check_command("#42", None) is None
+    assert gh_check_command("a1b2c3d", None) is None
+    assert gh_check_command("ab" * 20, "not-a-repo") is None
+    assert gh_check_command("#42", "o/r") == "gh pr view 42 --repo o/r"
+    assert gh_check_command("o/r#7", "x/y") == "gh pr view 7 --repo o/r"      # canonical form
+    assert gh_check_command("https://github.com/o/r/pull/7", None) == "gh pr view 7 --repo o/r"
+    assert gh_check_command("ab" * 20, "o/r").startswith("gh api repos/o/r/commits/")
+    for got in (gh_check_command("#42", None), gh_check_command("a1b2c3d", None)):
+        assert got is None or "<" not in got
+
+
+def test_sanitize_can_keep_newlines_for_multiline_output():
+    from artifact_contract import sanitize_text
+
+    assert sanitize_text("a\nb\tc d‮e", keep_newlines=True) == "a\nb\tc de"
+    assert sanitize_text("a\nb\tc d") == "a b c d"

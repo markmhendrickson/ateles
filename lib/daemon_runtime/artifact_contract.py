@@ -11,8 +11,10 @@ Pure functions only — no I/O. Call sites inject ``resolve_artifact_ref``.
 from __future__ import annotations
 
 import re
+import shlex
+import unicodedata
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 CauseCode = Literal[
     "missing_header",
@@ -24,6 +26,7 @@ CauseCode = Literal[
     "record_not_saved",
     "ref_unverifiable",
     "ref_check_unavailable",
+    "gate_error",
 ]
 
 # What the resolver can say about a PR or commit reference. "unavailable" is
@@ -54,15 +57,17 @@ ARTIFACT_GATE_PREFIX = "[ARTIFACT_GATE]"
 # Shell / injection metacharacters never allowed in a ref body.
 _SHELL_METACHAR_RE = re.compile(r"[;&|`$()<>\\]")
 
+# The PR number is bounded to 9 digits: `int()` on thousands of digits raises
+# ValueError (Python's 4300-digit limit), and no repository has a billion PRs.
 # ASCII-only: with Unicode semantics `\d` matches other scripts' digits (int() then
 # accepts them) and IGNORECASE folds a few non-ASCII letters onto ASCII ones.
 _PR_URL_RE = re.compile(
     r"^https?://(?:www\.)?github\.com/"
-    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<number>[0-9]+)\s*$",
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<number>[0-9]{1,9})\s*$",
     re.IGNORECASE | re.ASCII,
 )
 _PR_SHORTHAND_RE = re.compile(
-    r"^(?:PR\s*)?#(?P<number>[0-9]+)\s*$",
+    r"^(?:PR\s*)?#(?P<number>[0-9]{1,9})\s*$",
     re.IGNORECASE | re.ASCII,
 )
 _SHA_RE = re.compile(r"^(?P<sha>[0-9a-f]{40})\s*$", re.IGNORECASE | re.ASCII)
@@ -75,6 +80,14 @@ _REPO_PART_RE = re.compile(r"^(?![-.])[A-Za-z0-9_.-]+$", re.ASCII)
 # prose (`wrong_body_for_dispatch`): it answered the right question, but a
 # prefix can be ambiguous, so this gate never resolves one. Only a full 40-char
 # SHA is accepted as a commit ref.
+# A GitHub PR / issue / commit link anywhere in the text. A body that contains one
+# but is not exactly one PR URL is a near miss (a wrapper sentence, a `/files` or
+# `#fragment` or `?query` suffix, an issue link): the agent very probably DID
+# open something, so it is BLOCKED rather than retried into a duplicate.
+_GH_URL_IN_TEXT_RE = re.compile(
+    r"https?://(?:www\.)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:pull|issues|commit)/[A-Za-z0-9]+",
+    re.IGNORECASE | re.ASCII,
+)
 _SHORT_SHA_RE = re.compile(r"^(?P<sha>[0-9a-f]{7,39})\s*$", re.IGNORECASE | re.ASCII)
 _ENG_SPEC_RE = re.compile(r"^ENG_SPEC_SECTION\b", re.IGNORECASE)
 
@@ -97,16 +110,14 @@ CAUSE_HINTS: dict[CauseCode, str] = {
     ),
     "invalid_ref_shape": (
         "The agent offered a reference this gate will not accept: a link to another "
-        "repo or host, or malformed text."
+        "host or a non-PR page, or malformed text."
     ),
     "wrong_body_for_dispatch": (
         "The agent answered a different question than this dispatch asked."
     ),
     "ref_unverifiable": (
-        "The reference cannot be checked as offered (the task records no repo, or a "
-        "malformed one; the reference names a different repo than the task; or it is "
-        "an abbreviated SHA), so the agent's work is neither accepted nor judged "
-        "wrong. A PR or commit may already exist."
+        "The reference cannot be checked as offered, so the agent's work is neither "
+        "accepted nor judged wrong. A PR or commit may already exist."
     ),
     "ref_check_unavailable": (
         "GitHub could not be asked right now (rate limit, outage, timeout or network "
@@ -114,13 +125,43 @@ CAUSE_HINTS: dict[CauseCode, str] = {
         "very likely exists."
     ),
     "record_not_saved": (
-        "The agent's PR or commit was accepted, but the task record did not save "
+        "The agent's deliverable was accepted, but the task record did not save "
         "(the result or status write did not read back)."
+    ),
+    "gate_error": (
+        "The artifact gate itself raised an error while judging the deliverable, so "
+        "the deliverable is neither accepted nor judged wrong. The error is in the "
+        "detail field of this line."
     ),
 }
 
-# `record_not_saved` fires for every gated role, not only Cicada. A prose role's
-# deliverable is text, not a PR, so it has its own wording.
+# `ref_unverifiable` is one code but several situations; each has its own wording.
+UNVERIFIABLE_HINTS: dict[str, str] = {
+    "no_repo": (
+        "The task records no repo, so the offered reference cannot be checked against "
+        "one. A PR or commit may already exist."
+    ),
+    "bad_repo": (
+        "The repo recorded on the task is malformed, so the offered reference cannot "
+        "be checked against it. A PR or commit may already exist."
+    ),
+    "other_repo": (
+        "The offered PR link names a different repo than the task's. That PR exists "
+        "in the wrong place; a retry would open another."
+    ),
+    "short_sha": (
+        "The reference is an abbreviated SHA; only a full 40-character SHA can be "
+        "checked. The commit may already exist."
+    ),
+    "near_miss": (
+        "The body contains a GitHub link but is not exactly one PR URL (a wrapper "
+        "sentence, an issue or commit link, or a suffix such as /files, #fragment or "
+        "?query). The agent very likely opened something."
+    ),
+}
+
+# Deliverable-shape wording for `record_not_saved`: the PR wording is false for a
+# prose deliverable or an eng-spec section.
 RECORD_NOT_SAVED_TEXT_HINT = (
     "The agent's deliverable text was accepted, but the task record did not save "
     "(the result or status write did not read back)."
@@ -131,56 +172,51 @@ _RETRY_NOTE = (
     "backoff (up to APIS_MAX_TASK_ATTEMPTS attempts, default 3); you do not need "
     "to re-dispatch it."
 )
+_RECORD_BY_HAND = (
+    "If a real deliverable already exists, record it as the task result with status "
+    "done before the retries run, or a retry may duplicate it (procedure: "
+    "docs/agent_execution_runbook.md, 'Recording a deliverable by hand')."
+)
+_BLOCKED_NOTE = "The task is BLOCKED and is NOT retried automatically."
 
-# `{record_cmd}` is filled by `artifact_gate_reason` (see `record_done_command`).
+# Words only. The recording commands (when there is a real value to record) are a
+# separate block added by `artifact_gate_reason`.
 CAUSE_NEXT_STEPS: dict[CauseCode, str] = {
-    "missing_header": (
-        _RETRY_NOTE + " If the work was actually done (a PR or file exists), stop "
-        "the retries by recording it first: {record_cmd}"
-    ),
-    "empty_body": (
-        _RETRY_NOTE + " If the agent did deliver something, record it first: "
-        "{record_cmd}"
-    ),
+    "missing_header": _RETRY_NOTE + " " + _RECORD_BY_HAND,
+    "empty_body": _RETRY_NOTE + " " + _RECORD_BY_HAND,
     "blocked": (
-        "Give the agent what it says it needs, then reopen the task. A BLOCKED task "
-        "is not retried automatically."
+        "Give the agent what it says it needs, then reopen the task by setting its "
+        "status back to routed (below); a BLOCKED task is not retried automatically, "
+        "and the stall watchdog re-dispatches a routed task after its stall window."
     ),
-    "unresolvable_ref": (
-        _RETRY_NOTE + " If a real PR or commit exists for this task under a "
-        "different reference, record it first, or a retry may open a second one: "
-        "{record_cmd}"
-    ),
-    "invalid_ref_shape": (
-        _RETRY_NOTE + " If the agent already opened a real PR or commit for this "
-        "task, record it first, or a retry may open a second one: {record_cmd}"
-    ),
-    "wrong_body_for_dispatch": (
-        _RETRY_NOTE + " If the body is actually the deliverable, record it: "
-        "{record_cmd}"
-    ),
+    "unresolvable_ref": _RETRY_NOTE + " " + _RECORD_BY_HAND,
+    "invalid_ref_shape": _RETRY_NOTE + " " + _RECORD_BY_HAND,
+    "wrong_body_for_dispatch": _RETRY_NOTE + " " + _RECORD_BY_HAND,
     "ref_unverifiable": (
-        "The task is BLOCKED and is NOT retried automatically. Do not re-dispatch "
-        "(it could open a second PR). Check the offered reference by hand, then "
-        "record it and mark the task done: {record_cmd}"
+        _BLOCKED_NOTE + " Do not re-dispatch (it could open a second PR). Check the "
+        "offered reference by hand, then record it and mark the task done."
     ),
     "ref_check_unavailable": (
-        "The task is BLOCKED and is NOT retried automatically. Do not re-dispatch. "
-        "Once GitHub is reachable, check the reference by hand, then record it and "
-        "mark the task done: {record_cmd}"
+        _BLOCKED_NOTE + " Do not re-dispatch. Once GitHub is reachable, check the "
+        "reference by hand, then record it and mark the task done."
     ),
     "record_not_saved": (
-        "The PR exists; the task record did not save. The task is BLOCKED and is not "
-        "retried. Do not re-dispatch (it would open a second PR). Record it: "
-        "{record_cmd}"
+        _BLOCKED_NOTE + " Do not re-dispatch (it would redo the agent's work). "
+        "Record the deliverable and mark the task done."
+    ),
+    "gate_error": (
+        _BLOCKED_NOTE + " Do not re-dispatch. Read the detail field above and the "
+        "dispatcher log for this task, then record or resolve the deliverable by hand."
     ),
 }
 
-RECORD_NOT_SAVED_TEXT_NEXT = (
-    "The deliverable is in the alert above; only the task record did not save. The "
-    "task is BLOCKED and is not retried. Do not re-dispatch (it would redo the "
-    "work). Record it: {record_cmd}"
-)
+RECORD_NOT_SAVED_PR_EXTRA = " The PR or commit exists; a retry would open a second one."
+RECORD_NOT_SAVED_TEXT_EXTRA = " The deliverable is not a PR; a retry would redo the work."
+
+# The longest value the alert will put into a copy-paste command. A longer
+# deliverable is never truncated into the command (a truncated value would be
+# recorded as the result); the words say where the full text is.
+MAX_RECORD_VALUE_CHARS = 500
 
 
 def trim_on_word(text: str, limit: int = 160) -> str:
@@ -194,24 +230,120 @@ def trim_on_word(text: str, limit: int = 160) -> str:
     return cut.rstrip(" ,;:") + "…"
 
 
-def record_done_command(
-    task_id: str | None, ref: str | None, *, ref_based: bool = True
-) -> str:
-    """The exact CLI to record a deliverable on a task and close it.
+def sanitize_text(text: str | None, *, keep_newlines: bool = False) -> str:
+    """Make agent-controlled text safe to embed in a one-line operator message.
 
-    Shape read from the Neotoma CLI (`neotoma corrections create`); `result` and
-    `status` are the two task fields the dispatcher itself writes. Corrections can
-    silently no-op, so the instruction ends with a read-back.
+    Format characters (bidi overrides, zero-width) are removed; control characters
+    and the Unicode line / paragraph separators (U+2028, U+2029, U+0085, vertical
+    tab, form feed, ...) become spaces so agent text cannot start a new line or
+    spoof surrounding markup. ``keep_newlines`` keeps `\\n` and `\\t` for multi-line
+    output such as a stdout tail (everything else is still neutralized).
     """
-    tid = task_id or "<task_id>"
-    placeholder = "<the PR or commit reference>" if ref_based else "<the deliverable text>"
-    value = trim_on_word(ref or placeholder, 160).replace("'", "")
-    return (
-        f"neotoma corrections create --entity-id {tid} --entity-type task "
-        f"--field-name result --corrected-value '{value}', then the same with "
-        f"--field-name status --corrected-value done, and read the task back "
-        f"(a correction can silently no-op)."
+    out = []
+    for ch in text or "":
+        if keep_newlines and ch in "\n\t":
+            out.append(ch)
+            continue
+        cat = unicodedata.category(ch)
+        if cat == "Cf":
+            continue
+        out.append(" " if cat in {"Cc", "Zl", "Zp"} else ch)
+    return "".join(out)
+
+
+def pr_url(parsed: "ParsedRef") -> str | None:
+    """The full https URL of a parsed PR / commit reference, or None if not derivable."""
+    if not (parsed.owner and parsed.repo):
+        return None
+    if parsed.kind == "pr" and parsed.number is not None:
+        return f"https://github.com/{parsed.owner}/{parsed.repo}/pull/{parsed.number}"
+    if parsed.kind == "sha" and parsed.sha:
+        return f"https://github.com/{parsed.owner}/{parsed.repo}/commit/{parsed.sha}"
+    return None
+
+
+def complete_reference_url(text: str | None) -> str | None:
+    """*text* if it is exactly one full PR URL (self-sufficient to record), else None."""
+    t = (text or "").strip()
+    return t if _PR_URL_RE.match(t) else None
+
+
+def record_commands(task_id: str, value: str) -> list[str]:
+    """The copy-ready commands to record a deliverable by hand, one command per line.
+
+    Three SEPARATE commands (never a prose sentence): the result correction, the
+    status correction, and the read-back. Every command carries the global
+    `--api-only`: without it the CLI defaults data commands to the in-process
+    LOCAL store, so the correction and the read-back would both hit the wrong store
+    and give false confirmation while the hosted task stays stuck. Arguments are
+    shell-quoted, so the printed line splits back into exactly this argv.
+    """
+    base = ["neotoma", "--api-only", "corrections", "create",
+            "--entity-id", task_id, "--entity-type", "task"]
+    return [
+        shlex.join(base + ["--field-name", "result", "--corrected-value", value]),
+        shlex.join(base + ["--field-name", "status", "--corrected-value", "done"]),
+        shlex.join(["neotoma", "--api-only", "entities", "get", task_id]),
+    ]
+
+
+def reopen_command(task_id: str) -> str:
+    """Set a BLOCKED task back to routed (the documented operator remediation)."""
+    return shlex.join(
+        ["neotoma", "--api-only", "corrections", "create", "--entity-id", task_id,
+         "--entity-type", "task", "--field-name", "status", "--corrected-value", "routed"]
     )
+
+
+_CANONICAL_PR_RE = re.compile(
+    r"^(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)#(?P<number>[0-9]{1,9})$", re.ASCII
+)
+
+
+def gh_check_command(offered: str | None, expected_repo: str | None) -> str | None:
+    """A real `gh` command the operator can run to check a reference, or None.
+
+    Never a placeholder: with no known repo a bare `#N` or SHA has no command (the
+    words say to find the PR first), consistent with the recording commands.
+    """
+    text = (offered or "").strip()
+    m = _PR_URL_RE.match(text) or _CANONICAL_PR_RE.match(text)
+    if m:
+        return shlex.join(["gh", "pr", "view", m.group("number"), "--repo",
+                           f"{m.group('owner')}/{m.group('repo')}"])
+    repo = _split_dispatch_repo(expected_repo)
+    if repo is None:
+        return None
+    short = _PR_SHORTHAND_RE.match(text)
+    if short:
+        return shlex.join(["gh", "pr", "view", short.group("number"), "--repo", "/".join(repo)])
+    if _SHORT_SHA_RE.match(text) or _SHA_RE.match(text):
+        return shlex.join(["gh", "api", f"repos/{repo[0]}/{repo[1]}/commits/{text}", "--jq", ".sha"])
+    return None
+
+
+def alert_text(reason: str, limit: int = 1800) -> str:
+    """Fit *reason* into an operator alert without ever cutting a command mid-line.
+
+    The recovery commands (the block that starts at the "Record it by hand" or
+    "Reopen" label) are kept WHOLE or dropped whole: a command cut mid-line is
+    worse than none. If the text fits it is returned unchanged; otherwise the head
+    is trimmed to leave room for the whole command block, and if even that does not
+    leave a usable head the commands are dropped with a pointer to the reason.
+    """
+    if len(reason) <= limit:
+        return reason
+    idx = min(
+        (i for i in (reason.find("\nRecord it by hand"), reason.find("\nReopen")) if i >= 0),
+        default=-1,
+    )
+    if idx < 0:
+        return reason[:limit] + "…"
+    head, commands = reason[:idx], reason[idx:]
+    room = limit - len(commands)
+    if room >= 600:
+        return (head if len(head) <= room else head[:room] + "…") + commands
+    return head[: limit - 120] + "…\n(recovery commands omitted here; see the task's reason and the runbook)"
 
 
 _GH_UNAVAILABLE_MARKERS = (
@@ -235,9 +367,14 @@ _GH_ABSENT_MARKERS = (
     "could not resolve to a pullrequest",
     "no pull requests found",
     "no commit found for sha",
-    "http 404",
     "http 422",
 )
+# NOT here: "http 404". The only path that can emit it is the commit lookup
+# (`gh api repos/o/r/commits/<sha>`), where GitHub answers 422 for a missing
+# commit and 404 ONLY when the repository is missing or not visible to the token,
+# byte-identical to a private repo this identity cannot see. A real commit there
+# must not be called absent (that would be FAILED, i.e. re-run, i.e. duplicate
+# work), so a 404 falls through to "unavailable".
 
 
 def classify_gh_ref_failure(returncode: int, stderr: str) -> RefCheck:
@@ -303,6 +440,8 @@ class InvalidRef:
     code: CauseCode
     reason: str
     body: str = ""
+    # For `ref_unverifiable`: which situation, so the hint and check command fit.
+    situation: str = ""
 
 
 # Seeded from the pre-#1155 Anthus GATE_SATISFACTION_RULES map (short + verbose
@@ -532,6 +671,8 @@ def looks_like_pr_or_commit_ref(body: str) -> bool:
         return False
     if re.match(r"^https?://", stripped, re.IGNORECASE):
         return True
+    if _GH_URL_IN_TEXT_RE.search(stripped):
+        return True  # a sentence around a GitHub link: a (near-miss) ref attempt
     if _SHA_RE.match(stripped) or _SHORT_SHA_RE.match(stripped):
         return True
     if _PR_SHORTHAND_RE.match(stripped):
@@ -616,16 +757,28 @@ def parse_github_ref(
     stripped = (body or "").strip()
     if not stripped:
         return InvalidRef(code="invalid_ref_shape", reason="empty ref", body=stripped)
-    if _SHELL_METACHAR_RE.search(stripped):
-        return InvalidRef(
-            code="invalid_ref_shape",
-            reason="shell metacharacters in ref",
-            body=stripped,
-        )
     if _ENG_SPEC_RE.match(stripped):
         return InvalidRef(
             code="invalid_ref_shape",
             reason="ENG_SPEC_SECTION is not a github ref",
+            body=stripped,
+        )
+    if _GH_URL_IN_TEXT_RE.search(stripped) and not _PR_URL_RE.match(stripped):
+        # Never handed to `gh`: only classified.
+        return InvalidRef(
+            code="ref_unverifiable",
+            reason=(
+                "the body contains a GitHub link but is not exactly one PR URL "
+                "(a wrapper sentence, an issue or commit link, or a suffix such as "
+                "/files, #fragment or ?query)"
+            ),
+            body=stripped,
+            situation="near_miss",
+        )
+    if _SHELL_METACHAR_RE.search(stripped):
+        return InvalidRef(
+            code="invalid_ref_shape",
+            reason="shell metacharacters in ref",
             body=stripped,
         )
 
@@ -652,6 +805,7 @@ def parse_github_ref(
                     else "PR URL, and the repo recorded on the task is malformed"
                 ),
                 body=stripped,
+                situation="no_repo" if not dispatch_repo else "bad_repo",
             )
         if (owner.lower(), repo.lower()) != (
             expected[0].lower(),
@@ -663,6 +817,7 @@ def parse_github_ref(
                 code="ref_unverifiable",
                 reason="cross-repo PR URL vs the repo recorded on the task",
                 body=stripped,
+                situation="other_repo",
             )
         return ParsedRef(
             kind="pr",
@@ -677,6 +832,7 @@ def parse_github_ref(
             code="ref_unverifiable",
             reason="abbreviated SHA; only a full 40-character SHA can be checked",
             body=stripped,
+            situation="short_sha",
         )
 
     sha_m = _SHA_RE.match(stripped)
@@ -691,6 +847,7 @@ def parse_github_ref(
                     else "SHA, and the repo recorded on the task is malformed"
                 ),
                 body=stripped,
+                situation="no_repo" if not dispatch_repo else "bad_repo",
             )
         sha = sha_m.group("sha").lower()
         return ParsedRef(
@@ -713,6 +870,7 @@ def parse_github_ref(
                     else "bare #N, and the repo recorded on the task is malformed"
                 ),
                 body=stripped,
+                situation="no_repo" if not dispatch_repo else "bad_repo",
             )
         number = int(short_m.group("number"))
         return ParsedRef(
@@ -741,44 +899,96 @@ def artifact_gate_reason(
     offered: str | None = None,
     expected_repo: str | None = None,
     ref_based: bool = True,
-    record_ref: str | None = None,
+    record_value: str | None = None,
+    situation: str | None = None,
+    redact: Callable[[str], str] | None = None,
 ) -> str:
     """Build a grep-stable ``[ARTIFACT_GATE] <code> …`` reason string.
 
-    Layout: a grep-stable head (`[ARTIFACT_GATE] <code> role=… kind=… …`), then
-    what happened, then the agent's own words on their own line (never run into
-    the next step), then a `Next:` line that says what happens automatically
-    (whether the watchdog will retry) and what the operator can do, with the
-    exact command where one exists.
+    Layout: a grep-stable head (`[ARTIFACT_GATE] <code> role=… kind=… offered=…
+    expected_repo=… detail=…`), then what happened, then the agent's own words on
+    their own line, then a `Next:` line saying whether the watchdog will retry and
+    what the operator can do, then (only when there is a real value to record) the
+    copy-ready commands, one per line, indented two spaces.
 
-    ``offered`` / ``expected_repo`` put the reference the agent gave and the repo
-    the task expected into the head, so the operator does not have to dig.
-    ``ref_based`` is False for a prose deliverable (only `record_not_saved`
-    changes: a prose role has no PR to point at).
+    Every piece of agent-controlled text (``offered``, ``verbatim_body``,
+    ``extra``, ``record_value``) goes through ``redact`` when given, and then
+    through `sanitize_text`, so a secret in an agent's header never reaches the
+    task reason, the operator alert, the run thread or a printed command.
+
+    ``record_value`` is the FULL value a command would record; there is no
+    placeholder and no truncation: if it is longer than `MAX_RECORD_VALUE_CHARS`
+    the commands are withheld and the words say to copy it from the run's stdout.
+    ``ref_based`` is False for a deliverable that is text rather than a PR / commit
+    (only `record_not_saved` changes). ``situation`` picks the `ref_unverifiable`
+    wording and the `gh` check command.
     """
+    def clean(text: str | None) -> str:
+        # Sanitize BEFORE redacting: one invisible character (zero-width space,
+        # soft hyphen, word joiner, a bidi mark) inside a token defeats a plain
+        # substring redaction, so the invisible characters go first.
+        t = sanitize_text(text or "")
+        return sanitize_text(redact(t) if redact else t)
+
     parts = [f"{ARTIFACT_GATE_PREFIX} {code}", f"role={role}"]
     if kind is not None:
         parts.append(f"kind={kind}")
     if offered is not None:
-        parts.append(f'offered="{trim_on_word(offered, 160)}"')
+        parts.append(f'offered="{trim_on_word(clean(offered), 160)}"')
     if expected_repo is not None or offered is not None:
-        parts.append(f"expected_repo={expected_repo or 'none recorded on the task'}")
+        shown = clean(expected_repo) if expected_repo else "(none recorded on the task)"
+        parts.append(f"expected_repo={shown}")
     if extra:
-        parts.append(extra)
+        parts.append(f'detail="{trim_on_word(clean(extra), 300)}"')
     head = " ".join(parts)
 
-    if code == "record_not_saved" and not ref_based:
-        hint, nxt = RECORD_NOT_SAVED_TEXT_HINT, RECORD_NOT_SAVED_TEXT_NEXT
+    if code == "ref_unverifiable" and situation in UNVERIFIABLE_HINTS:
+        hint = UNVERIFIABLE_HINTS[situation]
+    elif code == "record_not_saved" and not ref_based:
+        hint = RECORD_NOT_SAVED_TEXT_HINT
     else:
-        hint, nxt = CAUSE_HINTS[code], CAUSE_NEXT_STEPS[code]
-    nxt = nxt.format(
-        record_cmd=record_done_command(task_id, record_ref or offered, ref_based=ref_based)
-    )
+        hint = CAUSE_HINTS[code]
+    nxt = CAUSE_NEXT_STEPS[code]
+    if code == "record_not_saved":
+        nxt += RECORD_NOT_SAVED_PR_EXTRA if ref_based else RECORD_NOT_SAVED_TEXT_EXTRA
 
     lines = [f"{head} — {hint}"]
     if verbatim_body is not None:
-        lines.append(f'Agent said: "{verbatim_body}"')
+        lines.append(f'Agent said: "{clean(verbatim_body)}"')
+
+    check = gh_check_command(clean(offered), expected_repo) if code in {
+        "ref_unverifiable", "ref_check_unavailable"
+    } else None
+    value = clean(record_value) if record_value else None
+    commands: list[str] = []
+    if code == "blocked" and task_id:
+        commands = [reopen_command(task_id)]
+    elif code in {"ref_unverifiable", "ref_check_unavailable", "record_not_saved"}:
+        if value and task_id and len(value) <= MAX_RECORD_VALUE_CHARS:
+            commands = record_commands(task_id, value)
+        elif value and task_id:
+            nxt += (
+                " The deliverable is too long to embed in a command: copy the full "
+                "`[role] kind:` header line from the run's stdout as the --corrected-value "
+                "(see the runbook, 'Recording a deliverable by hand')."
+            )
+        elif code != "record_not_saved":
+            nxt += (
+                " The offered reference is not complete enough to record as it is: "
+                "find the real PR or commit, then record its full URL (see the "
+                "runbook, 'Recording a deliverable by hand')."
+            )
     lines.append(f"Next: {nxt}")
+    if check:
+        lines.append(f"Check it: {check}")
+    if commands:
+        label = (
+            "Reopen (then the watchdog re-dispatches after its stall window):"
+            if code == "blocked"
+            else "Record it by hand, then read it back (each line is one command):"
+        )
+        lines.append(label)
+        lines.extend(f"  {c}" for c in commands)
     return "\n".join(lines)
 
 

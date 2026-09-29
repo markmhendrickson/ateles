@@ -90,12 +90,15 @@ GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import functools
 import hashlib
 import logging
 import os
 import stat
 import sys
 import time
+import traceback
 from pathlib import Path
 
 
@@ -258,7 +261,11 @@ from lib.daemon_runtime.artifact_contract import (  # noqa: E402
     body_shape_for_dispatch,
     classify_artifact_body,
     classify_gh_ref_failure,
+    complete_reference_url,
     eng_spec_has_content,
+    pr_url,
+    alert_text,
+    sanitize_text,
     infer_body_shape,
     parse_artifact_header,
     parse_github_ref,
@@ -567,6 +574,36 @@ from task_watchdog import TaskWatchdog  # noqa: E402
 # ── Artifact completion gate (ateles#1155) ─────────────────────────────────────
 
 
+# Every reason built for an operator passes agent-controlled text (the offered
+# ref, the retained BLOCKED words, the record value) through the secret redactor.
+def _redact_agent_text(text: str) -> str:
+    """Redact secrets from agent-controlled text, invisible characters removed FIRST.
+
+    One zero-width space, soft hyphen, word joiner or bidi mark inside a token
+    defeats a plain substring redaction, so those are stripped before the
+    redactor runs.
+    """
+    return _redact_secrets(sanitize_text(text))
+
+
+_gate_reason = functools.partial(artifact_gate_reason, redact=_redact_agent_text)
+
+
+# A rate limit or a network blip is often gone a second later, so an
+# "unavailable" answer is retried once in-call before the task is BLOCKED.
+_RESOLVE_ATTEMPTS = 2
+
+# The most an operator alert carries; a recovery command block is kept whole or
+# dropped whole to fit (see `alert_text`).
+_ALERT_LIMIT = 1800
+_RESOLVE_RETRY_DELAY_SECONDS = 1.0
+
+
+def _text_identity(text: str) -> str:
+    """A short stable identity for a text deliverable: a hash, never the text."""
+    return "text-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def resolve_artifact_ref(parsed: ParsedRef, *, repo: str | None = None) -> str:
     """Ask GitHub whether a parsed PR/commit exists, via argv ``gh``.
 
@@ -602,13 +639,26 @@ def resolve_artifact_ref(parsed: ParsedRef, *, repo: str | None = None) -> str:
         ]
     else:
         return "unavailable"
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return "unavailable"
-    return classify_gh_ref_failure(proc.returncode, proc.stderr or "")
+    verdict = "unavailable"
+    for attempt in range(_RESOLVE_ATTEMPTS):
+        stderr = ""
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30, check=False
+            )
+            stderr = proc.stderr or ""
+            verdict = classify_gh_ref_failure(proc.returncode, stderr)
+        except (OSError, subprocess.TimeoutExpired):
+            verdict = "unavailable"
+        if verdict != "unavailable":
+            break
+        # A 404 means the repository is missing or not visible to this identity;
+        # asking again a second later cannot change that.
+        if "http 404" in stderr.lower():
+            break
+        if attempt + 1 < _RESOLVE_ATTEMPTS:
+            time.sleep(_RESOLVE_RETRY_DELAY_SECONDS)
+    return verdict
 
 
 def _normalize_ref_check(value) -> str:
@@ -1320,17 +1370,22 @@ async def dispatch_task(
                     f"{skill} deliverable ACCEPTED but the task record did NOT "
                     f"save on {entity_id}"
                 ),
+                "error": (
+                    f"{skill} artifact gate ERROR on {entity_id} (task BLOCKED, NOT "
+                    "retried; do not re-dispatch; the error is in the detail field)"
+                ),
             }
             job_msgs = {
                 "gate": f"task {entity_id} → {skill} artifact gate refused: {stage}",
                 "agent_blocked": f"task {entity_id} → {skill} reported it is blocked",
                 "held": f"task {entity_id} → {skill} reference could not be checked",
+                "error": f"task {entity_id} → {skill} artifact gate raised an error",
                 "record_not_saved": (
                     f"task {entity_id} → {skill} deliverable accepted, "
                     "task record not saved"
                 ),
             }
-            shown = reason if len(reason) <= 1800 else reason[:1800] + "…"
+            shown = alert_text(reason, _ALERT_LIMIT)
             notifier.send(
                 f"{heads[alert]}\n{shown}",
                 priority=Priority.BLOCKER,
@@ -1338,7 +1393,7 @@ async def dispatch_task(
             )
             job.failed(job_msgs[alert])
 
-        def _artifact_verdict(contract):
+        async def _artifact_verdict(contract):
             """Judge one role's declared contract.
 
             Returns ``(header, identity, note)`` when the deliverable is
@@ -1360,13 +1415,33 @@ async def dispatch_task(
                     artifact_kind=contract.artifact_kind,
                 )
 
+            if header is not None:
+                # Redact the agent-controlled header ONCE, here, so nothing
+                # downstream (the reason, the alert, the run thread, a printed
+                # command, the stored result) can carry a secret it printed.
+                header = dataclasses.replace(
+                    header,
+                    body=_redact_agent_text(header.body),
+                    matched_line=_redact_agent_text(header.matched_line),
+                )
+
             if header is None:
                 # Carry a bounded stdout tail so the operator can see what the
                 # agent DID say. Redacted first: child output has held tokens.
+                # Redacted (invisible characters first) and neutralized: child
+                # output has held tokens, and it is agent-controlled text.
                 tail = stdout_tail_for_reason(
-                    _redact_secrets(getattr(result, "stdout", "") or ""), limit=2048
+                    sanitize_text(
+                        _redact_secrets(
+                            sanitize_text(
+                                getattr(result, "stdout", "") or "", keep_newlines=True
+                            )
+                        ),
+                        keep_newlines=True,
+                    ),
+                    limit=2048,
                 )
-                reason = artifact_gate_reason(
+                reason = _gate_reason(
                     "missing_header", role=contract.role,
                     kind=contract.artifact_kind, task_id=entity_id,
                 )
@@ -1381,7 +1456,7 @@ async def dispatch_task(
             if body_class == "empty":
                 _artifact_fail(
                     TaskStatus.FAILED,
-                    artifact_gate_reason(
+                    _gate_reason(
                         "empty_body", role=contract.role,
                         kind=contract.artifact_kind, task_id=entity_id,
                     ),
@@ -1396,10 +1471,10 @@ async def dispatch_task(
                 # the agent needs.
                 _artifact_fail(
                     TaskStatus.BLOCKED,
-                    artifact_gate_reason(
+                    _gate_reason(
                         "blocked", role=contract.role, kind=contract.artifact_kind,
                         task_id=entity_id,
-                        verbatim_body=_redact_secrets(header.body)[:800],
+                        verbatim_body=header.body[:800],
                     ),
                     stage="blocked",
                     alert="agent_blocked",
@@ -1417,7 +1492,7 @@ async def dispatch_task(
                 # to look up.
                 _artifact_fail(
                     TaskStatus.FAILED,
-                    artifact_gate_reason(
+                    _gate_reason(
                         "wrong_body_for_dispatch",
                         role=contract.role,
                         kind=contract.artifact_kind,
@@ -1432,13 +1507,13 @@ async def dispatch_task(
 
             # The stored result is the header line as redacted, and the read-back
             # compares against that same string.
-            stored_line = _redact_secrets(header.matched_line)
+            stored_line = header.matched_line
 
             if shape == "eng_spec_section" and not eng_spec_has_content(header.body):
                 # A bare token names no authored section.
                 _artifact_fail(
                     TaskStatus.FAILED,
-                    artifact_gate_reason(
+                    _gate_reason(
                         "empty_body", role=contract.role, kind=contract.artifact_kind,
                         task_id=entity_id,
                         extra="bare ENG_SPEC_SECTION with no content",
@@ -1451,9 +1526,14 @@ async def dispatch_task(
                 # prose / eng_spec_section, or a role with no resolver (every
                 # contract but Cicada's): the header IS the deliverable, even if
                 # it happens to contain a link. Nothing to look up.
-                return header, trim_on_word(stored_line, 200), f"{shape} ok", stored_line
+                # The idempotency key embeds this identity, so agent TEXT is hashed
+                # rather than embedded (up to 200 agent-chosen characters).
+                return header, _text_identity(stored_line), f"{shape} ok", stored_line, shape
 
             dispatch_repo = _dispatch_repo_from_snapshot(snapshot)
+            # No inner handler: anything `parse_github_ref` raises is an unexpected
+            # gate error, and the catch-all at the call site turns it into BLOCKED
+            # (`gate_error`), not a FAILED the watchdog would re-run.
             parsed = parse_github_ref(header.body, dispatch_repo=dispatch_repo)
             offered = header.body
             if isinstance(parsed, InvalidRef):
@@ -1465,7 +1545,7 @@ async def dispatch_task(
                 held = parsed.code == "ref_unverifiable"
                 _artifact_fail(
                     TaskStatus.BLOCKED if held else TaskStatus.FAILED,
-                    artifact_gate_reason(
+                    _gate_reason(
                         parsed.code,
                         role=contract.role,
                         kind=contract.artifact_kind,
@@ -1473,27 +1553,33 @@ async def dispatch_task(
                         offered=offered,
                         expected_repo=dispatch_repo,
                         extra=parsed.reason,
+                        situation=parsed.situation,
+                        record_value=complete_reference_url(offered) if held else None,
                     ),
                     stage="blocked" if held else "failed",
                     alert="held" if held else "gate",
                 )
                 return None
+            # `gh` is a blocking subprocess (up to 30s, twice): keep it off the
+            # event loop so the SSE loop and every other dispatch keep moving.
             check = _normalize_ref_check(
-                resolve_artifact_ref(parsed, repo=dispatch_repo)
+                await asyncio.to_thread(
+                    resolve_artifact_ref, parsed, repo=dispatch_repo
+                )
             )
             if check == "unavailable":
                 # GitHub could not answer. That is not evidence the ref does not
                 # exist, and FAILED is the watchdog's automatic re-run lane.
                 _artifact_fail(
                     TaskStatus.BLOCKED,
-                    artifact_gate_reason(
+                    _gate_reason(
                         "ref_check_unavailable",
                         role=contract.role,
                         kind=contract.artifact_kind,
                         task_id=entity_id,
                         offered=parsed.canonical or offered,
                         expected_repo=dispatch_repo,
-                        record_ref=parsed.canonical or offered,
+                        record_value=pr_url(parsed),
                     ),
                     stage="blocked",
                     alert="held",
@@ -1502,23 +1588,23 @@ async def dispatch_task(
             if check == "absent":
                 _artifact_fail(
                     TaskStatus.FAILED,
-                    artifact_gate_reason(
+                    _gate_reason(
                         "unresolvable_ref",
                         role=contract.role,
                         kind=contract.artifact_kind,
                         task_id=entity_id,
                         offered=parsed.canonical or offered,
                         expected_repo=dispatch_repo,
-                        record_ref=parsed.canonical or offered,
                     ),
                     stage="failed",
                 )
                 return None
             return (
                 header,
-                parsed.canonical or trim_on_word(stored_line, 200),
+                parsed.canonical or _text_identity(stored_line),
                 "artifact ok",
                 stored_line,
+                shape,
             )
 
         artifact = None
@@ -1526,7 +1612,29 @@ async def dispatch_task(
             role or ""
         )
         if result.ok and contract is not None:
-            artifact = _artifact_verdict(contract)
+            try:
+                artifact = await _artifact_verdict(contract)
+            except Exception as exc:  # noqa: BLE001 — never leave the task EXECUTING
+                # Whatever raised, the agent's deliverable is neither accepted nor
+                # judged wrong. BLOCKED, with an alert, so the task does not sit
+                # in EXECUTING with no status and an unclosed run session.
+                log.error(
+                    "[%s] artifact gate raised for %s\n%s",
+                    DAEMON_NAME, entity_id, _redact_agent_text(traceback.format_exc()),
+                )
+                _artifact_fail(
+                    TaskStatus.BLOCKED,
+                    _gate_reason(
+                        "gate_error",
+                        role=contract.role,
+                        kind=contract.artifact_kind,
+                        task_id=entity_id,
+                        extra=f"{type(exc).__name__}: {exc}",
+                    ),
+                    stage="blocked",
+                    alert="error",
+                )
+                return
             if artifact is None:
                 return
 
@@ -1592,7 +1700,7 @@ async def dispatch_task(
                 TaskStatus.VERIFIED.value if run_session else TaskStatus.EXECUTING.value
             )
             if artifact is not None:
-                header, identity, note, stored_line = artifact
+                header, identity, note, stored_line, shape = artifact
                 # `complete_task_with_result` writes `result` before `status`
                 # AND reads both back: the exact header line must be the stored
                 # result before DONE is written, and the terminal status must
@@ -1644,16 +1752,16 @@ async def dispatch_task(
                     # write. BLOCKED waits for operator remediation instead.
                     _artifact_fail(
                         TaskStatus.BLOCKED,
-                        artifact_gate_reason(
+                        _gate_reason(
                             "record_not_saved",
                             role=skill or "unknown",
                             kind=contract.artifact_kind,
                             task_id=entity_id,
-                            ref_based=contract.resolver_policy == "github_ref",
-                            record_ref=identity,
+                            ref_based=shape == "pr_or_commit",
+                            record_value=stored_line,
                             extra=(
-                                f"ref={identity} failed_at={outcome.stage} "
-                                f"({outcome.detail})"
+                                (f"ref={identity} " if shape == "pr_or_commit" else "")
+                                + f"failed_at={outcome.stage} ({outcome.detail})"
                             ),
                         ),
                         stage="blocked",
