@@ -181,6 +181,7 @@ from harness_router import (  # noqa: E402
     configured_headroom,
     configured_providers,
     cooling_providers,
+    live_headroom,
 )
 from local_provider import (  # noqa: E402
     LOCAL_PROVIDER,
@@ -325,6 +326,9 @@ def _headroom_note() -> str:
         source = "env APIS_HARNESS_HEADROOM"
     else:
         source = "defaults (all 1.0)"
+    live = [p for p in configured_providers() if live_headroom(p) is not None]
+    if live:
+        source += f"; live usage for {', '.join(live)}"
     values = configured_headroom()
     rendered = ", ".join(f"{p}={values[p]:g}" for p in configured_providers())
     cooling = ", ".join(sorted(cooling_providers())) or "none"
