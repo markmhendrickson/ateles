@@ -787,6 +787,28 @@ def test_github_delivery_never_routes_local_even_for_an_eligible_class(tmp_path,
     assert all("--settings" not in cmd for cmd, _ in spawns.calls)
 
 
+@pytest.mark.parametrize("guard", ["command_wrapper", "local_review"])
+def test_guarded_lens_dispatch_never_routes_local_even_for_an_eligible_class(
+    tmp_path, guard
+):
+    """harness_lens_runner probes its sandbox wrapper / inference-only env for
+    the frontier provider it names; an unpinned guarded dispatch must never be
+    rerouted onto claude-local, whose binary those guards were not probed on."""
+    _write_config(tmp_path)
+    kwargs = (
+        {"command_wrapper": ["/usr/bin/nice"]}
+        if guard == "command_wrapper"
+        else {
+            "local_review": True,
+            "env_extra": {"ATELES_LOCAL_REVIEW_HOME": str(tmp_path / "home")},
+        }
+    )
+    spawns, events = _Spawns(local_reply=(0, b"local", b"")), []
+    result = _run(spawns, events, work_class="rebase", **kwargs)
+    assert result.provider == "claude"
+    assert all("--settings" not in cmd for cmd, _ in spawns.calls)
+
+
 def test_unconfigured_host_never_runs_local():
     spawns, events = _Spawns(local_reply=(0, b"local", b"")), []
     result = _run(spawns, events, work_class="rebase")

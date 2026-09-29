@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -94,7 +95,31 @@ CODEX_BIN = (
     or shutil.which("codex")
 )
 CURSOR_BIN = os.environ.get("APIS_CURSOR_BIN") or shutil.which("cursor-agent")
+TRUSTED_MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
+
+
+async def _kill_spawned_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill and drain exactly the process group created for one provider run.
+
+    Provider CLIs commonly launch a native child. Killing only the immediate
+    wrapper can orphan that child with the stdout/stderr pipes still open,
+    which makes the timeout path's follow-up ``communicate()`` hang forever.
+    Every caller launches with ``start_new_session=True``, so the wrapper PID
+    is also the exact process-group ID; no process-name or broad PID matching
+    is involved.
+    """
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and hasattr(os, "killpg"):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        proc.kill()
+    await proc.communicate()
+
+
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
 )
@@ -291,7 +316,7 @@ def _require_neotoma_base_url() -> str:
     v = os.environ.get("NEOTOMA_BASE_URL", "").strip()
     if not v:
         raise RuntimeError(
-            'NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance (e.g. https://neotoma.markmhendrickson.com). Local hosting was retired 2026-08-04 and http://localhost:9180 no longer serves anything, so there is deliberately no default: a silent fallback would send writes at a dead port. Under launchd the plist supplies this; for an ad-hoc run, export it or source ~/.config/neotoma/.env first.'
+            "NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance (e.g. https://neotoma.markmhendrickson.com). Local hosting was retired 2026-08-04 and http://localhost:9180 no longer serves anything, so there is deliberately no default: a silent fallback would send writes at a dead port. Under launchd the plist supplies this; for an ad-hoc run, export it or source ~/.config/neotoma/.env first."
         )
     return v.rstrip("/")
 
@@ -414,8 +439,7 @@ GATE_VERDICT_POSITION_RULE = (
 
 _VERDICT_VOCABULARY_LINES = {
     "APPROVE": "all checks pass, no blockers.",
-    "REQUEST_CHANGES": "one or more [BLOCKING] findings; the author must "
-    "address them.",
+    "REQUEST_CHANGES": "one or more [BLOCKING] findings; the author must address them.",
     "COMMENT": "observations only; nothing blocks merge.",
     "BLOCKED": "cannot proceed (missing information, open pre-impl gate, etc.).",
     "SIGNED_OFF": "your gate/phase is signed off.",
@@ -1158,6 +1182,18 @@ class SkillResult:
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
     provider: str = ""
     attempted_providers: tuple[str, ...] = ()
+    # Set only when the runner independently established that a zero-exit
+    # child encountered one canonical delivery denial and no provider
+    # capacity/auth/launch diagnostic.  Callers must not infer this from the
+    # free-form transcript or from ``error`` alone.
+    delivery_failure_reason: str = ""
+    # Every distinct delivery denial found across the complete stderr
+    # diagnostic set, in canonical signature order rather than transcript
+    # order.  ``delivery_failure_reason`` is trusted only when this tuple has
+    # exactly that one recoverable entry and ``delivery_failure_conflicts`` is
+    # empty.
+    delivery_failure_reasons: tuple[str, ...] = ()
+    delivery_failure_conflicts: tuple[str, ...] = ()
     # Set (ISO-8601, local zone) when NOTHING ran because every eligible
     # provider is inside a persisted session/usage-limit cooling window: the
     # earliest instant one comes back. Distinct from generic exhaustion.
@@ -1202,6 +1238,9 @@ _AUTH_FAILURE_SIGNATURES = (
     "invalid api key",
     "not logged in",
     "login required",
+    "permission denied (publickey)",
+    "could not read username for",
+    "authentication failed for",
 )
 
 _METERED_CREDENTIALS = (
@@ -1222,6 +1261,149 @@ def _provider_binaries() -> dict[str, str | None]:
             CLAUDE_BIN if local_provider.load_config() is not None else None
         ),
     }
+
+
+_DIAGNOSTIC_PREFIX_RE = re.compile(r"^(?:(?:fatal|error):\s*)+")
+_API_ERROR_PREFIX_RE = re.compile(r"^api error:\s*(?:\d{3}\s*:?[ \t]*)?")
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+_SSH_AUTH_DIAGNOSTIC_RE = re.compile(
+    r"^(?:[\w.+-]+@[\w.-]+:\s*)?permission denied \(publickey\)(?:$|[ \t:;,.-])"
+)
+_CAPACITY_DIAGNOSTIC_PATTERNS = (
+    re.compile(r"^you(?:'ve| have) hit (?:your )?(?:weekly |session )?usage limit\b"),
+    re.compile(r"^you(?:'ve| have) hit your (?:weekly |session )?limit\b"),
+    re.compile(r"^you(?:'ve| have) reached your usage limit\b"),
+)
+
+
+def _diagnostic_starts_with(line: str, signature: str) -> bool:
+    """Match a diagnostic token with an optional explanatory suffix."""
+    if not line.startswith(signature):
+        return False
+    if len(line) == len(signature):
+        return True
+    return line[len(signature)] in " \t:;,.-(["
+
+
+def _normalize_diagnostic_candidate(candidate: str) -> str:
+    """Normalize one anchored diagnostic without searching within its prose."""
+    normalized = _ANSI_SGR_RE.sub("", candidate).replace("\u00a0", " ").strip().lower()
+    while normalized:
+        previous = normalized
+        normalized = _DIAGNOSTIC_PREFIX_RE.sub("", normalized)
+        normalized = _API_ERROR_PREFIX_RE.sub("", normalized)
+        if normalized == previous:
+            break
+    return normalized
+
+
+def _diagnostic_envelope_candidates(envelope: object) -> tuple[str, ...]:
+    """Return only the supported string fields from a provider JSON envelope."""
+    if not isinstance(envelope, dict):
+        return ()
+    error = envelope.get("error")
+    if isinstance(error, str):
+        return (error,)
+    if isinstance(error, dict):
+        return tuple(
+            value
+            for key in ("message", "type")
+            if isinstance(value := error.get(key), str)
+        )
+    return ()
+
+
+def _diagnostic_candidate_kind(candidate: str) -> str | None:
+    """Classify one already-extracted candidate at its normalized start."""
+    normalized = _normalize_diagnostic_candidate(candidate)
+    if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", normalized):
+        return "launch"
+    if _SSH_AUTH_DIAGNOSTIC_RE.match(normalized) or any(
+        _diagnostic_starts_with(normalized, signature)
+        for signature in _AUTH_FAILURE_SIGNATURES
+    ):
+        return "auth"
+    if any(
+        _diagnostic_starts_with(normalized, signature)
+        for signature in _CAPACITY_FAILURE_SIGNATURES
+    ) or any(pattern.match(normalized) for pattern in _CAPACITY_DIAGNOSTIC_PATTERNS):
+        return "capacity"
+    return None
+
+
+def _diagnostic_line_kind(raw_line: str) -> str | None:
+    """Classify one provider diagnostic without scanning ordinary prose.
+
+    Normalize provider API/JSON envelopes, SGR color, and Git's ``fatal:`` or
+    ``error:`` prefixes. Keep matching anchored at the extracted diagnostic
+    start so a prompt or verdict discussing these words is excluded.
+    """
+    normalized = _normalize_diagnostic_candidate(raw_line)
+    if not normalized:
+        return None
+    candidates = [normalized]
+    if normalized.startswith("{"):
+        try:
+            envelope = json.loads(normalized)
+        except json.JSONDecodeError:
+            envelope = None
+        extracted = _diagnostic_envelope_candidates(envelope)
+        if extracted:
+            candidates = list(extracted)
+    for candidate in candidates:
+        if (kind := _diagnostic_candidate_kind(candidate)) is not None:
+            return kind
+    return None
+
+
+def _structured_diagnostic_kinds(text: str) -> set[str]:
+    """Classify JSON envelopes that start at a diagnostic line boundary.
+
+    ``json.JSONDecoder.raw_decode`` lets a formatted envelope end before a
+    following diagnostic line. Requiring the object to start after only the
+    same supported prefixes as the line classifier, and to occupy the rest of
+    its closing line, keeps arbitrary prose out of this structured path.
+    """
+    cleaned = _ANSI_SGR_RE.sub("", text).replace("\u00a0", " ")
+    decoder = json.JSONDecoder()
+    kinds: set[str] = set()
+    line_start = 0
+    while line_start < len(cleaned):
+        line_end = cleaned.find("\n", line_start)
+        if line_end < 0:
+            line_end = len(cleaned)
+        first_line = cleaned[line_start:line_end]
+        brace_offset = first_line.find("{")
+        if brace_offset >= 0:
+            prefix = first_line[:brace_offset]
+            if _normalize_diagnostic_candidate(prefix + "{}") == "{}":
+                object_start = line_start + brace_offset
+                try:
+                    envelope, object_end = decoder.raw_decode(cleaned, object_start)
+                except json.JSONDecodeError:
+                    envelope = None
+                    object_end = object_start
+                closing_line_end = cleaned.find("\n", object_end)
+                if closing_line_end < 0:
+                    closing_line_end = len(cleaned)
+                if not cleaned[object_end:closing_line_end].strip():
+                    for candidate in _diagnostic_envelope_candidates(envelope):
+                        if (kind := _diagnostic_candidate_kind(candidate)) is not None:
+                            kinds.add(kind)
+        line_start = line_end + 1
+    return kinds
+
+
+def _diagnostic_failure_kinds(*texts: str) -> set[str]:
+    kinds = {
+        kind
+        for text in texts
+        for raw_line in text.splitlines()
+        if (kind := _diagnostic_line_kind(raw_line)) is not None
+    }
+    for text in texts:
+        kinds.update(_structured_diagnostic_kinds(text))
+    return kinds
 
 
 def _cool_after_capacity_failure(provider: str, result: "SkillResult") -> None:
@@ -1298,13 +1480,21 @@ def _cooled_message(windows: dict[str, dict[str, object]]) -> tuple[str, str]:
 
 def _provider_failure_kind(*texts: str) -> str | None:
     """Classify failures that are safe to retry on another harness."""
+    kinds = _diagnostic_failure_kinds(*texts)
+    if "capacity" in kinds:
+        return "capacity"
+    if "auth" in kinds:
+        return "auth"
+
+    # Failed-provider payloads may embed diagnostics in arbitrary sentences.
+    # Preserve that established fallback for failed attempts only; delivery
+    # recovery uses only the anchored line classifier above.
     blob = " ".join(text for text in texts if text).lower()
     if any(signature in blob for signature in _CAPACITY_FAILURE_SIGNATURES):
         return "capacity"
     if any(signature in blob for signature in _AUTH_FAILURE_SIGNATURES):
         return "auth"
     return None
-
 
 
 # ── Codex sandbox: writable git roots + network (ateles#590) ──────────────────
@@ -1415,6 +1605,66 @@ _DELIVERY_DENIAL_SIGNATURES: tuple[tuple[str, str], ...] = (
     ),
 )
 
+# The canonical, exact errors emitted when a zero-exit child did useful work
+# but the delivery mechanism refused it. Provider routing must preserve these
+# errors verbatim: they describe a task/delivery failure, not provider capacity
+# or authentication, even when the larger transcript quotes those words.
+_DELIVERY_DENIAL_REASONS = frozenset(
+    reason for _pattern, reason in _DELIVERY_DENIAL_SIGNATURES
+)
+_RECOVERABLE_DELIVERY_DENIAL_REASONS = frozenset(
+    {
+        "sandbox denied network access — the child could not push or reach the GitHub API",
+        "the child could not reach the git remote — nothing was pushed",
+    }
+)
+
+
+def _delivery_failure_reasons(*texts: str) -> tuple[str, ...]:
+    """Return every distinct delivery denial in canonical signature order.
+
+    Signature order, rather than line order, makes the classification stable
+    when two diagnostics are emitted in the opposite order.  Only stderr is
+    supplied by the runner; stdout may quote these strings as reviewed prose.
+    """
+    lines = [
+        line.strip() for text in texts if text for line in text.lower().splitlines()
+    ]
+    return tuple(
+        reason
+        for pattern, reason in _DELIVERY_DENIAL_SIGNATURES
+        if any(re.match(pattern, line) for line in lines)
+    )
+
+
+def _delivery_failure_conflicts(
+    reasons: tuple[str, ...], *texts: str
+) -> tuple[str, ...]:
+    """Name every condition that makes delivery-only recovery ambiguous."""
+    conflicts: list[str] = []
+    if len(reasons) > 1:
+        conflicts.append("multiple_delivery_failures")
+    diagnostic_kinds = _diagnostic_failure_kinds(*texts)
+    conflicts.extend(
+        kind for kind in ("auth", "capacity", "launch") if kind in diagnostic_kinds
+    )
+    if len(reasons) == 1 and reasons[0] not in _RECOVERABLE_DELIVERY_DENIAL_REASONS:
+        conflicts.append("nonrecoverable_delivery_failure")
+    return tuple(conflicts)
+
+
+def _delivery_diagnostic_error(
+    reasons: tuple[str, ...], conflicts: tuple[str, ...]
+) -> str:
+    if not reasons:
+        return ""
+    if not conflicts:
+        return reasons[0]
+    return (
+        "mixed delivery diagnostics — delivery="
+        f"{list(reasons)!r}; conflicts={list(conflicts)!r}"
+    )
+
 
 def _delivery_failure_reason(*texts: str) -> str | None:
     """Name the delivery denial in a child's output, if there is one.
@@ -1430,15 +1680,8 @@ def _delivery_failure_reason(*texts: str) -> str | None:
     # signatures, so any agent dispatched to read them was reported as a failed
     # delivery (ateles#601 pm lens, reproduced). Anchoring is what separates
     # "git said this" from "someone wrote this down".
-    for text in texts:
-        if not text:
-            continue
-        for line in text.lower().splitlines():
-            stripped = line.strip()
-            for pattern, reason in _DELIVERY_DENIAL_SIGNATURES:
-                if re.match(pattern, stripped):
-                    return reason
-    return None
+    reasons = _delivery_failure_reasons(*texts)
+    return reasons[0] if reasons else None
 
 
 def _provider_command(
@@ -1449,6 +1692,7 @@ def _provider_command(
     *,
     cwd: str | None,
     network: bool = False,
+    codex_outer_sandboxed: bool = False,
     model: str | None = None,
 ) -> tuple[list[str], bytes | None]:
     """Build one provider's noninteractive command and initial stdin payload.
@@ -1457,6 +1701,15 @@ def _provider_command(
     #590 asks for it "without granting blanket network access to every
     dispatch", so it is off by default and the caller turns it on for the
     dispatches whose task actually involves GitHub delivery.
+
+    ``codex_outer_sandboxed`` is reserved for a caller that has already bound
+    a separately probed OS sandbox around the Codex process. In that one case
+    Codex must not install its own nested macOS Seatbelt profile:
+    ``sandbox-exec`` rejects the nested ``sandbox_apply`` operation before any
+    command can run. ``danger-full-access`` here means "no inner Codex
+    sandbox"; the caller's outer sandbox remains the enforcement boundary.
+    `_run_skill_once` refuses this flag unless the real command is wrapped by
+    ``sandbox-exec``.
 
     ``model`` (ateles#567 / operator ruling 2026-09-29, model_tiering.py):
     when non-empty, pins this dispatch to a named model instead of the
@@ -1478,17 +1731,12 @@ def _provider_command(
             None,
         )
 
-    composite_prompt = (
-        f"{system_prompt}\n\n"
-        "---\n\n"
-        "## Dispatched task\n\n"
-        f"{work_prompt}"
-    )
+    composite_prompt = f"{system_prompt}\n\n---\n\n## Dispatched task\n\n{work_prompt}"
     if provider == "codex":
         # See the ateles#590 note above _git_roots_for_sandbox: without these
         # two additions a codex child in a linked worktree writes correct code
         # and then cannot commit, push, or open a PR.
-        git_roots = _git_roots_for_sandbox(cwd)
+        git_roots = [] if codex_outer_sandboxed else _git_roots_for_sandbox(cwd)
         add_dir_flags: list[str] = []
         for root in git_roots:
             add_dir_flags += ["--add-dir", root]
@@ -1501,17 +1749,24 @@ def _provider_command(
         # and to the dispatches that need it rather than to all of them (#590:
         # "without granting blanket network access to every dispatch").
         network_flags = (
-            ["-c", "sandbox_workspace_write.network_access=true"] if network else []
+            []
+            if codex_outer_sandboxed
+            else ["-c", "sandbox_workspace_write.network_access=true"]
+            if network
+            else []
         )
-        if network:
+        if network and not codex_outer_sandboxed:
             log.info("[apis] codex sandbox: network enabled for this dispatch")
+        sandbox_mode = (
+            "danger-full-access" if codex_outer_sandboxed else "workspace-write"
+        )
         return (
             [
                 binary,
                 "exec",
                 *(["--model", model] if model else []),
                 "--sandbox",
-                "workspace-write",
+                sandbox_mode,
                 *network_flags,
                 *add_dir_flags,
                 "--ephemeral",
@@ -1563,17 +1818,26 @@ def _requested_model(provider: str, cmd: list[str]) -> str | None:
         # Support the `--model=x` spelling too.
         for flag in ("--model=",):
             if arg.startswith(flag):
-                value = arg[len(flag):].strip()
+                value = arg[len(flag) :].strip()
                 return value or None
     return None
 
 
 def _subscription_only_env(
     env_extra: dict[str, str] | None = None,
+    *,
+    local_review: bool = False,
+    local_review_home: str | None = None,
 ) -> dict[str, str]:
-    """Build a child env that cannot silently spill into metered API billing.
+    """Build the child environment for a governed harness invocation.
 
-    Two independent controls:
+    Local review inference gets an allowlisted environment rather than the
+    daemon's ambient credentials.  Its isolated HOME/GH_CONFIG_DIR plus Git's
+    explicit no-helper settings close credential-file, keychain, SSH-agent,
+    and inherited-token publication paths while retaining only subscription
+    authentication needed to run the selected model.
+
+    Two independent controls on metered API billing:
 
     * The harness metered keys (``_METERED_CREDENTIALS``) are stripped unless
       ``APIS_ALLOW_METERED_HARNESS=1`` explicitly allows them.
@@ -1588,7 +1852,48 @@ def _subscription_only_env(
     (tracked as a follow-up); until then ``test_unnamed_future_metered_key_is_scrubbed``
     is an ``xfail(strict=True)`` documenting the gap.
     """
-    child = {**os.environ, **(env_extra or {})}
+    merged = {**os.environ, **(env_extra or {})}
+    if local_review:
+        if not local_review_home:
+            raise ValueError("local_review requires an isolated local_review_home")
+        allowed = {
+            "PATH",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "NO_COLOR",
+            "CODEX_HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        }
+        child = {key: value for key, value in merged.items() if key in allowed}
+        isolated = Path(local_review_home)
+        child.update(
+            {
+                "HOME": str(isolated),
+                "XDG_CONFIG_HOME": str(isolated / ".config"),
+                "GH_CONFIG_DIR": str(isolated / ".config" / "gh"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GCM_INTERACTIVE": "never",
+                "GIT_ASKPASS": "/usr/bin/false",
+                "SSH_ASKPASS": "/usr/bin/false",
+                # An empty credential.helper resets any helper accumulated
+                # from repository-local configuration before disabling
+                # interactive fallback.
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": "",
+                "GIT_CONFIG_KEY_1": "credential.interactive",
+                "GIT_CONFIG_VALUE_1": "never",
+            }
+        )
+    else:
+        child = merged
     if child.get("APIS_ALLOW_METERED_HARNESS", "0") != "1":
         for key in _METERED_CREDENTIALS:
             child.pop(key, None)
@@ -1619,6 +1924,9 @@ async def _run_skill_once(
     include_github_contract: bool = False,
     cwd: str | None = None,
     owns_pending_gate: bool = False,
+    command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
     work_class: str | None = None,
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
@@ -1701,12 +2009,37 @@ async def _run_skill_once(
     + skill + live-policy instructions through their provider prompt carriers
     and use their ambient configured tools.
 
+    ``local_review`` gives a child inference-only authority: no GitHub or
+    Neotoma publication credentials, no ambient credential files/keychain,
+    no SSH agent, and (for Claude) an empty strict MCP configuration.  Parent
+    publication remains outside this child environment.
+
     ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
     child subprocess runs with this working directory instead of inheriting the
     daemon's. This is how the qa lens (Phoenicurus) is given a writable checkout
     of a PR branch so it can author an eval fixture, run ``eval:tier1``, commit,
     and push. When None (every call site that predates QE3), the child inherits
     the daemon's directory unchanged — exact current behaviour, no regression.
+
+    ``command_wrapper`` (harness_lens_runner, ent_89a4d44b063cb0902106da49):
+    when supplied, its elements are PREPENDED to the provider's own argv
+    before ``asyncio.create_subprocess_exec`` runs it below — e.g.
+    ``["/usr/bin/sandbox-exec", "-f", "/path/to/profile.sb"]`` to run
+    codex/cursor's real binary under a macOS sandbox that denies specific file
+    reads/writes. The absolute executable and profile shape are validated here;
+    PATH resolution is never accepted for the no-inner-sandbox transition.
+    This is the only point in the dispatch path where the process that will
+    actually execute is assembled, so it is the only point a caller can make
+    a guard bind onto the REAL subprocess rather than merely describe an
+    intended mitigation next to code that runs unwrapped. Applied
+    unconditionally when given — a caller that only wants it for codex/cursor
+    passes ``None`` here for claude. The wrapper itself never needs and is
+    never handed credential material; it wraps argv only.
+
+    ``codex_outer_sandboxed`` disables Codex's inner sandbox only after this
+    function verifies that the actual command is wrapped by ``sandbox-exec``.
+    It exists for harness_lens_runner's probed effect-level guard; ordinary
+    Codex dispatches retain ``workspace-write``.
 
     ``work_class`` (ateles task ent_71387d9c1d1d3d1eef9ecc01 — lean local
     prompt): when ``provider == local_provider.LOCAL_PROVIDER``, this replaces
@@ -1723,6 +2056,27 @@ async def _run_skill_once(
     """
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
+
+    if codex_outer_sandboxed:
+        trusted_wrapper_profile_pair = bool(
+            provider == "codex"
+            and command_wrapper
+            and len(command_wrapper) == 3
+            and command_wrapper[0] == str(TRUSTED_MACOS_SANDBOX_EXEC)
+            and command_wrapper[1] == "-f"
+            and Path(command_wrapper[2]).is_absolute()
+            and TRUSTED_MACOS_SANDBOX_EXEC.is_file()
+            and os.access(TRUSTED_MACOS_SANDBOX_EXEC, os.X_OK)
+        )
+        if not trusted_wrapper_profile_pair:
+            msg = (
+                "codex_outer_sandboxed requires provider='codex' and the exact "
+                "trusted wrapper/profile pair rooted at "
+                f"{TRUSTED_MACOS_SANDBOX_EXEC}; refusing to disable the inner "
+                "Codex sandbox for a PATH-resolved, relative, malformed, or "
+                "look-alike wrapper"
+            )
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
     agent_def = await asyncio.to_thread(_load_agent_def, _role)
@@ -2070,8 +2424,30 @@ async def _run_skill_once(
             prompt,
             cwd=cwd,
             network=include_github_contract,
+            codex_outer_sandboxed=codex_outer_sandboxed,
             model=resolved_model,
         )
+    if command_wrapper:
+        # Prepended to the REAL argv that create_subprocess_exec below will
+        # run — not a parallel description of a guard, the guard itself. See
+        # this parameter's docstring on _run_skill_once.
+        cmd = [*command_wrapper, *cmd]
+
+    local_review_home = (
+        (env_extra or {}).get("ATELES_LOCAL_REVIEW_HOME", "") if local_review else ""
+    )
+    if local_review:
+        if not local_review_home or not Path(local_review_home).is_absolute():
+            raise RuntimeError(
+                "local_review dispatch requires an absolute "
+                "ATELES_LOCAL_REVIEW_HOME supplied by the caller"
+            )
+        if github_token is not None:
+            raise RuntimeError(
+                "local_review dispatch cannot accept github_token; publication "
+                "authority belongs exclusively to the parent"
+            )
+        (Path(local_review_home) / ".config" / "gh").mkdir(parents=True, exist_ok=True)
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
     # Dispatched `claude --print` children inherit the ambient Claude MCP config,
@@ -2100,10 +2476,20 @@ async def _run_skill_once(
     #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
-    if provider == "claude":
-        _neotoma_base = os.environ.get(
-            "NEOTOMA_BASE_URL", ""
-        ).rstrip("/")
+    if provider == "claude" and local_review:
+        # Claude otherwise merges project/user MCP configuration. A local
+        # review child has no Neotoma publication role at all, so give it an
+        # explicitly empty, strict MCP universe rather than relying on absent
+        # tokens alone. The parent process retains its own MCP/GitHub authority.
+        fd, _mcp_tmp_path = tempfile.mkstemp(
+            suffix=".json", prefix="apis_local_review_mcp_"
+        )
+        os.chmod(_mcp_tmp_path, 0o600)
+        with os.fdopen(fd, "w") as _f:
+            json.dump({"mcpServers": {}}, _f)
+        cmd += ["--mcp-config", _mcp_tmp_path, "--strict-mcp-config"]
+    elif provider == "claude":
+        _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
         # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
         # shared daemon bearer, so every agent without its own credential behaves
         # exactly as before. A gate owner is NOT refused here for lacking one
@@ -2153,9 +2539,7 @@ async def _run_skill_once(
 
         # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
         try:
-            fd, _mcp_tmp_path = tempfile.mkstemp(
-                suffix=".json", prefix="apis_mcp_"
-            )
+            fd, _mcp_tmp_path = tempfile.mkstemp(suffix=".json", prefix="apis_mcp_")
             os.chmod(_mcp_tmp_path, 0o600)
             with os.fdopen(fd, "w") as _f:
                 json.dump(_mcp_cfg, _f)
@@ -2190,8 +2574,10 @@ async def _run_skill_once(
         # server name matches the mcpServers key (here: "mcpsrv_neotoma" — the
         # universal convention across all 31 agent SKILLs and 24 agent_definitions).
         # This allows all tools from that MCP server without enumerating them individually.
-        allowed_list = list(tools)
-        if "mcp__mcpsrv_neotoma__*" not in allowed_list:
+        allowed_list = [
+            tool for tool in tools if not (local_review and tool.startswith("mcp__"))
+        ]
+        if not local_review and "mcp__mcpsrv_neotoma__*" not in allowed_list:
             allowed_list.append("mcp__mcpsrv_neotoma__*")
         # ateles#795: name the two read-only gate tools explicitly even though
         # the `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them —
@@ -2202,7 +2588,8 @@ async def _run_skill_once(
         # `correct()` of `gate_status` must NOT be pre-approved — and, for a
         # gate-owning run, is additionally on the deny list below regardless
         # of the wildcard.
-        allowed_list = gate_writeback_allowlist(allowed_list)
+        if not local_review:
+            allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
         log.info(
@@ -2228,7 +2615,7 @@ async def _run_skill_once(
         # gate-owning run, `correct` is additionally denied below — the `*`
         # wildcard on its own left `correct` reachable, which is exactly the
         # sink Falco's review confirmed on PR #1181.
-        allowed = ",".join(gate_writeback_allowlist(["*"]))
+        allowed = ",".join(["*"] if local_review else gate_writeback_allowlist(["*"]))
         cmd += ["--allowed-tools", allowed]
         log.info(
             f"[apis] Spawning via {provider}: "
@@ -2283,7 +2670,11 @@ async def _run_skill_once(
     # Hard boundary from the approved plan: all three adapters use bundled
     # subscription auth by default. API-key credentials are removed so a capped
     # plan queues/fails over instead of silently spending metered tokens.
-    subprocess_env = _subscription_only_env(env_extra)
+    subprocess_env = _subscription_only_env(
+        env_extra,
+        local_review=local_review,
+        local_review_home=local_review_home or None,
+    )
     if local_cfg is not None:
         # Local inference: point the CLI at the loopback proxy and strip any
         # frontier OAuth credential so it cannot be sent there.
@@ -2323,7 +2714,7 @@ async def _run_skill_once(
     # a child's MCP writes are attributed to the role; the header is. Reading
     # these three vars as "the lens writes as itself" is what let the shared
     # bearer pass for a per-lens identity while ateles#795 stayed open.
-    if not degraded and agent_def.aauth_sub:
+    if not local_review and not degraded and agent_def.aauth_sub:
         keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
         if keys_dir:
             jwk_path = os.path.join(keys_dir, f"{_role}.jwk.json")
@@ -2343,6 +2734,7 @@ async def _run_skill_once(
             stderr=asyncio.subprocess.PIPE,
             env=subprocess_env,
             cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree
+            start_new_session=True,
         )
     except OSError as exc:
         if _mcp_tmp_path is not None:
@@ -2366,13 +2758,14 @@ async def _run_skill_once(
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(
-                    input=stdin_payload if stdin_payload is not None else prompt.encode()
+                    input=stdin_payload
+                    if stdin_payload is not None
+                    else prompt.encode()
                 ),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
+            await _kill_spawned_process_group(proc)
             duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
             msg = f"timed out after {timeout}s"
             log.error(f"[apis] {skill} dispatch {msg}")
@@ -2444,7 +2837,22 @@ async def _run_skill_once(
         # stdout as prose. Scanning both made "the child read about a denial"
         # indistinguishable from "the child was denied", and the reproduction
         # transcript in #601's own body is a verbatim instance of that.
-        _delivery_denial = _delivery_failure_reason(_stderr_text)
+        _delivery_reasons = _delivery_failure_reasons(_stderr_text)
+        _delivery_conflicts = _delivery_failure_conflicts(
+            _delivery_reasons, _stderr_text
+        )
+        _delivery_denial = _delivery_diagnostic_error(
+            _delivery_reasons, _delivery_conflicts
+        )
+        _delivery_only_reason = (
+            _delivery_reasons[0]
+            if (
+                len(_delivery_reasons) == 1
+                and not _delivery_conflicts
+                and proc.returncode == 0
+            )
+            else ""
+        )
         if _delivery_denial and proc.returncode == 0:
             log.error(
                 f"[apis] {skill} dispatch via {provider} exited 0 but could not "
@@ -2485,7 +2893,7 @@ async def _run_skill_once(
             skill=skill,
             ok=(
                 proc.returncode == 0
-                and _delivery_denial is None
+                and not _delivery_denial
                 and _postcondition_failure is None
             ),
             returncode=proc.returncode,
@@ -2496,6 +2904,13 @@ async def _run_skill_once(
                 _delivery_denial
                 if (_delivery_denial and proc.returncode == 0)
                 else (_postcondition_failure or "")
+            ),
+            delivery_failure_reason=_delivery_only_reason,
+            delivery_failure_reasons=(
+                _delivery_reasons if proc.returncode == 0 else ()
+            ),
+            delivery_failure_conflicts=(
+                _delivery_conflicts if proc.returncode == 0 else ()
             ),
             usage=_usage,
         )
@@ -2645,12 +3060,27 @@ async def run_skill(
     preferred_provider: str | None = None,
     owns_pending_gate: bool = False,
     seated_reviewer: bool = False,
+    command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
     work_class: str | None = None,
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     model: str | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
+    attempt — see that function's docstring. Unrelated to provider selection;
+    it wraps whichever provider's binary ends up chosen.
+
+    ``codex_outer_sandboxed`` is the paired adapter signal for an already
+    probed outer ``sandbox-exec`` wrapper. `_run_skill_once` validates the pair
+    before choosing Codex's no-inner-sandbox mode.
+
+    ``local_review`` selects a child environment with inference authority but
+    no ambient GitHub or Neotoma publication authority. The parent retains and
+    independently applies any publication gate.
 
     The first candidate is selected with smooth weighted round-robin using the
     operator-supplied headroom estimates. Capacity, authentication, and launch
@@ -2724,14 +3154,27 @@ async def run_skill(
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
         return await _run_skill_once(
-            skill, prompt, provider=selected, role=role,
-            task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
+            skill,
+            prompt,
+            provider=selected,
+            role=role,
+            task_entity_id=task_entity_id,
+            timeout=timeout,
+            env_extra=env_extra,
+            notifier=notifier,
+            github_token=github_token,
+            include_github_contract=include_github_contract,
+            cwd=cwd,
+            owns_pending_gate=deny_correct,
+            command_wrapper=command_wrapper,
+            codex_outer_sandboxed=codex_outer_sandboxed,
+            local_review=local_review,
             agent_session_id=agent_session_id,
-            notifier=notifier, github_token=github_token,
-            include_github_contract=include_github_contract, cwd=cwd,
-            owns_pending_gate=deny_correct, work_class=work_class,
-            action_class=action_class, escalation_signals=escalation_signals,
-            model=fallback_model or model, precomputed_tier=precomputed_tier,
+            work_class=work_class,
+            action_class=action_class,
+            escalation_signals=escalation_signals,
+            model=fallback_model or model,
+            precomputed_tier=precomputed_tier,
         )
 
     local_first = (
@@ -2748,10 +3191,17 @@ async def run_skill(
         # path), so this only removes local eligibility, never frontier
         # eligibility.
         and not include_github_contract
+        # A guarded dispatch (harness_lens_runner's probed sandbox wrapper or
+        # its inference-only local_review mode) was probed for the frontier
+        # provider it names; never reroute it to a provider it was not probed
+        # for.
+        and not command_wrapper
+        and not local_review
         and local_provider.is_eligible(work_class, local_provider.load_config())
     )
     return await _run_provider_attempts(
-        skill, attempt,
+        skill,
+        attempt,
         fallback_models_for=(
             (lambda names: {name: model for name in names}) if model else None
         ),
@@ -2760,8 +3210,11 @@ async def run_skill(
             restricted_to_claude=deny_correct,
         ),
         provider=provider,
-        role=role, task_entity_id=task_entity_id, notifier=notifier,
-        preferred_provider=preferred_provider, owns_pending_gate=deny_correct,
+        role=role,
+        task_entity_id=task_entity_id,
+        notifier=notifier,
+        preferred_provider=preferred_provider,
+        owns_pending_gate=deny_correct,
         local_first=local_first,
     )
 
@@ -3008,9 +3461,7 @@ async def _run_provider_attempts(
                 f"ineligible: {reason or 'not selected'}"
             )
             return SkillResult(skill, False, None, "", "", error=msg)
-        configured = os.environ.get(
-            "APIS_HARNESS_PROVIDERS", "claude,codex,cursor"
-        )
+        configured = os.environ.get("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
         cooling = ",".join(sorted(cooling_providers())) or "none"
         msg = (
             "no subscription-backed harness provider has usable headroom "
@@ -3055,15 +3506,49 @@ async def _run_provider_attempts(
             attempt(selected, fallback_model=pinned) if pinned else attempt(selected)
         )
         result.attempted_providers = tuple(attempted)
+        # _run_skill_once carries an explicit delivery-only signal only after
+        # independently excluding provider diagnostics from stderr. Preserve
+        # that result before scanning the child's large stdout transcript:
+        # quoted "session limit" prose in a completed verdict is not capacity.
+        # Synthetic/alternate callers must satisfy the same exact invariants;
+        # an error string alone is never the signal.
+        delivery_only = (
+            not result.ok
+            and result.returncode == 0
+            and result.delivery_failure_reason in _DELIVERY_DENIAL_REASONS
+            and result.error == result.delivery_failure_reason
+            and result.delivery_failure_reasons == (result.delivery_failure_reason,)
+            and not result.delivery_failure_conflicts
+        )
+        if delivery_only:
+            return result
+        # A result claiming delivery-only while carrying mixed provider
+        # diagnostics is ambiguous and must take the ordinary failure path.
+        if result.delivery_failure_reason and not delivery_only:
+            result.delivery_failure_reason = ""
+        # A child that emitted any delivery diagnostic but did not satisfy the
+        # exact delivery-only contract is not safe to replay on another
+        # provider.  Returning the original result preserves its complete
+        # stderr and the structured conflict set instead of cooling a healthy
+        # provider because the completed review's stdout happened to quote a
+        # capacity phrase.  This is the cause of the generic Codex-capacity
+        # reports observed by the parent runner at 0a63667d.
+        if result.delivery_failure_reasons:
+            return result
         if local_failure and selected != local_provider.LOCAL_PROVIDER:
             result.local_failure = local_failure
-        # A successful agent may legitimately discuss "usage limits" in its
-        # answer. Only inspect stdout when the process itself failed; stderr and
-        # explicit runner errors remain diagnostic on every result.
-        failure_kind = _provider_failure_kind(
-            result.error,
-            result.stderr,
-            result.stdout if not result.ok else "",
+        # ONE success-path rule: a zero-exit result is never stream-classified.
+        # A successful harness may carry its prompt, transcript, or verdict on
+        # stderr (a Codex review always does), and that prose can legitimately
+        # quote "usage limit" or "quota exceeded". Once the adapter has
+        # established success and the delivery checks above found no denial,
+        # those streams are result content rather than provider diagnostics.
+        # On the non-success path every stream (error, stderr, stdout) is
+        # classified, as before.
+        failure_kind = (
+            None
+            if result.ok
+            else _provider_failure_kind(result.error, result.stderr, result.stdout)
         )
         launch_failure = result.error.startswith(f"{selected} launch failed:")
 
@@ -3157,7 +3642,9 @@ async def _run_provider_attempts(
     return last_result
 
 
-async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> SkillResult:
+async def run_review_prompt(
+    *, role: str, prompt: str, timeout: int = 180
+) -> SkillResult:
     """Route an inference-only review without granting any publisher authority.
 
     The caller owns the role prompt and GitHub signature. Models must be
@@ -3182,11 +3669,22 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
     # Inference gets only its subscription authentication and runtime settings.
     # GitHub/Neotoma credentials remain exclusively with the publisher process.
     env = {
-        key: value for key, value in inherited.items()
-        if key in {
-            "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CODEX_HOME",
-            "CLAUDE_CODE_OAUTH_TOKEN", "SSL_CERT_FILE", "SSL_CERT_DIR",
-            "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+        key: value
+        for key, value in inherited.items()
+        if key
+        in {
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "CODEX_HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "NO_PROXY",
         }
     }
 
@@ -3195,28 +3693,70 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
         model = models[provider].strip()
         with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
             if provider == "claude":
-                cmd = [binary, "--print", "--model", model, "--tools", "",
-                       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                       "--setting-sources", ""]
+                cmd = [
+                    binary,
+                    "--print",
+                    "--model",
+                    model,
+                    "--tools",
+                    "",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    '{"mcpServers":{}}',
+                    "--setting-sources",
+                    "",
+                ]
             else:
-                cmd = [binary, "exec", "--model", model, "--ignore-user-config",
-                       "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
-                       "-c", "features.shell_tool=false", "-c", "features.unified_exec=false",
-                       "-c", "web_search=\"disabled\"", "-c", "forced_login_method=\"chatgpt\"",
-                       "--color", "never", "-"]
+                cmd = [
+                    binary,
+                    "exec",
+                    "--model",
+                    model,
+                    "--ignore-user-config",
+                    "--sandbox",
+                    "read-only",
+                    "--ephemeral",
+                    "--skip-git-repo-check",
+                    "-c",
+                    "features.shell_tool=false",
+                    "-c",
+                    "features.unified_exec=false",
+                    "-c",
+                    'web_search="disabled"',
+                    "-c",
+                    'forced_login_method="chatgpt"',
+                    "--color",
+                    "never",
+                    "-",
+                ]
             started = time.monotonic()
             process = None
             try:
                 process = await asyncio.create_subprocess_exec(
-                    *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE, cwd=workdir, env=env,
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=workdir,
+                    env=env,
+                    start_new_session=True,
                 )
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=prompt.encode()), timeout=timeout,
+                    process.communicate(input=prompt.encode()),
+                    timeout=timeout,
                 )
-                out, err = stdout.decode(errors="replace"), stderr.decode(errors="replace")
-                result = SkillResult(role, process.returncode == 0 and bool(out.strip()),
-                                     process.returncode, out, err, provider=provider)
+                out, err = (
+                    stdout.decode(errors="replace"),
+                    stderr.decode(errors="replace"),
+                )
+                result = SkillResult(
+                    role,
+                    process.returncode == 0 and bool(out.strip()),
+                    process.returncode,
+                    out,
+                    err,
+                    provider=provider,
+                )
                 if result.ok:
                     verdicts = re.findall(
                         r"(?im)^\s*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
@@ -3224,22 +3764,41 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
                     )
                     if len(verdicts) != 1:
                         result.ok = False
-                        result.error = "review response must contain exactly one explicit verdict"
+                        result.error = (
+                            "review response must contain exactly one explicit verdict"
+                        )
                 elif not out.strip() and process.returncode == 0:
                     result.error = "empty review response"
             except asyncio.TimeoutError:
                 if process is not None:
-                    process.kill()
-                    await process.communicate()
-                result = SkillResult(role, False, None, "", "",
-                                     error=f"review timed out after {timeout}s", provider=provider)
+                    await _kill_spawned_process_group(process)
+                result = SkillResult(
+                    role,
+                    False,
+                    None,
+                    "",
+                    "",
+                    error=f"review timed out after {timeout}s",
+                    provider=provider,
+                )
             except OSError as exc:
-                result = SkillResult(role, False, None, "", "",
-                                     error=f"{provider} launch failed: {exc}", provider=provider)
+                result = SkillResult(
+                    role,
+                    False,
+                    None,
+                    "",
+                    "",
+                    error=f"{provider} launch failed: {exc}",
+                    provider=provider,
+                )
             try:
                 await asyncio.to_thread(
-                    _write_harness_event, task_entity_id="", role=role, agent_sub="",
-                    event_type="subprocess", tool_name=f"{provider}:{role}",
+                    _write_harness_event,
+                    task_entity_id="",
+                    role=role,
+                    agent_sub="",
+                    event_type="subprocess",
+                    tool_name=f"{provider}:{role}",
                     success="true" if result.ok else "false",
                     input_summary=f"tool-restricted review; requested model={model}",
                     output_summary=f"provider={provider}; role={role}; {result.error or result.returncode}",
@@ -3250,5 +3809,9 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
             return result
 
     return await _run_provider_attempts(
-        role, attempt, binaries=binaries, role=role, retry_safe=True,
+        role,
+        attempt,
+        binaries=binaries,
+        role=role,
+        retry_safe=True,
     )

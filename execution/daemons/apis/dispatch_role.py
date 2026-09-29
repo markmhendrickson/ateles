@@ -252,6 +252,11 @@ async def dispatch(
     cwd: str | None = None,
     timeout: int | None = None,
     task_entity_id: str = "",
+    env_extra: dict[str, str] | None = None,
+    seated_reviewer: bool = False,
+    command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
     work_class: str | None = None,
     github_delivery: bool = False,
     github_token: str | None = None,
@@ -273,6 +278,37 @@ async def dispatch(
     credential stripping, and the harness_event rows. This function's only job
     is to hand it a well-formed request.
 
+    ``env_extra`` (harness-lens-runner, ent_898998f41372ce24369fb365): merged
+    on top of the child's environment by ``_subscription_only_env`` inside
+    ``run_skill`` — the mechanism a caller uses to override ``HOME`` /
+    ``CODEX_HOME`` for an isolated, credential-blind sandbox on a non-Claude
+    provider. This process's own environment (and hence its Neotoma/gh
+    access) is untouched; only the dispatched CHILD sees the override.
+
+    ``seated_reviewer`` forwards to ``run_skill`` unchanged. It does NOT mean
+    "this is a lens run" in general — it means the run must be treated exactly
+    like a panel-seated reviewer with shared-bearer Neotoma MCP access, which
+    forces claude-only routing (see ``run_skill``'s docstring). A caller
+    dispatching a lens review to codex/cursor that never receives Neotoma MCP
+    tools in the first place (this codebase injects ``--mcp-config`` only for
+    ``provider == "claude"``) should leave this False rather than set it and
+    then be silently rerouted to claude.
+
+    ``command_wrapper`` (ent_89a4d44b063cb0902106da49): forwarded verbatim to
+    ``run_skill`` -> ``_run_skill_once``, which prepends it to the provider's
+    OWN argv before the subprocess actually runs. This is how a caller makes
+    a guard (e.g. a macOS ``sandbox-exec`` profile denying reads of specific
+    credential paths) bind onto the real dispatched process rather than
+    merely describe an intended mitigation next to code that runs unwrapped.
+
+    ``codex_outer_sandboxed`` accompanies harness_lens_runner's probed
+    ``sandbox-exec`` wrapper. It tells the Codex adapter not to attempt an
+    unsupported nested Seatbelt sandbox; ``run_skill`` fails closed if the
+    flag is supplied without that outer wrapper.
+
+    ``local_review`` selects the inference-only environment: no ambient
+    GitHub/Neotoma publication authority or credential fallback reaches the
+    child. The caller, not the child, owns any later publication.
     ``github_delivery`` states that this task must commit, push, or open a pull
     request. It reuses ``run_skill``'s existing GitHub-contract path, which both
     injects the delivery contract and enables Codex network for this dispatch.
@@ -298,6 +334,11 @@ async def dispatch(
         timeout=timeout,
         cwd=cwd,
         provider=provider,
+        env_extra=env_extra,
+        seated_reviewer=seated_reviewer,
+        command_wrapper=command_wrapper,
+        codex_outer_sandboxed=codex_outer_sandboxed,
+        local_review=local_review,
         work_class=work_class,
         github_token=github_token,
         include_github_contract=github_delivery,
