@@ -263,12 +263,12 @@ jobs:
           python3 "$f"
 
       # Decision 114: when register row 114 is ruled, data_model.md#concepts'
-      # agent_policy row must carry a GOVERNS -> agent edge and state that
-      # scope/agent_sub is superseded by it for an agent-specific rule.
-      # Prevents ruled-without-registration drift: the ruling is fully argued
-      # in conformance.md and migration.md (G34), but the one table a reader
-      # consults for what fields and edges agent_policy actually carries had
-      # not been updated to match.
+      # `agent behavioural rule` row must carry exactly one GOVERNS -> agent
+      # edge and exactly one `scope` and one `agent_sub` entry, each equal to
+      # the approved text held in the checker (exact match, no prose reading),
+      # with no HTML comment, raw HTML tag or ~~ on that row or on register
+      # row 114. Prevents ruled-without-registration drift: the one table a
+      # reader consults for the rule's fields and edges must say what was ruled.
       - name: Decision 114 — ruled GOVERNS-edge shape in data_model
         if: always() && steps.corpus.outputs.present == 'true'
         run: |

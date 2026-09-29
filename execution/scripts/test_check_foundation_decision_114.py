@@ -309,3 +309,147 @@ def test_fails_when_prose_is_dressed_as_an_edge_of_an_unknown_type(tmp_path: Pat
     write_corpus(tmp_path, data_model_text=data_model(row))
     problems = decision_114.check(tmp_path)
     assert len(problems) == 1 and "not an edge" in problems[0]
+
+
+# --- Red: text attached to a fields-column claim entry (qa, 3c5341cf) ----------------------------
+
+
+def _field_entry(field: str) -> str:
+    return f"`{field}` ({ {'scope': SCOPE_OK, 'agent_sub': AGENT_SUB_OK}[field]})"
+
+
+def _row_with_field_entry(field: str, entry: str) -> str:
+    """A rule row whose `field` entry is replaced by ``entry`` and the other field left approved."""
+    other = "agent_sub" if field == "scope" else "scope"
+    fields = f"`rule`; `rule_kind`; {entry}; {_field_entry(other)}"
+    edges = f"`GOVERNS` → `agent` ({GOVERNS_OK}); `SUPERSEDES` → `rule` (the rule it replaces)"
+    return (
+        f"| agent behavioural rule | `rule` | {fields} | {edges} | the rules in force | "
+        "the rendered mirrors | an operator's name |"
+    )
+
+
+FIELD_WRAPPERS = tuple(
+    [lambda e, a=aside: f"{e} — {a}" for aside in ASIDES]
+    + [
+        lambda e: f"not {e}",
+        lambda e: f"{e}, reverted",
+        lambda e: f"~~{e}~~",
+        lambda e: f"<del>{e}</del>",
+    ]
+)
+
+
+@pytest.mark.parametrize("wrap", FIELD_WRAPPERS)
+@pytest.mark.parametrize("field", ("scope", "agent_sub"))
+def test_text_around_a_field_claim_fails(tmp_path: Path, wrap, field: str) -> None:
+    """At 3c5341cf only the parenthetical was compared, so every one of these returned 0 problems."""
+    row = _row_with_field_entry(field, wrap(_field_entry(field)))
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    assert decision_114.check(tmp_path)
+
+
+def test_bare_second_mention_of_a_field_fails(tmp_path: Path) -> None:
+    row = rule_row(extra_fields="; `scope` is still what the loader reads")
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    assert decision_114.check(tmp_path)
+
+
+def test_exact_field_entries_pass(tmp_path: Path) -> None:
+    for field in ("scope", "agent_sub"):
+        write_corpus(tmp_path / field, data_model_text=data_model(_row_with_field_entry(field, _field_entry(field))))
+        assert decision_114.check(tmp_path / field) == []
+
+
+# --- Red: decoy register row (security, 3c5341cf) ----------------------------------------------
+
+
+def test_non_ruled_decoy_register_row_does_not_disable_the_check(tmp_path: Path) -> None:
+    """At 3c5341cf the first `| 114 |` line anywhere won, so this returned 0 problems."""
+    decoy = "| 114 | decoy | x | y | **open** |\n\n"
+    conformance = CONFORMANCE_RULED.replace("## The register", decoy + "## The register", 1)
+    write_corpus(tmp_path, conformance=conformance, data_model_text=data_model(rule_row(governs=None)))
+    problems = decision_114.check(tmp_path)
+    assert problems and any("GOVERNS" in p for p in problems)
+
+
+def test_second_register_row_114_is_ambiguous(tmp_path: Path) -> None:
+    conformance = CONFORMANCE_RULED.replace("| 114 |", "| 114 | decoy | x | y | **open** |\n| 114 |", 1)
+    write_corpus(tmp_path, conformance=conformance)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "more than one register row" in problems[0]
+
+
+def test_register_row_only_inside_a_comment_is_not_found(tmp_path: Path) -> None:
+    conformance = CONFORMANCE_RULED.replace("| 114 |", "<!--\n| 114 |", 1) + "-->\n"
+    write_corpus(tmp_path, conformance=conformance)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "no register row" in problems[0]
+
+
+# --- Red: markup hiding the approved text (security, 3c5341cf) ---------------------------------
+
+
+def _live_like_row() -> str:
+    return rule_row(extra_edges="; `PART_OF` → `policy` (a grouping); `SUPERSEDES` → `rule` (the rule it replaces)")
+
+
+def test_html_comment_hiding_the_governs_entry_fails(tmp_path: Path) -> None:
+    """Security's reproduction: a comment opened in one edge entry and closed in the next hides the
+    approved GOVERNS entry from a renderer while every entry still parses. 0 problems at 3c5341cf."""
+    row = rule_row(
+        governs=GOVERNS_OK,
+        extra_edges="; `SUPERSEDES` → `rule` (the rule it replaces)",
+    ).replace("`GOVERNS` → `agent`", "`PART_OF` → `policy` (a grouping <!-- ); `GOVERNS` → `agent`", 1)
+    row = row.replace("; `SUPERSEDES`", " --> ); `SUPERSEDES`", 1)
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    problems = decision_114.check(tmp_path)
+    assert any("decision-114-markup" in p for p in problems)
+
+
+def test_approved_field_texts_moved_into_a_comment_fail(tmp_path: Path) -> None:
+    row = rule_row(scope="still the live target selector", agent_sub="still read").replace(
+        "| `GOVERNS`",
+        f"<!-- `scope` ({SCOPE_OK}); `agent_sub` ({AGENT_SUB_OK}) --> | `GOVERNS`",
+        1,
+    )
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    problems = decision_114.check(tmp_path)
+    assert any("decision-114-markup" in p for p in problems)
+
+
+def test_strikethrough_around_the_governs_entry_fails(tmp_path: Path) -> None:
+    row = _live_like_row().replace("`GOVERNS` → `agent`", "~~`GOVERNS` → `agent`", 1).replace(
+        "; `PART_OF`", "~~; `PART_OF`", 1
+    )
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    problems = decision_114.check(tmp_path)
+    assert any("decision-114-markup" in p for p in problems)
+
+
+@pytest.mark.parametrize("markup", ("<!-- x -->", "<span hidden>x</span>", "<details>x</details>", "~~x~~"))
+def test_any_hiding_markup_on_the_concepts_row_fails(tmp_path: Path, markup: str) -> None:
+    row = _live_like_row().replace("the rules in force", f"the rules in force {markup}")
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "decision-114-markup" in problems[0]
+
+
+def test_hiding_markup_on_register_row_114_fails(tmp_path: Path) -> None:
+    conformance = CONFORMANCE_RULED.replace("tied to its agent", "tied <!-- not --> to its agent")
+    write_corpus(tmp_path, conformance=conformance)
+    problems = decision_114.check(tmp_path)
+    assert len(problems) == 1 and "decision-114-markup" in problems[0] and "conformance.md" in problems[0]
+
+
+def test_ruled_hidden_in_a_comment_still_enables_the_check(tmp_path: Path) -> None:
+    """Hiding can only turn the check on: `**ruled**` inside a comment on an open row enforces."""
+    conformance = CONFORMANCE_OPEN.replace("**open**", "**open** <!-- **ruled** -->")
+    write_corpus(tmp_path, conformance=conformance, data_model_text=data_model(rule_row(governs=None)))
+    assert decision_114.check(tmp_path)
+
+
+def test_ascii_arrow_less_than_is_not_markup(tmp_path: Path) -> None:
+    row = _live_like_row().replace("; `PART_OF` → `policy`", "; `REFERS_TO` <- finding (the finding)")
+    write_corpus(tmp_path, data_model_text=data_model(row))
+    assert decision_114.check(tmp_path) == []

@@ -2176,12 +2176,12 @@ definition — where this table and an entry's own prose differ, the entry gover
 | Design-wide property, argued once | [invariant](#invariant) | `principles.md`'s twelve | [`invariant`](#invariant) |
 | A mechanism that fails visibly on violation | [control](#control) | whatever a [guard](#guard), [gate](#gate), CI step, or admission check names as its failure path | [`control`](#control) |
 | Vehicle delivering a payload into context | [carrier](#carrier) | protocol, integration, bundle, local instruction file, or hook | [`carrier`](#carrier) |
-| Content of one recurring piece of work | [procedure](#procedure) | targeted at a [workflow](#workflow), [step](#step), [adapter](#adapter) operation, or [policy](#policy) | [`procedure`](#procedure) |
+| Content of one recurring piece of work | [procedure](#procedure) | targeted at a [workflow](#workflow), [step](#step), [adapter](#adapter) operation, or a [rule](#rule) that points to it | [`procedure`](#procedure) |
 | Harness-matrix row label for a delivered procedure | [method](#method) | `harness_carriers.md#payloads`'s Method row only, never a design type | [`method`](#method) |
 | File a harness loads by name | [skill](#skill) | source state the harnesses hold; never a design target | [`skill`](#skill) |
 | Field allowlist on a write grant | [parameter constraint](#parameter-constraint) | `agent_grant.param_constraints` | [`parameter constraint`](#parameter-constraint) |
 | Interface obligation set an existing mechanism carries | [contract](#contract) — always qualified: admission contract, write contract, record-usage contract, document contract | the mechanism each compound names; no record of its own | [`contract`](#contract) |
-| Decision point evaluating an action against a policy | [gate](#gate) (`action gate`) | `action_policy`, evaluated per action | [`gate`](#gate) |
+| Decision point evaluating an action against an `action_policy` | [gate](#gate) (`action gate`) | `action_policy`, evaluated per action | [`gate`](#gate) |
 | — (rejected; names nothing a rule, a policy, or a compound type doesn't) | ~~guideline~~, ~~directive~~ | — | [`policy`](#policy) |
 
 **Foundation → Ateles → Neotoma, per row above.** The design (this file, `data_model.md`) states the

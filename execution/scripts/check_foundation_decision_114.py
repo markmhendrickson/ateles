@@ -36,6 +36,19 @@ catch, not this check's; the check guarantees that the three spans that carry th
 exactly what was ruled. It also requires every edges-column entry to be an edge of a type in
 ``ALLOWED_EDGE_TYPES`` (`` `TYPE` → target ``), so a bare prose entry cannot sit in the edge list, and
 exactly one `GOVERNS` → `agent` entry, so a second one cannot carry a denial beside the approved one.
+The fields column is held to the same entry-level exactness: every `;`-separated entry that names
+`scope` or `agent_sub` must be, in full, `` `field` (<approved text>) ``, with nothing before the
+backtick or after the closing parenthesis, and each field is described by exactly one entry.
+
+**What a reader sees, not only the bytes.** The approved spans must be visible when the page renders.
+HTML comments are blanked before either row is located (line numbers kept), so a row inside a comment
+is not found; and the concepts row and register row 114 are refused outright if their raw line carries
+an HTML comment delimiter, a raw HTML tag, or GFM strikethrough (``~~``) — markup is a finite grammar, so
+refusing it is complete where reading prose for denials was not. Both rows are looked up only inside
+their own section (``## Concepts``; ``## The register of open design decisions``), and a second match in
+either section is a problem rather than a silent first-match, so a decoy row cannot mask or disable the
+real one. Whether row 114 is ruled is read from its raw line, so text hidden in a comment can only turn
+the check on, never off.
 
 This is a corpus-shape check, the same kind `check_foundation_decision_101.py` and
 `check_foundation_decision_117.py` already are: it takes on no traversal or loader-implementation scope.
@@ -53,6 +66,24 @@ from pathlib import Path
 FOUNDATION_DIR = Path("docs/foundation")
 
 _DECISION_ROW_RE = re.compile(r"^\|\s*114\s*\|")
+
+REGISTER_HEADING = "## The register of open design decisions"
+CONCEPTS_HEADING = "## Concepts"
+
+_HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+
+# Markup that can hide or strike text from a reader while the raw bytes still carry it.
+_HIDING_MARKUP_RE = re.compile(r"<!--|-->|~~|</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
+
+
+def _blank_html_comments(text: str) -> str:
+    """Remove HTML comments (an unclosed one runs to the end), keeping every newline so line numbers
+    in the result match the raw text."""
+    return _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
+def _hiding_markup(line: str) -> list[str]:
+    return sorted(set(_HIDING_MARKUP_RE.findall(line)))
 
 # The approved claim sentences. Each tuple is closed: a span passes only by equalling one entry after
 # whitespace normalization. Add an entry (or replace one) in the same PR that changes the row's wording.
@@ -129,7 +160,8 @@ _EDGE_ENTRY_RE = re.compile(r"^\s*`(?P<type>[A-Z_]+)`\s*(?:→|->|←|<-)\s*\S")
 # identifier, while allowing the closing backtick, whitespace, or `(`.
 _GOVERNS_AGENT_RE = re.compile(r"^\s*`GOVERNS`\s*(?:→|->)\s*`?agent`?(?!\w)")
 
-_FIELD_OWN_PAREN_RE = re.compile(r"`(scope|agent_sub)`\s*(\()")
+_FIELD_MENTION_RE = re.compile(r"`(scope|agent_sub)`")
+_FIELD_ENTRY_RE = re.compile(r"^`(?P<field>scope|agent_sub)`\s*\(")
 
 
 def _malformed_edge_entries(edges_cell: str) -> list[str]:
@@ -168,26 +200,42 @@ def _has_governs_edge_entry(edges_cell: str) -> bool:
     return len(entries) == 1 and _governs_agent_entry_is_approved(entries[0])
 
 
-def _field_descriptions(fields_cell: str) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {"scope": [], "agent_sub": []}
-    for match in _FIELD_OWN_PAREN_RE.finditer(fields_cell):
-        description = _extract_balanced_paren(fields_cell, match.start(2))
-        if description is not None:
-            out[match.group(1)].append(description)
-    return out
+def _field_entry_description(entry: str) -> tuple[str, str] | None:
+    """``(field, description)`` when ``entry`` is, in full, `` `field` (description) `` — nothing before
+    the backtick, nothing after the closing parenthesis — else ``None``."""
+    entry = entry.strip()
+    match = _FIELD_ENTRY_RE.match(entry)
+    if not match:
+        return None
+    open_at = match.end() - 1
+    description = _extract_balanced_paren(entry, open_at)
+    if description is None or entry[open_at + len(description) + 2 :].strip():
+        return None
+    return match.group("field"), description
 
 
 def _has_affirmative_superseded_claim(fields_cell: str) -> bool:
-    """True when every `scope` and `agent_sub` description in the cell is an approved text, and both
-    fields carry one. A second, unapproved description of either field fails it too, so a denial cannot
-    ride beside the approved sentence as another mention of the same field."""
-    found = _field_descriptions(fields_cell)
-    return (
-        bool(found["scope"])
-        and bool(found["agent_sub"])
-        and all(_approved(d, APPROVED_SCOPE_TEXTS) for d in found["scope"])
-        and all(_approved(d, APPROVED_AGENT_SUB_TEXTS) for d in found["agent_sub"])
-    )
+    """True when `scope` and `agent_sub` are each described by exactly one fields-column entry, and that
+    entry is, in full, the field and an approved parenthetical.
+
+    Every entry that names either field must be such an entry: text before the backtick (``not``, ``~~``),
+    text after the parenthesis (``— though the loader still reads it``), or a second entry naming the
+    field all fail it, the same entry-level exactness the edges column applies to `GOVERNS` → `agent`.
+    """
+    approved = {"scope": APPROVED_SCOPE_TEXTS, "agent_sub": APPROVED_AGENT_SUB_TEXTS}
+    seen = {"scope": 0, "agent_sub": 0}
+    for entry in _split_top_level(fields_cell):
+        mentioned = set(_FIELD_MENTION_RE.findall(entry))
+        if not mentioned:
+            continue
+        parsed = _field_entry_description(entry)
+        if parsed is None:
+            return False
+        field, description = parsed
+        if not _approved(description, approved[field]):
+            return False
+        seen[field] += 1
+    return seen == {"scope": 1, "agent_sub": 1}
 
 
 class CorpusProblem(Exception):
@@ -198,32 +246,51 @@ class AmbiguousCorpusRow(Exception):
     """More than one candidate row was found where exactly one is required."""
 
 
-def decision_114_row(conformance_text: str) -> tuple[int, list[str]] | None:
-    for no, line in enumerate(conformance_text.splitlines(), 1):
-        if not _DECISION_ROW_RE.match(line):
+def _iter_section_lines(text: str, heading: str) -> "list[tuple[int, str]]":
+    """(line no, line) pairs for lines inside the ``heading`` section, HTML comments blanked.
+
+    Scoped to that section — stopping at the next ``## `` heading — rather than the whole document, so a
+    second table sharing the row's shape elsewhere is never mistaken for the live row, and a row inside
+    an HTML comment (which a reader never sees) is never found.
+    """
+    lines: list[tuple[int, str]] = []
+    in_section = False
+    for no, line in enumerate(_blank_html_comments(text).splitlines(), 1):
+        if line.startswith("## "):
+            in_section = line.strip() == heading
             continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        return no, cells
-    return None
+        if in_section:
+            lines.append((no, line))
+    return lines
 
 
 def _iter_concepts_section_lines(data_model_text: str) -> "list[tuple[int, str]]":
-    """Yield (line no, line) pairs for lines inside the ``## Concepts`` section.
+    return _iter_section_lines(data_model_text, CONCEPTS_HEADING)
 
-    Scoped to that section specifically — stopping at the next ``## ``
-    heading — rather than the whole document, so a second table sharing the
-    concepts-row shape elsewhere (an appendix, migration notes, a
-    before/after comparison) is never mistaken for the live concepts row.
+
+def decision_114_row(conformance_text: str) -> tuple[int, list[str]] | None:
+    """(line no, cells of the raw line) for register row 114.
+
+    Requires exactly one row beginning ``| 114 |`` inside the register section; more than one raises
+    ``AmbiguousCorpusRow``, so a non-ruled decoy placed above the real row cannot switch the check off.
+    The cells come from the raw line, comments included, so ``**ruled**`` hidden in a comment still
+    enables the check — hiding can only turn it on.
     """
-    lines: list[tuple[int, str]] = []
-    in_concepts = False
-    for no, line in enumerate(data_model_text.splitlines(), 1):
-        if line.startswith("## "):
-            in_concepts = line.strip() == "## Concepts"
-            continue
-        if in_concepts:
-            lines.append((no, line))
-    return lines
+    raw_lines = conformance_text.splitlines()
+    matches = [
+        no for no, line in _iter_section_lines(conformance_text, REGISTER_HEADING)
+        if _DECISION_ROW_RE.match(line)
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise AmbiguousCorpusRow(
+            "found more than one register row beginning `| 114 |` within "
+            f"{REGISTER_HEADING} (lines {', '.join(map(str, matches))}); expected exactly one"
+        )
+    no = matches[0]
+    line = raw_lines[no - 1]
+    return no, [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
 def agent_policy_concepts_row(
@@ -293,11 +360,14 @@ def check(root: Path) -> list[str]:
             )
 
     conformance_text = conformance_path.read_text(encoding="utf-8")
-    row = decision_114_row(conformance_text)
+    try:
+        row = decision_114_row(conformance_text)
+    except AmbiguousCorpusRow as exc:
+        return [f"{conformance_path}:1: decision-114-register — {exc}"]
     if row is None:
         return [
             f"{conformance_path}:1: decision-114-register — no register row "
-            'beginning "| 114 |"'
+            f'beginning "| 114 |" within {REGISTER_HEADING}'
         ]
 
     row_no, cells = row
@@ -319,7 +389,21 @@ def check(root: Path) -> list[str]:
         ]
 
     concepts_row_no, fields_cell, edges_cell, _whole_row = concepts_row
-    return check_concepts_row(data_model_path, concepts_row_no, fields_cell, edges_cell)
+    problems = []
+    for path, no, raw in (
+        (conformance_path, row_no, conformance_text.splitlines()[row_no - 1]),
+        (data_model_path, concepts_row_no, data_model_text.splitlines()[concepts_row_no - 1]),
+    ):
+        markup = _hiding_markup(raw)
+        if markup:
+            problems.append(
+                f"{path}:{no}: decision-114-markup — the row carries markup that can hide or strike "
+                f"text from a reader ({', '.join(markup)}); HTML comments, raw HTML tags and `~~` are "
+                "refused on the rows decision 114's check reads, so what it verifies is what renders"
+            )
+    return problems + check_concepts_row(
+        data_model_path, concepts_row_no, fields_cell, edges_cell
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
