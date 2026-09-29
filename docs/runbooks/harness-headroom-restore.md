@@ -191,3 +191,35 @@ Pass `--task-entity-id ent_...` on the real (non-dry-run) command, then query
 module docstring, USAGE section, for the exact `retrieve_entities` call. No
 access to this script's own process or stdout is needed to see whether the
 dispatch started, completed, or failed.
+
+## Usage gate: a refused frontier dispatch is not exhaustion
+
+Claude dispatch is also gated on the usage snapshot itself
+(`harness_router.usage_gate`, Phase A3). A dispatch is refused, with its own
+message, when:
+
+- **`usage reading stale since <time>`** (or `missing` / `malformed`): the
+  reading is older than `APIS_USAGE_STALE_SECONDS` (default 1800), absent, or not
+  a valid set of windows. The dispatcher refreshes it itself before selecting
+  when it is older than `APIS_USAGE_REFRESH_SECONDS` (default 600), by running one
+  minimal `claude` probe whose `rate_limit_event` carries the plan's five-hour and
+  weekly windows; a refusal means that probe also failed (not logged in, CLI
+  missing). Run the same refresh by hand and read the verdict:
+
+  ```sh
+  python3 execution/scripts/harness_usage.py refresh
+  python3 execution/scripts/harness_usage.py show
+  ```
+
+  Verify: `show` lists `usage_gate.snapshot_age_seconds` near 0 and
+  `dispatch_allowed`. Do not edit the headroom file to get past a stale refusal;
+  it does not affect the gate.
+- **`weekly usage N% is at or above the pace line ...`**: swarm use is ahead of
+  `APIS_USAGE_WEEKLY_CEILING_PERCENT` (60) x the elapsed fraction of the week +
+  `APIS_USAGE_PACE_BURST_PERCENT` (10). The message states when capacity returns
+  if nothing more is used. Note the weekly percent is the whole account, so the
+  operator's own sessions count toward it. Local/mechanical work is never gated;
+  Codex and Cursor have no automatic live source and are not gated.
+
+`APIS_USAGE_GATE=off` disables the gate (an emergency valve, not a fix), and
+`APIS_USAGE_PROBE=off` disables only the automatic probe.
