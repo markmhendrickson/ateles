@@ -360,6 +360,33 @@ BASH_BLOCK = [
         "env -u running python3 -c after source",
         f"source {ENV}; env -u X python3 -c 'import os; print(os.environ)'",
     ),
+    # Security review of ateles#1346 (ent_a447f6f9062e19f3454278de): a dump
+    # invoked through a non-canonical path must stay refused after a source,
+    # not only `env` and `/usr/bin/env`.
+    ("doubled-slash env path after source", f"source {ENV}; //usr/bin/env"),
+    ("dot-dot env path after source", f"source {ENV}; /usr/bin/../bin/env"),
+    (
+        "non-standard bin env path after source",
+        f"source {ENV}; /opt/homebrew/bin/env",
+    ),
+    ("relative printenv path after source", f"source {ENV}; ./printenv"),
+    (
+        "dot-dot printenv path after source",
+        f"source {ENV}; /usr/bin/../bin/printenv",
+    ),
+    ("doubled-slash env path, no source", "//usr/bin/env"),
+    ("non-standard printenv path, no source", "/opt/homebrew/bin/printenv"),
+    # Combined and long inline-program flags (qa and security non-blocking
+    # notes on the same review).
+    ("env -u running bash -lc set after source", f"source {ENV}; env -u X bash -lc set"),
+    (
+        "env -u running perl -E after source",
+        f"source {ENV}; env -u X perl -E 'print %ENV'",
+    ),
+    (
+        "env -u running node --eval after source",
+        f"source {ENV}; env -u X node --eval 'console.log(process.env)'",
+    ),
 ]
 
 BASH_ALLOW = [
@@ -490,6 +517,13 @@ BASH_ALLOW = [
     (
         "env -u in a shell wrapper running a command",
         'sh -c "env -u GITHUB_TOKEN gh pr list"',
+    ),
+    # The any-path match for env/printenv (ateles#1346 security review) must
+    # not turn a URL path segment or a pathed program run into a dump.
+    ("URL whose last segment is env", "curl -s https://example.test/v1/env"),
+    (
+        "pathed env running a program after source",
+        f"source {ENV}; /opt/homebrew/bin/env -u X gh pr list",
     ),
     (
         "sourced variable used as a request header, response discarded",

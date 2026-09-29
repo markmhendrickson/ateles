@@ -443,8 +443,18 @@ _PROC_ENVIRON_RE = re.compile(r"/proc/[^\s'\"]*?/environ\b")
 _COMMAND_START = r"(?<![A-Za-z0-9_./-])"
 _COMMAND_END = r"(?![A-Za-z0-9_./-])"
 _BIN_PATH = r"(?:/(?:usr/)?bin/)?"
-_PRINTENV_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}printenv{_COMMAND_END}")
-_ENV_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}env{_COMMAND_END}")
+# `env` and `printenv` are matched under ANY directory prefix, not only the
+# two canonical bin directories: `//usr/bin/env`, `/usr/bin/../bin/env`,
+# `./printenv` and a Homebrew or Nix path all run the same dump, and the
+# narrower `_BIN_PATH` let them through after a credential source once the
+# post-source check stopped using the loose word match (security review of
+# ateles#1346, finding ent_a447f6f9062e19f3454278de). The prefix stops at
+# shell syntax, quotes, `$` and `=`, and a `:` may neither precede nor
+# appear in it, so a URL such as `https://host/env` is not read as a path.
+_PATHED_COMMAND_START = r"(?<![A-Za-z0-9_./:-])"
+_ANY_PATH = r"(?:[^\s;&|<>()`'\"$:=]*/)?"
+_PRINTENV_RE = re.compile(rf"{_PATHED_COMMAND_START}{_ANY_PATH}printenv{_COMMAND_END}")
+_ENV_RE = re.compile(rf"{_PATHED_COMMAND_START}{_ANY_PATH}env{_COMMAND_END}")
 _SERVICE_ENV_RE = re.compile(
     rf"{_COMMAND_START}{_BIN_PATH}launchctl\s+(?:print|getenv){_COMMAND_END}"
     rf"|{_COMMAND_START}{_BIN_PATH}systemctl\s+"
@@ -546,13 +556,33 @@ def _env_dumps_ambient(segment: str) -> bool:
 # walk ENVIRON), or a shell/interpreter given an inline program. After a
 # credential source, `env -u X <one of these>` is refused even though env
 # itself prints nothing; before the ent_32394756032dd7a59e9311b6 fix every
-# post-source `env` was refused, and these shapes must not become reachable
-# through the narrowing (self-review finding, `env -u X bash -c set`).
+# post-source `env` was refused, and the common dumping shapes should not
+# become reachable through the narrowing (self-review finding, `env -u X
+# bash -c set`). This is a denylist, so it is not complete: a wrapper such as
+# `env -u X nice bash -c set` still passes, exactly as the unwrapped
+# `nice bash -c set` does after a source on main. Judging every post-source
+# program by capability, with or without `env`, is follow-up task
+# ent_4c0f949eeafbca174819e22f.
 _ENV_DUMPING_PROGRAMS = frozenset({"env", "printenv", "awk", "gawk", "mawk", "nawk"})
 _INLINE_PROGRAM_INTERPRETERS = re.compile(
     r"^(?:sh|bash|zsh|dash|ksh|python[0-9.]*|perl|ruby|node|nodejs)$"
 )
-_INLINE_PROGRAM_FLAGS = frozenset({"-c", "-e", "-pe", "-ne"})
+_INLINE_PROGRAM_LONG_FLAGS = frozenset({"--command", "--eval", "--print"})
+
+
+def _is_inline_program_flag(word: str) -> bool:
+    """True for a flag that hands an interpreter an inline program: the
+    separate `-c`/`-e` forms, combined short flags (`bash -lc`, `sh -xc`,
+    `perl -pe`, `perl -E`, `node -p`), and node's long `--eval`/`--print`.
+    Matching exact words only let the combined forms through (qa and
+    security review of ateles#1346)."""
+    if word.split("=", 1)[0] in _INLINE_PROGRAM_LONG_FLAGS:
+        return True
+    return (
+        word.startswith("-")
+        and not word.startswith("--")
+        and bool(set(word[1:]) & set("ceEp"))
+    )
 
 
 def _env_dumps_after_source(segment: str) -> bool:
@@ -566,8 +596,8 @@ def _env_dumps_after_source(segment: str) -> bool:
         name = program[0].rsplit("/", 1)[-1]
         if name in _ENV_DUMPING_PROGRAMS:
             return True
-        if _INLINE_PROGRAM_INTERPRETERS.match(name) and (
-            _INLINE_PROGRAM_FLAGS & set(program[1:])
+        if _INLINE_PROGRAM_INTERPRETERS.match(name) and any(
+            _is_inline_program_flag(word) for word in program[1:]
         ):
             return True
     return False
