@@ -2119,7 +2119,8 @@ class TestEvaluateLensToleratesTheRealHarnessFooter:
 
 # ── carried sign-offs (ruling `rereview_only_blockers_and_touched_areas`) ────
 
-SECURITY_FIX_FILE = ".claude/hooks/some_guard.py"  # security area only
+SECURITY_FIX_FILE = "execution/scripts/test_guard.py"  # allowlisted: qa only
+CODE_FIX_FILE = ".claude/hooks/some_guard.py"  # a security path: every lens
 DOC_FILE = "docs/guide/how_to.md"  # ux area
 UNMAPPED_FILE = "lib/some_util.py"  # in no area
 FIVE = ["pm", "arch", "ux", "qa", "security"]
@@ -2189,7 +2190,7 @@ def _fix_sides(*fix_files: str) -> dict[str, list[dict]]:
     }
 
 
-def _fix_round_comments(*, blocked=("security",), reran=("security",)) -> list[dict]:
+def _fix_round_comments(*, blocked=("security",), reran=("security", "qa")) -> list[dict]:
     earlier = _round_comments(OLD_HEAD, blocked=blocked)
     now = [c for c in _round_comments(HEAD) if any(
         f"review:{lens} " in c["body"] for lens in reran)]
@@ -2209,7 +2210,7 @@ class TestCarriedSignOffs:
         code = await target.run(REPO, PR, [], apply=apply, panel_all=True, **kwargs)
         return code, client
 
-    async def test_a_security_fix_reviewed_by_security_alone_approves_and_names_the_carried(
+    async def test_a_test_only_security_fix_reviewed_by_security_and_qa_approves_and_names_the_carried(
         self, monkeypatch
     ):
         code, client = await self._run(
@@ -2217,22 +2218,29 @@ class TestCarriedSignOffs:
         )
         assert code == 0
         body = client.posted[0]["json"]["body"]
-        for lens in ("pm", "arch", "ux", "qa"):
+        for lens in ("pm", "arch", "ux", "qa", "security"):
             assert f"**{lens}**" in body
         # every carried lens is named with the full head its verdict came from
-        assert body.count("CARRIED FORWARD") == 4
-        assert body.count(f"at head `{OLD_HEAD}`") == 4
+        assert body.count("CARRIED FORWARD") == 3
+        assert body.count(f"at head `{OLD_HEAD}`") == 3
         assert "**security** (falco): `signed_off` —" in body
+        assert "**qa** (phoenicurus): `signed_off` —" in body
         assert "carried forward from an earlier head" in body
 
     async def test_a_docs_fix_also_needs_ux_at_the_current_head(self, monkeypatch):
         sides = _fix_sides(SECURITY_FIX_FILE, DOC_FILE)
         code, client = await self._run(monkeypatch, _fix_round_comments(), sides)
         assert code == 1 and client.posted == []  # ux was not re-run
-        comments = _fix_round_comments(reran=("security", "ux"))
+        comments = _fix_round_comments(reran=("security", "qa", "ux"))
         code, client = await self._run(monkeypatch, comments, sides)
         assert code == 0
-        assert client.posted[0]["json"]["body"].count("CARRIED FORWARD") == 3
+        assert client.posted[0]["json"]["body"].count("CARRIED FORWARD") == 2
+
+    async def test_a_code_fix_carries_nothing(self, monkeypatch):
+        code, client = await self._run(
+            monkeypatch, _fix_round_comments(), _fix_sides(CODE_FIX_FILE)
+        )
+        assert code == 1 and client.posted == []
 
     async def test_an_unmapped_file_carries_nothing(self, monkeypatch):
         code, client = await self._run(
@@ -2274,4 +2282,44 @@ class TestCarriedSignOffs:
             apply=False,
         )
         assert code == 0
-        assert capsys.readouterr().out.count("carried") >= 4
+        assert capsys.readouterr().out.count("carried") >= 3
+
+    async def test_a_moved_guard_line_is_a_change_not_an_empty_delta(self, monkeypatch):
+        """Security review of ateles#1368: the same +/- lines at a different place
+        measured 0 changed lines, so nothing was touched and every lens carried."""
+        old = [_pr_file(SECURITY_FIX_FILE, "@@ -1,3 +1,4 @@\n a\n+check()\n b\n")]
+        old[0]["sha"] = "blob-old"
+        new = [_pr_file(SECURITY_FIX_FILE, "@@ -1,3 +1,4 @@\n a\n b\n+check()\n")]
+        new[0]["sha"] = "blob-new"
+        comments = _fix_round_comments(blocked=(), reran=())
+        code, client = await self._run(monkeypatch, comments, {OLD_HEAD: old, HEAD: new})
+        assert code == 1 and client.posted == []
+
+    async def test_an_empty_delta_after_a_head_change_carries_nothing(self, monkeypatch):
+        same = [_pr_file("a_random_file.txt")]
+        comments = _fix_round_comments(blocked=(), reran=())
+        code, client = await self._run(monkeypatch, comments, {OLD_HEAD: same, HEAD: same})
+        assert code == 1 and client.posted == []
+
+    async def test_a_refusal_keeps_why_the_lens_could_not_be_carried(self, monkeypatch, capsys):
+        sides = _fix_sides(SECURITY_FIX_FILE, DOC_FILE)
+        code, _ = await self._run(monkeypatch, _fix_round_comments(), sides, apply=False)
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "Not carried from an earlier head: the fix touched its area" in out
+
+    async def test_an_unreadable_delta_says_so_on_the_failing_row(self, monkeypatch, capsys):
+        sides = _fix_sides(SECURITY_FIX_FILE)
+        del sides[OLD_HEAD]
+        await self._run(monkeypatch, _fix_round_comments(), sides, apply=False)
+        assert "unreadable" in capsys.readouterr().out
+
+
+def test_help_documents_carrying_and_no_carry(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--help"])
+    with pytest.raises(SystemExit):
+        target.main()
+    out = capsys.readouterr().out
+    assert "--no-carry" in out
+    assert "earlier head" in out
+    assert "--no-carry" in (target.__doc__ or "")

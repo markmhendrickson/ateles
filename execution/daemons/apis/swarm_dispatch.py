@@ -104,6 +104,7 @@ import model_tiering
 import review_carry
 import review_delta
 from skill_runner import (
+    ATELES_REPO,
     GATE_OWNER_TOOL_DENY_UNAVAILABLE,
     GATE_VERDICT_POSITION_RULE,
     NEOTOMA_IDENTITY_UNAVAILABLE,
@@ -6509,6 +6510,15 @@ class SwarmDispatcher:
                     f"{ {k: v.head[:7] for k, v in carried_lenses.items()} }"
                 )
                 await self._post_carry_note(trigger, selection, review_head)
+                if not panel:
+                    # Every seated lens is carried: nothing was re-reviewed, so
+                    # there is nothing to aggregate. The approval gate carries
+                    # the earlier verdicts itself and names them.
+                    log.info(
+                        f"[{DAEMON_NAME}] {ref}: every panel lens carried — "
+                        "aggregation skipped"
+                    )
+                    return
 
         reviews: list[tuple[str, str]] = []
         failed_lenses: list[tuple[str, str]] = []
@@ -6553,6 +6563,7 @@ class SwarmDispatcher:
                 expectations,
                 parent,
                 review_head,
+                changed_files,
                 pending_gates=pending_gates,
                 live_gates=live_gates,
                 signals=panel_signals,
@@ -11273,32 +11284,21 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _panelist_prompt(
+    def _lens_duty_blocks(
         t: SwarmTrigger,
         lens: Lens,
         expectation: str,
-        parent: int | None = None,
-        has_worktree: bool = False,
-        owns_pending_gate: bool = False,
-        changed_files: list[str] | None = None,
-        reviewed_head: str | None = None,
-    ) -> str:
-        """Build a lens panelist's prompt.
+        parent: int | None,
+        has_worktree: bool,
+        changed_files: list[str] | None,
+    ) -> tuple[str, str, str, str, str]:
+        """The duties every lens prompt carries, built in one place.
 
-        `has_worktree` reflects whether this panelist actually got a writable PR
-        checkout as its cwd. It gates the evidence bar: telling a lens to "run
-        the code" when it is reviewing diff-only would be a lie that either
-        wastes its turn or invites invented output (#254 / plan
-        ent_ccd6660fc28800a2ae3a5623).
-
-        `changed_files` keys the foundation reading list
-        (docs/foundation/conformance.md): every reviewing lens receives the
-        kernel plus the documents keyed to the paths this PR touches, inlined,
-        so a finding can cite the invariant by path; the pm and arch lenses
-        also receive the mechanical check of the PR body's design basis.
-        Forward-looking lenses do not review, so they get neither. Empty on a
-        checkout with no reading list.
-        """
+        (expectation block, blocking rules with the evidence bar, expectation
+        check-off, gate verdict format, foundation reading list with the pm/arch
+        design-basis check). `_panelist_prompt` and the combined pm/qa/ux pass
+        both call this, so a duty added for a lens reaches both and they cannot
+        drift (pm review of ateles#1368)."""
         expectation_block = (
             "Your pre-registered expectations on the parent issue were:\n"
             f"{expectation}\n\nReview against them first: did the change meet "
@@ -11406,6 +11406,50 @@ class SwarmDispatcher:
                     foundation_block += "\n" + design_basis_block(
                         t.body, where="the PR body"
                     )
+        return (
+            expectation_block,
+            blocking_rules,
+            checkoff_block,
+            gate_writeback_block,
+            foundation_block,
+        )
+
+    @staticmethod
+    def _panelist_prompt(
+        t: SwarmTrigger,
+        lens: Lens,
+        expectation: str,
+        parent: int | None = None,
+        has_worktree: bool = False,
+        owns_pending_gate: bool = False,
+        changed_files: list[str] | None = None,
+        reviewed_head: str | None = None,
+    ) -> str:
+        """Build a lens panelist's prompt.
+
+        `has_worktree` reflects whether this panelist actually got a writable PR
+        checkout as its cwd. It gates the evidence bar: telling a lens to "run
+        the code" when it is reviewing diff-only would be a lie that either
+        wastes its turn or invites invented output (#254 / plan
+        ent_ccd6660fc28800a2ae3a5623).
+
+        `changed_files` keys the foundation reading list
+        (docs/foundation/conformance.md): every reviewing lens receives the
+        kernel plus the documents keyed to the paths this PR touches, inlined,
+        so a finding can cite the invariant by path; the pm and arch lenses
+        also receive the mechanical check of the PR body's design basis.
+        Forward-looking lenses do not review, so they get neither. Empty on a
+        checkout with no reading list.
+        """
+        (
+            expectation_block,
+            blocking_rules,
+            checkoff_block,
+            gate_writeback_block,
+            foundation_block,
+        ) = SwarmDispatcher._lens_duty_blocks(
+            t, lens, expectation, parent, has_worktree, changed_files
+        )
         _panelist_role = f"{lens.lens} lens panelist"
         marker_head = _normalise_full_sha(
             reviewed_head if reviewed_head is not None else t.head_sha
@@ -11811,13 +11855,18 @@ class SwarmDispatcher:
         """Say on the PR which lenses were carried and which re-ran. Best-effort."""
         rows = "\n".join(
             f"- **{lens}**: `{c.verdict or 'clear'}` at `{c.head}`"
+            + (f" — {c.url}" if c.url else "")
             for lens, c in sorted(selection.carried.items())
         )
+        rerun_rows = "\n".join(
+            f"- **{lens}**: {selection.reasons.get(lens, 're-run')}"
+            for lens in sorted(selection.rerun)
+        )
         body = (
-            f"Re-review of `{review_head[:7]}` is narrowed. Re-running: "
-            f"{', '.join(sorted(selection.rerun)) or 'none'}. Carried forward "
-            "because they cleared an earlier head and the fix since then touched "
-            f"none of their areas:\n{rows}"
+            f"Re-review of `{review_head[:7]}` is narrowed.\n\nRe-running:\n"
+            f"{rerun_rows or '- none'}\n\nCarried forward, because they cleared "
+            "an earlier head and the fix since then touched none of their "
+            f"areas:\n{rows}"
         )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -11831,49 +11880,93 @@ class SwarmDispatcher:
         except Exception as exc:
             log.warning(f"[{DAEMON_NAME}] carry note not posted: {exc}")
 
+    @staticmethod
+    def _lens_agent_prompt(agent: str) -> str:
+        """The agent's own SKILL.md (its prompt), "" when unreadable."""
+        path = ATELES_REPO / ".claude" / "skills" / agent / "SKILL.md"
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
     def _combined_prompt(
         self,
         t: SwarmTrigger,
         lenses: list[Lens],
         expectations: dict[str, str],
         head: str,
+        parent: int | None = None,
+        changed_files: list[str] | None = None,
     ) -> str:
         """One prompt that has the pm, qa and ux lenses review together.
 
-        Each lens gets its own delimiter block that opens with its OWN header and
-        verdict line, so each block is exactly the reply that lens would return
-        alone and the gate's reader parses it unchanged."""
-        blocks = []
+        Each lens keeps its full duties: its own agent prompt, and the same
+        expectation block, evidence bar, expectation check-off, gate verdict
+        format and foundation reading list (with the pm design-basis check) that
+        `_panelist_prompt` gives it, built by the same helper. Each lens's reply
+        is its own delimiter block that opens with its OWN header and verdict
+        line, so the gate's reader parses it unchanged."""
+        sections = []
+        readings = reading_block(list(changed_files or []))
+        reading_given = False
         for lens in lenses:
-            header = attribution_header(lens.agent, f"{lens.lens} lens panelist")
-            blocks.append(
-                f"{review_carry.combined_delimiter(lens.lens)}\n{header}\n"
-                "**SIGNED_OFF** (or `**BLOCKED**` / `**REQUEST_CHANGES**` plus "
-                "`[BLOCKING] <category>: <summary>` lines)\n"
-                f"<findings for the {lens.lens} lens only>\n"
+            (
+                expectation_block,
+                blocking_rules,
+                checkoff_block,
+                gate_block,
+                foundation_block,
+            ) = self._lens_duty_blocks(
+                t, lens, expectations.get(lens.agent, ""), parent, False, changed_files
             )
-            expectation = expectations.get(lens.agent, "")
-            blocks[-1] = (
-                f"Lens `{lens.lens}` checks: {lens.checks}\n"
-                + (f"Pre-registered expectations: {expectation}\n" if expectation else "")
-                + "Block format:\n" + blocks[-1]
+            if readings and readings in foundation_block:
+                # The reading list is the same for every lens: state it once
+                # (it is large) and point the other lenses at it.
+                if reading_given:
+                    foundation_block = foundation_block.replace(
+                        readings,
+                        "The design foundation reading list given for the first "
+                        "lens above applies to this lens too.",
+                    )
+                reading_given = True
+            header = attribution_header(lens.agent, f"{lens.lens} lens panelist")
+            sections.append(
+                f"######## LENS `{lens.lens}` (agent `{lens.agent}`) ########\n"
+                f"This lens's own agent prompt:\n<<<AGENT_PROMPT {lens.agent}\n"
+                f"{self._lens_agent_prompt(lens.agent)}\nAGENT_PROMPT>>>\n\n"
+                f"Review ONLY through your `{lens.lens}` lens: {lens.checks}\n"
+                f"{expectation_block}\n\n{blocking_rules}"
+                f"{checkoff_block}{gate_block}{foundation_block}\n\n"
+                "Your block, exactly in this shape:\n"
+                f"{review_carry.combined_delimiter(lens.lens)}\n{header}\n"
+                "**<VERDICT>**\n"
+                f"<findings for the {lens.lens} lens only>\n"
+                + (
+                    "State in your findings that this lens ran diff-only in the "
+                    "combined pass (no checkout, nothing executed).\n"
+                    if lens.lens == "qa"
+                    else ""
+                )
             )
         return (
             f"Review PR {t.repository}#{t.number} ({t.title}) at head `{head}` "
             "as the following lenses IN ONE PASS. You run diff-only: read the PR "
-            "diff, do not post comments yourself, and mark a finding "
-            "`[BLOCKING]` only when it is evident from the diff.\n\n"
+            "diff. Do not post PR comments yourself: the dispatcher posts each "
+            "block as that lens's own comment. Editing your pre-registered "
+            "expectation checklist on the parent issue, where a lens below asks "
+            "for it, is the only write you make.\n\n"
             "Return ONE reply made of one block per lens, in this order. Each "
-            "block starts with its own delimiter line, then its header line "
-            "EXACTLY as shown, then its verdict line, then its findings. Never "
-            "write one lens's header or verdict inside another lens's block, "
-            "and do not quote a verdict line anywhere. The dispatcher posts each "
-            "block as that lens's own comment under its head marker ("
+            "block starts with its own delimiter line, then that lens's header "
+            "line EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
+            "with your bold verdict token), then its findings. Never write one "
+            "lens's header or verdict inside another lens's block, do not quote "
+            "a verdict line anywhere, and add no artifact or attribution line of "
+            "your own after the last block. The dispatcher posts each block "
+            "under its head marker ("
             + ", ".join(f"`{compose_lens_review_marker(l.lens, head)}`" for l in lenses)
-            + "); do not write a marker yourself. A block whose second "
-            f"line is not its own verdict is read as not passing. "
-            f"{GATE_VERDICT_POSITION_RULE}.\n\n"
-            + "\n".join(blocks)
+            + "); do not write a marker yourself. A block whose second line is "
+            f"not its own verdict is read as not passing. {GATE_VERDICT_POSITION_RULE}.\n\n"
+            + "\n".join(sections)
         )
 
     async def _run_combined_pass(
@@ -11883,6 +11976,7 @@ class SwarmDispatcher:
         expectations: dict[str, str],
         parent: int | None,
         review_head: str,
+        changed_files: list[str] | None = None,
         *,
         pending_gates: set[str],
         live_gates,
@@ -11900,9 +11994,16 @@ class SwarmDispatcher:
             return {}
         try:
             first = combinable[0]
+            if not all(self._lens_agent_prompt(item.agent) for item in combinable):
+                # A lens whose own prompt cannot be loaded cannot be reviewed
+                # in a pass that promises its full duties: run them one by one.
+                return {}
             result = await run_skill(
                 first.agent,
-                self._combined_prompt(trigger, combinable, expectations, review_head),
+                self._combined_prompt(
+                    trigger, combinable, expectations, review_head, parent,
+                    changed_files,
+                ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,
                 notifier=self.notifier,
@@ -11947,6 +12048,7 @@ class SwarmDispatcher:
     ) -> set[str]:
         """Post each accepted lens's own verdict comment; the lenses posted."""
         posted: set[str] = set()
+        combined_by = next(iter(accepted.values())).skill if accepted else ""
         if not accepted or not review_head:
             return posted
         url = (
@@ -11957,7 +12059,11 @@ class SwarmDispatcher:
             async with httpx.AsyncClient(timeout=30) as client:
                 for lens, res in accepted.items():
                     body = review_carry.compose_combined_comment(
-                        res.stdout, compose_lens_review_marker(lens, review_head)
+                        res.stdout,
+                        compose_lens_review_marker(lens, review_head),
+                        provenance=review_carry.combined_provenance(
+                            lens, [k for k in accepted], combined_by
+                        ),
                     )
                     resp = await client.post(
                         url, json={"body": body}, headers=self._github_headers(trigger.repository)

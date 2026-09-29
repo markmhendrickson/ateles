@@ -36,9 +36,10 @@ HEADER_NAME = {
     "pm": "Pavo", "arch": "Waxwing", "ux": "Accipiter", "qa": "Phoenicurus",
     "security": "Falco",
 }
-SECURITY_FILE = ".claude/hooks/some_guard.py"  # security area only
-DOC_FILE = "docs/guide/how_to.md"  # ux area
-UNMAPPED_FILE = "lib/some_util.py"  # in no area
+SECURITY_FILE = ".claude/hooks/some_guard.py"  # a security path: every lens
+TEST_FILE = "execution/scripts/test_guard.py"  # allowlisted: qa only
+DOC_FILE = "docs/guide/how_to.md"  # allowlisted prose docs: ux only
+UNMAPPED_FILE = "lib/some_util.py"  # code: every lens
 
 
 def _body(lens: str, head: str, verdict: str = "SIGNED_OFF", finding: str = "") -> str:
@@ -82,17 +83,36 @@ def _select(comments, delta, *, forced=()):
 
 
 class TestSelection:
-    def test_one_line_security_fix_reruns_security_only(self):
-        sel = _select(_round(OLD, blocked=("security",)), _delta(SECURITY_FILE))
-        assert sel.rerun == {"security"}
-        assert set(sel.carried) == {"pm", "arch", "ux", "qa"}
+    def test_a_security_blocker_fixed_in_a_test_reruns_security_and_qa_only(self):
+        sel = _select(_round(OLD, blocked=("security",)), _delta(TEST_FILE))
+        assert sel.rerun == {"security", "qa"}
+        assert set(sel.carried) == {"pm", "arch", "ux"}
         assert all(c.head == OLD for c in sel.carried.values())
 
     def test_a_docs_change_also_reruns_ux(self):
-        sel = _select(
-            _round(OLD, blocked=("security",)), _delta(SECURITY_FILE, DOC_FILE)
-        )
-        assert sel.rerun == {"security", "ux"}
+        sel = _select(_round(OLD, blocked=("security",)), _delta(TEST_FILE, DOC_FILE))
+        assert sel.rerun == {"security", "qa", "ux"}
+
+    def test_a_code_fix_to_a_security_blocker_reruns_every_lens(self):
+        sel = _select(_round(OLD, blocked=("security",)), _delta(SECURITY_FILE))
+        assert sel.rerun == set(FIVE)
+        assert sel.carried == {}
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/cli/index.ts",  # a ux pattern
+            "src/cli/permissions.ts",
+            "src/services/docs/render.ts",  # a ux pattern
+            ".claude/skills/x/SKILL.md",  # a ux pattern, and an agent prompt
+            "execution/scripts/release_notes.py",  # a pm pattern, and code
+            "src/server/routes.ts",  # an arch pattern
+        ],
+    )
+    def test_a_code_fix_under_a_pm_or_ux_pattern_still_reruns_security_and_arch(self, path):
+        sel = _select(_round(OLD, blocked=("pm",)), _delta(path))
+        assert {"security", "arch"} <= sel.rerun, path
+        assert "security" not in sel.carried and "arch" not in sel.carried
 
     def test_an_unmapped_file_reruns_every_lens(self):
         sel = _select(_round(OLD, blocked=("security",)), _delta(UNMAPPED_FILE))
@@ -104,6 +124,13 @@ class TestSelection:
         sel = _select(_round(OLD, blocked=("arch",)), _delta(DOC_FILE))
         assert "arch" in sel.rerun and "arch" not in sel.carried
         assert sel.rerun == {"arch", "ux"}
+
+    def test_an_empty_delta_with_a_moved_head_carries_nothing(self):
+        """An empty delta means "nothing measured", not "nothing changed" (security
+        review of ateles#1368): the head moved, so it is unknown."""
+        records = sd.lens_records(_round(OLD))
+        sel = review_carry.select_rerun(FIVE, records, NEW, {OLD: review_delta.Delta(0, ())})
+        assert sel.rerun == set(FIVE) and sel.carried == {}
 
     def test_a_lens_whose_latest_verdict_blocked_is_not_carried_from_its_earlier_clear(self):
         mid = "c" * 40
@@ -153,21 +180,48 @@ class TestSelection:
     @pytest.mark.parametrize(
         "path",
         [
-            ".claude/hooks/x.py",
-            "execution/daemons/apis/auth/token.py",
-            "lib/aauth_keys.py",
-            ".env.example",
+            # the paths the security and arch reviews measured as narrowed
+            "apps/task-dashboard/server/auth.ts",
+            "apps/task-dashboard/server/neotomaProxy.ts",
+            "src/cli/permissions.ts",
+            "inspector/src/api/store.ts",
+            "src/services/docs/render.ts",
+            ".github/workflows/ci.yml",
+            "tests/conftest.py",
+            "execution/scripts/release_notes.py",
+            "CLAUDE.md",
+            "docs/agents/pavo.md",
+            "src/mcp/server.ts",
+            "src/cli/index.ts",
+            "src/server/routes.ts",
+            "execution/daemons/apis/grant_checker.py",
+            "lib/daemon_runtime/aauth_signer.py",
+            "execution/hooks/x.py",
+            "services/webhook_handler.py",
+            # dependency manifests and code
+            "package.json",
+            "requirements-dev.txt",
+            "pyproject.toml",
+            "lib/some_util.py",
+            "README.md",
+            # a test file inside a security path stays a security path
+            ".claude/hooks/test_guard.py",
         ],
     )
-    def test_security_paths_always_touch_security(self, path):
-        assert "security" in review_carry.lenses_for_path(path)
+    def test_code_and_sensitive_paths_belong_to_every_lens(self, path):
+        assert review_carry.lenses_for_path(path) == review_carry.ALL_LENSES
 
-    def test_the_map_derives_from_the_panel_registry_not_a_retyped_list(self):
-        for lens in ("arch", "ux", "security"):
-            patterns = lens_by_name(lens).diff_patterns
-            assert patterns, lens
-        assert review_carry.lenses_for_path("migrations/001.sql") >= {"arch"}
-        assert review_carry.lenses_for_path("execution/x/test_thing.py") == {"qa"}
+    @pytest.mark.parametrize(
+        "path,lenses",
+        [
+            ("docs/guide/how_to.md", {"ux"}),
+            ("docs/foundation/principles.md", {"arch", "ux"}),
+            ("execution/scripts/test_thing.py", {"qa"}),
+            ("CHANGELOG.md", {"pm"}),
+        ],
+    )
+    def test_only_the_explicit_allowlist_narrows(self, path, lenses):
+        assert review_carry.lenses_for_path(path) == lenses
 
 
 # ── the combined pm / qa / ux pass ──────────────────────────────────────────
@@ -276,6 +330,7 @@ class TestDispatcherCombinedPass:
             {},
             80,
             NEW,
+            ["execution/daemons/apis/swarm_dispatch.py"],
             pending_gates=set(),
             live_gates={},
             signals=None,
@@ -319,7 +374,7 @@ class TestAggregationNamesCarriedLenses:
 
 @pytest.mark.asyncio
 class TestDispatcherSelectionReadsTheThread:
-    async def test_a_security_only_fix_selects_security_from_real_comments(self, monkeypatch):
+    async def test_a_test_only_security_fix_selects_security_and_qa_from_real_comments(self, monkeypatch):
         comments = _round(OLD, blocked=("security",))
 
         class _Client:
@@ -345,7 +400,7 @@ class TestDispatcherSelectionReadsTheThread:
                     files = [{"filename": "a.txt", "patch": "+x\n", "changes": 1}]
                     if sha == NEW:
                         files.append(
-                            {"filename": SECURITY_FILE, "patch": "+y\n", "changes": 1}
+                            {"filename": TEST_FILE, "patch": "+y\n", "changes": 1}
                         )
                     return _R({"files": files})
                 page = (params or {}).get("page", 1)
@@ -360,8 +415,8 @@ class TestDispatcherSelectionReadsTheThread:
             _trigger(head_sha=NEW, base_ref="main"), panel, NEW, forced=set()
         )
         assert sel is not None
-        assert sel.rerun == {"security"}
-        assert set(sel.carried) == {"pm", "arch", "ux", "qa"}
+        assert sel.rerun == {"security", "qa"}
+        assert set(sel.carried) == {"pm", "arch", "ux"}
 
     async def test_a_failed_read_keeps_the_full_panel(self, monkeypatch):
         class _Boom:
@@ -379,3 +434,189 @@ class TestDispatcherSelectionReadsTheThread:
         assert await d._rereview_selection(
             _trigger(head_sha=NEW), panel, NEW, forced=set()
         ) is None
+
+
+# ── the combined prompt keeps each lens's duties (pm review of ateles#1368) ──
+
+
+def _dispatcher():
+    from test_gate_sign_off_dispatch import _StubNotifier, _config
+
+    return sd.SwarmDispatcher(_StubNotifier(), _config())
+
+
+class TestCombinedPromptKeepsEachLensDuties:
+    FILES = ["execution/daemons/apis/swarm_dispatch.py"]
+
+    def _prompt(self, lenses=("pm", "qa", "ux"), expectations=None):
+        from test_gate_sign_off_dispatch import _trigger
+
+        panel = [lens_by_name(x) for x in lenses]
+        t = _trigger(head_sha=NEW, body="Closes #80.")
+        return t, _dispatcher()._combined_prompt(
+            t, panel, expectations or {}, NEW, 80, self.FILES
+        )
+
+    def test_each_lens_own_agent_prompt_is_in_it(self):
+        _, prompt = self._prompt()
+        d = _dispatcher()
+        for agent in ("pavo", "phoenicurus", "accipiter"):
+            own = d._lens_agent_prompt(agent)
+            assert own.strip(), agent
+            assert own in prompt, agent
+
+    def test_pm_gets_the_design_basis_check_and_every_lens_the_reading_list(self):
+        t, prompt = self._prompt()
+        assert sd.design_basis_block(t.body, where="the PR body") in prompt
+        readings = sd.reading_block(self.FILES)
+        assert readings and readings in prompt
+        assert prompt.count(readings) == 1  # stated once, not three times
+
+    def test_the_expectation_checkoff_uses_the_parent_issue(self):
+        _, prompt = self._prompt(expectations={"pavo": "- [ ] scope matches"})
+        assert "scope matches" in prompt
+        assert "issues/80/comments" in prompt
+        assert f"{sd.EXPECTATION_MARKER} (pm)" in prompt
+
+    def test_every_lens_gets_the_gate_verdict_format_and_the_evidence_bar(self):
+        _, prompt = self._prompt()
+        for lens in ("pm", "qa", "ux"):
+            agent = lens_by_name(lens).agent
+            assert sd.gate_verdict_instruction(agent, f"{lens} lens panelist") in prompt
+        assert prompt.count("EVIDENCE BAR FOR BLOCKING") == 3
+
+    def test_the_duties_are_the_same_helper_the_solo_prompt_uses(self):
+        from test_gate_sign_off_dispatch import _trigger
+
+        t = _trigger(head_sha=NEW, body="Closes #80.")
+        lens = lens_by_name("pm")
+        duties = sd.SwarmDispatcher._lens_duty_blocks(t, lens, "- [ ] x", 80, False, self.FILES)
+        solo = sd.SwarmDispatcher._panelist_prompt(
+            t, lens, "- [ ] x", 80, has_worktree=False, changed_files=self.FILES,
+            reviewed_head=NEW,
+        )
+        for block in duties:
+            assert block.strip() in solo
+
+    def test_the_template_has_no_parenthetical_verdict_and_no_artifact_line(self):
+        _, prompt = self._prompt()
+        assert "(or `**BLOCKED**`" not in prompt
+        assert "**<VERDICT>**" in prompt
+        assert "artifact or attribution line of your own" in prompt
+        assert "diff-only in the combined pass" in prompt  # qa says so
+
+    @pytest.mark.asyncio
+    async def test_a_lens_whose_own_prompt_cannot_load_is_not_reviewed_in_the_pass(self, monkeypatch):
+        async def boom(*a, **k):
+            raise AssertionError("no dispatch expected")
+
+        monkeypatch.setattr(sd, "run_skill", boom)
+        monkeypatch.setattr(sd.SwarmDispatcher, "_lens_agent_prompt", staticmethod(lambda a: ""))
+        from test_gate_sign_off_dispatch import _trigger
+
+        panel = [lens_by_name(x) for x in ("pm", "qa", "ux")]
+        assert await _dispatcher()._run_combined_pass(
+            _trigger(), panel, {}, 80, NEW, self.FILES,
+            pending_gates=set(), live_gates={}, signals=None,
+        ) == {}
+
+
+# ── partial failures of the combined pass ────────────────────────────────────
+
+
+class _PostClient:
+    """Records comment POSTs; the Nth POST (1-based) fails when `fail_on` is set."""
+
+    def __init__(self, fail_on: int | None = None):
+        self.fail_on = fail_on
+        self.bodies: list[str] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        self.bodies.append(json["body"])
+
+        class _R:
+            def raise_for_status(s):
+                pass
+
+        if self.fail_on == len(self.bodies):
+            raise httpx.ConnectError("post failed")
+        return _R()
+
+
+def _reply_for(verdicts: dict[str, str]) -> SkillResult:
+    return SkillResult(
+        skill="pavo", ok=True, returncode=0, stdout=_combined_reply(verdicts), stderr=""
+    )
+
+
+@pytest.mark.asyncio
+class TestCombinedPassPartialFailures:
+    async def _run(self, monkeypatch, result, client):
+        async def fake_run_skill(agent, prompt, **kwargs):
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+        monkeypatch.setattr(sd, "usable_providers", lambda: set())
+        from test_gate_sign_off_dispatch import _trigger
+
+        panel = [lens_by_name(x) for x in ("pm", "qa", "ux")]
+        return await _dispatcher()._run_combined_pass(
+            _trigger(head_sha=NEW), panel, {}, 80, NEW, ["execution/x.py"],
+            pending_gates=set(), live_gates={}, signals=None,
+        )
+
+    async def test_one_unreadable_block_runs_that_lens_alone_and_keeps_the_others(self, monkeypatch):
+        reply = _combined_reply({"pm": "SIGNED_OFF", "qa": "SIGNED_OFF", "ux": "SIGNED_OFF"})
+        # qa's block loses its verdict line: unreadable.
+        reply = reply.replace(
+            f"**\U0001f916 Phoenicurus — Ateles swarm, qa lens panelist**\n**SIGNED_OFF**\n",
+            f"**\U0001f916 Phoenicurus — Ateles swarm, qa lens panelist**\nno verdict here\n",
+        )
+        client = _PostClient()
+        out = await self._run(
+            monkeypatch, SkillResult("pavo", True, 0, reply, ""), client
+        )
+        assert set(out) == {"pm", "ux"}
+        assert len(client.bodies) == 2  # qa was not posted; it runs alone
+
+    async def test_a_failed_second_post_leaves_that_lens_and_later_ones_to_run_alone(self, monkeypatch):
+        client = _PostClient(fail_on=2)
+        out = await self._run(
+            monkeypatch,
+            _reply_for({"pm": "SIGNED_OFF", "qa": "SIGNED_OFF", "ux": "SIGNED_OFF"}),
+            client,
+        )
+        assert set(out) == {"pm"}  # pm posted; qa and ux run alone
+
+    async def test_a_failed_combined_run_falls_back_to_per_lens_runs(self, monkeypatch):
+        client = _PostClient()
+        failed = SkillResult("pavo", False, 1, "", "boom")
+        assert await self._run(monkeypatch, failed, client) == {}
+        assert client.bodies == []
+
+    async def test_a_combined_run_that_raises_falls_back_to_per_lens_runs(self, monkeypatch):
+        client = _PostClient()
+        assert await self._run(monkeypatch, RuntimeError("provider down"), client) == {}
+        assert client.bodies == []
+
+    async def test_each_posted_comment_carries_provenance_and_still_reads_clear(self, monkeypatch):
+        client = _PostClient()
+        out = await self._run(
+            monkeypatch,
+            _reply_for({"pm": "SIGNED_OFF", "qa": "SIGNED_OFF", "ux": "SIGNED_OFF"}),
+            client,
+        )
+        assert set(out) == {"pm", "qa", "ux"}
+        for lens, body in zip(("pm", "qa", "ux"), client.bodies):
+            assert "Combined pm/qa/ux pass" in body
+            assert sd.sign_off_is_warranted(body, lens_agent=lens_by_name(lens).agent)
+        assert "diff-only" in client.bodies[1]

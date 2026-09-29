@@ -2,7 +2,17 @@
 """
 execution/scripts/approve_pr_as_app.py — approve a PR as the swarm's GitHub
 App, but ONLY when every required review lens has cleared the PR's CURRENT
-head and every required status check is green.
+head (or, for a lens the fix did not touch, an earlier head the approval
+review names) and every required status check is green.
+
+Carried sign-offs (ateles#1368, ruling `rereview_only_blockers_and_touched_areas`):
+a lens with no verdict on the current head clears on its verdict at an EARLIER
+head only when it signed off there, never blocked, and the fix's own delta
+since that head touches none of its areas (`review_carry`: every file belongs
+to every lens unless on a short docs/tests/release-notes allowlist; an empty or
+unreadable delta carries nothing). The approval review names every carried lens
+with the head its verdict came from. `--no-carry` requires every lens on the
+current head itself.
 
 Bootstrap mode (agent_policy `ent_d0f1a840e549b3b299f62397`): the operator
 has ruled that sessions, not the operator, approve merges, under the App's
@@ -84,7 +94,7 @@ conclusion always blocks. See `_unscheduled_non_required_reason`.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
-        [--lenses pm,security] [--panel {required,all}] [--apply]
+        [--lenses pm,security] [--panel {required,all}] [--no-carry] [--apply]
 
 `--lenses` ADDS to the derived floor; it can never remove a lens the panel
 logic would itself require for this diff/issue. `--panel all` (the default
@@ -704,9 +714,9 @@ async def carry_earlier_signoffs(
     """
     records = lens_records(comments)
     pending = [o for o in lens_outcomes if not o.passed and not o.head_matched]
-    heads = review_carry.candidate_heads([o.lens for o in pending], records, head_sha)
-    if not heads:
+    if not pending:
         return lens_outcomes
+    heads = review_carry.candidate_heads([o.lens for o in pending], records, head_sha)
     deltas = {
         old: await review_carry.fetch_interdiff(
             client,
@@ -725,6 +735,13 @@ async def carry_earlier_signoffs(
     for outcome in lens_outcomes:
         carried = selection.carried.get(outcome.lens)
         if carried is None or outcome not in pending:
+            if outcome in pending and outcome.lens in selection.reasons:
+                # Keep WHY it could not be carried next to why it failed, so a
+                # refusal reads "the fix touched ux's area", not just "no verdict".
+                outcome.reason = (
+                    f"{outcome.reason} Not carried from an earlier head: "
+                    f"{selection.reasons[outcome.lens]}."
+                )
             out.append(outcome)
             continue
         out.append(
@@ -1571,7 +1588,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Approve a PR as the swarm's GitHub App, only when every required "
-            "review lens has cleared the PR's current head, AND no lens of any "
+            "review lens has cleared the PR's current head (or, for a lens the "
+            "fix since its earlier sign-off did not touch, that earlier head, "
+            "named in the approval; --no-carry turns this off), AND no lens of any "
             "kind carries a live REQUEST_CHANGES/[BLOCKING] verdict on that "
             "head. The required-lens floor is derived from "
             "review_panel.select_panel for this PR's diff and linked issue; "

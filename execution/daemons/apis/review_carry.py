@@ -10,14 +10,18 @@ Operator rulings, 2026-09-29 (Phase A3 plan ``ent_c2fa995ec1058a3e7b8b5b20``):
   approval gate parses.
 
 This module holds the pure decisions, shared by the Apis panel dispatch
-(``swarm_dispatch``) and the approval gate (``approve_pr_as_app``) so the two
-cannot disagree about what may be carried. It extends the existing carry-forward
+(``swarm_dispatch``) and the approval gate (``approve_pr_as_app``), so both
+apply one carry rule. The dispatcher also forces a pending gate's owner to
+re-run (``forced``); the gate reads no gate state and relies on that re-run
+having produced a current-head verdict. It extends the existing carry-forward
 (a signed-off gate stays signed off, and only its owner is re-seated when it is
 pending) from gates to lens verdicts; it adds no second selection path.
 
 Fail-closed by construction, on every input:
 
-* a changed file that matches no lens area maps to EVERY lens;
+* every changed file belongs to EVERY lens unless it is on a short explicit
+  allowlist of paths a lens provably does not own (docs, tests, release notes);
+* an empty delta after a head change is unknown, and carries nothing;
 * a lens that blocked, or whose latest verdict is not an explicit clear, is
   never carried;
 * a delta that cannot be read carries nothing;
@@ -51,63 +55,63 @@ ALL_LENSES: frozenset[str] = frozenset(lens.lens for lens in LENSES)
 COMBINED_LENSES: tuple[str, ...] = ("pm", "qa", "ux")
 
 # ── Lens areas ──────────────────────────────────────────────────────────────
-# Derived from the classifiers that already exist, never retyped:
-#   * every panel lens's own ``diff_patterns`` (review_panel.LENSES) — the
-#     surfaces that pull that lens into a panel are the surfaces it owns;
-#   * ``model_tiering.SECURITY_SENSITIVE_PATH_FRAGMENTS`` for security.
-# The extras below cover the areas the operator named that the registry does
-# not pattern (qa: tests and CI; pm: release artifacts; ux: docs and runbooks;
-# arch: the design docs and contracts). A path in NO area is not "safe": it is
-# unmapped, and unmapped means every lens (`lenses_for_path`).
-_EXTRA_AREA_PATTERNS: dict[str, tuple[str, ...]] = {
-    "qa": (
-        r"(^|/)test_[^/]*\.py$",
-        r"_test\.py$",
-        r"(^|/)tests?/",
-        r"(^|/)conftest\.py$",
-        r"(^|/)\.github/workflows/",
-        r"(^|/)pytest\.ini$",
+# INVERTED default (security and arch reviews of ateles#1368): every file
+# belongs to EVERY lens, unless it is on the short allowlist below of paths a
+# lens provably does not own. `review_panel.LENSES[*].diff_patterns` decide who
+# is SEATED on a panel; missing one there is harmless, so they must never be
+# read in reverse as "owned by this lens alone". They appear here only to
+# widen: a path that is security-sensitive keeps every lens.
+#
+# The allowlist is deliberately narrow and written out, not derived:
+#   * prose docs under `docs/` (not the foundation docs, not agent prompts);
+#   * foundation docs under `docs/foundation/` (design: arch and ux);
+#   * test modules, `test_*.py` and `*_test.py` (not `conftest.py`, which
+#     configures the run);
+#   * release notes in markdown.
+# Anything else, and above all code, workflows, dependency manifests, agent
+# prompts and security paths, keeps every lens.
+_ALLOWLIST: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
+    (re.compile(r"^docs/foundation/.*\.md$"), frozenset({"arch", "ux"})),
+    (re.compile(r"^docs/agents/"), ALL_LENSES),  # agent prompts are behaviour
+    (re.compile(r"^docs/.*\.md$"), frozenset({"ux"})),
+    (re.compile(r"(^|/)(test_[^/]*|[^/]*_test)\.py$"), frozenset({"qa"})),
+    (re.compile(r"(^|/)CHANGELOG[^/]*\.md$|^docs/releases?/.*\.md$"), frozenset({"pm"})),
+)
+
+# Paths that keep every lens whatever the allowlist says: workflows, dependency
+# manifests, and anything a security surface pattern claims.
+_ALWAYS_ALL: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(^|/)\.github/"),
+    re.compile(
+        r"(^|/)(package(-lock)?\.json|pyproject\.toml|setup\.(py|cfg)|Pipfile(\.lock)?"
+        r"|requirements[^/]*\.txt|poetry\.lock|yarn\.lock|pnpm-lock\.yaml)$"
     ),
-    "pm": (
-        r"(^|/)CHANGELOG",
-        r"(^|/)docs/releases?/",
-        r"(^|/)release[_-]notes",
-    ),
-    "ux": (
-        r"\.md$",
-        r"(^|/)runbooks?/",
-    ),
-    "arch": (
-        r"(^|/)docs/foundation/",
-        r"(^|/)contracts?/",
-    ),
-}
+)
+_SECURITY_LENS_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern)
+    for lens in LENSES
+    if lens.lens == "security"
+    for pattern in lens.diff_patterns
+)
 
 
-def _compile_areas() -> dict[str, tuple[re.Pattern[str], ...]]:
-    areas: dict[str, list[re.Pattern[str]]] = {}
-    for lens in LENSES:
-        patterns = [re.compile(p) for p in lens.diff_patterns]
-        patterns += [re.compile(p) for p in _EXTRA_AREA_PATTERNS.get(lens.lens, ())]
-        if patterns:
-            areas[lens.lens] = patterns
-    return {name: tuple(patterns) for name, patterns in areas.items()}
-
-
-_AREA_PATTERNS = _compile_areas()
+def _keeps_every_lens(path: str) -> bool:
+    return (
+        any(p.search(path) for p in _ALWAYS_ALL)
+        or any(p.search(path) for p in _SECURITY_LENS_PATTERNS)
+        or any(fragment in path for fragment in model_tiering.SECURITY_SENSITIVE_PATH_FRAGMENTS)
+    )
 
 
 def lenses_for_path(path: str) -> frozenset[str]:
-    """The lenses whose area *path* falls in. A path in no area maps to EVERY
-    lens: an unclassified change is never assumed safe to skip a review for."""
-    hit = {
-        lens
-        for lens, patterns in _AREA_PATTERNS.items()
-        if any(p.search(path) for p in patterns)
-    }
-    if any(fragment in path for fragment in model_tiering.SECURITY_SENSITIVE_PATH_FRAGMENTS):
-        hit.add("security")
-    return frozenset(hit) if hit else ALL_LENSES
+    """The lenses whose area *path* falls in: EVERY lens unless the path is on
+    the allowlist and is not a security-sensitive path."""
+    if _keeps_every_lens(path):
+        return ALL_LENSES
+    for pattern, lenses in _ALLOWLIST:
+        if pattern.search(path):
+            return lenses
+    return ALL_LENSES
 
 
 def lenses_touched(files: Iterable[str]) -> frozenset[str]:
@@ -220,6 +224,12 @@ def select_rerun(
             rerun.add(lens)
             reasons[lens] = f"delta since {cand.head[:7]} unreadable"
             continue
+        if not delta.files:
+            # The head moved, so "no changed file" is a measurement that found
+            # nothing, not proof of nothing: unknown, and unknown carries nothing.
+            rerun.add(lens)
+            reasons[lens] = f"delta since {cand.head[:7]} is empty although the head moved"
+            continue
         touched = lenses_touched(delta.files)
         if lens in touched:
             rerun.add(lens)
@@ -300,8 +310,20 @@ def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str,
     return blocks
 
 
-def compose_combined_comment(block: str, marker: str) -> str:
+def combined_provenance(lens: str, lenses: Sequence[str], run_as: str) -> str:
+    """One line saying this verdict came from a combined pass, so the record
+    does not read as a solo run of the lens's own agent."""
+    extra = " It ran diff-only: nothing was executed." if lens == "qa" else ""
+    return (
+        f"_Combined {'/'.join(lenses)} pass, run as {run_as or 'the first lens agent'}; "
+        f"this is the {lens} lens's own verdict.{extra}_"
+    )
+
+
+def compose_combined_comment(block: str, marker: str, provenance: str = "") -> str:
     """The PR comment for one lens of a combined pass: the head marker line,
-    then the lens's own block starting with its header and verdict. The layout
-    is the one a lens posting alone produces, so `lens_own_verdict` reads it."""
-    return f"{marker}\n{block.strip()}\n"
+    then the lens's own block starting with its header and verdict, then a
+    provenance line. The layout up to the verdict is the one a lens posting
+    alone produces, so `lens_own_verdict` reads it."""
+    tail = f"\n{provenance}\n" if provenance else ""
+    return f"{marker}\n{block.strip()}\n{tail}"
