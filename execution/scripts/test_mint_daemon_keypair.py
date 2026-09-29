@@ -370,3 +370,39 @@ class TestCliMessages:
         out = self._run("--name", "accipiter", "--keys-dir", str(keys_dir)).stdout
         real = stat.S_IMODE((keys_dir / "accipiter.jwk.json").stat().st_mode)
         assert f"mode: {real:04o}" in out
+
+    def test_first_mint_says_written_and_not_rotated(self, keys_dir: Path) -> None:
+        out = self._run("--name", "accipiter", "--keys-dir", str(keys_dir)).stdout
+        assert "Keypair written to:" in out
+        assert "ROTATED" not in out
+
+    def test_force_over_existing_key_says_rotated_and_old_key_destroyed(
+        self, keys_dir: Path
+    ) -> None:
+        self._run("--name", "accipiter", "--keys-dir", str(keys_dir))
+        out = self._run(
+            "--name", "accipiter", "--keys-dir", str(keys_dir), "--force"
+        ).stdout
+        assert "ROTATED" in out and "destroyed" in out
+        assert "Keypair written to:" not in out
+
+    def test_force_with_no_existing_key_is_a_first_mint_message(
+        self, keys_dir: Path
+    ) -> None:
+        out = self._run(
+            "--name", "accipiter", "--keys-dir", str(keys_dir), "--force"
+        ).stdout
+        assert "Keypair written to:" in out and "ROTATED" not in out
+
+    def test_closing_hint_follows_the_canonical_step_order(self, keys_dir: Path) -> None:
+        out = self._run("--name", "accipiter", "--keys-dir", str(keys_dir)).stdout
+        steps = [
+            "createAgentGrant",
+            "listAgentGrants",
+            "verify_aauth_signer.py",
+            "Restart the daemon",
+        ]
+        positions = [out.index(marker) for marker in steps]
+        assert positions == sorted(positions), out
+        assert "accipiter@ateles-swarm" in out
+        assert "ATELES_AAUTH_KEYS_DIR" in out

@@ -233,20 +233,45 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
+        # Message-only: a --force over an existing key is a rotation, and must
+        # not read like a first mint. (mint() itself does its own lstat checks.)
+        rotated = args.force and os.path.lexists(
+            args.keys_dir / f"{validate_name(args.name)}.jwk.json"
+        )
         out_path = mint(args.name, args.keys_dir, force=args.force)
     except (ValueError, OSError) as exc:
         sys.exit(f"ERROR: {exc}")
 
     name = validate_name(args.name)
+    sub = f"{name}@ateles-swarm"
     # Non-secret metadata only — never the private scalar (d) or the public
     # coordinates (x/y).
-    print(f"Keypair written to: {out_path}")
-    print(f"  sub: {name}@ateles-swarm")
+    if rotated:
+        print(f"Keypair ROTATED at: {out_path}")
+        print("  the previous private key has been destroyed and cannot be recovered")
+    else:
+        print(f"Keypair written to: {out_path}")
+    print(f"  sub: {sub}")
     print(f"  format: canonical JWK (ES256 P-256)")
     print(f"  mode: {stat.S_IMODE(out_path.stat().st_mode):04o}")
     print()
-    print("Next: restart the daemon so it picks up the new keypair.")
-
+    # Same order as docs/aauth.md "Identity provisioning": mint (done), register
+    # the grant, check it, verify, restart.
+    print('Next, in this order (details: docs/aauth.md, "Identity provisioning"):')
+    print(f"  2. Register the agent_grant for {sub} (operator: neotoma request --operation createAgentGrant).")
+    print(
+        "  3. Check it exists: neotoma request --operation listAgentGrants "
+        f"--query '{{\"q\": \"{sub}\", \"status\": \"active\"}}'"
+    )
+    print(
+        f"  4. Verify the signer: python3 execution/scripts/verify_aauth_signer.py "
+        f"--jwk {out_path} --live <neotoma-base-url>"
+    )
+    print("  5. Restart the daemon so it picks up the new keypair.")
+    print(
+        "Note: the dispatcher reads ATELES_AAUTH_KEYS_DIR; it must point at the "
+        "same directory as this key."
+    )
 
 if __name__ == "__main__":
     main()
