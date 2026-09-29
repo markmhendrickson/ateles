@@ -71,6 +71,17 @@ class Outcome:
     # The branch tip before the integration started. Verification needs it to
     # prove the branch's own work survived, and a failed run is restored to it.
     orig_head: str = ""
+    # The full ref of the branch that was integrated (`refs/heads/<name>`). The
+    # undo may move THIS ref and no other, whatever a model left checked out.
+    orig_ref: str = ""
+
+
+@dataclass
+class Restoration:
+    """What `restore_original` did, and, if it could not finish, why not."""
+
+    undone: str = ""
+    problem: str = ""
 
 
 _guard_module = None
@@ -110,6 +121,8 @@ def require_linked_worktree(cwd: str) -> str | None:
     refusal. The Ateles repo's own main clone is refused too; a dispatch works in
     a worktree.
     """
+    if not Path(cwd).is_dir():
+        return f"{cwd} does not exist or is not a directory"
     guard = _load_guard()
     if guard is None:
         return (
@@ -286,23 +299,66 @@ def abort_integration(cwd: str) -> str:
     return pending
 
 
-def restore_original(cwd: str, orig_head: str) -> str:
-    """Put a failed integration back as it was found; returns what was undone.
+def _symbolic_ref(cwd: str) -> str:
+    """The full ref HEAD is on, or '' when HEAD is detached."""
+    proc = _git(cwd, "symbolic-ref", "-q", "HEAD")
+    return _out(proc) if proc.returncode == 0 else ""
 
-    Aborts any operation in progress, then, if a model moved the branch (for
-    example `git reset --hard <base>` after aborting), resets it to the recorded
-    pre-integration tip. Safe because a dispatch only starts on a clean tracked
-    tree in a dedicated worktree.
+
+def restore_original(cwd: str, orig_head: str, orig_ref: str) -> Restoration:
+    """Put a failed integration back as it was found; never touches another branch.
+
+    The integrated branch is ``orig_ref``, recorded before anything ran. A model
+    that failed may have left the worktree on a different branch or detached, so
+    HEAD is not trusted: this puts HEAD back on ``orig_ref`` first, verifies with
+    ``symbolic-ref`` that it is there, and only then resets it to ``orig_head``,
+    which moves that one ref. Anything it cannot do safely it refuses and names in
+    ``problem`` (branch gone, checkout blocked, uncommitted work that would be
+    carried across), leaving the worktree as it is for a person to look at.
     """
-    if require_linked_worktree(cwd):
-        return ""
-    undone = abort_integration(cwd)
-    if orig_head and _head_sha(cwd) != orig_head:
-        if _git(cwd, "reset", "--hard", orig_head).returncode == 0:
-            undone = (
-                undone + " and " if undone else ""
-            ) + f"a branch move (reset to {orig_head[:12]})"
-    return undone
+    if not orig_head or not orig_ref.startswith("refs/heads/"):
+        return Restoration(
+            problem="no integrated branch was recorded, so nothing can be restored"
+        )
+    unsafe = require_linked_worktree(cwd)
+    if unsafe:
+        return Restoration(problem=f"refusing to restore: {unsafe}")
+    branch = orig_ref[len("refs/heads/") :]
+    if _git(cwd, "rev-parse", "--verify", "--quiet", orig_ref).returncode != 0:
+        return Restoration(
+            problem=f"the integrated branch {branch} no longer exists; nothing was reset, "
+            "the worktree needs attention"
+        )
+    undone: list[str] = []
+    aborted = abort_integration(cwd)
+    if aborted:
+        undone.append(f"the in-progress {aborted}")
+    current = _symbolic_ref(cwd)
+    if current != orig_ref:
+        dirty = _dirty_tracked(cwd)
+        if dirty:
+            return Restoration(
+                ", ".join(undone),
+                f"HEAD is on {current or 'a detached commit'}, not {branch}, and the tree has "
+                "uncommitted changes that a checkout would carry across; not touching it, "
+                "the worktree needs attention: " + "; ".join(dirty[:3]),
+            )
+        switched = _git(cwd, "checkout", branch)
+        if switched.returncode != 0 or _symbolic_ref(cwd) != orig_ref:
+            return Restoration(
+                ", ".join(undone),
+                f"could not put HEAD back on {branch} ({_tail(switched.stderr, 300)}); "
+                "nothing was reset, the worktree needs attention",
+            )
+        undone.append(f"a move away from {branch} (back on it)")
+    if _head_sha(cwd) != orig_head:
+        # HEAD is verified to be on orig_ref, so this moves that ref only.
+        if _git(cwd, "reset", "--hard", orig_head).returncode != 0:
+            return Restoration(
+                ", ".join(undone), f"could not reset {branch} to {orig_head[:12]}"
+            )
+        undone.append(f"a branch move (reset {branch} to {orig_head[:12]})")
+    return Restoration(", ".join(undone))
 
 
 def _conflict_hunks(path: str, budget: int) -> tuple[str, int]:
@@ -408,6 +464,8 @@ def attempt_integration(
         )
     if not base or base.startswith("-"):
         return Outcome(REFUSED, f"invalid base ref {base!r}")
+    if not Path(cwd).is_dir():
+        return Outcome(REFUSED, f"{cwd} does not exist or is not a directory")
     if _git(cwd, "rev-parse", "--is-inside-work-tree").returncode != 0:
         return Outcome(REFUSED, f"{cwd} is not a git worktree")
     unsafe = require_linked_worktree(cwd)
@@ -440,12 +498,14 @@ def attempt_integration(
         )
 
     orig_head = _head_sha(cwd)
+    orig_ref = _symbolic_ref(cwd)
     if _contains(cwd, base_sha):
         return Outcome(
             DONE,
             f"branch already contains {base} ({base_sha[:12]}); nothing to integrate",
             base_sha,
             orig_head=orig_head,
+            orig_ref=orig_ref,
         )
 
     if mode == MODE_REBASE:
@@ -461,12 +521,14 @@ def attempt_integration(
                 f"git reported success but verification failed: {problem}",
                 base_sha,
                 orig_head=orig_head,
+                orig_ref=orig_ref,
             )
         return Outcome(
             DONE,
             f"{mode} of {base} ({base_sha[:12]}) finished cleanly; HEAD is now {_head_sha(cwd)[:12]}",
             base_sha,
             orig_head=orig_head,
+            orig_ref=orig_ref,
         )
 
     files = unmerged_files(cwd)
@@ -478,6 +540,7 @@ def attempt_integration(
             conflicted_files=files,
             brief=conflict_brief(cwd, base, base_sha, mode, files, budget=brief_budget),
             orig_head=orig_head,
+            orig_ref=orig_ref,
         )
     detail = _tail((proc.stderr or "") + "\n" + (proc.stdout or ""))
     abort_integration(cwd)
@@ -486,6 +549,7 @@ def attempt_integration(
         f"git {mode} failed without conflicts: {detail}",
         base_sha,
         orig_head=orig_head,
+        orig_ref=orig_ref,
     )
 
 

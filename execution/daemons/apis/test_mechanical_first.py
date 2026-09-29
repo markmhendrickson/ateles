@@ -851,3 +851,113 @@ def test_cli_reports_a_local_failure_on_stdout_json_and_stderr(cli, repo, monkey
 def test_cli_rejects_integration_without_rebase_onto(cli):
     rc, envelope = cli("--work-class", "rebase", "--integration", "merge", "--cwd", ".")
     assert rc != 0 and "--integration requires --rebase-onto" in envelope["reason"]
+
+
+# ── security round 2: the undo may only ever move the integrated branch ─────
+# The undo is the one destructive step in this module, and the model that made
+# the mess picks what is checked out when it runs.
+
+
+def _dispatch_with_model(repo, monkeypatch, behave, mode=mf.MODE_REBASE):
+    async def model(skill, prompt, **kwargs):
+        behave()
+        return SkillResult(skill, False, 1, "", "", error="the model gave up", provider="claude-local")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", model)
+    return asyncio.run(
+        dispatch_role.dispatch(
+            "cicada", "x", cwd=str(repo), work_class="rebase",
+            integration_base="main", integration_mode=mode,
+        )
+    )
+
+
+def _abort_and_reset_to_base(repo, mode):
+    subprocess.run(["git", mode, "--abort"], cwd=repo, capture_output=True)
+    git(repo, "reset", "-q", "--hard", "main")
+
+
+@pytest.mark.parametrize("mode", [mf.MODE_REBASE, mf.MODE_MERGE])
+def test_a_model_that_switches_branch_then_fails_leaves_the_other_branch_alone(
+    repo, monkeypatch, no_events, mode
+):
+    add_conflict(repo)
+    original = git(repo, "rev-parse", "HEAD")
+    state = {}
+
+    def wander():
+        _abort_and_reset_to_base(repo, mode)  # damages the integrated branch...
+        git(repo, "checkout", "-q", "-b", "unrelated")  # ...then wanders off
+        commit(repo, "unrelated.txt", "someone else's work\n", "unrelated work")
+        state["other"] = git(repo, "rev-parse", "unrelated")
+
+    result = _dispatch_with_model(repo, monkeypatch, wander, mode)
+    assert not result.ok
+    assert git(repo, "rev-parse", "unrelated") == state["other"], "another branch must never be reset"
+    assert git(repo, "rev-parse", "feature") == original, "the integrated branch is restored"
+    assert git(repo, "symbolic-ref", "HEAD") == "refs/heads/feature", "and HEAD is back on it"
+    assert "RESTORE FAILED" not in result.error
+
+
+@pytest.mark.parametrize("mode", [mf.MODE_REBASE, mf.MODE_MERGE])
+def test_a_model_that_detaches_head_then_fails_gets_the_same_outcome(
+    repo, monkeypatch, no_events, mode
+):
+    add_conflict(repo)
+    original = git(repo, "rev-parse", "HEAD")
+
+    def detach():
+        _abort_and_reset_to_base(repo, mode)
+        git(repo, "checkout", "-q", "--detach")
+
+    result = _dispatch_with_model(repo, monkeypatch, detach, mode)
+    assert not result.ok
+    assert git(repo, "symbolic-ref", "HEAD") == "refs/heads/feature"
+    assert git(repo, "rev-parse", "feature") == original
+
+
+def test_if_the_integrated_branch_was_deleted_the_restore_refuses_and_touches_nothing(
+    repo, clone, monkeypatch, no_events
+):
+    add_conflict(repo)
+    state = {}
+
+    def delete_it():
+        _abort_and_reset_to_base(repo, mf.MODE_REBASE)
+        git(repo, "checkout", "-q", "--detach")
+        git(clone, "branch", "-q", "other", "main")
+        git(repo, "branch", "-q", "-D", "feature")
+        state["head"] = git(repo, "rev-parse", "HEAD")
+        state["other"] = git(clone, "rev-parse", "other")
+
+    result = _dispatch_with_model(repo, monkeypatch, delete_it)
+    assert not result.ok
+    assert "RESTORE FAILED" in result.error and "no longer exists" in result.error
+    assert git(repo, "rev-parse", "HEAD") == state["head"], "HEAD is not moved"
+    assert git(clone, "rev-parse", "other") == state["other"]
+    assert subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "refs/heads/feature"], cwd=repo
+    ).returncode != 0, "nothing recreates or resets a branch that is gone"
+
+
+def test_restore_refuses_rather_than_carry_uncommitted_work_to_another_branch(repo):
+    add_conflict(repo)
+    outcome = mf.attempt_integration(str(repo), "main")
+    _abort_and_reset_to_base(repo, mf.MODE_REBASE)
+    git(repo, "checkout", "-q", "-b", "unrelated")
+    (repo / "shared.txt").write_text("uncommitted edit on the other branch\n")
+    other = git(repo, "rev-parse", "unrelated")
+    restored = mf.restore_original(str(repo), outcome.orig_head, outcome.orig_ref)
+    assert restored.problem and "uncommitted" in restored.problem
+    assert git(repo, "rev-parse", "unrelated") == other
+    assert (repo / "shared.txt").read_text() == "uncommitted edit on the other branch\n"
+
+
+def test_the_outcome_records_the_integrated_branch_ref(repo):
+    assert mf.attempt_integration(str(repo), "main").orig_ref == "refs/heads/feature"
+
+
+def test_a_nonexistent_cwd_is_a_refusal_not_a_crash(tmp_path):
+    missing = str(tmp_path / "nope")
+    assert mf.attempt_integration(missing, "main").status == mf.REFUSED
+    assert mf.run_generators(missing, ["true"]).status == mf.REFUSED

@@ -116,6 +116,7 @@ import signal
 import sys
 from pathlib import Path
 
+
 # ── Env bootstrap ─────────────────────────────────────────────────────────────
 # An orchestrating session's shell does not necessarily carry the daemon env,
 # and skill_runner hard-requires NEOTOMA_BASE_URL (no localhost default by
@@ -128,7 +129,11 @@ from pathlib import Path
 # materialized dotenv carries operator-behaviour switches (e.g.
 # ATELES_SWARM_REQUIRE_LABEL) that must not silently reach a test process.
 def _dotenv_should_load() -> bool:
-    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         return False
     if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
         return False
@@ -235,9 +240,7 @@ def available_roles() -> list[str]:
     skills_dir = ATELES_REPO / ".claude" / "skills"
     if not skills_dir.is_dir():
         return []
-    return sorted(
-        p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file()
-    )
+    return sorted(p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file())
 
 
 async def dispatch(
@@ -301,8 +304,12 @@ async def dispatch(
     )
     if work_class == "rebase" and integration_base:
         return await _integrate_then_model(
-            role, task, base=integration_base, mode=integration_mode,
-            workdir=cwd or os.getcwd(), run_kwargs=run_kwargs,
+            role,
+            task,
+            base=integration_base,
+            mode=integration_mode,
+            workdir=cwd or os.getcwd(),
+            run_kwargs=run_kwargs,
         )
     if work_class == "regenerate_generated_files" and regenerate_commands:
         outcome = await asyncio.to_thread(
@@ -382,7 +389,14 @@ async def _integrate_then_model(
         result = await run_skill(role, prompt, **run_kwargs)
     except BaseException:
         # A crash or cancellation mid-run must not leave the integration open.
-        await asyncio.to_thread(mechanical_first.restore_original, workdir, outcome.orig_head)
+        restored = await asyncio.to_thread(
+            mechanical_first.restore_original,
+            workdir,
+            outcome.orig_head,
+            outcome.orig_ref,
+        )
+        if restored.problem:
+            print(f"dispatch_role: RESTORE FAILED: {restored.problem}", file=sys.stderr)
         raise
     if result.ok:
         problem = await asyncio.to_thread(
@@ -396,13 +410,19 @@ async def _integrate_then_model(
             result.ok = False
             result.error = f"the model reported success but the integration did not verify: {problem}"
     if not result.ok:
-        undone = await asyncio.to_thread(
-            mechanical_first.restore_original, workdir, outcome.orig_head
+        restored = await asyncio.to_thread(
+            mechanical_first.restore_original,
+            workdir,
+            outcome.orig_head,
+            outcome.orig_ref,
         )
-        if undone:
+        detail = result.error or "dispatch failed"
+        if restored.problem:
+            print(f"dispatch_role: RESTORE FAILED: {restored.problem}", file=sys.stderr)
+            result.error = f"{detail} (RESTORE FAILED: {restored.problem})"
+        elif restored.undone:
             result.error = (
-                f"{result.error or 'dispatch failed'} (undid {undone}; the worktree is as it "
-                "was found)"
+                f"{detail} (undid {restored.undone}; the worktree is as it was found)"
             )
     result.attempted_providers = (DETERMINISTIC_PROVIDER, *result.attempted_providers)
     return result
@@ -549,6 +569,7 @@ def _install_signal_envelope(emitter: _Emitter) -> None:
     than a laundered exit 0 — a caller checking only the exit code must not be
     told a killed dispatch succeeded.
     """
+
     def _handler(signum, _frame):  # pragma: no cover - exercised as a subprocess
         name = signal.Signals(signum).name
         emitter.emit_failure(
