@@ -172,12 +172,22 @@ template to `op item edit`'s stdin, never as a CLI assignment. The Anthropic
 path (no create endpoint exists) prompts for the new key with `getpass`
 (hidden, not echoed) instead.
 
-Order of operations, every provider: create/accept the new key → write it to
-1Password → verify it with a harmless read-only call → only then, and only if
+Order of operations, every provider: create/accept the new key → verify it
+with a harmless read-only call → only then write it to 1Password → only if
 you pass `--revoke-old`/`--archive-old`, revoke the old one → run
-`secrets_publish.py` + `secrets_materialize.py` → print the daemons/plists
-that read that var (restart those, not all of them). If verification fails,
-nothing downstream runs and the old key is left alone.
+`secrets_publish.py` + `secrets_materialize.py` for **every** manifest file
+block that reads the rotated variable from the 1Password item you passed as
+`--op-item-ref` (derived from `manifest.env-map.json`, e.g. both `neotoma` and
+`openclaw` for `ANTHROPIC_API_KEY`; a block reading the same variable from a
+different item is named but not republished) → print the
+required commit-and-push of the updated snapshots in `ateles-private`, and the
+daemons/plists that read that var (restart those, not all of them). If
+verification fails (after a few short retries for transient errors while a
+fresh key propagates), nothing is written to 1Password, nothing downstream runs,
+and the old key is left alone — so 1Password never disagrees with the SOPS
+snapshot and the running services. For OpenAI and ElevenLabs the key already
+minted at the provider is left there, and its id is printed so you can delete
+it in the provider's dashboard (re-running the script would mint another).
 
 **OpenAI** — creates a new project service account + key
 (`POST /v1/organization/projects/{project_id}/service_accounts`), verifies
@@ -235,7 +245,12 @@ python execution/scripts/rotate_provider_key.py elevenlabs \
 
 **Anthropic** — no create endpoint exists in the Admin API docs
 (`platform.claude.com/docs/en/api/admin-api/apikeys`, checked 2026-09-26), so
-mint the key yourself in the Anthropic console first, then run:
+mint the key yourself in the Anthropic console first — **inside a workspace**.
+A key minted outside any workspace fails verification with HTTP 400 ("not
+scoped to a workspace … must include the anthropic-workspace-id header"), and
+the services that read `ANTHROPIC_API_KEY` (Claude Code, the SDK, LiteLLM)
+never send that header, so the script refuses it and tells you to re-mint
+rather than writing it anywhere. Then run:
 
 ```bash
 python execution/scripts/rotate_provider_key.py anthropic \
@@ -257,7 +272,9 @@ python execution/scripts/rotate_provider_key.py anthropic \
 Anthropic has no delete endpoint — archive/inactive is the only lifecycle
 action — so this is the terminal step for that provider.
 
-Every run ends by publishing the encrypted snapshot, materializing it, and
+Every run ends by publishing and materializing each snapshot that carries the
+var, printing the `git add … && git commit … && git push` you must run in
+`ateles-private` (the script does not push for you), and
 printing the daemons/plists known to consume that var (e.g. `com.ateles.apis`
 for `ANTHROPIC_API_KEY`) so you know what to restart; pass `--no-downstream`
 to skip that and do it by hand. Nothing this script does prints a key value —
