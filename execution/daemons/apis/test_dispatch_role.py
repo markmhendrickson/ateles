@@ -118,6 +118,47 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
     assert seen["prompt"] == "do the thing"
 
 
+def test_dispatch_forwards_action_class_and_model(monkeypatch) -> None:
+    """CLI surface (operator ruling 2026-09-29, model_tiering.py): --action-class
+    and --model reach run_skill unchanged, the same way --provider/--cwd do
+    above. This is the programmatic half of cross-surface parity; the argv
+    effect test below (test_cli_action_class_reaches_real_child_argv) is the
+    CLI-driven half."""
+    seen: dict = {}
+
+    async def _capture(skill, prompt, **kwargs):
+        seen.update(kwargs)
+        return SkillResult(skill, True, 0, "out", "", provider="claude")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada", "do the thing",
+            action_class="lens_review:security", model="claude-opus-5-thinking-high",
+        )
+    )
+    assert result.ok
+    assert seen["action_class"] == "lens_review:security"
+    assert seen["model"] == "claude-opus-5-thinking-high"
+
+
+def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
+    """A caller naming neither must leave run_skill's tiering inputs at their
+    no-op defaults — exact prior CLI behaviour, no regression."""
+    seen: dict = {}
+
+    async def _capture(skill, prompt, **kwargs):
+        seen.update(kwargs)
+        return SkillResult(skill, True, 0, "out", "", provider="claude")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+
+    asyncio.run(dispatch_role.dispatch("cicada", "do the thing"))
+    assert seen["action_class"] is None
+    assert seen["model"] is None
+
+
 @pytest.fixture
 def captured_codex_dispatches(fake_repo, monkeypatch):
     """Capture real ``run_skill`` subprocess boundaries without launching Codex."""
@@ -178,6 +219,68 @@ def _assert_github_identity(invocation: dict, *, token: str | None) -> None:
     else:
         assert env["GITHUB_TOKEN"] == token
         assert env["GH_TOKEN"] == token
+
+
+def test_cli_action_class_reaches_real_child_argv(
+    captured_codex_dispatches, monkeypatch
+) -> None:
+    """Effect test, CLI surface: `dispatch_role.py --action-class ... `
+    resolves a tier via the live action_policy/vendor_binding config and the
+    resolved model reaches the REAL child argv — not merely that
+    model_tiering resolves a tier in isolation (policy
+    `fixed_means_behavior_verified_not_contract_accepted`,
+    ent_db0b7855d47012084477fb00). Companion to
+    test_dispatch_forwards_action_class_and_model above, which covers the
+    programmatic surface with a mocked run_skill; this one runs the real
+    subprocess-boundary path via `captured_codex_dispatches`."""
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "top"}')
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING", '{"codex": {"top": "gpt-5.6-sol-xhigh"}}'
+    )
+
+    rc = dispatch_role.main(
+        ["--role", "cicada", "--task", "do the thing", "--action-class", "build"]
+    )
+
+    assert rc == 0
+    assert len(captured_codex_dispatches) == 1
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-sol-xhigh"
+
+
+def test_cli_explicit_model_overrides_action_class(
+    captured_codex_dispatches, monkeypatch
+) -> None:
+    """--model wins outright over --action-class tier resolution, matching
+    run_skill's own override-beats-config precedence."""
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "top"}')
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING", '{"codex": {"top": "from-tiering"}}'
+    )
+
+    rc = dispatch_role.main(
+        [
+            "--role", "cicada", "--task", "do the thing",
+            "--action-class", "build", "--model", "explicit-override",
+        ]
+    )
+
+    assert rc == 0
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "explicit-override"
+
+
+def test_cli_no_action_class_leaves_argv_without_model_flag(
+    captured_codex_dispatches,
+) -> None:
+    """No --action-class and no --model: exact prior behaviour, no --model
+    flag at all — the no-op default this whole feature must preserve."""
+    rc = dispatch_role.main(["--role", "cicada", "--task", "do the thing"])
+
+    assert rc == 0
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert "--model" not in cmd
 
 
 @pytest.mark.parametrize("github_token", [None, ""])
@@ -854,3 +957,35 @@ def test_fatal_signal_writes_an_envelope_and_dies_by_that_signal(
     env_obj = _json.loads(stdout)
     assert env_obj["ok"] is False
     assert signame in env_obj["reason"]
+
+
+def test_headroom_note_names_a_persisted_cooling_window(tmp_path, monkeypatch) -> None:
+    """The 2026-09-29 log said "cooling: none" while claude's session was spent."""
+    import time
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "absent.json"))
+    harness_router.reset_state()
+    harness_router.record_cooling("claude", time.time() + 3600, reason="session_limit")
+    assert "cooling: claude" in dispatch_role._headroom_note()
+
+
+def test_a_cooled_result_envelope_carries_cooled_until(
+    fake_repo, monkeypatch, capsys
+) -> None:
+    async def _cooled(skill, prompt, **kwargs):
+        return SkillResult(
+            skill, False, None, "", "",
+            error="all eligible subscription-backed harness providers are cooled until 2026-09-29T12:30+02:00",
+            cooled_until="2026-09-29T12:30+02:00",
+        )
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _cooled)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(["--role", "cicada", "--task", "x", "--json"])
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["cooled_until"] == "2026-09-29T12:30+02:00"
+    assert "cooled until" in env["reason"]

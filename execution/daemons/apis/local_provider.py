@@ -24,8 +24,17 @@ level, or a ``vendor_binding``-shaped record with them under ``config``::
       "chars_per_token": 3.0,
       "output_reserve_tokens": 1024,
       "harness_overhead_tokens": 6000,
+      "tool_output_cap_tokens": 3276,
       "default_tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
     }
+
+A failed local run may fall over only to the cheapest frontier tier: the model the
+``vendor_binding`` (model_tiering.py) binds to the ``mechanical`` tier for each
+provider. That binding is the single source; this config carries no model
+names. A provider with no such binding, or no ``vendor_binding`` at all, is not a
+fallback: the run is refused and recorded as a local failure rather than replayed
+on a provider's ambient default. The operator's ruling of 2026-09-29 makes that
+model Claude Haiku (`{"claude": {"mechanical": "haiku"}}` in the vendor_binding).
 
 No file, ``enabled: false`` or an invalid record means the provider does not
 exist for this process: every dispatch stays on the frontier providers.
@@ -40,6 +49,10 @@ Two safety properties are enforced here and pinned by tests:
   PreToolUse entries, so the local path binds exactly the guards the frontier
   path does and cannot drift into a stale hand-kept copy. A missing required
   guard refuses the launch rather than running unguarded.
+
+Work that git or a generator can finish never reaches this provider at all: see
+``mechanical_first.py``, which also refuses anything but a dedicated linked
+worktree, since direct subprocess git bypasses those guards.
 """
 
 from __future__ import annotations
@@ -123,13 +136,18 @@ LEAN_ROLE_SUMMARY = (
 # PreToolUse hooks bind independently of the prompt.
 _LEAN_HARD_RULES: dict[str, str] = {
     "rebase": (
-        "Rebase the current branch onto the named base with `git rebase "
-        "<base>`. Resolve conflicts by re-reading the conflicting hunks, "
-        "never by discarding either side blindly. After the rebase, verify "
-        "the branch contains the base's HEAD commit and the working tree is "
-        "clean before reporting success. Do not force-push unless the task "
-        "explicitly says to; if it does, use `--force-with-lease`, never "
-        "bare `--force`."
+        "Integrate the named base into the current branch using the method the "
+        "task names: `git rebase <base>` (the default), or a merge commit "
+        "(`git merge --no-ff <base>`) when the task asks for one — a merge "
+        "commit is the right method for a branch that is already pushed and "
+        "reviewed, because a rebase would rewrite its published history. "
+        "Resolve conflicts by re-reading the conflicting hunks, never by "
+        "discarding either side blindly, then `git add` the resolved files and "
+        "continue (`GIT_EDITOR=true git rebase --continue`, or `git commit "
+        "--no-edit` for a merge). After integrating, verify the branch "
+        "contains the base's HEAD commit and the working tree is clean before "
+        "reporting success. Do not force-push unless the task explicitly says "
+        "to; if it does, use `--force-with-lease`, never bare `--force`."
     ),
     "regenerate_generated_files": (
         "Run exactly the generator command(s) the task names. Do not hand-"
@@ -246,6 +264,9 @@ class LocalProviderConfig:
     output_reserve_tokens: int = 1024
     harness_overhead_tokens: int = 6000
     default_tools: tuple[str, ...] = field(default=DEFAULT_TOOLS)
+    # Cap, in tokens, on any single tool result the CLI may put in context.
+    # 0 means "derive from the ceiling" (see ``tool_output_cap``).
+    tool_output_cap_tokens: int = 0
 
 
 def _is_loopback(url: str) -> bool:
@@ -292,9 +313,12 @@ def parse_config(record: dict) -> LocalProviderConfig:
         output_reserve_tokens=int(record.get("output_reserve_tokens") or 1024),
         harness_overhead_tokens=int(record.get("harness_overhead_tokens") or 6000),
         default_tools=tools,
+        tool_output_cap_tokens=int(record.get("tool_output_cap_tokens") or 0),
     )
     if cfg.chars_per_token <= 0 or cfg.output_reserve_tokens < 0 or cfg.harness_overhead_tokens < 0:
         raise ValueError("chars_per_token must be > 0 and token reserves >= 0")
+    if cfg.tool_output_cap_tokens < 0:
+        raise ValueError("tool_output_cap_tokens must be >= 0")
     if any(t.startswith("mcp__") for t in cfg.default_tools):
         raise ValueError("default_tools must not name MCP tools; the local path has no MCP servers")
     return cfg
@@ -440,6 +464,11 @@ def build_command(
     return cmd
 
 
+def tool_output_cap(config: LocalProviderConfig) -> int:
+    """Tokens one tool result may occupy: configured, else a tenth of the window."""
+    return config.tool_output_cap_tokens or max(512, config.context_ceiling_tokens // 10)
+
+
 def apply_env(env: dict[str, str], config: LocalProviderConfig) -> dict[str, str]:
     """Point the child's claude CLI at the local proxy, with no frontier credential."""
     for key in _FRONTIER_CREDENTIALS:
@@ -454,8 +483,35 @@ def apply_env(env: dict[str, str], config: LocalProviderConfig) -> dict[str, str
     # The CLI does not know a local model's window and assumes 200K, so its
     # auto-compaction would never fire before the local ceiling. Tell it.
     env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(config.context_ceiling_tokens)
+    # Never compact on the local path. Verified 2026-09-29 against claude
+    # 2.1.283 on a 32K local window: the CLI's own system prompt and tool
+    # schemas plus its compaction reserve leave so little headroom that every
+    # compact refills within 3 turns, and the run burns ~80s of local compute
+    # before aborting with "Autocompact is thrashing". With compaction off the
+    # same overflow surfaces as a plain "Prompt is too long" (a classified
+    # context ceiling), which is a failure this module already names.
+    env["DISABLE_AUTO_COMPACT"] = "1"
+    # Bound what one tool result may add to context, so a large `git log` or
+    # file read cannot alone fill the window. The same probe with these caps
+    # (compaction left on) completed instead of thrashing.
+    cap = tool_output_cap(config)
+    env["BASH_MAX_OUTPUT_LENGTH"] = str(int(cap * config.chars_per_token))
+    env["CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS"] = str(cap)
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     return env
+
+
+# Specific reasons under ``local_run_failed``. Each is a signature the claude
+# CLI prints when the local run dies for a reason of its own, observed on
+# 2026-09-29 (a rebase dispatch: "Autocompact is thrashing" after 158s).
+REASON_AUTOCOMPACT_THRASH = "autocompact_thrash"
+REASON_UNRECOGNIZED_MODEL = "unrecognized_model"
+
+_THRASH_SIGNATURES = ("autocompact is thrashing", "context refilled to the limit")
+# The CLI prints this on stderr for ANY model id it has no catalog entry for,
+# on a run that succeeds as well as one that fails (verified 2026-09-29), so
+# it is a note about a failed run, never a failure by itself.
+_UNRECOGNIZED_MODEL_SIGNATURE = "[claude-code:unrecognized_model]"
 
 
 def classify_failure(*texts: str) -> str:
@@ -468,6 +524,27 @@ def classify_failure(*texts: str) -> str:
     if any(sig in blob for sig in _ENDPOINT_SIGNATURES):
         return FAILURE_ENDPOINT
     return FAILURE_RUN
+
+
+def failure_reason(*texts: str) -> str:
+    """The specific reason behind a failed local run, or '' when none is known.
+
+    Only meaningful for a run that already failed. ``unrecognized_model`` is
+    reported only when nothing more specific explains the failure, since the
+    CLI prints it on healthy runs too.
+    """
+    blob = " ".join(t for t in texts if t).lower()
+    if any(sig in blob for sig in _THRASH_SIGNATURES):
+        return REASON_AUTOCOMPACT_THRASH
+    if classify_failure(blob) == FAILURE_RUN and _UNRECOGNIZED_MODEL_SIGNATURE in blob:
+        return REASON_UNRECOGNIZED_MODEL
+    return ""
+
+
+def describe_failure(*texts: str) -> str:
+    """``kind`` or ``kind:reason``, the string recorded for a local failure."""
+    kind, reason = classify_failure(*texts), failure_reason(*texts)
+    return f"{kind}:{reason}" if reason else kind
 
 
 # ── Post-condition checks ────────────────────────────────────────────────────
