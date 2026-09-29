@@ -14,6 +14,7 @@ stubbed through ``_World`` so each test states the one fact it varies.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import subprocess
 import sys
@@ -165,6 +166,13 @@ def _pr_dispatcher(monkeypatch, world) -> SwarmDispatcher:
 
 def _run_handle_pr(monkeypatch, world) -> _Recorder:
     d = _pr_dispatcher(monkeypatch, world)
+    # These tests pin what each lens's OWN dispatch runs at. The combined
+    # pm/qa/ux pass and the narrowed re-round change how many dispatches a
+    # panel makes, not the tier a lens resolves to; both are covered in
+    # test_review_carry.py, so they are switched off here.
+    d.config = dataclasses.replace(
+        d.config, combined_review_pass=False, narrow_rereview=False
+    )
     # `_pr_dispatcher_with_stubs` installed its own run_skill; replace it with
     # the recorder so kwargs are captured, keeping its verdict outputs.
     rec = _Recorder(
@@ -1043,14 +1051,16 @@ _REAL_NEW_BLOCKING = SwarmDispatcher._new_blocking_finding
 
 def _small_delta_after_merging_main(gh: _Github) -> None:
     """The PR's own diff at both heads: same two files, its own lines unchanged
-    bar one added line, while hunks moved because main changed around them."""
+    bar one added line, while hunks moved because main changed around them. The
+    unchanged file keeps the same blob: a file whose blob differs is a changed
+    file even when its +/- lines match (`review_delta._unmeasured_change`)."""
     gh.compare[PREV_HEAD] = [
         _file("src/feature.py", _patch("+one", "-two", start=10)),
-        _file(".claude/hooks/gate.py", _patch("+guard", start=5)),
+        _file(".claude/hooks/gate.py", _patch("+guard", start=5), sha="gate-blob"),
     ]
     gh.compare[CUR_HEAD] = [
         _file("src/feature.py", _patch("+one", "-two", "+fix from review", start=430)),
-        _file(".claude/hooks/gate.py", _patch("+guard", start=77)),
+        _file(".claude/hooks/gate.py", _patch("+guard", start=77), sha="gate-blob"),
     ]
 
 
@@ -1292,3 +1302,212 @@ def test_missing_lens_rerun_of_a_big_pr_with_a_small_delta_runs_mid(
     assert tier_of(rec.only("phoenicurus")).tier == "mid"
     rec = _run_missing_lens(monkeypatch, "security")
     assert tier_of(rec.only("falco")).tier == "top"
+
+
+def test_panel_narrowed_reround_dispatches_only_the_lenses_it_selected(
+    monkeypatch, world
+):
+    """Ruling `rereview_only_blockers_and_touched_areas`: the panel dispatch
+    applies the selection, so a carried lens is not dispatched at all."""
+    import review_carry
+
+    world.fix_rounds = 1
+    d = _pr_dispatcher(monkeypatch, world)
+    d.config = dataclasses.replace(
+        d.config, combined_review_pass=False, narrow_rereview=True
+    )
+    seen: dict[str, list[str]] = {}
+
+    async def fake_selection(self, trigger, panel, review_head, *, forced):
+        seen["panel"] = [item.lens for item in panel]
+        carried = {
+            lens: review_carry.Carried(lens, "b" * 40, "signed_off", "u")
+            for lens in seen["panel"]
+            if lens != "arch"
+        }
+        return review_carry.RerunSelection(frozenset({"arch"}), carried)
+
+    async def no_note(self, *a, **k):
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_rereview_selection", fake_selection)
+    monkeypatch.setattr(SwarmDispatcher, "_post_carry_note", no_note)
+    rec = _Recorder(
+        monkeypatch,
+        stdout={"lanius": "GATE_INHERITANCE: clear", "vanellus": "**APPROVE**\nlgtm"},
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    lens_agents = {"pavo", "waxwing", "phoenicurus", "falco", "accipiter"}
+    dispatched = {skill for skill, _ in rec.calls} & lens_agents
+    assert "arch" in seen["panel"] and len(seen["panel"]) > 1
+    assert dispatched == {"waxwing"}
+
+
+# ── default-on wiring, end to end through `_handle_pr` (qa review of #1368) ──
+
+
+class _Wire:
+    """Everything a wiring test records: ordered events, prompts, posted bodies."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.prompts: dict[str, str] = {}
+        self.posts: list[str] = []
+        self.worktrees: list[str] = []
+
+
+def _wire(monkeypatch, world, *, combined: bool, narrow: bool) -> tuple[SwarmDispatcher, _Wire]:
+    import httpx
+
+    from test_review_carry import _combined_reply
+
+    w = _Wire()
+    d = _pr_dispatcher(monkeypatch, world)
+    d.config = dataclasses.replace(
+        d.config, combined_review_pass=combined, narrow_rereview=narrow
+    )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        w.events.append(f"skill:{skill}")
+        w.prompts[skill] = prompt
+        if skill == "lanius":
+            out = "GATE_INHERITANCE: clear"
+        elif skill == "vanellus":
+            out = "**APPROVE**\nlgtm"
+        elif skill == "pavo" and "IN ONE PASS" in prompt:
+            out = _combined_reply({"pm": "SIGNED_OFF", "qa": "SIGNED_OFF"})
+        else:
+            out = "**COMMENT**\nlgtm"
+        return SkillResult(skill, True, 0, out, "")
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            class _R:
+                status_code = 200
+
+                def raise_for_status(s):
+                    pass
+
+                def json(s):
+                    return []
+
+            return _R()
+
+        async def post(self, url, json=None, headers=None):
+            body = json["body"]
+            w.posts.append(body)
+            marker = swarm_dispatch._LENS_MARKER_RE.search(body)
+            w.events.append(f"post:{marker.group('lens')}" if marker else "post:note")
+
+            class _R:
+                def raise_for_status(s):
+                    pass
+
+            return _R()
+
+    async def fake_worktree(repo, number, agent):
+        w.worktrees.append(agent)
+        return None
+
+    async def expectations(self, repo, number):
+        return {"pavo": "- [ ] the scope matches the issue"}
+
+    monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", expectations)
+    # Agent prompts load from `skill_runner.ATELES_REPO`, which defaults to the
+    # operator's clone (absent in CI); pin it to this checkout.
+    monkeypatch.setattr(swarm_dispatch, "ATELES_REPO", _REPO_ROOT)
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_worktree)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
+    monkeypatch.setattr(swarm_dispatch, "usable_providers", lambda: set())
+    return d, w
+
+
+def test_handle_pr_runs_pm_and_qa_in_one_pass_and_posts_their_comments_before_aggregating(
+    monkeypatch, world
+):
+    # A path keyed to a foundation document, so the reading list differs from the
+    # kernel-only list a call with no changed files would give.
+    world.files = ["execution/daemons/apis/swarm_dispatch.py"]
+    d, w = _wire(monkeypatch, world, combined=True, narrow=False)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert w.events.count("skill:pavo") == 1, "one dispatch for the combined lenses"
+    assert "skill:phoenicurus" not in w.events, "qa has no separate dispatch"
+    assert "phoenicurus" not in w.worktrees, "no qa checkout for the combined lens"
+    assert "post:pm" in w.events and "post:qa" in w.events
+    # `changed_files` and `parent` reach the composed prompt through both hops
+    # (`_handle_pr` -> `_run_combined_pass` -> `_combined_prompt`): the foundation
+    # reading list keyed to the changed paths, the pm design-basis check, and the
+    # check-off on the parent issue all vanish if either hop drops them.
+    prompt = w.prompts["pavo"]
+    readings = swarm_dispatch.reading_block(list(world.files))
+    assert readings and readings != swarm_dispatch.reading_block([])
+    assert readings in prompt
+    assert "Design basis" in prompt
+    assert "issues/80/comments" in prompt
+    assert "the scope matches the issue" in prompt
+    vanellus_at = w.events.index("skill:vanellus")
+    assert w.events.index("post:pm") < vanellus_at
+    assert w.events.index("post:qa") < vanellus_at
+
+
+def _carried_selection():
+    import review_carry
+
+    carried = {
+        lens: review_carry.Carried(lens, "b" * 40, "signed_off", f"https://c/{lens}")
+        for lens in ("pm", "qa")
+    }
+    return carried
+
+
+def test_handle_pr_names_carried_lenses_to_the_aggregator_and_posts_the_note(
+    monkeypatch, world
+):
+    import review_carry
+
+    world.fix_rounds = 1
+    d, w = _wire(monkeypatch, world, combined=False, narrow=True)
+
+    async def selection(self, trigger, panel, head, *, forced):
+        carried = _carried_selection()
+        return review_carry.RerunSelection(
+            frozenset(item.lens for item in panel if item.lens not in carried),
+            carried,
+            {"arch": "the fix touched its area"},
+        )
+
+    monkeypatch.setattr(SwarmDispatcher, "_rereview_selection", selection)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert "CARRIED FORWARD" in w.prompts["vanellus"]
+    assert "b" * 40 in w.prompts["vanellus"]
+    note = [p for p in w.posts if "narrowed" in p]
+    assert len(note) == 1
+    assert "https://c/pm" in note[0], "the note links each carried verdict"
+    assert "the fix touched its area" in note[0], "and says why the others re-ran"
+    assert "skill:pavo" not in w.events and "skill:phoenicurus" not in w.events
+
+
+def test_handle_pr_skips_the_aggregator_when_every_lens_is_carried(monkeypatch, world):
+    import review_carry
+
+    world.fix_rounds = 1
+    d, w = _wire(monkeypatch, world, combined=False, narrow=True)
+
+    async def selection(self, trigger, panel, head, *, forced):
+        carried = {
+            item.lens: review_carry.Carried(item.lens, "b" * 40, "signed_off", "u")
+            for item in panel
+        }
+        return review_carry.RerunSelection(frozenset(), carried, {})
+
+    monkeypatch.setattr(SwarmDispatcher, "_rereview_selection", selection)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert "skill:vanellus" not in w.events
+    assert any("narrowed" in p for p in w.posts), "the note still says what carried"

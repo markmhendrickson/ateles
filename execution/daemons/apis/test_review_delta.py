@@ -41,17 +41,35 @@ def test_an_identical_pr_side_diff_has_no_delta():
 
 
 def test_base_branch_content_between_the_heads_is_not_part_of_the_delta():
-    """Merging the base branch shifts the hunks and rewrites the context around
-    the PR's own lines, but the PR's +/- lines are the same: no delta."""
+    """Merging the base branch shifts the hunks around the PR's own lines. A file
+    whose blob is the same at both heads is the same file, whatever the patch
+    text around it now says: no delta."""
     before = [
-        _file("src/a.py", _patch("+one", "-two", start=10, context=("old ctx",))),
-        _file(".claude/hooks/gate.py", _patch("+guard", start=5)),
+        _file("src/a.py", _patch("+one", "-two", start=10, context=("old ctx",)), sha="s1"),
+        _file(".claude/hooks/gate.py", _patch("+guard", start=5), sha="s2"),
     ]
     after = [
-        _file("src/a.py", _patch("+one", "-two", start=400, context=("main moved this",))),
-        _file(".claude/hooks/gate.py", _patch("+guard", start=77)),
+        _file("src/a.py", _patch("+one", "-two", start=400, context=("main moved this",)), sha="s1"),
+        _file(".claude/hooks/gate.py", _patch("+guard", start=77), sha="s2"),
     ]
     assert review_delta.interdiff(before, after) == review_delta.Delta(0, ())
+
+
+def test_a_changed_file_is_never_reported_as_no_delta_even_when_its_change_lines_match():
+    """Security review of ateles#1368: the same +/- lines at a different place in
+    the file (a guard moved past the call it protects) measured 0 lines, so the
+    file read as untouched. A file present on both sides whose blob or patch
+    differs is changed, at least one line."""
+    before = [_file("src/auth/x.ts", _patch("+check()", start=10, context=("a", "b")), sha="s1")]
+    after = [_file("src/auth/x.ts", _patch("+check()", start=10, context=("b", "a")), sha="s2")]
+    delta = review_delta.interdiff(before, after)
+    assert delta.files == ("src/auth/x.ts",) and delta.lines >= 1
+
+
+def test_without_blobs_a_differing_patch_is_still_a_change():
+    before = [_file("src/a.py", _patch("+one", start=10, context=("x",)))]
+    after = [_file("src/a.py", _patch("+one", start=90, context=("y",)))]
+    assert review_delta.interdiff(before, after).files == ("src/a.py",)
 
 
 def test_only_what_the_pr_changed_since_the_review_is_counted():
