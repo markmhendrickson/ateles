@@ -100,6 +100,14 @@ SECURITY_SENSITIVE_PATH_FRAGMENTS: tuple[str, ...] = (
 # the more direct proxy for how much judgement a diff needs).
 LARGE_DIFF_LINE_THRESHOLD = 400
 
+# Operator ruling `small_rereview_rounds_run_mid` (2026-09-29): pm, qa and ux
+# re-review rounds of a SMALL change run at their policy tier (mid) instead of
+# escalating on the round alone. arch and security re-rounds stay top, as do
+# large or security-touching ones; that is why only these three are listed.
+ROUND_TOLERANT_ACTION_CLASSES: frozenset[str] = frozenset(
+    {"lens_review:pm", "lens_review:qa", "lens_review:ux"}
+)
+
 
 def _tier_index(tier: str) -> int:
     try:
@@ -222,6 +230,12 @@ class EscalationSignals:
     # measurement the security-path and size signals are both silently False,
     # which would tier a possibly-large or security-sensitive dispatch DOWN.
     diff_unreadable: bool = False
+    # A blocking finding that no earlier round had raised (ruling
+    # `small_rereview_rounds_run_mid`, 2026-09-29). Unlike `prior_blocking_finding`
+    # (an earlier round blocked, which a re-review is by definition verifying),
+    # this means the last round turned up something NEW — the change is not
+    # converging, so it raises any class.
+    new_blocking_finding: bool = False
 
     def touches_security_sensitive_path(self) -> bool:
         return any(
@@ -230,16 +244,25 @@ class EscalationSignals:
             for fragment in SECURITY_SENSITIVE_PATH_FRAGMENTS
         )
 
-    def reasons(self) -> list[str]:
-        """Every reason this dispatch's tier should be raised, for logging."""
+    def reasons(self, action_class: str = "") -> list[str]:
+        """Every reason this dispatch's tier should be raised, for logging.
+
+        ``action_class`` matters for exactly one narrowing: a re-review round
+        (and the fact that an earlier round blocked) does not by itself raise
+        a class in ``ROUND_TOLERANT_ACTION_CLASSES``. Size, security paths, a
+        NEW blocking finding, a failed attempt and an unreadable diff still do.
+        """
+        tolerant = action_class in ROUND_TOLERANT_ACTION_CLASSES
         out: list[str] = []
         if self.diff_lines_changed > LARGE_DIFF_LINE_THRESHOLD:
             out.append(f"diff_lines_changed={self.diff_lines_changed}>{LARGE_DIFF_LINE_THRESHOLD}")
         if self.touches_security_sensitive_path():
             out.append("touches_security_sensitive_path")
-        if self.prior_blocking_finding:
+        if self.prior_blocking_finding and not tolerant:
             out.append("prior_blocking_finding")
-        if self.review_round > 1:
+        if self.new_blocking_finding:
+            out.append("new_blocking_finding")
+        if self.review_round > 1 and not tolerant:
             out.append(f"review_round={self.review_round}")
         if self.prior_attempt_failed:
             out.append("prior_attempt_failed")
@@ -248,7 +271,11 @@ class EscalationSignals:
         return out
 
 
-def escalate(base_tier: str, signals: "EscalationSignals | None") -> tuple[str, list[str]]:
+def escalate(
+    base_tier: str,
+    signals: "EscalationSignals | None",
+    action_class: str = "",
+) -> tuple[str, list[str]]:
     """Apply escalation signals to a resolved tier; return (tier, reasons).
 
     Any single signal raises straight to the top tier — these are correctness
@@ -260,7 +287,7 @@ def escalate(base_tier: str, signals: "EscalationSignals | None") -> tuple[str, 
     """
     if signals is None:
         return base_tier, []
-    reasons = signals.reasons()
+    reasons = signals.reasons(action_class)
     if not reasons:
         return base_tier, []
     return _higher_tier(base_tier, DEFAULT_TIER), reasons
@@ -301,7 +328,7 @@ def resolve_tier(
         source = "unresolved_class"
     else:
         source = "policy"
-    escalated_tier, reasons = escalate(base_tier, signals)
+    escalated_tier, reasons = escalate(base_tier, signals, action_class)
     if reasons:
         source = "escalated"
     return ResolvedTier(
@@ -332,6 +359,7 @@ DEFAULT_ACTION_POLICY_HINT: dict[str, str] = {
     "lens_review:pm": "mid",
     "lens_review:qa": "mid",
     "lens_review:ux": "mid",
+    "issue_triage": "mid",
     "carry_forward_check": "mid",
     "repair_diagnosed": "mid",
     "rebase": "mechanical",
@@ -345,20 +373,20 @@ DEFAULT_ACTION_POLICY_HINT: dict[str, str] = {
 #
 # The single home for the class names ``swarm_dispatch`` passes to
 # ``run_skill(action_class=...)``. Names come from the operator ruling and
-# ``DEFAULT_ACTION_POLICY_HINT`` above; the three below the line are classes
-# the ruling does not name. They are passed as their own explicit names and
-# are deliberately absent from the committed example policy, so they resolve
-# ``unresolved_class -> top`` (fail-closed) until the operator rules on them.
-# Every dispatch of one is visible as ``tiering=top(unresolved_class)``, which
-# is how their volume gets measured before anyone loosens them.
+# ``DEFAULT_ACTION_POLICY_HINT`` above. ``issue_triage`` was ruled mid on
+# 2026-09-29 (``issue_triage_and_backfill_run_mid``). The two below the line
+# are classes no ruling names: they are deliberately absent from the committed
+# example policy, so they resolve ``unresolved_class -> top`` (fail-closed)
+# until the operator rules on them, and every dispatch of one is visible as
+# ``tiering=top(unresolved_class)``.
 
 ACTION_BUILD = "build"
 ACTION_SECURITY_FIX = "security_fix"
 ACTION_REPAIR_DIAGNOSED = "repair_diagnosed"
 ACTION_CARRY_FORWARD_CHECK = "carry_forward_check"
 ACTION_CI_LOG_TRIAGE = "ci_log_triage"
-# Not named by the ruling — unmapped on purpose, so they run at ``top``:
-ACTION_ISSUE_TRIAGE = "issue_triage"  # Lanius new-issue protocol
+ACTION_ISSUE_TRIAGE = "issue_triage"  # Lanius new-issue protocol and entity backfill
+# Not named by any ruling — unmapped on purpose, so they run at ``top``:
 ACTION_PANEL_AGGREGATION = "panel_aggregation"  # Vanellus verdict aggregation
 ACTION_TASK_DISPATCH_FALLBACK = "task_dispatch"  # queue task with no action_type
 
@@ -390,6 +418,22 @@ DISPATCH_ACTION_CLASSES: tuple[str, ...] = (
 def lens_review_class(lens: str) -> str:
     """Action class for one lens's review (or spec section, or fix guidance)."""
     return f"{LENS_REVIEW_PREFIX}{lens.strip().lower()}"
+
+
+def repair_action_class(blocking_lenses: "set[str] | frozenset[str]") -> str:
+    """Action class for a Cicada repair of already-diagnosed blocking findings.
+
+    The ONE classifier both repair sites call (the fix-round path and the
+    revision sweep), so they cannot drift: a security finding among them makes
+    it a ``security_fix`` (stays top, per the ruling); anything else is a
+    ``repair_diagnosed`` (mid). Security review of ateles#1358 found the sweep
+    classifying every repair as the latter.
+    """
+    return (
+        ACTION_SECURITY_FIX
+        if "security" in {str(l).strip().lower() for l in blocking_lenses}
+        else ACTION_REPAIR_DIAGNOSED
+    )
 
 
 class UnboundTierError(ValueError):

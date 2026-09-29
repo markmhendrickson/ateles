@@ -6,6 +6,7 @@
   "lens_review:pm": "mid",
   "lens_review:qa": "mid",
   "lens_review:ux": "mid",
+  "issue_triage": "mid",
   "carry_forward_check": "mid",
   "repair_diagnosed": "mid",
   "rebase": "mechanical",

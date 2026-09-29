@@ -52,6 +52,7 @@ class _World:
         self.files: list[str] = ["src/feature.py"]
         self.lines: int | None = 40
         self.fix_rounds: int = 0
+        self.new_blocking_finding: bool = False
         self.changed_files_stub = None  # re-applied after helpers that override it
 
 
@@ -73,6 +74,9 @@ def world(monkeypatch, tmp_path) -> _World:
     async def rounds(self, trigger):
         return w.fix_rounds
 
+    async def new_finding(self, trigger):
+        return w.new_blocking_finding
+
     async def noop(self, *a, **k):
         return None
 
@@ -81,6 +85,13 @@ def world(monkeypatch, tmp_path) -> _World:
     monkeypatch.setattr(SwarmDispatcher, "_diff_lines_changed", lines, raising=False)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", rounds)
     monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", noop)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_new_blocking_finding", new_finding, raising=False
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher, "_blocking_findings_from_reviewed_head_comments",
+        lambda self, t, h: _async_return({}),
+    )
     monkeypatch.setattr(
         SwarmDispatcher, "_pr_head_sha", lambda self, t: _async_return("a" * 40)
     )
@@ -124,7 +135,9 @@ def tier_of(kwargs: dict) -> model_tiering.ResolvedTier:
 
 
 def _dispatcher() -> SwarmDispatcher:
-    return SwarmDispatcher(_StubNotifier(), _config())
+    # `require_label` is read from the environment at import; pin it off so a
+    # shell exporting ATELES_SWARM_REQUIRE_LABEL cannot skip these PRs locally.
+    return SwarmDispatcher(_StubNotifier(), _config(require_label=""))
 
 
 # ── _handle_pr: Lanius gate check, the panel, Vanellus ───────────────────────
@@ -171,14 +184,45 @@ def test_panel_arch_lens_stays_on_top(monkeypatch, world):
     assert tier_of(waxwing).tier == "top"
 
 
-def test_panel_repeated_round_raises_a_mid_lens_to_top(monkeypatch, world):
+def test_panel_small_rereview_of_a_mid_lens_stays_mid(monkeypatch, world):
+    """Ruling `small_rereview_rounds_run_mid` (2026-09-29): a pm/qa/ux re-review
+    of a small change, no security path, no NEW blocking finding, runs mid."""
     world.fix_rounds = 1  # a fix round already happened: this is round 2
+    rec = _run_handle_pr(monkeypatch, world)
+    for agent in ("pavo", "phoenicurus"):
+        resolved = tier_of(rec.only(agent))
+        assert (resolved.tier, resolved.source) == ("mid", "policy"), agent
+
+
+def test_panel_rereview_of_arch_and_security_stays_top(monkeypatch, world):
+    world.fix_rounds = 1
+    rec = _run_handle_pr(monkeypatch, world)
+    resolved = tier_of(rec.only("waxwing"))
+    assert resolved.tier == "top"
+    assert any(r.startswith("review_round=") for r in resolved.escalation_reasons)
+
+
+def test_panel_rereview_with_a_new_blocking_finding_goes_top(monkeypatch, world):
+    world.fix_rounds = 2
+    world.new_blocking_finding = True
     rec = _run_handle_pr(monkeypatch, world)
     resolved = tier_of(rec.only("pavo"))
     assert resolved.tier == "top"
-    assert resolved.source == "escalated"
-    assert any(r.startswith("review_round=") for r in resolved.escalation_reasons)
-    assert "prior_blocking_finding" in resolved.escalation_reasons
+    assert "new_blocking_finding" in resolved.escalation_reasons
+
+
+def test_panel_large_rereview_of_a_mid_lens_goes_top(monkeypatch, world):
+    world.fix_rounds = 1
+    world.lines = 900
+    rec = _run_handle_pr(monkeypatch, world)
+    assert tier_of(rec.only("pavo")).tier == "top"
+
+
+def test_panel_security_path_rereview_of_a_mid_lens_goes_top(monkeypatch, world):
+    world.fix_rounds = 1
+    world.files = [".claude/hooks/gate.py"]
+    rec = _run_handle_pr(monkeypatch, world)
+    assert tier_of(rec.only("pavo")).tier == "top"
 
 
 def test_panel_large_diff_raises_a_mid_lens_to_top(monkeypatch, world):
@@ -218,6 +262,8 @@ def test_lanius_pr_check_does_not_measure_the_diff(monkeypatch, world):
     world.files = ["execution/hooks/x.py"]
     rec = _run_handle_pr(monkeypatch, world)
     assert tier_of(rec.only("lanius")).tier == "mid"
+    # Lanius is not one of the three round-tolerant lenses: a repeat round
+    # still raises it.
     world.fix_rounds = 2
     rec = _run_handle_pr(monkeypatch, world)
     assert tier_of(rec.only("lanius")).tier == "top"
@@ -288,22 +334,55 @@ def test_missing_lens_rerun_passes_the_lens_class(monkeypatch, world):
     assert tier_of(falco).tier == "top"
 
 
-def test_missing_lens_rerun_of_a_mid_lens_escalates_on_a_repeated_round(
+def test_missing_lens_rerun_of_a_mid_lens_stays_mid_on_a_small_repeat_round(
     monkeypatch, world
 ):
-    rec = _run_missing_lens(monkeypatch, "qa")
-    assert tier_of(rec.only("phoenicurus")).tier == "mid"
     world.fix_rounds = 1
     rec = _run_missing_lens(monkeypatch, "qa")
+    assert tier_of(rec.only("phoenicurus")).tier == "mid"
+
+
+def test_missing_lens_rerun_of_a_mid_lens_escalates_on_a_new_blocking_finding(
+    monkeypatch, world
+):
+    world.fix_rounds = 1
+    world.new_blocking_finding = True
+    rec = _run_missing_lens(monkeypatch, "qa")
     assert tier_of(rec.only("phoenicurus")).tier == "top"
+
+
+def test_missing_lens_rerun_of_arch_on_a_repeat_round_stays_top(monkeypatch, world):
+    world.fix_rounds = 1
+    rec = _run_missing_lens(monkeypatch, "arch")
+    assert tier_of(rec.only("waxwing")).tier == "top"
 
 
 # ── resume_unactioned_revisions ──────────────────────────────────────────────
 
 
-def _run_revision_sweep(monkeypatch, *, attempts_before: int = 0) -> _Recorder:
+REVIEW_BODY_UX = "[BLOCKING] naming: the flag is undiscoverable\ndetail"
+REVIEW_BODY_SECURITY = (
+    "<!-- review:security commit=" + "b" * 40 + " -->\n"
+    "**Falco, security lens panelist**\n**REQUEST_CHANGES**\n"
+    "[BLOCKING] injection: unsanitised input reaches the shell\ndetail"
+)
+
+
+def _run_revision_sweep(
+    monkeypatch,
+    *,
+    attempts_before: int = 0,
+    review_body: str = REVIEW_BODY_UX,
+    comment_lenses: tuple[str, ...] = (),
+) -> _Recorder:
     d = _dispatcher()
     rec = _Recorder(monkeypatch)
+    # Lenses with a standing blocking finding in the PR's own lens comments.
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_blocking_findings_from_reviewed_head_comments",
+        lambda self, t, h: _async_return({lens: [object()] for lens in comment_lenses}),
+    )
 
     async def scan(repo, now, stale):
         return [
@@ -318,13 +397,16 @@ def _run_revision_sweep(monkeypatch, *, attempts_before: int = 0) -> _Recorder:
                 "labels": [],
                 "_blocking_review_at": "x",
                 "_revision_pushed_at": "y",
-                "_blocking_review_body": "[BLOCKING] the age parse drops the stamp",
+                "_blocking_review_body": review_body,
             }
         ]
 
     monkeypatch.setattr(d, "_prs_with_unactioned_revisions", scan)
     if attempts_before:
-        d._revision_retries[("o/r", 163, "b" * 40)] = attempts_before
+        # The key the sweep actually reads: f"{ref}@{head_sha}". Seeding any
+        # other shape is a silent no-op and leaves the retry escalation
+        # untested (qa review of ateles#1358).
+        d._revision_retries[f"o/r#163@{'b' * 40}"] = attempts_before
     asyncio.run(d.resume_unactioned_revisions(["o/r"]))
     return rec
 
@@ -347,6 +429,73 @@ def test_revision_sweep_repair_does_not_treat_its_own_input_as_escalation(
     assert signals.review_round == 1
 
 
+def test_revision_sweep_retry_escalates_on_the_attempt_alone(monkeypatch, world):
+    """The `attempts > 0` half: no recorded fix round, only a prior sweep
+    attempt on this head. Must fail if that half of the condition is removed."""
+    world.fix_rounds = 0
+    rec = _run_revision_sweep(monkeypatch, attempts_before=1)
+    resolved = tier_of(rec.only("cicada"))
+    assert resolved.tier == "top"
+    assert "prior_attempt_failed" in resolved.escalation_reasons
+
+
+def test_revision_sweep_first_attempt_does_not_escalate(monkeypatch, world):
+    world.fix_rounds = 0
+    rec = _run_revision_sweep(monkeypatch, attempts_before=0)
+    assert tier_of(rec.only("cicada")).tier == "mid"
+
+
+def test_revision_sweep_security_review_body_is_a_security_fix_on_top(
+    monkeypatch, world
+):
+    """Security review of ateles#1358: the sweep repaired a security finding
+    as `repair_diagnosed` (mid). It must classify like the fix-round path."""
+    rec = _run_revision_sweep(monkeypatch, review_body=REVIEW_BODY_SECURITY)
+    cicada = rec.only("cicada")
+    assert cicada["action_class"] == "security_fix"
+    assert tier_of(cicada).tier == "top"
+
+
+def test_revision_sweep_security_named_only_in_an_aggregate_body_is_top(
+    monkeypatch, world
+):
+    """A formal aggregate review may name the finding without a lens marker.
+    The bare word is enough: a false positive costs a top run, a miss runs a
+    security fix on mid."""
+    rec = _run_revision_sweep(
+        monkeypatch,
+        review_body="**REQUEST_CHANGES**\n[BLOCKING] Security: path traversal in upload",
+    )
+    assert rec.only("cicada")["action_class"] == "security_fix"
+
+
+def test_revision_sweep_security_finding_in_the_lens_comments_is_top(
+    monkeypatch, world
+):
+    """Attribution from the PR's own lens comments, not only the review body."""
+    rec = _run_revision_sweep(monkeypatch, comment_lenses=("security",))
+    cicada = rec.only("cicada")
+    assert cicada["action_class"] == "security_fix"
+    assert tier_of(cicada).tier == "top"
+
+
+def test_revision_sweep_non_security_review_stays_a_mid_repair(monkeypatch, world):
+    rec = _run_revision_sweep(monkeypatch, comment_lenses=("ux",))
+    cicada = rec.only("cicada")
+    assert cicada["action_class"] == "repair_diagnosed"
+    assert tier_of(cicada).tier == "mid"
+
+
+def test_both_repair_sites_share_one_classifier():
+    assert model_tiering.repair_action_class({"ux", "security"}) == "security_fix"
+    assert model_tiering.repair_action_class({"ux", "qa"}) == "repair_diagnosed"
+    assert model_tiering.repair_action_class(set()) == "repair_diagnosed"
+    src = (Path(__file__).parent / "swarm_dispatch.py").read_text()
+    assert src.count("model_tiering.repair_action_class(") == 2, (
+        "the fix-round and sweep repair sites must both call the shared classifier"
+    )
+
+
 def test_revision_sweep_retry_escalates_as_a_failed_prior_attempt(
     monkeypatch, world
 ):
@@ -360,9 +509,7 @@ def test_revision_sweep_retry_escalates_as_a_failed_prior_attempt(
 # ── issue pipeline: Lanius triage, spec sections, the build ──────────────────
 
 
-def test_issue_pipeline_lanius_is_unmapped_triage_that_fails_to_top(
-    monkeypatch, world
-):
+def test_issue_pipeline_lanius_triage_runs_mid(monkeypatch, world):
     rec = _Recorder(
         monkeypatch, stdout={"lanius": "GATE_INHERITANCE: clear"}
     )
@@ -375,8 +522,7 @@ def test_issue_pipeline_lanius_is_unmapped_triage_that_fails_to_top(
     lanius = rec.only("lanius")
     assert lanius["action_class"] == "issue_triage"
     resolved = tier_of(lanius)
-    assert resolved.tier == "top"
-    assert resolved.source == "unresolved_class"
+    assert (resolved.tier, resolved.source) == ("mid", "policy")
 
 
 def test_issue_pipeline_sections_run_at_their_lens_tier(monkeypatch, world):
@@ -508,7 +654,7 @@ def test_ci_fix_second_round_escalates(monkeypatch, world):
 # ── ensure_issue_entity ──────────────────────────────────────────────────────
 
 
-def test_entity_backfill_triage_is_unmapped_and_fails_to_top(monkeypatch, world):
+def test_entity_backfill_triage_runs_mid(monkeypatch, world):
     rec = _Recorder(monkeypatch, stdout={"lanius": ""})
 
     class _State:
@@ -530,7 +676,8 @@ def test_entity_backfill_triage_is_unmapped_and_fails_to_top(monkeypatch, world)
     asyncio.run(_dispatcher().ensure_issue_entity("o/r", 414))
     lanius = rec.only("lanius")
     assert lanius["action_class"] == "issue_triage"
-    assert tier_of(lanius).source == "unresolved_class"
+    resolved = tier_of(lanius)
+    assert (resolved.tier, resolved.source) == ("mid", "policy")
 
 
 # ── apis.py: queue task dispatch ─────────────────────────────────────────────
@@ -725,3 +872,84 @@ def test_ledger_write_failure_never_raises(tmp_path, monkeypatch):
     model_tiering.record_dispatch(
         skill="x", provider="claude", resolved=None, model=None
     )
+
+
+# ── new blocking finding (ruling `small_rereview_rounds_run_mid`) ────────────
+
+
+def _lens_comment(lens: str, sha_char: str, when: str, findings: list[str]) -> dict:
+    body = f"<!-- review:{lens} commit={sha_char * 40} -->\n**REQUEST_CHANGES**\n" + "\n".join(
+        f"[BLOCKING] {f}\ndetail" for f in findings
+    )
+    return {"body": body, "created_at": when}
+
+
+def test_a_finding_repeated_on_the_next_head_is_not_new():
+    comments = [
+        _lens_comment("qa", "1", "2026-09-29T01:00:00Z", ["coverage: no test for X"]),
+        _lens_comment("qa", "2", "2026-09-29T02:00:00Z", ["coverage: no test for X"]),
+    ]
+    assert swarm_dispatch.has_new_blocking_finding(comments) is False
+
+
+def test_a_finding_absent_from_every_earlier_head_is_new():
+    comments = [
+        _lens_comment("qa", "1", "2026-09-29T01:00:00Z", ["coverage: no test for X"]),
+        _lens_comment("qa", "2", "2026-09-29T02:00:00Z", ["coverage: no test for Y"]),
+    ]
+    assert swarm_dispatch.has_new_blocking_finding(comments) is True
+
+
+def test_a_finding_that_returns_after_being_fixed_is_not_new_only_if_seen_before():
+    comments = [
+        _lens_comment("qa", "1", "2026-09-29T01:00:00Z", ["a: one"]),
+        _lens_comment("qa", "2", "2026-09-29T02:00:00Z", ["b: two"]),
+        _lens_comment("qa", "3", "2026-09-29T03:00:00Z", ["a: one"]),
+    ]
+    # head 3's blocker was raised at head 1, so it is not new.
+    assert swarm_dispatch.has_new_blocking_finding(comments) is False
+
+
+def test_a_single_reviewed_head_has_nothing_to_be_new_against():
+    comments = [_lens_comment("qa", "1", "2026-09-29T01:00:00Z", ["a: one"])]
+    assert swarm_dispatch.has_new_blocking_finding(comments) is False
+    assert swarm_dispatch.has_new_blocking_finding([]) is False
+
+
+def test_non_blocking_findings_and_unmarked_comments_are_ignored():
+    comments = [
+        _lens_comment("qa", "1", "2026-09-29T01:00:00Z", ["a: one"]),
+        {"body": "[BLOCKING] x: not a lens comment", "created_at": "2026-09-29T01:30:00Z"},
+        {
+            "body": "<!-- review:qa commit=" + "2" * 40 + " -->\n[NON-BLOCKING] nit: z\nd",
+            "created_at": "2026-09-29T02:00:00Z",
+        },
+    ]
+    assert swarm_dispatch.has_new_blocking_finding(comments) is False
+
+
+def test_unreadable_comments_count_as_a_new_finding(monkeypatch):
+    """Fail closed: when the thread cannot be read, escalate."""
+
+    async def boom(self, repository, number, client):
+        raise RuntimeError("github down")
+
+    monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", boom)
+    assert asyncio.run(_dispatcher()._new_blocking_finding(_trigger())) is True
+
+
+def test_round_one_never_reads_the_thread_for_a_new_finding(monkeypatch, world):
+    """Nothing can be new on the first round, so no comment scan is spent."""
+    scans: list[int] = []
+
+    async def spy(self, trigger):
+        scans.append(1)
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_new_blocking_finding", spy)
+    world.fix_rounds = 0
+    signals = asyncio.run(_dispatcher()._review_signals(_trigger()))
+    assert scans == [] and signals.new_blocking_finding is False
+    world.fix_rounds = 1
+    signals = asyncio.run(_dispatcher()._review_signals(_trigger()))
+    assert scans == [1] and signals.new_blocking_finding is True

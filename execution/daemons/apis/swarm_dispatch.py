@@ -2848,6 +2848,59 @@ def lens_comment_satisfies_presence(
     return _legacy_lens_prefix_present(text, lens)
 
 
+def security_named_in_review_text(text: str | None) -> bool:
+    """True when a standing blocking review's text names the security lens.
+
+    Deliberately coarse and fail-closed: a `review:security` marker or line, or
+    the bare word "security" anywhere in the body. A formal aggregate review can
+    carry a security blocker with no lens marker, and a miss here runs a
+    security fix on the mid tier, while a false positive only runs a repair on
+    `top`. (Security review of ateles#1358.)
+    """
+    return bool(re.search(r"\bsecurity\b", text or "", re.IGNORECASE))
+
+
+def _finding_fingerprint(lens: str, finding) -> tuple[str, str, str]:
+    return (
+        lens.lower(),
+        finding.category,
+        " ".join(finding.summary.lower().split()),
+    )
+
+
+def has_new_blocking_finding(comments: list[dict]) -> bool:
+    """Whether the most recent reviewed head's blocking findings include one no
+    earlier head raised (ruling `small_rereview_rounds_run_mid`).
+
+    Lens comments carry `<!-- review:<lens> commit=<sha> -->` and keep their
+    body when later superseded, so each head's blockers can be rebuilt from the
+    thread. Heads are ordered by first appearance. One head (or none) has
+    nothing to be new against. A reworded finding reads as new, which fails
+    toward `top`.
+    """
+    order: list[str] = []
+    by_head: dict[str, set[tuple[str, str, str]]] = {}
+    for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+        body = comment.get("body") or ""
+        marker = _LENS_MARKER_RE.search(body)
+        if not marker:
+            continue
+        sha = marker.group("sha").lower()
+        lens = marker.group("lens").lower()
+        if sha not in by_head:
+            order.append(sha)
+            by_head[sha] = set()
+        for finding in parse_findings(body, lens=lens):
+            if finding.blocking:
+                by_head[sha].add(_finding_fingerprint(lens, finding))
+    if len(order) < 2:
+        return False
+    earlier: set[tuple[str, str, str]] = set()
+    for sha in order[:-1]:
+        earlier |= by_head[sha]
+    return bool(by_head[order[-1]] - earlier)
+
+
 def lenses_missing_comments(
     comment_bodies: list[str],
     lenses: list[str],
@@ -4128,6 +4181,7 @@ class SwarmDispatcher:
                     # a failed earlier attempt — a prior sweep retry or a
                     # recorded fix round — is.
                     prior_fix_rounds = await self._fix_round_count(trigger)
+                    blocking_review = pr.get("_blocking_review_body") or ""
                     result = await run_skill(
                         "cicada",
                         self._cicada_fix_prompt(
@@ -4136,12 +4190,19 @@ class SwarmDispatcher:
                                 pr.get("body") or "", repository
                             ),
                             attempts + 1,
-                            pr.get("_blocking_review_body") or "",
+                            blocking_review,
                         ),
                         github_token=_token_for_agent_on_repo("cicada", repository),
                         include_github_contract=True,
                         notifier=self.notifier,
-                        action_class=model_tiering.ACTION_REPAIR_DIAGNOSED,
+                        # Same classifier as the fix-round path, fed by what
+                        # the outstanding review actually contains: a repair
+                        # of a security finding is a `security_fix` (top).
+                        action_class=model_tiering.repair_action_class(
+                            await self._standing_blocking_lenses(
+                                trigger, blocking_review
+                            )
+                        ),
                         escalation_signals=await self._tier_signals(
                             trigger,
                             prior_attempt_failed=attempts > 0 or prior_fix_rounds > 0,
@@ -6162,7 +6223,9 @@ class SwarmDispatcher:
         # Gate-inheritance check = a carry-forward check. It reads the parent
         # issue's gates, not the diff, so it escalates on the round and a
         # prior blocking finding only (no diff measurement).
-        lanius_signals = await self._review_signals(trigger, measure_diff=False)
+        lanius_signals = await self._review_signals(
+            trigger, measure_diff=False, detect_new_finding=False
+        )
         lanius = await run_skill(
             "lanius",
             self._lanius_pr_prompt(trigger, parent),
@@ -7739,11 +7802,7 @@ class SwarmDispatcher:
             notifier=self.notifier,
             # Implementing already-diagnosed findings is mid-tier work; a
             # security finding makes it a security fix, which stays on top.
-            action_class=(
-                model_tiering.ACTION_SECURITY_FIX
-                if "security" in by_lens
-                else model_tiering.ACTION_REPAIR_DIAGNOSED
-            ),
+            action_class=model_tiering.repair_action_class(set(by_lens)),
             escalation_signals=fix_signals,
         )
         # An auth-expired claude call can exit 0 with the 401 in stdout, so a
@@ -11456,6 +11515,47 @@ class SwarmDispatcher:
             )
             return []
 
+    async def _standing_blocking_lenses(
+        self, trigger: SwarmTrigger, review_body: str
+    ) -> set[str]:
+        """Lenses with a standing blocking finding, for repair classification.
+
+        Two sources, unioned: the lens comments at the PR's current head (the
+        authoritative attribution, the same read `_route_blocking_findings`
+        falls back to), and the outstanding review body's own text, which may
+        be a formal aggregate carrying no lens marker. The body check is
+        deliberately coarse and fails toward `top`: see
+        `security_named_in_review_text`.
+        """
+        lenses: set[str] = set()
+        head = _normalise_full_sha(trigger.head_sha or "")
+        if head:
+            lenses |= set(
+                await self._blocking_findings_from_reviewed_head_comments(
+                    trigger, head
+                )
+            )
+        if security_named_in_review_text(review_body):
+            lenses.add("security")
+        return lenses
+
+    async def _new_blocking_finding(self, trigger: SwarmTrigger) -> bool:
+        """Did the last review round raise a blocking finding no earlier round
+        had? Unreadable comments answer True (fail-closed: unknown escalates)."""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] new-finding scan failed for "
+                f"{trigger.repository}#{trigger.number}: {exc} — tiering treats "
+                "it as a new blocking finding and escalates"
+            )
+            return True
+        return has_new_blocking_finding(comments)
+
     async def _diff_lines_changed(self, t: SwarmTrigger) -> int | None:
         """Added + deleted lines of the PR, or None when GitHub could not say.
 
@@ -11529,18 +11629,30 @@ class SwarmDispatcher:
         *,
         changed_files: list[str] | None = None,
         measure_diff: bool = True,
+        detect_new_finding: bool = True,
     ) -> model_tiering.EscalationSignals:
         """Signals for a REVIEW of this PR: a repeated round, or a blocking
-        finding an earlier round already raised, both raise the tier. The
-        fix-round marker is the dispatcher's own record of both."""
+        finding an earlier round already raised, raise the tier for a class
+        that is not round-tolerant (`small_rereview_rounds_run_mid` exempts
+        pm/qa/ux). The fix-round marker is the dispatcher's own record of both.
+
+        A NEW blocking finding is read from the PR's lens comments, and only
+        when a repeat round exists (round 1 has nothing to be new against).
+        """
         prior_fix_rounds = await self._fix_round_count(trigger)
-        return await self._tier_signals(
+        new_finding = (
+            detect_new_finding
+            and prior_fix_rounds > 0
+            and await self._new_blocking_finding(trigger)
+        )
+        signals = await self._tier_signals(
             trigger,
             review_round=prior_fix_rounds + 1,
             prior_blocking_finding=prior_fix_rounds > 0,
             changed_files=changed_files,
             measure_diff=measure_diff,
         )
+        return dataclasses.replace(signals, new_blocking_finding=bool(new_finding))
 
     async def _preregistered_expectations(
         self, repository: str, issue_number: int

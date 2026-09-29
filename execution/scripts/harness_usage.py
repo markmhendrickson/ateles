@@ -17,7 +17,8 @@ at its reported reset without a hand edit of the headroom file.
     # What selection will use now:
     harness_usage.py show
 
-    # Dispatches per model tier (from the tier ledger every dispatch writes):
+    # Dispatch attempts per model tier (from the tier ledger; a provider
+    # failover counts once per provider tried):
     harness_usage.py tiers --since-hours 24
 """
 
@@ -77,7 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("show", help="print the headroom selection would use now")
 
     tiers = sub.add_parser(
-        "tiers", help="print dispatch counts per model tier from the tier ledger"
+        "tiers",
+        help=(
+            "print dispatch attempts per model tier from the tier ledger "
+            "(a provider failover counts once per provider tried)"
+        ),
     )
     tiers.add_argument(
         "--since-hours", type=float, default=None,
