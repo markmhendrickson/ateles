@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -119,7 +120,44 @@ class BuildBlocker(Exception):
     site build silently skipping a section or fabricating design tokens."""
 
 
+_PRODUCT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_SLUG_RE = re.compile(r"^(?:index|[a-z0-9][a-z0-9-]{0,63})$")
+
+
+def validate_product(product: str) -> str:
+    """A product name becomes a path segment (inventory file, output
+    directory), so it is an allowlisted slug, not free text."""
+    if not isinstance(product, str) or not _PRODUCT_RE.match(product):
+        raise BuildBlocker(
+            "invalid product name: expected lowercase letters, digits, '-' or '_' "
+            "starting with a letter"
+        )
+    return product
+
+
+def _contained_file(base: Path, source: object, root: Path, suffixes: tuple[str, ...]) -> Path:
+    """Resolve `source` (declared in an inventory) against `base` and require
+    that the real path, after symlink resolution, is a file inside `root`
+    with an expected suffix. Anything else raises BuildBlocker: the field
+    that names a file to read is the field that carries the safety meaning,
+    so an escape, an absolute path, a symlink out, or an unexpected file
+    type is refused rather than read."""
+    if not isinstance(source, str) or not source or "\x00" in source:
+        raise BuildBlocker("source path is missing or malformed")
+    if Path(source).is_absolute():
+        raise BuildBlocker(f"source path must be relative: {source}")
+    resolved = (base / source).resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise BuildBlocker(f"source path escapes its allowed root: {source}")
+    if resolved.suffix not in suffixes:
+        raise BuildBlocker(f"source path has an unexpected file type: {source}")
+    if any(part.startswith(".env") or part == ".git" for part in resolved.parts):
+        raise BuildBlocker(f"source path is not readable by the generator: {source}")
+    return resolved
+
+
 def load_inventory(product: str) -> dict:
+    validate_product(product)
     path = INVENTORY_DIR / f"{product}.json"
     if not path.exists():
         raise BuildBlocker(
@@ -132,7 +170,7 @@ def resolve_design_tokens(inventory: dict) -> dict:
     rel = inventory.get("design_tokens")
     if not rel:
         raise BuildBlocker("inventory does not declare a design_tokens path")
-    path = GEN_DIR / rel
+    path = _contained_file(GEN_DIR, rel, DESIGN_TOKENS_DIR, (".json",))
     if not path.exists():
         raise BuildBlocker(
             f"design tokens not found at {path.relative_to(REPO_ROOT)} — "
@@ -151,8 +189,21 @@ def resolve_section(product: str, section: dict) -> dict:
     origin = section.get("origin")
     source = section.get("source")
 
+    try:
+        if origin == "page_specific":
+            path = _contained_file(GEN_DIR, source, CONTENT_DIR, (".json",))
+        elif origin == "authored":
+            path = _contained_file(REPO_ROOT, source, REPO_ROOT, (".md",))
+        elif origin == "positioning_mirror":
+            path = _contained_file(
+                REPO_ROOT, source, REPO_ROOT / "docs" / "positioning", (".md",)
+            )
+        else:
+            return {"_resolved": False, "_blocker": f"unknown content origin: {origin!r}"}
+    except BuildBlocker as exc:
+        return {"_resolved": False, "_blocker": str(exc)}
+
     if origin == "page_specific":
-        path = GEN_DIR / source
         if not path.exists():
             return {
                 "_resolved": False,
@@ -162,7 +213,6 @@ def resolve_section(product: str, section: dict) -> dict:
         return {"_resolved": True, "origin": origin, "data": data}
 
     if origin == "authored":
-        path = REPO_ROOT / source
         if not path.exists():
             return {
                 "_resolved": False,
@@ -177,7 +227,6 @@ def resolve_section(product: str, section: dict) -> dict:
         }
 
     if origin == "positioning_mirror":
-        path = REPO_ROOT / source
         if not path.exists():
             return {
                 "_resolved": False,
@@ -214,13 +263,16 @@ def build_page(
             blockers.append(f"{page['slug']}#{section['id']}: {r['_blocker']}")
         resolved_sections.append((section["id"], r))
 
-    html = tpl.render_page(
-        product=product,
-        page=page,
-        site_pages=site_pages,
-        sections=resolved_sections,
-        tokens=tokens,
-    )
+    try:
+        html = tpl.render_page(
+            product=product,
+            page=page,
+            site_pages=site_pages,
+            sections=resolved_sections,
+            tokens=tokens,
+        )
+    except tpl.TokenError as exc:
+        raise BuildBlocker(str(exc)) from exc
     return html, blockers
 
 
@@ -237,6 +289,8 @@ def render_site(product: str) -> tuple[dict[Path, str], list[str]]:
     all_blockers: list[str] = []
     rendered: dict[Path, str] = {}
     for page in inventory["pages"]:
+        if not _SLUG_RE.match(str(page.get("slug", ""))):
+            raise BuildBlocker(f"invalid page slug in inventory: {page.get('slug')!r}")
         html, blockers = build_page(product, page, inventory["pages"], tokens)
         all_blockers.extend(blockers)
 

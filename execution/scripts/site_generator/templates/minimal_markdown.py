@@ -23,6 +23,8 @@ import html
 import re
 from urllib.parse import urljoin, urlparse
 
+from .safe_url import safe_href
+
 _INLINE_CODE = re.compile(r"`([^`]+)`")
 _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")
@@ -48,7 +50,8 @@ def _inline(text: str, link_base: str | None = None) -> str:
 
     def link(match: re.Match) -> str:
         label, href = match.groups()
-        return f'<a href="{html.escape(_resolved_href(href, link_base), quote=True)}">{label}</a>'
+        target = safe_href(_resolved_href(href, link_base))
+        return f'<a href="{html.escape(target, quote=True)}">{label}</a>'
 
     text = _LINK.sub(link, text)
     text = _BOLD.sub(r"<strong>\1</strong>", text)

@@ -413,3 +413,224 @@ def test_preview_refuses_to_serve_a_build_with_unresolved_sections(
     )
 
     assert preview_server.main() == 1
+
+
+# ---------------------------------------------------------------------------
+# Security: link schemes, source-path containment, product/slug names, CSS.
+# Each test below was run against the pre-fix generator and failed there.
+# ---------------------------------------------------------------------------
+
+from templates.safe_url import safe_href  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "javascript:alert%28document.cookie%29",
+        "JaVaScRiPt:alert%281%29",
+        "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+        "vbscript:msgbox",
+        "file:///etc/passwd",
+        "java\tscript:alert%281%29",
+        " javascript:alert%281%29",
+        "java&#x09;script:alert%281%29",
+        "javascript&#58;alert%281%29",
+        "​javascript:alert%281%29",
+    ],
+)
+def test_safe_href_rejects_dangerous_schemes(href):
+    assert safe_href(href) == "#"
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://example.com/a?b=c",
+        "http://example.com",
+        "mailto:someone@example.com",
+        "/docs/page/",
+        "#section",
+        "relative/path.md",
+        "../up.md",
+        "?q=1",
+    ],
+)
+def test_safe_href_keeps_ordinary_links(href):
+    assert safe_href(href) == href
+
+
+def test_markdown_link_with_dangerous_scheme_is_neutralised():
+    for payload in (
+        "[x](javascript:alert%28document.cookie%29)",
+        "[x](JaVaScRiPt:alert%281%29)",
+        "[x](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)",
+    ):
+        out = mdlib.to_html(payload)
+        assert 'href="#"' in out
+        assert "javascript" not in out.lower()
+        assert "data:text" not in out
+
+
+def test_markdown_link_keeps_https_and_rewrites_relative_with_base():
+    out = mdlib.to_html("[a](https://example.com/x) [b](y.md)", link_base="https://h/o/")
+    assert 'href="https://example.com/x"' in out
+    assert 'href="https://h/o/y.md"' in out
+
+
+def test_page_specific_cta_hrefs_are_gated(tmp_repo):
+    repo_root, gen_dir = tmp_repo
+    (gen_dir / "content" / "testproduct" / "hero.json").write_text(
+        json.dumps(
+            {
+                "headline": "H",
+                "secondary_cta": {"label": "Go", "href": "javascript:alert%281%29"},
+            }
+        )
+    )
+    (gen_dir / "content" / "testproduct" / "other.json").write_text(
+        json.dumps(
+            {
+                "headline": "O",
+                "lede": "l",
+                "sibling": [{"title": "S", "body": "b", "href": "data:text/html,x"}],
+            }
+        )
+    )
+    _write_inventory(
+        gen_dir,
+        [
+            {
+                "slug": "index",
+                "title": "T",
+                "primary_cta": {"label": "Nav", "href": "JAVASCRIPT:alert%281%29"},
+                "sections": [
+                    {"id": "hero", "origin": "page_specific", "source": "content/testproduct/hero.json"},
+                    {"id": "the-other-half", "origin": "page_specific", "source": "content/testproduct/other.json"},
+                ],
+            }
+        ],
+    )
+    assert build_site.build("testproduct", repo_root / "dist" / "site") == []
+    html = (repo_root / "dist" / "site" / "testproduct" / "index.html").read_text()
+    assert "javascript" not in html.lower()
+    assert "data:text" not in html
+
+
+def _single_section_inventory(gen_dir, origin, source):
+    _write_inventory(
+        gen_dir,
+        [{"slug": "index", "title": "T", "sections": [{"id": "s", "origin": origin, "source": source}]}],
+    )
+
+
+@pytest.mark.parametrize(
+    "origin,source",
+    [
+        ("authored", "../outside.md"),
+        ("authored", "/etc/passwd"),
+        ("positioning_mirror", "../../README.md"),
+        ("positioning_mirror", "../../../../../outside.md"),
+        ("positioning_mirror", "docs/positioning/../../sibling_of_docs.md"),
+        ("page_specific", "content/../../../outside.json"),
+    ],
+)
+def test_source_paths_that_escape_their_root_are_blockers_and_not_read(tmp_repo, origin, source):
+    repo_root, gen_dir = tmp_repo
+    canary = "CANARY-OUTSIDE-ROOT"
+    (repo_root / "sibling_of_docs.md").write_text(canary)
+    (repo_root / "README.md").write_text(canary)
+    (repo_root.parent / "outside.md").write_text(canary)
+    (gen_dir.parent.parent / "outside.json").write_text(json.dumps({"headline": canary}))
+    _single_section_inventory(gen_dir, origin, source)
+    out_dir = repo_root / "dist" / "site"
+    blockers = build_site.build("testproduct", out_dir)
+    assert blockers, "an escaping source must block the build"
+    assert not (out_dir / "testproduct").exists()
+
+
+def test_symlink_out_of_root_is_refused(tmp_repo, tmp_path):
+    repo_root, gen_dir = tmp_repo
+    outside = tmp_path / "outside.md"
+    outside.write_text("CANARY-OUTSIDE-ROOT")
+    (repo_root / "docs" / "positioning" / "testproduct" / "link.md").symlink_to(outside)
+    _single_section_inventory(gen_dir, "positioning_mirror", "docs/positioning/testproduct/link.md")
+    assert build_site.build("testproduct", repo_root / "dist" / "site")
+
+
+def test_authored_source_must_be_markdown_and_not_a_dotenv(tmp_repo):
+    repo_root, gen_dir = tmp_repo
+    (repo_root / ".env").write_text("K=V")
+    (repo_root / "config.json").write_text("{}")
+    for source in (".env", "config.json"):
+        _single_section_inventory(gen_dir, "authored", source)
+        assert build_site.build("testproduct", repo_root / "dist" / "site")
+
+
+def test_design_tokens_path_escape_is_a_blocker(tmp_repo):
+    repo_root, gen_dir = tmp_repo
+    (repo_root.parent / "evil.json").write_text(json.dumps(FIXTURE_TOKENS))
+    inv = {"product": "testproduct", "design_tokens": "../../../../evil.json", "pages": []}
+    (gen_dir / "inventory" / "testproduct.json").write_text(json.dumps(inv))
+    with pytest.raises(build_site.BuildBlocker):
+        build_site.render_site("testproduct")
+
+
+@pytest.mark.parametrize("product", ["../evil", "a/b", "A", "", "x;y", "..", "-x"])
+def test_product_name_is_validated_before_any_path_join(tmp_repo, product):
+    repo_root, gen_dir = tmp_repo
+    # A real inventory one level above INVENTORY_DIR: an unvalidated join
+    # would load it.
+    (gen_dir / "evil.json").write_text(json.dumps({"product": "evil", "design_tokens": "x", "pages": []}))
+    with pytest.raises(build_site.BuildBlocker):
+        build_site.load_inventory(product)
+
+
+def test_preview_server_rejects_bad_product_before_serving(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["preview_server.py", "../evil", "--no-build"])
+    assert preview_server.main() == 1
+
+
+def test_page_slug_is_validated(tmp_repo):
+    repo_root, gen_dir = tmp_repo
+    _write_inventory(gen_dir, [{"slug": "../../escape", "title": "T", "sections": []}])
+    with pytest.raises(build_site.BuildBlocker):
+        build_site.render_site("testproduct")
+
+
+@pytest.mark.parametrize(
+    "where,value",
+    [
+        ("heading_font_family", "x}</style><script>alert(1)</script>"),
+        ("body_font_family", "a; background:url(http://evil/x)"),
+        ("h1_size", "3rem;}body{display:none"),
+        ("code_font_family", "mono /* c */"),
+    ],
+)
+def test_unsafe_design_token_values_stop_the_build(where, value):
+    import copy
+
+    tokens = copy.deepcopy(FIXTURE_TOKENS)
+    tokens["product"]["type_scale"][where] = value
+    with pytest.raises(tpl.TokenError):
+        tpl.build_css(tokens)
+
+
+def test_unsafe_palette_value_stops_the_build():
+    import copy
+
+    tokens = copy.deepcopy(FIXTURE_TOKENS)
+    tokens["product"]["color_palette"]["light"]["ink"] = "#000;}</style>"
+    with pytest.raises(tpl.TokenError):
+        tpl.build_css(tokens)
+
+
+def test_token_error_surfaces_as_build_blocker(tmp_repo):
+    repo_root, gen_dir = tmp_repo
+    import copy
+
+    tokens = copy.deepcopy(FIXTURE_TOKENS)
+    tokens["product"]["type_scale"]["h1_size"] = "3rem;}"
+    (gen_dir / "design_tokens" / "testproduct.json").write_text(json.dumps(tokens))
+    _write_inventory(gen_dir, [{"slug": "index", "title": "T", "sections": []}])
+    with pytest.raises(build_site.BuildBlocker):
+        build_site.render_site("testproduct")

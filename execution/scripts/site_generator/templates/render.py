@@ -16,12 +16,47 @@ for them. This first proof stays CSS-and-HTML only.
 from __future__ import annotations
 
 import html as html_mod
+import re
 
 from . import minimal_markdown as mdlib
+from .safe_url import safe_href
 
 
 def _esc(s: str) -> str:
     return html_mod.escape(s or "", quote=True)
+
+
+def _href(value: object) -> str:
+    """Escape an href AFTER passing it through the scheme allowlist. Use this
+    for every `href=` built from inventory or page_specific data."""
+    return _esc(safe_href(value))
+
+
+class TokenError(ValueError):
+    """A design-token value that is not safe to place in the <style> block."""
+
+
+# Characters a CSS value from the design system may contain. No `;`, braces,
+# angle brackets, backslash or `@`: any of those could end the declaration,
+# the rule or the <style> element.
+_CSS_VALUE_OK = re.compile(r"^[A-Za-z0-9 #%.,()\-_'\"+/:!]*$")
+
+
+def _css(value: object, what: str) -> str:
+    """Return a design-token value if it is safe in a CSS declaration, else
+    raise TokenError (the build stops; nothing is silently sanitised)."""
+    text = str(value)
+    lowered = text.lower()
+    if (
+        not _CSS_VALUE_OK.match(text)
+        or "/*" in text
+        or "*/" in text
+        or "url(" in lowered
+        or "expression(" in lowered
+        or "import" in lowered
+    ):
+        raise TokenError(f"design token {what!r} has a value that is not safe in CSS")
+    return text
 
 
 def _css_vars(mode_tokens: dict) -> str:
@@ -46,7 +81,7 @@ def _css_vars(mode_tokens: dict) -> str:
     for key in order:
         if key in mode_tokens:
             var_name = "--" + key.replace("_", "-")
-            decls.append(f"{var_name}: {mode_tokens[key]};")
+            decls.append(f"{var_name}: {_css(mode_tokens[key], key)};")
     return "\n    ".join(decls)
 
 
@@ -65,13 +100,16 @@ def build_css(tokens: dict) -> str:
     light = palette.get("light", {})
     dark = palette.get("dark", {})
 
-    heading_font = type_scale.get("heading_font_family", "system-ui, sans-serif")
-    body_font = type_scale.get("body_font_family", "system-ui, sans-serif")
-    code_font = type_scale.get("code_font_family", "ui-monospace, monospace")
-    h1_size = type_scale.get("h1_size", "clamp(2rem, 6vw, 3.4rem)")
-    h2_size = type_scale.get("h2_size", "clamp(1.4rem, 4vw, 2rem)")
-    body_size = type_scale.get("body_base_size", "16px")
-    heading_weight = type_scale.get("heading_weight", 700)
+    # Every design-token value that reaches the <style> block is checked by
+    # _css(): a value that could end the declaration, rule or element stops
+    # the build (TokenError) instead of being interpolated.
+    heading_font = _css(type_scale.get("heading_font_family", "system-ui, sans-serif"), "heading_font_family")
+    body_font = _css(type_scale.get("body_font_family", "system-ui, sans-serif"), "body_font_family")
+    code_font = _css(type_scale.get("code_font_family", "ui-monospace, monospace"), "code_font_family")
+    h1_size = _css(type_scale.get("h1_size", "clamp(2rem, 6vw, 3.4rem)"), "h1_size")
+    h2_size = _css(type_scale.get("h2_size", "clamp(1.4rem, 4vw, 2rem)"), "h2_size")
+    body_size = _css(type_scale.get("body_base_size", "16px"), "body_base_size")
+    heading_weight = _css(type_scale.get("heading_weight", 700), "heading_weight")
 
     root_radius = (
         radius.get("root_radius_variable", "--radius: 10px")
@@ -79,9 +117,11 @@ def build_css(tokens: dict) -> str:
         .strip()
         .rstrip(";")
     )
+    root_radius = _css(root_radius, "root_radius_variable")
     max_w = "1080px"
     if "container" in spacing and "--maxw:" in spacing["container"]:
         max_w = spacing["container"].split("--maxw:")[1].split(";")[0].strip()
+    max_w = _css(max_w, "container --maxw")
 
     return f"""
 :root {{
@@ -231,7 +271,7 @@ def _render_page_specific(section_id: str, data: dict) -> str:
         )
         sec_cta = ""
         if data.get("secondary_cta"):
-            sec_cta = f'<a class="btn ghost" href="{_esc(data["secondary_cta"]["href"])}">{_esc(data["secondary_cta"]["label"])}</a>'
+            sec_cta = f'<a class="btn ghost" href="{_href(data["secondary_cta"]["href"])}">{_esc(data["secondary_cta"]["label"])}</a>'
         footnote = (
             f'<p class="small muted" style="margin-top:20px">{_esc(data["footnote"])}</p>'
             if data.get("footnote")
@@ -283,7 +323,7 @@ def _render_page_specific(section_id: str, data: dict) -> str:
             else ""
         )
         cols = "".join(
-            f"""<div><h3>{f'<a href="{_esc(s["href"])}">{_esc(s["title"])}</a>' if s.get("href") else _esc(s["title"])}</h3>
+            f"""<div><h3>{f'<a href="{_href(s["href"])}">{_esc(s["title"])}</a>' if s.get("href") else _esc(s["title"])}</h3>
 <p class="small" style="color:var(--ink-2)">{_esc(s["body"])}</p></div>"""
             for s in data.get("sibling", [])
         )
@@ -325,7 +365,7 @@ def render_page(
 
     primary_cta = page.get("primary_cta") or {}
     nav_cta = (
-        f'<a class="btn" href="{_esc(primary_cta.get("href", "#"))}">{_esc(primary_cta.get("label", ""))}</a>'
+        f'<a class="btn" href="{_href(primary_cta.get("href", "#"))}">{_esc(primary_cta.get("label", ""))}</a>'
         if primary_cta
         else ""
     )
