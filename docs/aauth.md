@@ -10,7 +10,7 @@ Covers the AAuth-related files in this repo (`execution/scripts/mint_daemon_keyp
 
 ---
 
-AAuth is the agent authentication protocol Ateles uses to give every daemon and invocable agent a verifiable identity. This document maps where AAuth is used across the repo, how each component fits together, and what still needs to be done before the full trust chain is active.
+AAuth is the agent authentication protocol Ateles uses to attribute every daemon and invocable agent's requests to a named agent (a `sub` the request claims, backed by proof of possession of a key; see "What AAuth does here" below). This document maps where AAuth is used across the repo, how each component fits together, and what still needs to be done before the full trust chain is active.
 
 ---
 
@@ -20,7 +20,7 @@ AAuth solves two intertwined problems:
 
 1. **Attribution — which agent wrote this observation?** Without AAuth, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, a daemon that signs its requests on the RFC 9421 path with its own EC keypair is verified by Neotoma, which then records `agent_sub` (for example `anthus@ateles-swarm`, or `cursor@markmhendrickson.com` for IDE sessions) on the observations from that verified request — provenance down to the agent, not just the operator. A daemon that only sends the lighter `X-AAuth-Token` JWT (`lib/daemon_runtime/aauth_signer.py`) is **not** verified by Neotoma today (nothing in Neotoma consumes that header), so it gets no `agent_sub` from it.
 
-2. **Authorization — what is this agent allowed to do, and to which entities and tools?** Each verified `(sub, iss)` is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
+2. **Authorization — what is this agent allowed to do, and to which entities and tools?** The `(sub, iss)` a verified request presents is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
    - by **operation** (`store_structured`, `create_relationship`, `correct`, `retrieve`, …)
    - by **entity type** (`store_structured: ["agent_action_observation", "participation_record"]` instead of `*`)
    - by **field, scope, or external resource** (e.g. `github_harness:write` scoped to specific repos for Cicada/Vanellus)
@@ -28,7 +28,7 @@ AAuth solves two intertwined problems:
 
    The grant is the per-agent policy boundary. Monedula's grant lets it write `transaction` and `payment_profile` but not `agent_definition`; Cicada's lets it write `agent_action_observation` but not `business_strategy`; a future read-only auditor agent could have a grant that allows `retrieve: *` and nothing else. Wrong-capability writes fail at admission, before any side effect — the boundary lives in Neotoma, not in agent code.
 
-So AAuth is both **who** (signed identity) and **what they're allowed to touch** (grant-driven capability scope). The two halves are inseparable: signature verification proves who the agent is; grant admission decides whether that agent is allowed to perform this specific operation on this specific entity type or call this specific tool. Today only Cursor, Cicada, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
+So AAuth is both **who the request claims to be** (a signed, self-asserted identity) and **what that claimed identity is allowed to touch** (grant-driven capability scope). The two halves are inseparable, but signature verification does not prove who the agent is. It proves the sender holds the private key matching the public key the request itself carries (`cnf.jwk`). The `sub` and `iss` inside that request are **self-asserted**: Neotoma decodes the agent-token JWT without checking the JWT's own signature (the key is taken from the JWT's `cnf.jwk`), and matches grants on `(sub, iss)`. `match_thumbprint` on a grant is optional, and only a grant with a `match_thumbprint` pin ties an identity to a specific key. Grant admission then decides whether that claimed `(sub, iss)` may perform this specific operation on this specific entity type or call this specific tool. Today only Cursor, Cicada, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
 
 Neotoma's AAuth pipeline:
 1. **Signature verification** — checks the RFC 9421 HTTP Message Signature
@@ -253,7 +253,7 @@ Each `agent_definition` entity in Neotoma carries:
 - `aauth_sub` — the agent's subject claim (e.g. `anthus@ateles-swarm`)
 - `agent_grant` — capability tier: `operator` | `service` | `public_read`
 
-Daemons load these at startup via `AgentLoader` and use `aauth_sub` as the identity in signed requests.
+Daemons load these at startup via `AgentLoader` and use `aauth_sub` as the (self-asserted) identity claimed in signed requests.
 
 ---
 
@@ -356,7 +356,7 @@ capabilities:
 
 (Shown as shorthand. The stored and `createAgentGrant` shape is an array of `{"op": ..., "entity_types": [...]}` entries, as in the examples below.)
 
-No thumbprint pin — any valid ES256 key under the same `(sub, iss)` is admitted. This allows software and hardware keys to rotate without updating the grant.
+No thumbprint pin — any valid ES256 key that presents the same `(sub, iss)` is admitted, because `sub` and `iss` are self-asserted and only a `match_thumbprint` pin binds a grant to a specific key. This lets software and hardware keys rotate without updating the grant, and it also means a party holding *any* ES256 key can be admitted by claiming that `(sub, iss)`. Whether to pin grants is an operator policy call and is not changed here.
 
 ---
 

@@ -152,8 +152,8 @@ rotation (see below), because `agent_identity()` reads only `<name>.jwk.json`.
    `--force` destroys the old private key irrecoverably; there is no undo.
 1. Run `mint_daemon_keypair.py --name <daemon>` — this writes `<name>.jwk.json`.
    If a `<name>.jwk.json` already exists (rotating a canonical key), add
-   `--force`. The grant matches `(sub, iss)` with no thumbprint pin, so a
-   rotation does not need a new grant; still run the check (step 3 of the order
+   `--force`. An unpinned grant matches `(sub, iss)` (no `match_thumbprint`), so
+   a rotation does not need a new grant; still run the check (step 3 of the order
    above) and then the verify step.
 2. JWKS: **nothing to do today.** No JWKS is published for daemon keys and
    Neotoma verifies from the inline key, so there is nothing to add. Once daemon
@@ -165,6 +165,11 @@ rotation (see below), because `agent_identity()` reads only `<name>.jwk.json`.
    observation expiry window (5 min). Until then there is nothing to remove.
 
 Rotate keypairs at least quarterly or immediately on suspected compromise.
+
+If the **sub itself is suspect** (compromise, or the key may have been copied),
+rotating the key is not enough: an unpinned grant admits any key that presents
+the same `(sub, iss)`. Revoke or replace the `agent_grant` for that sub (via the
+operator's Neotoma session), not just the key.
 
 ## JWKS endpoint (planned)
 
@@ -190,6 +195,13 @@ their public key inline (see below).
   `cnf.jwk` binds the signing key). It does not read `ateles-private/keys` and
   needs no published JWKS to do so. Verification is separate from admission:
   admission still needs an active `agent_grant` matching `(sub, iss)`.
+- **What verification proves.** It proves the sender holds the private key
+  matching the public key the request carries. It does **not** prove who the
+  agent is: `sub` and `iss` are self-asserted (Neotoma decodes the agent-token JWT
+  without checking the JWT's own signature and takes the key from its `cnf.jwk`),
+  and grants match on `(sub, iss)`. Only a grant's optional `match_thumbprint` ties
+  an identity to a specific key; an unpinned grant admits any ES256 key that
+  presents the matching `(sub, iss)`.
 - A daemon that only sends the JWT-only `X-AAuth-Token` is therefore **not
   verified** by Neotoma today.
 
