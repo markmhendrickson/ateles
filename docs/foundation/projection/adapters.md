@@ -5,7 +5,7 @@
 
 Every rule `adapters.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`adapters.md`](../adapters.md) and are not repeated here (decision 66).
 
-43 rules.
+47 rules.
 
 ## [The workflow engine never reads an external system; it reads the record](../adapters.md#the-workflow-engine-never-reads-an-external-system-it-reads-the-record)
 
@@ -121,3 +121,16 @@ Every rule `adapters.md` owns, one entry each: the rule's own statement from `co
 ## [What separates a binding from a deployment's configuration](../adapters.md#what-separates-a-binding-from-a-deployments-configuration)
 
 - **AD-42** — (decision 35's distinguishing rule, the vocabulary pass of 2026-09-15): a `vendor_binding` addresses an external system the swarm does not own; a `deployment_configuration` carries out and verifies a procedure on the swarm's own software; a verification target is the mark of the second and no binding carries one *[M for the type separation and the census; R for whether a newly proposed type is one of these two under a second name, which is a reading of the rule]*
+
+## [The record holds the entries read, and coverage says which](../adapters.md#the-record-holds-the-entries-read-and-coverage-says-which)
+
+- **AD-43** — (decision 104): the record claims only the entries read; an absence is never read as the system holding none *[M]*
+
+## [Coverage and sourced time travel with adapter-sourced state to every surface that presents it](../adapters.md#coverage-and-sourced-time-travel-with-adapter-sourced-state-to-every-surface-that-presents-it)
+
+- **AD-44** — (decision 104): a surface presenting adapter-sourced state carries its coverage and sourced time, derived at the read; the operator's view (decision 37) first *[M for the provenance read and the absence of a stored copy; R for whether the rendering makes coverage legible to the operator]*
+
+## [Adapter-sourced material is incorporated by a declared step, bounded by what it names](../adapters.md#adapter-sourced-material-is-incorporated-by-a-declared-step-bounded-by-what-it-names)
+
+- **AD-45** — (decision 104): a declared step, never the adapter, makes typed entities and edges; each links to its interpretation *[M]*
+- **AD-46** — the same: bounded by what the material names; no third-party Art. 9 categories *[M for the named bound and the allowlist; R for whether a summary of an incidental disclosure is minimal]*

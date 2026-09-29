@@ -905,6 +905,15 @@ closed, is a finding and takes the standing axis (above; the next section for cl
 here adds an actor: the dashboard is the operator reading, and the operator is already a principal with a
 grant.
 
+**What the read owes the operator for adapter-sourced state.** Where the view renders state that came
+through an adapter — a pull request's checks, a reply on a thread, an occurrence on a calendar — it carries
+that state's coverage and sourced time beside it, derived at the read from provenance and never stored on
+the view, so the operator is told what was read rather than having to know to ask. The rule and what fails
+when a surface omits it are decision 104's
+(`adapters.md#coverage-and-sourced-time-travel-with-adapter-sourced-state-to-every-surface-that-presents-it`);
+it is stated here because this is the read it binds first, and a console built for the operator's view is
+specified against it.
+
 **The cost accepted** is that a completion the operator would have wanted to hear of is not carried unless
 a workflow declares its delivery or the binding lists it, so an operator who does not read the record does
 not learn of closed work. Accepted: the alternative — a channel that carries completions by default — is the
