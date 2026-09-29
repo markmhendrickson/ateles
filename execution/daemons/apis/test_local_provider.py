@@ -133,7 +133,7 @@ def test_lean_prompt_carries_no_agent_definition_or_policy_content():
     prompt = local_provider.build_lean_prompt("worktree_hygiene")
     # None of the frontier-only scaffolding this replaces may leak in: no
     # agent_policy rendering, no SKILL.md/agent_definition mirror content.
-    for marker in ("Active agent policies", "entity_type: agent_definition", "gate_status"):
+    for marker in ("Active agent policies", "entity_type: agent_definition", "gate_status"):  # vocab-ok: asserts the retired name is ABSENT
         assert marker not in prompt
 
 
