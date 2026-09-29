@@ -1,0 +1,7 @@
+{
+  "claude": {
+    "top": "opus",
+    "mid": "sonnet",
+    "mechanical": "haiku"
+  }
+}

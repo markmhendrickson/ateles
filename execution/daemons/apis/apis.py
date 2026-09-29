@@ -483,6 +483,7 @@ from routing import (  # noqa: E402
 
 import github_gateway  # noqa: E402
 
+import model_tiering  # noqa: E402
 from skill_runner import run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
@@ -601,6 +602,14 @@ async def _spawn_harness_skill(
         task_entity_id=entity_id,
         agent_session_id=run_agent_session_id or "",
         notifier=notifier,
+        # The task's action class, by the same inference the execution gate
+        # uses (explicit `action_type` wins, else the per-agent default). A
+        # class the live action_policy does not map resolves to `top`, so a
+        # task with no recognizable class never silently runs cheap.
+        action_class=(
+            _infer_action_type(skill, snapshot)
+            or model_tiering.ACTION_TASK_DISPATCH_FALLBACK
+        ),
     )
     return result
 

@@ -58,3 +58,54 @@ def test_malformed_window_is_rejected() -> None:
         harness_usage.main(["usage", "claude", "--window", "weekly=lots"])
     with pytest.raises(SystemExit):
         harness_usage.main(["exhausted", "claude", "--until", "next tuesday"])
+
+
+def test_tiers_command_reports_dispatch_counts_per_tier(capsys, monkeypatch, tmp_path) -> None:
+    """`harness_usage.py tiers` reads the ledger every dispatch writes, so the
+    per-tier spend can be read against the weekly budget."""
+    import model_tiering
+
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "ledger.jsonl"))
+    for tier, klass in (("top", "build"), ("mid", "lens_review:pm"), ("mid", "lens_review:qa")):
+        model_tiering.record_dispatch(
+            skill="x", provider="claude",
+            resolved=model_tiering.ResolvedTier(tier, "policy", klass), model="m",
+        )
+    model_tiering.record_dispatch(skill="x", provider="claude", resolved=None, model=None)
+
+    assert harness_usage.main(["tiers"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total"] == 4
+    assert report["by_tier"] == {"top": 1, "mid": 2, "untiered": 1}
+    assert report["by_class"]["lens_review:pm"] == {"mid": 1}
+
+    assert harness_usage.main(["tiers", "--since-hours", "1"]) == 0
+    assert json.loads(capsys.readouterr().out)["total"] == 4
+
+
+def test_tiers_command_on_a_missing_ledger_is_an_empty_report(capsys, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "absent.jsonl"))
+    assert harness_usage.main(["tiers"]) == 0
+    assert json.loads(capsys.readouterr().out)["total"] == 0
+
+
+def test_show_surfaces_a_spent_session_window(capsys) -> None:
+    """Weekly headroom reads healthy while the 5-hour window is spent."""
+    until = time.time() + 2 * 3600
+    harness_router.record_usage("claude", [{"name": "weekly", "used_percent": 35}])
+    harness_router.record_cooling("claude", until, reason="session_limit")
+
+    assert harness_usage.main(["show"]) == 0
+    claude = json.loads(capsys.readouterr().out)["claude"]
+
+    assert claude["headroom"] == pytest.approx(0.65)
+    assert claude["cooling"]["reason"] == "session_limit"
+    assert claude["cooling"]["until"] == harness_router._iso_from_wall(until)
+    assert 7100 < claude["cooling"]["remaining_seconds"] <= 7200
+    assert claude["windows"][0]["name"] == "weekly"
+
+
+def test_show_reports_no_cooling_once_the_window_has_passed(capsys) -> None:
+    harness_router.record_cooling("claude", time.time() - 10, reason="session_limit")
+    assert harness_usage.main(["show"]) == 0
+    assert json.loads(capsys.readouterr().out)["claude"]["cooling"] is None

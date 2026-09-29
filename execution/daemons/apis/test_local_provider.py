@@ -34,6 +34,8 @@ CONFIG = {
     "eligible_work_classes": ["rebase", "regenerate_generated_files"],
 }
 
+VENDOR_BINDING = {"claude": {"mechanical": "haiku", "mid": "sonnet", "top": "opus"}}
+
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
@@ -44,6 +46,10 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
     monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer")
     monkeypatch.setenv("NEOTOMA_BASE_URL", "http://neotoma.test")
+    # No ambient vendor_binding: with none, a failed local run has nowhere to
+    # fall over to. Tests that want the cheapest-tier fallback use `fallback_bound`.
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "no-vendor-binding.json"))
+    monkeypatch.delenv("APIS_VENDOR_BINDING", raising=False)
     # Deterministic default: pin ATELES_REPO_PATH to the real repo root
     # rather than leaving the host shell's ambient value (or lack of one) to
     # leak in. Most tests here need it set to exercise a successful
@@ -55,6 +61,15 @@ def _isolated(monkeypatch, tmp_path):
     yield
     harness_router.reset_state()
     skill_runner._agent_def_cache.clear()
+
+
+@pytest.fixture
+def fallback_bound(tmp_path, monkeypatch):
+    """A vendor_binding that names a cheapest-tier ('mechanical') claude model."""
+    path = tmp_path / "vendor-binding.json"
+    path.write_text(json.dumps(VENDOR_BINDING), encoding="utf-8")
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(path))
+    return VENDOR_BINDING
 
 
 def _write_config(tmp_path, record=None):
@@ -497,6 +512,31 @@ def test_mechanical_work_runs_local_with_guards_and_provenance(tmp_path, monkeyp
     assert fields["provider"] == LOCAL and fields["model"] == "qwen3-coder-ollama"
 
 
+def test_tiered_mechanical_work_still_runs_local(tmp_path, monkeypatch):
+    """Model tiering must not push mechanical work off claude-local: a
+    vendor_binding with no claude-local entry (claude-local takes its model
+    from its own config, not vendor_binding) must neither refuse the local
+    attempt nor replace the local model with a frontier one. The frontier claude
+    fallback is bound, so a refusal would show up as a failover to it."""
+    _write_config(tmp_path)
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"rebase": "mechanical"}')
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "no-policy.json"))
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING", '{"claude": {"mechanical": "claude-haiku-4-5"}}'
+    )
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "no-binding.json"))
+    spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
+    result = _run(spawns, events, work_class="rebase", action_class="rebase")
+
+    assert result.ok and result.provider == LOCAL
+    assert result.attempted_providers == (LOCAL,)
+    (cmd, _), = spawns.calls
+    assert cmd[cmd.index("--model") + 1] == "qwen3-coder-ollama"
+    assert "claude-haiku-4-5" not in cmd
+    done = [e for e in events if e["event_type"] == "subprocess" and e["success"] == "true"]
+    assert done and done[0]["resolved_tier"].tier == "mechanical"
+
+
 def test_local_dispatch_uses_the_lean_prompt_not_agent_def_or_policy(tmp_path, monkeypatch):
     """The regression this whole change exists to fix: a claude-local dispatch
     must carry the tiny lean prompt (role + work-class hard rules) as its
@@ -516,7 +556,7 @@ def test_local_dispatch_uses_the_lean_prompt_not_agent_def_or_policy(tmp_path, m
     assert len(system_prompt) < 2000
 
 
-def test_local_dispatch_fails_over_on_wrong_worktree_hygiene_answer(tmp_path):
+def test_local_dispatch_fails_over_on_wrong_worktree_hygiene_answer(tmp_path, fallback_bound):
     """The exact regression: a local run that exits 0 with a plausible but
     WRONG count must not be accepted as ok — it must fail over to frontier,
     same as any other local_run_failed, without cooling local down (a wrong
@@ -590,7 +630,7 @@ def test_local_dispatch_with_stub_agent_def_is_reported_degraded(tmp_path, monke
     )
 
 
-def test_local_failure_falls_over_to_frontier_and_records_why(tmp_path):
+def test_local_failure_falls_over_to_frontier_and_records_why(tmp_path, fallback_bound):
     _write_config(tmp_path)
     spawns, events = _Spawns(), []
     result = _run(spawns, events, work_class="rebase")
@@ -605,7 +645,7 @@ def test_local_failure_falls_over_to_frontier_and_records_why(tmp_path):
     assert LOCAL in harness_router.cooling_providers()
 
 
-def test_over_ceiling_prompt_is_refused_before_launch_and_falls_over(tmp_path):
+def test_over_ceiling_prompt_is_refused_before_launch_and_falls_over(tmp_path, fallback_bound):
     _write_config(tmp_path, {**CONFIG, "context_ceiling_tokens": 8000})
     spawns, events = _Spawns(local_reply=(0, b"should not run", b"")), []
     result = _run(spawns, events, prompt="x" * 60_000, work_class="rebase")
@@ -618,7 +658,7 @@ def test_over_ceiling_prompt_is_refused_before_launch_and_falls_over(tmp_path):
     assert LOCAL not in harness_router.cooling_providers()
 
 
-def test_missing_repo_path_env_refuses_local_launch_and_falls_over(tmp_path, monkeypatch):
+def test_missing_repo_path_env_refuses_local_launch_and_falls_over(tmp_path, monkeypatch, fallback_bound):
     """ATELES_REPO_PATH unset must refuse the claude-local launch rather than
     silently reading guards from the ATELES_REPO fallback (~/repos/ateles, a
     possibly-stale shared clone) — the launch stays safe (falls over to
@@ -807,7 +847,7 @@ def test_dispatch_role_forwards_work_class_and_gates_pinned_local(tmp_path, monk
     assert rc != 0 and seen == {}
 
 
-def test_ordinary_local_task_failure_falls_over_without_cooling_local(tmp_path):
+def test_ordinary_local_task_failure_falls_over_without_cooling_local(tmp_path, fallback_bound):
     """A failed task (e.g. a merge conflict) is not evidence the endpoint is down."""
     _write_config(tmp_path)
     spawns, events = _Spawns(local_reply=(1, b"", b"CONFLICT (content): merge conflict in f.txt")), []
@@ -816,3 +856,181 @@ def test_ordinary_local_task_failure_falls_over_without_cooling_local(tmp_path):
     failover, = [e for e in events if e["event_type"] == "provider_failover"]
     assert "failover_reason=local_run_failed" in failover["output_summary"]
     assert LOCAL not in harness_router.cooling_providers()
+
+
+# ── never thrash: the child is given caps and no compaction ────────────────
+# Observed 2026-09-29: a rebase dispatch on the 32K local window ran 158s and
+# aborted with "Autocompact is thrashing". The probe that reproduced it took
+# ~80s; with these settings the same probe no longer thrashes.
+
+
+def test_local_child_settings_disable_compaction_and_cap_tool_output():
+    child: dict[str, str] = {}
+    cfg = _cfg()
+    local_provider.apply_env(child, cfg)
+    cap = local_provider.tool_output_cap(cfg)
+    assert child["DISABLE_AUTO_COMPACT"] == "1"
+    assert cap == 32768 // 10
+    assert child["CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS"] == str(cap)
+    assert child["BASH_MAX_OUTPUT_LENGTH"] == str(int(cap * cfg.chars_per_token))
+    # The configured cap wins over the derived one.
+    child = {}
+    local_provider.apply_env(child, _cfg(tool_output_cap_tokens=1000))
+    assert child["CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS"] == "1000"
+
+
+def test_the_spawned_local_child_receives_the_thrash_guards(tmp_path):
+    _write_config(tmp_path)
+    spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
+    result = _run(spawns, events, work_class="rebase")
+    assert result.ok
+    (_, child_env), = spawns.calls
+    assert child_env["DISABLE_AUTO_COMPACT"] == "1"
+    assert int(child_env["BASH_MAX_OUTPUT_LENGTH"]) < 32768
+
+
+# ── local failures carry a specific reason ──────────────────────────────────
+
+THRASH_STDOUT = (
+    b"Autocompact is thrashing: the context refilled to the limit within 3 turns "
+    b"of the previous compact, 3 times in a row."
+)
+UNRECOGNIZED = b'[claude-code:unrecognized_model] {"model":"qwen3-coder-ollama","query_source":"sdk"}'
+
+
+def test_thrash_signature_is_a_local_run_failure_with_a_specific_reason():
+    assert local_provider.classify_failure(THRASH_STDOUT.decode()) == "local_run_failed"
+    assert local_provider.describe_failure(THRASH_STDOUT.decode(), UNRECOGNIZED.decode()) == (
+        "local_run_failed:autocompact_thrash"
+    )
+
+
+def test_unrecognized_model_is_only_blamed_when_nothing_else_explains_the_failure():
+    assert local_provider.describe_failure("", UNRECOGNIZED.decode()) == (
+        "local_run_failed:unrecognized_model"
+    )
+    # A more specific cause wins over the note.
+    assert local_provider.describe_failure("Prompt is too long", UNRECOGNIZED.decode()) == "context_ceiling"
+    assert local_provider.describe_failure("the tests still fail") == "local_run_failed"
+
+
+def test_unrecognized_model_note_on_a_successful_run_is_not_a_failure(tmp_path):
+    """The CLI prints the notice on healthy runs too (verified live 2026-09-29)."""
+    _write_config(tmp_path)
+    spawns, events = _Spawns(local_reply=(0, b"rebased", UNRECOGNIZED)), []
+    result = _run(spawns, events, work_class="rebase")
+    assert result.ok and result.provider == LOCAL and result.local_failure == ""
+    assert not [e for e in events if e["event_type"] == "provider_failover"]
+
+
+def test_thrash_run_is_recorded_with_its_reason(tmp_path, fallback_bound):
+    _write_config(tmp_path)
+    spawns, events = _Spawns(local_reply=(1, THRASH_STDOUT, UNRECOGNIZED)), []
+    result = _run(spawns, events, work_class="rebase")
+    failover, = [e for e in events if e["event_type"] == "provider_failover"]
+    assert "failover_reason=local_run_failed:autocompact_thrash" in failover["output_summary"]
+    assert result.local_failure == "local_run_failed:autocompact_thrash"
+    # A thrash says nothing about the endpoint's health.
+    assert LOCAL not in harness_router.cooling_providers()
+
+
+# ── no silent frontier fallback ─────────────────────────────────────────────
+
+
+def test_fallback_tier_is_the_cheapest_frontier_tier():
+    import model_tiering
+    assert skill_runner.LOCAL_FALLBACK_TIER == model_tiering.TIERS[model_tiering.TIERS.index("local") + 1]
+
+
+def test_fallback_models_come_only_from_the_bound_cheapest_tier(tmp_path, monkeypatch):
+    # No binding at all: nothing may be a fallback (not the ambient default).
+    assert skill_runner._local_fallback_models(["claude", "codex"]) == {}
+    path = tmp_path / "vb.json"
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(path))
+    path.write_text(json.dumps({"claude": {"mechanical": "haiku"}, "codex": {"top": "big"}}))
+    # codex is bound, but not at the cheapest tier: not a fallback.
+    assert skill_runner._local_fallback_models(["claude", "codex", "cursor"]) == {"claude": "haiku"}
+
+
+def test_failed_local_run_is_refused_not_replayed_on_the_frontier_default(tmp_path):
+    _write_config(tmp_path)  # no vendor_binding: no cheapest-tier model to fall back to
+    spawns, events = _Spawns(local_reply=(1, THRASH_STDOUT, UNRECOGNIZED)), []
+    result = _run(spawns, events, work_class="rebase")
+
+    assert result.ok is False
+    assert result.attempted_providers == (LOCAL,)
+    assert len(spawns.calls) == 1 and "--settings" in spawns.calls[0][0], "no frontier spawn"
+    assert "frontier fallback was refused" in result.error
+    assert result.local_failure == "local_run_failed:autocompact_thrash"
+    failover, = [e for e in events if e["event_type"] == "provider_failover"]
+    assert "next_provider=none" in failover["output_summary"]
+    assert "frontier_fallback=refused" in failover["output_summary"]
+
+
+def test_fallback_runs_only_on_the_named_model_and_still_records_the_local_failure(tmp_path, fallback_bound):
+    _write_config(tmp_path)
+    spawns, events = _Spawns(local_reply=(1, THRASH_STDOUT, b"")), []
+    result = _run(spawns, events, work_class="rebase")
+
+    assert result.ok and result.provider == "claude"
+    frontier_cmd = spawns.calls[1][0]
+    assert frontier_cmd[frontier_cmd.index("--model") + 1] == "haiku"
+    # Success on the frontier must not read as a local success.
+    assert result.local_failure == "local_run_failed:autocompact_thrash"
+
+
+def test_fallback_to_a_provider_bound_only_at_a_higher_tier_is_refused(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    path = tmp_path / "vb-high.json"
+    path.write_text(json.dumps({"claude": {"top": "opus"}}))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(path))
+    spawns, events = _Spawns(local_reply=(1, THRASH_STDOUT, b"")), []
+    result = _run(spawns, events, work_class="rebase")
+    assert result.ok is False and result.attempted_providers == (LOCAL,)
+    assert len(spawns.calls) == 1
+
+
+def test_an_explicit_caller_model_is_used_for_the_fallback_as_given(tmp_path):
+    _write_config(tmp_path)  # no binding, but the caller named its own model
+    spawns, events = _Spawns(local_reply=(1, THRASH_STDOUT, b"")), []
+    result = _run(spawns, events, work_class="rebase", model="sonnet")
+    assert result.ok and result.provider == "claude"
+    frontier = spawns.calls[1][0]
+    assert frontier[frontier.index("--model") + 1] == "sonnet"
+
+
+def test_cooling_local_takes_the_same_policy_instead_of_a_silent_frontier_run(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    harness_router.cool_down(LOCAL)
+    spawns, events = _Spawns(), []
+    refused = _run(spawns, events, work_class="rebase")
+    assert refused.ok is False and spawns.calls == []
+    assert refused.local_failure.startswith("endpoint_unreachable")
+
+    bound = tmp_path / "vb.json"
+    bound.write_text(json.dumps(VENDOR_BINDING))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(bound))
+    spawns, events = _Spawns(), []
+    allowed = _run(spawns, events, work_class="rebase")
+    assert allowed.ok and allowed.provider == "claude"
+    (cmd, _), = spawns.calls
+    assert cmd[cmd.index("--model") + 1] == "haiku"
+
+
+def test_frontier_only_work_is_untouched_by_the_fallback_policy(tmp_path):
+    """No work_class: no local-first, no --model, no refusal — exactly as before."""
+    _write_config(tmp_path)
+    spawns, events = _Spawns(), []
+    result = _run(spawns, events)
+    assert result.ok and result.provider == "claude" and result.local_failure == ""
+    (cmd, _), = spawns.calls
+    assert "--model" not in cmd
+
+
+# ── rebase rules and the caller's intent agree ──────────────────────────────
+
+
+def test_rebase_hard_rules_allow_a_merge_commit_for_a_pushed_branch():
+    rules = local_provider.lean_hard_rules("rebase")
+    assert "git merge --no-ff" in rules and "already pushed" in rules
+    assert "git rebase <base>" in rules  # still the default

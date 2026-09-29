@@ -33,6 +33,7 @@ on:
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
+      - "lib/capabilities/**"
       - "lib/transcript_clarity.py"
       - "lib/test_transcript_clarity.py"
       - "lib/github_app_token.py"
@@ -132,6 +133,11 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/turdus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      # ateles#1189: the media-generation capability client (fail-closed spend
+      # cap, credential isolation). Its own step so the effect tests that guard
+      # the billing boundary are attributable and never an uncollected lane.
+      - name: Run capability client lib tests
+        run: uv run --extra dev python -m pytest lib/capabilities/ -q
       - name: Run transcript clarity lib tests
         run: uv run --extra dev python -m pytest lib/test_transcript_clarity.py -q
       - name: Run GitHub App token helper tests
