@@ -48,6 +48,8 @@ import ipaddress
 import json
 import math
 import os
+import re
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +82,117 @@ REQUIRED_GUARDS = (
     "gmail_send_gate.py",
     "gh_identity_guard.py",
 )
+
+# ── Lean local prompt ───────────────────────────────────────────────────────
+# The full dispatch prompt (agent_definition.prompt_markdown + the live
+# agent_policy rendering, unfiltered) is built for a frontier model with a
+# ~200K window and covers every judgement domain the swarm has — Gmail,
+# payments, RGPD, correspondence voice, PR review conventions, none of which a
+# mechanical local job ever touches. Measured on 2026-09-29 (ateles task
+# ent_71387d9c1d1d3d1eef9ecc01): dispatching cicada's full prompt for a
+# worktree_hygiene job costs ~44K tokens, of which ~35K (79%, 70 policy rows)
+# is `agent_policy` content with zero relevance filter. At a 32K local ceiling
+# that prompt cannot fit at all; forcing it to fit at 64K produced a WRONG
+# answer that still reported ok=True (7 prunable worktrees counted vs. 56
+# true) — the model was not refusing, it was silently dropping the task under
+# an oversized, mostly-irrelevant prompt.
+#
+# `build_lean_prompt` replaces the full prompt for `claude-local` dispatches
+# ONLY (see `skill_runner._run_skill_once`'s provider check) with: a one-line
+# role statement, the mechanical task's own instructions, and the small set of
+# hard rules relevant to THAT work class. Nothing else. Guards enforced by the
+# PreToolUse hooks (stash, sibling-repo, Gmail send, gh identity — see
+# REQUIRED_GUARDS above) are deliberately NOT restated here: they bind through
+# the hook regardless of what the prompt says, so repeating them only spends
+# tokens the local window cannot afford.
+#
+# Frontier dispatches (skill_runner.build_system_prompt) are UNCHANGED by this
+# module — this is an additive, local-only prompt path.
+
+LEAN_ROLE_SUMMARY = (
+    "You are a swarm worker running a bounded, mechanical task on a local "
+    "model with a small context window. Follow the task instructions exactly. "
+    "Do only what is asked — no exploration beyond what the task requires, no "
+    "extra commentary. Report your result plainly at the end of your reply."
+)
+
+# One short paragraph of hard rules per mechanical work class — only the
+# rules that class can actually violate. Kept well under what a frontier
+# prompt would carry for the same class; guard-enforced rules (never stash,
+# never --no-verify, worktree isolation) are omitted here because the
+# PreToolUse hooks bind independently of the prompt.
+_LEAN_HARD_RULES: dict[str, str] = {
+    "rebase": (
+        "Rebase the current branch onto the named base with `git rebase "
+        "<base>`. Resolve conflicts by re-reading the conflicting hunks, "
+        "never by discarding either side blindly. After the rebase, verify "
+        "the branch contains the base's HEAD commit and the working tree is "
+        "clean before reporting success. Do not force-push unless the task "
+        "explicitly says to; if it does, use `--force-with-lease`, never "
+        "bare `--force`."
+    ),
+    "regenerate_generated_files": (
+        "Run exactly the generator command(s) the task names. Do not hand-"
+        "edit a generated file. After regenerating, diff the result against "
+        "what was committed; report the file paths that changed. If the "
+        "generator reports an error, report the error verbatim rather than "
+        "editing the output to make it pass."
+    ),
+    "carry_forward_check": (
+        "Compare the named branch's net patch against the target — report "
+        "exactly what differs, with file paths. Do not modify anything; this "
+        "is a read-only comparison. State your count or verdict as a single "
+        "unambiguous number or line at the end of your reply."
+    ),
+    "ci_log_triage": (
+        "Read the named CI log or run. Report the failing step name, the "
+        "first error line, and whether the failure looks environmental or "
+        "code-caused. Do not attempt a fix unless the task asks for one. "
+        "Quote the exact failing line rather than paraphrasing it."
+    ),
+    "worktree_hygiene": (
+        "Enumerate worktrees with `git worktree list --porcelain` (never "
+        "hand-parse `git worktree list`'s human-readable columns — the paths "
+        "can contain spaces). A worktree is prunable when its entry has a "
+        "line starting with `prunable` (e.g. `prunable gitdir file points to "
+        "non-existent location`). Count prunable worktrees by counting those "
+        "lines, not by inspecting directories on disk. State the count as a "
+        "single number at the end of your reply, e.g. `prunable_count: 7`. "
+        "Do not run `git worktree prune` unless the task explicitly asks "
+        "for it."
+    ),
+}
+
+
+def lean_hard_rules(work_class: str | None) -> str:
+    """The hard-rules paragraph for one work class, or '' when none applies."""
+    if not work_class:
+        return ""
+    return _LEAN_HARD_RULES.get(work_class, "")
+
+
+def build_lean_prompt(work_class: str | None) -> str:
+    """The system prompt for a `claude-local` dispatch: role + hard rules.
+
+    Deliberately takes neither ``agent_def.prompt_markdown`` nor a
+    ``policy_prompt``, and deliberately does NOT inline the dispatched role's
+    SKILL.md either: every role's SKILL.md in this repo is that role's own
+    agent_definition mirror (identity, gate protocol, PR/GitHub conventions —
+    the same ~14K-character document `render_policy_prompt` was already
+    oversized alongside), not a lean, work-class-scoped task description. A
+    mechanical dispatch's actual instructions arrive separately, on stdin, as
+    the run's own ``prompt`` (see `_run_skill_once`'s
+    ``input=stdin_payload if ... else prompt.encode()``) — the model sees
+    them as its user turn regardless of what this function returns. This
+    system prompt only has to state WHO it is and WHAT class-specific hard
+    rules apply; the WHAT-to-do-right-now is the stdin prompt, in full,
+    unfiltered, exactly as the caller wrote it.
+    """
+    rules = lean_hard_rules(work_class)
+    parts = [LEAN_ROLE_SUMMARY]
+    if rules:
+        parts.append(f"## Hard rules for this task class\n\n{rules}")
+    return "\n\n---\n\n".join(p for p in parts if p)
 
 # Not a credential: the loopback proxy runs without a master key, but the
 # claude CLI needs some API key to skip its login flow.
@@ -355,3 +468,119 @@ def classify_failure(*texts: str) -> str:
     if any(sig in blob for sig in _ENDPOINT_SIGNATURES):
         return FAILURE_ENDPOINT
     return FAILURE_RUN
+
+
+# ── Post-condition checks ────────────────────────────────────────────────────
+# The regression this module exists to fix (ent_71387d9c1d1d3d1eef9ecc01) was
+# not a crash: the local model returned a syntactically fine, confidently
+# wrong answer (7 prunable worktrees against a true 56) and the dispatch
+# recorded `ok: true`. Exit code and "the child replied" are necessary but not
+# sufficient for a mechanical task with a checkable ground truth. Each
+# function below re-derives that ground truth independently of the model's
+# own words and either confirms or refutes the model's stated answer; a
+# refutation is surfaced as a failure so `_run_provider_attempts` fails over
+# to a frontier provider instead of accepting a wrong local result.
+#
+# Deliberately narrow: only work classes with an OBJECTIVE, cheaply-computed
+# ground truth get a check here. A class with no entry is not verified beyond
+# the exit code — same as before this module existed — because inventing a
+# check with no real ground truth would just be a second guess with more
+# code around it.
+
+_PRUNABLE_COUNT_RE = re.compile(r"prunable_count\s*:\s*(\d+)", re.IGNORECASE)
+
+
+def _git_porcelain_prunable_count(cwd: str | None) -> int | None:
+    """The ground-truth prunable-worktree count, or None if git could not run."""
+    try:
+        proc = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=cwd or None,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    # A prunable worktree's line is `prunable <reason>` (e.g. "prunable
+    # gitdir file points to non-existent location"), not the bare word —
+    # match the leading token, not the whole line.
+    return sum(
+        1 for line in proc.stdout.splitlines() if line.strip().startswith("prunable ")
+        or line.strip() == "prunable"
+    )
+
+
+def verify_worktree_hygiene(stdout: str, *, cwd: str | None) -> str | None:
+    """Refute a `worktree_hygiene` result against the real prunable count.
+
+    Returns a failure reason naming both numbers when the model's stated
+    `prunable_count:` disagrees with `git worktree list --porcelain`, or when
+    it stated no parseable count at all. Returns None (pass) when the stated
+    count matches, or when git itself could not be queried here (a checker
+    that cannot establish ground truth must not manufacture a failure).
+    """
+    truth = _git_porcelain_prunable_count(cwd)
+    if truth is None:
+        return None
+    # The LAST match, not the first: a model that reasons out loud and
+    # self-corrects ("prunable_count: 3 ... wait, recounting: prunable_count:
+    # 9") states its actual final answer last. Taking the first match would
+    # validate against an interim number the model itself abandoned.
+    matches = list(_PRUNABLE_COUNT_RE.finditer(stdout or ""))
+    if not matches:
+        return (
+            "worktree_hygiene post-condition: reply carried no parseable "
+            "`prunable_count: N` line to check against the true count "
+            f"({truth})"
+        )
+    claimed = int(matches[-1].group(1))
+    if claimed != truth:
+        return (
+            f"worktree_hygiene post-condition: claimed prunable_count="
+            f"{claimed} but `git worktree list --porcelain` shows {truth}"
+        )
+    return None
+
+
+# work_class -> checker(stdout, cwd=...) -> failure reason | None
+_POSTCONDITION_CHECKS = {
+    "worktree_hygiene": verify_worktree_hygiene,
+}
+
+# Every OTHER mechanical work class, named explicitly rather than left
+# implicit. A class with no checker gets no ground-truth verification beyond
+# its exit code — same exposure the worktree_hygiene regression had before
+# this module existed. Listing them here (checked by
+# test_local_provider.py::test_every_mechanical_class_is_accounted_for_in_
+# postcondition_checks) makes that a visible, deliberate gap instead of a
+# silent one: adding a 6th mechanical work class without adding it to EITHER
+# this set or `_POSTCONDITION_CHECKS` fails that test, so the next class
+# forces the same "does this need a checker" decision this one did.
+_MECHANICAL_CLASSES_WITHOUT_POSTCONDITION_CHECK = frozenset({
+    "rebase",
+    "regenerate_generated_files",
+    "carry_forward_check",
+    "ci_log_triage",
+})
+
+
+def verify_postcondition(
+    work_class: str | None, stdout: str, *, cwd: str | None
+) -> str | None:
+    """Run the work class's post-condition check, or None when it has none.
+
+    Called only for `claude-local` results (see `skill_runner`'s use of this
+    function) — a frontier dispatch is unaffected. A checker raising is
+    treated as "could not verify" rather than a failure: a broken checker
+    must not fail a run that may in fact be correct.
+    """
+    checker = _POSTCONDITION_CHECKS.get(work_class or "")
+    if checker is None:
+        return None
+    try:
+        return checker(stdout, cwd=cwd)
+    except Exception:  # noqa: BLE001 — a checker defect must not fail the run
+        return None

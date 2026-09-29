@@ -116,6 +116,176 @@ def test_ceiling_refusal_accounts_for_overhead_and_reserve():
     assert refusal and "context ceiling" in refusal
 
 
+# ── lean local prompt (ateles task ent_71387d9c1d1d3d1eef9ecc01) ──────────
+
+
+def test_lean_prompt_is_tiny_regardless_of_work_class():
+    # Regression bound: the full frontier prompt this replaces measured
+    # ~44K tokens (132K chars) for one role. Every mechanical work class's
+    # lean prompt must stay a couple of orders of magnitude smaller so it
+    # leaves the 32K local ceiling almost entirely for tool output.
+    for work_class in local_provider.MECHANICAL_WORK_CLASSES:
+        prompt = local_provider.build_lean_prompt(work_class)
+        assert len(prompt) < 2000, f"{work_class}: lean prompt is {len(prompt)} chars"
+
+
+def test_lean_prompt_carries_no_agent_definition_or_policy_content():
+    prompt = local_provider.build_lean_prompt("worktree_hygiene")
+    # None of the frontier-only scaffolding this replaces may leak in: no
+    # agent_policy rendering, no SKILL.md/agent_definition mirror content.
+    for marker in ("Active agent policies", "entity_type: agent_definition", "gate_status"):  # vocab-ok: asserts the retired name is ABSENT
+        assert marker not in prompt
+
+
+def test_lean_prompt_states_the_work_classs_own_hard_rule():
+    prompt = local_provider.build_lean_prompt("worktree_hygiene")
+    assert "prunable" in prompt
+    prompt = local_provider.build_lean_prompt("rebase")
+    assert "rebase" in prompt.lower()
+
+
+def test_lean_prompt_with_no_work_class_is_just_the_role_summary():
+    assert local_provider.build_lean_prompt(None) == local_provider.LEAN_ROLE_SUMMARY
+
+
+def test_lean_hard_rules_unknown_class_returns_empty():
+    assert local_provider.lean_hard_rules("not_a_real_class") == ""
+    assert local_provider.lean_hard_rules(None) == ""
+
+
+def test_every_mechanical_class_has_lean_hard_rules():
+    # Drift guard: MECHANICAL_WORK_CLASSES and _LEAN_HARD_RULES are two
+    # independently hand-maintained structures keyed by the same strings.
+    # Without this, a new mechanical class silently gets a lean prompt with
+    # NO task-specific guidance (just the bare role summary) and nothing
+    # fails — this test is what fails instead.
+    missing = local_provider.MECHANICAL_WORK_CLASSES - local_provider._LEAN_HARD_RULES.keys()
+    assert not missing, f"mechanical work class(es) with no lean hard rules: {missing}"
+
+
+def test_every_mechanical_class_is_accounted_for_in_postcondition_checks():
+    # Same drift guard, for post-condition coverage: every mechanical work
+    # class must be EITHER in _POSTCONDITION_CHECKS (has a ground-truth
+    # checker) OR explicitly named as not-yet-covered. A class in neither
+    # set is a silent, un-tracked verification gap — exactly the shape of
+    # the regression this module exists to fix, just for a different class.
+    covered = set(local_provider._POSTCONDITION_CHECKS)
+    declared_uncovered = local_provider._MECHANICAL_CLASSES_WITHOUT_POSTCONDITION_CHECK
+    accounted_for = covered | declared_uncovered
+    missing = local_provider.MECHANICAL_WORK_CLASSES - accounted_for
+    assert not missing, (
+        f"mechanical work class(es) neither checked nor declared uncovered: {missing}"
+    )
+    overlap = covered & declared_uncovered
+    assert not overlap, f"class(es) both checked AND declared uncovered: {overlap}"
+
+
+# ── post-condition checks ───────────────────────────────────────────────────
+
+
+def test_verify_worktree_hygiene_passes_on_matching_count(tmp_path):
+    with patch(
+        "local_provider._git_porcelain_prunable_count", return_value=3
+    ):
+        assert local_provider.verify_worktree_hygiene(
+            "I found 3 prunable worktrees.\nprunable_count: 3", cwd=str(tmp_path)
+        ) is None
+
+
+def test_verify_worktree_hygiene_fails_red_on_wrong_count(tmp_path):
+    # This is the exact shape of the regression this checker exists to catch:
+    # a confident, well-formed answer that is simply wrong (7 claimed vs. 56
+    # true prunable worktrees — ateles task ent_71387d9c1d1d3d1eef9ecc01).
+    with patch(
+        "local_provider._git_porcelain_prunable_count", return_value=56
+    ):
+        failure = local_provider.verify_worktree_hygiene(
+            "prunable_count: 7", cwd=str(tmp_path)
+        )
+    assert failure and "7" in failure and "56" in failure
+
+
+def test_verify_worktree_hygiene_uses_the_final_stated_count(tmp_path):
+    # A model that reasons out loud and self-corrects states its actual
+    # answer LAST. Checking the first number would validate against an
+    # interim count the model itself abandoned.
+    with patch("local_provider._git_porcelain_prunable_count", return_value=9):
+        assert local_provider.verify_worktree_hygiene(
+            "prunable_count: 3\n\nWait, let me recount.\nprunable_count: 9",
+            cwd=str(tmp_path),
+        ) is None
+        failure = local_provider.verify_worktree_hygiene(
+            "prunable_count: 9\n\nWait, let me recount.\nprunable_count: 3",
+            cwd=str(tmp_path),
+        )
+        assert failure and "claimed prunable_count=3" in failure
+
+
+def test_verify_worktree_hygiene_fails_red_on_no_parseable_count(tmp_path):
+    with patch(
+        "local_provider._git_porcelain_prunable_count", return_value=5
+    ):
+        failure = local_provider.verify_worktree_hygiene(
+            "There are some prunable worktrees.", cwd=str(tmp_path)
+        )
+    assert failure and "no parseable" in failure
+
+
+def test_verify_worktree_hygiene_abstains_when_git_unavailable(tmp_path):
+    with patch("local_provider._git_porcelain_prunable_count", return_value=None):
+        # Whatever the model said, a checker with no ground truth must not
+        # manufacture a failure.
+        assert local_provider.verify_worktree_hygiene(
+            "prunable_count: 999", cwd=str(tmp_path)
+        ) is None
+
+
+def test_git_porcelain_prunable_count_matches_real_git_output(tmp_path):
+    """Ground truth against REAL git, not a stub: create N prunable worktrees
+    (a worktree registration whose gitdir has been deleted) in a throwaway
+    repo, and confirm the count matches exactly."""
+    import subprocess as sp
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("x")
+    sp.run(["git", "add", "."], cwd=repo, check=True)
+    sp.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+    n_prunable = 3
+    for i in range(n_prunable):
+        wt = tmp_path / f"wt{i}"
+        sp.run(
+            ["git", "worktree", "add", "-q", "-b", f"branch{i}", str(wt)],
+            cwd=repo, check=True,
+        )
+        # Delete the worktree directory without `git worktree remove`, which
+        # is exactly what makes git report it `prunable`.
+        import shutil as sh
+
+        sh.rmtree(wt)
+
+    assert local_provider._git_porcelain_prunable_count(str(repo)) == n_prunable
+
+
+def test_verify_postcondition_no_checker_for_class_returns_none(tmp_path):
+    assert local_provider.verify_postcondition("rebase", "anything", cwd=str(tmp_path)) is None
+    assert local_provider.verify_postcondition(None, "anything", cwd=str(tmp_path)) is None
+
+
+def test_verify_postcondition_swallows_checker_exceptions(tmp_path):
+    with patch(
+        "local_provider._POSTCONDITION_CHECKS",
+        {"worktree_hygiene": lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))},
+    ):
+        assert local_provider.verify_postcondition(
+            "worktree_hygiene", "prunable_count: 1", cwd=str(tmp_path)
+        ) is None
+
+
 # ── command and environment ────────────────────────────────────────────────
 
 
@@ -261,6 +431,14 @@ def _agent_def():
                            tool_allowlist="Bash,Read,Edit", aauth_sub="cicada@ateles-swarm")
 
 
+def _stub_agent_def():
+    """Empty prompt_markdown — simulates AgentLoader's load-failure fallback
+    (lib/daemon_runtime/agent_loader.py's `_stub()`): a synthesized, plausible
+    aauth_sub but no real role instructions ever loaded."""
+    return AgentDefinition(name="cicada", tool_allowlist="Bash,Read,Edit",
+                           aauth_sub="cicada@ateles-swarm")
+
+
 class _Spawns:
     """Fake create_subprocess_exec: records argv/env, replies per provider."""
 
@@ -317,6 +495,99 @@ def test_mechanical_work_runs_local_with_guards_and_provenance(tmp_path, monkeyp
     assert done and done[0]["tool_name"] == f"{LOCAL}:cicada"
     fields = done[0]["usage"].as_event_fields()
     assert fields["provider"] == LOCAL and fields["model"] == "qwen3-coder-ollama"
+
+
+def test_local_dispatch_uses_the_lean_prompt_not_agent_def_or_policy(tmp_path, monkeypatch):
+    """The regression this whole change exists to fix: a claude-local dispatch
+    must carry the tiny lean prompt (role + work-class hard rules) as its
+    --system-prompt, never the agent_definition.prompt_markdown ("You are
+    Cicada.", from _agent_def()) or a live-policy rendering. A frontier
+    dispatch is untouched — this only asserts the local branch."""
+    _write_config(tmp_path)
+    spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
+    result = _run(spawns, events, work_class="rebase")
+    assert result.ok and result.provider == LOCAL
+
+    (cmd, _), = spawns.calls
+    system_prompt = cmd[cmd.index("--system-prompt") + 1]
+    assert system_prompt == local_provider.build_lean_prompt("rebase")
+    assert "You are Cicada." not in system_prompt  # agent_def.prompt_markdown
+    assert "Active agent policies" not in system_prompt  # policy_prompt
+    assert len(system_prompt) < 2000
+
+
+def test_local_dispatch_fails_over_on_wrong_worktree_hygiene_answer(tmp_path):
+    """The exact regression: a local run that exits 0 with a plausible but
+    WRONG count must not be accepted as ok — it must fail over to frontier,
+    same as any other local_run_failed, without cooling local down (a wrong
+    answer says nothing about endpoint health)."""
+    _write_config(tmp_path, {**CONFIG, "eligible_work_classes": ["worktree_hygiene"]})
+    spawns, events = _Spawns(local_reply=(0, b"prunable_count: 7", b"")), []
+    with patch("local_provider._git_porcelain_prunable_count", return_value=56):
+        result = _run(spawns, events, work_class="worktree_hygiene")
+
+    assert result.provider == "claude"  # fell over
+    assert result.attempted_providers == (LOCAL, "claude")
+    failover, = [e for e in events if e["event_type"] == "provider_failover"]
+    assert "failover_reason=local_run_failed" in failover["output_summary"]
+    assert LOCAL not in harness_router.cooling_providers()
+
+
+def test_local_dispatch_accepts_correct_worktree_hygiene_answer(tmp_path):
+    _write_config(tmp_path, {**CONFIG, "eligible_work_classes": ["worktree_hygiene"]})
+    spawns, events = _Spawns(local_reply=(0, b"prunable_count: 56", b"")), []
+    with patch("local_provider._git_porcelain_prunable_count", return_value=56):
+        result = _run(spawns, events, work_class="worktree_hygiene")
+
+    assert result.ok and result.provider == LOCAL
+
+
+def test_local_dispatch_with_stub_agent_def_is_reported_degraded(tmp_path, monkeypatch):
+    """A local dispatch for a role whose agent_definition failed to load
+    (stub: empty prompt_markdown, synthesized aauth_sub) must be treated as
+    DEGRADED exactly like a frontier dispatch would be — not silently treated
+    as a healthy load just because the lean prompt never reads
+    prompt_markdown in the first place. Regression: `degraded` was briefly
+    hardcoded False for every claude-local run, which would have (a) skipped
+    the undefined-role alert path and (b) let a stub's synthesized aauth_sub
+    receive AAuth signing-key injection."""
+    _write_config(tmp_path)
+    monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path / "keys"))
+    # A JWK IS present at the expected path — if `degraded` were wrongly
+    # False here, signing vars would be injected for a role with no real
+    # loaded definition.
+    (tmp_path / "keys").mkdir()
+    (tmp_path / "keys" / "cicada.jwk.json").write_text("{}")
+
+    loader = MagicMock()
+    loader.return_value.load.return_value = _stub_agent_def()
+    spawns, events = _Spawns(local_reply=(0, b"result", b"")), []
+    with (
+        patch("skill_runner.AgentLoader", loader),
+        patch("skill_runner.CLAUDE_BIN", "/bin/claude"),
+        patch("skill_runner.ATELES_REPO", _REPO_ROOT),
+        patch("skill_runner.CODEX_BIN", None),
+        patch("skill_runner.CURSOR_BIN", None),
+        patch("skill_runner._write_harness_event", side_effect=lambda **kw: events.append(kw)),
+        patch("asyncio.create_subprocess_exec", side_effect=spawns.spawn),
+    ):
+        result = asyncio.run(
+            skill_runner.run_skill(
+                "cicada", "rebase onto main", role="cicada",
+                task_entity_id="ent_task", work_class="rebase",
+            )
+        )
+
+    assert result.ok and result.provider == LOCAL
+    (_, env), = spawns.calls
+    assert "NEOTOMA_AAUTH_PRIVATE_JWK_PATH" not in env, (
+        "a stub agent_def must not receive AAuth signing-key injection on the local path"
+    )
+    degraded_events = [e for e in events if e.get("output_summary") == "degraded_generic_subagent"]
+    assert degraded_events, (
+        "a stub agent_def on the local path must still write the degraded_generic_subagent "
+        "harness_event, same as the frontier path"
+    )
 
 
 def test_local_failure_falls_over_to_frontier_and_records_why(tmp_path):
@@ -457,6 +728,21 @@ def test_non_mechanical_or_gated_work_never_runs_local(tmp_path, kwargs):
     _write_config(tmp_path)
     spawns, events = _Spawns(local_reply=(0, b"local", b"")), []
     result = _run(spawns, events, **kwargs)
+    assert result.provider == "claude"
+    assert all("--settings" not in cmd for cmd, _ in spawns.calls)
+
+
+def test_github_delivery_never_routes_local_even_for_an_eligible_class(tmp_path, monkeypatch):
+    """local_provider.build_lean_prompt has no SWARM_GITHUB_CONTRACT /
+    SWARM_PRIOR_ART_CONTRACT — a GitHub-delivery dispatch must stay off the
+    local path even when its work_class is otherwise eligible."""
+    _write_config(tmp_path, {**CONFIG, "eligible_work_classes": ["ci_log_triage"]})
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
+    spawns, events = _Spawns(local_reply=(0, b"local", b"")), []
+    result = _run(
+        spawns, events, work_class="ci_log_triage",
+        include_github_contract=True, github_token="tok",
+    )
     assert result.provider == "claude"
     assert all("--settings" not in cmd for cmd, _ in spawns.calls)
 

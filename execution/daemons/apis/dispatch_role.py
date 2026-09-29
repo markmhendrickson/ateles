@@ -244,6 +244,9 @@ async def dispatch(
     GitHub identity. The default stays False so read-only and filesystem-only
     work remains under the sandbox's network denial.
     """
+    # work_class reaches run_skill's local-first routing AND (via
+    # _run_skill_once) the lean-prompt/post-condition path — see
+    # local_provider.build_lean_prompt / verify_postcondition.
     return await run_skill(
         role,
         task,
