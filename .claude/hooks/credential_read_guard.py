@@ -463,32 +463,44 @@ _ENV_RE = re.compile(rf"{_PATHED_COMMAND_START}{_ANY_PATH}env{_COMMAND_END}")
 # of ateles#1346, round 2).
 _CANONICAL_ENV_WORD_RE = re.compile(r"(?:/(?:usr/)?bin/)?(?:env|printenv)")
 _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
-# Programs that run (or may run) one of their operands as a command, plus
-# the shell keywords after which a command starts. A path after one of these
-# is treated as being in command position, which fails closed: `sudo -u root
-# /x/env` and `sh -c "./printenv"` stay refused, at the cost of also refusing
-# `sudo ls config/env`. `env` itself is not listed; its program operand is
-# parsed exactly by `_env_program`. Script interpreters (python, perl, ruby,
-# node) are deliberately absent: they read an operand as a script, so
-# `python3 -m venv .venv/env` passes a path, and cannot run the binary.
-_OPERAND_RUNNERS = frozenset(
+# Programs known to take a path operand only as data: they never run it,
+# and a path argument such as `ls config/env` is not an invocation. This is
+# an ALLOWLIST on purpose. A first version listed the runners instead, and a
+# runner list can never be complete (`mise exec`, `gosu`, `bundle exec`,
+# `$R` holding `sudo`); every program not listed here, including one named
+# through a variable or substitution, puts the path in command position and
+# refuses (self-review of this change). Programs that print their operands
+# (`ls`, `realpath`) are safe here because a pipe into a runner is refused
+# separately (`_pipes_into_runner`). `git` and `python3` are admitted only in
+# their argument-only forms (`_git_is_argument_only`, `python3 -m venv`).
+_ARGUMENT_ONLY_PROGRAMS = frozenset(
     {
-        "sudo", "doas", "su", "runuser", "nice", "ionice", "chrt", "taskset",
-        "nohup", "setsid", "stdbuf", "timeout", "gtimeout", "time", "command",
-        "builtin", "exec", "eval", "xargs", "parallel", "find", "busybox",
-        "toybox", "unbuffer", "caffeinate", "watch", "strace", "ltrace",
-        "flock", "chroot", "nsenter", "unshare", "firejail", "sandbox-exec",
-        "arch", "script", "sh", "bash", "zsh", "dash", "ksh", "fish", "csh",
-        "tcsh", "ssh", "fly", "flyctl",
-        "kubectl", "docker", "podman", "nix-shell", "direnv", "npx", "npm",
-        "pnpm", "yarn", "uv", "uvx", "poetry", "pipx", "pkexec", "op", "sops",
-        "aws-vault", "doppler", "dotenv", "infisical", "chamber", "teller",
-        "then", "do", "else", "elif", "if", "while", "until", "!",
+        "ls", "cd", "pushd", "rm", "rmdir", "mkdir", "cp", "mv", "ln", "touch",
+        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "du",
+        "tree", "chmod", "chown", "chgrp", "realpath", "readlink", "grep",
+        "egrep", "fgrep", "rg", "ag", "diff", "cmp", "tar", "zip", "unzip",
+        "open", "code", "vim", "vi", "nano", "trash",
     }
 )  # fmt: skip
-# Secret-injecting wrappers (`op run --`, `sops exec-env`, `aws-vault exec`,
-# `doppler run`) are listed because the program they run inherits the very
-# secrets they inject (self-review of this change).
+_GIT_ARGUMENT_ONLY_SUBCOMMANDS = frozenset(
+    {
+        "add", "rm", "mv", "diff", "log", "show", "status", "restore",
+        "checkout", "switch", "ls-files", "blame", "grep", "commit", "reset",
+    }
+)  # fmt: skip
+_GIT_OPTIONS_WITH_ARGUMENT = frozenset({"-C", "-c", "--git-dir", "--work-tree"})
+
+
+def _git_is_argument_only(words: list) -> bool:
+    """True when `git <words>` is a subcommand that takes paths as data.
+    `git bisect run ./env`, `git rebase -x ./env` and `git submodule foreach`
+    run an operand, so any subcommand not listed refuses."""
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        index += 2 if words[index] in _GIT_OPTIONS_WITH_ARGUMENT else 1
+    return index < len(words) and words[index] in _GIT_ARGUMENT_ONLY_SUBCOMMANDS
+
+
 _COMMAND_BOUNDARY_CHARS = frozenset(";&|(){}`\n")
 
 
@@ -550,13 +562,25 @@ def _in_command_position(segment: str, start: int) -> bool:
     # A completed expansion is a word, not a command boundary: `ls
     # $(pwd)/env` and `ls ${D}/env` pass a path argument to `ls`.
     pre = re.sub(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`", "X", pre)
-    text = pre[_last_command_boundary(pre) + 1 :]
+    boundary = _last_command_boundary(pre)
+    # Inside an open `$(`, backtick or process substitution the output may
+    # itself be run (`$(ls ./env)`, `sh <(echo ./env)`), so refuse there.
+    if boundary >= 0 and (
+        pre[boundary] == "`"
+        or (pre[boundary] == "(" and pre[boundary - 1 : boundary] in ("$", "<", ">"))
+    ):
+        return True
+    text = pre[boundary + 1 :]
     words = _shlex_prefix_words(text)
     if words is None:
         return True
     # When the match is not preceded by whitespace, the last word is the
     # start of the matched word itself (`"$D"/env`, `X/env`), not a program.
+    # A value attached with `=` (`git -c core.pager=./env`, `--opt=./env`)
+    # may be a program another tool runs, so that refuses.
     if words and text and not text[-1].isspace():
+        if "=" in words[-1]:
+            return True
         words = words[:-1]
     while True:
         while words and _ASSIGNMENT_WORD_RE.fullmatch(words[0]):
@@ -572,9 +596,13 @@ def _in_command_position(segment: str, start: int) -> bool:
                 return True
             words = program
             continue
-        if name in _OPERAND_RUNNERS:
-            return True
-        return False
+        if name in _ARGUMENT_ONLY_PROGRAMS:
+            return False
+        if name == "git":
+            return not _git_is_argument_only(words[1:])
+        if re.fullmatch(r"python[0-9.]*", name):
+            return words[1:3] != ["-m", "venv"]
+        return True
 
 
 def _env_word_matches(pattern: re.Pattern, segment: str):
@@ -590,6 +618,27 @@ def _env_word_matches(pattern: re.Pattern, segment: str):
 
 def _printenv_invoked(segment: str) -> bool:
     return next(_env_word_matches(_PRINTENV_RE, segment), None) is not None
+
+
+# A later pipeline stage that runs what it reads: `ls ./env | xargs -I{} {}`
+# and `echo ./env | sh` execute a path an earlier stage only printed. Each
+# segment is judged alone, so this is checked across the whole command.
+_PIPES_INTO_RUNNER_RE = re.compile(
+    r"\|(?!\|)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?"
+    r"(?:xargs|parallel|sh|bash|zsh|dash|ksh|fish|eval|source|while|\.)(?=\s|$)"
+)
+
+
+def _pipes_into_runner(command: str) -> bool:
+    """True when `command` pipes into a runner AND names a non-canonical
+    `env`/`printenv` path anywhere, which a pipe could hand to it."""
+    if not _PIPES_INTO_RUNNER_RE.search(command):
+        return False
+    return any(
+        not _CANONICAL_ENV_WORD_RE.fullmatch(match.group(0))
+        for pattern in (_ENV_RE, _PRINTENV_RE)
+        for match in pattern.finditer(command)
+    )
 
 
 _SERVICE_ENV_RE = re.compile(
@@ -1348,6 +1397,9 @@ def check_bash(command: str):
         hit = _chain_touches_credential_via_pipe(chain)
         if hit:
             return hit
+
+    if _pipes_into_runner(joined):
+        return "ambient environment dump"
 
     for segment in _split_segments(command):
         normalized = " ".join(segment.split())

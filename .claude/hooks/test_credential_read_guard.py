@@ -416,6 +416,19 @@ BASH_BLOCK = [
     ),
     ("quoted paren hiding the runner", 'sudo -u "a(b" /opt/x/env'),
     ("quoted semicolon hiding the runner", 'sudo -u "a;b" /opt/x/env'),
+    # Second self-review: a runner LIST can never be complete, so the check
+    # is an allowlist of argument-only programs. Each of these was allowed
+    # by the runner-list version.
+    ("unlisted runner mise exec", "mise exec -- /opt/x/env"),
+    ("unlisted runner bundle exec", "bundle exec ./env"),
+    ("coproc keyword", "coproc ./env"),
+    ("runner held in a variable", "R=sudo; $R ./env"),
+    ("runner from a command substitution", "$(echo sudo) ./env"),
+    ("pipe into xargs running the path", "echo ./env | xargs -I{} {}"),
+    ("pipe into a shell running the path", "ls ./printenv | sh"),
+    ("substitution output run as a command", "$(ls ./env)"),
+    ("git bisect run on a pathed env", "git bisect run ./env"),
+    ("git rebase -x on a pathed env", "git rebase -x ./env"),
     (
         "env -u running perl -pe after source",
         f"source {ENV}; env -u X perl -pe 1",
@@ -570,6 +583,8 @@ BASH_ALLOW = [
     ("ls an expansion-prefixed path ending in env", "ls $(pwd)/env"),
     ("env -u running ls on a path ending in env", "env -u X ls config/env"),
     ("ls a quoted path ending in env", 'ls "config/env"'),
+    ("git -C diff a path ending in env", "git -C repo diff -- src/env"),
+    ("ls piped to a non-runner", "ls config/env | wc -l"),
     ("quoted parens before a path ending in env", 'git log --grep "x (y)" -- src/env'),
     ("ls a path ending in env after source", f"source {ENV}; ls config/env"),
     (
