@@ -29,6 +29,8 @@ import swarm_dispatch as sd  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
+REPO_ROOT = _HERE.parents[2]
+
 OLD = "b" * 40
 NEW = "a" * 40
 FIVE = ["pm", "arch", "ux", "qa", "security"]
@@ -77,6 +79,15 @@ def _delta(*files: str) -> review_delta.Delta:
 def _select(comments, delta, *, forced=()):
     records = sd.lens_records(comments)
     return review_carry.select_rerun(FIVE, records, NEW, {OLD: delta}, forced=forced)
+
+
+@pytest.fixture(autouse=True)
+def _agent_prompts_come_from_this_checkout(monkeypatch):
+    """`skill_runner.ATELES_REPO` defaults to the operator's clone at
+    ~/repos/ateles, which CI does not have. The combined pass loads each lens's
+    own SKILL.md from it, so these tests pin it to the checkout under test
+    instead of depending on the host."""
+    monkeypatch.setattr(sd, "ATELES_REPO", REPO_ROOT)
 
 
 # ── selection ───────────────────────────────────────────────────────────────
@@ -520,6 +531,7 @@ class TestCombinedPromptKeepsEachLensDuties:
     def test_each_lens_own_agent_prompt_reaches_the_run_once(self):
         _, prompt = self._prompt()
         d = _dispatcher()
+        assert d._lens_agent_prompt("pavo").strip(), "agent prompts must load here"
         # pm is first, so its prompt is the run's system prompt and is not
         # inlined again (~20 KB); the other two lenses' prompts are inlined.
         assert d._lens_agent_prompt("pavo") not in prompt

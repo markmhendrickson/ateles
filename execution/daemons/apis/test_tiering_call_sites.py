@@ -1419,6 +1419,9 @@ def _wire(monkeypatch, world, *, combined: bool, narrow: bool) -> tuple[SwarmDis
         return {"pavo": "- [ ] the scope matches the issue"}
 
     monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", expectations)
+    # Agent prompts load from `skill_runner.ATELES_REPO`, which defaults to the
+    # operator's clone (absent in CI); pin it to this checkout.
+    monkeypatch.setattr(swarm_dispatch, "ATELES_REPO", _REPO_ROOT)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_worktree)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
