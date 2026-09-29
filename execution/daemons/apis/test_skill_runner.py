@@ -4737,6 +4737,89 @@ class TestModelTieringDispatch:
         assert entity["output_summary"].startswith("tiering=mid(policy) ")
 
     @patch("skill_runner.AgentLoader")
+    def test_real_dispatch_logs_and_ledgers_tier_source_and_model(
+        self, MockLoader, monkeypatch, tmp_path, caplog
+    ) -> None:
+        """Effect through the real runner: a dispatch leaves
+        `tiering=<tier>(<source>) model=<model>` in the log AND one row in the
+        tier ledger the `harness_usage.py tiers` report reads."""
+        import json as _json
+        import logging
+
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        ledger = tmp_path / "tier-ledger.jsonl"
+        monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
+        monkeypatch.setenv(
+            "APIS_VENDOR_BINDING", '{"claude": {"mid": "claude-sonnet-5"}}'
+        )
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing({}),
+            ),
+            patch("os.path.exists", return_value=False),
+            caplog.at_level(logging.INFO, logger="apis.skill_runner"),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "cicada", "work prompt", role="cicada", action_class="build",
+                )
+            )
+
+        assert result.ok
+        assert any(
+            "tiering=mid(policy) model=claude-sonnet-5" in r.getMessage()
+            for r in caplog.records
+        )
+        rows = [_json.loads(line) for line in ledger.read_text().splitlines()]
+        assert [(r["tier"], r["source"], r["model"], r["action_class"]) for r in rows] == [
+            ("mid", "policy", "claude-sonnet-5", "build")
+        ]
+
+    @patch("skill_runner.AgentLoader")
+    def test_real_dispatch_with_no_action_class_is_counted_untiered(
+        self, MockLoader, monkeypatch, tmp_path
+    ) -> None:
+        """A site that never names a class must be visible as `untiered`, so
+        the report shows how much still runs on the provider default."""
+        import json as _json
+
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+        ledger = tmp_path / "tier-ledger.jsonl"
+        monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._fake_exec_capturing({}),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            result = self._run(
+                skill_runner.run_skill("cicada", "work prompt", role="cicada")
+            )
+
+        assert result.ok
+        rows = [_json.loads(line) for line in ledger.read_text().splitlines()]
+        assert [(r["tier"], r["source"]) for r in rows] == [
+            ("untiered", "no_action_class")
+        ]
+
+    @patch("skill_runner.AgentLoader")
     def test_failover_carries_the_same_action_class_to_the_next_provider(
         self, MockLoader, monkeypatch, tmp_path
     ) -> None:
