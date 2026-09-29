@@ -127,6 +127,7 @@ def _gate_view(provider: str, headroom: float) -> dict[str, object]:
             None if gate.elapsed_fraction is None else round(gate.elapsed_fraction, 4)
         ),
         "burst_percent": gate.burst_percent,
+        "last_refresh_failure": gate.probe_failure,
         "retry_or_capacity_returns_at": (
             None if gate.returns_at is None else harness_router.render_wall(gate.returns_at)
         ),

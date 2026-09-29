@@ -332,13 +332,13 @@ def test_refresh_replaces_an_aged_reading() -> None:
 
 def test_failed_probe_leaves_reading_to_age_out_and_gate_refuses() -> None:
     _record(5.0, observed=NOW - 3600)
-    before = hr._usage_path().read_text()
+    before = hr.usage_windows("claude")
     outcome = usage_probe.refresh_usage_if_stale(
         {"claude": "/bin/claude"}, env={}, now_wall=NOW,
         run=_fake_run("Not logged in", [], returncode=1),
     )
     assert outcome["claude"].startswith("probe failed")
-    assert hr._usage_path().read_text() == before
+    assert hr.usage_windows("claude") == before  # nothing recorded as a reading
     gate = hr.usage_gate("claude", now_wall=NOW)
     assert gate is not None and gate.code == hr.GATE_STALE
 
@@ -417,3 +417,132 @@ def test_dispatch_refreshes_the_reading_before_selecting(monkeypatch) -> None:
     attempts: list = []
     result = _dispatch({"claude": "/bin/claude"}, attempts)
     assert attempts == ["claude"] and result.ok is True
+
+
+# --- ordering: the refresh must precede EVERY read that feeds selection (arch, PR #1369)
+
+
+def _stale_then_fresh(monkeypatch):
+    """A stale reading that a fake refresh replaces with a healthy one; logs order."""
+    now = time.time()
+    _record(66.0, observed=now - 7 * 3600, resets=now + 6 * 86400)
+    events: list[str] = []
+
+    def fake_refresh(binaries, **kwargs):
+        events.append("refresh")
+        hr.record_usage("claude", [
+            {"name": "five_hour", "used_percent": 5.0},
+            {"name": "weekly_all", "used_percent": 4.0,
+             "resets_at": hr._iso_from_wall(now + 6 * 86400)},
+        ])
+        return {"claude": "refreshed"}
+
+    monkeypatch.setattr(skill_runner, "refresh_usage_if_stale", fake_refresh)
+    return events
+
+
+def test_run_skill_refreshes_before_the_tier_filter_reads_selection(monkeypatch) -> None:
+    """`_tier_bound_binaries` calls `usable_provider_names`, which consults the gate;
+    on a stale reading it must already have been refreshed, or claude looks
+    excluded and the filter falls back to providers with no bound model."""
+    events = _stale_then_fresh(monkeypatch)
+    seen: dict = {}
+
+    def spy_tier_filter(binaries, tier, pinned, **kw):
+        gate = hr.usage_gate("claude")
+        seen["claude_allowed_at_selection"] = gate is not None and gate.allowed
+        events.append("select")
+        return binaries
+
+    async def stub_attempts(skill, attempt, **kw):
+        return skill_runner.SkillResult(skill, True, 0, "done", "")
+
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/bin/claude"})
+    monkeypatch.setattr(skill_runner, "_tier_bound_binaries", spy_tier_filter)
+    monkeypatch.setattr(skill_runner, "_run_provider_attempts", stub_attempts)
+    asyncio.run(skill_runner.run_skill("pavo", "p"))
+    assert events[:2] == ["refresh", "select"]
+    assert seen["claude_allowed_at_selection"] is True
+
+
+def test_usable_providers_refreshes_before_reading_the_gate(monkeypatch) -> None:
+    """review_panel.resolve_lens_provider consumes this view."""
+    _stale_then_fresh(monkeypatch)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/bin/claude"})
+    assert "claude" in skill_runner.usable_providers()
+
+
+# --- non-blocking review items: say why a refresh failed, and how to fix a refusal
+
+
+NOT_LOGGED_IN = json.dumps({
+    "type": "result", "is_error": True, "result": "Not logged in \u00b7 Please run /login",
+})
+
+
+def test_probe_failure_keeps_the_clis_own_reason() -> None:
+    outcome = usage_probe.refresh_usage_if_stale(
+        {"claude": "/bin/claude"}, env={}, now_wall=NOW,
+        run=_fake_run(NOT_LOGGED_IN, [], returncode=1),
+    )
+    assert "Not logged in" in outcome["claude"]
+
+
+def test_probe_failure_reason_falls_back_to_stderr_and_masks_token_like_runs() -> None:
+    secret = "sk-ant-" + "a1B2c3D4" * 6
+
+    def run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, "", f"error: auth rejected for key {secret}\n")
+
+    outcome = usage_probe.refresh_usage_if_stale(
+        {"claude": "/bin/claude"}, env={}, now_wall=NOW, run=run)
+    assert "auth rejected" in outcome["claude"]
+    assert secret not in outcome["claude"] and "<masked>" in outcome["claude"]
+    assert secret not in hr._usage_path().read_text()
+
+
+def test_refusal_carries_why_the_refresh_failed_and_how_to_fix_it() -> None:
+    _record(5.0, observed=NOW - 3600)
+    usage_probe.refresh_usage_if_stale(
+        {"claude": "/bin/claude"}, env={}, now_wall=NOW,
+        run=_fake_run(NOT_LOGGED_IN, [], returncode=1),
+    )
+    gate = hr.usage_gate("claude", now_wall=NOW)
+    assert gate is not None and gate.code == hr.GATE_STALE
+    assert "Not logged in" in gate.message
+    assert "harness_usage.py refresh" in gate.message
+    assert "harness-headroom-restore.md" in gate.message
+    assert gate.probe_failure and "Not logged in" in gate.probe_failure
+
+
+@pytest.mark.parametrize("case", ["missing", "malformed", "stale"])
+def test_every_refresh_class_refusal_points_at_the_fix(case) -> None:
+    if case == "malformed":
+        hr._usage_path().write_text(json.dumps({"claude": {
+            "observed_at": hr._iso_from_wall(NOW), "windows": [{"name": "", "used_percent": 1}]}}))
+    elif case == "stale":
+        _record(5.0, observed=NOW - 3600)
+    gate = hr.usage_gate("claude", now_wall=NOW)
+    assert gate is not None and gate.code == case
+    assert "harness_usage.py refresh" in gate.message
+
+
+def test_success_clears_the_recorded_failure() -> None:
+    hr.record_probe_failure("claude", "Not logged in")
+    _record(5.0)
+    assert "last_probe_failure" not in hr._read_json_object(hr._usage_path())["claude"]
+
+
+def test_entry_holding_only_a_failure_or_cooling_is_missing_not_malformed() -> None:
+    hr.record_probe_failure("claude", "Not logged in")
+    gate = hr.usage_gate("claude", now_wall=NOW)
+    assert gate is not None and gate.code == hr.GATE_MISSING
+    assert "Not logged in" in gate.message
+
+
+def test_account_without_a_weekly_window_names_the_valve() -> None:
+    hr.record_usage("claude", [{"name": "five_hour", "used_percent": 5}], observed_at=NOW)
+    gate = hr.usage_gate("claude", now_wall=NOW)
+    assert gate is not None and gate.code == hr.GATE_MALFORMED
+    assert "APIS_USAGE_GATE=off" in gate.message

@@ -221,5 +221,26 @@ message, when:
   operator's own sessions count toward it. Local/mechanical work is never gated;
   Codex and Cursor have no automatic live source and are not gated.
 
-`APIS_USAGE_GATE=off` disables the gate (an emergency valve, not a fix), and
-`APIS_USAGE_PROBE=off` disables only the automatic probe.
+Every stale, missing or malformed refusal already carries the refresh command
+above and, when the last automatic refresh failed, the CLI's own reason (for
+example "Not logged in"): `show` prints the same as `last_refresh_failure`. Read
+it before anything else; it tells login trouble from a missing binary from a
+changed report shape.
+
+An account whose report has **no weekly window** cannot be paced, so it is
+refused as malformed on every dispatch; the only way past that is the valve
+below.
+
+**The valve, and where to set it.** `APIS_USAGE_GATE=off` disables the gate (an
+emergency valve, not a fix) and `APIS_USAGE_PROBE=off` disables only the
+automatic probe. The Apis daemon reads them from its own environment: add the
+variable under `EnvironmentVariables` in `~/Library/LaunchAgents/com.ateles.apis.plist`,
+then unload and load that plist and confirm the new process picked it up. A
+shell `export` changes what `harness_usage.py show` reports in that shell but
+does NOT change what the running daemon does. Remove the variable and restart
+again once the reading is fed.
+
+**What the meter costs.** The probe is one small haiku call at most every
+`APIS_USAGE_REFRESH_SECONDS` (600) while dispatches are running, and it counts
+toward the window it measures. It is skipped while Claude is cooling and when
+the reading is fresh.

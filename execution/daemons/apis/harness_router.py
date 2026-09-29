@@ -526,6 +526,30 @@ def record_cooling(
     )
 
 
+def record_probe_failure(
+    provider: str, detail: str, *, observed_at: float | None = None
+) -> None:
+    """Remember why the last automatic usage refresh failed.
+
+    Kept beside the reading (cleared by the next successful ``record_usage``) so
+    a refusal and ``harness_usage.py show`` can say WHY the reading is not being
+    refreshed (not logged in, binary missing, report shape changed) instead of
+    only that it is stale.  Other usage facts are untouched.
+    """
+    normalized = provider.strip().lower()
+    if normalized not in PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider!r}")
+    _write_usage_entry(
+        normalized,
+        update={
+            "last_probe_failure": {
+                "at": _iso_from_wall(time.time() if observed_at is None else observed_at),
+                "detail": " ".join(str(detail).split())[:300],
+            }
+        },
+    )
+
+
 def cooled_until_all(
     available: Mapping[str, str | None], *, now_wall: float | None = None
 ) -> dict[str, dict[str, object]] | None:
@@ -608,9 +632,11 @@ def render_wall(wall: float) -> str:
 # Incident 2026-09-29: over 60% of the weekly Claude allowance went in under a
 # day while the snapshot still read 20%, observed seven hours earlier.  Headroom
 # and the 60% ceiling both acted on a reading nobody had refreshed, so nothing
-# throttled.  The gate is the single place that decides whether a new frontier
-# dispatch may start, from the snapshot alone: it fails CLOSED when the reading
-# is missing, malformed or older than a bound, and it paces the week.
+# throttled.  Among dispatches routed through this router the gate is the single
+# place that decides whether a new frontier dispatch may start, from the snapshot
+# alone: it fails CLOSED when the reading is missing, malformed or older than a
+# bound, and it paces the week.  Daemons that launch the ``claude`` CLI directly
+# never went through this router and are not covered.
 #
 # Scope: only providers with an automatic live feeder are gated
 # (``APIS_USAGE_GATED_PROVIDERS``, default ``claude``, fed by ``usage_probe``).
@@ -649,6 +675,23 @@ class UsageGate:
     # When the refusal clears if nothing more is used (pace), or when a retry
     # is worthwhile (stale/missing/malformed); ``None`` when allowed.
     returns_at: float | None = None
+    # Why the last automatic refresh failed, when it did (see record_probe_failure).
+    probe_failure: str | None = None
+
+
+REFRESH_HINT = (
+    "To fix: run `python3 execution/scripts/harness_usage.py refresh` "
+    "(see docs/runbooks/harness-headroom-restore.md, section 'Usage gate')"
+)
+
+
+def _probe_failure_text(entry: object) -> str | None:
+    failure = entry.get("last_probe_failure") if isinstance(entry, dict) else None
+    if not isinstance(failure, dict) or not failure.get("detail"):
+        return None
+    at = _wall_from_iso(failure.get("at"))
+    when = f" at {render_wall(at)}" if at is not None else ""
+    return f"last automatic refresh failed{when}: {failure['detail']}"
 
 
 def _env_float(name: str, default: float, *, low: float, high: float) -> float:
@@ -701,14 +744,19 @@ def pace_burst_percent() -> float:
 
 
 def _refused(
-    provider: str, code: str, message: str, moment: float, **fields: object
+    provider: str, code: str, message: str, moment: float, *,
+    entry: object = None, **fields: object
 ) -> UsageGate:
+    """A refusal for a reading that needs REFRESHING: says how, and why it failed."""
+    failure = _probe_failure_text(entry)
+    text = f"{message}; {failure}" if failure else message
     return UsageGate(
         provider=provider,
         allowed=False,
         code=code,
-        message=message,
+        message=f"{text}. {REFRESH_HINT}",
         returns_at=moment + usage_retry_seconds(),
+        probe_failure=failure,
         **fields,  # type: ignore[arg-type]
     )
 
@@ -733,12 +781,15 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
         "max_age_seconds": max_age, "ceiling_percent": ceiling, "burst_percent": burst,
     }
     entry = _read_json_object(_usage_path()).get(normalized)
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or (
+        "observed_at" not in entry and "windows" not in entry
+        and "exhausted_until" not in entry
+    ):
         return _refused(
             normalized, GATE_MISSING,
             f"usage reading missing for {normalized} (never observed); "
             "refusing new frontier dispatch until one is recorded",
-            moment, **common,
+            moment, entry=entry, **common,
         )
     exhausted_until = _wall_from_iso(entry.get("exhausted_until"))
     if exhausted_until is not None and exhausted_until > moment:
@@ -761,7 +812,7 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
             normalized, GATE_MALFORMED,
             f"usage reading malformed for {normalized} ({problem}); "
             "refusing new frontier dispatch until a valid one is recorded",
-            moment, observed_at=observed_at, **common,
+            moment, entry=entry, observed_at=observed_at, **common,
         )
     assert observed_at is not None and isinstance(windows, list)
     age = max(0.0, moment - observed_at)
@@ -772,7 +823,7 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
             f"usage reading stale since {render_wall(observed_at)} "
             f"({int(age // 60)} min old, bound {int(max_age // 60)} min); "
             "refusing new frontier dispatch until it is refreshed",
-            moment, **common,
+            moment, entry=entry, **common,
         )
     weekly = next(
         (w for w in windows if str(w.get("name")).strip() in WEEKLY_WINDOW_NAMES), None
@@ -783,8 +834,9 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
             normalized, GATE_MALFORMED,
             f"usage reading for {normalized} has no weekly window with a reset "
             "time, so the weekly pace cannot be computed; refusing new frontier "
-            "dispatch until one is recorded",
-            moment, **common,
+            "dispatch until one is recorded (an account with no weekly window "
+            "stays refused; the only way past it is APIS_USAGE_GATE=off)",
+            moment, entry=entry, **common,
         )
     if resets_at <= moment:
         return _refused(
@@ -792,7 +844,7 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
             f"usage reading stale since {render_wall(observed_at)}: its weekly "
             f"window reset at {render_wall(resets_at)}; refusing new frontier "
             "dispatch until it is refreshed",
-            moment, **common,
+            moment, entry=entry, **common,
         )
     used = float(weekly["used_percent"])
     start = resets_at - WEEK_SECONDS

@@ -3065,7 +3065,11 @@ def usable_providers() -> set[str]:
     honored, so that pinning never turns into "the lens silently did not run"
     (review_panel.resolve_lens_provider).
     """
-    return usable_provider_names(_provider_binaries())
+    binaries = _provider_binaries()
+    # The usage gate is part of "usable": refresh a stale reading first, or a
+    # provider that would be usable after the refresh looks excluded.
+    _refresh_usage_snapshot(binaries)
+    return usable_provider_names(binaries)
 
 
 async def run_skill(
@@ -3170,6 +3174,14 @@ async def run_skill(
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and the claude-only routing.
     deny_correct = owns_pending_gate or seated_reviewer
+
+    # Refresh the usage snapshot BEFORE anything reads provider selection:
+    # `_tier_bound_binaries` below consults the usage gate through
+    # `usable_provider_names`, so a refresh that ran later (inside
+    # `_run_provider_attempts`) would let a stale reading exclude claude here and
+    # send the tier filter's fallback to providers with no model bound.
+    if provider in (None, "claude"):
+        await asyncio.to_thread(_refresh_usage_snapshot, _provider_binaries())
 
     precomputed_tier: model_tiering.ResolvedTier | None = None
     if model is None and action_class is not None:
@@ -3444,11 +3456,10 @@ async def _run_provider_attempts(
         preferred_provider = None
 
     if provider in (None, "claude"):
-        # Feed the live usage snapshot before selection reads it (harness_router
-        # usage gate): a run that reports nothing about the plan cannot refresh
-        # it, so the reading is refreshed here when it has aged past the refresh
-        # bound.  Never raises; a failed refresh leaves the reading to age out
-        # and the gate refuses on it.
+        # Callers that enter here directly (run_review_prompt) refresh here;
+        # `run_skill` already did, ahead of its own selection reads, so this is
+        # then a cheap "fresh" check.  Never raises; a failed refresh leaves the
+        # reading to age out and the gate refuses on it.
         await asyncio.to_thread(_refresh_usage_snapshot, binaries)
     candidates = provider_candidates(
         binaries, preferred=provider, local_first=local_first and not owns_pending_gate

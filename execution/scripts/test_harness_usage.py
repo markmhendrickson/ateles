@@ -198,3 +198,12 @@ def test_refresh_command_feeds_the_snapshot(monkeypatch, capsys) -> None:
     assert harness_usage.main(["refresh"]) == 0
     assert seen["force"] is True and seen["binaries"] == {"claude": "/bin/claude"}
     assert "ANTHROPIC_API_KEY" not in seen["names"]
+
+
+def test_show_surfaces_why_the_last_refresh_failed(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    harness_router.record_probe_failure("claude", "probe exit 1 ...; CLI said: Not logged in")
+    gate = _gate(capsys)
+    assert gate["dispatch_allowed"] is False
+    assert "Not logged in" in gate["last_refresh_failure"]
+    assert "harness_usage.py refresh" in gate["reason"]

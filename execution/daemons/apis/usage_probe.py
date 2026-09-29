@@ -34,6 +34,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -110,6 +111,45 @@ def parse_rate_limit_windows(stdout: str) -> list[dict[str, object]]:
     return windows
 
 
+_TOKEN_LIKE = re.compile(r"[A-Za-z0-9_\-\.]{32,}")
+
+
+def failure_excerpt(stdout: str, stderr: str, limit: int = 200) -> str:
+    """The CLI's own reason for a failed probe, short and safe to log and show.
+
+    Prefers the ``result`` event's text (for example "Not logged in"), then the
+    last stderr line, then the last non-JSON stdout line.  Long token-like runs
+    are masked so an unexpected message cannot carry a credential into the
+    snapshot, a log line or a refusal.
+    """
+    candidates: list[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result":
+                text = event.get("result")
+                if isinstance(text, str) and text.strip():
+                    candidates.append(text)
+            elif isinstance(event, dict) and event.get("type") == "assistant":
+                content = (event.get("message") or {}).get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        text = block.get("text") if isinstance(block, dict) else None
+                        if isinstance(text, str) and text.strip():
+                            candidates.append(text)
+    stderr_lines = [ln for ln in stderr.splitlines() if ln.strip()]
+    plain = [ln for ln in stdout.splitlines() if ln.strip() and not ln.lstrip().startswith("{")]
+    for pool in (candidates[-1:], stderr_lines[-1:], plain[-1:]):
+        if pool:
+            text = _TOKEN_LIKE.sub("<masked>", " ".join(pool[0].split()))
+            return text[:limit]
+    return "no output"
+
+
 def probe_command(binary: str) -> list[str]:
     """The cheapest invocation that still returns the account's windows."""
     return [
@@ -128,7 +168,7 @@ def probe_claude(
     binary: str,
     *,
     env: Mapping[str, str],
-    timeout: float = 90.0,
+    timeout: float = 60.0,
     run=subprocess.run,
 ) -> ProbeResult:
     """Run one probe and return its validated windows (no snapshot write)."""
@@ -144,11 +184,15 @@ def probe_claude(
                 input=PROBE_PROMPT,
             )
     except (OSError, subprocess.SubprocessError) as exc:
-        return ProbeResult(False, f"probe did not run: {type(exc).__name__}")
+        return ProbeResult(
+            False, f"probe did not run: {type(exc).__name__}: {str(exc)[:120]}"
+        )
     windows = parse_rate_limit_windows(proc.stdout or "")
     if not windows:
         return ProbeResult(
-            False, f"probe exit {proc.returncode} returned no rate_limit_event windows"
+            False,
+            f"probe exit {proc.returncode} returned no rate_limit_event windows; "
+            f"CLI said: {failure_excerpt(proc.stdout or '', proc.stderr or '')}",
         )
     return ProbeResult(True, "ok", tuple(windows))
 
@@ -234,6 +278,10 @@ def _refresh_claude(
         result = probe_claude(binary, env=env, run=run)
         if not result.ok:
             log.warning(f"[apis] claude usage probe failed: {result.detail}")
+            try:
+                harness_router.record_probe_failure("claude", result.detail)
+            except Exception as exc:  # noqa: BLE001 - diagnostics must not break dispatch
+                log.error(f"[apis] could not record the usage probe failure: {exc}")
             return f"probe failed: {result.detail}"
         harness_router.record_usage("claude", result.windows)
         log.info(
