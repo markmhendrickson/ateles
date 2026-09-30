@@ -615,6 +615,68 @@ class TestCodexPreToolUseMatcherSurfaces(unittest.TestCase):
 
 
 class TestCodexGuardEffect(unittest.TestCase):
+    def test_reporting_contract_reaches_session_context(self) -> None:
+        command = next(
+            c for c in _hook_commands("SessionStart") if "reporting_contract.py" in c
+        )
+        result = _run(
+            command,
+            {
+                "session_id": "codex-reporting-session",
+                "hook_event_name": "SessionStart",
+                "source": "compact",
+                "cwd": str(REPO_ROOT),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MATERIAL STATE CHANGE", result.stdout)
+        self.assertIn("final answer self-contained", result.stdout)
+
+    def test_reporting_gate_blocks_low_level_codex_turn(self) -> None:
+        command = next(
+            c for c in _hook_commands("Stop") if "report_quality_gate.py" in c
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "rollout.jsonl"
+            rows = [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message", "role": "assistant", "phase": "commentary",
+                        "content": [{"type": "output_text", "text": "I’ll inspect the file next."}],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message", "role": "assistant", "phase": "commentary",
+                        "content": [{"type": "output_text", "text": "I’ll run the test next."}],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message", "role": "assistant", "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": "Done — see above."}],
+                    },
+                },
+            ]
+            transcript.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            result = _run(
+                command,
+                {
+                    "session_id": "codex-reporting-session",
+                    "hook_event_name": "Stop",
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": "Done — see above.",
+                    "cwd": str(REPO_ROOT),
+                },
+            )
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("per-tool narration", payload["reason"])
+
     def test_configured_git_stash_guard_returns_a_codex_deny(self) -> None:
         commands = _hook_commands("PreToolUse")
         command = next(c for c in commands if "git_stash_guard.py" in c)
