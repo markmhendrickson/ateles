@@ -8,7 +8,7 @@
       "path": "/",
       "nav_label": "Overview",
       "title": "Neotoma — the system of record for AI agents",
-      "meta_description": "Robust epistemological design for agents: durable facts, corrections, provenance, disagreement, and time.",
+      "meta_description": "One record for connected AI agents across vendors, with corrections, point-in-time state, and provenance.",
       "template": "product_homepage",
       "template_entity_id": "ent_a7132845b99eb265fc85749e",
       "primary_cta": {"label": "Install", "href": "/install/", "scope": "site_wide_primary"},

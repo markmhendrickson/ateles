@@ -870,16 +870,79 @@ def test_product_identities_render_distinct_signature_devices(tmp_path):
     assert ".concept-film-media, .concept-film-overlay { display: none; }" in neotoma
     assert "The system of record for AI agents." in neotoma
     assert (
-        "Persistent, connected context agents can create, retrieve, and update—with provenance intact."
+        "One record your connected agents can defer to, whichever vendor built them. "
+        "Know what was true, when, and on whose evidence." in neotoma
+    )
+    assert "Open source · local-first · not tied to one agent vendor" in neotoma
+    assert "A record agents can trust" in neotoma
+    assert (
+        "For operators whose agents share consequential state across tools and vendors."
         in neotoma
+    )
+    neotoma_mechanism = json.loads(
+        (
+            _GEN_DIR.parent.parent.parent / "docs/sites/neotoma/index/mechanism.json"
+        ).read_text()
+    )
+    assert neotoma_mechanism["items"][0]["body"] == (
+        "Important state lives outside any one prompt, thread, model, or vendor context."
     )
     assert "Delegate more than a session can hold." not in neotoma
     assert "The operating system for agentic organizations." in ateles
     assert (
-        "Give agents distinct roles, bounded authority, and shared direction—so the organization keeps moving without constant supervision."
+        "Give agents distinct roles, bounded authority, and shared direction across model "
+        "providers—so work advances without constant supervision." in ateles
+    )
+    assert (
+        "Open source · across configured model providers · single-operator reference today"
+        in ateles
+    )
+    ateles_hero = json.loads(
+        (
+            _GEN_DIR.parent.parent.parent / "docs/sites/ateles/index/hero.json"
+        ).read_text()
+    )
+    assert ateles_hero["scope"] == "owned by you · distinct roles · shared mission"
+    assert "that structure lives outside any one vendor’s conversation." in ateles
+    assert (
+        "For operators and teams delegating outcomes across several agent roles."
+        in ateles
+    )
+    ateles_mechanism = json.loads(
+        (
+            _GEN_DIR.parent.parent.parent / "docs/sites/ateles/index/mechanism.json"
+        ).read_text()
+    )
+    assert ateles_mechanism["items"][0]["label"] == "Roles"
+    assert (
+        "You cannot delegate real work to agents you cannot hold to account." in ateles
+    )
+    assert (
+        "<title>Ateles — the operating system for agentic organizations.</title>"
         in ateles
     )
     assert ateles.count("Delegate outcomes, not every next step.") == 1
+
+    neotoma_compare = (tmp_path / "neotoma" / "compare" / "index.html").read_text()
+    assert (
+        "The record stays inside one vendor, and its current value, source, and "
+        "correction history are not independently governed." in neotoma_compare
+    )
+    assert (
+        "Keeps current and point-in-time state with source and history across connected agents."
+        in neotoma_compare
+    )
+
+    ateles_compare = (tmp_path / "ateles" / "compare" / "index.html").read_text()
+    assert (
+        "A model vendor can coordinate work inside a run. Ateles preserves roles, "
+        "priorities, authority, and accountability across runs and providers."
+        in ateles_compare
+    )
+    assert (
+        "Roles, relationships, authority, attributed decisions, and accountable outcomes "
+        "across providers." in ateles_compare
+    )
 
 
 def test_neotoma_cinematic_hero_has_no_semantic_svg_or_overlay(tmp_path):

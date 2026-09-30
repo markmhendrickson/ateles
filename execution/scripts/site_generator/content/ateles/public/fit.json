@@ -5,7 +5,7 @@
   },
   "layout": "proof_cards",
   "eyebrow": "Built for an organization, starting with one operator",
-  "headline": "For people delegating outcomes across several agent roles.",
+  "headline": "For operators and teams delegating outcomes across several agent roles.",
   "lede": "The reference implementation starts with one operator. The design extends toward several accountable people without replacing the organizational model.",
   "items": [
     {"label": "Good fit", "title": "Your agents already have different jobs", "body": "Research, building, review, operations, and communication need distinct responsibilities and handoffs."},

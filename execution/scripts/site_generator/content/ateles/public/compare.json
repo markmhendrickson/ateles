@@ -6,12 +6,12 @@
   "layout": "comparison",
   "eyebrow": "Compare the boundary",
   "headline": "Orchestration coordinates a run. Ateles organizes ongoing responsibility.",
-  "lede": "Both can route work. The difference appears when roles, priorities, authority, and accountability must persist beyond one execution.",
+  "lede": "A model vendor can coordinate work inside a run. Ateles preserves roles, priorities, authority, and accountability across runs and providers.",
   "columns": ["Question", "Run orchestration", "Ateles design"],
   "rows": [
     ["Who does the work?", "A router selects or spawns a worker", "Named roles take responsibility within a standing organization"],
     ["Why does it matter?", "Context is supplied to the current run", "The task carries a line back to the mission and priorities above it"],
     ["When should work stop?", "The workflow reaches a configured step", "A consequential action returns to the person entitled to decide"],
-    ["What persists?", "Execution state for the run", "Roles, relationships, responsibilities, decisions, and accountable outcomes"]
+    ["What persists?", "Execution state for the run", "Roles, relationships, authority, attributed decisions, and accountable outcomes across providers."]
   ]
 }
