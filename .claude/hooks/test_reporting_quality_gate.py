@@ -97,6 +97,28 @@ def test_impact_language_does_not_count_as_a_next_action():
     assert any("next owner/action" in item for item in found)
 
 
+@pytest.mark.parametrize(
+    "next_state",
+    [
+        "Next: review owns verification.",
+        "Owner: the review team.",
+        "The reviewer will verify the change.",
+        "The PR remains blocked on review.",
+        "No further action is needed.",
+    ],
+)
+def test_explicit_next_action_or_settled_stop_state_is_accepted(next_state):
+    transcript = gate.Transcript(
+        commentary=(),
+        final=(
+            "Changed execution/daemons/apis/router.py at 21d60ce0; PID 4821, "
+            f"rc=0, 37 tests passed. This prevents regressions. {next_state}",
+        ),
+    )
+    found = gate.findings(transcript)
+    assert not any("next owner/action" in item for item in found)
+
+
 def test_jargon_dense_final_without_translation_blocks():
     transcript = gate.Transcript(
         commentary=(),

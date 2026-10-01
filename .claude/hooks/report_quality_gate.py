@@ -46,8 +46,15 @@ IMPACT_RE = re.compile(
     re.I,
 )
 NEXT_RE = re.compile(
-    r"\b(?:next|owner|blocked|remains?|will|review(?:er)?|no (?:action|decision)|"
-    r"decision(?:s)? (?:needed|required))\b",
+    r"(?:\bnext(?:\s+(?:step|action|owner))?\s*[:\u2014-]"
+    r"|\bowner\s*[:=]"
+    r"|\b(?:reviewer|review|operator|maintainer|agent|team)\s+"
+    r"(?:owns?|will|must|should|needs?\s+to)\b"
+    r"|\b(?:blocked|waiting)\s+(?:on|by|for)\b"
+    r"|\bremains?\s+(?:blocked|queued|pending|open|in review|waiting)\b"
+    r"|\b(?:no|nothing)\s+(?:further\s+)?(?:action|decision|work|change)s?\s+"
+    r"(?:is\s+|are\s+)?(?:needed|required|remains?)\b"
+    r"|\b(?:a\s+)?decisions?\s+(?:is|are)\s+(?:needed|required)\b)",
     re.I,
 )
 MECHANISM_PATTERNS = (
