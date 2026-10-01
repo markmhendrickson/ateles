@@ -16,6 +16,10 @@ _PHASE_ROW = re.compile(
 )
 _H3 = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 _PHASE_HEADING = re.compile(r"^phase\s+(.+?)\s+workstreams$", re.IGNORECASE)
+_COVERAGE_COUNT = re.compile(
+    r"\b(?P<label>audited|imported|excluded|unresolved)\s*[:=]\s*(?P<count>\d+)\b",
+    re.IGNORECASE,
+)
 
 
 def _fold(text: str) -> str:
@@ -169,6 +173,95 @@ def _entity_item(section: str, entity_id: str) -> str:
             end += 1
         return "\n".join(lines[start:end])
     return ""
+
+
+def score_source_session_resume(text: str, scenario: dict) -> dict:
+    """Score observable whole-session coverage before any workstream action.
+
+    ``scenario`` names the exact source session, every source lane that must be
+    audited, and plan identifiers whose first appearance represents workstream
+    binding.  This keeps the check behavioral: a report cannot pass by merely
+    repeating policy phrases while silently dropping sibling lanes.
+    """
+    source_session_id = scenario["source_session_id"]
+    lane_ids = scenario["lane_ids"]
+    plan_ids = scenario.get("plan_ids", [])
+    folded = _fold(text)
+    failed: list[str] = []
+
+    session_pos = text.find(source_session_id)
+    plan_positions = [pos for plan_id in plan_ids if (pos := text.find(plan_id)) >= 0]
+    if session_pos < 0 or (plan_positions and session_pos > min(plan_positions)):
+        failed.append("exact_source_session_first")
+
+    coverage = _heading_section(text, "source-session coverage ledger")
+    dispositions: dict[str, str] = {}
+    duplicate_dispositions: list[str] = []
+    omitted_lanes: list[str] = []
+    for lane_id in lane_ids:
+        item = _entity_item(coverage, lane_id)
+        item_folded = _fold(item)
+        matched = [
+            disposition
+            for disposition, markers in {
+                "imported": ("imported",),
+                "excluded": ("explicitly excluded",),
+                "unresolved": ("unresolved",),
+            }.items()
+            if any(marker in item_folded for marker in markers)
+        ]
+        if not item:
+            omitted_lanes.append(lane_id)
+        elif len(matched) != 1:
+            duplicate_dispositions.append(lane_id)
+        else:
+            dispositions[lane_id] = matched[0]
+    if omitted_lanes:
+        failed.append("all_source_lanes_accounted_for")
+    if duplicate_dispositions:
+        failed.append("exactly_one_disposition_per_lane")
+
+    reported_counts = {
+        match.group("label").lower(): int(match.group("count"))
+        for match in _COVERAGE_COUNT.finditer(text)
+    }
+    actual_counts = {
+        "audited": len(lane_ids),
+        "imported": sum(value == "imported" for value in dispositions.values()),
+        "excluded": sum(value == "excluded" for value in dispositions.values()),
+        "unresolved": sum(value == "unresolved" for value in dispositions.values()),
+    }
+    if set(reported_counts) != set(actual_counts) or any(
+        reported_counts.get(label) != count for label, count in actual_counts.items()
+    ):
+        failed.append("all_four_coverage_counts")
+    if reported_counts.get("audited") != reported_counts.get(
+        "imported", -1
+    ) + reported_counts.get("excluded", -1) + reported_counts.get("unresolved", -1):
+        failed.append("coverage_balance_equation")
+
+    completeness_claimed = any(
+        marker in folded
+        for marker in (
+            "comprehensively resumed",
+            "complete resume",
+            "coverage is complete",
+            "all source lanes are accounted for",
+        )
+    )
+    if omitted_lanes and completeness_claimed:
+        failed.append("no_completeness_claim_with_omission")
+
+    return {
+        "outcome": "pass" if not failed else "fail",
+        "failed": list(dict.fromkeys(failed)),
+        "source_session_id": source_session_id,
+        "dispositions": dispositions,
+        "omitted_lanes": omitted_lanes,
+        "duplicate_dispositions": duplicate_dispositions,
+        "reported_counts": reported_counts,
+        "actual_counts": actual_counts,
+    }
 
 
 def score_report(

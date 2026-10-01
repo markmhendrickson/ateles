@@ -48,6 +48,16 @@ subordinate workstream label such as E2 is not canonical Phase E. Put
 serial/parallel task execution underneath the phase-level view.
 """
 
+WHOLE_SESSION_CONTRACT = """
+For a whole-session continuation, bind the exact source session first. Build
+the terminal resumable population as a union of the transcript inventory, the
+session_digest or workboard, linked tasks and plans, and the terminal handoff.
+Complete a source-session coverage ledger with imported, explicitly excluded,
+and unresolved dispositions. Report the balance as audited = imported +
+excluded + unresolved. Never claim the session is comprehensively resumed
+while an omitted row exists.
+"""
+
 
 @pytest.mark.parametrize(
     ("slug", "extra"),
@@ -55,7 +65,8 @@ serial/parallel task execution underneath the phase-level view.
         (
             "continue-session",
             "Show a planning resume ledger. Queue a newly introduced "
-            "workstream until current work is captured, workboarded, and dispatched.",
+            "workstream until current work is captured, workboarded, and dispatched."
+            + WHOLE_SESSION_CONTRACT,
         ),
         (
             "digest",
@@ -87,6 +98,7 @@ def test_task_stages_cannot_masquerade_as_master_plan_phases(slug: str) -> None:
     skill_specific = (
         "Show a planning resume ledger. Queue a newly introduced workstream "
         "until current work is captured, workboarded, and dispatched."
+        + WHOLE_SESSION_CONTRACT
         if slug == "continue-session"
         else "Show a planning spine summary. Queue a newly introduced workstream "
         "until current work is captured, workboarded, and dispatched."
@@ -133,7 +145,8 @@ def test_shared_contract_fails_on_each_missing_clause(
     errors = contract_errors(
         "continue-session",
         body + "Show a planning resume ledger. Queue a newly introduced workstream "
-        "until current work is captured, workboarded, and dispatched.",
+        "until current work is captured, workboarded, and dispatched."
+        + WHOLE_SESSION_CONTRACT,
     )
     assert any(expected_fragment in error for error in errors)
 
@@ -142,7 +155,7 @@ def test_resume_requires_the_planning_records_resumed() -> None:
     errors = contract_errors(
         "continue-session",
         BASE + "Queue a newly introduced workstream until current work is captured, "
-        "workboarded, and dispatched.",
+        "workboarded, and dispatched." + WHOLE_SESSION_CONTRACT,
     )
     assert any("resume ledger" in error for error in errors)
 
@@ -160,6 +173,33 @@ def test_interactive_skills_require_sequential_admission_gate() -> None:
     for slug in ("continue-session", "digest"):
         errors = contract_errors(slug, BASE)
         assert any("captured, workboarded, and dispatched" in error for error in errors)
+
+
+def test_pre_fix_single_plan_skill_fails_whole_session_contract() -> None:
+    pre_fix = (
+        BASE
+        + PHASE_REPORTING_CONTRACT
+        + "Show a planning resume ledger. Bind exactly one plan before doing anything "
+        "else. Queue a newly introduced workstream until current work is captured, "
+        "workboarded, and dispatched."
+    )
+
+    errors = contract_errors("continue-session", pre_fix)
+
+    assert any("exact source session" in error for error in errors)
+    assert any("source-session coverage ledger" in error for error in errors)
+    assert any(
+        "audited = imported + excluded + unresolved" in error for error in errors
+    )
+
+
+def test_corrected_continue_session_fixture_passes_whole_session_contract() -> None:
+    fixture = (
+        _REPO_ROOT
+        / "execution/evals/planning_spine/fixtures/skills/continue-session/SKILL.md"
+    ).read_text()
+
+    assert contract_errors("continue-session", fixture) == []
 
 
 def test_reconcile_is_explicitly_retrospective() -> None:

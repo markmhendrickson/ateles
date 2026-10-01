@@ -94,6 +94,41 @@ VALID_REPORT = """
 truth for this report.
 """
 
+SOURCE_SESSION_SCENARIO = {
+    "source_session_id": "session_fixture_named_handoff",
+    "lane_ids": [f"lane_fixture_{index:02d}" for index in range(1, 14)],
+    "plan_ids": [f"plan_fixture_{index:02d}" for index in range(1, 14)],
+}
+
+WHOLE_SESSION_REPORT = """
+## Source session: Named handoff (`session_fixture_named_handoff`)
+
+The exact source session was bound before any similarly named workstream plan.
+
+### Source-session coverage ledger
+
+| Source lane | Canonical workstream | Disposition |
+| --- | --- | --- |
+| `lane_fixture_01` discoverable lane | `plan_fixture_01` | Imported |
+| `lane_fixture_02` sibling lane | `plan_fixture_02` | Imported |
+| `lane_fixture_03` sibling lane | `plan_fixture_03` | Imported |
+| `lane_fixture_04` sibling lane | `plan_fixture_04` | Imported |
+| `lane_fixture_05` sibling lane | `plan_fixture_05` | Imported |
+| `lane_fixture_06` sibling lane | `plan_fixture_06` | Imported |
+| `lane_fixture_07` sibling lane | `plan_fixture_07` | Imported |
+| `lane_fixture_08` sibling lane | `plan_fixture_08` | Imported |
+| `lane_fixture_09` sibling lane | `plan_fixture_09` | Imported |
+| `lane_fixture_10` sibling lane | `plan_fixture_10` | Imported |
+| `lane_fixture_11` sibling lane | `plan_fixture_11` | Explicitly excluded — terminal and superseded |
+| `lane_fixture_12` sibling lane | `plan_fixture_12` | Explicitly excluded — outside requested scope |
+| `lane_fixture_13` sibling lane | `plan_fixture_13` | Unresolved — canonical task is ambiguous |
+
+audited: 13; imported: 10; excluded: 2; unresolved: 1
+
+The coverage balance is 13 = 10 + 2 + 1. The unresolved lane prevents a
+comprehensive-resume claim and any domain action that assumes its state.
+"""
+
 
 def test_original_task_stage_report_fails_the_effect_check() -> None:
     result = checks.score_report(MISLEADING_REPORT, FIXTURE)
@@ -106,6 +141,71 @@ def test_original_task_stage_report_fails_the_effect_check() -> None:
         "structural_phase_binding",
         "unbound_work_is_cross_phase",
         "reconcile_is_retrospective",
+    } <= set(result["failed"])
+
+
+def test_named_session_accounts_for_one_lane_and_twelve_siblings() -> None:
+    result = checks.score_source_session_resume(
+        WHOLE_SESSION_REPORT, SOURCE_SESSION_SCENARIO
+    )
+
+    assert result["outcome"] == "pass", result
+    assert result["actual_counts"] == {
+        "audited": 13,
+        "imported": 10,
+        "excluded": 2,
+        "unresolved": 1,
+    }
+
+
+def test_omitted_sibling_cannot_claim_complete_source_session_resume() -> None:
+    omitted_row = (
+        "| `lane_fixture_12` sibling lane | `plan_fixture_12` | "
+        "Explicitly excluded — outside requested scope |\n"
+    )
+    wrong = WHOLE_SESSION_REPORT.replace(omitted_row, "").replace(
+        "prevents a\ncomprehensive-resume claim",
+        "is noted, but all source lanes are accounted for and coverage is complete",
+    )
+
+    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+
+    assert result["outcome"] == "fail"
+    assert "lane_fixture_12" in result["omitted_lanes"]
+    assert {
+        "all_source_lanes_accounted_for",
+        "all_four_coverage_counts",
+        "no_completeness_claim_with_omission",
+    } <= set(result["failed"])
+
+
+def test_plan_first_shortcut_fails_exact_source_session_binding() -> None:
+    wrong = (
+        WHOLE_SESSION_REPORT.replace(
+            "## Source session: Named handoff (`session_fixture_named_handoff`)\n\n",
+            "",
+        )
+        + "\nSource session: `session_fixture_named_handoff`\n"
+    )
+
+    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+
+    assert result["outcome"] == "fail"
+    assert "exact_source_session_first" in result["failed"]
+
+
+def test_coverage_counts_must_report_all_dispositions_and_balance() -> None:
+    wrong = WHOLE_SESSION_REPORT.replace(
+        "audited: 13; imported: 10; excluded: 2; unresolved: 1",
+        "audited: 13; imported: 11; unresolved: 1",
+    )
+
+    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+
+    assert result["outcome"] == "fail"
+    assert {
+        "all_four_coverage_counts",
+        "coverage_balance_equation",
     } <= set(result["failed"])
 
 
