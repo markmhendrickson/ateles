@@ -86,6 +86,9 @@ def _change_lines(entry: dict) -> list[str] | None:
 
 def _file_interdiff(old: dict, new: dict) -> int:
     """Changed lines between one file's old PR-side patch and its new one."""
+    old_sha, new_sha = old.get("sha"), new.get("sha")
+    if old_sha and old_sha == new_sha:
+        return 0  # the same blob: the file did not change, whatever its patch text
     old_lines, new_lines = _change_lines(old), _change_lines(new)
     if old_lines is None or new_lines is None:
         # No patch on a side: equal blobs mean the file is identical at both
@@ -94,7 +97,7 @@ def _file_interdiff(old: dict, new: dict) -> int:
             return 0
         return max(_entry_size(old), _entry_size(new))
     if old_lines == new_lines:
-        return 0
+        return _unmeasured_change(old, new)
     if len(old_lines) + len(new_lines) > _MAX_PATCH_LINES_TO_MATCH:
         return max(len(old_lines), len(new_lines))
     # An ORDERED match, not a multiset one, so a block of the PR's own change
@@ -106,6 +109,19 @@ def _file_interdiff(old: dict, new: dict) -> int:
         ).get_matching_blocks()
     )
     return (len(old_lines) - matched) + (len(new_lines) - matched)
+
+
+def _unmeasured_change(old: dict, new: dict) -> int:
+    """1 when the +/- lines match but the file did not stay the same, else 0.
+
+    The line measure drops context and position, so a guard moved past the call
+    it protects reads as zero changed lines (security review of ateles#1368).
+    A file present on both sides whose blob or patch text differs changed,
+    whatever the line measure says. Callers that classify files (a carried
+    sign-off) read this as touched; tiering reads it as one line."""
+    if old.get("sha") != new.get("sha") or old.get("patch") != new.get("patch"):
+        return 1
+    return 0
 
 
 def interdiff(old_files: list[dict], new_files: list[dict]) -> Delta:

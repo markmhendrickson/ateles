@@ -288,11 +288,10 @@ async def dispatch(
     ``seated_reviewer`` forwards to ``run_skill`` unchanged. It does NOT mean
     "this is a lens run" in general — it means the run must be treated exactly
     like a panel-seated reviewer with shared-bearer Neotoma MCP access, which
-    forces claude-only routing (see ``run_skill``'s docstring). A caller
-    dispatching a lens review to codex/cursor that never receives Neotoma MCP
-    tools in the first place (this codebase injects ``--mcp-config`` only for
-    ``provider == "claude"``) should leave this False rather than set it and
-    then be silently rerouted to claude.
+    restricts routing to adapters with a proven subtractive deny for
+    ``correct`` (see ``run_skill``'s docstring). A caller dispatching an
+    inference-only review that never receives Neotoma MCP tools should leave
+    this False; it does not need the seated-review control.
 
     ``command_wrapper`` (ent_89a4d44b063cb0902106da49): forwarded verbatim to
     ``run_skill`` -> ``_run_skill_once``, which prepends it to the provider's

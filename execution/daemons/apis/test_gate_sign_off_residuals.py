@@ -184,9 +184,8 @@ class TestEverySeatedLensIsDeniedCorrect:
         deny = captured[captured.index("--disallowed-tools") + 1].split(",")
         assert "mcp__mcpsrv_neotoma__correct" in deny
 
-    def test_advisory_seat_routes_to_claude_only(self, monkeypatch, tmp_path):
-        """Same fail-closed routing as a gate owner: no other adapter here can
-        deny a single MCP tool, so a preference for codex is not honoured."""
+    def test_advisory_seat_honors_deny_capable_codex(self, monkeypatch, tmp_path):
+        """A seated advisory lens may use Codex but still excludes Cursor."""
         harness_router.reset_state()
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor,claude")
         monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
@@ -210,7 +209,7 @@ class TestEverySeatedLensIsDeniedCorrect:
             pytest.fail(f"run_skill has no seated_reviewer control: {exc}")
 
         assert result.ok
-        assert attempted == [("claude", True)]
+        assert attempted == [("codex", True)]
 
     def _panel_seen(self, monkeypatch) -> dict:
         seen: dict = {}

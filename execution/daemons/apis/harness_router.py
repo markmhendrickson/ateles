@@ -35,21 +35,26 @@ without restarting Apis:
     ``~/.config/ateles/harness-usage.json``.  Per provider::
 
         {"observed_at": ISO, "exhausted_until": ISO|null,
-         "windows": [{"name": "weekly", "used_percent": 3, "resets_at": ISO}]}
+         "windows": [{"name": "weekly", "used_percent": 3, "resets_at": ISO}],
+         "probe": {"status": "available|exhausted|unknown",
+                   "observed_at": ISO, "source": str, "detail": str|null}}
 
     Live headroom is ``1 - max(used_percent)/100`` over windows that have not
     yet reset (a window past its ``resets_at`` counts as unused), and ``0.0``
-    while ``exhausted_until`` is in the future.  An observation older than
-    ``APIS_HARNESS_USAGE_MAX_AGE_SECONDS`` (default 21600) whose windows have
-    not reset carries no opinion.
+    while ``exhausted_until`` is in the future.  Providers whose CLIs expose no
+    numeric quota report use a bounded native probe: a current success supplies
+    positive availability (headroom ``1.0``), an explicit limit refusal supplies
+    exhaustion, and every other result is ``unknown`` rather than exhausted.
+    An observation older than ``APIS_HARNESS_USAGE_MAX_AGE_SECONDS`` (default
+    21600) whose windows have not reset carries no opinion.
 
     A provider that refused with a session/usage-limit message is also held out
     by a per-provider ``cooling`` object in the same file, written by
     ``record_cooling`` (``{"until": ISO, "reason": str, "observed_at": ISO}``).
     Unlike the process-local ``cool_down`` timer, it survives across the
     short-lived ``dispatch_role`` processes, and ends at the reset the refusal
-    stated rather than after a flat hour.  It expires on its own; a fresh usage
-    observation or exhaustion report leaves it in force.
+    stated rather than after a flat hour.  It expires on its own; a fresh
+    successful usage observation or provider probe clears it as stale evidence.
 
 ``APIS_HARNESS_MIN_HEADROOM``
     Providers at or below this value are held out.  Default: 0.05.
@@ -71,10 +76,12 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import tempfile
 import time
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -210,21 +217,33 @@ def live_headroom(provider: str, *, now_wall: float | None = None) -> float | No
     windows = entry.get("windows")
     if not isinstance(windows, list):
         return None
-    if exhausted_until is not None and not windows:
-        # The reported reset has passed and nothing newer was observed: the
-        # plan has reset, so the provider is back to full headroom.
-        return 1.0
+    probe = entry.get("probe")
+    probe_status = probe.get("status") if isinstance(probe, dict) else None
+    probe_observed = (
+        _wall_from_iso(probe.get("observed_at")) if isinstance(probe, dict) else None
+    )
     try:
         max_age = float(os.environ.get("APIS_HARNESS_USAGE_MAX_AGE_SECONDS", "21600"))
     except ValueError:
         max_age = 21600.0
+    probe_fresh = (
+        probe_observed is not None and 0 <= moment - probe_observed <= max_age
+    )
+    if not windows and probe_status == "available" and probe_fresh:
+        return 1.0
+    if exhausted_until is not None and not windows:
+        # The reported reset has passed and nothing newer was observed: the
+        # plan has reset, so the provider is back to full headroom.
+        return 1.0
     observed_at = _wall_from_iso(entry.get("observed_at"))
     fresh = observed_at is not None and moment - observed_at <= max_age
+    if any(_window_problem(window) for window in windows):
+        # A malformed reading is UNKNOWN, never exhausted: fall through to the
+        # headroom file.  (The usage gate below refuses a gated provider on it.)
+        return None
     used: list[float] = []
     all_reset = bool(windows)
     for window in windows:
-        if not isinstance(window, dict):
-            continue
         fraction = _clamp(_percent(window.get("used_percent")))
         if fraction is None:
             all_reset = False
@@ -241,10 +260,36 @@ def live_headroom(provider: str, *, now_wall: float | None = None) -> float | No
 
 
 def _percent(value: object) -> float | None:
+    """A ``0..100`` percent as a ``0..1`` fraction, or ``None`` when unusable.
+
+    Non-numeric, non-finite (``Infinity``/``NaN``) and out-of-range values are
+    all ``None``: a reading that is not a percentage is not a reading, and the
+    old clamp turned ``Infinity`` into "fully used", which held Claude out of
+    every dispatch on a garbage write.
+    """
+    if isinstance(value, bool):
+        return None
     try:
-        return float(value) / 100.0  # type: ignore[arg-type]
+        percent = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(percent) or percent < 0.0 or percent > 100.0:
+        return None
+    return percent / 100.0
+
+
+def _window_problem(window: object) -> str | None:
+    """Why one recorded usage window is not a usable reading, or ``None``."""
+    if not isinstance(window, dict):
+        return "window is not an object"
+    name = window.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return "window has no name"
+    if _percent(window.get("used_percent")) is None:
+        return f"window {name!r} has no valid used_percent (need a finite 0-100)"
+    if window.get("resets_at") is not None and _wall_from_iso(window["resets_at"]) is None:
+        return f"window {name!r} has an unparseable resets_at"
+    return None
 
 
 def _live_observed_at(provider: str) -> float | None:
@@ -254,6 +299,25 @@ def _live_observed_at(provider: str) -> float | None:
     return _wall_from_iso(entry.get("observed_at"))
 
 
+def _probe_evidence(
+    provider: str, *, now_wall: float | None = None
+) -> dict[str, object] | None:
+    """Return a current provider-native probe observation, or ``None``."""
+    entry = _read_json_object(_usage_path()).get(provider)
+    probe = entry.get("probe") if isinstance(entry, dict) else None
+    if not isinstance(probe, dict) or probe.get("status") not in {
+        "available", "exhausted", "unknown",
+    }:
+        return None
+    observed = _wall_from_iso(probe.get("observed_at"))
+    if observed is None:
+        return None
+    moment = time.time() if now_wall is None else now_wall
+    if observed > moment + 300.0 or moment - observed > usage_stale_seconds():
+        return None
+    return dict(probe)
+
+
 # Where a provider's resolved headroom came from.  These name the four
 # precedence tiers ``configured_headroom`` documents, so a caller that refuses
 # on a ``0.0`` can point the operator at the source that actually won instead
@@ -261,6 +325,7 @@ def _live_observed_at(provider: str) -> float | None:
 HEADROOM_SOURCE_MANUAL_OVERRIDE = "manual_override"
 HEADROOM_SOURCE_DATED_OVERRIDE = "dated_cooldown_override"
 HEADROOM_SOURCE_LIVE_USAGE = "live_usage_snapshot"
+HEADROOM_SOURCE_LIVE_PROBE = "live_provider_probe"
 HEADROOM_SOURCE_UNDATED_OVERRIDE = "undated_override"
 HEADROOM_SOURCE_DEFAULT = "default"
 
@@ -300,7 +365,19 @@ def headroom_resolution(
             if undated is None:
                 undated = 1.0
 
-        if dated is not None:
+        probe = _probe_evidence(provider, now_wall=moment)
+        probe_observed = (
+            _wall_from_iso(probe.get("observed_at")) if probe is not None else None
+        )
+        dated_is_stale = (
+            dated_source != HEADROOM_SOURCE_MANUAL_OVERRIDE
+            and probe is not None
+            and probe.get("status") == "available"
+            and written_at is not None
+            and probe_observed is not None
+            and probe_observed >= written_at
+        )
+        if dated is not None and not dated_is_stale:
             result[provider] = (dated, dated_source)
             continue
         live = live_headroom(provider, now_wall=moment)
@@ -321,7 +398,14 @@ def headroom_resolution(
                 )
             )
             if superseded:
-                result[provider] = (live, HEADROOM_SOURCE_LIVE_USAGE)
+                source = (
+                    HEADROOM_SOURCE_LIVE_PROBE
+                    if probe is not None
+                    and probe.get("status") == "available"
+                    and not usage_windows(provider)
+                    else HEADROOM_SOURCE_LIVE_USAGE
+                )
+                result[provider] = (live, source)
                 continue
         if undated is None:
             result[provider] = (1.0, HEADROOM_SOURCE_DEFAULT)
@@ -360,6 +444,7 @@ def _write_usage_entry(
     entry: Mapping[str, object] | None = None,
     *,
     update: Mapping[str, object] | None = None,
+    clear_keys: Iterable[str] = (),
 ) -> None:
     """Read-merge-write one provider's usage entry atomically.
 
@@ -385,6 +470,8 @@ def _write_usage_entry(
             merged = dict(entry or {})
             if "cooling" in current:
                 merged.setdefault("cooling", current["cooling"])
+        for key in clear_keys:
+            merged.pop(key, None)
         existing[provider] = merged
         fd, tmp_name = tempfile.mkstemp(
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
@@ -407,6 +494,7 @@ def record_usage(
     windows: Iterable[Mapping[str, object]],
     *,
     observed_at: float | None = None,
+    provider_probe: bool = False,
 ) -> None:
     """Record a live plan-usage observation for one provider.
 
@@ -419,27 +507,35 @@ def record_usage(
         raise ValueError(f"unsupported provider: {provider!r}")
     rendered = []
     for window in windows:
-        used = _percent(window.get("used_percent"))
-        if used is None:
-            raise ValueError(f"window without numeric used_percent: {window!r}")
+        problem = _window_problem(window)
+        if problem is not None:
+            raise ValueError(f"refusing to record a malformed usage window: {problem}")
         item: dict[str, object] = {
-            "name": str(window.get("name", "")),
+            "name": str(window["name"]).strip(),
             "used_percent": float(window["used_percent"]),  # type: ignore[arg-type]
         }
         if window.get("resets_at") is not None:
-            if _wall_from_iso(window.get("resets_at")) is None:
-                raise ValueError(f"unparseable resets_at: {window!r}")
             item["resets_at"] = window["resets_at"]
         rendered.append(item)
+    if not rendered:
+        raise ValueError("refusing to record a usage observation with no windows")
+    at = time.time() if observed_at is None else observed_at
+    entry: dict[str, object] = {
+        "observed_at": _iso_from_wall(at),
+        "windows": rendered,
+        "exhausted_until": None,
+    }
+    if provider_probe:
+        entry["probe"] = {
+            "status": "available",
+            "observed_at": _iso_from_wall(at),
+            "source": "provider_usage_report",
+            "detail": None,
+        }
     _write_usage_entry(
         normalized,
-        {
-            "observed_at": _iso_from_wall(
-                time.time() if observed_at is None else observed_at
-            ),
-            "windows": rendered,
-            "exhausted_until": None,
-        },
+        entry,
+        clear_keys=("cooling", "last_probe_failure") if provider_probe else (),
     )
 
 
@@ -454,14 +550,74 @@ def record_exhausted(
     normalized = provider.strip().lower()
     if normalized not in PROVIDERS:
         raise ValueError(f"unsupported provider: {provider!r}")
+    at = time.time() if observed_at is None else observed_at
     _write_usage_entry(
         normalized,
         {
-            "observed_at": _iso_from_wall(
-                time.time() if observed_at is None else observed_at
-            ),
+            "observed_at": _iso_from_wall(at),
             "windows": [],
             "exhausted_until": _iso_from_wall(until),
+            "probe": {
+                "status": "exhausted",
+                "observed_at": _iso_from_wall(at),
+                "source": "provider_refusal",
+                "detail": f"capacity exhausted until {_iso_from_wall(until)}",
+            },
+        },
+    )
+
+
+def record_probe_available(
+    provider: str,
+    *,
+    source: str,
+    detail: str = "provider-native probe succeeded",
+    observed_at: float | None = None,
+) -> None:
+    """Record positive capacity evidence from a subscription-backed CLI."""
+    normalized = provider.strip().lower()
+    if normalized not in FRONTIER_PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider!r}")
+    at = time.time() if observed_at is None else observed_at
+    _write_usage_entry(
+        normalized,
+        {
+            "observed_at": _iso_from_wall(at),
+            "windows": [],
+            "exhausted_until": None,
+            "probe": {
+                "status": "available",
+                "observed_at": _iso_from_wall(at),
+                "source": source,
+                "detail": detail,
+            },
+        },
+        clear_keys=("cooling", "last_probe_failure"),
+    )
+
+
+def record_probe_unknown(
+    provider: str,
+    *,
+    source: str,
+    detail: str,
+    observed_at: float | None = None,
+) -> None:
+    """Record that a live provider probe produced no capacity verdict."""
+    normalized = provider.strip().lower()
+    if normalized not in FRONTIER_PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider!r}")
+    at = time.time() if observed_at is None else observed_at
+    _write_usage_entry(
+        normalized,
+        update={
+            "probe": {
+                "status": "unknown",
+                "observed_at": _iso_from_wall(at),
+                "source": source,
+                "detail": detail,
+            },
+            "last_probe_failure": {"at": _iso_from_wall(at), "detail": detail},
         },
     )
 
@@ -491,6 +647,30 @@ def record_cooling(
                 "observed_at": _iso_from_wall(
                     time.time() if observed_at is None else observed_at
                 ),
+            }
+        },
+    )
+
+
+def record_probe_failure(
+    provider: str, detail: str, *, observed_at: float | None = None
+) -> None:
+    """Remember why the last automatic usage refresh failed.
+
+    Kept beside the reading (cleared by the next successful ``record_usage``) so
+    a refusal and ``harness_usage.py show`` can say WHY the reading is not being
+    refreshed (not logged in, binary missing, report shape changed) instead of
+    only that it is stale.  Other usage facts are untouched.
+    """
+    normalized = provider.strip().lower()
+    if normalized not in PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider!r}")
+    _write_usage_entry(
+        normalized,
+        update={
+            "last_probe_failure": {
+                "at": _iso_from_wall(time.time() if observed_at is None else observed_at),
+                "detail": " ".join(str(detail).split())[:300],
             }
         },
     )
@@ -572,6 +752,344 @@ def render_wall(wall: float) -> str:
     return datetime.fromtimestamp(wall).astimezone().isoformat(timespec="minutes")
 
 
+# ---------------------------------------------------------------------------
+# Usage gate: freshness and weekly pacing for frontier dispatch
+#
+# Incident 2026-09-29: over 60% of the weekly Claude allowance went in under a
+# day while the snapshot still read 20%, observed seven hours earlier.  Headroom
+# and the 60% ceiling both acted on a reading nobody had refreshed, so nothing
+# throttled.  Among dispatches routed through this router the gate is the single
+# place that decides whether a new frontier dispatch may start, from the snapshot
+# alone: it fails CLOSED when the reading is missing, malformed or older than a
+# bound, and it paces the week.  Daemons that launch the ``claude`` CLI directly
+# never went through this router and are not covered.
+#
+# Scope: only providers with an automatic live feeder are gated
+# (``APIS_USAGE_GATED_PROVIDERS``, default all configured frontier providers,
+# fed by ``usage_probe``).
+# Numeric usage windows are preferred where available; providers without them
+# use a bounded native request as explicit available/exhausted/unknown evidence.
+# Local providers are never gated: mechanical work keeps running.
+# ---------------------------------------------------------------------------
+
+WEEK_SECONDS = 7 * 24 * 3600.0
+WEEKLY_WINDOW_NAMES = ("weekly_all", "weekly")
+
+GATE_OK = "ok"
+GATE_MISSING = "missing"
+GATE_MALFORMED = "malformed"
+GATE_STALE = "stale"
+GATE_PACED = "paced"
+GATE_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class UsageGate:
+    """The gate's verdict for one provider, with the numbers behind it."""
+
+    provider: str
+    allowed: bool
+    code: str
+    message: str
+    observed_at: float | None = None
+    age_seconds: float | None = None
+    max_age_seconds: float | None = None
+    weekly_used_percent: float | None = None
+    weekly_resets_at: float | None = None
+    elapsed_fraction: float | None = None
+    pace_percent: float | None = None
+    ceiling_percent: float | None = None
+    burst_percent: float | None = None
+    # When the refusal clears if nothing more is used (pace), or when a retry
+    # is worthwhile (stale/missing/malformed); ``None`` when allowed.
+    returns_at: float | None = None
+    # Why the last automatic refresh failed, when it did (see record_probe_failure).
+    probe_failure: str | None = None
+
+
+REFRESH_HINT = (
+    "To fix: run `python3 execution/scripts/harness_usage.py refresh` "
+    "(see docs/runbooks/harness-headroom-restore.md, section 'Usage gate')"
+)
+
+
+def _probe_failure_text(entry: object, moment: float) -> str | None:
+    failure = entry.get("last_probe_failure") if isinstance(entry, dict) else None
+    if not isinstance(failure, dict) or not failure.get("detail"):
+        return None
+    at = _wall_from_iso(failure.get("at"))
+    when = f" at {render_wall(at)}" if at is not None else ""
+    text = f"last automatic refresh failed{when}: {failure['detail']}"
+    if at is not None:
+        retry = at + usage_probe_backoff_seconds()
+        if retry > moment:
+            text += f" (next automatic retry after {render_wall(retry)})"
+    return text
+
+
+def _env_float(name: str, default: float, *, low: float, high: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return min(high, max(low, value)) if math.isfinite(value) else default
+
+
+def usage_gate_enabled() -> bool:
+    return os.environ.get("APIS_USAGE_GATE", "on").strip().lower() not in (
+        "off", "0", "false", "no",
+    )
+
+
+def usage_gated_providers() -> tuple[str, ...]:
+    raw = os.environ.get(
+        "APIS_USAGE_GATED_PROVIDERS", ",".join(configured_providers())
+    )
+    return tuple(
+        p for p in (item.strip().lower() for item in raw.split(","))
+        if p in FRONTIER_PROVIDERS
+    )
+
+
+def usage_stale_seconds() -> float:
+    """Longest a reading may age before frontier dispatch is refused (30 min)."""
+    return _env_float("APIS_USAGE_STALE_SECONDS", 1800.0, low=60.0, high=6 * 3600.0)
+
+
+def usage_refresh_seconds() -> float:
+    """Age at which a dispatch refreshes the reading first; always < the bound."""
+    return min(
+        _env_float("APIS_USAGE_REFRESH_SECONDS", 600.0, low=30.0, high=6 * 3600.0),
+        usage_stale_seconds() / 2.0,
+    )
+
+
+def usage_retry_seconds() -> float:
+    return _env_float("APIS_USAGE_RETRY_SECONDS", 600.0, low=30.0, high=6 * 3600.0)
+
+
+def usage_probe_backoff_seconds() -> float:
+    """After a failed automatic refresh, wait this long before probing again (5 min).
+
+    A logged-out or missing CLI leaves the reading stale, so without a backoff
+    every dispatch (one per lens) would relaunch the same failing probe.
+    """
+    return _env_float("APIS_USAGE_PROBE_BACKOFF_SECONDS", 300.0, low=0.0, high=6 * 3600.0)
+
+
+def weekly_ceiling_percent() -> float:
+    """Share of the weekly allowance the swarm may use (operator ruling: 60)."""
+    return _env_float("APIS_USAGE_WEEKLY_CEILING_PERCENT", 60.0, low=1.0, high=100.0)
+
+
+def pace_burst_percent() -> float:
+    """Points above the elapsed-fraction pace line the swarm may run ahead."""
+    return _env_float("APIS_USAGE_PACE_BURST_PERCENT", 10.0, low=0.0, high=100.0)
+
+
+def _refused(
+    provider: str, code: str, message: str, moment: float, *,
+    entry: object = None, **fields: object
+) -> UsageGate:
+    """A refusal for a reading that needs REFRESHING: says how, and why it failed."""
+    failure = _probe_failure_text(entry, moment)
+    text = f"{message}; {failure}" if failure else message
+    return UsageGate(
+        provider=provider,
+        allowed=False,
+        code=code,
+        message=f"{text}. {REFRESH_HINT}",
+        returns_at=moment + usage_retry_seconds(),
+        probe_failure=failure,
+        **fields,  # type: ignore[arg-type]
+    )
+
+
+def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | None:
+    """Decide whether ``provider`` may start a new frontier dispatch.
+
+    ``None`` when the provider is not gated (gate off, or explicitly omitted).
+    Otherwise a ``UsageGate`` that is refused for a missing, malformed or stale
+    reading, or when weekly use has reached the elapsed-fraction pace line
+    (``ceiling x elapsed + burst``, capped at the ceiling).  Deliberately reads
+    only the snapshot, so it is the same answer in every process.
+    """
+    normalized = provider.strip().lower()
+    if not usage_gate_enabled() or normalized not in usage_gated_providers():
+        return None
+    moment = time.time() if now_wall is None else now_wall
+    max_age = usage_stale_seconds()
+    ceiling = weekly_ceiling_percent()
+    burst = pace_burst_percent()
+    common: dict[str, object] = {
+        "max_age_seconds": max_age, "ceiling_percent": ceiling, "burst_percent": burst,
+    }
+    entry = _read_json_object(_usage_path()).get(normalized)
+    if not isinstance(entry, dict) or (
+        "observed_at" not in entry and "windows" not in entry
+        and "exhausted_until" not in entry and "probe" not in entry
+    ):
+        return _refused(
+            normalized, GATE_MISSING,
+            f"usage reading missing for {normalized} (never observed); "
+            "refusing new frontier dispatch until one is recorded",
+            moment, entry=entry, **common,
+        )
+    exhausted_until = _wall_from_iso(entry.get("exhausted_until"))
+    if exhausted_until is not None and exhausted_until > moment:
+        # A reported exhaustion is itself a current reading; headroom (0.0)
+        # already holds the provider out until its stated reset.
+        return UsageGate(normalized, True, GATE_OK, "exhaustion recorded", **common)  # type: ignore[arg-type]
+    observed_at = _wall_from_iso(entry.get("observed_at"))
+    windows = entry.get("windows")
+    raw_probe = entry.get("probe")
+    if isinstance(raw_probe, dict) and not windows:
+        probe_status = raw_probe.get("status")
+        probe_source = str(raw_probe.get("source") or "provider-native probe")
+        probe_detail = str(raw_probe.get("detail") or "no detail")
+        probe_observed = _wall_from_iso(raw_probe.get("observed_at"))
+        if probe_observed is None or probe_observed > moment + 300.0:
+            return _refused(
+                normalized, GATE_MALFORMED,
+                f"capacity evidence malformed for {normalized} from {probe_source} "
+                "(no valid observed_at)",
+                moment, entry=entry, **common,
+            )
+        age = max(0.0, moment - probe_observed)
+        common.update(observed_at=probe_observed, age_seconds=age)
+        if age > max_age:
+            return _refused(
+                normalized, GATE_STALE,
+                f"capacity evidence stale for {normalized} from {probe_source} "
+                f"since {render_wall(probe_observed)} ({int(age // 60)} min old, "
+                f"bound {int(max_age // 60)} min)",
+                moment, entry=entry, **common,
+            )
+        if probe_status == "available":
+            return UsageGate(
+                normalized, True, GATE_OK,
+                f"{normalized} available from {probe_source}", **common,
+            )  # type: ignore[arg-type]
+        if probe_status == "unknown":
+            return _refused(
+                normalized, GATE_UNKNOWN,
+                f"capacity unknown for {normalized} from {probe_source}: {probe_detail}",
+                moment, entry=entry, **common,
+            )
+        if probe_status == "exhausted":
+            return _refused(
+                normalized, GATE_STALE,
+                f"exhaustion evidence for {normalized} from {probe_source} no longer "
+                "has a future reset; a recovery probe is required",
+                moment, entry=entry, **common,
+            )
+    problem = None
+    if observed_at is None:
+        problem = "no valid observed_at"
+    elif observed_at > moment + 300.0:
+        problem = "observed_at is in the future"
+    elif not isinstance(windows, list) or not windows:
+        problem = "no usage windows"
+    else:
+        problem = next((p for p in map(_window_problem, windows) if p), None)
+    if problem is not None:
+        return _refused(
+            normalized, GATE_MALFORMED,
+            f"usage reading malformed for {normalized} ({problem}); "
+            "refusing new frontier dispatch until a valid one is recorded",
+            moment, entry=entry, observed_at=observed_at, **common,
+        )
+    assert observed_at is not None and isinstance(windows, list)
+    age = max(0.0, moment - observed_at)
+    common.update(observed_at=observed_at, age_seconds=age)
+    if age > max_age:
+        return _refused(
+            normalized, GATE_STALE,
+            f"usage reading stale since {render_wall(observed_at)} "
+            f"({int(age // 60)} min old, bound {int(max_age // 60)} min); "
+            "refusing new frontier dispatch until it is refreshed",
+            moment, entry=entry, **common,
+        )
+    weekly = next(
+        (w for w in windows if str(w.get("name")).strip() in WEEKLY_WINDOW_NAMES), None
+    )
+    resets_at = _wall_from_iso(weekly.get("resets_at")) if weekly else None
+    if weekly is None or resets_at is None:
+        return _refused(
+            normalized, GATE_MALFORMED,
+            f"usage reading for {normalized} has no weekly window with a reset "
+            "time, so the weekly pace cannot be computed; refusing new frontier "
+            "dispatch until one is recorded (an account with no weekly window "
+            "stays refused; the only way past it is APIS_USAGE_GATE=off)",
+            moment, entry=entry, **common,
+        )
+    if resets_at <= moment:
+        return _refused(
+            normalized, GATE_STALE,
+            f"usage reading stale since {render_wall(observed_at)}: its weekly "
+            f"window reset at {render_wall(resets_at)}; refusing new frontier "
+            "dispatch until it is refreshed",
+            moment, entry=entry, **common,
+        )
+    used = float(weekly["used_percent"])
+    start = resets_at - WEEK_SECONDS
+    elapsed = min(1.0, max(0.0, (moment - start) / WEEK_SECONDS))
+    pace = min(ceiling, ceiling * elapsed + burst)
+    common.update(
+        weekly_used_percent=used, weekly_resets_at=resets_at,
+        elapsed_fraction=elapsed, pace_percent=pace,
+    )
+    if used < pace:
+        return UsageGate(normalized, True, GATE_OK, "within the weekly pace line", **common)  # type: ignore[arg-type]
+    if used >= ceiling:
+        returns_at = resets_at
+    else:
+        # Solve ceiling*e + burst = used for the moment the pace line catches up
+        # (a minute of slack so it is strictly above), assuming no further use.
+        returns_at = min(
+            resets_at, start + ((used - burst) / ceiling) * WEEK_SECONDS + 60.0
+        )
+    return UsageGate(
+        normalized, False, GATE_PACED,
+        f"weekly usage {used:.0f}% is at or above the pace line {pace:.1f}% "
+        f"({ceiling:.0f}% ceiling x {elapsed:.0%} of the week elapsed + "
+        f"{burst:.0f} burst); frontier capacity for {normalized} returns at "
+        f"{render_wall(returns_at)} if nothing more is used (the weekly percent "
+        "is the whole account, so the operator's own sessions count toward it)",
+        returns_at=returns_at, **common,  # type: ignore[arg-type]
+    )
+
+
+def usage_gate_refusals_all(
+    available: Mapping[str, str | None], *, now_wall: float | None = None
+) -> dict[str, UsageGate] | None:
+    """Each gate refusal when the gate is why no frontier provider can run.
+
+    ``None`` unless at least one configured provider is otherwise eligible
+    (binary present, headroom above the floor, not cooled) and EVERY such
+    provider is gate-refused.  Mirrors ``cooled_until_all`` so the dispatcher
+    reports a stale or paced refusal as what it is, not as generic exhaustion.
+    """
+    moment = time.time() if now_wall is None else now_wall
+    headroom = configured_headroom(now_wall=moment)
+    minimum = minimum_headroom()
+    refusals: dict[str, UsageGate] = {}
+    for provider in configured_providers():
+        if not available.get(provider):
+            continue
+        if persisted_cooling(provider, now_wall=moment) is not None:
+            continue
+        gate = usage_gate(provider, now_wall=moment)
+        if gate is not None and not gate.allowed:
+            refusals[provider] = gate
+            continue
+        if headroom[provider] <= minimum:
+            continue
+        if gate is None or gate.allowed:
+            return None
+    return refusals or None
+
+
 def _provider_exclusion_reason(
     provider: str,
     available: Mapping[str, str | None],
@@ -584,6 +1102,9 @@ def _provider_exclusion_reason(
     """Return why one supported provider is ineligible, or ``None``."""
     if not available.get(provider):
         return "binary unavailable"
+    gate = usage_gate(provider, now_wall=moment_wall)
+    if gate is not None and not gate.allowed:
+        return gate.message
     if headroom[provider] <= minimum:
         return f"headroom={headroom[provider]:.3f} is at or below minimum={minimum:.3f}"
     cooling = persisted_cooling(provider, now_wall=moment_wall)
@@ -608,7 +1129,7 @@ def provider_exclusion_reason(
     return _provider_exclusion_reason(
         normalized,
         available,
-        headroom=configured_headroom(),
+        headroom=configured_headroom(now_wall=now_wall),
         minimum=minimum_headroom(),
         moment=time.monotonic() if now is None else now,
         moment_wall=now_wall,
@@ -623,7 +1144,7 @@ def usable_provider_names(
 ) -> set[str]:
     """Return configured providers passing the router's eligibility predicate."""
     moment = time.monotonic() if now is None else now
-    headroom = configured_headroom()
+    headroom = configured_headroom(now_wall=now_wall)
     minimum = minimum_headroom()
     return {
         provider
@@ -681,7 +1202,7 @@ def provider_candidates(
         normalized = preferred.strip().lower()
         order = [normalized] if normalized in PROVIDERS else []
 
-    headroom = configured_headroom()
+    headroom = configured_headroom(now_wall=now_wall)
     minimum = minimum_headroom()
 
     eligible = [

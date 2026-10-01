@@ -130,3 +130,104 @@ def test_tiers_reasons_flag_reports_why_dispatches_were_raised(capsys, monkeypat
     assert report["by_reason"] == {
         "diff_lines_changed": {"total": 1, "by_class": {"lens_review:pm": 1}}
     }
+
+
+# --- usage gate view in `show` (ent_1e50b009d88b08e47963f847 / ent_63b22ea0d13109238c0a00bf)
+
+
+def _gate(capsys, provider: str = "claude") -> dict:
+    capsys.readouterr()
+    assert harness_usage.main(["show"]) == 0
+    return json.loads(capsys.readouterr().out)[provider]["usage_gate"]
+
+
+def test_show_reports_age_ceiling_pace_line_and_allowed(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    now = time.time()
+    week_start = now - 0.5 * harness_router.WEEK_SECONDS
+    resets = harness_router._iso_from_wall(week_start + harness_router.WEEK_SECONDS)
+    harness_usage.main(["usage", "claude", "--window", f"weekly_all=35@{resets}"])
+    gate = _gate(capsys)
+    assert gate["dispatch_allowed"] is True and gate["gated"] is True
+    assert gate["weekly_ceiling_percent"] == 60.0
+    assert gate["pace_line_percent"] == pytest.approx(40.0, abs=0.5)
+    assert gate["snapshot_age_seconds"] < 60
+    assert "ALLOWED" in gate["summary"]
+
+
+def test_show_reports_refused_when_over_pace_or_stale(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    resets = harness_router._iso_from_wall(time.time() + 6 * 86400)
+    harness_usage.main(["usage", "claude", "--window", f"weekly_all=66@{resets}"])
+    gate = _gate(capsys)
+    assert gate["dispatch_allowed"] is False and gate["code"] == "paced"
+    assert gate["retry_or_capacity_returns_at"]
+    harness_router.record_usage(
+        "claude",
+        [{"name": "weekly_all", "used_percent": 1, "resets_at": resets}],
+        observed_at=time.time() - 3 * 3600,
+    )
+    stale = _gate(capsys)
+    assert stale["dispatch_allowed"] is False and stale["code"] == "stale"
+    assert stale["snapshot_age_seconds"] >= 3 * 3600 - 5
+    assert stale["stale_after_seconds"] == 1800
+
+
+def test_show_marks_ungated_provider_by_headroom(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    gate = _gate(capsys, "codex")
+    assert gate["gated"] is False and gate["dispatch_allowed"] is True
+
+
+def test_usage_command_refuses_a_malformed_window(capsys) -> None:
+    with pytest.raises(SystemExit):
+        harness_usage.main(["usage", "claude", "--window", "weekly_all=inf"])
+    assert harness_router.usage_windows("claude") == []
+
+
+def test_refresh_command_feeds_the_snapshot(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(harness_usage.shutil, "which", lambda name: f"/bin/{name}")
+    for provider in ("CLAUDE", "CODEX", "CURSOR"):
+        monkeypatch.delenv(f"APIS_{provider}_BIN", raising=False)
+    seen: dict = {}
+
+    def fake_refresh(binaries, *, env, force, **_kw):
+        seen.update(binaries=binaries, force=force, names=sorted(env))
+        return {name: "refreshed" for name in binaries}
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("CURSOR_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(harness_usage.usage_probe, "refresh_usage_if_stale", fake_refresh)
+    assert harness_usage.main(["refresh"]) == 0
+    assert seen["force"] is True and seen["binaries"] == {
+        "claude": "/bin/claude",
+        "codex": "/bin/codex",
+        "cursor": "/bin/cursor-agent",
+    }
+    assert "ANTHROPIC_API_KEY" not in seen["names"]
+    assert "OPENAI_API_KEY" not in seen["names"]
+    assert "CURSOR_API_KEY" not in seen["names"]
+
+
+def test_show_surfaces_why_the_last_refresh_failed(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    harness_router.record_probe_failure("claude", "probe exit 1 ...; CLI said: Not logged in")
+    gate = _gate(capsys)
+    assert gate["dispatch_allowed"] is False
+    assert "Not logged in" in gate["last_refresh_failure"]
+    assert "harness_usage.py refresh" in gate["reason"]
+
+
+def test_refresh_command_says_it_ran_under_the_operators_login(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(harness_usage.shutil, "which", lambda name: f"/bin/{name}")
+    for provider in ("CLAUDE", "CODEX", "CURSOR"):
+        monkeypatch.delenv(f"APIS_{provider}_BIN", raising=False)
+    monkeypatch.setattr(
+        harness_usage.usage_probe, "refresh_usage_if_stale",
+        lambda binaries, **kw: {name: "refreshed" for name in binaries},
+    )
+    harness_usage.main(["refresh"])
+    err = capsys.readouterr().err
+    assert "YOUR login" in err and "can still fail there" in err

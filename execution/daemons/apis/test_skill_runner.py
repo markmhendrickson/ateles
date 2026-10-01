@@ -18,6 +18,7 @@ import os
 import signal
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -5029,22 +5030,29 @@ class TestGateOwnerToolDenyAcrossProviders:
         assert result.ok
         assert "--disallowed-tools" not in captured_cmd
 
-    # ── codex / cursor: fail closed, never launch unrestricted ─────────────
+    # ── codex: isolated deny contract; cursor: refuse ──────────────────────
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_codex_refuses_a_gate_owning_launch(
-        self, MockLoader, mock_write_harness, monkeypatch
+    def test_codex_gate_owner_launches_with_verified_isolated_deny(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
     ) -> None:
-        """RED before the fix: codex has no `--mcp-config` / tool-allowlist
-        flag at all in `_provider_command` (`--sandbox workspace-write` only),
-        so a gate-owning lens routed to it would launch with `correct`
-        reachable through the ambient ombudsman config — exactly the sink
-        this PR closes for claude. It must refuse instead.
+        """RED before the fix: Codex was categorically refused before argv.
+
+        The gate-owning child now gets an isolated CODEX_HOME with exactly one
+        record server.  Its allowlist deliberately includes ``correct`` so the
+        assertion proves the documented deny-after-allow behavior rather than
+        merely proving ``correct`` was omitted from an additive grant.  The
+        auth symlink also proves a Codex refresh reaches the canonical cache.
         """
         fake_def = _make_def(
             prompt_markdown="Role: Waxwing.",
-            tool_allowlist="*",
+            tool_allowlist=(
+                "mcp__mcpsrv_neotoma__correct,"
+                "mcp__mcpsrv_neotoma__retrieve_entity_by_identifier,"
+                "mcp__mcpsrv_neotoma__retrieve_entity_snapshot,"
+                "mcp__mcpsrv_neotoma__store"
+            ),
             aauth_sub="waxwing@ateles-swarm",
             name="waxwing",
         )
@@ -5052,11 +5060,36 @@ class TestGateOwnerToolDenyAcrossProviders:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://record.example")
+        source_home = tmp_path / "source-codex-home"
+        source_home.mkdir()
+        source_auth = source_home / "auth.json"
+        source_auth.write_text("{}", encoding="utf-8")
+        source_auth.chmod(0o600)
+        monkeypatch.setenv("CODEX_HOME", str(source_home))
+        skill_root = tmp_path / ".claude" / "skills" / "waxwing"
+        skill_root.mkdir(parents=True)
+        (skill_root / "SKILL.md").write_text("skill md", encoding="utf-8")
+        monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
 
         launched = []
+        observed: dict = {}
 
         async def fake_exec(*cmd, **kwargs):
             launched.append(cmd)
+            child_home = Path(kwargs["env"]["CODEX_HOME"])
+            observed["home"] = child_home
+            observed["auth_is_symlink"] = (child_home / "auth.json").is_symlink()
+            observed["config_mode"] = (child_home / "config.toml").stat().st_mode & 0o777
+            observed["config"] = tomllib.loads(
+                (child_home / "config.toml").read_text(encoding="utf-8")
+            )
+            observed["bearer"] = kwargs["env"][
+                skill_runner.CODEX_GATE_BEARER_ENV
+            ]
+            (child_home / "auth.json").write_text(
+                '{"refreshed": true}', encoding="utf-8"
+            )
             proc = MagicMock()
             proc.returncode = 0
 
@@ -5068,8 +5101,6 @@ class TestGateOwnerToolDenyAcrossProviders:
 
         with (
             patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
         ):
             result = self._run(
@@ -5083,12 +5114,151 @@ class TestGateOwnerToolDenyAcrossProviders:
                 )
             )
 
-        assert not result.ok, (
-            "codex cannot deny a single MCP tool in this codebase — a "
-            "gate-owning run must refuse rather than launch unrestricted"
+        assert result.ok and len(launched) == 1
+        assert launched[0][1:3] == ("--strict-config", "exec")
+        assert "shared-daemon-token" not in repr(launched[0])
+        server = observed["config"]["mcp_servers"][
+            skill_runner.CODEX_NEOTOMA_SERVER_ID
+        ]
+        assert set(observed["config"]["mcp_servers"]) == {
+            skill_runner.CODEX_NEOTOMA_SERVER_ID
+        }
+        assert server["disabled_tools"] == ["correct"]
+        assert "correct" in server["enabled_tools"]
+        advertised = {"correct", "store", *skill_runner.CODEX_GATE_REQUIRED_READ_TOOLS}
+        effective = (advertised & set(server["enabled_tools"])) - set(
+            server["disabled_tools"]
         )
-        assert not launched, "the child must never actually start"
+        assert "correct" not in effective
+        assert set(skill_runner.CODEX_GATE_REQUIRED_READ_TOOLS) <= effective
+        assert observed["bearer"] == "shared-daemon-token"
+        assert observed["auth_is_symlink"] is True
+        assert json.loads(source_auth.read_text(encoding="utf-8")) == {
+            "refreshed": True
+        }
+        assert observed["config_mode"] == 0o600
+        assert not observed["home"].exists(), "per-run CODEX_HOME must be cleaned up"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_codex_refuses_when_the_deny_contract_cannot_be_proved(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        fake_def = _make_def(
+            prompt_markdown="Role: Waxwing.",
+            tool_allowlist="*",
+            aauth_sub="waxwing@ateles-swarm",
+            name="waxwing",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://record.example")
+        source_home = tmp_path / "source-codex-home"
+        source_home.mkdir()
+        source_auth = source_home / "auth.json"
+        source_auth.write_text("{}", encoding="utf-8")
+        source_auth.chmod(0o600)
+        monkeypatch.setenv("CODEX_HOME", str(source_home))
+        skill_root = tmp_path / ".claude" / "skills" / "waxwing"
+        skill_root.mkdir(parents=True)
+        (skill_root / "SKILL.md").write_text("skill md", encoding="utf-8")
+        monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
+        def config_without_deny(base_url: str, agent_tools: list[str]) -> str:
+            del agent_tools
+            reads = json.dumps(list(skill_runner.CODEX_GATE_REQUIRED_READ_TOOLS))
+            endpoint = f"{base_url.rstrip('/')}/mcp"
+            return (
+                'cli_auth_credentials_store = "file"\n\n'
+                f"[mcp_servers.{skill_runner.CODEX_NEOTOMA_SERVER_ID}]\n"
+                f"url = {json.dumps(endpoint)}\n"
+                f"bearer_token_env_var = "
+                f"{json.dumps(skill_runner.CODEX_GATE_BEARER_ENV)}\n"
+                "required = true\n"
+                f"enabled_tools = {reads}\n"
+            )
+
+        monkeypatch.setattr(
+            skill_runner, "_codex_gate_config_text", config_without_deny
+        )
+        launched = []
+
+        async def fake_exec(*cmd, **kwargs):
+            launched.append(cmd)
+            raise AssertionError("an ineffective deny must refuse before launch")
+
+        with (
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "waxwing",
+                    "review prompt",
+                    role="waxwing",
+                    provider="codex",
+                    task_entity_id="ent_abc",
+                    owns_pending_gate=True,
+                )
+            )
+
+        assert not result.ok and launched == []
         assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
+        assert "disabled_tools must deny exactly" in result.error
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_non_gate_codex_keeps_the_effective_codex_home(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        """Ordinary Codex runs retain their ambient command/config behavior."""
+        fake_def = _make_def(
+            prompt_markdown="Role: Falco.",
+            tool_allowlist="*",
+            aauth_sub="falco@ateles-swarm",
+            name="falco",
+        )
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        source_home = tmp_path / "source-codex-home"
+        source_home.mkdir()
+        (source_home / "auth.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(source_home))
+        skill_root = tmp_path / ".claude" / "skills" / "falco"
+        skill_root.mkdir(parents=True)
+        (skill_root / "SKILL.md").write_text("skill md", encoding="utf-8")
+        monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
+        observed: dict[str, str] = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            observed["codex_home"] = kwargs["env"]["CODEX_HOME"]
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"**COMMENT**", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "falco",
+                    "review prompt",
+                    role="falco",
+                    provider="codex",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        assert result.ok
+        assert observed["codex_home"] == str(source_home)
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -5156,30 +5326,24 @@ class TestGateOwnerToolDenyAcrossProviders:
         }
 
 
-# ── #1181 operational finding: gate-owner refusal must fail over, not stop ────
+# ── #1181 operational finding: gate-owner routing must stay deny-capable ──────
 #
 # The in-attempt refusal above (`_run_skill_once` returning `SkillResult(ok=
 # False, error=f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: ...")`) is correct in
 # isolation, but `_run_provider_attempts` only advances to the next candidate
 # on a classified `failure_kind` or a `"{selected} launch failed:"` error —
-# this refusal is neither, so when `provider_candidates` picked cursor or
-# codex first (the common case per the live dispatch mix in the finding), the
-# loop returned the refusal immediately with no attempt on claude. The fix
-# filters candidates to `claude` BEFORE selection whenever `owns_pending_gate`
-# is set, so ordinary failover logic naturally lands on claude without ever
-# reaching the in-attempt refusal on a live run.
-class TestGateOwnerFailoverToClaude:
+# this refusal is neither, so when `provider_candidates` picked Cursor first
+# (the common case per the live dispatch mix in the finding), the
+# loop returned the refusal immediately. The fix filters candidates to the
+# adapters with a proven subtractive deny BEFORE selection.
+class TestGateOwnerDenyCapableRouting:
     def _run(self, coro):
         return asyncio.run(coro)
 
-    def test_gate_owning_run_launches_on_claude_despite_candidate_order(
+    def test_gate_owning_run_honors_safe_codex_before_cursor(
         self, monkeypatch, tmp_path
     ) -> None:
-        """RED before the fix: with [cursor, codex, claude] all eligible,
-        `provider_candidates` picks cursor first (smooth weighted round-robin
-        with equal headroom follows configured order). The old code attempted
-        cursor, got the in-attempt refusal, and returned it unchanged — never
-        trying claude. The fix must land on claude."""
+        """Cursor is excluded, while a safe Codex preference remains usable."""
         harness_router.reset_state()
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex,claude")
         monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
@@ -5189,22 +5353,6 @@ class TestGateOwnerFailoverToClaude:
 
         async def attempt(selected: str) -> skill_runner.SkillResult:
             attempted.append(selected)
-            if selected != "claude":
-                # Exactly the shape of the real in-attempt refusal: ok=False,
-                # an error that is neither a classified failure_kind nor a
-                # "launch failed:"-prefixed string.
-                return skill_runner.SkillResult(
-                    "waxwing",
-                    False,
-                    None,
-                    "",
-                    "",
-                    error=(
-                        f"{skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
-                        f"provider {selected!r} has no mechanism..."
-                    ),
-                    provider=selected,
-                )
             return skill_runner.SkillResult(
                 "waxwing",
                 True,
@@ -5224,25 +5372,19 @@ class TestGateOwnerFailoverToClaude:
         )
 
         assert result.ok
-        assert result.provider == "claude"
-        assert attempted == ["claude"], (
-            "cursor/codex must never even be attempted — the constraint is "
-            "applied at candidate selection, not discovered via a failed "
-            "attempt"
-        )
+        assert result.provider == "codex"
+        assert attempted == ["codex"]
         assert harness_router.cooling_providers() == set(), (
             "the in-attempt refusal is not a launch failure and must not "
-            "cool down cursor or codex for every other role"
+            "cool down cursor or Codex for every other role"
         )
 
-    def test_gate_owning_run_fails_closed_when_claude_ineligible(
+    def test_gate_owning_run_fails_closed_when_only_cursor_is_eligible(
         self, monkeypatch, tmp_path
     ) -> None:
-        """The same run with only [cursor, codex] eligible (no claude binary
-        at all) must fail closed with a legible reason and cool nothing —
-        never fall over to cursor/codex unrestricted."""
+        """Cursor alone cannot satisfy the subtractive-deny contract."""
         harness_router.reset_state()
-        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor")
         monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
         monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
 
@@ -5253,7 +5395,7 @@ class TestGateOwnerFailoverToClaude:
             skill_runner._run_provider_attempts(
                 "waxwing",
                 should_not_run,
-                binaries={"cursor": "c", "codex": "d"},
+                binaries={"cursor": "c"},
                 owns_pending_gate=True,
             )
         )
@@ -5262,9 +5404,77 @@ class TestGateOwnerFailoverToClaude:
         assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
         assert result.attempted_providers == ()
         assert harness_router.cooling_providers() == set(), (
-            "failing closed on an unavailable claude must not cool down any "
-            "provider — cursor and codex are simply not offered, not failing"
+            "failing closed without a deny-capable adapter must not cool down "
+            "Cursor — it was not attempted"
         )
+
+    def test_unpinned_codex_preflight_refusal_fails_over_to_claude(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """No child started, so a safe alternative may take the review."""
+        harness_router.reset_state()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,claude")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+        monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
+        attempted: list[str] = []
+
+        async def attempt(selected: str) -> skill_runner.SkillResult:
+            attempted.append(selected)
+            if selected == "codex":
+                return skill_runner.SkillResult(
+                    "waxwing",
+                    False,
+                    None,
+                    "",
+                    "",
+                    error=(
+                        "codex launch failed: "
+                        f"{skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
+                        "isolated config could not be verified"
+                    ),
+                    provider=selected,
+                )
+            return skill_runner.SkillResult(
+                "waxwing", True, 0, "**SIGNED_OFF**", "", provider=selected
+            )
+
+        result = self._run(
+            skill_runner._run_provider_attempts(
+                "waxwing",
+                attempt,
+                binaries={"codex": "d", "claude": "e"},
+                owns_pending_gate=True,
+            )
+        )
+
+        assert result.ok and result.provider == "claude"
+        assert attempted == ["codex", "claude"]
+        assert "codex" not in harness_router.cooling_providers()
+
+    def test_gate_owner_candidates_still_require_a_tier_binding(
+        self, monkeypatch
+    ) -> None:
+        tier = skill_runner.model_tiering.ResolvedTier(
+            tier="top",
+            source="policy",
+            action_class="lens_review:security",
+        )
+        monkeypatch.setattr(
+            skill_runner.model_tiering,
+            "configured_vendor_binding",
+            lambda: {"claude": {"top": "claude-top"}},
+        )
+        monkeypatch.setattr(
+            skill_runner,
+            "usable_provider_names",
+            lambda binaries: {name for name, path in binaries.items() if path},
+        )
+
+        filtered = skill_runner._tier_bound_binaries(
+            {"codex": "d", "claude": "e"}, tier, None
+        )
+
+        assert filtered == {"claude": "e"}
 
     def test_non_gate_owning_run_keeps_unchanged_candidate_order(
         self, monkeypatch, tmp_path
@@ -5848,16 +6058,14 @@ class TestModelTieringDispatch:
         return result, spawned
 
     @patch("skill_runner.AgentLoader")
-    def test_gate_owning_run_with_unbound_claude_names_the_binding(
+    def test_gate_owning_run_with_no_safe_tier_binding_names_the_binding(
         self, MockLoader, monkeypatch, tmp_path
     ) -> None:
-        """A gate-owning run can only use claude. With the tier bound on codex
-        alone, the failure must name the missing vendor_binding entry, not
-        report claude as an ineligible (missing) binary."""
+        """With neither deny-capable provider bound, name the binding defect."""
         result, spawned = self._run_unbound_scenario(
             MockLoader, monkeypatch, tmp_path,
             providers="claude,codex",
-            binding='{"codex": {"mid": "codex-mid-model"}}',
+            binding='{"cursor": {"mid": "cursor-mid-model"}}',
             owns_pending_gate=True,
         )
         assert not result.ok
@@ -5963,3 +6171,28 @@ class TestModelTieringDispatch:
         cmd = captured["cmd"]
         assert "--model" in cmd
         assert cmd[cmd.index("--model") + 1] == "codex-mid"
+
+
+# ── redaction covers per-agent PAT variables ─────────────────────────────────
+
+
+def test_redact_secrets_covers_every_per_agent_pat_variable(monkeypatch):
+    """Agent PATs are `<ROLE>_AGENT_PAT` (plus ATELES_AGENT_PAT): found by suffix,
+    so a new agent's PAT is redacted without editing the fixed list."""
+    import skill_runner as sr
+
+    values = {
+        "ATELES_AGENT_PAT": "FAKE-TEST-PAT-VALUE-ATELES-0001",
+        "NEOTOMA_AGENT_PAT": "FAKE-TEST-PAT-VALUE-NEOTOMA-0002",
+        "BRANDNEWROLE_AGENT_PAT": "FAKE-TEST-PAT-VALUE-NEWROLE-0003",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    text = " | ".join(f"saw {v}" for v in values.values())
+    out = sr._redact_secrets(text)
+    for name, value in values.items():
+        assert value not in out, f"{name} leaked"
+        assert f"<redacted:{name}>" in out
+    # Short values are left alone (not a credential, and would corrupt output).
+    monkeypatch.setenv("SHORTROLE_AGENT_PAT", "abc")
+    assert sr._redact_secrets("abc stays") == "abc stays"
