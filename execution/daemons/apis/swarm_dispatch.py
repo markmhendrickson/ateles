@@ -3664,6 +3664,12 @@ class SwarmDispatcher:
                     # persist a failed harness_event below before returning.
                     await self._clear_pipeline_inflight(trigger)
         except IssuePipelineWriteError as exc:
+            # A contended attempt can already have a distinct ``queued``
+            # marker from before semaphore acquisition. The failing inflight
+            # preflight compensates its own exact marker, but the outer error
+            # path must clear every marker for this issue so the startup sweep
+            # cannot resurrect an attempt that was explicitly refused.
+            await self._clear_pipeline_inflight(trigger)
             durable = await self._record_issue_pipeline_failure(trigger, exc)
             level = "durably recorded" if durable else "DURABILITY UNCONFIRMED"
             log.error(

@@ -261,3 +261,68 @@ def test_issue_body_patch_403_refuses_agents_and_records_failure(monkeypatch):
     assert stored[0]["summary"] == (
         "issue pipeline refused at github_issue_body_write (HTTP 403)"
     )
+
+
+def test_contended_failure_clears_queued_and_inflight_markers(monkeypatch):
+    stored: list[dict] = []
+    launched: list[int] = []
+    deleted: list[int] = []
+    posted: list[dict] = []
+
+    class ImmediateContendedSemaphore:
+        def locked(self):
+            return True
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None, **kwargs):
+            posted.append(json or {})
+            return _Response(201, {"id": len(posted)})
+
+        async def patch(self, url, **kwargs):
+            return _Response(403, {})
+
+        async def get(self, url, **kwargs):
+            return _Response(
+                200,
+                [
+                    {
+                        "id": 1,
+                        "body": posted[0]["body"],
+                    }
+                ],
+            )
+
+        async def delete(self, url, **kwargs):
+            deleted.append(int(url.rsplit("/", 1)[-1]))
+            return _Response(204, {})
+
+    async def pipeline(self, trigger):
+        launched.append(trigger.number)
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", pipeline)
+    _install_durable_failure_store(monkeypatch, stored)
+
+    dispatcher = _dispatcher()
+    dispatcher._issue_semaphore = ImmediateContendedSemaphore()
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert launched == []
+    assert len(posted) == 2
+    assert sorted(deleted) == [1, 2]
+    assert stored[0]["event_type"] == "github.issue_pipeline_failed"
