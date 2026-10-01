@@ -101,6 +101,13 @@ to that checkout, and leaves unrelated hooks intact. It copies no rule body: `Se
 uses the shared Ateles guards. Codex requires a separate trust decision for non-managed hooks; open
 `/hooks`, review the Ateles definitions, and trust them.
 
+Codex also discovers the committed project-level `.codex/hooks.json`, and its documented composition
+model runs matching user- and project-level commands concurrently. The rule-delivery hooks therefore use
+one locked receipt under the Codex home: identical content for the same lifecycle revision is injected
+once, while a later startup, resume, compaction, subagent, or prompt revision remains deliverable. Keep both
+carriers installed; the project file is the portable binding and the user install remains the outside-repo
+carrier.
+
 **Verify:** start a new Codex session and list its MCP servers; the Ateles tools are available. The hook
 panel shows the trusted Ateles entries, and session start reports `Loading live Ateles rules`. Then run:
 

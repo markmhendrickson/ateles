@@ -141,15 +141,25 @@ every prompt slower and noisier than the problem it fixes.
 Never logs a rule body to stderr (only entity ids and counts) — some
 agent_policy rows hold operator payment details (CLAUDE.md).
 """
+
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _session_integrity import read_hook_input, load_state, save_state, log  # noqa: E402
+from _session_integrity import (  # noqa: E402
+    read_hook_input,
+    load_state,
+    save_state,
+    state_lock,
+    log,
+)
 from rule_index_state import (  # noqa: E402
-    hash_signature, last_delivered, record_delivered_subset, row_signature,
+    hash_signature,
+    last_delivered,
+    record_delivered_subset,
+    row_signature,
 )
 
 _HOOK_DIR = Path(__file__).resolve().parent
@@ -238,7 +248,9 @@ _CLOSER = (
 )
 
 
-def _render_delta(added_or_changed: list, budget_chars: int) -> tuple[str, frozenset[str]]:
+def _render_delta(
+    added_or_changed: list, budget_chars: int
+) -> tuple[str, frozenset[str]]:
     """added_or_changed: list[PolicySkill]. Mandatory rows rendered in full
     first (sorted by entity_id for determinism), advisory rows as one-line
     summaries, until the budget runs out — never cuts a rendered row
@@ -261,15 +273,22 @@ def _render_delta(added_or_changed: list, budget_chars: int) -> tuple[str, froze
         (s for s in added_or_changed if s.rule_kind != "mandatory"),
         key=lambda s: s.entity_id,
     )
-    ordered = [("mandatory", s) for s in mandatory] + [("advisory", s) for s in advisory]
+    ordered = [("mandatory", s) for s in mandatory] + [
+        ("advisory", s) for s in advisory
+    ]
 
     def _fits(n_blocks: int, n_omitted: int) -> bool:
         blocks = [
-            _mandatory_full_block(s.entity_id, s.body) if kind == "mandatory"
+            _mandatory_full_block(s.entity_id, s.body)
+            if kind == "mandatory"
             else _advisory_summary_line(s)
             for kind, s in ordered[:n_blocks]
         ]
-        tail = f"\n({n_omitted} more changed rule(s) omitted for space.)" if n_omitted else ""
+        tail = (
+            f"\n({n_omitted} more changed rule(s) omitted for space.)"
+            if n_omitted
+            else ""
+        )
         text = _HEADER + "\n".join(blocks) + _CLOSER + tail
         return len(text) <= budget_chars
 
@@ -281,7 +300,8 @@ def _render_delta(added_or_changed: list, budget_chars: int) -> tuple[str, froze
 
     kept_pairs = ordered[:kept]
     blocks = [
-        _mandatory_full_block(s.entity_id, s.body) if kind == "mandatory"
+        _mandatory_full_block(s.entity_id, s.body)
+        if kind == "mandatory"
         else _advisory_summary_line(s)
         for kind, s in kept_pairs
     ]
@@ -313,54 +333,66 @@ def main() -> int:
     current_sig = row_signature(scoped_rows)
     current_hash = hash_signature(current_sig)
 
-    state = load_state(session_id)
-    prior_hash, prior_rows = last_delivered(state)
+    # Codex launches matching project- and user-level hooks concurrently.
+    # Keep the read/decision/print/write transaction under the same lock as
+    # SessionStart so only one carrier can emit a given delta.
+    with state_lock(session_id, ev):
+        state = load_state(session_id, ev)
+        prior_hash, prior_rows = last_delivered(state)
 
-    if prior_hash == current_hash:
-        return 0  # unchanged set — inject nothing (per spec)
+        if prior_hash == current_hash:
+            return 0  # unchanged set — inject nothing (per spec)
 
-    if prior_hash is None:
-        # Genuinely no baseline — not merely "nothing changed since the
-        # last one." Render the SAME full tiered index a fresh SessionStart
-        # would, not a delta against an empty set (see module docstring:
-        # this is the fix for the session that started before the
-        # SessionStart hook was wired and so never got one).
-        rendered, delivered_ids = render_index_text_with_ids(skills, INDEX_BUDGET_CHARS)
-        print(_FULL_INDEX_HEADER)
-        print(rendered)
-        # `delivered_ids` came back structurally from the renderer (tier
-        # A/A2/B: every row; tier C: only the KEPT rows) — never inferred by
-        # scanning `rendered`, which a row's own unsanitized body could
-        # spoof (module docstring, task ent_bd3fcf561449b6ebbabc36ca).
-    else:
-        changed_ids = {
-            eid for eid, ts in current_sig.items() if prior_rows.get(eid) != ts
-        }
-        # Start from whatever was already safely recorded as delivered
-        # (restricted to rows still present in the current scoped set —
-        # a retired/re-scoped row drops out rather than lingering forever).
-        delivered_ids = set(prior_rows) & current_sig.keys()
-        if changed_ids:
-            by_id = {s.entity_id: s for s in skills}
-            added_or_changed = [by_id[eid] for eid in changed_ids if eid in by_id]
-            if added_or_changed:
-                rendered, rendered_ids = _render_delta(added_or_changed, BUDGET_CHARS)
-                print(rendered)
-                # `rendered_ids` came back structurally from `_render_delta`
-                # (built from `ordered[:kept]`, the same list the blocks are
-                # generated from) — never inferred by scanning `rendered`,
-                # which a mandatory row's own raw body could spoof. Still
-                # intersected with `changed_ids` as a second, independent
-                # narrowing: only a row that was BOTH actually emitted AND
-                # genuinely in this turn's changed set is newly delivered.
-                delivered_ids |= rendered_ids & changed_ids
+        if prior_hash is None:
+            # Genuinely no baseline — not merely "nothing changed since the
+            # last one." Render the SAME full tiered index a fresh SessionStart
+            # would, not a delta against an empty set (see module docstring:
+            # this is the fix for the session that started before the
+            # SessionStart hook was wired and so never got one).
+            rendered, delivered_ids = render_index_text_with_ids(
+                skills, INDEX_BUDGET_CHARS
+            )
+            print(_FULL_INDEX_HEADER)
+            print(rendered)
+            # `delivered_ids` came back structurally from the renderer (tier
+            # A/A2/B: every row; tier C: only the KEPT rows) — never inferred by
+            # scanning `rendered`, which a row's own unsanitized body could
+            # spoof (module docstring, task ent_bd3fcf561449b6ebbabc36ca).
+        else:
+            changed_ids = {
+                eid for eid, ts in current_sig.items() if prior_rows.get(eid) != ts
+            }
+            # Start from whatever was already safely recorded as delivered
+            # (restricted to rows still present in the current scoped set —
+            # a retired/re-scoped row drops out rather than lingering forever).
+            delivered_ids = set(prior_rows) & current_sig.keys()
+            if changed_ids:
+                by_id = {s.entity_id: s for s in skills}
+                added_or_changed = [by_id[eid] for eid in changed_ids if eid in by_id]
+                if added_or_changed:
+                    rendered, rendered_ids = _render_delta(
+                        added_or_changed, BUDGET_CHARS
+                    )
+                    print(rendered)
+                    # `rendered_ids` came back structurally from `_render_delta`
+                    # (built from `ordered[:kept]`, the same list the blocks are
+                    # generated from) — never inferred by scanning `rendered`,
+                    # which a mandatory row's own raw body could spoof. Still
+                    # intersected with `changed_ids` as a second, independent
+                    # narrowing: only a row that was BOTH actually emitted AND
+                    # genuinely in this turn's changed set is newly delivered.
+                    delivered_ids |= rendered_ids & changed_ids
 
-    # Record ONLY the rows that were actually rendered with at least a
-    # one-line mention this turn, union'd with whatever was already safely
-    # delivered before — never the full candidate/scoped set. An omitted
-    # row is simply absent from the next recorded signature, so a later
-    # prompt (or the next SessionStart) retries it.
-    save_state(session_id, record_delivered_subset(state, scoped_rows, delivered_ids))
+        # Record ONLY the rows that were actually rendered with at least a
+        # one-line mention this turn, union'd with whatever was already safely
+        # delivered before — never the full candidate/scoped set. An omitted
+        # row is simply absent from the next recorded signature, so a later
+        # prompt (or the next SessionStart) retries it.
+        save_state(
+            session_id,
+            record_delivered_subset(state, scoped_rows, delivered_ids),
+            ev,
+        )
     return 0
 
 
