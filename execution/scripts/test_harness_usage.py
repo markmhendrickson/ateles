@@ -175,6 +175,7 @@ def test_show_reports_refused_when_over_pace_or_stale(monkeypatch, capsys) -> No
 
 def test_show_marks_ungated_provider_by_headroom(monkeypatch, capsys) -> None:
     monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
     gate = _gate(capsys, "codex")
     assert gate["gated"] is False and gate["dispatch_allowed"] is True
 
@@ -186,18 +187,28 @@ def test_usage_command_refuses_a_malformed_window(capsys) -> None:
 
 
 def test_refresh_command_feeds_the_snapshot(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(harness_usage.shutil, "which", lambda name: "/bin/claude")
+    monkeypatch.setattr(harness_usage.shutil, "which", lambda name: f"/bin/{name}")
+    for provider in ("CLAUDE", "CODEX", "CURSOR"):
+        monkeypatch.delenv(f"APIS_{provider}_BIN", raising=False)
     seen: dict = {}
 
     def fake_refresh(binaries, *, env, force, **_kw):
         seen.update(binaries=binaries, force=force, names=sorted(env))
-        return {"claude": "refreshed"}
+        return {name: "refreshed" for name in binaries}
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("CURSOR_API_KEY", "not-a-real-key")
     monkeypatch.setattr(harness_usage.usage_probe, "refresh_usage_if_stale", fake_refresh)
     assert harness_usage.main(["refresh"]) == 0
-    assert seen["force"] is True and seen["binaries"] == {"claude": "/bin/claude"}
+    assert seen["force"] is True and seen["binaries"] == {
+        "claude": "/bin/claude",
+        "codex": "/bin/codex",
+        "cursor": "/bin/cursor-agent",
+    }
     assert "ANTHROPIC_API_KEY" not in seen["names"]
+    assert "OPENAI_API_KEY" not in seen["names"]
+    assert "CURSOR_API_KEY" not in seen["names"]
 
 
 def test_show_surfaces_why_the_last_refresh_failed(monkeypatch, capsys) -> None:
@@ -210,10 +221,12 @@ def test_show_surfaces_why_the_last_refresh_failed(monkeypatch, capsys) -> None:
 
 
 def test_refresh_command_says_it_ran_under_the_operators_login(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(harness_usage.shutil, "which", lambda name: "/bin/claude")
+    monkeypatch.setattr(harness_usage.shutil, "which", lambda name: f"/bin/{name}")
+    for provider in ("CLAUDE", "CODEX", "CURSOR"):
+        monkeypatch.delenv(f"APIS_{provider}_BIN", raising=False)
     monkeypatch.setattr(
         harness_usage.usage_probe, "refresh_usage_if_stale",
-        lambda binaries, **kw: {"claude": "refreshed"},
+        lambda binaries, **kw: {name: "refreshed" for name in binaries},
     )
     harness_usage.main(["refresh"])
     err = capsys.readouterr().err

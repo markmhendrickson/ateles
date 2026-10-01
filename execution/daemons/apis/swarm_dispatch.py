@@ -12016,7 +12016,7 @@ class SwarmDispatcher:
                 include_github_contract=True,
                 notifier=self.notifier,
                 preferred_provider=resolve_lens_provider(
-                    first, available_providers=usable_providers()
+                    first, available_providers=await usable_providers_async()
                 ),
                 owns_pending_gate=any(
                     gate_owner_tool_deny(

@@ -9,9 +9,12 @@ went in under a day while the snapshot read 20%, observed seven hours earlier.
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
+import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -167,8 +170,10 @@ def test_reading_whose_weekly_window_already_reset_is_stale() -> None:
 
 
 def test_gate_off_and_ungated_providers_are_untouched(monkeypatch) -> None:
-    assert hr.usage_gate("codex", now_wall=NOW) is None
+    assert hr.usage_gate("codex", now_wall=NOW).code == hr.GATE_MISSING
     assert hr.usage_gate("claude-local", now_wall=NOW) is None
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    assert hr.usage_gate("codex", now_wall=NOW) is None
     monkeypatch.setenv("APIS_USAGE_GATE", "off")
     assert hr.usage_gate("claude", now_wall=NOW) is None
 
@@ -228,6 +233,7 @@ def test_ceiling_and_burst_are_configurable(monkeypatch) -> None:
 
 def test_gate_excludes_claude_and_leaves_other_providers() -> None:
     _record(66.0)
+    hr.record_probe_available("codex", source="codex_exec", observed_at=NOW)
     avail = {"claude": "/bin/claude", "codex": "/bin/codex", "cursor": None}
     assert hr.provider_candidates(avail, now_wall=NOW) == ["codex"]
     reason = hr.provider_exclusion_reason("claude", avail, now_wall=NOW)
@@ -310,6 +316,90 @@ def test_refresh_records_snapshot_and_reopens_the_gate() -> None:
     assert kwargs["env"] == {"PATH": "/usr/bin"}  # the caller's environment, nothing added
     assert Path(kwargs["cwd"]).name.startswith("usage-probe-")
     assert {w["name"] for w in hr.usage_windows("claude")} == {"five_hour", "weekly_all"}
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_native_probe_success_records_current_availability(provider) -> None:
+    calls: list = []
+    outcome = usage_probe.refresh_usage_if_stale(
+        {provider: f"/bin/{provider}"}, env={"PATH": "/usr/bin"},
+        now_wall=NOW, run=_fake_run('{"type":"result","result":"ok"}', calls),
+    )
+    assert outcome == {provider: "refreshed"}
+    command, kwargs = calls[0]
+    assert command[0] == f"/bin/{provider}"
+    if provider == "cursor":
+        assert "--force" not in command
+        assert command[command.index("--mode") + 1] == "ask"
+        assert command[command.index("--sandbox") + 1] == "enabled"
+    assert kwargs["timeout"] == 60.0
+    assert kwargs["env"] == {"PATH": "/usr/bin"}
+    assert Path(kwargs["cwd"]).name.startswith(f"usage-probe-{provider}-")
+    gate = hr.usage_gate(provider, now_wall=NOW)
+    assert gate is not None and gate.allowed and gate.code == hr.GATE_OK
+    assert hr.live_headroom(provider, now_wall=NOW) == 1.0
+
+
+def test_current_success_supersedes_stale_exhaustion_and_dated_override(monkeypatch, tmp_path) -> None:
+    headroom = tmp_path / "headroom.json"
+    headroom.write_text(json.dumps({"codex": {
+        "headroom": 0.0,
+        "cooldown_until": hr._iso_from_wall(NOW + 7200),
+        "cooldown_reason": "previous refusal",
+    }}))
+    os.utime(headroom, (NOW - 60, NOW - 60))
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(headroom))
+    hr.record_exhausted("codex", NOW + 7200, observed_at=NOW - 120)
+    hr.record_probe_available("codex", source="codex_exec", observed_at=NOW)
+    assert hr.headroom_resolution(now_wall=NOW)["codex"] == (
+        1.0, hr.HEADROOM_SOURCE_LIVE_PROBE,
+    )
+    assert hr.persisted_cooling("codex", now_wall=NOW) is None
+    assert hr.provider_candidates({"codex": "/bin/codex"}, now_wall=NOW) == ["codex"]
+
+
+def test_unknown_probe_is_distinct_from_exhaustion() -> None:
+    outcome = usage_probe.refresh_usage_if_stale(
+        {"codex": "/bin/codex"}, env={}, now_wall=NOW,
+        run=_fake_run("Not logged in", [], returncode=1),
+    )
+    assert outcome["codex"].startswith("probe failed")
+    entry = hr._read_json_object(hr._usage_path())["codex"]
+    assert entry["probe"]["status"] == "unknown"
+    assert entry.get("exhausted_until") is None
+    gate = hr.usage_gate("codex", now_wall=NOW)
+    assert gate is not None and not gate.allowed and gate.code == hr.GATE_UNKNOWN
+    assert hr.live_headroom("codex", now_wall=NOW) is None
+
+
+def test_native_probe_error_masks_token_like_output() -> None:
+    secret = "mask-" + "a1B2c3D4" * 6
+    output = json.dumps({"type": "turn.failed", "error": f"rejected {secret}"})
+    outcome = usage_probe.refresh_usage_if_stale(
+        {"codex": "/bin/codex"}, env={}, now_wall=NOW,
+        run=_fake_run(output, [], returncode=1),
+    )
+    assert secret not in outcome["codex"]
+    assert secret not in hr._usage_path().read_text()
+    assert "<masked>" in outcome["codex"]
+
+
+def test_explicit_provider_exhaustion_still_refuses() -> None:
+    outcome = usage_probe.refresh_usage_if_stale(
+        {"codex": "/bin/codex"}, env={}, now_wall=NOW,
+        run=_fake_run("usage limit reached; try again in 2 hours", [], returncode=1),
+    )
+    assert outcome == {"codex": "exhausted"}
+    entry = hr._read_json_object(hr._usage_path())["codex"]
+    assert entry["probe"]["status"] == "exhausted"
+    assert hr.live_headroom("codex", now_wall=NOW) == 0.0
+    assert hr.provider_candidates({"codex": "/bin/codex"}, now_wall=NOW) == []
+
+
+def test_every_configured_provider_uses_the_shared_gate_and_adapter(monkeypatch) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,claude,codex")
+    assert hr.usage_gated_providers() == ("cursor", "claude", "codex")
+    assert set(hr.usage_gated_providers()) == set(usage_probe.PROBE_ADAPTERS)
 
 
 def test_refresh_is_skipped_while_reading_is_fresh() -> None:
@@ -549,9 +639,6 @@ def test_account_without_a_weekly_window_names_the_valve() -> None:
 
 
 # --- the probe never runs on the event loop; a failing probe backs off (arch + qa, PR #1369 round 2)
-
-import ast
-import threading
 
 
 def _record_refresh_threads(monkeypatch) -> list:

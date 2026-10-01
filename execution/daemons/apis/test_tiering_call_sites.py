@@ -1354,6 +1354,7 @@ class _Wire:
         self.prompts: dict[str, str] = {}
         self.posts: list[str] = []
         self.worktrees: list[str] = []
+        self.provider_reads = 0
 
 
 def _wire(monkeypatch, world, *, combined: bool, narrow: bool) -> tuple[SwarmDispatcher, _Wire]:
@@ -1418,6 +1419,10 @@ def _wire(monkeypatch, world, *, combined: bool, narrow: bool) -> tuple[SwarmDis
     async def expectations(self, repo, number):
         return {"pavo": "- [ ] the scope matches the issue"}
 
+    async def fake_usable_providers() -> set[str]:
+        w.provider_reads += 1
+        return set()
+
     monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", expectations)
     # Agent prompts load from `skill_runner.ATELES_REPO`, which defaults to the
     # operator's clone (absent in CI); pin it to this checkout.
@@ -1425,7 +1430,9 @@ def _wire(monkeypatch, world, *, combined: bool, narrow: bool) -> tuple[SwarmDis
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_worktree)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
-    monkeypatch.setattr(swarm_dispatch, "usable_providers", lambda: set())
+    monkeypatch.setattr(
+        swarm_dispatch, "usable_providers_async", fake_usable_providers
+    )
     return d, w
 
 
@@ -1438,6 +1445,7 @@ def test_handle_pr_runs_pm_and_qa_in_one_pass_and_posts_their_comments_before_ag
     d, w = _wire(monkeypatch, world, combined=True, narrow=False)
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert w.events.count("skill:pavo") == 1, "one dispatch for the combined lenses"
+    assert w.provider_reads >= 1, "PR handling awaits the refreshed provider view"
     assert "skill:phoenicurus" not in w.events, "qa has no separate dispatch"
     assert "phoenicurus" not in w.worktrees, "no qa checkout for the combined lens"
     assert "post:pm" in w.events and "post:qa" in w.events
