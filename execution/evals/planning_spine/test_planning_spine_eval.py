@@ -169,11 +169,32 @@ raise a checkpoint/escalation if it remains unavailable.
 """
 
 
-def _materialized_fixture_session(run_dir: Path, *_args, **_kwargs) -> dict:
-    """Build the harness result from the fixture graph materialized for this run."""
+def _invoked_scenario(run_dir: Path) -> tuple[str, dict]:
+    """Resolve the active fixture scenario from the invocation prepared for this run."""
+    prompt = (run_dir / "prompt.txt").read_text().strip()
+    matches = [
+        (name, scenario)
+        for name, scenario in FIXTURE["scenarios"].items()
+        if scenario["prompt"].strip() == prompt
+    ]
+    assert len(matches) == 1, f"expected one scenario for prompt, found {len(matches)}"
+    return matches[0]
+
+
+def _materialized_fixture_report(run_dir: Path) -> str:
+    """Build the scenario-appropriate report from the materialized fixture graph."""
     state = json.loads((run_dir / "ws" / "neotoma_state.json").read_text())
     fixture = {**FIXTURE, **state}
-    scenario = fixture["scenarios"]["continue-session-named-session"]
+    scenario_name, scenario = _invoked_scenario(run_dir)
+    halted_reports = {
+        "continue-session-missing-session": NOT_FOUND_REPORT,
+        "continue-session-ambiguous-session": AMBIGUOUS_REPORT,
+        "continue-session-empty-session": EMPTY_REPORT,
+        "continue-session-unreadable-session": UNREADABLE_REPORT,
+    }
+    if scenario_name in halted_reports:
+        return halted_reports[scenario_name]
+
     outcomes = checks.source_session_fixture_outcomes(fixture, scenario)
     rows = []
     disposition_labels = {
@@ -220,6 +241,12 @@ def _materialized_fixture_session(run_dir: Path, *_args, **_kwargs) -> dict:
             "The unresolved lane prevents state-dependent domain action.",
         ]
     )
+    return report
+
+
+def _materialized_fixture_session(run_dir: Path, *_args, **_kwargs) -> dict:
+    """Build the harness result from the fixture graph materialized for this run."""
+    report = _materialized_fixture_report(run_dir)
     return {"turns": [[{"type": "result", "result": report}]], "error": None}
 
 
@@ -1024,6 +1051,93 @@ def test_normal_named_session_invocation_uses_source_session_scorer(
 
     assert result["outcome"] == "pass", result
     assert result["source_session_id"] == "session_fixture_named_handoff"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "resolution"),
+    [
+        ("continue-session-missing-session", "not_found"),
+        ("continue-session-empty-session", "empty"),
+        ("continue-session-unreadable-session", "unreadable"),
+    ],
+)
+def test_normal_recovery_invocation_uses_source_session_scorer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    resolution: str,
+) -> None:
+    monkeypatch.setattr(
+        runner.RULE_RUNNER,
+        "drive_session",
+        _materialized_fixture_session,
+    )
+
+    result = runner.run_scenario(
+        tmp_path / "run",
+        scenario,
+        "fixture-model",
+        0.0,
+        1.0,
+    )
+
+    assert result["outcome"] == "pass", result
+    assert result["resolution"] == resolution
+
+
+@pytest.mark.parametrize(
+    ("scenario", "unsafe_report", "failed_markers"),
+    [
+        (
+            "continue-session-missing-session",
+            NOT_FOUND_REPORT + "\nSelected plan_fixture_01 and domain action completed.\n",
+            {"pre_action_stop", "halted_state_no_domain_action"},
+        ),
+        (
+            "continue-session-empty-session",
+            "Exact session bound successfully; continuation completed normally.",
+            {"explicit_empty_outcome", "halted_state_no_domain_action"},
+        ),
+        (
+            "continue-session-unreadable-session",
+            EMPTY_REPORT.replace(
+                "No work was resumed",
+                "Unreadable evidence was treated as empty; coverage is complete",
+            ),
+            {
+                "unreadable_evidence_named",
+                "unreadable_lanes_unresolved",
+                "unreadable_not_empty_or_complete",
+            },
+        ),
+    ],
+)
+def test_normal_recovery_invocation_rejects_unsafe_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    unsafe_report: str,
+    failed_markers: set[str],
+) -> None:
+    monkeypatch.setattr(
+        runner.RULE_RUNNER,
+        "drive_session",
+        lambda *_args, **_kwargs: {
+            "turns": [[{"type": "result", "result": unsafe_report}]],
+            "error": None,
+        },
+    )
+
+    result = runner.run_scenario(
+        tmp_path / "run",
+        scenario,
+        "fixture-model",
+        0.0,
+        1.0,
+    )
+
+    assert result["outcome"] == "fail"
+    assert failed_markers <= set(result["failed"])
 
 
 def test_normal_harness_first_source_only_mutation_goes_red(
