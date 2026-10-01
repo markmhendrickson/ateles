@@ -17,8 +17,10 @@ name: pytest env guard
 # conftest.py and the apis conftest import every hook the guard provides. The
 # same test file also runs in the `pytest` job of ateles-tests.yml.
 #
-# Required-check registration is a repo-settings action the operator owns; the
-# check name to register is "guard tests" (job below).
+# Merge enforcement is provided by the required, unfiltered
+# `gitleaks (secrets + PII)` job in secret-pii-scan.yml, which runs the same
+# effect tests. This separate unfiltered job keeps failures attributable to the
+# pytest guard itself and catches regressions on main as well as pull requests.
 
 on:
   pull_request:
