@@ -3670,7 +3670,18 @@ class SwarmDispatcher:
             # path must clear every marker for this issue so the startup sweep
             # cannot resurrect an attempt that was explicitly refused.
             await self._clear_pipeline_inflight(trigger)
-            durable = await self._record_issue_pipeline_failure(trigger, exc)
+            try:
+                durable = await self._record_issue_pipeline_failure(trigger, exc)
+            except Exception:
+                # The refusal and blocker notification must remain observable
+                # even when the durable event store or its readback is down.
+                # Do not interpolate the exception: an upstream response may
+                # contain credential or user-supplied material.
+                durable = False
+                log.error(
+                    f"[{DAEMON_NAME}] {ref}: could not persist and read back "
+                    "the sanitized issue-pipeline failure event"
+                )
             level = "durably recorded" if durable else "DURABILITY UNCONFIRMED"
             log.error(
                 f"[{DAEMON_NAME}] {ref}: refusing issue pipeline before agent "

@@ -139,6 +139,53 @@ def test_marker_403_refuses_agents_and_persists_sanitized_failure(monkeypatch):
     assert any("required GitHub write failed" in msg for msg in dispatcher.notifier.sent)
 
 
+@pytest.mark.parametrize("failure_point", ["store", "readback"])
+def test_failure_record_outage_still_sends_blocker(monkeypatch, failure_point):
+    launched: list[int] = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, **kwargs):
+            return _Response(403, {})
+
+        async def get(self, url, **kwargs):
+            return _Response(200, [])
+
+    async def store(self, entities, idempotency_key):
+        if failure_point == "store":
+            raise RuntimeError("synthetic store outage")
+        return {"entities": [{"entity_id": "ent_failure"}]}
+
+    async def query(self, path, payload):
+        assert failure_point == "readback"
+        raise RuntimeError("synthetic readback outage")
+
+    async def pipeline(self, trigger):
+        launched.append(trigger.number)
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", store)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_post", query)
+    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", pipeline)
+
+    dispatcher = _dispatcher()
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert launched == []
+    assert any(
+        "DURABILITY UNCONFIRMED" in message
+        for message in dispatcher.notifier.sent
+    )
+
+
 def test_readiness_probes_issue_write_without_reading_or_replacing_body(monkeypatch):
     calls: list[tuple[str, str, object]] = []
     launched: list[int] = []
