@@ -85,6 +85,18 @@ def test_mechanism_dense_final_without_impact_or_next_action_blocks():
     assert any("next owner/action" in item for item in found)
 
 
+def test_impact_language_does_not_count_as_a_next_action():
+    transcript = gate.Transcript(
+        commentary=(),
+        final=(
+            "Changed execution/daemons/apis/router.py at 21d60ce0; PID 4821, "
+            "rc=0, 37 tests passed. This will prevent regressions.",
+        ),
+    )
+    found = gate.findings(transcript)
+    assert any("next owner/action" in item for item in found)
+
+
 def test_jargon_dense_final_without_translation_blocks():
     transcript = gate.Transcript(
         commentary=(),
