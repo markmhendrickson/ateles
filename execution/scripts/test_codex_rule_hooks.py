@@ -741,12 +741,13 @@ class TestCodexGuardEffect(unittest.TestCase):
                 {
                     "session_id": "codex-reporting-session",
                     "hook_event_name": "Stop",
+                    "model": "codex-test-model",
                     "transcript_path": str(transcript),
                     "last_assistant_message": "Done — see above.",
                     "cwd": str(REPO_ROOT),
                 },
             )
-        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["decision"], "block")
         self.assertIn("per-tool narration", payload["reason"])

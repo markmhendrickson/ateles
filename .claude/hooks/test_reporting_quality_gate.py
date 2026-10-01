@@ -109,7 +109,7 @@ def test_short_settled_final_after_commentary_is_self_contained():
     assert gate.findings(transcript) == []
 
 
-def test_stop_hook_is_blocking_by_default(tmp_path, monkeypatch, capsys):
+def test_claude_stop_hook_preserves_exit_two_contract(tmp_path, monkeypatch, capsys):
     path = _write(
         tmp_path,
         [
@@ -130,11 +130,13 @@ def test_codex_stable_last_message_field_owns_final(tmp_path, monkeypatch, capsy
         [_codex_row("commentary", "The transcript wire format could change.")],
     )
     event = {
+        "hook_event_name": "Stop",
+        "model": "codex-test-model",
         "transcript_path": path,
         "last_assistant_message": "Done — see the updates above.",
     }
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
-    assert gate.main() == 2
+    assert gate.main() == 0
     assert "self-contained" in json.loads(capsys.readouterr().out)["reason"]
 
 
@@ -149,13 +151,15 @@ def test_codex_last_message_preserves_all_phased_commentary(
         ],
     )
     event = {
+        "hook_event_name": "Stop",
+        "model": "codex-test-model",
         "transcript_path": path,
         "last_assistant_message": (
             "Review complete. This confirms the behavior. No changes are needed."
         ),
     }
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
-    assert gate.main() == 2
+    assert gate.main() == 0
     assert "per-tool narration" in json.loads(capsys.readouterr().out)["reason"]
 
 
