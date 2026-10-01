@@ -30,7 +30,6 @@ import swarm_dispatch
 from skill_runner import SkillResult
 from swarm_dispatch import SwarmDispatcher
 from test_swarm_dispatch import (
-    _FakeSpecStore,
     _StubNotifier,
     _async_return,
     _config,
@@ -1083,7 +1082,7 @@ def test_a_small_rereview_delta_runs_pm_qa_ux_mid_and_arch_security_top(github):
     assert signals.changed_files == ("src/feature.py",)
     assert signals.review_round == 2 and signals.prior_blocking_finding
     assert not signals.new_blocking_finding and not signals.diff_unreadable
-    assert {l: _tier_for(l, signals) for l in ("pm", "qa", "ux")} == {
+    assert {lens: _tier_for(lens, signals) for lens in ("pm", "qa", "ux")} == {
         "pm": "mid", "qa": "mid", "ux": "mid",
     }
     assert _tier_for("arch", signals) == "top"
