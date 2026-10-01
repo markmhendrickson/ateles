@@ -204,6 +204,53 @@ def test_cli_exec_unconfigured_exits_2_without_running(monkeypatch, capsys):
     assert "not configured" in capsys.readouterr().err
 
 
+def test_cli_push_uses_app_token_only_for_git_branch_push(
+    configured, monkeypatch, capsys
+):
+    """The natural branch-push path must not reuse the durable author PAT."""
+    seen = {}
+
+    def fake_exec(file, args, env):
+        seen.update(file=file, args=args, env=env)
+
+    monkeypatch.setenv("ATELES_AGENT_PAT", "github_pat_durable_author")
+    monkeypatch.setattr(gat.os, "execvpe", fake_exec)
+
+    gat.main(
+        [
+            "push",
+            "--repo",
+            "o/r",
+            "--",
+            "--set-upstream",
+            "origin",
+            "topic-branch",
+        ]
+    )
+
+    assert seen["file"] == "git"
+    assert seen["args"] == [
+        "git",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.https://github.com.helper=!gh auth git-credential",
+        "-c",
+        "credential.interactive=never",
+        "push",
+        "--set-upstream",
+        "origin",
+        "topic-branch",
+    ]
+    app_token = seen["env"]["GH_TOKEN"]
+    assert app_token.startswith("ghs_fake_")
+    assert seen["env"]["GITHUB_TOKEN"] == app_token
+    assert app_token != seen["env"]["ATELES_AGENT_PAT"]
+    assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    out = capsys.readouterr()
+    assert app_token not in out.out and app_token not in out.err
+
+
 def test_gh_read_env_injects_app_token(configured, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_ambient_pat")
     env = gat.gh_read_env("o/r")

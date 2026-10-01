@@ -33,6 +33,10 @@ CLI (never prints a token):
     python3 lib/github_app_token.py exec [--repo owner/name] [--env NAME ...] -- CMD ...
         Run CMD with GH_TOKEN and GITHUB_TOKEN (plus any --env names) set to a
         fresh installation token. The token exists only in CMD's environment.
+    python3 lib/github_app_token.py push --repo owner/name -- [GIT-PUSH-ARG ...]
+        Push the current branch with the installation token supplied through
+        gh's Git credential helper. This action does not create a pull request:
+        PR authorship remains a separate principal from the approving App.
 """
 
 from __future__ import annotations
@@ -375,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         argv, cmd_tail = argv[:split], argv[split + 1 :]
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("action", choices=("check", "exec"))
+    parser.add_argument("action", choices=("check", "exec", "push"))
     parser.add_argument("--repo", default=None, help="owner/name (resolves the installation)")
     parser.add_argument("--prefix", default=DEFAULT_APP_ENV_PREFIX, help="App env prefix")
     parser.add_argument(
@@ -386,8 +390,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "check":
             return _cli_check(args.repo, args.prefix)
+        if args.action == "push" and not args.repo:
+            raise AppTokenError("push requires --repo owner/name")
         if not cmd_tail:
-            parser.error("exec needs a command after --")
+            if args.action == "exec":
+                parser.error("exec needs a command after --")
         env = {
             **os.environ,
             **token_env(args.repo, prefix=args.prefix, extra_names=tuple(args.env)),
@@ -395,7 +402,27 @@ def main(argv: list[str] | None = None) -> int:
     except AppTokenError as exc:
         print(f"github_app_token: {exc}", file=sys.stderr)
         return 2
-    os.execvpe(cmd_tail[0], cmd_tail, env)
+    if args.action == "push":
+        # Keep the token in the child environment, not argv or git config.
+        # Clearing credential.helper prevents an ambient operator keychain from
+        # winning; gh then serves the App token from GH_TOKEN for github.com.
+        # This is deliberately branch-push-only. PR creation keeps its separate
+        # author identity so this App can remain the binding reviewer.
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        git_argv = [
+            "git",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.https://github.com.helper=!gh auth git-credential",
+            "-c",
+            "credential.interactive=never",
+            "push",
+            *cmd_tail,
+        ]
+        os.execvpe("git", git_argv, env)
+    else:
+        os.execvpe(cmd_tail[0], cmd_tail, env)
     return 127  # unreachable
 
 
