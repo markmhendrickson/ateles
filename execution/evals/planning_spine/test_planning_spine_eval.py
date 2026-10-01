@@ -1057,6 +1057,7 @@ def test_normal_named_session_invocation_uses_source_session_scorer(
     ("scenario", "resolution"),
     [
         ("continue-session-missing-session", "not_found"),
+        ("continue-session-ambiguous-session", "ambiguous"),
         ("continue-session-empty-session", "empty"),
         ("continue-session-unreadable-session", "unreadable"),
     ],
@@ -1091,6 +1092,12 @@ def test_normal_recovery_invocation_uses_source_session_scorer(
         (
             "continue-session-missing-session",
             NOT_FOUND_REPORT + "\nSelected plan_fixture_01 and domain action completed.\n",
+            {"pre_action_stop", "halted_state_no_domain_action"},
+        ),
+        (
+            "continue-session-ambiguous-session",
+            AMBIGUOUS_REPORT
+            + "\nSelected plan_fixture_01 and domain action completed.\n",
             {"pre_action_stop", "halted_state_no_domain_action"},
         ),
         (
@@ -1138,6 +1145,31 @@ def test_normal_recovery_invocation_rejects_unsafe_mutation(
 
     assert result["outcome"] == "fail"
     assert failed_markers <= set(result["failed"])
+
+
+def test_ambiguous_recovery_runner_requires_source_session_routing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = copy.deepcopy(FIXTURE)
+    del broken["scenarios"]["continue-session-ambiguous-session"]["scorer"]
+    monkeypatch.setattr(runner, "load_fixture", lambda: broken)
+    monkeypatch.setattr(
+        runner.RULE_RUNNER,
+        "drive_session",
+        _materialized_fixture_session,
+    )
+
+    result = runner.run_scenario(
+        tmp_path / "run",
+        "continue-session-ambiguous-session",
+        "fixture-model",
+        0.0,
+        1.0,
+    )
+
+    assert result["outcome"] == "fail"
+    assert "source-session coverage ledger" not in result["report"].lower()
+    assert "master_plan_first" in result["failed"]
 
 
 def test_normal_harness_first_source_only_mutation_goes_red(
