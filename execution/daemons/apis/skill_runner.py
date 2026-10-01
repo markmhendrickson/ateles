@@ -275,11 +275,12 @@ def _codex_gate_enabled_tools(agent_tools: list[str]) -> tuple[str, ...] | None:
 def _codex_gate_config_text(base_url: str, agent_tools: list[str]) -> str:
     """Render the complete isolated Codex config for one gate-owning run."""
     enabled_tools = _codex_gate_enabled_tools(agent_tools)
+    endpoint = f"{base_url.rstrip('/')}/mcp"
     lines = [
         'cli_auth_credentials_store = "file"',
         "",
         f"[mcp_servers.{CODEX_NEOTOMA_SERVER_ID}]",
-        f"url = {json.dumps(f'{base_url.rstrip('/')}/mcp')}",
+        f"url = {json.dumps(endpoint)}",
         f"bearer_token_env_var = {json.dumps(CODEX_GATE_BEARER_ENV)}",
         "required = true",
     ]
