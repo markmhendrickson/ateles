@@ -37,10 +37,10 @@ canonical_context_entities:
   - operator_profile
   - locale_profile
   - swarm_roster
-  - channel_config
   - vendor_binding
   - task_policy
   - payment_profile
+  - channel_config
 ---
 
 # monedula
