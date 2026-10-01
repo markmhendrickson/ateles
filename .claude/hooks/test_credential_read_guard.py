@@ -494,6 +494,10 @@ BASH_BLOCK = [
         f"source {ENV}; /usr/bin/git -c alias.x=!env x",
     ),
     (
+        "nonstandard git path alias executes env after source",
+        f"source {ENV}; /opt/homebrew/bin/git -c alias.x=!env x",
+    ),
+    (
         "git pager executes bare env after source",
         f"source {ENV}; git -c core.pager=env log",
     ),
@@ -504,6 +508,10 @@ BASH_BLOCK = [
     (
         "pathed git pager executes env after source",
         f"source {ENV}; /usr/bin/git -c core.pager=env log",
+    ),
+    (
+        "normalized git path pager executes env after source",
+        f"source {ENV}; /opt/homebrew/bin/../bin//git -c core.pager=env log",
     ),
 ]
 
@@ -685,6 +693,15 @@ BASH_ALLOW = [
     (
         "git pager env -u runs a program after source",
         f"source {ENV}; git -c core.pager='env -u X less' log",
+    ),
+    (
+        "nonstandard git path keeps ordinary config data after source",
+        f"source {ENV}; /opt/homebrew/bin/git -c user.name=env status",
+    ),
+    (
+        "normalized git path pager env -u runs a program after source",
+        f"source {ENV}; /opt/homebrew/bin/../bin//git "
+        "-c core.pager='env -u X less' log",
     ),
     (
         "sourced variable used as a request header, response discarded",

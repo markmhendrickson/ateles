@@ -101,6 +101,7 @@ crashes the harness is worse than either.
 
 import json
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -934,7 +935,38 @@ def _env_program(tail: str):
     return None
 
 
-_CANONICAL_GIT_COMMANDS = frozenset({"git", "/bin/git", "/usr/bin/git"})
+def _lexically_resolves_to_git(command_word: str) -> bool | None:
+    """Classify a command word without consulting the filesystem.
+
+    Git may be installed below any prefix, and redundant separators or
+    parent traversal do not change the executable's final path component.
+    Dynamic command words cannot be classified safely at hook time.
+    """
+    if command_word == "git":
+        return True
+    if any(marker in command_word for marker in ("$", "`", "*", "?", "[")):
+        return None
+    if "/" not in command_word:
+        return False
+    normalized = posixpath.normpath(command_word)
+    return posixpath.basename(normalized) == "git"
+
+
+def _has_executable_git_config(words: list[str]) -> bool:
+    """Return whether words carry a Git config key that names a command."""
+    for index, word in enumerate(words):
+        if word == "-c" and index + 1 < len(words):
+            config = words[index + 1]
+        elif word.startswith("-c") and len(word) > 2:
+            config = word[2:]
+        else:
+            continue
+        key, separator, _value = config.partition("=")
+        if separator and (
+            key.lower().startswith("alias.") or key.lower() == "core.pager"
+        ):
+            return True
+    return False
 
 
 def _git_config_post_source(segment: str) -> tuple[bool, str]:
@@ -950,10 +982,25 @@ def _git_config_post_source(segment: str) -> tuple[bool, str]:
     try:
         words = shlex.split(segment)
     except ValueError:
+        # A malformed Git command carrying an executable config value is an
+        # uninspectable safety field. The generic matcher cannot distinguish
+        # the config value from Git's later operands, so deny rather than let
+        # the parse error erase the executable sink.
+        if re.search(r"(?:^|\s)(?:[^\s;|&]*/)?git(?:/+)?\s", segment) and re.search(
+            r"(?:^|\s)-c(?:\s+)?(?:alias\.[^=\s]+|core\.pager)=",
+            segment,
+            re.IGNORECASE,
+        ):
+            return True, segment
         return False, segment
     while words and _ASSIGNMENT_WORD_RE.fullmatch(words[0]):
         words = words[1:]
-    if not words or words[0] not in _CANONICAL_GIT_COMMANDS:
+    if not words:
+        return False, segment
+    git_command = _lexically_resolves_to_git(words[0])
+    if git_command is None:
+        return (_has_executable_git_config(words[1:]), segment)
+    if not git_command:
         return False, segment
 
     masked = list(words)
