@@ -57,13 +57,21 @@ def _dispatcher() -> SwarmDispatcher:
     )
 
 
-def _install_durable_failure_store(monkeypatch, captured: list[dict]) -> None:
+def _install_durable_failure_store(
+    monkeypatch,
+    captured: list[dict],
+    events: list[str] | None = None,
+) -> None:
     async def store(self, entities, idempotency_key):
+        if events is not None:
+            events.append("failure-stored")
         captured.extend(entities)
         return {"entities": [{"entity_id": "ent_failure"}]}
 
     async def query(self, path, payload):
         assert path == "entities/query"
+        if events is not None:
+            events.append("failure-read-back")
         return {
             "entities": [
                 {
@@ -119,7 +127,7 @@ def test_marker_403_refuses_agents_and_persists_sanitized_failure(monkeypatch):
     assert any("required GitHub write failed" in msg for msg in dispatcher.notifier.sent)
 
 
-def test_readiness_uses_real_comment_post_and_issue_body_patch(monkeypatch):
+def test_readiness_probes_issue_write_without_reading_or_replacing_body(monkeypatch):
     calls: list[tuple[str, str, object]] = []
     launched: list[int] = []
 
@@ -135,7 +143,7 @@ def test_readiness_uses_real_comment_post_and_issue_body_patch(monkeypatch):
 
         async def post(self, url, json=None, **kwargs):
             calls.append(("POST", url, json))
-            return _Response(201, {})
+            return _Response(201, {"id": 77})
 
         async def get(self, url, **kwargs):
             calls.append(("GET", url, None))
@@ -145,7 +153,7 @@ def test_readiness_uses_real_comment_post_and_issue_body_patch(monkeypatch):
 
         async def patch(self, url, json=None, **kwargs):
             calls.append(("PATCH", url, json))
-            return _Response(200, {})
+            return _Response(422, {})
 
     async def pipeline(self, trigger):
         launched.append(trigger.number)
@@ -157,11 +165,17 @@ def test_readiness_uses_real_comment_post_and_issue_body_patch(monkeypatch):
 
     assert launched == [_issue_trigger().number]
     assert calls[0][0] == "POST" and calls[0][1].endswith("/comments")
-    assert ("PATCH", calls[2][1], {"body": "current issue body"}) == calls[2]
+    assert calls[1][0] == "PATCH"
+    assert calls[1][2] == {"state": "apis-write-readiness-probe"}
+    assert not any(
+        method == "GET" and not url.endswith("/comments")
+        for method, url, _payload in calls
+    )
 
 
 def test_issue_body_patch_403_is_a_bounded_write_error(monkeypatch):
     planted_payload = "raw-github-error-body"
+    deleted: list[str] = []
 
     class Client:
         def __init__(self, *args, **kwargs):
@@ -174,13 +188,14 @@ def test_issue_body_patch_403_is_a_bounded_write_error(monkeypatch):
             return False
 
         async def post(self, url, **kwargs):
-            return _Response(201, {})
-
-        async def get(self, url, **kwargs):
-            return _Response(200, {"body": "current body"})
+            return _Response(201, {"id": 88})
 
         async def patch(self, url, **kwargs):
             return _Response(403, {}, secret_body=planted_payload)
+
+        async def delete(self, url, **kwargs):
+            deleted.append(url)
+            return _Response(204, {})
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
 
@@ -194,11 +209,15 @@ def test_issue_body_patch_403_is_a_bounded_write_error(monkeypatch):
     assert raised.value.stage == "github_issue_body_write"
     assert raised.value.status_code == 403
     assert planted_payload not in str(raised.value)
+    assert deleted == [
+        "https://api.github.com/repos/owner/repo/issues/comments/88"
+    ]
 
 
 def test_issue_body_patch_403_refuses_agents_and_records_failure(monkeypatch):
     stored: list[dict] = []
     launched: list[int] = []
+    events: list[str] = []
 
     class Client:
         def __init__(self, *args, **kwargs):
@@ -211,24 +230,34 @@ def test_issue_body_patch_403_refuses_agents_and_records_failure(monkeypatch):
             return False
 
         async def post(self, url, **kwargs):
-            return _Response(201, {})
-
-        async def get(self, url, **kwargs):
-            return _Response(200, {"body": "current body"})
+            events.append("marker-created")
+            return _Response(201, {"id": 99})
 
         async def patch(self, url, **kwargs):
+            events.append("write-probe-failed")
             return _Response(403, {})
+
+        async def delete(self, url, **kwargs):
+            events.append("marker-cleared")
+            return _Response(204, {})
 
     async def pipeline(self, trigger):
         launched.append(trigger.number)
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
     monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", pipeline)
-    _install_durable_failure_store(monkeypatch, stored)
+    _install_durable_failure_store(monkeypatch, stored, events)
 
     asyncio.run(_dispatcher()._handle_issue_opened(_issue_trigger()))
 
     assert launched == []
+    assert events == [
+        "marker-created",
+        "write-probe-failed",
+        "marker-cleared",
+        "failure-stored",
+        "failure-read-back",
+    ]
     assert stored[0]["summary"] == (
         "issue pipeline refused at github_issue_body_write (HTTP 403)"
     )

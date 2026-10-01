@@ -3684,11 +3684,17 @@ class SwarmDispatcher:
         """Require the GitHub write surfaces before dispatching any agent.
 
         The marker POST is the real durable-resume write, not a synthetic
-        permission lookup.  On the ``inflight`` transition we also GET and
-        PATCH the issue body with its current value.  That no-op PATCH uses the
-        exact method, URL and JSON shape the later spec mirror uses, proving
-        both required write capabilities before Lanius or any section agent is
-        launched.  Any failure is fatal to this pipeline attempt.
+        permission lookup. On the ``inflight`` transition we PATCH the issue
+        endpoint with an intentionally invalid ``state`` value. GitHub reaches
+        issue-write authorization before validating that field: HTTP 422 is
+        therefore the expected success signal, and no issue content changes.
+        This proves the same endpoint and permission the later body mirror uses
+        without a GET/PATCH race that could restore a stale body over a
+        concurrent human edit. Any other response is fatal to this attempt.
+
+        If the marker POST succeeds but the write probe fails, delete that
+        exact marker before surfacing the failure. The durable Neotoma failure
+        record is written by the caller independently of this compensation.
         """
         marker = self._PIPELINE_INFLIGHT_MARKER.format(
             started_at=datetime.now(timezone.utc).isoformat(), stage=stage
@@ -3711,26 +3717,69 @@ class SwarmDispatcher:
 
             if stage != "inflight":
                 return
+            try:
+                marker_payload = resp.json()
+            except (TypeError, ValueError):
+                marker_payload = {}
+            marker_id = (
+                marker_payload.get("id")
+                if isinstance(marker_payload, dict)
+                else None
+            )
             issue_url = (
                 f"https://api.github.com/repos/{trigger.repository}/issues/"
                 f"{trigger.number}"
             )
             try:
-                current = await client.get(
-                    issue_url, headers=self._github_headers(trigger.repository)
-                )
-                current.raise_for_status()
-                current_body = current.json().get("body") or ""
                 patch = await client.patch(
                     issue_url,
-                    json={"body": current_body},
+                    json={"state": "apis-write-readiness-probe"},
                     headers=self._github_headers(trigger.repository),
                 )
-                patch.raise_for_status()
+                if patch.status_code != 422:
+                    patch.raise_for_status()
+                    raise IssuePipelineWriteError(
+                        "github_issue_body_probe_unexpected",
+                        patch.status_code,
+                    )
             except Exception as exc:
+                await self._clear_created_pipeline_marker(
+                    trigger, client, marker_id
+                )
+                if isinstance(exc, IssuePipelineWriteError):
+                    raise
                 raise IssuePipelineWriteError(
                     "github_issue_body_write", self._http_status(exc)
                 ) from exc
+
+    async def _clear_created_pipeline_marker(
+        self,
+        trigger: SwarmTrigger,
+        client: httpx.AsyncClient,
+        marker_id: object,
+    ) -> None:
+        """Delete the exact marker created by the readiness attempt."""
+        if not isinstance(marker_id, int) or isinstance(marker_id, bool):
+            log.error(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                "write readiness failed after marker creation, but GitHub "
+                "returned no marker id; falling back to marker scan"
+            )
+            await self._clear_pipeline_inflight(trigger)
+            return
+        try:
+            deleted = await client.delete(
+                f"https://api.github.com/repos/{trigger.repository}/issues/"
+                f"comments/{marker_id}",
+                headers=self._github_headers(trigger.repository),
+            )
+            deleted.raise_for_status()
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                "could not clear readiness marker after the write probe failed "
+                f"(HTTP {self._http_status(exc) or 'unknown'})"
+            )
 
     @staticmethod
     def _http_status(exc: Exception) -> int | None:
@@ -3785,9 +3834,14 @@ class SwarmDispatcher:
                 "include_snapshots": True,
             },
         )
-        expected = {key: value for key, value in entity.items() if key != "entity_type"}
+        expected = {
+            key: value for key, value in entity.items() if key != "entity_type"
+        }
         return any(
-            all((row.get("snapshot") or {}).get(key) == value for key, value in expected.items())
+            all(
+                (row.get("snapshot") or {}).get(key) == value
+                for key, value in expected.items()
+            )
             for row in (data or {}).get("entities", [])
         )
 
