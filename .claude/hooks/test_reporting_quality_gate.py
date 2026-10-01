@@ -138,6 +138,27 @@ def test_codex_stable_last_message_field_owns_final(tmp_path, monkeypatch, capsy
     assert "self-contained" in json.loads(capsys.readouterr().out)["reason"]
 
 
+def test_codex_last_message_preserves_all_phased_commentary(
+    tmp_path, monkeypatch, capsys
+):
+    path = _write(
+        tmp_path,
+        [
+            _codex_row("commentary", "I’ll inspect the file next."),
+            _codex_row("commentary", "I’ll run the test next."),
+        ],
+    )
+    event = {
+        "transcript_path": path,
+        "last_assistant_message": (
+            "Review complete. This confirms the behavior. No changes are needed."
+        ),
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+    assert gate.main() == 2
+    assert "per-tool narration" in json.loads(capsys.readouterr().out)["reason"]
+
+
 def test_missing_transcript_fails_open(monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
     assert gate.main() == 0

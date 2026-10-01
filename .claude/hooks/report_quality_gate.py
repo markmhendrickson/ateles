@@ -141,7 +141,7 @@ def read_transcript(path: str | None) -> Transcript:
 
     explicit_final = tuple(text for phase, text in rows if phase == "final_answer")
     explicit_commentary = tuple(text for phase, text in rows if phase == "commentary")
-    if explicit_final:
+    if explicit_commentary or explicit_final:
         return Transcript(explicit_commentary, explicit_final)
     # Claude has no phase marker: its final assistant text is the last row and
     # earlier assistant text in the turn is the progress stream.
@@ -165,9 +165,7 @@ def findings(transcript: Transcript) -> list[str]:
         )
 
     final = "\n".join(transcript.final).strip()
-    if COLLAPSED_REFERENCE_RE.search(final) or (
-        transcript.commentary and len(final) < 45 and not IMPACT_RE.search(final)
-    ):
+    if COLLAPSED_REFERENCE_RE.search(final):
         found.append(
             "final is not self-contained: restate the outcome, why it matters, and "
             "the next owner/action because commentary may collapse"
