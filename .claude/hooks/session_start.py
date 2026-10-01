@@ -29,14 +29,20 @@ def main() -> int:
     save_state(session_id, state)
 
     # Context reminder — keeps the binding contract in working attention.
+    # Deliberately names NO default plan: the binding is resolved per
+    # workstream, and a named default is what bound every session to the
+    # swarm architecture plan regardless of what it was working on.
     print(
         "[session-integrity] This is a write-bearing-capable session. Per "
-        "docs/session_integrity.md: bind this session's conversation entity "
-        f"PART_OF a plan (default: {DEFAULT_PLAN_ID}), store each turn as "
-        "user+assistant agent_message rows PART_OF the conversation, and link "
-        "any derived artifacts REFERS_TO the conversation + PART_OF the plan. "
-        "A write-bearing session that ends with no plan link or no stored "
-        "turns will be flagged at Stop."
+        "docs/session_integrity.md: resolve the plan matching THIS session's "
+        "workstream (retrieve_entities entity_type=plan, search=<workstream>; "
+        "create one if none fits) and bind this session's conversation entity "
+        "PART_OF it. There is no default plan — do not fall back to the swarm "
+        "architecture plan, which is superseded for new work. Store each turn "
+        "as user+assistant agent_message rows PART_OF the conversation, and "
+        "link any derived artifacts REFERS_TO the conversation + PART_OF the "
+        "plan. A write-bearing session that ends with no plan link or no "
+        "stored turns will be flagged at Stop."
     )
 
     # Intake protocol — auto-engage the fast intake→dispatch→report flow on the
