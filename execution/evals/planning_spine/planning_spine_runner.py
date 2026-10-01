@@ -157,7 +157,7 @@ def score_scenario_report(report: str, fixture: dict, scenario: str) -> dict:
     scenario_data = fixture["scenarios"][scenario]
     scorer = scenario_data.get("scorer", "planning_spine")
     if scorer == "source_session_resume":
-        return checks.score_source_session_resume(report, scenario_data)
+        return checks.score_source_session_resume(report, fixture, scenario_data)
     if scorer == "planning_spine":
         invoked_skill = scenario_data.get("invoked_skill", scenario)
         return checks.score_report(report, fixture, invoked_skill=invoked_skill)

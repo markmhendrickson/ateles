@@ -94,12 +94,7 @@ VALID_REPORT = """
 truth for this report.
 """
 
-SOURCE_SESSION_SCENARIO = {
-    "source_session_id": "session_fixture_named_handoff",
-    "lane_ids": [f"lane_fixture_{index:02d}" for index in range(1, 14)],
-    "task_ids": [f"task_fixture_{index:02d}" for index in range(1, 14)],
-    "plan_ids": [f"plan_fixture_{index:02d}" for index in range(1, 14)],
-}
+SOURCE_SESSION_SCENARIO = FIXTURE["scenarios"]["continue-session-named-session"]
 
 WHOLE_SESSION_REPORT = """
 ## Source session: Named handoff (`session_fixture_named_handoff`)
@@ -122,13 +117,205 @@ The exact source session was bound before any similarly named workstream plan.
 | `lane_fixture_10` sibling lane | `task_fixture_10` / `plan_fixture_10` | Imported |
 | `lane_fixture_11` sibling lane | `task_fixture_11` / `plan_fixture_11` | Explicitly excluded — terminal and superseded |
 | `lane_fixture_12` sibling lane | `task_fixture_12` / `plan_fixture_12` | Explicitly excluded — outside requested scope |
-| `lane_fixture_13` sibling lane | `task_fixture_13` / `plan_fixture_13` | Unresolved — canonical task is ambiguous |
+| `lane_fixture_13` sibling lane | Candidates: `task_fixture_13` → `plan_fixture_13`; `task_fixture_13_candidate_b` → `plan_fixture_13_candidate_b` | Unresolved — canonical task is ambiguous |
 
 audited: 13; imported: 10; excluded: 2; unresolved: 1
 
 The coverage balance is 13 = 10 + 2 + 1. The unresolved lane prevents a
 comprehensive-resume claim and any domain action that assumes its state.
 """
+
+
+def _expected_fixture_binding_ids() -> tuple[list[str], list[str]]:
+    indexes = range(1, 14)
+    return (
+        [f"task_fixture_{index:02d}" for index in indexes],
+        [f"plan_fixture_{index:02d}" for index in range(1, 14)],
+    )
+
+
+def _source_lanes_by_kind(fixture: dict) -> dict[str, set[str]]:
+    found: dict[str, set[str]] = {}
+    for entity in fixture["entities"].values():
+        snapshot = entity.get("snapshot", {})
+        source_kind = snapshot.get("source_kind")
+        if not source_kind:
+            continue
+        lane_ids = {
+            item["lane_id"]
+            for item in snapshot.get("source_lanes", [])
+            if item.get("lane_id")
+        }
+        if snapshot.get("source_lane_id"):
+            lane_ids.add(snapshot["source_lane_id"])
+        found.setdefault(source_kind, set()).update(lane_ids)
+    return found
+
+
+def test_named_session_fixture_declares_every_task_and_plan_entity() -> None:
+    task_ids, plan_ids = _expected_fixture_binding_ids()
+
+    missing = [
+        entity_id
+        for entity_id in [*task_ids, *plan_ids]
+        if entity_id not in FIXTURE["entities"]
+    ]
+
+    assert missing == []
+
+
+def test_named_session_fixture_binds_every_numbered_task_to_its_plan() -> None:
+    task_ids, plan_ids = _expected_fixture_binding_ids()
+    edges = {
+        (edge["source_entity_id"], edge["target_entity_id"])
+        for edge in FIXTURE["relationships"]
+        if edge["relationship_type"] == "PART_OF"
+    }
+
+    missing = [
+        (task_id, plan_id)
+        for task_id, plan_id in zip(task_ids, plan_ids, strict=True)
+        if (task_id, plan_id) not in edges
+    ]
+
+    assert missing == []
+
+
+def test_ambiguous_lane_exposes_candidates_without_asserting_canonical_pair() -> None:
+    scenario = FIXTURE["scenarios"]["continue-session-named-session"]
+    candidates = []
+    for entity_id, entity in FIXTURE["entities"].items():
+        snapshot = entity.get("snapshot", {})
+        if snapshot.get("source_lane_id") == "lane_fixture_13":
+            candidates.append(entity_id)
+
+    assert "task_ids" not in scenario
+    assert "plan_ids" not in scenario
+    assert sorted(candidates) == [
+        "task_fixture_13",
+        "task_fixture_13_candidate_b",
+    ]
+    assert "`task_fixture_13` / `plan_fixture_13`" not in WHOLE_SESSION_REPORT
+
+
+def test_named_session_fixture_requires_union_beyond_narrow_candidate() -> None:
+    scenario = FIXTURE["scenarios"]["continue-session-named-session"]
+    prompt = scenario["prompt"]
+    session_snapshot = FIXTURE["entities"][scenario["source_session_id"]]["snapshot"]
+    lanes_by_kind = _source_lanes_by_kind(FIXTURE)
+
+    assert "Lanes 1-10" not in prompt
+    assert "imported" not in prompt.lower()
+    assert "workstream_lanes" not in session_snapshot
+    assert set(lanes_by_kind) == {
+        "transcript",
+        "workboard",
+        "linked_task",
+        "terminal_handoff",
+    }
+    assert set().union(*lanes_by_kind.values()) == {
+        f"lane_fixture_{index:02d}" for index in range(1, 14)
+    }
+    assert all(len(lanes) < 13 for lanes in lanes_by_kind.values())
+
+
+def test_named_session_bindings_are_derived_from_fixture_graph() -> None:
+    result = checks.source_session_fixture_outcomes(FIXTURE, SOURCE_SESSION_SCENARIO)
+
+    assert result["failed"] == []
+    assert result["bindings"]["lane_fixture_01"] == {
+        "outcome": "unique",
+        "pairs": [("task_fixture_01", "plan_fixture_01")],
+        "invalid_tasks": [],
+    }
+    assert result["bindings"]["lane_fixture_13"] == {
+        "outcome": "ambiguous",
+        "pairs": [
+            ("task_fixture_13", "plan_fixture_13"),
+            ("task_fixture_13_candidate_b", "plan_fixture_13_candidate_b"),
+        ],
+        "invalid_tasks": [],
+    }
+
+
+def test_scorer_fails_when_a_bound_task_entity_does_not_exist() -> None:
+    broken = copy.deepcopy(FIXTURE)
+    del broken["entities"]["task_fixture_05"]
+
+    result = checks.score_source_session_resume(
+        WHOLE_SESSION_REPORT,
+        broken,
+        broken["scenarios"]["continue-session-named-session"],
+    )
+
+    assert result["outcome"] == "fail"
+    assert "fixture_graph_binding" in result["failed"]
+
+
+def test_scorer_fails_when_task_plan_part_of_edge_is_missing() -> None:
+    broken = copy.deepcopy(FIXTURE)
+    broken["relationships"] = [
+        edge
+        for edge in broken["relationships"]
+        if not (
+            edge["relationship_type"] == "PART_OF"
+            and edge["source_entity_id"] == "task_fixture_05"
+            and edge["target_entity_id"] == "plan_fixture_05"
+        )
+    ]
+
+    result = checks.score_source_session_resume(
+        WHOLE_SESSION_REPORT,
+        broken,
+        broken["scenarios"]["continue-session-named-session"],
+    )
+
+    assert result["outcome"] == "fail"
+    assert "fixture_graph_binding" in result["failed"]
+
+
+def test_scorer_rejects_asserted_canonical_pair_for_ambiguous_lane() -> None:
+    candidate_row = (
+        "| `lane_fixture_13` sibling lane | Candidates: `task_fixture_13` → "
+        "`plan_fixture_13`; `task_fixture_13_candidate_b` → "
+        "`plan_fixture_13_candidate_b` | Unresolved — canonical task is ambiguous |"
+    )
+    asserted_row = (
+        "| `lane_fixture_13` sibling lane | `task_fixture_13` / "
+        "`plan_fixture_13` | Unresolved — canonical task is ambiguous |"
+    )
+    wrong = WHOLE_SESSION_REPORT.replace(candidate_row, asserted_row)
+
+    result = checks.score_source_session_resume(
+        wrong, FIXTURE, SOURCE_SESSION_SCENARIO
+    )
+
+    assert result["outcome"] == "fail"
+    assert "ambiguous_lane_must_not_assert_canonical_binding" in result["failed"]
+
+
+def test_tempting_narrow_candidate_cannot_replace_complete_source_union() -> None:
+    wrong = """
+## Source session: Named handoff (`session_fixture_named_handoff`)
+
+### Source-session coverage ledger
+
+| Source lane | Canonical workstream | Disposition |
+| --- | --- | --- |
+| `lane_fixture_01` discoverable lane | `task_fixture_01` / `plan_fixture_01` | Imported |
+
+audited: 1; imported: 1; excluded: 0; unresolved: 0
+"""
+
+    result = checks.score_source_session_resume(
+        wrong, FIXTURE, SOURCE_SESSION_SCENARIO
+    )
+
+    assert result["outcome"] == "fail"
+    assert set(result["omitted_lanes"]) == {
+        f"lane_fixture_{index:02d}" for index in range(2, 14)
+    }
+    assert "all_source_lanes_accounted_for" in result["failed"]
 
 
 def test_original_task_stage_report_fails_the_effect_check() -> None:
@@ -147,7 +334,7 @@ def test_original_task_stage_report_fails_the_effect_check() -> None:
 
 def test_named_session_accounts_for_one_lane_and_twelve_siblings() -> None:
     result = checks.score_source_session_resume(
-        WHOLE_SESSION_REPORT, SOURCE_SESSION_SCENARIO
+        WHOLE_SESSION_REPORT, FIXTURE, SOURCE_SESSION_SCENARIO
     )
 
     assert result["outcome"] == "pass", result
@@ -164,7 +351,7 @@ def test_named_session_requires_every_canonical_task_plan_binding() -> None:
     for index in range(1, 14):
         wrong = wrong.replace(f" / `plan_fixture_{index:02d}`", "")
 
-    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert "canonical_task_plan_binding" in result["failed"]
@@ -180,7 +367,7 @@ def test_named_session_rejects_conflicting_duplicate_lane_row() -> None:
         f"\n{duplicate}\naudited: 13; imported: 10; excluded: 2; unresolved: 1",
     )
 
-    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert "exactly_one_ledger_row_per_lane" in result["failed"]
@@ -196,7 +383,7 @@ def test_omitted_sibling_cannot_claim_complete_source_session_resume() -> None:
         "is noted, but all source lanes are accounted for and coverage is complete",
     )
 
-    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert "lane_fixture_12" in result["omitted_lanes"]
@@ -216,7 +403,7 @@ def test_plan_first_shortcut_fails_exact_source_session_binding() -> None:
         + "\nSource session: `session_fixture_named_handoff`\n"
     )
 
-    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert "exact_source_session_first" in result["failed"]
@@ -228,7 +415,7 @@ def test_coverage_counts_must_report_all_dispositions_and_balance() -> None:
         "audited: 13; imported: 11; unresolved: 1",
     )
 
-    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert {

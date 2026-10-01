@@ -4,7 +4,9 @@ This eval exercises `continue-session` and `digest` through ordinary slash-comma
 invocation in the repository's sandboxed Claude-session harness. It reuses the
 rule-delivery eval's session driver, path guard, and fixture Neotoma server.
 The default run includes both a single-workstream `continue-session` scenario
-and a whole named-session scenario with thirteen independently bound lanes.
+and a whole named-session scenario with thirteen lanes distributed across a
+transcript, workboard, linked tasks, and terminal handoff. A similarly named
+narrow plan is deliberately easy to find first.
 
 The fixture is intentionally public-safe and synthetic. Its graph preserves the
 behavior under review:
@@ -28,11 +30,13 @@ duplicate task ascent per affected task, and keep `reconcile-planning`
 retrospective. Stable fixture entity IDs bind these effects, so changing a human
 title cannot change placement or make an equivalent report fail.
 
-The named-session scorer additionally requires exactly one ledger row for each
-source lane, the expected canonical task and plan IDs in that row, one
-disposition, and counts that balance across imported, excluded, and unresolved
-lanes. The normal runner selects this scorer from the scenario metadata; the
-coverage cannot pass only through a detached unit-test helper.
+The named-session scorer derives the resumable population from that source
+union and each canonical task/plan binding from real fixture `PART_OF` edges.
+It requires exactly one ledger row and disposition per lane, rejects phantom or
+unbound identities, and requires an ambiguous lane to expose both candidates
+without asserting either as canonical. The normal runner selects this scorer
+from scenario metadata; coverage cannot pass only through a detached unit-test
+helper or a prompt that contains the answer key.
 
 The three `fixtures/skills/*/SKILL.md` files are generated review evidence, not
 sources. Neotoma prod remains canonical. `fixtures/review_bundle.json` records

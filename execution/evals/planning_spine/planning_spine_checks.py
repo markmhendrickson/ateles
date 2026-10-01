@@ -62,9 +62,24 @@ def phase_ancestry_outcomes(fixture: dict) -> dict[str, dict]:
     phase_names = {
         item["id"]: item["name"] for item in entities[master_id]["snapshot"]["phases"]
     }
+    source_session_tasks = {
+        entity_id
+        for entity_id, entity in entities.items()
+        if entity.get("entity_type") == "task"
+        and entity.get("snapshot", {}).get("source_lane_id")
+    }
+    source_session_plans = {
+        target
+        for task_id in source_session_tasks
+        for target in outbound.get(task_id, [])
+    }
     outcomes: dict[str, dict] = {}
     for entity_id, entity in entities.items():
-        if entity_id == master_id or entity["entity_type"] != "plan":
+        if (
+            entity_id == master_id
+            or entity["entity_type"] != "plan"
+            or entity_id in source_session_plans
+        ):
             continue
         phases: set[str] = set()
         seen = {entity_id}
@@ -107,7 +122,9 @@ def task_ascent_outcomes(fixture: dict) -> dict[str, str]:
     return {
         entity_id: "missing" if not outbound.get(entity_id) else "duplicate"
         for entity_id, entity in fixture["entities"].items()
-        if entity["entity_type"] == "task" and len(outbound.get(entity_id, [])) != 1
+        if entity["entity_type"] == "task"
+        and not entity.get("snapshot", {}).get("source_lane_id")
+        and len(outbound.get(entity_id, [])) != 1
     }
 
 
@@ -175,24 +192,137 @@ def _entity_item(section: str, entity_id: str) -> str:
     return ""
 
 
-def score_source_session_resume(text: str, scenario: dict) -> dict:
-    """Score observable whole-session coverage before any workstream action.
+_SOURCE_STATE_DISPOSITION = {
+    "active": "imported",
+    "terminal_superseded": "excluded",
+    "outside_requested_scope": "excluded",
+    "ambiguous_binding": "unresolved",
+}
 
-    ``scenario`` names the exact source session, every source lane that must be
-    audited, and plan identifiers whose first appearance represents workstream
-    binding.  This keeps the check behavioral: a report cannot pass by merely
-    repeating policy phrases while silently dropping sibling lanes.
-    """
+
+def source_session_fixture_outcomes(fixture: dict, scenario: dict) -> dict:
+    """Derive source-lane population and task/plan candidates from fixture graph."""
+    entities = fixture["entities"]
+    relationships = fixture.get("relationships", [])
     source_session_id = scenario["source_session_id"]
-    lane_ids = scenario["lane_ids"]
-    task_ids = scenario.get("task_ids", [])
-    plan_ids = scenario.get("plan_ids", [])
-    if task_ids and len(task_ids) != len(lane_ids):
-        raise ValueError("source-session scenario must bind one task per lane")
-    if plan_ids and len(plan_ids) != len(lane_ids):
-        raise ValueError("source-session scenario must bind one plan per lane")
-    folded = _fold(text)
     failed: list[str] = []
+    if source_session_id not in entities:
+        failed.append("source_session_entity_exists")
+
+    evidence_ids = {
+        edge["source_entity_id"]
+        for edge in relationships
+        if edge["relationship_type"] == "PART_OF"
+        and edge["target_entity_id"] == source_session_id
+    }
+    linked_task_ids = {
+        edge["target_entity_id"]
+        for edge in relationships
+        if edge["relationship_type"] == "REFERS_TO"
+        and edge["source_entity_id"] == source_session_id
+    }
+    lane_states: dict[str, set[str]] = {}
+    lane_sources: dict[str, set[str]] = {}
+    for entity_id in sorted(evidence_ids | linked_task_ids):
+        entity = entities.get(entity_id)
+        if entity is None:
+            failed.append("source_evidence_entity_exists")
+            continue
+        snapshot = entity.get("snapshot", {})
+        source_kind = snapshot.get("source_kind")
+        records = list(snapshot.get("source_lanes", []))
+        if snapshot.get("source_lane_id"):
+            records.append(
+                {
+                    "lane_id": snapshot["source_lane_id"],
+                    "state": snapshot.get("source_state"),
+                }
+            )
+        for record in records:
+            lane_id = record.get("lane_id")
+            state = record.get("state")
+            if not lane_id or not source_kind or state not in _SOURCE_STATE_DISPOSITION:
+                failed.append("source_evidence_shape")
+                continue
+            lane_states.setdefault(lane_id, set()).add(state)
+            lane_sources.setdefault(lane_id, set()).add(source_kind)
+
+    observed_source_kinds = set().union(*lane_sources.values()) if lane_sources else set()
+    required_source_kinds = set(scenario.get("required_source_kinds", []))
+    if observed_source_kinds != required_source_kinds:
+        failed.append("complete_source_union")
+
+    expected_dispositions: dict[str, str] = {}
+    for lane_id, states in lane_states.items():
+        dispositions = {_SOURCE_STATE_DISPOSITION[state] for state in states}
+        if len(dispositions) != 1:
+            failed.append("consistent_source_lane_state")
+        else:
+            expected_dispositions[lane_id] = dispositions.pop()
+
+    part_of: dict[str, list[str]] = {}
+    for edge in relationships:
+        source = edge["source_entity_id"]
+        target = edge["target_entity_id"]
+        if (
+            edge["relationship_type"] == "PART_OF"
+            and source in entities
+            and target in entities
+            and entities[source].get("entity_type") == "task"
+            and entities[target].get("entity_type") == "plan"
+        ):
+            part_of.setdefault(source, []).append(target)
+    bindings: dict[str, dict] = {}
+    for lane_id in sorted(lane_states):
+        task_ids = sorted(
+            entity_id
+            for entity_id, entity in entities.items()
+            if entity.get("entity_type") == "task"
+            and entity.get("snapshot", {}).get("source_lane_id") == lane_id
+        )
+        pairs = sorted(
+            (task_id, plan_id)
+            for task_id in task_ids
+            for plan_id in part_of.get(task_id, [])
+        )
+        invalid_tasks = sorted(
+            task_id for task_id in task_ids if len(part_of.get(task_id, [])) != 1
+        )
+        if invalid_tasks or not pairs:
+            failed.append("fixture_graph_binding")
+        outcome = "unique" if len(pairs) == 1 else "ambiguous" if pairs else "missing"
+        bindings[lane_id] = {
+            "outcome": outcome,
+            "pairs": pairs,
+            "invalid_tasks": invalid_tasks,
+        }
+        disposition = expected_dispositions.get(lane_id)
+        if (outcome == "unique") != (disposition != "unresolved"):
+            failed.append("fixture_ambiguity_matches_disposition")
+
+    return {
+        "failed": list(dict.fromkeys(failed)),
+        "lane_ids": sorted(lane_states),
+        "lane_sources": {
+            lane_id: sorted(sources) for lane_id, sources in lane_sources.items()
+        },
+        "expected_dispositions": expected_dispositions,
+        "bindings": bindings,
+    }
+
+
+def score_source_session_resume(text: str, fixture: dict, scenario: dict) -> dict:
+    """Score whole-session coverage derived from distributed source evidence."""
+    source_session_id = scenario["source_session_id"]
+    fixture_outcomes = source_session_fixture_outcomes(fixture, scenario)
+    lane_ids = fixture_outcomes["lane_ids"]
+    bindings = fixture_outcomes["bindings"]
+    expected_dispositions = fixture_outcomes["expected_dispositions"]
+    all_pairs = [pair for binding in bindings.values() for pair in binding["pairs"]]
+    task_ids = [task_id for task_id, _ in all_pairs]
+    plan_ids = [plan_id for _, plan_id in all_pairs]
+    folded = _fold(text)
+    failed: list[str] = list(fixture_outcomes["failed"])
 
     session_pos = text.find(source_session_id)
     plan_positions = [pos for plan_id in plan_ids if (pos := text.find(plan_id)) >= 0]
@@ -205,8 +335,9 @@ def score_source_session_resume(text: str, scenario: dict) -> dict:
     omitted_lanes: list[str] = []
     duplicate_lanes: list[str] = []
     binding_failures: list[str] = []
+    ambiguous_binding_failures: list[str] = []
     coverage_lines = coverage.splitlines()
-    for index, lane_id in enumerate(lane_ids):
+    for lane_id in lane_ids:
         lane_pattern = _entity_pattern(lane_id)
         rows = [
             line
@@ -232,17 +363,30 @@ def score_source_session_resume(text: str, scenario: dict) -> dict:
             duplicate_dispositions.append(lane_id)
         else:
             dispositions[lane_id] = matched[0]
-        if len(rows) == 1:
-            expected_tasks = [task_ids[index]] if task_ids else []
-            expected_plans = [plan_ids[index]] if plan_ids else []
-            observed_tasks = [
-                task_id for task_id in task_ids if _entity_pattern(task_id).search(item)
-            ]
-            observed_plans = [
-                plan_id for plan_id in plan_ids if _entity_pattern(plan_id).search(item)
-            ]
-            if observed_tasks != expected_tasks or observed_plans != expected_plans:
+            if matched[0] != expected_dispositions.get(lane_id):
+                failed.append("source_lane_disposition")
+
+        if len(rows) != 1:
+            continue
+        candidate_pairs = bindings[lane_id]["pairs"]
+        candidate_tasks = [task_id for task_id, _ in candidate_pairs]
+        candidate_plans = [plan_id for _, plan_id in candidate_pairs]
+        observed_tasks = [
+            task_id for task_id in task_ids if _entity_pattern(task_id).search(item)
+        ]
+        observed_plans = [
+            plan_id for plan_id in plan_ids if _entity_pattern(plan_id).search(item)
+        ]
+        if bindings[lane_id]["outcome"] == "unique":
+            if observed_tasks != candidate_tasks or observed_plans != candidate_plans:
                 binding_failures.append(lane_id)
+        elif (
+            "candidate" not in item_folded
+            or sorted(observed_tasks) != sorted(candidate_tasks)
+            or sorted(observed_plans) != sorted(candidate_plans)
+        ):
+            ambiguous_binding_failures.append(lane_id)
+
     if omitted_lanes:
         failed.append("all_source_lanes_accounted_for")
     if duplicate_lanes:
@@ -251,6 +395,8 @@ def score_source_session_resume(text: str, scenario: dict) -> dict:
         failed.append("exactly_one_disposition_per_lane")
     if binding_failures:
         failed.append("canonical_task_plan_binding")
+    if ambiguous_binding_failures:
+        failed.append("ambiguous_lane_must_not_assert_canonical_binding")
 
     reported_counts = {
         match.group("label").lower(): int(match.group("count"))
@@ -287,11 +433,13 @@ def score_source_session_resume(text: str, scenario: dict) -> dict:
         "outcome": "pass" if not failed else "fail",
         "failed": list(dict.fromkeys(failed)),
         "source_session_id": source_session_id,
+        "lane_sources": fixture_outcomes["lane_sources"],
         "dispositions": dispositions,
         "omitted_lanes": omitted_lanes,
         "duplicate_lanes": duplicate_lanes,
         "duplicate_dispositions": duplicate_dispositions,
         "binding_failures": binding_failures,
+        "ambiguous_binding_failures": ambiguous_binding_failures,
         "reported_counts": reported_counts,
         "actual_counts": actual_counts,
     }
