@@ -3145,6 +3145,21 @@ class _CIHeadClaim:
     handled: bool = False
 
 
+class IssuePipelineWriteError(RuntimeError):
+    """A required GitHub write surface is unavailable for an issue pipeline.
+
+    ``stage`` and ``status_code`` are deliberately the only persisted details.
+    GitHub response bodies and request headers can contain account or credential
+    material and must never be copied into a durable failure record.
+    """
+
+    def __init__(self, stage: str, status_code: int | None = None):
+        self.stage = stage
+        self.status_code = status_code
+        detail = f"HTTP {status_code}" if status_code is not None else "request failed"
+        super().__init__(f"{stage}: {detail}")
+
+
 @dataclass
 class DispatchConfig:
     neotoma_base_url: str = os.environ.get(
@@ -3612,51 +3627,76 @@ class SwarmDispatcher:
         """
         ref = f"{trigger.repository}#{trigger.number}"
         sem = self._issue_pipeline_semaphore()
-        if sem.locked():
-            log.info(
-                f"[{DAEMON_NAME}] issue pipeline for {ref} QUEUED — waiting for "
-                "the issue-pipeline slot (another pipeline is running)"
-            )
-            _queued_at = datetime.now(timezone.utc)
-            # ateles#323: mark the pipeline BEFORE the semaphore is acquired,
-            # in the SAME branch that already detects queuing. A restart while
-            # parked here previously left NO durable trace at all, since the
-            # only marker write happened after acquisition; the resume sweep
-            # therefore never saw a queued-but-never-started pipeline. Gated
-            # on the existing `sem.locked()` branch (not written
-            # unconditionally) so the uncontended common case still pays for
-            # exactly one marker write, same as before this fix.
-            await self._mark_pipeline_inflight(trigger, stage="queued")
-        else:
-            _queued_at = None
-        async with sem:
-            if _queued_at is not None:
-                waited_s = (datetime.now(timezone.utc) - _queued_at).total_seconds()
+        try:
+            if sem.locked():
                 log.info(
-                    f"[{DAEMON_NAME}] issue pipeline for {ref} STARTED — "
-                    f"acquired the issue-pipeline slot after {waited_s:.1f}s queued"
+                    f"[{DAEMON_NAME}] issue pipeline for {ref} QUEUED — waiting for "
+                    "the issue-pipeline slot (another pipeline is running)"
                 )
-            await self._mark_pipeline_inflight(trigger, stage="inflight")
-            try:
-                await self._run_issue_spec_pipeline(trigger)
-            finally:
-                # Clear on success AND on failure: a pipeline that ran to a
-                # real error is not "interrupted" — it already reported itself
-                # and must not be resurrected by the sweep on every boot.
-                await self._clear_pipeline_inflight(trigger)
+                _queued_at = datetime.now(timezone.utc)
+                # ateles#323: mark the pipeline BEFORE the semaphore is acquired,
+                # in the SAME branch that already detects queuing. A restart while
+                # parked here previously left NO durable trace at all, since the
+                # only marker write happened after acquisition; the resume sweep
+                # therefore never saw a queued-but-never-started pipeline. Gated
+                # on the existing `sem.locked()` branch (not written
+                # unconditionally) so the uncontended common case still pays for
+                # exactly one marker write, same as before this fix.
+                await self._mark_pipeline_inflight(trigger, stage="queued")
+            else:
+                _queued_at = None
+            async with sem:
+                if _queued_at is not None:
+                    waited_s = (
+                        datetime.now(timezone.utc) - _queued_at
+                    ).total_seconds()
+                    log.info(
+                        f"[{DAEMON_NAME}] issue pipeline for {ref} STARTED — "
+                        f"acquired the issue-pipeline slot after {waited_s:.1f}s queued"
+                    )
+                await self._mark_pipeline_inflight(trigger, stage="inflight")
+                try:
+                    await self._run_issue_spec_pipeline(trigger)
+                finally:
+                    # Clear on success AND on a non-GitHub pipeline error: the
+                    # failure already reports itself and must not be resurrected
+                    # on every boot. Required GitHub write failures additionally
+                    # persist a failed harness_event below before returning.
+                    await self._clear_pipeline_inflight(trigger)
+        except IssuePipelineWriteError as exc:
+            durable = await self._record_issue_pipeline_failure(trigger, exc)
+            level = "durably recorded" if durable else "DURABILITY UNCONFIRMED"
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: refusing issue pipeline before agent "
+                f"dispatch; required GitHub write failed at {exc.stage} "
+                f"({level})"
+            )
+            self.notifier.send(
+                f"Issue pipeline refused for {ref}: required GitHub write "
+                f"failed at {exc.stage} ({level})",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
 
     async def _mark_pipeline_inflight(
         self, trigger: SwarmTrigger, *, stage: str = "inflight"
     ) -> None:
-        """Post the hidden pipeline marker at the given stage ("queued" before
-        the semaphore is acquired, "inflight" once inside it). Best-effort: a
-        marker we cannot write only costs resumability, so it must never block
-        the pipeline."""
+        """Require the GitHub write surfaces before dispatching any agent.
+
+        The marker POST is the real durable-resume write, not a synthetic
+        permission lookup.  On the ``inflight`` transition we also GET and
+        PATCH the issue body with its current value.  That no-op PATCH uses the
+        exact method, URL and JSON shape the later spec mirror uses, proving
+        both required write capabilities before Lanius or any section agent is
+        launched.  Any failure is fatal to this pipeline attempt.
+        """
         marker = self._PIPELINE_INFLIGHT_MARKER.format(
             started_at=datetime.now(timezone.utc).isoformat(), stage=stage
         )
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
+        if not _token_for_repo(trigger.repository) and not self.config.github_token:
+            raise IssuePipelineWriteError("github_credential_missing")
+        async with httpx.AsyncClient(timeout=30) as client:
+            try:
                 resp = await client.post(
                     f"https://api.github.com/repos/{trigger.repository}/issues/"
                     f"{trigger.number}/comments",
@@ -3664,12 +3704,92 @@ class SwarmDispatcher:
                     headers=self._github_headers(trigger.repository),
                 )
                 resp.raise_for_status()
-        except Exception as exc:
-            log.warning(
-                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: could "
-                f"not record in-flight pipeline marker ({exc}) — the run "
-                "proceeds but will not be resumable if the daemon restarts"
+            except Exception as exc:
+                raise IssuePipelineWriteError(
+                    "github_marker_write", self._http_status(exc)
+                ) from exc
+
+            if stage != "inflight":
+                return
+            issue_url = (
+                f"https://api.github.com/repos/{trigger.repository}/issues/"
+                f"{trigger.number}"
             )
+            try:
+                current = await client.get(
+                    issue_url, headers=self._github_headers(trigger.repository)
+                )
+                current.raise_for_status()
+                current_body = current.json().get("body") or ""
+                patch = await client.patch(
+                    issue_url,
+                    json={"body": current_body},
+                    headers=self._github_headers(trigger.repository),
+                )
+                patch.raise_for_status()
+            except Exception as exc:
+                raise IssuePipelineWriteError(
+                    "github_issue_body_write", self._http_status(exc)
+                ) from exc
+
+    @staticmethod
+    def _http_status(exc: Exception) -> int | None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        return int(status) if isinstance(status, int) else None
+
+    async def _record_issue_pipeline_failure(
+        self, trigger: SwarmTrigger, failure: IssuePipelineWriteError
+    ) -> bool:
+        """Persist and read back a sanitized failed-pipeline harness event."""
+        ref = f"{trigger.repository}#{trigger.number}"
+        status = (
+            f"HTTP {failure.status_code}"
+            if failure.status_code is not None
+            else "request failed"
+        )
+        entity = {
+            "entity_type": "harness_event",
+            "event_type": "github.issue_pipeline_failed",
+            "handler": DAEMON_NAME,
+            "subject_ref": ref,
+            "summary": f"issue pipeline refused at {failure.stage} ({status})",
+            "delivery_id": trigger.delivery_id,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+        }
+        stored = await self._store_entities(
+            [entity],
+            idempotency_key=(
+                f"issue-pipeline-failed-{trigger.repository}-{trigger.number}-"
+                f"{trigger.delivery_id}-{failure.stage}"
+            ),
+        )
+        if stored is None or self._store_result_has_unknown_fields(stored):
+            return False
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "harness_event",
+                "snapshot_filters": {
+                    "event_type": {
+                        "op": "eq",
+                        "value": entity["event_type"],
+                    },
+                    "delivery_id": {
+                        "op": "eq",
+                        "value": trigger.delivery_id,
+                    },
+                    "subject_ref": {"op": "eq", "value": ref},
+                },
+                "limit": 5,
+                "include_snapshots": True,
+            },
+        )
+        expected = {key: value for key, value in entity.items() if key != "entity_type"}
+        return any(
+            all((row.get("snapshot") or {}).get(key) == value for key, value in expected.items())
+            for row in (data or {}).get("entities", [])
+        )
 
     async def _clear_pipeline_inflight(self, trigger: SwarmTrigger) -> None:
         """Delete any in-flight markers on this issue. Best-effort."""
@@ -5993,14 +6113,13 @@ class SwarmDispatcher:
         Assembles ``state.sections`` in canonical order and splices the result
         into the issue description between the managed markers, preserving the
         human-written body above them (never clobbers the reporter's text).
-        Re-running replaces only the marked block.  Best-effort, never raises.
+        Re-running replaces only the marked block. A failed write raises the
+        bounded pipeline-write error used by the preflight, so the caller
+        records a durable failed-pipeline state instead of continuing with a
+        Neotoma-only spec that GitHub cannot expose.
         """
         if not _token_for_repo(trigger.repository) and not self.config.github_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — spec mirror skipped for "
-                f"{trigger.repository}#{trigger.number}"
-            )
-            return
+            raise IssuePipelineWriteError("github_credential_missing")
         managed = assemble_spec_markdown(state.sections or {})
         issue_url = (
             f"https://api.github.com/repos/{trigger.repository}/issues/"
@@ -6035,8 +6154,11 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] spec mirror failed for "
-                f"{trigger.repository}#{trigger.number}: {exc}"
+                f"{trigger.repository}#{trigger.number}"
             )
+            raise IssuePipelineWriteError(
+                "github_spec_mirror", self._http_status(exc)
+            ) from exc
 
     async def _open_implementation_pr(
         self, trigger: SwarmTrigger, state: SpecState
