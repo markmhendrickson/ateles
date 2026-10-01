@@ -86,6 +86,7 @@ set), and additionally "apply_patch" under Codex
 of the same name, not re-implemented) so a harness_config edit made through
 `apply_patch` is caught the same way an Edit/Write is under Claude Code.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -285,9 +286,7 @@ def _bash_touches_harness_config(command: str) -> bool:
 # --------------------------------------------------------------------------
 _GH_API_LEADER_RE = re.compile(r"^gh\s+api\b")
 _ADVISORY_PATH_RE = re.compile(r"/security-advisories\b", re.IGNORECASE)
-_GRAPHQL_ADVISORY_FIELD_RE = re.compile(
-    r"securityAdvisor(y|ies)\b", re.IGNORECASE
-)
+_GRAPHQL_ADVISORY_FIELD_RE = re.compile(r"securityAdvisor(y|ies)\b", re.IGNORECASE)
 
 
 def _gh_segment_touches_advisory(segment: str) -> bool:
@@ -597,8 +596,7 @@ def _render_context(
         "Point-of-use rule injection (ateles rule delivery audit "
         "ent_b66293f0dcc8c887d4fdbeae, recommendation 5): this action matches "
         "a high-risk category, so the full text of the governing rule(s) is "
-        "below rather than left to a fetch you may not make.\n\n"
-        + "\n\n".join(blocks)
+        "below rather than left to a fetch you may not make.\n\n" + "\n\n".join(blocks)
     )
     if "grant_write" in category_to_rows:
         text += _GRANT_PROBE_REMINDER
