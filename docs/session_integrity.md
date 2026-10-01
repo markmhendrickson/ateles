@@ -6,6 +6,54 @@
 
 > This document specifies how **every write-bearing session** — whether human-in-the-loop (Claude Code, Cursor, Codex) or autonomous (ateles daemons/agents) — is *mechanically required* to (a) link to at least one plan that it keeps current, (b) store its turns as `conversation` + `agent_message` entities related `PART_OF` the plan, and (c) link any derived artifacts it produces back to both the conversation (`REFERS_TO`) and the plan (`PART_OF`). It also defines the **canonical artifact taxonomy** the linkage invariant consumes (satisfying the dependency task in one place).
 
+## Foundation cutover notice: task ascent is authoritative
+
+The paragraph above describes the compatibility mechanism deployed today, not
+the foundation target. The foundation supersedes it in
+`docs/foundation/planning_model.md#binding-dissolves-a-tasks-ascent-is-its-binding`:
+a session binds no plan, every actionable output is a task with one upward
+`PART_OF` ascent, and no session writes a planning record's derived progress.
+The authoritative replacement is the `planning` workflow owned by ateles#965.
+Its engine, verdict, action-gate, intake/routing, relationship-registry, and
+instance-binding dependencies must exist before this document's compatibility
+gate or the legacy maintenance policy can be retired. Removing either first
+would leave live planning records maintained by nothing.
+
+### Shadow audit before cutover
+
+The existing Stop-hook scanner now derives a separate `planning_spine_status`
+from the ordered transcript and emits it with the ordinary session-integrity
+`harness_event`. It is deliberately advisory until the replacement workflow
+exists; `ATELES_SESSION_INTEGRITY_ENFORCE` continues to govern only the deployed
+compatibility contract.
+
+The shadow audit makes these cutover predicates observable now:
+
+- A task created by the session carries exactly one `PART_OF` in the same
+  atomic store call. Zero is `task_missing_ascent`; two is
+  `task_multiple_ascents`. A multi-task store whose implicit relationships
+  cannot be assigned without guessing is `task_ascent_unobservable`.
+- A direct session correction or store of a derived progress field on the
+  current instance's legacy `plan` type is
+  `session_authored_planning_progress`. The full registry-driven refusal across
+  every configured planning level remains ateles#965's write-path work.
+- `task.domain` is the explicit workstream key; where absent, the one ascent
+  target is the observable fallback. A different workstream may be recorded as
+  `status: queued`. It may become active only after a `session_digest` workboard
+  refresh and dispatch of every active task observed in the current stream.
+  Starting it earlier is `workstream_admitted_before_checkpoint`.
+- Harness task chips do not count as dispatch. The shadow audit recognizes the
+  Ateles `route_task` call and the Claude Code `Agent` tool because those are
+  actual executor handoffs with captured transcript shapes.
+
+This is one extension of the existing session-integrity scanner, not a second
+status store. Plans and tasks remain authoritative; `session_digest` is a
+derived workboard and recovery index. At cutover, the planning workflow and
+record proxy become the enforcing mechanisms, the legacy plan-contact
+classifier and maintenance policy retire in the same change, and this shadow
+result can become a blocking invariant only after its graph reads and
+cross-harness carriers are proven.
+
 ---
 
 ## 1. Problem statement
