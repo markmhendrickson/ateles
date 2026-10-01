@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -95,6 +96,129 @@ def _run(command: str, event: dict, *, env: dict[str, str] | None = None):
 
 
 class TestCodexRuleDeliveryEffect(unittest.TestCase):
+    def test_project_and_user_hooks_deliver_each_lifecycle_revision_once(self) -> None:
+        """Codex composes project and user hook files and launches matching
+        commands concurrently.  The two intentional carriers must produce one
+        developer-context payload for one lifecycle event, while a later
+        lifecycle revision still gets a fresh payload."""
+        with _FakeNeotoma() as fake, tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex-home"
+            installed_file = codex_home / "hooks.json"
+            installed = subprocess.run(
+                [
+                    os.fspath(Path(os.sys.executable)),
+                    os.fspath(INSTALLER),
+                    "--out",
+                    os.fspath(installed_file),
+                ],
+                text=True,
+                capture_output=True,
+                cwd=REPO_ROOT,
+                timeout=20,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            installed_hooks = json.loads(installed_file.read_text(encoding="utf-8"))
+            installed_commands = {
+                event: next(
+                    hook["command"]
+                    for group in installed_hooks["hooks"][event]
+                    for hook in group.get("hooks", [])
+                    if "session_rule_index.py" in hook["command"]
+                )
+                for event in ("SessionStart", "SubagentStart")
+            }
+            project_commands = {
+                event: next(
+                    command
+                    for command in _hook_commands(event)
+                    if "session_rule_index.py" in command
+                )
+                for event in ("SessionStart", "SubagentStart")
+            }
+
+            fake.handler.rows = [
+                {
+                    "entity_id": "ent_codex_dedupe_canary",
+                    "snapshot": {
+                        "title": "CODEX_DEDUPE_CANARY_72B1",
+                        "rule": "CODEX_DEDUPE_CANARY_72B1 reaches context once.",
+                        "applies_when": "always",
+                        "scope": "global",
+                        "status": "active",
+                        "rule_kind": "mandatory",
+                    },
+                }
+            ]
+            transcript = Path(tmp) / "rollout.jsonl"
+            transcript.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+            env = {
+                "NEOTOMA_BASE_URL": fake.base_url,
+                "CODEX_HOME": os.fspath(codex_home),
+            }
+
+            cases = (
+                (
+                    "SessionStart",
+                    {
+                        "session_id": "codex-root-dedupe-session",
+                        "hook_event_name": "SessionStart",
+                        "source": "startup",
+                        "transcript_path": os.fspath(transcript),
+                        "model": "test-model",
+                        "cwd": os.fspath(REPO_ROOT),
+                    },
+                ),
+                (
+                    "SubagentStart",
+                    {
+                        "session_id": "codex-child-dedupe-session",
+                        "turn_id": "turn-3",
+                        "agent_id": "agent-1",
+                        "agent_type": "worker",
+                        "hook_event_name": "SubagentStart",
+                        "transcript_path": os.fspath(transcript),
+                        "model": "test-model",
+                        "cwd": os.fspath(REPO_ROOT),
+                    },
+                ),
+            )
+            for event_name, event in cases:
+                with self.subTest(event=event_name):
+                    commands = (project_commands[event_name], installed_commands[event_name])
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        results = list(
+                            pool.map(lambda command: _run(command, event, env=env), commands)
+                        )
+                    self.assertTrue(
+                        all(result.returncode == 0 for result in results),
+                        [result.stderr for result in results],
+                    )
+                    deliveries = [
+                        result.stdout
+                        for result in results
+                        if "CODEX_DEDUPE_CANARY_72B1" in result.stdout
+                    ]
+                    self.assertEqual(
+                        len(deliveries),
+                        1,
+                        "the same project+user hook event was delivered more than once",
+                    )
+
+            transcript.write_text(
+                '{"type":"session_meta"}\n{"type":"turn_context"}\n',
+                encoding="utf-8",
+            )
+            later = _run(
+                project_commands["SessionStart"],
+                {
+                    **cases[0][1],
+                    "source": "compact",
+                },
+                env=env,
+            )
+            self.assertEqual(later.returncode, 0, later.stderr)
+            self.assertIn("CODEX_DEDUPE_CANARY_72B1", later.stdout)
+
     def test_installed_user_hooks_render_live_policy_outside_repo(self) -> None:
         with _FakeNeotoma() as fake, tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "codex-home" / "hooks.json"
