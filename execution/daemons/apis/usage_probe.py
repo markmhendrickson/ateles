@@ -1,4 +1,4 @@
-"""Feed the live plan-usage snapshot from the Claude CLI's own rate-limit report.
+"""Feed live harness capacity from each subscription-backed provider CLI.
 
 The one automatic, credential-free live source for Claude plan usage that was
 verified (2026-09-29): ``claude --print --output-format stream-json --verbose``
@@ -23,8 +23,12 @@ under a lock so concurrent dispatches share one probe, and it records nothing
 when the output is not a well-formed report: a failed probe leaves the old
 reading to age out, which the gate then refuses on (fail closed).
 
-Other providers have no such report (codex runs ephemeral and keeps no rollout;
-cursor prints text), so they are not fed and not gated.
+Codex and Cursor do not expose numeric plan windows.  Their adapters instead
+run the smallest provider-native request in an isolated temporary directory:
+success is positive recovery evidence, an explicit limit refusal with a reset
+is exhaustion evidence, and every other result is ``unknown``.  All adapters
+receive the subscription-only environment built by ``skill_runner``; this
+module never adds a metered credential or reads one directly.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import harness_router
+from limit_reset import parse_refusal
 
 log = logging.getLogger("apis.usage_probe")
 
@@ -57,6 +62,9 @@ class ProbeResult:
     ok: bool
     detail: str
     windows: tuple[dict[str, object], ...] = ()
+    status: str = "unknown"
+    source: str = "provider_native_probe"
+    exhausted_until: float | None = None
 
 
 def parse_rate_limit_windows(stdout: str) -> list[dict[str, object]]:
@@ -164,6 +172,56 @@ def probe_command(binary: str) -> list[str]:
     ]  # the prompt goes on stdin: --tools is variadic and swallows a trailing argument
 
 
+def provider_probe_command(provider: str, binary: str) -> tuple[list[str], str | None]:
+    """Return one bounded provider-native capacity command and its stdin.
+
+    The probes run in an empty temporary directory, persist no session, request
+    the provider's read-only/ask sandbox, and make one model turn with a prompt
+    that needs no tool.  Optional model overrides let deployment configuration
+    choose the cheapest subscription model without making a model name part of
+    the capacity contract.
+    """
+    if provider == "claude":
+        return probe_command(binary), PROBE_PROMPT
+    if provider == "codex":
+        model = os.environ.get("APIS_USAGE_PROBE_CODEX_MODEL", "").strip()
+        return (
+            [
+                binary,
+                "exec",
+                "--json",
+                *(["--model", model] if model else []),
+                "--sandbox",
+                "read-only",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "-",
+            ],
+            PROBE_PROMPT,
+        )
+    if provider == "cursor":
+        model = os.environ.get("APIS_USAGE_PROBE_CURSOR_MODEL", "").strip()
+        return (
+            [
+                binary,
+                "--print",
+                "--trust",
+                "--mode",
+                "ask",
+                "--sandbox",
+                "enabled",
+                "--output-format",
+                "json",
+                *(["--model", model] if model else []),
+                PROBE_PROMPT,
+            ],
+            None,
+        )
+    raise ValueError(f"unsupported provider probe: {provider!r}")
+
+
 def probe_claude(
     binary: str,
     *,
@@ -185,7 +243,9 @@ def probe_claude(
             )
     except (OSError, subprocess.SubprocessError) as exc:
         return ProbeResult(
-            False, f"probe did not run: {type(exc).__name__}: {str(exc)[:120]}"
+            False,
+            f"probe did not run: {type(exc).__name__}: {str(exc)[:120]}",
+            source="claude_rate_limit_event",
         )
     windows = parse_rate_limit_windows(proc.stdout or "")
     if not windows:
@@ -193,8 +253,111 @@ def probe_claude(
             False,
             f"probe exit {proc.returncode} returned no rate_limit_event windows; "
             f"CLI said: {failure_excerpt(proc.stdout or '', proc.stderr or '')}",
+            source="claude_rate_limit_event",
         )
-    return ProbeResult(True, "ok", tuple(windows))
+    return ProbeResult(
+        True,
+        "provider usage report succeeded",
+        tuple(windows),
+        status="available",
+        source="claude_rate_limit_event",
+    )
+
+
+def _json_result_error(stdout: str) -> str | None:
+    """Return a provider-reported result error even when the process exits 0."""
+    objects: list[dict[str, object]] = []
+    try:
+        whole = json.loads(stdout)
+    except (TypeError, ValueError):
+        whole = None
+    if isinstance(whole, dict):
+        objects.append(whole)
+    for line in stdout.splitlines():
+        try:
+            item = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(item, dict):
+            objects.append(item)
+    for item in reversed(objects):
+        if item.get("is_error") is True or item.get("type") in {"error", "turn.failed"}:
+            value = item.get("result") or item.get("message") or item.get("error")
+            text = " ".join(str(value or "provider reported an error").split())
+            return _TOKEN_LIKE.sub("<masked>", text)[:200]
+    return None
+
+
+def probe_provider(
+    provider: str,
+    binary: str,
+    *,
+    env: Mapping[str, str],
+    now_wall: float | None = None,
+    timeout: float = 60.0,
+    run=subprocess.run,
+) -> ProbeResult:
+    """Run one provider adapter and return capacity evidence without writing it."""
+    if provider == "claude":
+        return probe_claude(binary, env=env, timeout=timeout, run=run)
+    source = {"codex": "codex_exec", "cursor": "cursor_agent_print"}.get(
+        provider, f"{provider}_native_probe"
+    )
+    try:
+        command, stdin = provider_probe_command(provider, binary)
+        with tempfile.TemporaryDirectory(prefix=f"usage-probe-{provider}-") as cwd:
+            proc = run(
+                command,
+                cwd=cwd,
+                env=dict(env),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                input=stdin,
+            )
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return ProbeResult(
+            False,
+            f"probe did not run: {type(exc).__name__}: {str(exc)[:120]}",
+            source=source,
+        )
+    stdout, stderr = proc.stdout or "", proc.stderr or ""
+    refusal = parse_refusal(
+        stdout, stderr, provider=provider, now_wall=now_wall
+    )
+    if proc.returncode != 0 and refusal is not None and refusal.until_wall is not None:
+        return ProbeResult(
+            False,
+            f"{refusal.kind} limit; reset from {refusal.matched!r}",
+            status="exhausted",
+            source=source,
+            exhausted_until=refusal.until_wall,
+        )
+    reported_error = _json_result_error(stdout)
+    if proc.returncode == 0 and reported_error is None:
+        return ProbeResult(
+            True,
+            "provider-native probe succeeded",
+            status="available",
+            source=source,
+        )
+    detail = failure_excerpt(stdout, stderr)
+    if refusal is not None and refusal.until_wall is None:
+        detail = f"capacity refusal without a parseable reset: {refusal.matched}"
+    elif reported_error:
+        detail = reported_error
+    return ProbeResult(
+        False,
+        f"probe exit {proc.returncode}: {detail}",
+        source=source,
+    )
+
+
+PROBE_ADAPTERS = {
+    "claude": probe_provider,
+    "codex": probe_provider,
+    "cursor": probe_provider,
+}
 
 
 def _lock_path() -> Path:
@@ -223,12 +386,27 @@ def refresh_usage_if_stale(
         return {}
     outcomes: dict[str, str] = {}
     for provider in harness_router.usage_gated_providers():
+        if provider not in available:
+            continue
         binary = available.get(provider)
-        if provider != "claude" or not binary:
+        if not binary:
+            detail = f"{provider} binary unavailable"
+            harness_router.record_probe_unknown(
+                provider,
+                source="provider_binary",
+                detail=detail,
+                observed_at=now_wall,
+            )
+            outcomes[provider] = f"probe failed: {detail}"
             continue
         try:
-            outcomes[provider] = _refresh_claude(
-                binary, env=env, now_wall=now_wall, force=force, run=run
+            outcomes[provider] = _refresh_provider(
+                provider,
+                binary,
+                env=env,
+                now_wall=now_wall,
+                force=force,
+                run=run,
             )
         except Exception as exc:  # noqa: BLE001 - feeding must never break dispatch
             log.error(f"[apis] usage refresh for {provider} failed: {exc}")
@@ -240,7 +418,10 @@ def _observed_age(provider: str, moment: float) -> float | None:
     entry = harness_router._read_json_object(harness_router._usage_path()).get(provider)
     if not isinstance(entry, dict):
         return None
-    observed = harness_router._wall_from_iso(entry.get("observed_at"))
+    probe = entry.get("probe")
+    observed = harness_router._wall_from_iso(
+        probe.get("observed_at") if isinstance(probe, dict) else entry.get("observed_at")
+    )
     return None if observed is None else moment - observed
 
 
@@ -254,15 +435,21 @@ def _backoff_until(provider: str) -> float | None:
     return at + harness_router.usage_probe_backoff_seconds()
 
 
-def _refresh_claude(
-    binary: str, *, env: Mapping[str, str], now_wall: float | None, force: bool, run
+def _refresh_provider(
+    provider: str,
+    binary: str,
+    *,
+    env: Mapping[str, str],
+    now_wall: float | None,
+    force: bool,
+    run,
 ) -> str:
     moment = time.time() if now_wall is None else now_wall
     threshold = harness_router.usage_refresh_seconds()
 
     def is_fresh() -> bool:
-        age = _observed_age("claude", moment)
-        gate = harness_router.usage_gate("claude", now_wall=moment)
+        age = _observed_age(provider, moment)
+        gate = harness_router.usage_gate(provider, now_wall=moment)
         # A reading that is young but malformed still needs replacing.
         return (
             not force
@@ -273,7 +460,7 @@ def _refresh_claude(
         )
 
     def in_backoff() -> str | None:
-        until = _backoff_until("claude")
+        until = _backoff_until(provider)
         if not force and until is not None and moment < until:
             return (
                 "backoff (last automatic refresh failed; next attempt after "
@@ -286,8 +473,9 @@ def _refresh_claude(
         return "fresh"
     if (waiting := in_backoff()) is not None:
         return waiting
-    if not force and harness_router.persisted_cooling("claude", now_wall=moment):
-        # Held out until its reset anyway; the next dispatch after it probes.
+    if not force and harness_router.persisted_cooling(provider, now_wall=moment):
+        # The provider is held out until its stated reset.  Probe once the hold
+        # expires instead of spending a request that selection cannot use.
         return "cooled (probe skipped)"
     lock = _lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -301,17 +489,68 @@ def _refresh_claude(
         # window across every concurrent dispatch, not one per lens.
         if (waiting := in_backoff()) is not None:
             return waiting
-        result = probe_claude(binary, env=env, run=run)
-        if not result.ok:
-            log.warning(f"[apis] claude usage probe failed: {result.detail}")
+        adapter = PROBE_ADAPTERS.get(provider)
+        if adapter is None:
+            detail = f"no capacity probe adapter registered for {provider}"
+            harness_router.record_probe_unknown(
+                provider, source="probe_registry", detail=detail, observed_at=moment
+            )
+            return f"probe failed: {detail}"
+        result = adapter(
+            provider,
+            binary,
+            env=env,
+            now_wall=moment,
+            run=run,
+        )
+        if result.status == "unknown":
+            log.warning(f"[apis] {provider} usage probe failed: {result.detail}")
             try:
-                harness_router.record_probe_failure("claude", result.detail, observed_at=moment)
+                harness_router.record_probe_unknown(
+                    provider,
+                    source=result.source,
+                    detail=result.detail,
+                    observed_at=moment,
+                )
             except Exception as exc:  # noqa: BLE001 - diagnostics must not break dispatch
                 log.error(f"[apis] could not record the usage probe failure: {exc}")
             return f"probe failed: {result.detail}"
-        harness_router.record_usage("claude", result.windows)
-        log.info(
-            "[apis] claude usage refreshed: "
-            + ", ".join(f"{w['name']}={w['used_percent']}%" for w in result.windows)
-        )
+        if result.status == "exhausted" and result.exhausted_until is not None:
+            harness_router.record_exhausted(
+                provider, result.exhausted_until, observed_at=moment
+            )
+            log.info(
+                "[apis] %s exhaustion refreshed from %s until %s",
+                provider,
+                result.source,
+                harness_router.render_wall(result.exhausted_until),
+            )
+            return "exhausted"
+        if provider == "claude" and result.windows:
+            harness_router.record_usage(
+                provider, result.windows, observed_at=moment, provider_probe=True
+            )
+            log.info(
+                "[apis] claude usage refreshed: "
+                + ", ".join(
+                    f"{w['name']}={w['used_percent']}%" for w in result.windows
+                )
+            )
+        else:
+            harness_router.record_probe_available(
+                provider,
+                source=result.source,
+                detail=result.detail,
+                observed_at=moment,
+            )
+            log.info("[apis] %s capacity available from %s", provider, result.source)
         return "refreshed"
+
+
+def _refresh_claude(
+    binary: str, *, env: Mapping[str, str], now_wall: float | None, force: bool, run
+) -> str:
+    """Compatibility wrapper for tests and callers predating provider adapters."""
+    return _refresh_provider(
+        "claude", binary, env=env, now_wall=now_wall, force=force, run=run
+    )

@@ -14,8 +14,8 @@ at its reported reset without a hand edit of the headroom file.
     # Codex CLI said "usage limit ... try again at 2026-10-03 20:12":
     harness_usage.py exhausted codex --until 2026-10-03T20:12:00+02:00
 
-    # Refresh Claude's reading now from the CLI's own rate-limit report (the
-    # dispatcher does this automatically when the reading is older than
+    # Refresh every configured provider now from its native CLI (the dispatcher
+    # does this automatically when the reading is older than
     # APIS_USAGE_REFRESH_SECONDS; run it from a timer to keep it warm):
     harness_usage.py refresh
 
@@ -137,16 +137,30 @@ def _gate_view(provider: str, headroom: float) -> dict[str, object]:
     return view
 
 
-def _refresh_claude() -> int:
-    """Refresh Claude's reading from the CLI's own report and say what happened."""
-    binary = shutil.which("claude")
-    if not binary:
-        print("refresh: no claude binary on PATH; nothing recorded", file=sys.stderr)
-        return 1
-    # A metered key would report the API account's limits, not the plan's.
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
-    outcome = usage_probe.refresh_usage_if_stale({"claude": binary}, env=env, force=True)
+def _refresh_providers() -> int:
+    """Refresh every configured provider from its native subscription CLI."""
+    app_codex = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+    binaries = {
+        provider: (
+            os.environ.get(f"APIS_{provider.upper()}_BIN")
+            or shutil.which("cursor-agent" if provider == "cursor" else provider)
+            or (
+                str(app_codex)
+                if provider == "codex" and app_codex.is_file()
+                else None
+            )
+        )
+        for provider in harness_router.configured_providers()
+    }
+    # A metered key would measure or spend API capacity, not the subscription.
+    metered = {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "CURSOR_API_KEY",
+    }
+    env = {key: value for key, value in os.environ.items() if key not in metered}
+    outcome = usage_probe.refresh_usage_if_stale(binaries, env=env, force=True)
     print(json.dumps(outcome, indent=2))
     print(
         "note: this ran under YOUR login and environment; the daemon refreshes under "
@@ -154,7 +168,10 @@ def _refresh_claude() -> int:
         "after its next dispatch.",
         file=sys.stderr,
     )
-    return 0 if outcome.get("claude") == "refreshed" else 1
+    complete = outcome and all(
+        value in {"refreshed", "fresh"} for value in outcome.values()
+    )
+    return 0 if complete else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -212,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         ))
         return 0
     if args.command == "refresh":
-        return _refresh_claude()
+        return _refresh_providers()
     if args.command == "usage":
         try:
             harness_router.record_usage(args.provider, args.window)

@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -221,6 +222,189 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
 # an advisory seat, or a gate owner re-seated after its gate cleared, held the
 # same wildcard over the same shared bearer.
 GATE_OWNER_DENIED_TOOLS: tuple[str, ...] = ("mcp__mcpsrv_neotoma__correct",)
+
+# Codex names MCP tools relative to their configured server.  The public
+# agent definitions use Claude's fully-qualified spelling
+# (``mcp__mcpsrv_neotoma__<tool>``), while Codex's ``enabled_tools`` /
+# ``disabled_tools`` values contain only ``<tool>``.  Keep the translation
+# beside the source constants so the two surfaces cannot drift independently.
+CODEX_NEOTOMA_SERVER_ID = "mcpsrv_neotoma"
+CODEX_NEOTOMA_TOOL_PREFIX = f"mcp__{CODEX_NEOTOMA_SERVER_ID}__"
+CODEX_GATE_BEARER_ENV = "NEOTOMA_BEARER_TOKEN"
+CODEX_GATE_REQUIRED_READ_TOOLS: tuple[str, ...] = tuple(
+    tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX) for tool in GATE_WRITEBACK_TOOLS
+)
+CODEX_GATE_DENIED_TOOLS: tuple[str, ...] = tuple(
+    tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX) for tool in GATE_OWNER_DENIED_TOOLS
+)
+GATE_OWNER_DENY_CAPABLE_PROVIDERS: tuple[str, ...] = ("claude", "codex")
+
+
+@dataclass(frozen=True)
+class CodexGateOwnerConfig:
+    """Verified, isolated Codex configuration for one seated review run."""
+
+    home: Path
+    config_path: Path
+
+
+def _codex_gate_enabled_tools(agent_tools: list[str]) -> tuple[str, ...] | None:
+    """Translate one agent's Neotoma grant into Codex MCP-local tool names.
+
+    ``None`` means the agent already carries a wildcard and Codex should expose
+    the server's ordinary tool set, minus ``disabled_tools``.  A restricted
+    grant remains restricted, but always retains the two read tools a seated
+    reviewer needs for gate-state awareness.  ``correct`` may still appear in
+    the allowlist: Codex applies ``disabled_tools`` after ``enabled_tools``, so
+    keeping it there exercises the deny-wins property instead of relying on an
+    additive allowlist to subtract authority.
+    """
+    if "*" in agent_tools or f"{CODEX_NEOTOMA_TOOL_PREFIX}*" in agent_tools:
+        return None
+    translated = [
+        tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX)
+        for tool in agent_tools
+        if tool.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+    ]
+    for tool in CODEX_GATE_REQUIRED_READ_TOOLS:
+        if tool not in translated:
+            translated.append(tool)
+    return tuple(translated)
+
+
+def _codex_gate_config_text(base_url: str, agent_tools: list[str]) -> str:
+    """Render the complete isolated Codex config for one gate-owning run."""
+    enabled_tools = _codex_gate_enabled_tools(agent_tools)
+    endpoint = f"{base_url.rstrip('/')}/mcp"
+    lines = [
+        'cli_auth_credentials_store = "file"',
+        "",
+        f"[mcp_servers.{CODEX_NEOTOMA_SERVER_ID}]",
+        f"url = {json.dumps(endpoint)}",
+        f"bearer_token_env_var = {json.dumps(CODEX_GATE_BEARER_ENV)}",
+        "required = true",
+    ]
+    if enabled_tools is not None:
+        lines.append(f"enabled_tools = {json.dumps(list(enabled_tools))}")
+    lines.append(f"disabled_tools = {json.dumps(list(CODEX_GATE_DENIED_TOOLS))}")
+    return "\n".join(lines) + "\n"
+
+
+def _codex_gate_config_contract(config_path: Path, base_url: str) -> str | None:
+    """Return why *config_path* cannot enforce the gate-owner deny, or None.
+
+    This is the launch proof, not a best-effort lint.  The isolated config must
+    expose exactly the intended record server, source its bearer from the
+    child environment, keep the required reads, and deny exactly ``correct``.
+    Any malformed or broadened shape refuses the child before it starts.
+    """
+    try:
+        parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return f"Codex gate-owner config is unreadable: {exc}"
+    if parsed.get("cli_auth_credentials_store") != "file":
+        return "Codex gate-owner config must preserve file-backed subscription auth"
+    servers = parsed.get("mcp_servers")
+    if not isinstance(servers, dict) or set(servers) != {CODEX_NEOTOMA_SERVER_ID}:
+        return (
+            "Codex gate-owner config must contain exactly the intended MCP "
+            f"server {CODEX_NEOTOMA_SERVER_ID!r}"
+        )
+    server = servers.get(CODEX_NEOTOMA_SERVER_ID)
+    if not isinstance(server, dict):
+        return "Codex gate-owner MCP server configuration is not a table"
+    expected_url = f"{base_url.rstrip('/')}/mcp"
+    if server.get("url") != expected_url:
+        return "Codex gate-owner MCP server URL does not match NEOTOMA_BASE_URL"
+    if server.get("bearer_token_env_var") != CODEX_GATE_BEARER_ENV:
+        return "Codex gate-owner MCP bearer is not environment-bound"
+    if server.get("required") is not True:
+        return "Codex gate-owner MCP server is not marked required"
+    denied = server.get("disabled_tools")
+    if denied != list(CODEX_GATE_DENIED_TOOLS):
+        return (
+            "Codex gate-owner disabled_tools must deny exactly "
+            f"{list(CODEX_GATE_DENIED_TOOLS)!r}"
+        )
+    enabled = server.get("enabled_tools")
+    if enabled is not None:
+        if not isinstance(enabled, list) or not all(
+            isinstance(tool, str) for tool in enabled
+        ):
+            return "Codex gate-owner enabled_tools is not a string list"
+        missing_reads = set(CODEX_GATE_REQUIRED_READ_TOOLS) - set(enabled)
+        if missing_reads:
+            return (
+                "Codex gate-owner enabled_tools omits required reads: "
+                + ", ".join(sorted(missing_reads))
+            )
+    return None
+
+
+def _prepare_codex_gate_owner_config(
+    *,
+    base_url: str,
+    agent_tools: list[str],
+    env_extra: dict[str, str] | None,
+) -> CodexGateOwnerConfig:
+    """Create and read back an isolated Codex config without global mutation.
+
+    Codex refreshes file-backed ChatGPT credentials during ordinary runs.  The
+    isolated home therefore symlinks its ``auth.json`` to the effective source
+    instead of copying it: refreshes reach the canonical cache, while the
+    isolated ``config.toml`` still prevents ambient MCP servers from loading.
+    """
+    inherited_home = Path(
+        (env_extra or {}).get("CODEX_HOME")
+        or os.environ.get("CODEX_HOME")
+        or (Path.home() / ".codex")
+    )
+    auth_source = inherited_home / "auth.json"
+    if not auth_source.is_file():
+        raise RuntimeError(
+            "Codex subscription auth.json is unavailable in the effective "
+            "CODEX_HOME; refusing a gate-owning launch"
+        )
+    if auth_source.stat().st_mode & 0o077:
+        raise RuntimeError(
+            "Codex subscription auth.json is accessible to group or other users; "
+            "refusing a gate-owning launch"
+        )
+    tmp_parent_value = (env_extra or {}).get("TMPDIR", "").strip()
+    tmp_parent = Path(tmp_parent_value) if tmp_parent_value else None
+    if tmp_parent is not None:
+        tmp_parent.mkdir(parents=True, exist_ok=True)
+    home = Path(
+        tempfile.mkdtemp(
+            prefix="apis_codex_gate_",
+            dir=str(tmp_parent) if tmp_parent is not None else None,
+        )
+    )
+    try:
+        os.chmod(home, 0o700)
+        auth_path = home / "auth.json"
+        auth_path.symlink_to(auth_source.resolve(strict=True))
+        if not auth_path.is_symlink() or (
+            auth_path.resolve(strict=True) != auth_source.resolve(strict=True)
+        ):
+            raise RuntimeError(
+                "Codex gate-owner auth.json does not resolve to the effective "
+                "subscription credential cache"
+            )
+        config_path = home / "config.toml"
+        config_path.write_text(
+            _codex_gate_config_text(base_url, agent_tools), encoding="utf-8"
+        )
+        os.chmod(config_path, 0o600)
+        if config_path.stat().st_mode & 0o777 != 0o600:
+            raise RuntimeError("Codex gate-owner config is not mode 0600")
+        contract_error = _codex_gate_config_contract(config_path, base_url)
+        if contract_error:
+            raise RuntimeError(contract_error)
+        return CodexGateOwnerConfig(home=home, config_path=config_path)
+    except Exception:
+        shutil.rmtree(home, ignore_errors=True)
+        raise
 
 
 # ── Per-agent Neotoma credential (ateles#795) ─────────────────────────────────
@@ -2043,10 +2227,11 @@ async def _run_skill_once(
     what let a PR land under the operator's own account instead of the
     agent's (ateles#109's original incident).
 
-    Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
-    to the Claude adapter. Claude, Codex, and Cursor receive the same definition
-    + skill + live-policy instructions through their provider prompt carriers
-    and use their ambient configured tools.
+    Claude's `--allowed-tools` remains adapter-specific. A seated or
+    gate-owning Codex run receives an isolated, per-run ``CODEX_HOME`` whose
+    only MCP server is the intended Neotoma record server and whose
+    ``disabled_tools = ["correct"]`` deny is read back before launch. Ordinary
+    Codex runs and all Cursor runs retain their existing ambient-tool behavior.
 
     ``local_review`` gives a child inference-only authority: no GitHub or
     Neotoma publication credentials, no ambient credential files/keychain,
@@ -2189,24 +2374,14 @@ async def _run_skill_once(
     # Falco's REQUEST_CHANGES on PR #1181: the `claude` adapter can put
     # `correct` on a CLI deny list (`GATE_OWNER_DENIED_TOOLS`, applied below),
     # which takes precedence over the `mcp__mcpsrv_neotoma__*` wildcard every
-    # dispatch grants. Neither other adapter has an equivalent mechanism in
-    # this codebase today:
-    #   - `codex exec` here is launched with `--sandbox workspace-write` and
-    #     no `--mcp-config` / tool-allowlist flag at all (see
-    #     `_provider_command`) — there is no per-tool grant to narrow.
-    #   - `cursor-agent --print` is launched with `--force --approve-mcps`
-    #     (see `_provider_command`), which auto-approves EVERY MCP tool call
-    #     with no per-tool exception.
-    # A gate-owning run (`owns_pending_gate=True` — every run whose clean
-    # verdict `sign_off` records) must never reach either adapter unrestricted:
-    # that would silently reopen the exact sink this PR closes for `claude`,
-    # on a path nobody is failing loudly on. Refuse the launch instead, with a
-    # legible reason surfaced through the same `SkillResult.ok=False` +
-    # `error` shape every other launch failure already uses — `swarm_dispatch`
-    # already maps that shape to a public failure-class string in
-    # `review_failure_class` / `_surface_failed_sign_offs`, so this reuses the
-    # existing surfacing rather than inventing a new one.
-    if owns_pending_gate and provider != "claude":
+    # dispatch grants. Codex now has the equivalent subtractive primitive:
+    # ``mcp_servers.<id>.disabled_tools`` is applied after ``enabled_tools``.
+    # Its isolated config is created and structurally verified below, after
+    # prompt construction and before any subprocess launch. Cursor still has
+    # no equivalent: `cursor-agent --force --approve-mcps` auto-approves every
+    # MCP call with no per-tool exception. Refuse every unsupported provider
+    # here; Codex gets a second fail-closed preflight at config construction.
+    if owns_pending_gate and provider not in GATE_OWNER_DENY_CAPABLE_PROVIDERS:
         msg = (
             f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: provider {provider!r} has no "
             "mechanism in this codebase to deny a single MCP tool "
@@ -2515,6 +2690,8 @@ async def _run_skill_once(
     #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
+    _codex_gate_config: CodexGateOwnerConfig | None = None
+    _codex_gate_token = ""
     if provider == "claude" and local_review:
         # Claude otherwise merges project/user MCP configuration. A local
         # review child has no Neotoma publication role at all, so give it an
@@ -2593,6 +2770,43 @@ async def _run_skill_once(
                 f"[apis] Could not write MCP config temp file (non-fatal): {exc}"
             )
             _mcp_tmp_path = None
+    elif provider == "codex" and owns_pending_gate:
+        _codex_gate_token, _ = neotoma_token_for_agent(_role)
+        if not _codex_gate_token:
+            msg = (
+                f"{provider} launch failed: {GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
+                "Codex gate-owner config "
+                "cannot bind the Neotoma record server because no bearer token "
+                "is available; refusing to launch"
+            )
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider
+            )
+        try:
+            _codex_gate_config = _prepare_codex_gate_owner_config(
+                base_url=_require_neotoma_base_url(),
+                agent_tools=agent_def.tools,
+                env_extra=env_extra,
+            )
+        except (OSError, RuntimeError) as exc:
+            msg = (
+                f"{provider} launch failed: {GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
+                "Codex gate-owner config "
+                f"could not be created and verified ({exc}); refusing to launch"
+            )
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider
+            )
+        cmd.insert(len(command_wrapper or []) + 1, "--strict-config")
+        log.info(
+            "[apis] Codex seated-review MCP contract verified: server=%s "
+            "disabled_tools=%s required_reads=%s",
+            CODEX_NEOTOMA_SERVER_ID,
+            list(CODEX_GATE_DENIED_TOOLS),
+            list(CODEX_GATE_REQUIRED_READ_TOOLS),
+        )
 
     tools = agent_def.tools  # property: list[str]; ['*'] means all
     # ateles#795, Falco's REQUEST_CHANGES on PR #1181: for a gate-owning run,
@@ -2718,6 +2932,13 @@ async def _run_skill_once(
         # Local inference: point the CLI at the loopback proxy and strip any
         # frontier OAuth credential so it cannot be sent there.
         local_provider.apply_env(subprocess_env, local_cfg)
+    if _codex_gate_config is not None:
+        # Point Codex at the isolated config only after `_subscription_only_env`
+        # has assembled the child environment. The bearer value stays in the
+        # environment named by `bearer_token_env_var`; it never enters argv or
+        # config.toml.
+        subprocess_env["CODEX_HOME"] = str(_codex_gate_config.home)
+        subprocess_env[CODEX_GATE_BEARER_ENV] = _codex_gate_token
 
     # ateles#109 / ateles#590 (PR #1334): inject the resolved per-agent GitHub
     # identity, if any. The fail-closed refusals for a network-enabled
@@ -2781,6 +3002,8 @@ async def _run_skill_once(
                 os.unlink(_mcp_tmp_path)
             except OSError:
                 pass
+        if _codex_gate_config is not None:
+            shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
         msg = f"{provider} launch failed: {exc}"
         log.warning(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(
@@ -3068,6 +3291,8 @@ async def _run_skill_once(
                 os.unlink(_mcp_tmp_path)
             except OSError:
                 pass
+        if _codex_gate_config is not None:
+            shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
 
 
 def usable_providers() -> set[str]:
@@ -3180,9 +3405,9 @@ async def run_skill(
     so an advisory seat (security, content, ...) or a gate owner re-seated
     after its gate cleared could otherwise still `correct` the shared
     `gate_status` map. It carries the same controls as a gate-owning run:
-    `correct` on the CLI deny list, and claude-only routing, since no other
-    adapter here can deny a single MCP tool. No seated lens needs `correct`
-    for anything but gate state: they file findings through `store`.
+    `correct` on a subtractive deny list, and routing only to adapters that
+    prove that deny (Claude and Codex). No seated lens needs `correct` for
+    anything but gate state: they file findings through `store`.
 
     ``work_class`` names the kind of work (``local_provider.MECHANICAL_WORK_CLASSES``).
     When it is a configured mechanical class and the run is unpinned and not a
@@ -3211,7 +3436,7 @@ async def run_skill(
     """
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
-    # use it only for the deny and the claude-only routing.
+    # use it only for the deny and deny-capable routing.
     deny_correct = owns_pending_gate or seated_reviewer
 
     # Refresh the usage snapshot BEFORE anything reads provider selection:
@@ -3283,7 +3508,6 @@ async def run_skill(
         ),
         binaries=_tier_bound_binaries(
             _provider_binaries(), precomputed_tier, provider,
-            restricted_to_claude=deny_correct,
         ),
         provider=provider,
         role=role,
@@ -3299,8 +3523,6 @@ def _tier_bound_binaries(
     binaries: dict[str, str | None],
     tier: "model_tiering.ResolvedTier | None",
     pinned_provider: str | None,
-    *,
-    restricted_to_claude: bool = False,
 ) -> dict[str, str | None]:
     """Drop frontier providers with no model bound for ``tier`` before selection.
 
@@ -3312,16 +3534,14 @@ def _tier_bound_binaries(
 
     Left unfiltered (so the in-attempt refusal stays the backstop and names
     the missing binding) when: no tier was resolved, no vendor_binding is
-    configured at all, the caller pinned a provider, the run is a gate-owning
-    or seated-reviewer run (``_run_provider_attempts`` narrows those to
-    claude itself; filtering claude out first would misreport the cause as a
-    missing claude binary), or no router-eligible frontier provider would
-    remain (configured, headroom, not cooling — ``usable_provider_names``,
+    configured at all, the caller pinned a provider, or no router-eligible
+    frontier provider would remain (configured, headroom, not cooling —
+    ``usable_provider_names``,
     which unlike ``provider_candidates`` does not advance the round-robin).
     ``claude-local`` is never filtered — it runs its own configured model and
     takes no vendor_binding.
     """
-    if tier is None or pinned_provider is not None or restricted_to_claude:
+    if tier is None or pinned_provider is not None:
         return binaries
     binding = model_tiering.configured_vendor_binding()
     if not binding:
@@ -3460,39 +3680,35 @@ async def _run_provider_attempts(
     safely repeat after a timeout/outage without duplicating external effects.
 
     ``owns_pending_gate`` (ateles#795 / #1181 operational finding): an
-    UNPINNED gate-owning reviewer run (``provider is None``, the normal
-    dispatch path) must land on ``claude`` only — it is the sole provider
-    that can deny `mcp__mcpsrv_neotoma__correct` at the tool-permission layer
-    (see the preflight refusal in `_run_skill_once`). That refusal used to be
-    the ONLY mechanism enforcing this, but it fires from *inside* a
-    per-provider attempt, after `provider_candidates` has already picked
-    cursor or codex first (the common case — see the live dispatch mix in the
-    #1181 finding). `_run_provider_attempts` only fails over on a classified
-    `failure_kind` or a `"{selected} launch failed:"` error, and the in-attempt
-    refusal is neither, so it returned immediately with no failover to claude
-    and most gate-owner runs would stop. Filtering candidates to `claude`
-    BEFORE selection, here, fixes that: claude is simply the only candidate an
-    unpinned gate-owning run ever sees, so normal failover logic (try the next
-    eligible candidate) never needs to special-case this refusal.
+    UNPINNED seated/gate-owning review run (``provider is None``, the normal
+    dispatch path) may land only on an adapter with a proven subtractive deny
+    for ``correct``. Claude binds ``--disallowed-tools``; Codex binds an
+    isolated ``mcp_servers.<id>.disabled_tools`` config and verifies it before
+    launch. Cursor remains excluded. Filtering BEFORE selection keeps an
+    unsupported adapter from becoming a terminal in-attempt refusal that
+    prevents safe failover.
 
-    A caller that hard-PINS a specific non-claude ``provider`` (diagnostics,
-    focused tests) is left untouched by this filter — pinning already means
-    "run exactly this adapter or fail," so it still reaches the in-attempt
-    refusal in `_run_skill_once` unchanged, which remains the backstop for
-    every call path (pinned or not).
+    A caller that hard-PINS a specific ``provider`` (diagnostics, focused
+    tests) is left untouched by this filter — pinning already means "run
+    exactly this adapter or fail," so the adapter's own preflight remains the
+    backstop for every call path.
     """
     if owns_pending_gate and provider is None:
-        if preferred_provider and preferred_provider != "claude":
-            # A lens preference (e.g. the security lens's second-model
-            # `codex`) cannot be honoured on a run that must deny `correct`:
-            # say so rather than drop it silently.
+        if (
+            preferred_provider
+            and preferred_provider not in GATE_OWNER_DENY_CAPABLE_PROVIDERS
+        ):
+            # A lens preference cannot be honoured when its adapter lacks the
+            # required subtractive deny; say so rather than drop it silently.
             log.info(
                 f"[apis] {skill}: preferred provider {preferred_provider!r} "
                 "not used — this run denies mcp__mcpsrv_neotoma__correct, which "
-                "only the claude adapter can enforce"
+                f"only {GATE_OWNER_DENY_CAPABLE_PROVIDERS} can enforce"
             )
-        binaries = {"claude": binaries.get("claude")}
-        preferred_provider = None
+            preferred_provider = None
+        binaries = {
+            name: binaries.get(name) for name in GATE_OWNER_DENY_CAPABLE_PROVIDERS
+        }
 
     if provider in (None, "claude"):
         # Callers that enter here directly (run_review_prompt) refresh here;
@@ -3511,7 +3727,7 @@ async def _run_provider_attempts(
         candidates = [*head, preferred_provider, *rest]
     if not candidates:
         # Cooling is checked FIRST, over exactly the providers this run could
-        # have used (the claude-only narrowing for a gate-owning run, the pinned
+        # have used (the deny-capable narrowing for a gate-owning run, the pinned
         # provider for a pinned one): a live window is a self-clearing wait, not
         # a capability refusal, and must carry cooled_until so the panel defers
         # and resumes instead of paging the operator.
@@ -3531,14 +3747,16 @@ async def _run_provider_attempts(
                 skill, False, None, "", "", error=msg, cooled_until=retry_at,
             )
         if owns_pending_gate and provider is None:
-            reason = provider_exclusion_reason("claude", binaries) or "not eligible"
+            reasons = "; ".join(
+                f"{name}={provider_exclusion_reason(name, binaries) or 'not eligible'}"
+                for name in GATE_OWNER_DENY_CAPABLE_PROVIDERS
+            )
             msg = (
-                f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: claude is the only "
-                "provider that can deny a single MCP tool for a seated "
-                "reviewer or gate-owning run, and it is currently ineligible "
-                f"({reason}) — refusing "
-                "to launch on cursor/codex unrestricted rather than falling "
-                "over to them (ateles#795, #1181 operational finding). "
+                f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: no provider with a "
+                "proven single-tool deny is currently eligible for this seated "
+                f"reviewer or gate-owning run ({reasons}) — refusing to launch "
+                "on an unsupported provider unrestricted (ateles#795, #1181 "
+                "operational finding). "
                 "Nothing was cooled down."
             )
             log.error(f"[apis] {skill} dispatch refused — {msg}")
@@ -3640,9 +3858,25 @@ async def _run_provider_attempts(
             else _provider_failure_kind(result.error, result.stderr, result.stdout)
         )
         launch_failure = result.error.startswith(f"{selected} launch failed:")
+        gate_preflight_refusal = (
+            launch_failure and GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
+        )
 
         if result.ok and failure_kind is None:
             return result
+        if gate_preflight_refusal:
+            # No child started, so an unpinned review may safely try the next
+            # deny-capable adapter without cooling Codex for unrelated work.
+            # A pinned run, or one with no alternative, retains the precise
+            # fail-closed refusal instead of generic provider exhaustion.
+            if provider is not None or index >= len(pending):
+                return result
+            last_result = result
+            log.warning(
+                f"[apis] {skill}: {selected} gate-owner preflight refused; "
+                "trying next deny-capable provider without cooldown"
+            )
+            continue
         if selected == local_provider.LOCAL_PROVIDER:
             # Local inference failed: record why, and fall over to frontier.
             # Local-first routing is limited to mechanical work classes, which
