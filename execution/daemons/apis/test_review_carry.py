@@ -44,6 +44,10 @@ DOC_FILE = "docs/guide/how_to.md"  # allowlisted prose docs: ux only
 UNMAPPED_FILE = "lib/some_util.py"  # code: every lens
 
 
+async def _empty_usable_providers() -> set[str]:
+    return set()
+
+
 def _body(lens: str, head: str, verdict: str = "SIGNED_OFF", finding: str = "") -> str:
     text = (
         f"{sd.compose_lens_review_marker(lens, head)}\n"
@@ -362,6 +366,12 @@ class TestDispatcherCombinedPass:
     async def test_one_dispatch_posts_three_own_comments_and_accepts_them(self, monkeypatch):
         calls: list[dict] = []
         posted: list[dict] = []
+        provider_reads = 0
+
+        async def fake_usable_providers() -> set[str]:
+            nonlocal provider_reads
+            provider_reads += 1
+            return set()
 
         async def fake_run_skill(agent, prompt, **kwargs):
             calls.append({"agent": agent, **kwargs})
@@ -390,7 +400,7 @@ class TestDispatcherCombinedPass:
 
         monkeypatch.setattr(sd, "run_skill", fake_run_skill)
         monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
-        monkeypatch.setattr(sd, "usable_providers", lambda: set())
+        monkeypatch.setattr(sd, "usable_providers_async", fake_usable_providers)
         from test_gate_sign_off_dispatch import _StubNotifier, _config, _trigger
 
         d = sd.SwarmDispatcher(_StubNotifier(), _config())
@@ -407,6 +417,7 @@ class TestDispatcherCombinedPass:
             signals=None,
         )
         assert len(calls) == 1, "one dispatch for the three lenses"
+        assert provider_reads == 1, "combined pass awaits the refreshed provider view once"
         assert calls[0]["action_class"] == "lens_review:pm"
         assert set(results) == {"pm", "qa", "ux"}
         assert len(posted) == 3
@@ -599,7 +610,7 @@ class TestCombinedPromptKeepsEachLensDuties:
         client = _PostClient()
         monkeypatch.setattr(sd, "run_skill", fake_run_skill)
         monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
-        monkeypatch.setattr(sd, "usable_providers", lambda: set())
+        monkeypatch.setattr(sd, "usable_providers_async", _empty_usable_providers)
         monkeypatch.setattr(
             sd.SwarmDispatcher, "_lens_agent_prompt",
             staticmethod(lambda a: "" if a == "accipiter" else "x"),
@@ -659,7 +670,7 @@ class TestCombinedPassPartialFailures:
 
         monkeypatch.setattr(sd, "run_skill", fake_run_skill)
         monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
-        monkeypatch.setattr(sd, "usable_providers", lambda: set())
+        monkeypatch.setattr(sd, "usable_providers_async", _empty_usable_providers)
         from test_gate_sign_off_dispatch import _trigger
 
         panel = [lens_by_name(x) for x in ("pm", "qa", "ux")]

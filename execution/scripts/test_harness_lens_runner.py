@@ -73,7 +73,7 @@ def brief_file(tmp_path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _default_full_headroom(monkeypatch):
+def _default_full_headroom(monkeypatch, tmp_path):
     """Isolate every test from the operator's REAL
     ~/.config/ateles/harness-headroom.json (codex/cursor at 0.0 as of this
     task). Without this, `configured_headroom()` reads that live file and
@@ -95,9 +95,20 @@ def _default_full_headroom(monkeypatch):
     # (~/.config/ateles/harness-usage.json) into configured_headroom(); a
     # host whose real snapshot shows a provider exhausted would otherwise
     # fail every test here. Same isolation as execution/daemons/apis/conftest.
-    monkeypatch.setenv(
-        "APIS_HARNESS_USAGE_FILE", "/nonexistent/harness-usage.json"
-    )
+    usage_file = tmp_path / "harness-usage.json"
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(usage_file))
+    # The all-provider gate fails closed unless every configured frontier
+    # provider has current evidence. These tests exercise lens-runner behavior,
+    # not usage discovery, so provide the explicit successful probe result that
+    # their mocked dispatch assumes. Tests for exhaustion replace this file.
+    observed_at = time.time()
+    for provider in harness_router.FRONTIER_PROVIDERS:
+        harness_router.record_probe_available(
+            provider,
+            source="test_fixture",
+            detail="mocked provider is available",
+            observed_at=observed_at,
+        )
 
 
 @pytest.fixture(autouse=True)

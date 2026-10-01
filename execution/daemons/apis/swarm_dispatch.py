@@ -52,7 +52,6 @@ import shutil
 import sys
 import tempfile
 import unicodedata
-from urllib.parse import quote
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -65,10 +64,9 @@ from gate_waive import (
     SIGN_OFF_ATTRIBUTION_FAILED,
     SIGN_OFF_OTHER_AUTHORITY,
     AggregateWaiveOutcome,
+    IssueGateState,
     IssueGateStore,
     SignOffOutcome,
-    WaiveOutcome,
-    format_waive_comment,
     format_waive_comment_multi,
 )
 from github_gateway import SwarmTrigger
@@ -12016,7 +12014,7 @@ class SwarmDispatcher:
                 include_github_contract=True,
                 notifier=self.notifier,
                 preferred_provider=resolve_lens_provider(
-                    first, available_providers=usable_providers()
+                    first, available_providers=await usable_providers_async()
                 ),
                 owns_pending_gate=any(
                     gate_owner_tool_deny(
