@@ -101,6 +101,14 @@ def test_short_final_that_defers_to_collapsed_commentary_blocks():
     assert any("self-contained" in item for item in gate.findings(transcript))
 
 
+def test_short_settled_final_after_commentary_is_self_contained():
+    transcript = gate.Transcript(
+        commentary=("The review checked the requested reporting behavior.",),
+        final=("Review complete. No changes are needed.",),
+    )
+    assert gate.findings(transcript) == []
+
+
 def test_stop_hook_is_blocking_by_default(tmp_path, monkeypatch, capsys):
     path = _write(
         tmp_path,
