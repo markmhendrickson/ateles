@@ -32,11 +32,25 @@ title cannot change placement or make an equivalent report fail.
 
 The named-session scorer derives the resumable population from that source
 union and each canonical task/plan binding from real fixture `PART_OF` edges.
-It requires exactly one ledger row and disposition per lane, rejects phantom or
-unbound identities, and requires an ambiguous lane to expose both candidates
-without asserting either as canonical. The normal runner selects this scorer
-from scenario metadata; coverage cannot pass only through a detached unit-test
-helper or a prompt that contains the answer key.
+It requires each row to cite its source evidence and latest stored state,
+validates task → plan → parent ancestry, rejects a superseded session shell in
+favor of its proven canonical replacement, and requires an ambiguous lane to
+expose both candidates without asserting either as canonical. A post-inventory
+observation changes one lane after the terminal handoff so stale-state selection
+goes red. The normal runner selects this scorer from scenario metadata, and a
+first-source-only mutation also runs through `runner.run_scenario()`; coverage
+cannot pass only through a detached unit-test helper or a prompt that contains
+the answer key.
+
+Four additional normal-invocation scenarios cover the safe recovery contract
+before plan binding: an exact source that is not found, two corroborated
+candidates, an exactly bound zero-lane session, and a bound session with an
+unreadable required terminal source. Their scorers require checked surfaces or
+bounded candidates, an explicit zero-count ledger for the empty case, and
+preservation of both a readable lane and an unresolved lane plus bounded
+retry/escalation for partly unreadable evidence. Each requires an explicit
+no-domain-action and no-completeness-claim posture rather than treating absence,
+ambiguity, zero lanes, or unavailability as a successful resume.
 
 The three `fixtures/skills/*/SKILL.md` files are generated review evidence, not
 sources. Neotoma prod remains canonical. `fixtures/review_bundle.json` records

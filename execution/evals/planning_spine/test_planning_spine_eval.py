@@ -103,27 +103,124 @@ The exact source session was bound before any similarly named workstream plan.
 
 ### Source-session coverage ledger
 
-| Source lane | Canonical workstream | Disposition |
-| --- | --- | --- |
-| `lane_fixture_01` discoverable lane | `task_fixture_01` / `plan_fixture_01` | Imported |
-| `lane_fixture_02` sibling lane | `task_fixture_02` / `plan_fixture_02` | Imported |
-| `lane_fixture_03` sibling lane | `task_fixture_03` / `plan_fixture_03` | Imported |
-| `lane_fixture_04` sibling lane | `task_fixture_04` / `plan_fixture_04` | Imported |
-| `lane_fixture_05` sibling lane | `task_fixture_05` / `plan_fixture_05` | Imported |
-| `lane_fixture_06` sibling lane | `task_fixture_06` / `plan_fixture_06` | Imported |
-| `lane_fixture_07` sibling lane | `task_fixture_07` / `plan_fixture_07` | Imported |
-| `lane_fixture_08` sibling lane | `task_fixture_08` / `plan_fixture_08` | Imported |
-| `lane_fixture_09` sibling lane | `task_fixture_09` / `plan_fixture_09` | Imported |
-| `lane_fixture_10` sibling lane | `task_fixture_10` / `plan_fixture_10` | Imported |
-| `lane_fixture_11` sibling lane | `task_fixture_11` / `plan_fixture_11` | Explicitly excluded — terminal and superseded |
-| `lane_fixture_12` sibling lane | `task_fixture_12` / `plan_fixture_12` | Explicitly excluded — outside requested scope |
-| `lane_fixture_13` sibling lane | Candidates: `task_fixture_13` → `plan_fixture_13`; `task_fixture_13_candidate_b` → `plan_fixture_13_candidate_b` | Unresolved — canonical task is ambiguous |
+| Source lane | Source evidence | Canonical workstream | Latest stored state | Disposition |
+| --- | --- | --- | --- | --- |
+| `lane_fixture_01` discoverable lane | `transcript_fixture_named_handoff` | `task_fixture_01` / `plan_fixture_01` | `active` | Imported |
+| `lane_fixture_02` sibling lane | `transcript_fixture_named_handoff` | `task_fixture_02` / `plan_fixture_02` | `active` | Imported |
+| `lane_fixture_03` sibling lane | `transcript_fixture_named_handoff` | `task_fixture_03` / `plan_fixture_03` | `active` | Imported |
+| `lane_fixture_04` sibling lane | `workboard_fixture_named_handoff` | `task_fixture_04` / `plan_fixture_04` | `active` | Imported |
+| `lane_fixture_05` sibling lane | `workboard_fixture_named_handoff` | `task_fixture_05` / `plan_fixture_05` | `active` | Imported |
+| `lane_fixture_06` sibling lane | `workboard_fixture_named_handoff` | `task_fixture_06` / `plan_fixture_06` | `active` | Imported |
+| `lane_fixture_07` sibling lane | `workboard_fixture_named_handoff` | `task_fixture_07` / `plan_fixture_07` | `active` | Imported |
+| `lane_fixture_08` sibling lane | `task_fixture_08` | `task_fixture_08` / `plan_fixture_08` | `active` | Imported |
+| `lane_fixture_09` sibling lane | `task_fixture_09` | `task_fixture_09` / `plan_fixture_09` | `active` | Imported |
+| `lane_fixture_10` sibling lane | `task_fixture_10` | `task_fixture_10` / `plan_fixture_10` | `active` | Imported |
+| `lane_fixture_11` sibling lane | `handoff_fixture_named_handoff`; `post_inventory_fixture_named_handoff` | `task_fixture_11` / `plan_fixture_11` | `terminal_superseded` | Explicitly excluded — terminal and superseded |
+| `lane_fixture_12` sibling lane | `handoff_fixture_named_handoff` | `task_fixture_12` / `plan_fixture_12` | `outside_requested_scope` | Explicitly excluded — outside requested scope |
+| `lane_fixture_13` sibling lane | `transcript_fixture_named_handoff` | Candidates: `task_fixture_13` → `plan_fixture_13`; `task_fixture_13_candidate_b` → `plan_fixture_13_candidate_b` | `ambiguous_binding` | Unresolved — canonical task is ambiguous |
 
 audited: 13; imported: 10; excluded: 2; unresolved: 1
 
 The coverage balance is 13 = 10 + 2 + 1. The unresolved lane prevents a
 comprehensive-resume claim and any domain action that assumes its state.
 """
+
+NOT_FOUND_REPORT = """
+The exact source session `session_fixture_missing` was not found. I checked the
+conversation identifier index, transcript registry, workboard/session_digest,
+and terminal handoff records. I stopped before plan binding and took no domain
+action. Recovery: provide a stable session id or exact transcript path, or
+restore the missing record. No completeness claim is possible.
+"""
+
+AMBIGUOUS_REPORT = """
+The source identity is ambiguous. Candidates:
+- `session_fixture_ambiguous_a` — 2026-09-30T08:00:00Z, fixture-harness-a, fixture/repository-a
+- `session_fixture_ambiguous_b` — 2026-09-30T09:00:00Z, fixture-harness-b, fixture/repository-b
+I stopped before plan binding and took no domain action. Choose one stable id.
+No completeness claim is possible.
+"""
+
+EMPTY_REPORT = """
+## Source-session coverage ledger
+
+| Source lane | Source evidence | Canonical workstream | Latest stored state | Disposition |
+| --- | --- | --- | --- | --- |
+
+audited: 0; imported: 0; excluded: 0; unresolved: 0
+
+No work was resumed, no domain action was taken, and no completeness claim is
+made.
+"""
+
+UNREADABLE_REPORT = """
+## Source-session coverage ledger
+
+| Source lane | Source evidence | Canonical workstream | Latest stored state | Disposition |
+| --- | --- | --- | --- | --- |
+| `lane_fixture_readable_01` | `evidence_fixture_unreadable_readable` | unknown | `active` | Imported |
+| `lane_fixture_unreadable_01` | unavailable `evidence_fixture_unreadable` | unknown | unknown | Unresolved |
+
+audited: 2; imported: 1; excluded: 0; unresolved: 1
+
+The unavailable terminal evidence remains unknown, so coverage is not complete
+and no state-dependent domain action was taken. Retry that source twice, then
+raise a checkpoint/escalation if it remains unavailable.
+"""
+
+
+def _materialized_fixture_session(run_dir: Path, *_args, **_kwargs) -> dict:
+    """Build the harness result from the fixture graph materialized for this run."""
+    state = json.loads((run_dir / "ws" / "neotoma_state.json").read_text())
+    fixture = {**FIXTURE, **state}
+    scenario = fixture["scenarios"]["continue-session-named-session"]
+    outcomes = checks.source_session_fixture_outcomes(fixture, scenario)
+    rows = []
+    disposition_labels = {
+        "imported": "Imported",
+        "excluded": "Explicitly excluded — fixture reason",
+        "unresolved": "Unresolved — canonical task is ambiguous",
+    }
+    for lane_id in outcomes["lane_ids"]:
+        evidence = "; ".join(
+            f"`{entity_id}`" for entity_id in outcomes["lane_evidence_ids"][lane_id]
+        )
+        pairs = outcomes["bindings"][lane_id]["pairs"]
+        if outcomes["bindings"][lane_id]["outcome"] == "ambiguous":
+            binding = "Candidates: " + "; ".join(
+                f"`{task_id}` → `{plan_id}`" for task_id, plan_id in pairs
+            )
+        else:
+            task_id, plan_id = pairs[0]
+            binding = f"`{task_id}` / `{plan_id}`"
+        disposition = outcomes["expected_dispositions"][lane_id]
+        rows.append(
+            "| "
+            f"`{lane_id}` | {evidence} | {binding} | "
+            f"`{outcomes['latest_states'][lane_id]}` | "
+            f"{disposition_labels[disposition]} |"
+        )
+    counts = {
+        label: sum(value == label for value in outcomes["expected_dispositions"].values())
+        for label in ("imported", "excluded", "unresolved")
+    }
+    report = "\n".join(
+        [
+            "## Source session: Named handoff (`session_fixture_named_handoff`)",
+            "",
+            "### Source-session coverage ledger",
+            "",
+            "| Source lane | Source evidence | Canonical workstream | Latest stored state | Disposition |",
+            "| --- | --- | --- | --- | --- |",
+            *rows,
+            "",
+            f"audited: {len(rows)}; imported: {counts['imported']}; "
+            f"excluded: {counts['excluded']}; unresolved: {counts['unresolved']}",
+            "",
+            "The unresolved lane prevents state-dependent domain action.",
+        ]
+    )
+    return {"turns": [[{"type": "result", "result": report}]], "error": None}
 
 
 def _expected_fixture_binding_ids() -> tuple[list[str], list[str]]:
@@ -134,9 +231,24 @@ def _expected_fixture_binding_ids() -> tuple[list[str], list[str]]:
     )
 
 
-def _source_lanes_by_kind(fixture: dict) -> dict[str, set[str]]:
+def _source_lanes_by_kind(
+    fixture: dict, source_session_id: str
+) -> dict[str, set[str]]:
     found: dict[str, set[str]] = {}
-    for entity in fixture["entities"].values():
+    evidence_ids = {
+        edge["source_entity_id"]
+        for edge in fixture["relationships"]
+        if edge["relationship_type"] == "PART_OF"
+        and edge["target_entity_id"] == source_session_id
+    }
+    evidence_ids.update(
+        edge["target_entity_id"]
+        for edge in fixture["relationships"]
+        if edge["relationship_type"] == "REFERS_TO"
+        and edge["source_entity_id"] == source_session_id
+    )
+    for entity_id in evidence_ids:
+        entity = fixture["entities"][entity_id]
         snapshot = entity.get("snapshot", {})
         source_kind = snapshot.get("source_kind")
         if not source_kind:
@@ -202,7 +314,7 @@ def test_named_session_fixture_requires_union_beyond_narrow_candidate() -> None:
     scenario = FIXTURE["scenarios"]["continue-session-named-session"]
     prompt = scenario["prompt"]
     session_snapshot = FIXTURE["entities"][scenario["source_session_id"]]["snapshot"]
-    lanes_by_kind = _source_lanes_by_kind(FIXTURE)
+    lanes_by_kind = _source_lanes_by_kind(FIXTURE, scenario["source_session_id"])
 
     assert "Lanes 1-10" not in prompt
     assert "imported" not in prompt.lower()
@@ -249,7 +361,7 @@ def test_scorer_fails_when_a_bound_task_entity_does_not_exist() -> None:
     )
 
     assert result["outcome"] == "fail"
-    assert "fixture_graph_binding" in result["failed"]
+    assert "graph_derived_binding" in result["failed"]
 
 
 def test_scorer_fails_when_task_plan_part_of_edge_is_missing() -> None:
@@ -271,18 +383,20 @@ def test_scorer_fails_when_task_plan_part_of_edge_is_missing() -> None:
     )
 
     assert result["outcome"] == "fail"
-    assert "fixture_graph_binding" in result["failed"]
+    assert "graph_derived_binding" in result["failed"]
 
 
 def test_scorer_rejects_asserted_canonical_pair_for_ambiguous_lane() -> None:
     candidate_row = (
-        "| `lane_fixture_13` sibling lane | Candidates: `task_fixture_13` → "
+        "| `lane_fixture_13` sibling lane | `transcript_fixture_named_handoff` | "
+        "Candidates: `task_fixture_13` → "
         "`plan_fixture_13`; `task_fixture_13_candidate_b` → "
-        "`plan_fixture_13_candidate_b` | Unresolved — canonical task is ambiguous |"
+        "`plan_fixture_13_candidate_b` | `ambiguous_binding` | Unresolved — canonical task is ambiguous |"
     )
     asserted_row = (
-        "| `lane_fixture_13` sibling lane | `task_fixture_13` / "
-        "`plan_fixture_13` | Unresolved — canonical task is ambiguous |"
+        "| `lane_fixture_13` sibling lane | `transcript_fixture_named_handoff` | "
+        "`task_fixture_13` / `plan_fixture_13` | `ambiguous_binding` | "
+        "Unresolved — canonical task is ambiguous |"
     )
     wrong = WHOLE_SESSION_REPORT.replace(candidate_row, asserted_row)
 
@@ -375,7 +489,8 @@ def test_named_session_rejects_conflicting_duplicate_lane_row() -> None:
 
 def test_omitted_sibling_cannot_claim_complete_source_session_resume() -> None:
     omitted_row = (
-        "| `lane_fixture_12` sibling lane | `task_fixture_12` / `plan_fixture_12` | "
+        "| `lane_fixture_12` sibling lane | `handoff_fixture_named_handoff` | "
+        "`task_fixture_12` / `plan_fixture_12` | `outside_requested_scope` | "
         "Explicitly excluded — outside requested scope |\n"
     )
     wrong = WHOLE_SESSION_REPORT.replace(omitted_row, "").replace(
@@ -422,6 +537,228 @@ def test_coverage_counts_must_report_all_dispositions_and_balance() -> None:
         "all_four_coverage_counts",
         "coverage_balance_equation",
     } <= set(result["failed"])
+
+
+def test_post_inventory_update_is_the_latest_lane_state() -> None:
+    result = checks.source_session_fixture_outcomes(FIXTURE, SOURCE_SESSION_SCENARIO)
+
+    assert result["latest_states"]["lane_fixture_11"] == "terminal_superseded"
+    assert result["lane_evidence_ids"]["lane_fixture_11"] == [
+        "handoff_fixture_named_handoff",
+        "post_inventory_fixture_named_handoff",
+    ]
+
+
+def test_latest_state_requires_explicit_parseable_chronology() -> None:
+    broken = copy.deepcopy(FIXTURE)
+    broken["entities"]["post_inventory_fixture_named_handoff"]["snapshot"][
+        "observed_at"
+    ] = "not-a-time"
+
+    result = checks.score_source_session_resume(
+        WHOLE_SESSION_REPORT,
+        broken,
+        broken["scenarios"]["continue-session-named-session"],
+    )
+
+    assert result["outcome"] == "fail"
+    assert "source_evidence_chronology" in result["failed"]
+
+
+def test_first_source_only_discovery_goes_red() -> None:
+    transcript_only = """
+## Source session: Named handoff (`session_fixture_named_handoff`)
+### Source-session coverage ledger
+| Source lane | Source evidence | Canonical workstream | Latest stored state | Disposition |
+| --- | --- | --- | --- | --- |
+| `lane_fixture_01` | `transcript_fixture_named_handoff` | `task_fixture_01` / `plan_fixture_01` | `active` | Imported |
+| `lane_fixture_02` | `transcript_fixture_named_handoff` | `task_fixture_02` / `plan_fixture_02` | `active` | Imported |
+| `lane_fixture_03` | `transcript_fixture_named_handoff` | `task_fixture_03` / `plan_fixture_03` | `active` | Imported |
+| `lane_fixture_13` | `transcript_fixture_named_handoff` | Candidates: `task_fixture_13` → `plan_fixture_13`; `task_fixture_13_candidate_b` → `plan_fixture_13_candidate_b` | `ambiguous_binding` | Unresolved |
+audited: 4; imported: 3; excluded: 0; unresolved: 1
+"""
+
+    result = checks.score_source_session_resume(
+        transcript_only, FIXTURE, SOURCE_SESSION_SCENARIO
+    )
+
+    assert result["outcome"] == "fail"
+    assert "source_evidence_union" in result["failed"]
+
+
+def test_prompt_echo_without_graph_binding_goes_red() -> None:
+    broken = copy.deepcopy(FIXTURE)
+    broken["relationships"] = [
+        edge
+        for edge in broken["relationships"]
+        if not (
+            edge["relationship_type"] == "PART_OF"
+            and edge["source_entity_id"] == "plan_fixture_05"
+            and edge["target_entity_id"] == "plan_fixture_named_parent"
+        )
+    ]
+
+    result = checks.score_source_session_resume(
+        WHOLE_SESSION_REPORT,
+        broken,
+        broken["scenarios"]["continue-session-named-session"],
+    )
+
+    assert result["outcome"] == "fail"
+    assert "graph_derived_binding" in result["failed"]
+
+
+def test_superseded_session_shell_goes_red() -> None:
+    wrong = WHOLE_SESSION_REPORT.replace(
+        "`task_fixture_01` / `plan_fixture_01`",
+        "`task_fixture_01_shell` / `plan_fixture_01_shell`",
+        1,
+    )
+
+    result = checks.score_source_session_resume(
+        wrong, FIXTURE, SOURCE_SESSION_SCENARIO
+    )
+
+    assert result["outcome"] == "fail"
+    assert "superseded_shell_rejected" in result["failed"]
+
+
+def test_ignored_post_inventory_update_goes_red() -> None:
+    wrong = WHOLE_SESSION_REPORT.replace(
+        "`terminal_superseded` | Explicitly excluded — terminal and superseded",
+        "`active` | Imported",
+    ).replace(
+        "audited: 13; imported: 10; excluded: 2; unresolved: 1",
+        "audited: 13; imported: 11; excluded: 1; unresolved: 1",
+    )
+
+    result = checks.score_source_session_resume(
+        wrong, FIXTURE, SOURCE_SESSION_SCENARIO
+    )
+
+    assert result["outcome"] == "fail"
+    assert "latest_state_reconciliation" in result["failed"]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "report"),
+    [
+        ("continue-session-missing-session", NOT_FOUND_REPORT),
+        ("continue-session-ambiguous-session", AMBIGUOUS_REPORT),
+        ("continue-session-empty-session", EMPTY_REPORT),
+        ("continue-session-unreadable-session", UNREADABLE_REPORT),
+    ],
+)
+def test_whole_session_recovery_outcome_passes(scenario: str, report: str) -> None:
+    result = checks.score_source_session_resume(
+        report, FIXTURE, FIXTURE["scenarios"][scenario]
+    )
+
+    assert result["outcome"] == "pass", result
+
+
+def test_nearby_plan_fallback_fails_after_not_found() -> None:
+    wrong = NOT_FOUND_REPORT + "\nSelected plan_fixture_01 and resumed plan work.\n"
+    result = checks.score_source_session_resume(
+        wrong, FIXTURE, FIXTURE["scenarios"]["continue-session-missing-session"]
+    )
+
+    assert result["outcome"] == "fail"
+    assert "pre_action_stop" in result["failed"]
+
+
+def test_arbitrary_candidate_selection_fails_under_ambiguity() -> None:
+    wrong = AMBIGUOUS_REPORT + "\nI selected plan_fixture_01 and resumed plan work.\n"
+    result = checks.score_source_session_resume(
+        wrong, FIXTURE, FIXTURE["scenarios"]["continue-session-ambiguous-session"]
+    )
+
+    assert result["outcome"] == "fail"
+    assert "pre_action_stop" in result["failed"]
+
+
+def test_zero_lane_session_requires_explicit_empty_outcome() -> None:
+    wrong = "Exact session bound successfully; nothing else to report."
+    result = checks.score_source_session_resume(
+        wrong, FIXTURE, FIXTURE["scenarios"]["continue-session-empty-session"]
+    )
+
+    assert result["outcome"] == "fail"
+    assert "explicit_empty_outcome" in result["failed"]
+
+
+def test_unreadable_evidence_cannot_be_coerced_to_empty_or_complete() -> None:
+    wrong = EMPTY_REPORT.replace(
+        "No work was resumed", "Unreadable evidence was treated as empty; coverage is complete"
+    )
+    result = checks.score_source_session_resume(
+        wrong, FIXTURE, FIXTURE["scenarios"]["continue-session-unreadable-session"]
+    )
+
+    assert result["outcome"] == "fail"
+    assert {
+        "unreadable_evidence_named",
+        "unreadable_lanes_unresolved",
+        "unreadable_not_empty_or_complete",
+    } <= set(result["failed"])
+
+
+def test_partly_unreadable_evidence_preserves_readable_lane_state() -> None:
+    outcomes = checks.source_session_fixture_outcomes(
+        FIXTURE, FIXTURE["scenarios"]["continue-session-unreadable-session"]
+    )
+
+    assert outcomes["resolution"] == "unreadable"
+    assert outcomes["expected_dispositions"] == {
+        "lane_fixture_readable_01": "imported",
+        "lane_fixture_unreadable_01": "unresolved",
+    }
+    assert outcomes["latest_states"] == {
+        "lane_fixture_readable_01": "active",
+        "lane_fixture_unreadable_01": "unknown",
+    }
+
+
+@pytest.mark.parametrize(
+    ("scenario", "report"),
+    [
+        ("continue-session-missing-session", NOT_FOUND_REPORT),
+        ("continue-session-ambiguous-session", AMBIGUOUS_REPORT),
+        ("continue-session-empty-session", EMPTY_REPORT),
+        ("continue-session-unreadable-session", UNREADABLE_REPORT),
+    ],
+)
+def test_domain_action_fails_in_every_halted_state(scenario: str, report: str) -> None:
+    result = checks.score_source_session_resume(
+        report + "\nDomain action completed.\n",
+        FIXTURE,
+        FIXTURE["scenarios"][scenario],
+    )
+
+    assert result["outcome"] == "fail"
+    assert "halted_state_no_domain_action" in result["failed"]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "report"),
+    [
+        ("continue-session-missing-session", NOT_FOUND_REPORT),
+        ("continue-session-ambiguous-session", AMBIGUOUS_REPORT),
+        ("continue-session-empty-session", EMPTY_REPORT),
+        ("continue-session-unreadable-session", UNREADABLE_REPORT),
+    ],
+)
+def test_completeness_claim_fails_in_every_halted_state(
+    scenario: str, report: str
+) -> None:
+    result = checks.score_source_session_resume(
+        report + "\nCoverage is complete.\n",
+        FIXTURE,
+        FIXTURE["scenarios"][scenario],
+    )
+
+    assert result["outcome"] == "fail"
+    assert "halted_state_no_completeness_claim" in result["failed"]
 
 
 @pytest.mark.parametrize("skill", ["continue-session", "digest"])
@@ -674,10 +1011,7 @@ def test_normal_named_session_invocation_uses_source_session_scorer(
     monkeypatch.setattr(
         runner.RULE_RUNNER,
         "drive_session",
-        lambda *args, **kwargs: {
-            "turns": [[{"type": "result", "result": WHOLE_SESSION_REPORT}]],
-            "error": None,
-        },
+        _materialized_fixture_session,
     )
 
     result = runner.run_scenario(
@@ -690,3 +1024,35 @@ def test_normal_named_session_invocation_uses_source_session_scorer(
 
     assert result["outcome"] == "pass", result
     assert result["source_session_id"] == "session_fixture_named_handoff"
+
+
+def test_normal_harness_first_source_only_mutation_goes_red(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcript_only = """
+## Source session: Named handoff (`session_fixture_named_handoff`)
+### Source-session coverage ledger
+| Source lane | Source evidence | Canonical workstream | Latest stored state | Disposition |
+| --- | --- | --- | --- | --- |
+| `lane_fixture_01` | `transcript_fixture_named_handoff` | `task_fixture_01` / `plan_fixture_01` | `active` | Imported |
+audited: 1; imported: 1; excluded: 0; unresolved: 0
+"""
+    monkeypatch.setattr(
+        runner.RULE_RUNNER,
+        "drive_session",
+        lambda *args, **kwargs: {
+            "turns": [[{"type": "result", "result": transcript_only}]],
+            "error": None,
+        },
+    )
+
+    result = runner.run_scenario(
+        tmp_path / "run",
+        "continue-session-named-session",
+        "fixture-model",
+        0.0,
+        1.0,
+    )
+
+    assert result["outcome"] == "fail"
+    assert "source_evidence_union" in result["failed"]

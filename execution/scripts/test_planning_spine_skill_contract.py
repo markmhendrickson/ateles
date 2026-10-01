@@ -56,6 +56,15 @@ Complete a source-session coverage ledger with imported, explicitly excluded,
 and unresolved dispositions. Report the balance as audited = imported +
 excluded + unresolved. Never claim the session is comprehensively resumed
 while an omitted row exists.
+If exact resolution is not found, stop before plan binding, name checked
+sources, offer a stable id or exact path, and use
+[COPY: not-found message and recovery hint]. If it is ambiguous, present two
+or three stable candidates with timestamp, harness, or repository metadata,
+stop before plan binding, and use [COPY: ambiguity prompt]. An exact empty
+session emits audited: 0; imported: 0; excluded: 0; unresolved: 0, states no
+work was resumed, and uses [COPY: empty-session outcome]. Partly unreadable
+evidence remains unresolved: an unreadable source is unknown, never empty;
+name it, prohibit domain action, and make a bounded retry before escalation.
 """
 
 
@@ -200,6 +209,33 @@ def test_corrected_continue_session_fixture_passes_whole_session_contract() -> N
     ).read_text()
 
     assert contract_errors("continue-session", fixture) == []
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected_fragment"),
+    [
+        ("[COPY: not-found message and recovery hint]", "not-found"),
+        ("[COPY: ambiguity prompt]", "ambiguity prompt"),
+        ("[COPY: empty-session outcome]", "empty-session"),
+        ("Partly unreadable", "partly unreadable"),
+        ("bounded retry", "bounded retry"),
+        ("unreadable source is unknown, never empty", "unreadable source"),
+    ],
+)
+def test_each_whole_session_recovery_outcome_is_required(
+    marker: str, expected_fragment: str
+) -> None:
+    content = (
+        BASE
+        + PHASE_REPORTING_CONTRACT
+        + "Show a planning resume ledger. Queue a newly introduced workstream until "
+        "current work is captured, workboarded, and dispatched."
+        + WHOLE_SESSION_CONTRACT
+    )
+    assert contract_errors("continue-session", content) == []
+    errors = contract_errors("continue-session", content.replace(marker, "omitted"))
+
+    assert any(expected_fragment in error for error in errors)
 
 
 def test_reconcile_is_explicitly_retrospective() -> None:

@@ -96,6 +96,25 @@ continue everything from another assistant.
 1. **Bind the exact source session before any similarly named plan.** Resolve the session or
    transcript by stable identity (session/conversation id, exact transcript path, or an exact title
    plus corroborating metadata). A title-only or fuzzy plan match is a candidate, never the bind.
+   Exact-session resolution has four safe non-happy-path outcomes, and each is terminal for binding:
+
+   - **Not found:** stop before plan binding and domain action. Report the bounded sources and
+     identifiers checked, then offer one concrete recovery path: provide a stable session or
+     conversation id, provide the exact transcript path, or restore the missing record. Make no
+     completeness claim.
+     `[COPY: not-found message and recovery hint]`
+   - **Ambiguous:** stop before plan binding and domain action. Present two or three bounded
+     candidates, each with its stable identifier and disambiguating timestamp, harness, or
+     repository. Never select the nearest plan or candidate session, and make no completeness claim.
+     `[COPY: ambiguity prompt]`
+   - **Empty:** an exactly bound session with zero lanes is a valid empty result. Emit the normal
+     coverage-ledger structure with `audited: 0; imported: 0; excluded: 0; unresolved: 0`, state
+     explicitly that no work was resumed, take no domain action, and make no completeness claim.
+     `[COPY: empty-session outcome]`
+   - **Partly unreadable:** name every unavailable evidence source and keep every affected lane
+     **Unresolved**. Do not claim completeness or take state-dependent domain action. Retry each
+     unavailable source on a stated bound, then raise a checkpoint or escalation if it remains
+     unavailable; an unreadable source is unknown, never empty.
 2. **Build the terminal resumable population as a union, not a first-hit search.** Read the source
    transcript's final workstream/status inventory, the source session_digest or workboard, linked
    tasks and plans, and the terminal handoff. Add any lane changed after the last inventory. If no
@@ -444,6 +463,18 @@ general enough.
   source lane is omitted. For one workstream, MUST bind exactly one plan by argument, operator
   wording, environment as candidate only, then asking. MUST NOT treat a default plan as the binding
   or write one workstream's state into another's plan.
+- MUST stop before all plan binding and domain action when exact source-session identity is absent or
+  ambiguous. A not-found outcome MUST name bounded checked sources and a stable-id, exact-path, or
+  restore recovery action. An ambiguous outcome MUST present two or three stable candidate ids with
+  timestamp, harness, or repository metadata and MUST NOT choose one. Both MUST prohibit a
+  completeness claim.
+- MUST treat an exactly bound zero-lane session as a valid empty result: emit the normal zero-row
+  coverage ledger, report all four counts as zero, state that no work was resumed, and take no domain
+  action. Zero lanes MUST NOT be described as a successful resume of work or as a completeness claim.
+- MUST keep unavailable required evidence unknown. A partly unreadable outcome MUST name each
+  unavailable source, keep every affected lane Unresolved, prohibit completeness claims and
+  state-dependent domain action, and give a bounded retry followed by checkpoint or escalation.
+  MUST NOT coerce unreadable evidence to empty, resolved, imported, or excluded.
 - MUST derive present state rather than assert it, and MUST NOT record a point-in-time claim in any
   durable place where a derivation would serve.
 - MUST run section 2 before making any statement about where things stand, and MUST close it with an

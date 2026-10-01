@@ -50,6 +50,20 @@ _SKILL_REQUIREMENTS = {
         "comprehensively resumed while an omitted row exists": (
             "forbid completeness claims while a source lane is omitted"
         ),
+        "[copy: not-found message and recovery hint]": (
+            "define a recoverable exact-session not-found outcome"
+        ),
+        "[copy: ambiguity prompt]": (
+            "define bounded candidate disambiguation before binding"
+        ),
+        "[copy: empty-session outcome]": (
+            "define the explicit zero-lane ledger outcome"
+        ),
+        "partly unreadable": "keep unavailable terminal evidence unknown",
+        "bounded retry": "bound retries before checkpoint or escalation",
+        "unreadable source is unknown, never empty": (
+            "forbid coercing unavailable evidence to an empty result"
+        ),
     },
     "digest": {
         "planning spine summary": "include a planning-spine status summary",

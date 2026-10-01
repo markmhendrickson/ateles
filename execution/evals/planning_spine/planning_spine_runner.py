@@ -212,7 +212,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--scenarios",
-        default="continue-session,continue-session-named-session,digest",
+        default=(
+            "continue-session,continue-session-named-session,"
+            "continue-session-missing-session,continue-session-ambiguous-session,"
+            "continue-session-empty-session,continue-session-unreadable-session,digest"
+        ),
         help="comma-separated scenario names",
     )
     parser.add_argument("--model", default="sonnet")
