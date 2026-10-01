@@ -136,14 +136,25 @@ which rows it emitted a line for:
 `PolicySkill` list each tier's lines are generated from — never derived
 from the string a row's own content could forge a bracket into.
 """
+
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _session_integrity import read_hook_input, load_state, save_state  # noqa: E402
-from rule_index_state import record_delivered_subset  # noqa: E402
+from _session_integrity import (  # noqa: E402
+    read_hook_input,
+    load_state,
+    save_state,
+    state_lock,
+)
+from rule_index_state import (  # noqa: E402
+    delivered_subset_hash,
+    lifecycle_delivery_is_duplicate,
+    record_delivered_subset,
+    record_lifecycle_delivery,
+)
 
 # Resolve siblings relative to THIS FILE, never cwd/CLAUDE_PROJECT_DIR — the
 # one property that makes this hook usable from a user-level settings.json
@@ -216,21 +227,34 @@ def main() -> int:
         return 0
 
     text, emitted_ids, scoped_rows = rendered
-    print("# Agent policy rule index (live from Neotoma, ateles#1261)\n")
-    print(text)
+    if not session_id:
+        print("# Agent policy rule index (live from Neotoma, ateles#1261)\n")
+        print(text)
+        return 0
 
-    if session_id:
-        try:
-            state = load_state(session_id)
+    try:
+        content_hash = delivered_subset_hash(scoped_rows, set(emitted_ids))
+        with state_lock(session_id, ev):
+            state = load_state(session_id, ev)
+            if lifecycle_delivery_is_duplicate(state, ev, content_hash):
+                return 0
+
+            print("# Agent policy rule index (live from Neotoma, ateles#1261)\n")
+            print(text)
             # Record only the rows the renderer STRUCTURALLY reports as
             # emitted — not every session-scoped row, and never inferred by
             # scanning `text` (task ent_bd3fcf561449b6ebbabc36ca: a text
             # scan is spoofable by a bracket inside a row's own unsanitized
             # body). `to_skill` skipping a row, or tier C dropping one, are
             # both simply absent from `emitted_ids`.
-            save_state(session_id, record_delivered_subset(state, scoped_rows, emitted_ids))
-        except Exception as exc:  # noqa: BLE001 — never let bookkeeping break delivery
-            _log(f"could not record delivered signature: {exc}")
+            state = record_delivered_subset(state, scoped_rows, set(emitted_ids))
+            state = record_lifecycle_delivery(state, ev, content_hash)
+            save_state(session_id, state, ev)
+    except Exception as exc:  # noqa: BLE001 — never let bookkeeping break delivery
+        # If dedup bookkeeping fails, preserve the safety-relevant delivery.
+        _log(f"could not deduplicate delivered signature: {exc}")
+        print("# Agent policy rule index (live from Neotoma, ateles#1261)\n")
+        print(text)
     return 0
 
 

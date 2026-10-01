@@ -127,6 +127,12 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                 )
                 for event in ("SessionStart", "SubagentStart")
             }
+            installed_prompt = next(
+                hook["command"]
+                for group in installed_hooks["hooks"]["UserPromptSubmit"]
+                for hook in group.get("hooks", [])
+                if "session_rule_delivery.py" in hook["command"]
+            )
             project_commands = {
                 event: next(
                     command
@@ -135,6 +141,11 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                 )
                 for event in ("SessionStart", "SubagentStart")
             }
+            project_prompt = next(
+                command
+                for command in _hook_commands("UserPromptSubmit")
+                if "session_rule_delivery.py" in command
+            )
 
             fake.handler.rows = [
                 {
@@ -184,10 +195,15 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
             )
             for event_name, event in cases:
                 with self.subTest(event=event_name):
-                    commands = (project_commands[event_name], installed_commands[event_name])
+                    commands = (
+                        project_commands[event_name],
+                        installed_commands[event_name],
+                    )
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         results = list(
-                            pool.map(lambda command: _run(command, event, env=env), commands)
+                            pool.map(
+                                lambda command: _run(command, event, env=env), commands
+                            )
                         )
                     self.assertTrue(
                         all(result.returncode == 0 for result in results),
@@ -218,6 +234,56 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
             )
             self.assertEqual(later.returncode, 0, later.stderr)
             self.assertIn("CODEX_DEDUPE_CANARY_72B1", later.stdout)
+
+            prompt_session = "codex-prompt-dedupe-session"
+            baseline = _run(
+                project_commands["SessionStart"],
+                {
+                    **cases[0][1],
+                    "session_id": prompt_session,
+                },
+                env=env,
+            )
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            fake.handler.rows.append(
+                {
+                    "entity_id": "ent_codex_delta_dedupe_canary",
+                    "snapshot": {
+                        "title": "CODEX_DELTA_DEDUPE_CANARY_91C4",
+                        "rule": "CODEX_DELTA_DEDUPE_CANARY_91C4 reaches context once.",
+                        "applies_when": "always",
+                        "scope": "global",
+                        "status": "active",
+                        "rule_kind": "mandatory",
+                    },
+                }
+            )
+            prompt_event = {
+                "session_id": prompt_session,
+                "turn_id": "turn-4",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Continue.",
+                "transcript_path": os.fspath(transcript),
+                "model": "test-model",
+                "cwd": os.fspath(REPO_ROOT),
+            }
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                prompt_results = list(
+                    pool.map(
+                        lambda command: _run(command, prompt_event, env=env),
+                        (project_prompt, installed_prompt),
+                    )
+                )
+            delta_deliveries = [
+                result.stdout
+                for result in prompt_results
+                if "CODEX_DELTA_DEDUPE_CANARY_91C4" in result.stdout
+            ]
+            self.assertEqual(
+                len(delta_deliveries),
+                1,
+                "the same project+user prompt delta was delivered more than once",
+            )
 
     def test_installed_user_hooks_render_live_policy_outside_repo(self) -> None:
         with _FakeNeotoma() as fake, tempfile.TemporaryDirectory() as tmp:
@@ -286,15 +352,13 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CODEX_INSTALLED_CANARY_E31A", result.stdout)
 
-    def test_installed_hook_keys_state_on_checkout_not_cwd_without_claude_project_dir(
+    def test_installed_hook_keys_codex_state_on_shared_home_not_cwd(
         self,
     ) -> None:
         """Codex never sets CLAUDE_PROJECT_DIR. Without it, session state must
-        still land under the installed checkout's own .claude/.session_state/
-        (resolved from the hook script's file location) — never under
-        whatever directory the hook happened to be invoked from, which would
-        make the delta-delivery dedup this test guards silently unstable
-        across invocations from different cwds."""
+        land in the shared Codex home — never under the invoking cwd or one
+        installed checkout — so project- and user-level hook copies see the
+        same delivery receipts."""
         with _FakeNeotoma() as fake, tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "codex-home" / "hooks.json"
             installed = subprocess.run(
@@ -340,6 +404,7 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                         "session_id": "no-project-dir-session",
                         "hook_event_name": "SessionStart",
                         "source": "startup",
+                        "model": "test-model",
                         "cwd": os.fspath(outside),
                     }
                 ),
@@ -349,34 +414,26 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                 env={
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
                     "NEOTOMA_BASE_URL": fake.base_url,
+                    "CODEX_HOME": os.fspath(out.parent),
                     # Deliberately no CLAUDE_PROJECT_DIR — the real Codex shape.
                 },
                 timeout=20,
             )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("CODEX_NO_PROJECT_DIR_CANARY_5F2C", result.stdout)
-        state_file = (
-            REPO_ROOT
-            / ".claude"
-            / ".session_state"
-            / "no-project-dir-session.json"
-        )
-        try:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("CODEX_NO_PROJECT_DIR_CANARY_5F2C", result.stdout)
+            state_file = (
+                out.parent / ".ateles" / "session_state" / "no-project-dir-session.json"
+            )
             self.assertTrue(
                 state_file.exists(),
-                f"expected session state at {state_file}, keyed on the "
-                "installed checkout, not on the outside-repo cwd the hook "
-                "was invoked from",
+                f"expected shared Codex session state at {state_file}",
             )
             self.assertFalse(
                 (outside / ".claude" / ".session_state").exists(),
                 "session state must not be keyed on cwd when "
                 "CLAUDE_PROJECT_DIR is unset",
             )
-        finally:
-            if state_file.exists():
-                state_file.unlink()
 
     def test_configured_session_start_command_renders_live_policy(self) -> None:
         commands = _hook_commands("SessionStart")
@@ -531,9 +588,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         self,
     ) -> None:
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = [
@@ -594,9 +649,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         injected nothing) — this is the reproduction of Falco's non-blocking
         finding, now closed."""
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = [
@@ -645,9 +698,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         path must not match — same "affirmative shape, not blanket
         apply_patch coverage" posture as sibling_repo_worktree_guard.py."""
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = []

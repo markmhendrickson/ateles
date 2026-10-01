@@ -30,18 +30,29 @@ proxy for it.
 Stdlib-only (hashlib, json). No Neotoma access here — callers already have
 the rows from `fetch_active_policy_rows`.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 
 STATE_KEY = "rule_index_delivered"  # shared per-session state key
+LIFECYCLE_RECEIPT_KEY = "rule_index_lifecycle_receipt"
+_DUPLICATE_WINDOW_SECONDS = 60
 
 # The fields whose content defines a row's delivered identity. Anything
 # outside this set (status, rationale, canonical_name, ...) does not affect
 # what a session is told, so a change to it must not trigger a re-delivery.
 _CONTENT_FIELDS = (
-    "rule", "title", "applies_when", "scope", "agent_sub", "rule_kind", "domain",
+    "rule",
+    "title",
+    "applies_when",
+    "scope",
+    "agent_sub",
+    "rule_kind",
+    "domain",
 )
 
 
@@ -94,7 +105,9 @@ def record_delivery(state: dict, rows: list[dict]) -> dict:
     return state
 
 
-def record_delivered_subset(state: dict, rows: list[dict], delivered_ids: set[str]) -> dict:
+def record_delivered_subset(
+    state: dict, rows: list[dict], delivered_ids: set[str]
+) -> dict:
     """Like `record_delivery`, but only for the rows in `rows` whose entity
     id is in `delivered_ids` — the rest are simply absent from the recorded
     signature, so a later prompt (or the next SessionStart) treats them as
@@ -109,6 +122,78 @@ def last_delivered(state: dict) -> tuple[str | None, dict[str, str]]:
     when this session has never recorded a delivery."""
     delivered = state.get(STATE_KEY) or {}
     return delivered.get("hash"), (delivered.get("rows") or {})
+
+
+def delivered_subset_hash(rows: list[dict], delivered_ids: set[str]) -> str:
+    """Content hash for exactly the rows the renderer says it emitted."""
+    return hash_signature(
+        row_signature([r for r in rows if _entity_id(r) in delivered_ids])
+    )
+
+
+def lifecycle_revision(event: dict) -> str:
+    """Hash the documented fields that identify one Codex lifecycle point.
+
+    SessionStart has no hook-call id.  The start source plus a metadata-only
+    transcript revision distinguishes startup/resume/compact occurrences;
+    SubagentStart additionally has stable turn and agent ids.  Paths are
+    hashed, never persisted in clear text.
+    """
+    transcript = event.get("transcript_path")
+    transcript_revision: tuple[int, int] | None = None
+    if transcript:
+        try:
+            stat = os.stat(transcript)
+            transcript_revision = (stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            pass
+    fields = {
+        "hook_event_name": event.get("hook_event_name"),
+        "source": event.get("source"),
+        "turn_id": event.get("turn_id"),
+        "agent_id": event.get("agent_id"),
+        "agent_type": event.get("agent_type"),
+        "transcript_path_hash": (
+            hashlib.sha256(str(transcript).encode()).hexdigest() if transcript else None
+        ),
+        "transcript_revision": transcript_revision,
+    }
+    return hashlib.sha256(
+        json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def lifecycle_delivery_is_duplicate(
+    state: dict, event: dict, content_hash: str, *, now: float | None = None
+) -> bool:
+    """Whether this exact lifecycle revision/content was just delivered.
+
+    The bounded window collapses concurrently launched project+user handlers
+    without permanently consuming a legitimate later resume whose documented
+    input happens to be byte-for-byte identical.
+    """
+    receipt = state.get(LIFECYCLE_RECEIPT_KEY) or {}
+    observed_at = time.time() if now is None else now
+    try:
+        age = observed_at - float(receipt.get("recorded_at", 0))
+    except (TypeError, ValueError):
+        return False
+    return (
+        0 <= age <= _DUPLICATE_WINDOW_SECONDS
+        and receipt.get("revision") == lifecycle_revision(event)
+        and receipt.get("content_hash") == content_hash
+    )
+
+
+def record_lifecycle_delivery(
+    state: dict, event: dict, content_hash: str, *, now: float | None = None
+) -> dict:
+    state[LIFECYCLE_RECEIPT_KEY] = {
+        "revision": lifecycle_revision(event),
+        "content_hash": content_hash,
+        "recorded_at": time.time() if now is None else now,
+    }
+    return state
 
 
 # NOTE (ateles#1323 follow-up, Falco security review, task
