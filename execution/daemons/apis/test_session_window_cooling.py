@@ -258,6 +258,7 @@ def test_gate_owning_run_during_the_window_is_a_usage_limit() -> None:
     import swarm_dispatch
 
     harness_router.record_cooling("claude", time.time() + 3600, reason="session_limit")
+    harness_router.record_cooling("codex", time.time() + 3600, reason="session_limit")
     attempt, spawn = _spawning_attempt(REFUSAL)
 
     result = asyncio.run(
@@ -289,13 +290,13 @@ def test_pinned_provider_during_the_window_is_a_usage_limit() -> None:
     assert swarm_dispatch.review_failure_class(result) == "usage limit"
 
 
-def test_gate_owner_without_a_window_still_gets_the_tool_deny_refusal() -> None:
+def test_gate_owner_without_a_deny_capable_provider_gets_the_refusal() -> None:
     """The cooled path must not swallow the genuine capability refusal."""
     attempt, spawn = _spawning_attempt(REFUSAL)
     result = asyncio.run(
         skill_runner._run_provider_attempts(
             "pavo", attempt,
-            binaries={"claude": None, "codex": "/bin/codex", "cursor": None},
+            binaries={"claude": None, "codex": None, "cursor": "/bin/cursor"},
             owns_pending_gate=True,
         )
     )
