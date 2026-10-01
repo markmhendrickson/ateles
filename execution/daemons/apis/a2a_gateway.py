@@ -97,10 +97,23 @@ def _format_rejection(reason: str) -> str:
     return f"Rejected [{reason}]: {message} — {hint}"
 
 
+# Reasons that mean "allowed, but not on the strength of a verified grant".
+# A2A delegation is privileged and no longer degrades open (ateles#560), so this
+# is retained for accepts that reach the gateway carrying a degraded reason from
+# elsewhere — the disclosure must survive even if a future call site degrades.
+_ADVISORY_ALLOW_REASONS = frozenset(
+    {
+        "grant_check_unavailable_advisory",  # retired by #560; kept for parity
+        "grant_store_unavailable_read_degraded",
+        "tool_grants_not_declared_unmigrated",
+    }
+)
+
+
 def _format_advisory_note(reason: str) -> str:
     """Return the disclosure suffix to append to an accepted-task message when
     authorization ran in advisory (unenforced) mode; empty string otherwise."""
-    if reason == "grant_check_unavailable_advisory":
+    if reason in _ADVISORY_ALLOW_REASONS:
         return (
             " Note: authorization check was unavailable; this request was "
             "allowed under advisory policy."
@@ -257,9 +270,17 @@ def authorize_caller(
     seam for tests: a callable ``(aauth_sub) -> object`` exposing ``.is_active``
     and ``.has_capability(cap)`` (matching lib.daemon_runtime.AgentGrant).
 
-    Grant enforcement is advisory in the current phase (mirrors grant_checker's
-    own staging): a missing/unreachable checker logs and allows, rather than
-    hard-blocking. Hard-block lands with the PS-layer AAuth integration.
+    Fail posture (ateles#560). Cross-agent delegation is a privileged operation
+    (``a2a:task:create`` is in ``grant_checker.PRIVILEGED_OPS``), so this
+    boundary fails CLOSED in every degraded path:
+
+      - checker construction raised    → deny ``grant_check_failed``
+      - store reachable, ZERO grants   → deny ``no_grant`` (was: allowed)
+      - store unreachable              → deny ``grant_store_unavailable``
+
+    The previous ``grant_check_unavailable_advisory`` allow is gone. It could
+    not distinguish "we could not ask" from "the answer was no", which is the
+    exact conflation #560 exists to remove.
     """
     require = A2A_REQUIRE_AUTH if require_auth is None else require_auth
     if not require:
@@ -275,9 +296,33 @@ def authorize_caller(
         else:
             grant = grant_checker_factory(caller_sub)
     except Exception as exc:
-        log.warning("grant check unavailable for %s (%s) — allowing (advisory)",
-                    caller_sub, exc)
-        return True, "grant_check_unavailable_advisory"
+        log.error(
+            "grant check failed for %s (%s) — DENYING delegation; a privileged "
+            "boundary fails closed when it cannot verify authority",
+            caller_sub,
+            exc,
+        )
+        return False, "grant_check_failed"
+
+    # Prefer the tri-state API when the checker exposes it, so absent-grant and
+    # store-unreachable produce distinct, auditable reasons. Test doubles and
+    # AgentGrant instances that only carry the boolean shape still work below.
+    decide = getattr(grant, "decide_capability", None)
+    if callable(decide):
+        from lib.daemon_runtime.grant_checker import resolve_unknown
+
+        decision = decide(A2A_TASK_CAPABILITY)
+        allowed, reason = resolve_unknown(
+            decision, op=A2A_TASK_CAPABILITY, privileged=True
+        )
+        if not allowed:
+            log.warning(
+                "a2a delegation denied for %s: %s (%s)",
+                caller_sub,
+                reason,
+                decision.detail,
+            )
+        return allowed, reason
 
     if not getattr(grant, "is_active", False):
         return False, "grant_not_active"

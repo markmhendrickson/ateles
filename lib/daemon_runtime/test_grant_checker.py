@@ -11,6 +11,7 @@ network calls to Neotoma are made.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -20,7 +21,10 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.daemon_runtime.grant_checker import (  # noqa: E402
     AgentGrant,
     GrantChecker,
+    GrantVerdict,
     check_param_constraints,
+    is_privileged_op,
+    resolve_unknown,
 )
 
 
@@ -189,6 +193,173 @@ def test_constraints_generic_max_and_allowed():
 def test_constraints_unknown_key_ignored():
     ok, reason = check_param_constraints({"future_constraint": "xyz"}, {"a": 1})
     assert ok and reason == ""
+
+
+# ── ateles#560: absent grant must DENY, never silently allow ──────────────────
+#
+# Each of these fails on origin/main, where is_active()/check_capability()/
+# check_tool() all return permissive when self._grants is empty.
+
+
+def _loaded_empty() -> GrantChecker:
+    """A checker whose store answered successfully with ZERO grants."""
+    c = GrantChecker("ghost@ateles-swarm")
+    c._grants = []
+    c._loaded = True
+    c._load_error = None
+    c._loaded_at = time.time()
+    return c
+
+
+def _unreachable() -> GrantChecker:
+    """A checker whose store could not be reached at all."""
+    c = GrantChecker("offline@ateles-swarm")
+    c._grants = []
+    c._loaded = True
+    c._load_error = "connect timeout"
+    c._loaded_at = None
+    return c
+
+
+def _unreachable_with_cache(grant_entity, age_seconds: float) -> GrantChecker:
+    """Store unreachable now, but a successful load happened age_seconds ago."""
+    c = GrantChecker("monedula@ateles-swarm")
+    c._grants = [GrantChecker._parse(grant_entity)]
+    c._loaded = True
+    c._load_error = "connect timeout"
+    c._loaded_at = time.time() - age_seconds
+    return c
+
+
+def test_absent_grant_denies_is_active():
+    c = _loaded_empty()
+    assert c.is_active() is False
+    assert c.decide_active().verdict is GrantVerdict.DENY
+    assert c.decide_active().reason == "no_grant"
+
+
+def test_absent_grant_denies_check_capability():
+    c = _loaded_empty()
+    assert c.check_capability("store_structured") is False
+    assert c.check_capability("retrieve") is False
+    assert c.decide_capability("retrieve").reason == "no_grant"
+
+
+def test_absent_grant_denies_check_tool():
+    c = _loaded_empty()
+    allowed, constraints = c.check_tool("btc-wallet", "btc_send_transfer")
+    assert allowed is False
+    assert constraints is None
+    assert c.decide_tool("parquet", "read_parquet").reason == "no_grant"
+
+
+def test_absent_grant_is_reported_distinctly_from_revoked():
+    c = _loaded_empty()
+    assert c.has_no_grant() is True
+    # An absent grant is NOT a revoked grant; startup paths report them apart.
+    assert c.is_revoked() is False
+    assert c.is_suspended() is False
+
+
+def test_all_revoked_grants_deny():
+    e = _monedula_grant_entity()
+    e["snapshot"]["status"] = "revoked"
+    c = _checker_with(e)
+    assert c.is_active() is False
+    assert c.decide_active().reason == "no_active_grant"
+
+
+# ── ateles#560: unreachable store is UNKNOWN, resolved by privilege ───────────
+
+
+def test_unreachable_store_is_unknown_not_allow():
+    c = _unreachable()
+    d = c.decide_active()
+    assert d.verdict is GrantVerdict.UNKNOWN
+    assert d.is_unknown
+    # UNKNOWN must never read as allowed on the decision itself.
+    assert d.allowed is False
+
+
+def test_unreachable_store_denies_privileged_ops():
+    c = _unreachable_with_cache(_monedula_grant_entity(), 60)
+    # Writes, funds, and outbound comms fail CLOSED when we cannot verify,
+    # even with a fresh cached snapshot that would have allowed them.
+    assert c.check_capability("store_structured") is False
+    assert c.check_capability("github_harness:write") is False
+    allowed, _ = c.check_tool("btc-wallet", "btc_send_transfer")
+    assert allowed is False
+
+
+def test_unreachable_store_degrades_open_for_reads():
+    c = _unreachable_with_cache(_monedula_grant_entity(), 60)
+    # Read-shaped work still runs so a Neotoma outage does not halt the swarm.
+    assert c.check_capability("retrieve") is True
+    allowed, _ = c.check_tool("parquet", "read_parquet")
+    assert allowed is True
+
+
+def test_unreachable_with_no_cache_ever_denies_everything():
+    # Never had a successful load: there is no snapshot to degrade from, so
+    # even reads are denied. "We have never known" is not "probably fine".
+    c = _unreachable()
+    assert c.decide_active().reason == "grant_cache_stale"
+    assert c.check_capability("retrieve") is False
+    assert c.check_capability("store_structured") is False
+
+
+def test_unreachable_store_denies_reads_past_staleness_bound():
+    from lib.daemon_runtime.grant_checker import (
+        GRANT_CACHE_MAX_STALENESS_SECONDS as BOUND,
+    )
+
+    fresh = _unreachable_with_cache(_monedula_grant_entity(), BOUND - 60)
+    assert fresh.decide_active().reason == "grant_store_unreachable"
+    assert fresh.check_capability("retrieve") is True
+
+    stale = _unreachable_with_cache(_monedula_grant_entity(), BOUND + 60)
+    assert stale.decide_active().reason == "grant_cache_stale"
+    # A cache old enough to have missed a revocation vouches for nothing.
+    assert stale.check_capability("retrieve") is False
+    assert stale.is_active() is False
+
+
+def test_never_loaded_is_unknown():
+    c = GrantChecker("never@ateles-swarm")
+    assert c.decide_active().verdict is GrantVerdict.UNKNOWN
+    assert c.decide_active().reason == "grants_not_loaded"
+    assert c.check_capability("store_structured") is False
+
+
+def test_privileged_op_classification():
+    assert is_privileged_op("store_structured") is True
+    assert is_privileged_op("correct") is True
+    assert is_privileged_op("github_harness:write") is True
+    assert is_privileged_op("a2a:task:create") is True
+    assert is_privileged_op("tool:btc-wallet:btc_send_transfer") is True
+    assert is_privileged_op("retrieve") is False
+    assert is_privileged_op("tool:parquet:read_parquet") is False
+    # An unnamed operation is conservative, not free.
+    assert is_privileged_op("") is True
+
+
+def test_resolve_unknown_passes_determinate_verdicts_through():
+    from lib.daemon_runtime.grant_checker import GrantDecision
+
+    allow = GrantDecision(GrantVerdict.ALLOW, "active_grant")
+    deny = GrantDecision(GrantVerdict.DENY, "no_grant")
+    # Posture never overrides a determinate answer, in either direction.
+    assert resolve_unknown(allow, op="store_structured") == (True, "active_grant")
+    assert resolve_unknown(deny, op="retrieve") == (False, "no_grant")
+
+
+def test_active_grant_still_allows_no_regression():
+    c = _checker_with(_monedula_grant_entity())
+    assert c.is_active() is True
+    assert c.check_capability("store_structured") is True
+    allowed, constraints = c.check_tool("parquet", "read_parquet")
+    assert allowed is True
+    assert constraints == {"tables": ["transactions", "accounts"]}
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
