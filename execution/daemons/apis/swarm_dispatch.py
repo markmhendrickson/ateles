@@ -3692,11 +3692,13 @@ class SwarmDispatcher:
         The marker POST is the real durable-resume write, not a synthetic
         permission lookup. On the ``inflight`` transition we PATCH the issue
         endpoint with an intentionally invalid ``state`` value. GitHub reaches
-        issue-write authorization before validating that field: HTTP 422 is
-        therefore the expected success signal, and no issue content changes.
-        This proves the same endpoint and permission the later body mirror uses
-        without a GET/PATCH race that could restore a stale body over a
-        concurrent human edit. Any other response is fatal to this attempt.
+        issue-write authorization before validating that field: the specific
+        HTTP 422 invalid-``state`` validation error is therefore the expected
+        success signal, and no issue content changes. Other 422 responses,
+        including abuse or spam throttling, fail closed. This proves the same
+        endpoint and permission the later body mirror uses without a GET/PATCH
+        race that could restore a stale body over a concurrent human edit. Any
+        other response is fatal to this attempt.
 
         If the marker POST succeeds but the write probe fails, delete that
         exact marker before surfacing the failure. The durable Neotoma failure
@@ -3742,7 +3744,12 @@ class SwarmDispatcher:
                     json={"state": "apis-write-readiness-probe"},
                     headers=self._github_headers(trigger.repository),
                 )
-                if patch.status_code != 422:
+                if not self._is_expected_issue_write_probe_error(patch):
+                    if patch.status_code == 422:
+                        raise IssuePipelineWriteError(
+                            "github_issue_body_probe_unexpected",
+                            patch.status_code,
+                        )
                     patch.raise_for_status()
                     raise IssuePipelineWriteError(
                         "github_issue_body_probe_unexpected",
@@ -3757,6 +3764,36 @@ class SwarmDispatcher:
                 raise IssuePipelineWriteError(
                     "github_issue_body_write", self._http_status(exc)
                 ) from exc
+
+    @staticmethod
+    def _is_expected_issue_write_probe_error(response: httpx.Response) -> bool:
+        """Recognize only the deliberately invalid issue-state validation error.
+
+        GitHub also uses HTTP 422 for abuse and spam throttling. Those responses
+        do not prove that issue writes are currently available, so the status
+        code alone is insufficient for this fail-closed gate.
+        """
+        if response.status_code != 422:
+            return False
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(payload, dict) or payload.get("message") != "Validation Failed":
+            return False
+        errors = payload.get("errors")
+        if not isinstance(errors, list) or len(errors) != 1:
+            return False
+        error = errors[0]
+        return isinstance(error, dict) and {
+            "resource": error.get("resource"),
+            "field": error.get("field"),
+            "code": error.get("code"),
+        } == {
+            "resource": "Issue",
+            "field": "state",
+            "code": "invalid",
+        }
 
     async def _clear_created_pipeline_marker(
         self,

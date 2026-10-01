@@ -22,6 +22,18 @@ from swarm_dispatch import (
 from test_swarm_dispatch import _StubNotifier, _issue_trigger
 
 
+_EXPECTED_STATE_VALIDATION = {
+    "message": "Validation Failed",
+    "errors": [
+        {
+            "resource": "Issue",
+            "field": "state",
+            "code": "invalid",
+        }
+    ],
+}
+
+
 class _Response:
     def __init__(self, status: int, payload, *, secret_body: str = ""):
         self.status_code = status
@@ -153,7 +165,7 @@ def test_readiness_probes_issue_write_without_reading_or_replacing_body(monkeypa
 
         async def patch(self, url, json=None, **kwargs):
             calls.append(("PATCH", url, json))
-            return _Response(422, {})
+            return _Response(422, _EXPECTED_STATE_VALIDATION)
 
     async def pipeline(self, trigger):
         launched.append(trigger.number)
@@ -171,6 +183,48 @@ def test_readiness_probes_issue_write_without_reading_or_replacing_body(monkeypa
         method == "GET" and not url.endswith("/comments")
         for method, url, _payload in calls
     )
+
+
+def test_unrelated_422_does_not_prove_issue_write_readiness(monkeypatch):
+    deleted: list[str] = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, **kwargs):
+            return _Response(201, {"id": 78})
+
+        async def patch(self, url, **kwargs):
+            return _Response(
+                422,
+                {"message": "Validation Failed, or the endpoint has been spammed."},
+            )
+
+        async def delete(self, url, **kwargs):
+            deleted.append(url)
+            return _Response(204, {})
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
+
+    with pytest.raises(IssuePipelineWriteError) as raised:
+        asyncio.run(
+            _dispatcher()._mark_pipeline_inflight(
+                _issue_trigger(), stage="inflight"
+            )
+        )
+
+    assert raised.value.stage == "github_issue_body_probe_unexpected"
+    assert raised.value.status_code == 422
+    assert deleted == [
+        "https://api.github.com/repos/owner/repo/issues/comments/78"
+    ]
 
 
 def test_issue_body_patch_403_is_a_bounded_write_error(monkeypatch):
