@@ -13,6 +13,7 @@ credential or operator record is read.
 from __future__ import annotations
 
 import http.server
+import importlib.util
 import json
 import os
 import socket
@@ -97,11 +98,70 @@ def _run(command: str, event: dict, *, env: dict[str, str] | None = None):
 
 
 class TestCodexRuleDeliveryEffect(unittest.TestCase):
+    def test_lifecycle_receipts_are_bounded_pruned_and_fail_open(self) -> None:
+        module_path = REPO_ROOT / ".claude" / "hooks" / "rule_index_state.py"
+        spec = importlib.util.spec_from_file_location("rule_index_state", module_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        state = {
+            module.LIFECYCLE_RECEIPTS_KEY: {
+                "malformed": {"recorded_at": "not-a-timestamp"}
+            },
+            "rule_index_lifecycle_receipt": {
+                "revision": "legacy",
+                "content_hash": "payload",
+                "recorded_at": 1_000,
+            },
+        }
+        legacy_event = {
+            "hook_event_name": "SessionStart",
+            "turn_id": "legacy",
+        }
+        self.assertFalse(
+            module.lifecycle_delivery_is_duplicate(
+                state, legacy_event, "payload", now=1_000
+            )
+        )
+
+        events = []
+        for index in range(module._MAX_LIFECYCLE_RECEIPTS + 5):
+            event = {
+                "hook_event_name": "SessionStart",
+                "turn_id": f"turn-{index}",
+            }
+            events.append(event)
+            module.record_lifecycle_delivery(state, event, "payload", now=1_000 + index)
+
+        receipts = state[module.LIFECYCLE_RECEIPTS_KEY]
+        self.assertEqual(len(receipts), module._MAX_LIFECYCLE_RECEIPTS)
+        self.assertFalse(
+            module.lifecycle_delivery_is_duplicate(
+                state, events[0], "payload", now=1_040
+            )
+        )
+        self.assertTrue(
+            module.lifecycle_delivery_is_duplicate(
+                state, events[-1], "payload", now=1_040
+            )
+        )
+        self.assertFalse(
+            module.lifecycle_delivery_is_duplicate(
+                state,
+                events[-1],
+                "payload",
+                now=1_000 + len(events) + module._DUPLICATE_WINDOW_SECONDS,
+            )
+        )
+        self.assertEqual(state[module.LIFECYCLE_RECEIPTS_KEY], {})
+
     def test_session_state_lock_imports_without_fcntl_on_windows(self) -> None:
         """Native Windows has no ``fcntl`` module.  Exercise the Windows
         backend in an isolated interpreter so an unconditional POSIX import
         fails before any Codex hook can deliver its rules."""
-        probe = r'''
+        probe = r"""
 import importlib.abc
 import json
 import os
@@ -134,7 +194,7 @@ with tempfile.TemporaryDirectory() as state_dir:
         pass
 
 print(json.dumps(calls))
-'''
+"""
         result = subprocess.run(
             [sys.executable, "-c", probe, os.fspath(REPO_ROOT)],
             text=True,
@@ -270,6 +330,42 @@ print(json.dumps(calls))
                         "the same project+user hook event was delivered more than once",
                     )
 
+            interleaved_session = "codex-interleaved-dedupe-session"
+            event_a = {
+                **cases[0][1],
+                "session_id": interleaved_session,
+                "turn_id": "turn-a",
+            }
+            event_b = {
+                **cases[0][1],
+                "session_id": interleaved_session,
+                "turn_id": "turn-b",
+            }
+            interleaved_results = (
+                _run(project_commands["SessionStart"], event_a, env=env),
+                _run(project_commands["SessionStart"], event_b, env=env),
+                _run(installed_commands["SessionStart"], event_a, env=env),
+                _run(installed_commands["SessionStart"], event_b, env=env),
+            )
+            self.assertTrue(
+                all(result.returncode == 0 for result in interleaved_results),
+                [result.stderr for result in interleaved_results],
+            )
+            self.assertTrue(
+                all(
+                    "CODEX_DEDUPE_CANARY_72B1" in result.stdout
+                    for result in interleaved_results[:2]
+                ),
+                [result.stdout for result in interleaved_results],
+            )
+            self.assertTrue(
+                all(
+                    "CODEX_DEDUPE_CANARY_72B1" not in result.stdout
+                    for result in interleaved_results[2:]
+                ),
+                [result.stdout for result in interleaved_results],
+            )
+
             transcript.write_text(
                 '{"type":"session_meta"}\n{"type":"turn_context"}\n',
                 encoding="utf-8",
@@ -324,6 +420,10 @@ print(json.dumps(calls))
                         (project_prompt, installed_prompt),
                     )
                 )
+            self.assertTrue(
+                all(result.returncode == 0 for result in prompt_results),
+                [result.stderr for result in prompt_results],
+            )
             delta_deliveries = [
                 result.stdout
                 for result in prompt_results

@@ -39,8 +39,9 @@ import os
 import time
 
 STATE_KEY = "rule_index_delivered"  # shared per-session state key
-LIFECYCLE_RECEIPT_KEY = "rule_index_lifecycle_receipt"
+LIFECYCLE_RECEIPTS_KEY = "rule_index_lifecycle_receipts"
 _DUPLICATE_WINDOW_SECONDS = 60
+_MAX_LIFECYCLE_RECEIPTS = 32
 
 # The fields whose content defines a row's delivered identity. Anything
 # outside this set (status, rationale, canonical_name, ...) does not affect
@@ -163,6 +164,48 @@ def lifecycle_revision(event: dict) -> str:
     ).hexdigest()
 
 
+def _lifecycle_receipt_key(event: dict, content_hash: str) -> str:
+    """Stable JSON-object key for one lifecycle revision and payload."""
+    blob = json.dumps([lifecycle_revision(event), content_hash], separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _recent_lifecycle_receipts(state: dict, observed_at: float) -> dict:
+    """Return live, well-formed receipts and self-migrate malformed state.
+
+    The previous singular receipt key is intentionally ignored. Receipt state
+    is ephemeral, so treating legacy or malformed data as empty preserves the
+    fail-open delivery contract.
+    """
+    stored = state.get(LIFECYCLE_RECEIPTS_KEY)
+    if not isinstance(stored, dict):
+        return {}
+
+    recent: dict[str, dict[str, float]] = {}
+    for key, receipt in stored.items():
+        if not isinstance(key, str) or not isinstance(receipt, dict):
+            continue
+        try:
+            recorded_at = float(receipt["recorded_at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        age = observed_at - recorded_at
+        if 0 <= age <= _DUPLICATE_WINDOW_SECONDS:
+            recent[key] = {"recorded_at": recorded_at}
+    return recent
+
+
+def _store_lifecycle_receipts(state: dict, receipts: dict) -> dict:
+    """Persist only the newest bounded set of live receipts."""
+    newest = sorted(
+        receipts.items(),
+        key=lambda item: item[1]["recorded_at"],
+        reverse=True,
+    )[:_MAX_LIFECYCLE_RECEIPTS]
+    state[LIFECYCLE_RECEIPTS_KEY] = dict(newest)
+    return state[LIFECYCLE_RECEIPTS_KEY]
+
+
 def lifecycle_delivery_is_duplicate(
     state: dict, event: dict, content_hash: str, *, now: float | None = None
 ) -> bool:
@@ -172,27 +215,19 @@ def lifecycle_delivery_is_duplicate(
     without permanently consuming a legitimate later resume whose documented
     input happens to be byte-for-byte identical.
     """
-    receipt = state.get(LIFECYCLE_RECEIPT_KEY) or {}
     observed_at = time.time() if now is None else now
-    try:
-        age = observed_at - float(receipt.get("recorded_at", 0))
-    except (TypeError, ValueError):
-        return False
-    return (
-        0 <= age <= _DUPLICATE_WINDOW_SECONDS
-        and receipt.get("revision") == lifecycle_revision(event)
-        and receipt.get("content_hash") == content_hash
-    )
+    receipts = _recent_lifecycle_receipts(state, observed_at)
+    _store_lifecycle_receipts(state, receipts)
+    return _lifecycle_receipt_key(event, content_hash) in receipts
 
 
 def record_lifecycle_delivery(
     state: dict, event: dict, content_hash: str, *, now: float | None = None
 ) -> dict:
-    state[LIFECYCLE_RECEIPT_KEY] = {
-        "revision": lifecycle_revision(event),
-        "content_hash": content_hash,
-        "recorded_at": time.time() if now is None else now,
-    }
+    observed_at = time.time() if now is None else now
+    receipts = _recent_lifecycle_receipts(state, observed_at)
+    receipts[_lifecycle_receipt_key(event, content_hash)] = {"recorded_at": observed_at}
+    _store_lifecycle_receipts(state, receipts)
     return state
 
 
