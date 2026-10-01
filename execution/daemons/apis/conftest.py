@@ -13,9 +13,46 @@ for p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# Redact host environment values from every failure report (see the module
+# docstring: the 2026-09-29 incident printed a real host secret into an agent
+# transcript via an env-capturing test's assertion output). Importing a
+# `pytest_*` name into a conftest registers it as a hook.
+from lib.pytest_env_guard import (  # noqa: E402,F401
+    clear_host_env,
+    discard_startup_env,
+    pytest_collection_finish,
+    pytest_configure,
+    pytest_make_collect_report,
+    pytest_runtest_makereport,
+    pytest_warning_recorded,
+)
+
+
+# Import-time reads: `SwarmDispatcher.require_label` is a dataclass default
+# evaluated when swarm_dispatch is imported (a class-body call to
+# label_gate.required_label()), so a host shell that exports the label-gate
+# switch turns the gate on for every dispatcher a test builds and the per-test
+# fixture below is too late. Drop it before collection imports the daemon.
+discard_startup_env("ATELES_SWARM_REQUIRE_LABEL")
+
 
 @pytest.fixture(autouse=True)
-def _isolate_dispatch_failure_logs(monkeypatch, tmp_path):
+def _hermetic_host_env(monkeypatch):
+    """Start every test in this suite from a synthetic environment.
+
+    Daemon code builds child-process environments from ``os.environ``. If the
+    host shell already exports a variable the code under test is supposed to
+    inject itself (e.g. ``NEOTOMA_AAUTH_PRIVATE_JWK_PATH``), a "must not be
+    injected" test fails on the host and passes in CI, and a failure message
+    can print the host's whole environment. Dropping every non-allowlisted
+    host variable makes the outcome independent of the machine. Tests that need
+    a variable set it themselves with ``monkeypatch.setenv``.
+    """
+    clear_host_env(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dispatch_failure_logs(_hermetic_host_env, monkeypatch, tmp_path):
     """Never let a test write diagnostics into the operator's real log directory.
 
     `write_dispatch_failure_log` resolves `DISPATCH_FAILURE_LOG_DIR` at call time
@@ -33,7 +70,7 @@ def _isolate_dispatch_failure_logs(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_harness_usage_snapshot(monkeypatch, tmp_path):
+def _isolate_harness_usage_snapshot(_hermetic_host_env, monkeypatch, tmp_path):
     """Never let a test read or write the operator's live plan-usage snapshot.
 
     The router folds ``~/.config/ateles/harness-usage.json`` into every
@@ -46,7 +83,7 @@ def _isolate_harness_usage_snapshot(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _default_usage_gate_and_probe_off(monkeypatch):
+def _default_usage_gate_and_probe_off(_hermetic_host_env, monkeypatch):
     """Keep the usage gate and its live probe out of tests that do not target them.
 
     The gate fails closed on a missing snapshot and the probe would launch the
@@ -65,7 +102,9 @@ def _isolate_tier_ledger(monkeypatch, tmp_path):
     test run would pollute the per-tier counts the operator paces the weekly
     budget against. Tests that read the ledger set their own path.
     """
-    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(tmp_path / "isolated-tier-dispatch.jsonl"))
+    monkeypatch.setenv(
+        "APIS_TIER_LEDGER_FILE", str(tmp_path / "isolated-tier-dispatch.jsonl")
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -79,5 +118,9 @@ def _isolate_tiering_config(monkeypatch, tmp_path):
     exactly this way on the host after the config was installed. Point both at
     absent files; tests that exercise config set their own.
     """
-    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "isolated-action-policy.json"))
-    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "isolated-vendor-binding.json"))
+    monkeypatch.setenv(
+        "APIS_ACTION_POLICY_FILE", str(tmp_path / "isolated-action-policy.json")
+    )
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING_FILE", str(tmp_path / "isolated-vendor-binding.json")
+    )

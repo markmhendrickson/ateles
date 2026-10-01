@@ -22,6 +22,7 @@ import payment_journal  # noqa: E402
 import monedula  # noqa: E402
 from lib.approval.email_channel import ReadRepliesOutcome
 from lib.approval.tokens import subject_marker, token_for
+from lib.pytest_env_guard import assert_env_keys_absent
 
 
 @pytest.fixture(autouse=True)
@@ -1313,7 +1314,7 @@ def test_calendar_read_keeps_the_operator_default_gws_config(monkeypatch, tmp_pa
     (argv, env), = seen
     assert argv[1:4] == ["calendar", "events", "list"]
     assert (env or {}).get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR") != swarm_dir
-    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in (env or {})
+    assert_env_keys_absent(env or {}, "GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
 
 
 def test_consent_round_trip_through_the_swarm_mailbox_pays_once(monkeypatch, tmp_path):

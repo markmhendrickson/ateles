@@ -14,6 +14,7 @@ from typing import Any, Iterator
 from unittest.mock import patch
 
 from lib.approval import email_channel as ec
+from lib.pytest_env_guard import assert_env_keys_absent
 
 
 def _ok(stdout=""):
@@ -865,7 +866,7 @@ class TestSwarmMailboxRouting:
         assert argv[argv.index("--from") + 1] == "swarm@example.net"
         assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == swarm_dir
         # Scoped to the subprocess: the process env is not mutated.
-        assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in _os.environ
+        assert_env_keys_absent(_os.environ, "GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
 
     def test_every_reply_read_call_runs_as_the_swarm_mailbox(self, monkeypatch):
         swarm_dir = self._arm(monkeypatch)

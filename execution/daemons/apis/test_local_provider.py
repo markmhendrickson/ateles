@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -19,6 +20,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib.daemon_runtime import AgentDefinition  # noqa: E402
+from lib.pytest_env_guard import assert_env_keys_absent  # noqa: E402
 
 import harness_router  # noqa: E402
 import local_provider  # noqa: E402
@@ -328,8 +330,9 @@ def test_env_points_at_local_proxy_and_strips_frontier_credentials():
     env = {"CLAUDE_CODE_OAUTH_TOKEN": "oauth", "ANTHROPIC_AUTH_TOKEN": "tok",
            "ANTHROPIC_MODEL": "claude-sonnet-5", "PATH": "/bin"}
     local_provider.apply_env(env, _cfg())
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env and "ANTHROPIC_AUTH_TOKEN" not in env
-    assert "ANTHROPIC_MODEL" not in env
+    assert_env_keys_absent(
+        env, "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"
+    )
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4000"
     assert env["ANTHROPIC_API_KEY"] == local_provider.PLACEHOLDER_API_KEY
     assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "qwen3-coder-ollama"
@@ -505,7 +508,7 @@ def test_mechanical_work_runs_local_with_guards_and_provenance(tmp_path, monkeyp
     _guard_command(guards, "git_stash_guard.py")
     assert cmd[cmd.index("--tools") + 1] == "Bash,Read,Edit"
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4000"
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert_env_keys_absent(env, "CLAUDE_CODE_OAUTH_TOKEN")
     done = [e for e in events if e["event_type"] == "subprocess" and e["success"] == "true"]
     assert done and done[0]["tool_name"] == f"{LOCAL}:cicada"
     fields = done[0]["usage"].as_event_fields()
@@ -620,8 +623,10 @@ def test_local_dispatch_with_stub_agent_def_is_reported_degraded(tmp_path, monke
 
     assert result.ok and result.provider == LOCAL
     (_, env), = spawns.calls
-    assert "NEOTOMA_AAUTH_PRIVATE_JWK_PATH" not in env, (
-        "a stub agent_def must not receive AAuth signing-key injection on the local path"
+    assert_env_keys_absent(
+        env,
+        "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+        why="a stub agent_def must not receive AAuth signing-key injection on the local path",
     )
     degraded_events = [e for e in events if e.get("output_summary") == "degraded_generic_subagent"]
     assert degraded_events, (
@@ -682,10 +687,14 @@ def test_missing_repo_path_env_refuses_local_launch_and_falls_over(tmp_path, mon
     assert LOCAL in harness_router.cooling_providers()
 
 
-def test_repo_path_env_present_logs_which_path_was_read(tmp_path, monkeypatch, caplog):
-    """The success path names the exact ATELES_REPO_PATH it bound guards
-    from, so a stale-checkout diagnosis does not require re-deriving it from
-    the daemon's ambient environment after the fact."""
+def test_repo_path_env_present_logs_source_without_requiring_raw_host_path(
+    tmp_path, monkeypatch, caplog
+):
+    """The diagnostic names ATELES_REPO_PATH as its configuration source.
+
+    Its value may be redacted when it aliases a host value captured before
+    collection, such as GITHUB_WORKSPACE on CI.
+    """
     _write_config(tmp_path)
     monkeypatch.setenv("ATELES_REPO_PATH", str(_REPO_ROOT))
     spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
@@ -693,10 +702,13 @@ def test_repo_path_env_present_logs_which_path_was_read(tmp_path, monkeypatch, c
         result = _run(spawns, events, work_class="rebase")
 
     assert result.ok and result.provider == LOCAL
+    prefix = "claude-local guards read from ATELES_REPO_PATH="
+    messages = [rec.message for rec in caplog.records if prefix in rec.message]
+    assert messages
     assert any(
-        "claude-local guards read from ATELES_REPO_PATH=" in rec.message
-        and str(_REPO_ROOT) in rec.message
-        for rec in caplog.records
+        prefix + str(_REPO_ROOT) in message
+        or re.search(re.escape(prefix) + r"<redacted:[^>]+>", message)
+        for message in messages
     )
 
 

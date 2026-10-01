@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 import prepare
+from lib.pytest_env_guard import assert_env_keys_absent
 
 
 @pytest.fixture
@@ -332,7 +333,9 @@ def test_agent_env_prefers_oauth_when_both_set(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xxx")
     env = prepare._agent_env()
-    assert "ANTHROPIC_API_KEY" not in env, "API key must be dropped from child env"
+    assert_env_keys_absent(
+        env, "ANTHROPIC_API_KEY", why="API key must be dropped from child env"
+    )
     assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "oauth-tok"
 
 

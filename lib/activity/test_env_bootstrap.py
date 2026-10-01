@@ -21,6 +21,7 @@ import os
 import sys
 
 from lib.activity import _dotenv_should_load, _maybe_load_env_file
+from lib.pytest_env_guard import assert_env_keys_absent
 
 
 def test_should_load_true_outside_pytest_with_no_skip_flag():
@@ -64,10 +65,14 @@ def test_canary_gate_var_from_a_simulated_operator_dotenv_does_not_leak_via_acti
         # module-level guard exactly as `import lib.activity` would.
         assert "pytest" in sys.modules
         _maybe_load_env_file(fake_dotenv)
-        assert sentinel not in os.environ, (
-            "a simulated operator dotenv's label-gate switch leaked into the "
+        # Key-presence check through the helper: `assert X not in os.environ`
+        # makes pytest render the entire host environment on failure.
+        assert_env_keys_absent(
+            os.environ,
+            sentinel,
+            why="a simulated operator dotenv's label-gate switch leaked into the "
             "real process environment via lib.activity._maybe_load_env_file "
-            "while pytest was running"
+            "while pytest was running",
         )
     finally:
         if had_before:
