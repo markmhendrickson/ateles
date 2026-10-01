@@ -67,9 +67,10 @@ counts — same posture as session_rule_index.py; some `agent_policy` rows
 carry operator payment details, CLAUDE.md).
 
 Each match also emits a bounded `harness_event` audit row through the existing
-session-integrity emitter. It records only the action category, expected and
-injected rule ids, delivery status/policy, UTC injection time, and the hook
-payload's stable `tool_use_id` (or `call_id`/`request_id`). Older carriers
+session-integrity emitter. It records only an opaque per-invocation delivery
+id, the action category, expected and injected rule ids, delivery
+status/policy, UTC injection time, and the hook payload's stable `tool_use_id`
+(or `call_id`/`request_id`). Older carriers
 without a call id fall back to `turn_id`, then `session_id`; those fallbacks
 correlate only to the containing turn/session, and `correlation_basis` makes
 that limitation explicit. All identifier values are one-way hashed, and
@@ -90,6 +91,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -390,8 +392,11 @@ def _emit_injection_audit(
     """Emit one sanitized, bounded event for this governed action.
 
     Deliberately excluded: ``tool_input``, command/prompt text, paths, rule
-    bodies, and arbitrary exception strings. Audit emission is best-effort
-    and inherits the gate's fail-open policy from ``emit_harness_event_raw``.
+    bodies, arbitrary exception strings, and raw correlation identifiers. A
+    cryptographically random identity prevents separate actions from merging
+    when their bounded correlation is shared or unavailable. Audit emission
+    remains best-effort and inherits the gate's fail-open policy from
+    ``emit_harness_event_raw``.
     """
     expected = sorted(wanted_ids)[:16]
     injected = sorted(set(injected_ids))[:16]
@@ -404,10 +409,18 @@ def _emit_injection_audit(
         delivery_status = "retrieval_failed_or_unavailable"
     basis, correlation = _governed_call_correlation(ev)
     session_id = _sanitized_correlation(ev.get("session_id"))
+    event_identity = f"rule-injection-{secrets.token_hex(16)}"
     emit_harness_event_raw(
-        f"rule-injection-{hashlib.sha256(correlation.encode()).hexdigest()[:16]}",
+        event_identity,
         {
             "event_type": "rule_injection",
+            # Neotoma's harness_event schema falls back to ``title`` when its
+            # full legacy composite identity is unavailable. A fresh random
+            # title therefore gives each governed invocation its own entity,
+            # while ``delivery_id`` keeps that opaque identity explicit for
+            # downstream readers. Correlation stays separate and joinable.
+            "title": event_identity,
+            "delivery_id": event_identity,
             "session_id": session_id,
             "trigger_action_classes": sorted(set(categories))[:8],
             "rule_entity_ids": injected,

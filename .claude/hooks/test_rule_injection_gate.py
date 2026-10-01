@@ -893,6 +893,10 @@ class TestRuleInjectionAuditEvent:
         assert len(correlations) == 1
         assert next(iter(correlations)).startswith(expected_correlation_prefix)
         assert len(set(handler.stored_entity_ids)) == 2
+        delivery_ids = {item["delivery_id"] for item in events}
+        assert len(delivery_ids) == 2
+        assert all(item.startswith("rule-injection-") for item in delivery_ids)
+        assert {item["title"] for item in events} == delivery_ids
 
     def test_retrieval_failure_is_observable_and_stays_fail_open(
         self, fake_neotoma
