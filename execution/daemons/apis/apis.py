@@ -721,6 +721,39 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
+def _explicit_executor_excludes_apis(
+    entity_id: str, snapshot: dict, *, trigger: str
+) -> bool:
+    """Return whether a task already names an executor outside Apis.
+
+    ``assigned_to`` selects a swarm role; ``executor`` records who is already
+    carrying the task.  Session-launched workers use values such as
+    ``codex-subagent:<name>`` and legacy ``codex:<path>``.  Those are valid
+    owners even though Apis cannot resolve them through ``ASSIGNED_TO_ROUTES``.
+
+    Absence means the task is available to route.  ``swarm`` and
+    ``swarm:<role>`` explicitly opt into Apis.  Every other non-empty executor
+    excludes Apis: an unknown explicit owner must not be rewritten as an
+    unowned task or replaced through tag inference.
+    """
+    executor_raw = snapshot.get("executor")
+    executor = str(executor_raw).strip() if executor_raw is not None else ""
+    executor_key = executor.lower()
+    if (
+        not executor_key
+        or executor_key == "swarm"
+        or executor_key.startswith("swarm:")
+    ):
+        return False
+
+    log.info(
+        f"[{DAEMON_NAME}] task {entity_id!r} has explicit external executor "
+        f"{executor!r} (trigger={trigger}) — not dispatching; explicit "
+        "executor ownership excludes Apis"
+    )
+    return True
+
+
 async def _spawn_harness_skill(
     skill: str,
     entity_id: str,
@@ -864,6 +897,12 @@ async def dispatch_task(
             f"[{DAEMON_NAME}] task {entity_id!r} has a completed effect with "
             f"pending provenance (trigger={trigger}) — not dispatching"
         )
+        return
+
+    # ``executor`` is the task's live ownership record, distinct from the
+    # swarm-role hint in ``assigned_to``.  Refuse before routing or lifecycle
+    # writes so an external harness worker remains authoritative for status.
+    if _explicit_executor_excludes_apis(entity_id, snapshot, trigger=trigger):
         return
 
     # The snapshot read fine, so any prior unreadable streak for this task is
@@ -2273,6 +2312,13 @@ async def handle_checkpoint_brief(
         )
         return False
 
+    # A checkpoint may have been raised before an external session claimed the
+    # task.  Do not announce or stamp a dispatch that the live owner excludes.
+    if _explicit_executor_excludes_apis(
+        task_id, task_snapshot, trigger=f"approved checkpoint {entity_id}"
+    ):
+        return False
+
     brief_user_id = fetch_entity_user_id(entity_id)
     task_user_id = fetch_entity_user_id(task_id)
     if not brief_user_id or not task_user_id or brief_user_id != task_user_id:
@@ -2495,6 +2541,13 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
     if entity_type != "task":
         # Defensive: SSE client filters by entity type, but guard here too
+        return
+
+    # Ownership is an event-level precondition, not just a dispatch detail.
+    # Creation and due-today notifications happen before ``dispatch_task``;
+    # refuse external ownership before those effects.  ``dispatch_task`` keeps
+    # the same guard for reconciler, watchdog, and direct callers.
+    if _explicit_executor_excludes_apis(entity_id, snapshot, trigger=action):
         return
 
     title = snapshot.get("title", "(untitled)")

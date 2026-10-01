@@ -271,6 +271,97 @@ def test_handle_event_idempotency_only_claims_hydrated_events(monkeypatch):
     assert sum(1 for e, h in seen if e == "ent_z" and h) == 1
 
 
+def test_created_event_preserves_active_external_executor_ownership(monkeypatch):
+    """A natural create event must not let Apis overwrite a live subagent.
+
+    Session-launched workers record the same external executor in both task
+    ownership fields.  Apis cannot spawn that executor, but that is not an
+    unowned task: lifecycle writes belong to the named external executor.
+    """
+    from lib.daemon_runtime.sse_client import NeotomaEvent
+
+    async def _noop_hydrate(event):
+        return event
+
+    writes: list[tuple] = []
+    monkeypatch.setattr(apis, "hydrate_snapshot", _noop_hydrate)
+    monkeypatch.setattr(
+        apis,
+        "set_task_status",
+        lambda entity_id, status, **kwargs: writes.append(
+            (entity_id, status, kwargs.get("reason"))
+        ) or True,
+    )
+    monkeypatch.setattr(apis, "_announced", {})
+    monkeypatch.setattr(apis, "_created_seen", {})
+
+    snapshot = {
+        "title": "Implement the accepted evaluation contract",
+        "status": "in_progress",
+        "assigned_to": "codex-subagent:eval_p0_impl",
+        "executor": "codex-subagent:eval_p0_impl",
+        "tags": ["shared-instance", "evals", "ci"],
+    }
+    original = dict(snapshot)
+    event = NeotomaEvent(
+        entity_type="task",
+        entity_id="ent_external_executor",
+        action="created",
+        snapshot=snapshot,
+    )
+    event.hydrated = True
+    notifier = _Notifier()
+
+    asyncio.run(apis.handle_event(event, notifier))
+
+    assert snapshot == original
+    assert writes == []
+    assert notifier.sent == []
+    assert apis._created_seen == {}
+
+
+@pytest.mark.parametrize("executor", [None, "", "swarm", " SWARM ", "swarm:cicada"])
+def test_swarm_executor_remains_dispatchable(monkeypatch, executor):
+    """The external-owner guard must not silence the existing swarm path."""
+    monkeypatch.setattr(apis, "_activity", _FakeActivity())
+    snapshot = {
+        "title": "Fix the flaky CI pipeline",
+        "status": "in_progress",
+        "assigned_to": "cicada",
+        "executor": executor,
+        "tags": ["ops"],
+    }
+
+    with pytest.raises(_Stop):
+        _dispatch("ent_swarm_executor", snapshot, _Notifier())
+
+
+def test_direct_dispatch_preserves_external_executor_ownership(monkeypatch):
+    """Reconciler/watchdog callers receive the same ownership protection."""
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        apis,
+        "set_task_status",
+        lambda *args, **kwargs: writes.append((args, kwargs)) or True,
+    )
+    notifier = _Notifier()
+
+    _dispatch(
+        "ent_direct_external",
+        {
+            "title": "Continue the session-owned implementation",
+            "status": "in_progress",
+            "assigned_to": "codex-subagent:implementation",
+            "executor": "codex-subagent:implementation",
+            "tags": ["ops"],
+        },
+        notifier,
+    )
+
+    assert writes == []
+    assert notifier.sent == []
+
+
 def test_unhydrated_redeliveries_do_not_repeat_the_created_notice(monkeypatch):
     """Loxia review: a task whose early deliveries all 502 emitted one
     'Task created: (untitled)' INFO page per redelivery, because the announce

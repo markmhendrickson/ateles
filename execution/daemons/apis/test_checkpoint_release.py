@@ -319,6 +319,36 @@ def release_store(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_approved_checkpoint_does_not_reclaim_external_executor(
+    monkeypatch, release_store
+):
+    """An old approval cannot displace a session that now owns the task."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    records[task_id]["snapshot"].update(
+        status="in_progress",
+        assigned_to="codex-subagent:implementation",
+        executor="codex-subagent:implementation",
+    )
+    dispatches: list[str] = []
+
+    async def _capture_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)
+
+    monkeypatch.setattr(apis, "dispatch_task", _capture_dispatch)
+    notifier = _Notifier()
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, notifier)
+
+    assert released is False
+    assert dispatches == []
+    assert brief["resolved_dispatched"] is False
+    assert records[task_id]["snapshot"]["status"] == "in_progress"
+    assert notifier.sent == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "approval_failure",
     ["missing", "unreadable", "mismatched"],
