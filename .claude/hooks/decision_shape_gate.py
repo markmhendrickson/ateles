@@ -46,8 +46,10 @@ WHAT IT CHECKS, all string-detectable in the assistant's own final message:
    - Numbered lists are not option markers, so a "1. ... I recommend yes"
      list with no letters and no decision cue does not fire.
 
-MODE: BLOCK, set by the operator 2026-09-11 via ATELES_DECISION_SHAPE_ENFORCE=1
-in .claude/settings.json.
+MODE: BLOCK. Claude Code sets ATELES_DECISION_SHAPE_ENFORCE=1 in
+.claude/settings.json. Codex Stop/SubagentStop events are recognized by their
+documented ``model`` field and enforce directly, because the Codex user hook
+file has no shared environment block with Claude's settings.
 
 The operator chose BLOCK over WARN knowing the cost, and the reasoning is worth
 keeping. A Stop hook fires AFTER the message renders, so blocking does not
@@ -102,6 +104,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import emit_harness_event_raw, read_hook_input  # noqa: E402
 
 ENFORCE = os.environ.get("ATELES_DECISION_SHAPE_ENFORCE", "") in ("1", "true", "yes")
+CODEX_STOP_EVENTS = frozenset({"Stop", "SubagentStop"})
 
 # A question that asks leave to do the thing, rather than asking for a judgement.
 PERMISSION_RE = re.compile(
@@ -251,6 +254,38 @@ def last_assistant_text(transcript_path: str | None) -> str:
     except Exception:
         return ""
     return last
+
+
+def is_codex_stop_event(ev: dict) -> bool:
+    """True only for Codex's documented Stop-family event shape.
+
+    ``model`` is a Codex-specific common input field. Keying the carrier
+    adaptation on it preserves Claude Code's existing exit-code contract even
+    though both harnesses call the same evaluator with ``hook_event_name``.
+    """
+    return (
+        ev.get("hook_event_name") in CODEX_STOP_EVENTS
+        and isinstance(ev.get("model"), str)
+        and bool(ev["model"])
+    )
+
+
+def event_transcript_path(ev: dict) -> str | None:
+    """Select the transcript field documented for this Stop event."""
+    if ev.get("hook_event_name") == "SubagentStop":
+        value = ev.get("agent_transcript_path")
+    else:
+        value = ev.get("transcript_path")
+    return value if isinstance(value, str) else None
+
+
+def event_assistant_text(ev: dict, transcript_path: str | None) -> str:
+    """Prefer Codex's stable final-message field over transcript parsing."""
+    if is_codex_stop_event(ev):
+        value = ev.get("last_assistant_message")
+        if isinstance(value, str):
+            return value
+    return last_assistant_text(transcript_path)
 
 
 def _is_operator_prompt(row: dict) -> bool:
@@ -582,8 +617,10 @@ def main() -> int:
         return 0
 
     try:
-        transcript = ev.get("transcript_path")
-        text = last_assistant_text(transcript)
+        codex_stop = is_codex_stop_event(ev)
+        enforced = ENFORCE or codex_stop
+        transcript = event_transcript_path(ev)
+        text = event_assistant_text(ev, transcript)
         # Check 4 is session conduct; headless dispatched runs are out of its scope.
         asked = True if launched_in_print_mode() else turn_used_question_tool(transcript)
         found = findings(text, asked_via_tool=asked)
@@ -600,16 +637,19 @@ def main() -> int:
     # (BLOCK) vanishes once ATELES_DECISION_SHAPE_ENFORCE changes or the
     # session ends; the harness_event is what a later audit can check against.
     try:
-        emit_finding_event(ev.get("session_id", ""), found, ENFORCE)
+        emit_finding_event(ev.get("session_id", ""), found, enforced)
     except Exception:
         pass
 
-    if not ENFORCE:
+    if not enforced:
         sys.stderr.write(f"[decision-shape] WARN: {detail}\n")
         return 0
 
     print(json.dumps({"decision": "block", "reason": detail}))
-    return 2
+    # Codex consumes structured continuation JSON only from a successful
+    # command hook. Claude Code's established contract is exit 2 plus the
+    # same forward-compatible JSON payload.
+    return 0 if codex_stop else 2
 
 
 if __name__ == "__main__":
