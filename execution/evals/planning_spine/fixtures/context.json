@@ -90,7 +90,130 @@
     "ent_fixture_duplicate_task": {
       "entity_type": "task",
       "snapshot": {"title": "Split-parent verification", "status": "queued"}
-    }
+    },
+    "session_fixture_named_handoff": {
+      "entity_type": "conversation",
+      "snapshot": {
+        "title": "Named handoff",
+        "status": "active",
+        "source_session_id": "session_fixture_named_handoff",
+        "harness": "fixture-harness",
+        "repository": "fixture/repository",
+        "started_at": "2026-09-30T09:00:00Z"
+      }
+    },
+    "session_fixture_named_handoff_shell": {
+      "entity_type": "conversation",
+      "snapshot": {
+        "title": "Named handoff superseded shell",
+        "status": "superseded",
+        "source_session_id": "session_fixture_named_handoff",
+        "canonical_replacement_id": "session_fixture_named_handoff",
+        "harness": "fixture-harness",
+        "repository": "fixture/repository",
+        "started_at": "2026-09-29T09:00:00Z"
+      }
+    },
+    "transcript_fixture_named_handoff": {
+      "entity_type": "transcription",
+      "snapshot": {
+        "title": "Named handoff transcript",
+        "source_kind": "transcript",
+        "observed_at": "2026-09-30T09:30:00Z",
+        "source_lanes": [
+          {"lane_id": "lane_fixture_01", "state": "active"},
+          {"lane_id": "lane_fixture_02", "state": "active"},
+          {"lane_id": "lane_fixture_03", "state": "active"},
+          {"lane_id": "lane_fixture_13", "state": "ambiguous_binding"}
+        ]
+      }
+    },
+    "workboard_fixture_named_handoff": {
+      "entity_type": "session_digest",
+      "snapshot": {
+        "title": "Named handoff workboard",
+        "source_kind": "workboard",
+        "observed_at": "2026-09-30T10:00:00Z",
+        "source_lanes": [
+          {"lane_id": "lane_fixture_04", "state": "active"},
+          {"lane_id": "lane_fixture_05", "state": "active"},
+          {"lane_id": "lane_fixture_06", "state": "active"},
+          {"lane_id": "lane_fixture_07", "state": "active"}
+        ]
+      }
+    },
+    "handoff_fixture_named_handoff": {
+      "entity_type": "conversation_message",
+      "snapshot": {
+        "title": "Named handoff terminal handoff",
+        "source_kind": "terminal_handoff",
+        "observed_at": "2026-09-30T10:30:00Z",
+        "source_lanes": [
+          {"lane_id": "lane_fixture_11", "state": "active"},
+          {"lane_id": "lane_fixture_12", "state": "outside_requested_scope"}
+        ]
+      }
+    },
+    "post_inventory_fixture_named_handoff": {
+      "entity_type": "conversation_message",
+      "snapshot": {
+        "title": "Named handoff post-inventory update",
+        "source_kind": "terminal_handoff",
+        "observed_at": "2026-09-30T11:00:00Z",
+        "source_lanes": [
+          {"lane_id": "lane_fixture_11", "state": "terminal_superseded"}
+        ]
+      }
+    },
+    "transcript_fixture_named_handoff_shell": {
+      "entity_type": "transcription",
+      "snapshot": {
+        "title": "Superseded shell transcript",
+        "source_kind": "transcript",
+        "observed_at": "2026-09-29T09:30:00Z",
+        "source_lanes": [
+          {"lane_id": "lane_fixture_01", "state": "active"}
+        ]
+      }
+    },
+    "session_fixture_ambiguous_a": {"entity_type": "conversation", "snapshot": {"title": "Ambiguous handoff A", "lookup_key": "fixture_ambiguous_handoff", "harness": "fixture-harness-a", "repository": "fixture/repository-a", "started_at": "2026-09-30T08:00:00Z"}},
+    "session_fixture_ambiguous_b": {"entity_type": "conversation", "snapshot": {"title": "Ambiguous handoff B", "lookup_key": "fixture_ambiguous_handoff", "harness": "fixture-harness-b", "repository": "fixture/repository-b", "started_at": "2026-09-30T09:00:00Z"}},
+    "session_fixture_empty": {"entity_type": "conversation", "snapshot": {"title": "Empty bound session", "source_session_id": "session_fixture_empty", "harness": "fixture-harness", "repository": "fixture/repository"}},
+    "inventory_fixture_empty": {"entity_type": "session_digest", "snapshot": {"title": "Empty terminal inventory", "source_kind": "workboard", "observed_at": "2026-09-30T10:00:00Z", "source_lanes": []}},
+    "session_fixture_unreadable": {"entity_type": "conversation", "snapshot": {"title": "Partly unreadable bound session", "source_session_id": "session_fixture_unreadable", "harness": "fixture-harness", "repository": "fixture/repository"}},
+    "evidence_fixture_unreadable_readable": {"entity_type": "session_digest", "snapshot": {"title": "Readable workboard before unavailable handoff", "source_kind": "workboard", "observed_at": "2026-09-30T09:30:00Z", "source_lanes": [{"lane_id": "lane_fixture_readable_01", "state": "active"}]}},
+    "evidence_fixture_unreadable": {"entity_type": "conversation_message", "snapshot": {"title": "Unavailable terminal handoff", "source_kind": "terminal_handoff", "observed_at": "2026-09-30T10:00:00Z", "readable": false, "affected_lane_ids": ["lane_fixture_unreadable_01"]}},
+    "plan_fixture_named_parent": {"entity_type": "project", "snapshot": {"title": "Named handoff parent planning record", "status": "active"}},
+    "task_fixture_01": {"entity_type": "task", "snapshot": {"title": "Discoverable deployment task", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_01"}},
+    "task_fixture_02": {"entity_type": "task", "snapshot": {"title": "Sibling task 02", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_02"}},
+    "task_fixture_03": {"entity_type": "task", "snapshot": {"title": "Sibling task 03", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_03"}},
+    "task_fixture_04": {"entity_type": "task", "snapshot": {"title": "Sibling task 04", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_04"}},
+    "task_fixture_05": {"entity_type": "task", "snapshot": {"title": "Sibling task 05", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_05"}},
+    "task_fixture_06": {"entity_type": "task", "snapshot": {"title": "Sibling task 06", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_06"}},
+    "task_fixture_07": {"entity_type": "task", "snapshot": {"title": "Sibling task 07", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_07"}},
+    "task_fixture_08": {"entity_type": "task", "snapshot": {"title": "Linked task 08", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_kind": "linked_task", "observed_at": "2026-09-30T10:15:00Z", "source_lane_id": "lane_fixture_08", "source_state": "active"}},
+    "task_fixture_09": {"entity_type": "task", "snapshot": {"title": "Linked task 09", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_kind": "linked_task", "observed_at": "2026-09-30T10:15:00Z", "source_lane_id": "lane_fixture_09", "source_state": "active"}},
+    "task_fixture_10": {"entity_type": "task", "snapshot": {"title": "Linked task 10", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_kind": "linked_task", "observed_at": "2026-09-30T10:15:00Z", "source_lane_id": "lane_fixture_10", "source_state": "active"}},
+    "task_fixture_11": {"entity_type": "task", "snapshot": {"title": "Terminal superseded task", "status": "done", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_11"}},
+    "task_fixture_12": {"entity_type": "task", "snapshot": {"title": "Out-of-scope task", "status": "queued", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_12"}},
+    "task_fixture_13": {"entity_type": "task", "snapshot": {"title": "Ambiguous candidate task A", "status": "queued", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_13"}},
+    "task_fixture_13_candidate_b": {"entity_type": "task", "snapshot": {"title": "Ambiguous candidate task B", "status": "queued", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_13"}},
+    "task_fixture_01_shell": {"entity_type": "task", "snapshot": {"title": "Superseded shell deployment task", "status": "queued", "source_session_id": "session_fixture_named_handoff_shell", "source_lane_id": "lane_fixture_01"}},
+    "plan_fixture_01": {"entity_type": "plan", "snapshot": {"title": "Named handoff deployment candidate", "status": "active"}},
+    "plan_fixture_02": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 02", "status": "active"}},
+    "plan_fixture_03": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 03", "status": "active"}},
+    "plan_fixture_04": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 04", "status": "active"}},
+    "plan_fixture_05": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 05", "status": "active"}},
+    "plan_fixture_06": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 06", "status": "active"}},
+    "plan_fixture_07": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 07", "status": "active"}},
+    "plan_fixture_08": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 08", "status": "active"}},
+    "plan_fixture_09": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 09", "status": "active"}},
+    "plan_fixture_10": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 10", "status": "active"}},
+    "plan_fixture_11": {"entity_type": "plan", "snapshot": {"title": "Superseded plan 11", "status": "superseded"}},
+    "plan_fixture_12": {"entity_type": "plan", "snapshot": {"title": "Outside-scope plan 12", "status": "active"}},
+    "plan_fixture_13": {"entity_type": "plan", "snapshot": {"title": "Ambiguous candidate plan A", "status": "active"}},
+    "plan_fixture_13_candidate_b": {"entity_type": "plan", "snapshot": {"title": "Ambiguous candidate plan B", "status": "active"}},
+    "plan_fixture_01_shell": {"entity_type": "plan", "snapshot": {"title": "Superseded shell deployment plan", "status": "superseded"}}
   },
   "relationships": [
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_bound_task", "target_entity_id": "ent_fixture_bound_plan"},
@@ -105,11 +228,85 @@
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_plan", "target_entity_id": "ent_fixture_phase_b2"},
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_plan", "target_entity_id": "ent_fixture_phase_e"},
     {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_bound_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_e2_plan"}
+    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_e2_plan"},
+    {"relationship_type": "PART_OF", "source_entity_id": "transcript_fixture_named_handoff", "target_entity_id": "session_fixture_named_handoff"},
+    {"relationship_type": "PART_OF", "source_entity_id": "workboard_fixture_named_handoff", "target_entity_id": "session_fixture_named_handoff"},
+    {"relationship_type": "PART_OF", "source_entity_id": "handoff_fixture_named_handoff", "target_entity_id": "session_fixture_named_handoff"},
+    {"relationship_type": "PART_OF", "source_entity_id": "post_inventory_fixture_named_handoff", "target_entity_id": "session_fixture_named_handoff"},
+    {"relationship_type": "SUPERSEDED_BY", "source_entity_id": "session_fixture_named_handoff_shell", "target_entity_id": "session_fixture_named_handoff"},
+    {"relationship_type": "PART_OF", "source_entity_id": "transcript_fixture_named_handoff_shell", "target_entity_id": "session_fixture_named_handoff_shell"},
+    {"relationship_type": "REFERS_TO", "source_entity_id": "session_fixture_named_handoff_shell", "target_entity_id": "task_fixture_01_shell"},
+    {"relationship_type": "PART_OF", "source_entity_id": "inventory_fixture_empty", "target_entity_id": "session_fixture_empty"},
+    {"relationship_type": "PART_OF", "source_entity_id": "evidence_fixture_unreadable_readable", "target_entity_id": "session_fixture_unreadable"},
+    {"relationship_type": "PART_OF", "source_entity_id": "evidence_fixture_unreadable", "target_entity_id": "session_fixture_unreadable"},
+    {"relationship_type": "REFERS_TO", "source_entity_id": "session_fixture_named_handoff", "target_entity_id": "task_fixture_08"},
+    {"relationship_type": "REFERS_TO", "source_entity_id": "session_fixture_named_handoff", "target_entity_id": "task_fixture_09"},
+    {"relationship_type": "REFERS_TO", "source_entity_id": "session_fixture_named_handoff", "target_entity_id": "task_fixture_10"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_01", "target_entity_id": "plan_fixture_01"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_02", "target_entity_id": "plan_fixture_02"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_03", "target_entity_id": "plan_fixture_03"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_04", "target_entity_id": "plan_fixture_04"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_05", "target_entity_id": "plan_fixture_05"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_06", "target_entity_id": "plan_fixture_06"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_07", "target_entity_id": "plan_fixture_07"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_08", "target_entity_id": "plan_fixture_08"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_09", "target_entity_id": "plan_fixture_09"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_10", "target_entity_id": "plan_fixture_10"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_11", "target_entity_id": "plan_fixture_11"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_12", "target_entity_id": "plan_fixture_12"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_13", "target_entity_id": "plan_fixture_13"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_13_candidate_b", "target_entity_id": "plan_fixture_13_candidate_b"},
+    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_01_shell", "target_entity_id": "plan_fixture_01_shell"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_01", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_02", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_03", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_04", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_05", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_06", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_07", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_08", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_09", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_10", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_11", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_12", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_13", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_13_candidate_b", "target_entity_id": "plan_fixture_named_parent"},
+    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_01_shell", "target_entity_id": "plan_fixture_named_parent"}
   ],
   "scenarios": {
     "continue-session": {
       "prompt": "/continue-session Foundation rollout. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
+    },
+    "continue-session-named-session": {
+      "prompt": "/continue-session Named handoff source session `session_fixture_named_handoff`. Resume everything still relevant from that source session before taking domain action.",
+      "invoked_skill": "continue-session",
+      "scorer": "source_session_resume",
+      "source_session_id": "session_fixture_named_handoff",
+      "required_source_kinds": ["transcript", "workboard", "linked_task", "terminal_handoff"]
+    },
+    "continue-session-missing-session": {
+      "prompt": "/continue-session source session `session_fixture_missing`. Resume it only if the exact source can be bound.",
+      "invoked_skill": "continue-session",
+      "scorer": "source_session_resume",
+      "source_session_id": "session_fixture_missing"
+    },
+    "continue-session-ambiguous-session": {
+      "prompt": "/continue-session the session identified as `fixture_ambiguous_handoff`. Do not guess between corroborated candidates.",
+      "invoked_skill": "continue-session",
+      "scorer": "source_session_resume",
+      "source_session_lookup_key": "fixture_ambiguous_handoff"
+    },
+    "continue-session-empty-session": {
+      "prompt": "/continue-session exact source session `session_fixture_empty`.",
+      "invoked_skill": "continue-session",
+      "scorer": "source_session_resume",
+      "source_session_id": "session_fixture_empty"
+    },
+    "continue-session-unreadable-session": {
+      "prompt": "/continue-session exact source session `session_fixture_unreadable`; one required terminal source may be unavailable.",
+      "invoked_skill": "continue-session",
+      "scorer": "source_session_resume",
+      "source_session_id": "session_fixture_unreadable"
     },
     "digest": {
       "prompt": "/digest --report-only project. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"

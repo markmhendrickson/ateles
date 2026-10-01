@@ -35,6 +35,35 @@ _SKILL_REQUIREMENTS = {
         "captured, workboarded, and dispatched": (
             "queue a new workstream until current work is captured and dispatched"
         ),
+        "exact source session": "bind a whole-session continuation before a plan",
+        "terminal resumable population as a union": (
+            "combine every terminal source instead of accepting the first hit"
+        ),
+        "session_digest or workboard": "include the source session's status inventory",
+        "terminal handoff": "include the source session's terminal handoff",
+        "source-session coverage ledger": "account for every distinct source lane",
+        "explicitly excluded": "record a reasoned exclusion disposition",
+        "unresolved": "preserve lanes whose canonical identity is not proven",
+        "audited = imported + excluded + unresolved": (
+            "balance all four source-session coverage counts"
+        ),
+        "comprehensively resumed while an omitted row exists": (
+            "forbid completeness claims while a source lane is omitted"
+        ),
+        "[copy: not-found message and recovery hint]": (
+            "define a recoverable exact-session not-found outcome"
+        ),
+        "[copy: ambiguity prompt]": (
+            "define bounded candidate disambiguation before binding"
+        ),
+        "[copy: empty-session outcome]": (
+            "define the explicit zero-lane ledger outcome"
+        ),
+        "partly unreadable": "keep unavailable terminal evidence unknown",
+        "bounded retry": "bound retries before checkpoint or escalation",
+        "unreadable source is unknown, never empty": (
+            "forbid coercing unavailable evidence to an empty result"
+        ),
     },
     "digest": {
         "planning spine summary": "include a planning-spine status summary",

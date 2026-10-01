@@ -82,11 +82,63 @@ Before the first domain action, and whenever a new workstream appears, finish th
 
 This reporting contract does not retire the legacy session policy. Until the planning workflow, derived reads, and PM-10 write-path cutover are live, still perform the plan binding and maintenance rules below where they are required for compatibility. Treat that binding as a compatibility index only: task ascent is the source of truth for reporting and dispatch, and the skill must not claim that a session-owned plan field is authoritative current state.
 
-## 1. Identify the workstream
+## 1. Identify the continuation scope
 
-You are continuing *one* workstream. Everything downstream depends on binding the right plan, and
-binding the wrong one is worse than binding none — it writes one workstream's state into another's
-record, which is the collision that corrupted a plan in June 2026.
+First decide whether the operator named a **whole source session** or **one workstream**. This choice
+precedes plan binding. A source session is a container and may hold several sibling workstreams;
+binding one convenient plan first can silently discard the others.
+
+### 1a. Whole source session
+
+Use this mode when the operator names a session, conversation, harness task, transcript, or asks to
+continue everything from another assistant.
+
+1. **Bind the exact source session before any similarly named plan.** Resolve the session or
+   transcript by stable identity (session/conversation id, exact transcript path, or an exact title
+   plus corroborating metadata). A title-only or fuzzy plan match is a candidate, never the bind.
+   Exact-session resolution has four safe non-happy-path outcomes, and each is terminal for binding:
+
+   - **Not found:** stop before plan binding and domain action. Report the bounded sources and
+     identifiers checked, then offer one concrete recovery path: provide a stable session or
+     conversation id, provide the exact transcript path, or restore the missing record. Make no
+     completeness claim.
+     `[COPY: not-found message and recovery hint]`
+   - **Ambiguous:** stop before plan binding and domain action. Present two or three bounded
+     candidates, each with its stable identifier and disambiguating timestamp, harness, or
+     repository. Never select the nearest plan or candidate session, and make no completeness claim.
+     `[COPY: ambiguity prompt]`
+   - **Empty:** an exactly bound session with zero lanes is a valid empty result. Emit the normal
+     coverage-ledger structure with `audited: 0; imported: 0; excluded: 0; unresolved: 0`, state
+     explicitly that no work was resumed, take no domain action, and make no completeness claim.
+     `[COPY: empty-session outcome]`
+   - **Partly unreadable:** name every unavailable evidence source and keep every affected lane
+     **Unresolved**. Do not claim completeness or take state-dependent domain action. Retry each
+     unavailable source on a stated bound, then raise a checkpoint or escalation if it remains
+     unavailable; an unreadable source is unknown, never empty.
+2. **Build the terminal resumable population as a union, not a first-hit search.** Read the source
+   transcript's final workstream/status inventory, the source session_digest or workboard, linked
+   tasks and plans, and the terminal handoff. Add any lane changed after the last inventory. If no
+   terminal inventory exists, scan the transcript backwards until every nonterminal, blocked,
+   operator-waiting, queued, and just-completed lane is accounted for.
+3. **Reconcile identities.** Map each source lane to its canonical task and planning ascent. Collapse
+   a duplicate or superseded shell only when the record proves the canonical replacement; otherwise
+   keep both rows unresolved rather than guessing.
+4. **Complete a source-session coverage ledger before domain action.** One row per distinct source
+   lane, with source evidence, canonical task/plan, latest stored state, and exactly one disposition:
+   **Imported**, **Explicitly excluded** (with reason), or **Unresolved**. Report all four counts:
+   audited, imported, excluded, unresolved. The equation
+   `audited = imported + excluded + unresolved` must hold. Never claim the session is
+   comprehensively resumed while an omitted row exists; if unresolved is nonzero, say what could
+   not be bound and do not take action that assumes its state.
+5. **Resume each imported workstream independently.** Run section 2 for every imported lane against
+   its own task and upward `PART_OF` ascent. Do not invent an umbrella plan, flatten sibling plans,
+   or let one selected Primary plan become authority over the others.
+
+### 1b. One workstream
+
+Use this mode when the operator names a plan, task, PR, document, or other single lane. Everything
+downstream depends on binding the right plan, and binding the wrong one is worse than binding none —
+it writes one workstream's state into another's record.
 
 Resolve in this order, stopping at the first that succeeds:
 
@@ -105,7 +157,8 @@ If no plan exists for the work at all, say so and offer to create one rather tha
 nearest neighbour. A plan that does not exist is not the same as a plan you failed to find, and
 writing into an unrelated plan because it was closest is the failure mode above.
 
-**Once bound, maintain only that plan for the rest of the session.**
+In single-workstream mode, maintain only that plan for the rest of the session. In whole-session
+mode, preserve each imported lane's own plan/ascent and maintain them independently.
 
 ## 2. Derive present state — run this before saying anything about where things stand
 
@@ -344,8 +397,11 @@ Report the queue's *shape* and its top item, not an exhaustive dump.
 
 ## 6. First moves
 
-1. Bind the workstream (section 1).
-2. Run section 2 top to bottom. That is the state — everything before this is background.
+1. Choose whole-session or single-workstream mode (section 1). For a whole session, bind the
+   exact source session and complete the coverage ledger before any domain action; for one
+   workstream, bind its plan.
+2. Run section 2 top to bottom for the single workstream or for every imported session lane. That
+   is the state — everything before this is background.
 3. Report to the operator in his format: what landed, what is waiting on him and why it is his, one
    recommendation with an explicit stop-or-continue, and the list of what you could not verify.
 4. If nothing is waiting on you and no decision is newly answered, start the top item of queue class
@@ -399,9 +455,26 @@ general enough.
 
 ## Constraints
 
-- MUST bind exactly one plan before doing anything else, resolving by argument, then by what the
-  operator said, then by environment as a candidate only, then by asking. MUST NOT treat a default
-  plan named in a config file as the binding. MUST NOT write one workstream's state into another's plan.
+- MUST decide whether the operator named a whole source session or one workstream before plan
+  binding. For a whole session, MUST bind the exact source session first, build the union coverage
+  ledger, reconcile duplicates/superseded shells only with evidence, and account for every audited
+  lane as Imported, Explicitly excluded with reason, or Unresolved before domain action; MUST report
+  audited/imported/excluded/unresolved counts and MUST NOT claim comprehensive resumption while any
+  source lane is omitted. For one workstream, MUST bind exactly one plan by argument, operator
+  wording, environment as candidate only, then asking. MUST NOT treat a default plan as the binding
+  or write one workstream's state into another's plan.
+- MUST stop before all plan binding and domain action when exact source-session identity is absent or
+  ambiguous. A not-found outcome MUST name bounded checked sources and a stable-id, exact-path, or
+  restore recovery action. An ambiguous outcome MUST present two or three stable candidate ids with
+  timestamp, harness, or repository metadata and MUST NOT choose one. Both MUST prohibit a
+  completeness claim.
+- MUST treat an exactly bound zero-lane session as a valid empty result: emit the normal zero-row
+  coverage ledger, report all four counts as zero, state that no work was resumed, and take no domain
+  action. Zero lanes MUST NOT be described as a successful resume of work or as a completeness claim.
+- MUST keep unavailable required evidence unknown. A partly unreadable outcome MUST name each
+  unavailable source, keep every affected lane Unresolved, prohibit completeness claims and
+  state-dependent domain action, and give a bounded retry followed by checkpoint or escalation.
+  MUST NOT coerce unreadable evidence to empty, resolved, imported, or excluded.
 - MUST derive present state rather than assert it, and MUST NOT record a point-in-time claim in any
   durable place where a derivation would serve.
 - MUST run section 2 before making any statement about where things stand, and MUST close it with an

@@ -3,6 +3,10 @@
 This eval exercises `continue-session` and `digest` through ordinary slash-command
 invocation in the repository's sandboxed Claude-session harness. It reuses the
 rule-delivery eval's session driver, path guard, and fixture Neotoma server.
+The default run includes both a single-workstream `continue-session` scenario
+and a whole named-session scenario with thirteen lanes distributed across a
+transcript, workboard, linked tasks, and terminal handoff. A similarly named
+narrow plan is deliberately easy to find first.
 
 The fixture is intentionally public-safe and synthetic. Its graph preserves the
 behavior under review:
@@ -25,6 +29,28 @@ report missing and duplicate phase ancestry per workstream, report missing and
 duplicate task ascent per affected task, and keep `reconcile-planning`
 retrospective. Stable fixture entity IDs bind these effects, so changing a human
 title cannot change placement or make an equivalent report fail.
+
+The named-session scorer derives the resumable population from that source
+union and each canonical task/plan binding from real fixture `PART_OF` edges.
+It requires each row to cite its source evidence and latest stored state,
+validates task → plan → parent ancestry, rejects a superseded session shell in
+favor of its proven canonical replacement, and requires an ambiguous lane to
+expose both candidates without asserting either as canonical. A post-inventory
+observation changes one lane after the terminal handoff so stale-state selection
+goes red. The normal runner selects this scorer from scenario metadata, and a
+first-source-only mutation also runs through `runner.run_scenario()`; coverage
+cannot pass only through a detached unit-test helper or a prompt that contains
+the answer key.
+
+Four additional normal-invocation scenarios cover the safe recovery contract
+before plan binding: an exact source that is not found, two corroborated
+candidates, an exactly bound zero-lane session, and a bound session with an
+unreadable required terminal source. Their scorers require checked surfaces or
+bounded candidates, an explicit zero-count ledger for the empty case, and
+preservation of both a readable lane and an unresolved lane plus bounded
+retry/escalation for partly unreadable evidence. Each requires an explicit
+no-domain-action and no-completeness-claim posture rather than treating absence,
+ambiguity, zero lanes, or unavailability as a successful resume.
 
 The three `fixtures/skills/*/SKILL.md` files are generated review evidence, not
 sources. Neotoma prod remains canonical. `fixtures/review_bundle.json` records

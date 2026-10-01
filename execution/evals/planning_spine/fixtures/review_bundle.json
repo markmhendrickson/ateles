@@ -1,9 +1,9 @@
 {
   "artifact_role": "generated review evidence; not an authoring source",
   "canonical_source": "Neotoma prod skill entities",
-  "captured_at": "2026-09-28",
+  "captured_at": "2026-10-01",
   "context_fixture": "execution/evals/planning_spine/fixtures/context.json",
-  "context_sha256": "3d3d028273e43d0e153693d173c11b111610c01c5dc4b64911ad2ad6767d8a55",
+  "context_sha256": "533719a09dad08afdf423ad2632d35130408648d6a7f83a945dcdc60a9c10c9d",
   "generated_by": "execution/scripts/render_planning_spine_review_bundle.py",
   "public_safe": true,
   "skills": [
@@ -14,7 +14,7 @@
         "identifier": "continue-session"
       },
       "path": "execution/evals/planning_spine/fixtures/skills/continue-session/SKILL.md",
-      "sha256": "93cfabe02f62dc8db8a9c8a4964faf2168ac125af1a0d7544e9bd3d54b9ae430",
+      "sha256": "f5c800c7a3a117316dbdca5f05ed0c7ec52788dd822f09b113c348a0ee430f8a",
       "slug": "continue-session",
       "snapshot_source": "generated user mirror located by name:continue-session"
     },

@@ -5,7 +5,8 @@ The checked-in skill files are generated review evidence from Neotoma's
 canonical skill entities. Each run materializes those mirrors in an isolated
 workspace, serves the public-safe planning fixture through the same fixture MCP
 used by the rule-delivery evals, and invokes the skill by its ordinary slash
-command. ``checks.score_report`` judges the final observable report.
+command. Each scenario selects the effect scorer for its final observable
+report.
 
 Use ``--dry-run`` in credential-free CI to verify the complete setup. A live
 run requires the ``claude`` CLI and is intentionally opt-in because it spends
@@ -151,6 +152,18 @@ def prepare_run(run_dir: Path, scenario: str) -> None:
     (run_dir / "prompt.txt").write_text(scenario_data["prompt"] + "\n")
 
 
+def score_scenario_report(report: str, fixture: dict, scenario: str) -> dict:
+    """Select the scenario's effect scorer for one final report."""
+    scenario_data = fixture["scenarios"][scenario]
+    scorer = scenario_data.get("scorer", "planning_spine")
+    if scorer == "source_session_resume":
+        return checks.score_source_session_resume(report, fixture, scenario_data)
+    if scorer == "planning_spine":
+        invoked_skill = scenario_data.get("invoked_skill", scenario)
+        return checks.score_report(report, fixture, invoked_skill=invoked_skill)
+    raise ValueError(f"unknown planning-spine scorer: {scorer}")
+
+
 def run_scenario(
     run_dir: Path,
     scenario: str,
@@ -174,6 +187,7 @@ def run_scenario(
     transport_error = session["error"]
     if report.startswith("API Error:"):
         transport_error = report
+    fixture = load_fixture()
     scored = (
         {
             "outcome": "error",
@@ -181,7 +195,7 @@ def run_scenario(
             "infrastructure_error": transport_error or "no harness result",
         }
         if transport_error or not result
-        else checks.score_report(report, load_fixture(), invoked_skill=scenario)
+        else score_scenario_report(report, fixture, scenario)
     )
     output = {
         "scenario": scenario,
@@ -197,7 +211,13 @@ def run_scenario(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--scenarios", default="continue-session,digest", help="comma-separated slugs"
+        "--scenarios",
+        default=(
+            "continue-session,continue-session-named-session,"
+            "continue-session-missing-session,continue-session-ambiguous-session,"
+            "continue-session-empty-session,continue-session-unreadable-session,digest"
+        ),
+        help="comma-separated scenario names",
     )
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--max-run-usd", type=float, default=2.0)
