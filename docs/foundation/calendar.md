@@ -101,7 +101,7 @@ kinds do not depend on history: a series is always the series artifact, an occur
 artifact, and an occurrence the calendar has never stored independently is still an occurrence with an id
 the calendar will answer for. And every artifact in this design exists in the record once an adapter has read
 it and not before — the record never holds every entry an external system holds; it holds the ones read,
-and coverage says which (`adapters.md#what-the-adapter-does-with-every-event`). A daily series has
+and coverage says which (`adapters.md#the-record-holds-the-entries-read-and-coverage-says-which`, decision 104). A daily series has
 occurrences the record does not hold exactly as a mailbox has messages the record does not hold, and an
 instances read over a window states the window. Occurrence artifacts being unbounded is therefore not a
 departure from how artifacts come to exist; it is the ordinary condition of every artifact kind, made visible
