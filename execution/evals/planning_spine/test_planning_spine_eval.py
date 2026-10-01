@@ -97,6 +97,7 @@ truth for this report.
 SOURCE_SESSION_SCENARIO = {
     "source_session_id": "session_fixture_named_handoff",
     "lane_ids": [f"lane_fixture_{index:02d}" for index in range(1, 14)],
+    "task_ids": [f"task_fixture_{index:02d}" for index in range(1, 14)],
     "plan_ids": [f"plan_fixture_{index:02d}" for index in range(1, 14)],
 }
 
@@ -109,19 +110,19 @@ The exact source session was bound before any similarly named workstream plan.
 
 | Source lane | Canonical workstream | Disposition |
 | --- | --- | --- |
-| `lane_fixture_01` discoverable lane | `plan_fixture_01` | Imported |
-| `lane_fixture_02` sibling lane | `plan_fixture_02` | Imported |
-| `lane_fixture_03` sibling lane | `plan_fixture_03` | Imported |
-| `lane_fixture_04` sibling lane | `plan_fixture_04` | Imported |
-| `lane_fixture_05` sibling lane | `plan_fixture_05` | Imported |
-| `lane_fixture_06` sibling lane | `plan_fixture_06` | Imported |
-| `lane_fixture_07` sibling lane | `plan_fixture_07` | Imported |
-| `lane_fixture_08` sibling lane | `plan_fixture_08` | Imported |
-| `lane_fixture_09` sibling lane | `plan_fixture_09` | Imported |
-| `lane_fixture_10` sibling lane | `plan_fixture_10` | Imported |
-| `lane_fixture_11` sibling lane | `plan_fixture_11` | Explicitly excluded — terminal and superseded |
-| `lane_fixture_12` sibling lane | `plan_fixture_12` | Explicitly excluded — outside requested scope |
-| `lane_fixture_13` sibling lane | `plan_fixture_13` | Unresolved — canonical task is ambiguous |
+| `lane_fixture_01` discoverable lane | `task_fixture_01` / `plan_fixture_01` | Imported |
+| `lane_fixture_02` sibling lane | `task_fixture_02` / `plan_fixture_02` | Imported |
+| `lane_fixture_03` sibling lane | `task_fixture_03` / `plan_fixture_03` | Imported |
+| `lane_fixture_04` sibling lane | `task_fixture_04` / `plan_fixture_04` | Imported |
+| `lane_fixture_05` sibling lane | `task_fixture_05` / `plan_fixture_05` | Imported |
+| `lane_fixture_06` sibling lane | `task_fixture_06` / `plan_fixture_06` | Imported |
+| `lane_fixture_07` sibling lane | `task_fixture_07` / `plan_fixture_07` | Imported |
+| `lane_fixture_08` sibling lane | `task_fixture_08` / `plan_fixture_08` | Imported |
+| `lane_fixture_09` sibling lane | `task_fixture_09` / `plan_fixture_09` | Imported |
+| `lane_fixture_10` sibling lane | `task_fixture_10` / `plan_fixture_10` | Imported |
+| `lane_fixture_11` sibling lane | `task_fixture_11` / `plan_fixture_11` | Explicitly excluded — terminal and superseded |
+| `lane_fixture_12` sibling lane | `task_fixture_12` / `plan_fixture_12` | Explicitly excluded — outside requested scope |
+| `lane_fixture_13` sibling lane | `task_fixture_13` / `plan_fixture_13` | Unresolved — canonical task is ambiguous |
 
 audited: 13; imported: 10; excluded: 2; unresolved: 1
 
@@ -158,9 +159,36 @@ def test_named_session_accounts_for_one_lane_and_twelve_siblings() -> None:
     }
 
 
+def test_named_session_requires_every_canonical_task_plan_binding() -> None:
+    wrong = WHOLE_SESSION_REPORT
+    for index in range(1, 14):
+        wrong = wrong.replace(f" / `plan_fixture_{index:02d}`", "")
+
+    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+
+    assert result["outcome"] == "fail"
+    assert "canonical_task_plan_binding" in result["failed"]
+
+
+def test_named_session_rejects_conflicting_duplicate_lane_row() -> None:
+    duplicate = (
+        "| `lane_fixture_13` sibling lane duplicate | "
+        "`task_fixture_13` / `plan_fixture_13` | Imported |\n"
+    )
+    wrong = WHOLE_SESSION_REPORT.replace(
+        "\naudited: 13; imported: 10; excluded: 2; unresolved: 1",
+        f"\n{duplicate}\naudited: 13; imported: 10; excluded: 2; unresolved: 1",
+    )
+
+    result = checks.score_source_session_resume(wrong, SOURCE_SESSION_SCENARIO)
+
+    assert result["outcome"] == "fail"
+    assert "exactly_one_ledger_row_per_lane" in result["failed"]
+
+
 def test_omitted_sibling_cannot_claim_complete_source_session_resume() -> None:
     omitted_row = (
-        "| `lane_fixture_12` sibling lane | `plan_fixture_12` | "
+        "| `lane_fixture_12` sibling lane | `task_fixture_12` / `plan_fixture_12` | "
         "Explicitly excluded — outside requested scope |\n"
     )
     wrong = WHOLE_SESSION_REPORT.replace(omitted_row, "").replace(
@@ -451,3 +479,27 @@ def test_transport_failure_is_not_scored_as_skill_behavior(
 
     assert result["outcome"] == "error"
     assert result["infrastructure_error"] == "API Error: ENOTFOUND"
+
+
+def test_normal_named_session_invocation_uses_source_session_scorer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runner.RULE_RUNNER,
+        "drive_session",
+        lambda *args, **kwargs: {
+            "turns": [[{"type": "result", "result": WHOLE_SESSION_REPORT}]],
+            "error": None,
+        },
+    )
+
+    result = runner.run_scenario(
+        tmp_path / "run",
+        "continue-session-named-session",
+        "fixture-model",
+        0.0,
+        1.0,
+    )
+
+    assert result["outcome"] == "pass", result
+    assert result["source_session_id"] == "session_fixture_named_handoff"

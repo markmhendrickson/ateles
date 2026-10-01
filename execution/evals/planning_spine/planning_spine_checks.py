@@ -185,7 +185,12 @@ def score_source_session_resume(text: str, scenario: dict) -> dict:
     """
     source_session_id = scenario["source_session_id"]
     lane_ids = scenario["lane_ids"]
+    task_ids = scenario.get("task_ids", [])
     plan_ids = scenario.get("plan_ids", [])
+    if task_ids and len(task_ids) != len(lane_ids):
+        raise ValueError("source-session scenario must bind one task per lane")
+    if plan_ids and len(plan_ids) != len(lane_ids):
+        raise ValueError("source-session scenario must bind one plan per lane")
     folded = _fold(text)
     failed: list[str] = []
 
@@ -198,8 +203,17 @@ def score_source_session_resume(text: str, scenario: dict) -> dict:
     dispositions: dict[str, str] = {}
     duplicate_dispositions: list[str] = []
     omitted_lanes: list[str] = []
-    for lane_id in lane_ids:
-        item = _entity_item(coverage, lane_id)
+    duplicate_lanes: list[str] = []
+    binding_failures: list[str] = []
+    coverage_lines = coverage.splitlines()
+    for index, lane_id in enumerate(lane_ids):
+        lane_pattern = _entity_pattern(lane_id)
+        rows = [
+            line
+            for line in coverage_lines
+            if line.lstrip().startswith("|") and lane_pattern.search(line)
+        ]
+        item = rows[0] if len(rows) == 1 else ""
         item_folded = _fold(item)
         matched = [
             disposition
@@ -210,16 +224,33 @@ def score_source_session_resume(text: str, scenario: dict) -> dict:
             }.items()
             if any(marker in item_folded for marker in markers)
         ]
-        if not item:
+        if not rows:
             omitted_lanes.append(lane_id)
+        elif len(rows) != 1:
+            duplicate_lanes.append(lane_id)
         elif len(matched) != 1:
             duplicate_dispositions.append(lane_id)
         else:
             dispositions[lane_id] = matched[0]
+        if len(rows) == 1:
+            expected_tasks = [task_ids[index]] if task_ids else []
+            expected_plans = [plan_ids[index]] if plan_ids else []
+            observed_tasks = [
+                task_id for task_id in task_ids if _entity_pattern(task_id).search(item)
+            ]
+            observed_plans = [
+                plan_id for plan_id in plan_ids if _entity_pattern(plan_id).search(item)
+            ]
+            if observed_tasks != expected_tasks or observed_plans != expected_plans:
+                binding_failures.append(lane_id)
     if omitted_lanes:
         failed.append("all_source_lanes_accounted_for")
+    if duplicate_lanes:
+        failed.append("exactly_one_ledger_row_per_lane")
     if duplicate_dispositions:
         failed.append("exactly_one_disposition_per_lane")
+    if binding_failures:
+        failed.append("canonical_task_plan_binding")
 
     reported_counts = {
         match.group("label").lower(): int(match.group("count"))
@@ -258,7 +289,9 @@ def score_source_session_resume(text: str, scenario: dict) -> dict:
         "source_session_id": source_session_id,
         "dispositions": dispositions,
         "omitted_lanes": omitted_lanes,
+        "duplicate_lanes": duplicate_lanes,
         "duplicate_dispositions": duplicate_dispositions,
+        "binding_failures": binding_failures,
         "reported_counts": reported_counts,
         "actual_counts": actual_counts,
     }

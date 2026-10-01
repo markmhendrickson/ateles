@@ -90,6 +90,29 @@
     "ent_fixture_duplicate_task": {
       "entity_type": "task",
       "snapshot": {"title": "Split-parent verification", "status": "queued"}
+    },
+    "session_fixture_named_handoff": {
+      "entity_type": "conversation",
+      "snapshot": {
+        "title": "Named handoff",
+        "status": "active",
+        "source_session_id": "session_fixture_named_handoff",
+        "workstream_lanes": [
+          {"lane_id": "lane_fixture_01", "task_id": "task_fixture_01", "plan_id": "plan_fixture_01"},
+          {"lane_id": "lane_fixture_02", "task_id": "task_fixture_02", "plan_id": "plan_fixture_02"},
+          {"lane_id": "lane_fixture_03", "task_id": "task_fixture_03", "plan_id": "plan_fixture_03"},
+          {"lane_id": "lane_fixture_04", "task_id": "task_fixture_04", "plan_id": "plan_fixture_04"},
+          {"lane_id": "lane_fixture_05", "task_id": "task_fixture_05", "plan_id": "plan_fixture_05"},
+          {"lane_id": "lane_fixture_06", "task_id": "task_fixture_06", "plan_id": "plan_fixture_06"},
+          {"lane_id": "lane_fixture_07", "task_id": "task_fixture_07", "plan_id": "plan_fixture_07"},
+          {"lane_id": "lane_fixture_08", "task_id": "task_fixture_08", "plan_id": "plan_fixture_08"},
+          {"lane_id": "lane_fixture_09", "task_id": "task_fixture_09", "plan_id": "plan_fixture_09"},
+          {"lane_id": "lane_fixture_10", "task_id": "task_fixture_10", "plan_id": "plan_fixture_10"},
+          {"lane_id": "lane_fixture_11", "task_id": "task_fixture_11", "plan_id": "plan_fixture_11"},
+          {"lane_id": "lane_fixture_12", "task_id": "task_fixture_12", "plan_id": "plan_fixture_12"},
+          {"lane_id": "lane_fixture_13", "task_id": "task_fixture_13", "plan_id": "plan_fixture_13"}
+        ]
+      }
     }
   },
   "relationships": [
@@ -110,6 +133,15 @@
   "scenarios": {
     "continue-session": {
       "prompt": "/continue-session Foundation rollout. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
+    },
+    "continue-session-named-session": {
+      "prompt": "/continue-session Named handoff source session `session_fixture_named_handoff`. Resume the whole source session, account for every live lane before domain action, and report each lane's canonical task and plan binding. Lanes 1-10 are imported, lanes 11-12 are explicitly excluded as terminal or outside scope, and lane 13 remains unresolved.",
+      "invoked_skill": "continue-session",
+      "scorer": "source_session_resume",
+      "source_session_id": "session_fixture_named_handoff",
+      "lane_ids": ["lane_fixture_01", "lane_fixture_02", "lane_fixture_03", "lane_fixture_04", "lane_fixture_05", "lane_fixture_06", "lane_fixture_07", "lane_fixture_08", "lane_fixture_09", "lane_fixture_10", "lane_fixture_11", "lane_fixture_12", "lane_fixture_13"],
+      "task_ids": ["task_fixture_01", "task_fixture_02", "task_fixture_03", "task_fixture_04", "task_fixture_05", "task_fixture_06", "task_fixture_07", "task_fixture_08", "task_fixture_09", "task_fixture_10", "task_fixture_11", "task_fixture_12", "task_fixture_13"],
+      "plan_ids": ["plan_fixture_01", "plan_fixture_02", "plan_fixture_03", "plan_fixture_04", "plan_fixture_05", "plan_fixture_06", "plan_fixture_07", "plan_fixture_08", "plan_fixture_09", "plan_fixture_10", "plan_fixture_11", "plan_fixture_12", "plan_fixture_13"]
     },
     "digest": {
       "prompt": "/digest --report-only project. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
