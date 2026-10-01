@@ -66,6 +66,15 @@ FAIL-OPEN, STDLIB-ONLY, NEVER LOGS A RULE BODY TO STDERR (only entity ids and
 counts — same posture as session_rule_index.py; some `agent_policy` rows
 carry operator payment details, CLAUDE.md).
 
+Each match also emits a bounded `harness_event` audit row through the existing
+session-integrity emitter. It records only the action category, expected and
+injected rule ids, delivery status/policy, UTC injection time, and the hook
+payload's stable `tool_use_id` (or `call_id`/`request_id`). Older carriers
+without a call id fall back to `turn_id`, then `session_id`; those fallbacks
+correlate only to the containing turn/session, and `correlation_basis` makes
+that limitation explicit. All identifier values are one-way hashed, and
+tool input, prompts, paths, rule bodies, and exception text are never stored.
+
 Wire under PreToolUse with matcher
 "Edit|Write|NotebookEdit|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store|Bash"
 under Claude Code (no separate MultiEdit tool name in this Claude Code
@@ -78,13 +87,15 @@ of the same name, not re-implemented) so a harness_config edit made through
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _session_integrity import read_hook_input  # noqa: E402
+from _session_integrity import emit_harness_event_raw, read_hook_input  # noqa: E402
 
 _HOOK_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _HOOK_DIR.parent.parent
@@ -336,6 +347,83 @@ def _log(msg: str) -> None:
     sys.stderr.write(f"[rule_injection_gate] {msg}\n")
 
 
+def _sanitized_correlation(value: object) -> str:
+    """Return a bounded correlation value without persisting arbitrary input.
+
+    The one-way digest remains stable for joins while ensuring even a
+    credential-shaped value placed in an identifier field is never persisted
+    verbatim. Raw prompts, paths, and commands never enter this function.
+    """
+    text = value if isinstance(value, str) else ""
+    if text:
+        return "sha256:" + hashlib.sha256(text.encode()).hexdigest()[:24]
+    return "unavailable"
+
+
+def _governed_call_correlation(ev: dict) -> tuple[str, str]:
+    """Best stable correlation exposed by the hook contract.
+
+    Claude and Codex PreToolUse payloads expose ``tool_use_id``. Older hook
+    carriers may omit it; ``call_id`` and ``request_id`` are accepted when
+    present. ``turn_id``/``session_id`` are fallbacks and identify only the
+    containing turn/session, not one exact tool call. We record that basis
+    explicitly rather than inventing per-call attribution.
+    """
+    for key in (
+        "tool_use_id",
+        "call_id",
+        "request_id",
+        "turn_id",
+        "session_id",
+    ):
+        if ev.get(key):
+            return key, _sanitized_correlation(ev[key])
+    return "unavailable", "unavailable"
+
+
+def _emit_injection_audit(
+    ev: dict,
+    categories: list[str],
+    wanted_ids: set[str],
+    injected_ids: list[str],
+) -> None:
+    """Emit one sanitized, bounded event for this governed action.
+
+    Deliberately excluded: ``tool_input``, command/prompt text, paths, rule
+    bodies, and arbitrary exception strings. Audit emission is best-effort
+    and inherits the gate's fail-open policy from ``emit_harness_event_raw``.
+    """
+    expected = sorted(wanted_ids)[:16]
+    injected = sorted(set(injected_ids))[:16]
+    missing = sorted(set(expected) - set(injected))[:16]
+    if not missing:
+        delivery_status = "complete"
+    elif injected:
+        delivery_status = "partial"
+    else:
+        delivery_status = "retrieval_failed_or_unavailable"
+    basis, correlation = _governed_call_correlation(ev)
+    session_id = _sanitized_correlation(ev.get("session_id"))
+    emit_harness_event_raw(
+        f"rule-injection-{hashlib.sha256(correlation.encode()).hexdigest()[:16]}",
+        {
+            "event_type": "rule_injection",
+            "session_id": session_id,
+            "trigger_action_classes": sorted(set(categories))[:8],
+            "rule_entity_ids": injected,
+            "expected_rule_entity_ids": expected,
+            "missing_rule_entity_ids": missing,
+            "injected_at": datetime.now(timezone.utc).isoformat(),
+            "governed_call_correlation": correlation,
+            "correlation_basis": basis,
+            "delivery_status": delivery_status,
+            "delivery_policy": "fail_open",
+        },
+        log_tag="rule-injection",
+        session_id=session_id,
+    )
+
+
 def _neotoma_entity_types_touched(tool_name: str, tool_input: dict) -> set[str]:
     """Entity types a Neotoma `correct`/`store` call's payload targets.
 
@@ -524,6 +612,10 @@ def main() -> int:
         c: {eid: rows[eid] for eid in _CATEGORY_RULE_IDS.get(c, ()) if eid in rows}
         for c in categories
     }
+    injected_ids = sorted(
+        {eid for category_rows in category_to_rows.values() for eid in category_rows}
+    )
+    _emit_injection_audit(ev, categories, wanted_ids, injected_ids)
     # Even with no row fetched (Neotoma unreachable), a grant write still gets
     # the probe reminder — that instruction does not depend on Neotoma.
     if not any(category_to_rows.values()) and "grant_write" not in categories:
