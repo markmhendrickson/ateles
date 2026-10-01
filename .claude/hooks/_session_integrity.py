@@ -30,12 +30,20 @@ import os
 import sys
 import tempfile
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
-import fcntl
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - native Windows
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    _msvcrt = None
 
 DEFAULT_PLAN_ID = "ent_99ace4dd6673aa36ed08b1fe"  # Ateles Agent Swarm Architecture plan
 BOOKKEEPING_TYPES = {"conversation", "conversation_message", "agent_message"}
@@ -340,20 +348,43 @@ def state_lock(session_id: str, event: dict | None = None):
     JSON but cannot prevent two readers from both deciding to emit.
     """
     lock_path = state_path(session_id, event).with_suffix(".lock")
+    handle = None
     try:
-        handle = lock_path.open("a+", encoding="utf-8")
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle = lock_path.open("a+b")
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        elif _msvcrt is not None:
+            # ``msvcrt.locking`` locks bytes from the current file position.
+            # Keep one byte in the shared lock file and always lock byte zero.
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_LOCK, 1)
+        else:
+            raise OSError("no supported inter-process file-lock backend")
     except OSError as exc:
         # Delivery is safety-relevant.  Fail open to a possible duplicate,
         # never fail closed to silence because the receipt lock is unavailable.
+        if handle is not None:
+            handle.close()
         log(f"could not lock session state: {exc}")
         yield
         return
     try:
         yield
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        try:
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+            else:
+                handle.seek(0)
+                _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+        except OSError as exc:
+            log(f"could not unlock session state: {exc}")
+        finally:
+            handle.close()
 
 
 # ---------------------------------------------------------------------------
