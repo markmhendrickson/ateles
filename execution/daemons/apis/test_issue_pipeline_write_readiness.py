@@ -14,12 +14,18 @@ import httpx
 import pytest
 
 import swarm_dispatch
+from lib.notify import Priority
+from skill_runner import SkillResult
 from swarm_dispatch import (
     DispatchConfig,
     IssuePipelineWriteError,
     SwarmDispatcher,
 )
-from test_swarm_dispatch import _StubNotifier, _issue_trigger
+from test_swarm_dispatch import (
+    _StubNotifier,
+    _install_pipeline_stubs,
+    _issue_trigger,
+)
 
 
 _EXPECTED_STATE_VALIDATION = {
@@ -427,3 +433,98 @@ def test_contended_failure_clears_queued_and_inflight_markers(monkeypatch):
     assert len(posted) == 2
     assert sorted(deleted) == [1, 2]
     assert stored[0]["event_type"] == "github.issue_pipeline_failed"
+
+
+@pytest.mark.parametrize("failure_method", ["GET", "PATCH"])
+def test_spec_mirror_patch_403_records_failure_and_stops_pipeline(
+    monkeypatch, failure_method
+):
+    """A real spec-mirror refusal is contained by the issue handler."""
+    planted_payload = "planted-sensitive-github-response"
+    stored: list[dict] = []
+    mirror_calls: list[str] = []
+    cleanup_calls: list[int] = []
+    implementation_calls: list[int] = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            mirror_calls.append("GET")
+            if failure_method == "GET":
+                return _Response(403, {}, secret_body=planted_payload)
+            return _Response(200, {"body": "reporter-authored issue body"})
+
+        async def patch(self, url, **kwargs):
+            mirror_calls.append("PATCH")
+            return _Response(403, {}, secret_body=planted_payload)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(
+            skill,
+            True,
+            0,
+            "<<<SPEC_SECTION>>>concrete section<<<END_SPEC_SECTION>>>",
+            "",
+        )
+
+    async def successful_readiness(self, trigger, *, stage="inflight"):
+        assert stage == "inflight"
+
+    async def spy_clear(self, trigger):
+        cleanup_calls.append(trigger.number)
+
+    async def spy_open_pr(self, trigger, state):
+        implementation_calls.append(trigger.number)
+        return "https://github.com/owner/repo/pull/999"
+
+    real_mirror = SwarmDispatcher._mirror_spec_to_issue
+    _install_pipeline_stubs(
+        monkeypatch,
+        fake_run_skill,
+        select_agents=lambda *args, **kwargs: [],
+    )
+    # The shared harness replaces the mirror to keep unrelated pipeline tests
+    # offline. This regression must exercise the production mirror through the
+    # production handler, with only its earlier readiness probe forced green.
+    monkeypatch.setattr(SwarmDispatcher, "_mirror_spec_to_issue", real_mirror)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_mark_pipeline_inflight", successful_readiness
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight", spy_clear)
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", spy_open_pr)
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
+    _install_durable_failure_store(monkeypatch, stored)
+
+    dispatcher = _dispatcher()
+    dispatcher.config.auto_build = True
+    trigger = _issue_trigger()
+    asyncio.run(dispatcher._handle_issue_opened(trigger))
+
+    assert implementation_calls == []
+    assert cleanup_calls == [trigger.number, trigger.number]
+    assert mirror_calls == (["GET"] if failure_method == "GET" else ["GET", "PATCH"])
+
+    assert len(stored) == 1
+    event = stored[0]
+    assert event["event_type"] == "github.issue_pipeline_failed"
+    assert event["summary"] == (
+        "issue pipeline refused at github_spec_mirror (HTTP 403)"
+    )
+    assert event["delivery_id"] == trigger.delivery_id
+    assert event["subject_ref"] == f"{trigger.repository}#{trigger.number}"
+    assert planted_payload not in repr(stored)
+    assert "Authorization" not in repr(stored)
+    assert "test-github-token" not in repr(stored)
+
+    assert any(
+        priority == Priority.BLOCKER and "github_spec_mirror" in message
+        for message, priority in dispatcher.notifier.sent_full
+    )
