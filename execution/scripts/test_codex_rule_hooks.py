@@ -17,6 +17,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -96,6 +97,55 @@ def _run(command: str, event: dict, *, env: dict[str, str] | None = None):
 
 
 class TestCodexRuleDeliveryEffect(unittest.TestCase):
+    def test_session_state_lock_imports_without_fcntl_on_windows(self) -> None:
+        """Native Windows has no ``fcntl`` module.  Exercise the Windows
+        backend in an isolated interpreter so an unconditional POSIX import
+        fails before any Codex hook can deliver its rules."""
+        probe = r'''
+import importlib.abc
+import json
+import os
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+class BlockFcntl(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "fcntl":
+            raise ModuleNotFoundError("fcntl is unavailable on native Windows")
+        return None
+
+calls = []
+msvcrt = types.ModuleType("msvcrt")
+msvcrt.LK_LOCK = 1
+msvcrt.LK_UNLCK = 2
+msvcrt.locking = lambda fd, mode, size: calls.append((mode, size))
+sys.modules["msvcrt"] = msvcrt
+sys.modules.pop("fcntl", None)
+sys.meta_path.insert(0, BlockFcntl())
+sys.path.insert(0, os.fspath(Path(sys.argv[1]) / ".claude" / "hooks"))
+
+import _session_integrity
+
+with tempfile.TemporaryDirectory() as state_dir:
+    os.environ["ATELES_SESSION_STATE_DIR"] = state_dir
+    with _session_integrity.state_lock("windows-lock-probe"):
+        pass
+
+print(json.dumps(calls))
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", probe, os.fspath(REPO_ROOT)],
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [[1, 1], [2, 1]])
+
     def test_project_and_user_hooks_deliver_each_lifecycle_revision_once(self) -> None:
         """Codex composes project and user hook files and launches matching
         commands concurrently.  The two intentional carriers must produce one
