@@ -1,92 +1,98 @@
 {
   "_observation_ids": {
-    "anti_patterns": "c33f9fbb-0b65-f363-aed8-0a717c987303",
-    "border_radius": "4b14fa48-7ea0-448f-527d-48536cde2f8e",
-    "color_palette": "e8f1959c-6e1e-4631-37dc-9ac522359298",
-    "positioning_principles": "6cf174ca-305f-6da1-550f-478c589dbe54",
-    "scope": "49c9cf91-c089-c3f5-37c7-20c57be85985",
-    "spacing_system": "e77cd4e0-bc0a-8e34-293c-0f04407d85ad",
-    "type_scale": "4398315c-8712-635a-1193-4f52643b6adb"
+    "anti_patterns": "2ad1e882-858d-39cf-b4a7-f5303b7a3110",
+    "border_radius": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
+    "color_palette": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
+    "design_system_name": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
+    "positioning_principles": "c7de0f10-04d9-44f3-8cc1-92dadf72a7f0",
+    "scope": "e809b72e-b40a-d82e-5210-5b419901c8b0",
+    "spacing_system": "f4f0a201-7785-bf62-4a2b-a8ec811d1cfc",
+    "type_scale": "48c45b5f-3720-4fb7-225b-7de8cb04ec2b"
   },
   "_source": {
-    "entity_id": "ent_72e01f1008653b601be1a956",
+    "entity_id": "ent_746b1d7c717e7780e7943782",
     "entity_type": "design_system",
-    "fetched_at": "2026-09-21T12:49:29+00:00",
+    "fetched_at": "2026-09-21T16:12:06+00:00",
     "product": "neotoma"
+  },
+  "identity": {
+    "anti_patterns": [
+      "Never expose internal record IDs, entity types, field or decision keys, code-call names, repository filenames, phase bookkeeping, or agent instructions on a public page.",
+      "Do not paste research analysis, source citations, or implementation-review notes into public prose. Keep detailed evidence in linked source artifacts and translate it into a short reader-facing proof statement.",
+      "Do not turn the provenance rail into developer marginalia. Every visible label must be understandable to a cold external reader without product-internal vocabulary.",
+      "Do not spread the correction color as a general accent; reserve it for a superseded value or correction event.",
+      "Do not rely on animation to communicate source, version, correction, disagreement, or refresh; reduced-motion and static views must remain complete.",
+      "Do not diverge shared structural tokens from Ateles without a product reason; the products remain siblings through spacing, restraint, and hierarchy.",
+      "Do not reuse the Neotoma app or Inspector palette. Public product pages keep their distinct paper, ink, teal, and correction system."
+    ],
+    "border_radius": {
+      "note": "KEPT VERBATIM: 10px cards/panels, 8px buttons, 999px toggle pill \u2014 same as shared design_system."
+    },
+    "design_system_name": "Neotoma visual identity \u2014 the record",
+    "positioning_principles": [
+      "Neotoma\u2019s visual grammar is a persistent graph: typed records and durable relationships remain connected to sources, prior versions, and the agents that create, retrieve, and update them. Correction is one behavior in that graph, not the whole identity.",
+      "Graph and record flows make provenance, version history, relationships, disagreement, and current state understandable before supporting copy. Technical diagrams belong as supporting or reduced-motion media rather than displacing strong cinematic storytelling.",
+      "Public provenance rail: use plain labels such as \u201cSource\u201d, \u201cRecorded\u201d, \u201cVersion\u201d, \u201cCorrected\u201d, and \u201cReviewed\u201d. The rail may link to deeper evidence, but it never displays internal record IDs, schema names, field keys, code-call names, repo filenames, or unexplained system vocabulary.",
+      "Visible correction: show a concise prior value beside its current replacement, with the superseded value struck through and the current value clearly identified. The story is change with continuity, not a database operation.",
+      "Disagreement remains visible: two sourced claims can coexist until review settles the current view. Present who or what disagrees and the current status in ordinary language.",
+      "Typography supports the record metaphor: editorial headings carry permanence; monospace is reserved for short public labels such as dates, versions, and statuses\u2014not implementation notation.",
+      "Motion may trace a record from source to current state or pulse when a refresh arrives, but the static diagram must retain the full meaning under reduced-motion preferences.",
+      "Hero cinema is the preferred primary medium. The current silent 8-second correction-propagation film is a provisional full-field takeover because its cinematic execution is stronger than the code-native diagram; it must be replaced by a graph-first film showing persistent records and relationships, provenance, version history, and multiple agents creating, retrieving, and updating. The graph diagram remains the poster and reduced-motion fallback. No generated text, UI, faces, or generic AI/database imagery."
+    ],
+    "scope": "Neotoma product pages only, distinct from the shared structural design system. The identity is the living record: truth remains understandable as sources arrive, corrections supersede earlier values, disagreement is retained, and freshness changes over time. Public visuals use recognizable source, version, correction, current-state, disagreement, and refresh concepts. Deep provenance stays in linked source and repository artifacts; landing-page surfaces never display internal record IDs, schema names, field names, code-call names, decision keys, or unexplained system vocabulary. Neotoma remains a sibling, not a twin, of Ateles: shared spacing and restraint, different symbolic grammar.",
+    "spacing_system": {
+      "note": "KEPT VERBATIM from the shared design_system ent_72e01f1008653b601be1a956 \u2014 10px card/panel radius via --radius, --maxw:1080px, identical section/hero padding, .cap grid (10px 1fr/22px gap/28px 0 padding), .btn padding 11px 20px. Deliberate: the brief instructs shared structural skeleton with per-product accent/type/signature divergence, not full structural fork \u2014 diverging the skeleton too would produce two unrelated products rather than siblings."
+    }
   },
   "product": {
     "color_palette": {
       "dark": {
-        "accent": "#4ecdc4",
-        "accent_2": "#7fded7",
-        "accent_wash": "#11282a",
-        "ink": "#e8edf0",
-        "ink_2": "#b2bec8",
-        "ink_3": "#7e8b96",
-        "line": "#26323b",
-        "line_2": "#1d272e",
-        "paper": "#0d1318",
-        "paper_2": "#141c22",
-        "warn": "#d9a441"
+        "accent": "#6fd9bd",
+        "accent_2": "#8fe6cd",
+        "accent_wash": "#122019",
+        "correction": "#d9a441",
+        "ink": "#e9ede9",
+        "ink_2": "#c3ccc6",
+        "ink_3": "#9fb0a8",
+        "line": "#26332c",
+        "on_accent": "#0f1613",
+        "paper": "#0f1613",
+        "paper_2": "#151f1b"
       },
       "light": {
-        "accent": "#0c6b6b",
-        "accent_2": "#0a8f8a",
-        "accent_wash": "#e3efee",
-        "ink": "#101820",
-        "ink_2": "#33414f",
-        "ink_3": "#62727f",
-        "line": "#d9dfe3",
-        "line_2": "#e7ebee",
-        "paper": "#f4f6f7",
-        "paper_2": "#ffffff",
-        "warn": "#8a5a10"
+        "accent": "#1f6f5c",
+        "accent_2": "#2f8a72",
+        "accent_wash": "#e7ede7",
+        "correction": "#8a5a10",
+        "ink": "#14201c",
+        "ink_2": "#3c4a44",
+        "ink_3": "#5b6a63",
+        "line": "#ddd6c4",
+        "on_accent": "#f6f3ea",
+        "paper": "#f6f3ea",
+        "paper_2": "#efece1"
+      },
+      "rationale": "Paper/ink metaphor (not a generic accent-on-white SaaS scheme): a record's oldest technology is the page. Teal retained as seed hue from the current live palette (evolutionary, not a rebrand) but restructured. 'correction' is a NEW semantic color role, reserved exclusively for showing a superseded value struck through beside its replacement (signature move 4) \u2014 never reused as a UI accent, so it stays unambiguous.",
+      "wcag_aa_verified_2026_09_21": {
+        "accent_on_paper_dark": "10.78:1",
+        "accent_on_paper_light": "5.43:1",
+        "correction_on_paper_dark": "9.02:1",
+        "correction_on_paper_light": "5.98:1",
+        "ink_on_paper_dark": "15.51:1",
+        "ink_on_paper_light": "15.10:1",
+        "method": "relative-luminance WCAG contrast formula computed directly (python), all 10 pairs exceed 4.5:1 AA-normal-text threshold, none borderline",
+        "muted_on_paper_dark": "8.08:1",
+        "muted_on_paper_light": "5.13:1",
+        "on_accent_on_accent_dark_button_text": "10.78:1",
+        "on_accent_on_accent_light_button_text": "5.43:1"
       }
     },
     "type_scale": {
-      "body_base_size": "16px",
       "body_font_family": "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif",
       "code_font_family": "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace",
-      "h1_size": "clamp(2.1rem, 6.2vw, 3.6rem)",
-      "h2_size": "clamp(1.5rem, 4vw, 2.1rem)",
+      "google_fonts_licence": "All three (Fraunces, Inter, JetBrains Mono) are free, open-license Google Fonts already loaded via the current font mechanism; no licensing action is needed.",
       "heading_font_family": "Fraunces, Georgia, 'Times New Roman', serif",
-      "heading_weight": 600
-    }
-  },
-  "shared": {
-    "anti_patterns": [
-      "Do not reuse the Neotoma app/Inspector's own warm cream/terracotta palette on a public product page \u2014 decision public_pages_do_not_reuse_inspector_palette (DECIDED 2026-09-15, plan ent_98ef9d45f8a6896fed408f8f): it is a recognizable AI-generated design signature and these pages are handed to strangers (e.g. AI Summit Barcelona business-card QR). Each product gets its own deliberate, distinct accent + typeface identity built on the shared structural system, not a copy of the app's own look. This is the rule that made the prior version of this entity stale: it described a blue/red, no-serif, sharp-corner palette that matched neither product's actual shipped page.",
-      "Do not describe this entity's palette/type fields as if ONE set of values applies to both products \u2014 they do not; color_palette and type_scale are per-product. Only spacing_system and border_radius are shared verbatim.",
-      "No unstyled system-UI-only type stack for headings on either product \u2014 both pair a distinctive display font (Fraunces / Space Grotesk) with a plain sans body, never a single generic sans for everything.",
-      "No sharp 0-2px corners \u2014 both products use 10px card/panel radius and 8px button radius; only the fully-rounded (999px) toggle pill is an exception.",
-      "Do not silently reconcile a mismatch between this entity and a live served page \u2014 the 2026-09-21 build-landing-page runs (Ateles ent_48b0cb1115898ddc730c78bd, Neotoma ent_189a531c49bfc35d983e1135) correctly flagged the drift in their stage-4 gaps instead of overwriting it unilaterally; this correction is the reconciliation those two runs deferred."
-    ],
-    "border_radius": {
-      "buttons": "border-radius: 8px",
-      "cards_panels_tiers": "border-radius: var(--radius) (10px)",
-      "note": "Verified 2026-09-22 identical on both served pages. Supersedes the prior 'sharp corners, 2px max' rule, which matches neither live page.",
-      "root_radius_variable": "--radius: 10px",
-      "shared_verbatim": true,
-      "toggle_pills": "border-radius: 999px (fully rounded)"
-    },
-    "positioning_principles": [
-      "One shared structural system, two product themes: spacing scale, radius, layout grid, and component patterns (.cap, .card, .tier/.panel, .tw-toggle, .hanchor, footer .noun) are shared verbatim; accent colour, ink/paper hues, and typeface family carry each product's distinct identity per decision public_pages_do_not_reuse_inspector_palette",
-      "Warm, editorial, not utilitarian: soft paper backgrounds (not pure white/black), a display/heading serif or grotesk paired with a plain-text sans body, generous radius (10px) and soft shadows on cards/panels \u2014 the opposite of a sharp-cornered inspector aesthetic",
-      "Accent as the single differentiator: each product reads as itself through ONE hue (teal for Neotoma, terracotta/amber for Ateles) applied consistently to CTAs, eyebrows, cap-ticks, and hanchors, not through structural divergence",
-      "Light/dark parity: every token pair is fully specified for both color-scheme states via :root[data-theme] plus @media (prefers-color-scheme: dark), toggled by the same .tw-toggle control on both products",
-      "Accessible density: base body size 16-16.5px, line-height ~1.5-1.62, max reading width in ch units (62-64ch) on prose blocks"
-    ],
-    "scope": "Public-facing product pages (rendered_page entities for neotoma.io and ateles.co). ONE shared structural system \u2014 spacing scale, border radius, layout grid, component patterns (.cap, .card, .tier/.panel, .tw-toggle, .hanchor) and the light/dark toggle mechanism are identical across products \u2014 with per-product THEME tokens (accent colour, ink/paper hues, and typeface family) layered on top. Verified 2026-09-22 against both served pages' actual embedded CSS custom properties: shared tokens (--radius: 10px, --maxw: 1080px, section padding-block: 64px, .hero padding-block: clamp(56px,11vw,104px) 56px, .cap grid-template-columns: 10px 1fr / gap 22px / padding 28px 0, .btn padding 11px 20px / border-radius 8px) are byte-identical between neotoma.io and ateles.co; only --ink/--paper/--accent hues and font-family declarations differ. Does NOT cover the Neotoma app/inspector UI, which keeps its own warm cream/terracotta palette per decision public_pages_do_not_reuse_inspector_palette (plan ent_98ef9d45f8a6896fed408f8f) \u2014 these public pages are deliberately NOT that palette.",
-    "spacing_system": {
-      "button_padding": ".btn { padding: 11px 20px; }",
-      "cap_row": ".cap { grid-template-columns: 10px 1fr; gap: 22px; padding: 28px 0; }",
-      "card_padding": ".card { padding: 22px; } / .panel, .tier { padding: 16-24px 18-24px; }",
-      "container": ".wrap { max-width: var(--maxw); margin: 0 auto; padding-inline: 20px; } with --maxw: 1080px",
-      "cta_row_gap": ".cta-row { gap: 12px; margin-top: 30px; }",
-      "hero_padding": ".hero { padding-block: clamp(56px, 11vw, 104px) 56px; }",
-      "note": "Identical between neotoma.io and ateles.co as served \u2014 this is the strongest evidence the two pages are one system, not two.",
-      "section_padding": "section { padding-block: 64px; }",
-      "shared_verbatim": true
+      "rationale": "Family kept deliberately: research checked 2026-09-21 (fontsinuse.com/typefaces/171187/jetbrains-mono and designmd.app/library/fraunces-typography) supports Fraunces as a warm editorial face and JetBrains Mono as a credible technical companion. Their public roles are distinct: Fraunces gives durable statements a sense of permanence; JetBrains Mono carries short, plain-language record labels such as source, date, version, correction, and status. It must not display internal IDs, schema names, field keys, mechanism calls, or repo filenames."
     }
   }
 }

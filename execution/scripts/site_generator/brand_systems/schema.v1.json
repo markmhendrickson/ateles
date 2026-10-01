@@ -1,0 +1,919 @@
+{
+  "$defs": {
+    "asset_item": {
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "preview": {
+          "enum": [
+            "image",
+            "video",
+            "mark",
+            "none"
+          ]
+        },
+        "public_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "provisional",
+            "missing",
+            "retired"
+          ]
+        },
+        "use": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "status",
+        "use",
+        "source",
+        "repository_path"
+      ],
+      "type": "object"
+    },
+    "logo_variant": {
+      "additionalProperties": true,
+      "properties": {
+        "backgrounds": {
+          "type": "array"
+        },
+        "export_formats": {
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source_asset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "provisional",
+            "missing",
+            "retired"
+          ]
+        },
+        "use": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "use",
+        "source_asset",
+        "source_format",
+        "export_formats",
+        "backgrounds"
+      ],
+      "type": "object"
+    },
+    "market_reference": {
+      "additionalProperties": false,
+      "properties": {
+        "adopted_rule": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bad_practices_to_avoid": {
+          "type": "array"
+        },
+        "best_practices_to_adopt": {
+          "type": "array"
+        },
+        "brand_rule_class": {
+          "enum": [
+            "table_stakes",
+            "adapted_convention",
+            "distinctive_brand_territory"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "derived_learning": {
+          "type": "string"
+        },
+        "differentiation_implication": {
+          "type": "string"
+        },
+        "evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "observed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        "observed_fact": {
+          "type": "string"
+        },
+        "referenced_product": {
+          "type": "string"
+        },
+        "rejected_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relationship": {
+          "enum": [
+            "competitor",
+            "complement",
+            "incumbent",
+            "adjacent_benchmark"
+          ]
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "provisional",
+            "missing",
+            "retired"
+          ]
+        },
+        "support": {
+          "enum": [
+            "direct",
+            "synthesized",
+            "gap"
+          ]
+        },
+        "visibility": {
+          "enum": [
+            "public_safe",
+            "internal_review",
+            "confidential"
+          ]
+        }
+      },
+      "required": [
+        "referenced_product",
+        "relationship",
+        "evidence",
+        "observed_fact",
+        "derived_learning",
+        "best_practices_to_adopt",
+        "bad_practices_to_avoid",
+        "differentiation_implication",
+        "adopted_rule",
+        "rejected_pattern",
+        "brand_rule_class",
+        "confidence",
+        "support",
+        "status",
+        "visibility"
+      ],
+      "type": "object"
+    },
+    "status_item": {
+      "additionalProperties": true,
+      "properties": {
+        "guidance": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "provisional",
+            "missing",
+            "retired"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "guidance",
+        "source"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:ateles:brand-system:1.2.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Canonical expression contract with explicit intent, current competitive and aesthetic evidence, one original provisional territory with rejected alternatives and convergence tests, complete state-aware logo and typography systems, accessibility requirements, and a fail-closed approval gate.",
+  "properties": {
+    "asset_inventory": {
+      "items": {
+        "$ref": "#/$defs/asset_item"
+      },
+      "type": "array"
+    },
+    "completeness": {
+      "additionalProperties": true,
+      "required": [
+        "overall_status",
+        "dimensions",
+        "missing_items"
+      ],
+      "type": "object"
+    },
+    "downstream_contracts": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "consumer": {
+            "type": "string"
+          },
+          "contract": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "approved",
+              "provisional",
+              "missing",
+              "retired"
+            ]
+          }
+        },
+        "required": [
+          "consumer",
+          "contract",
+          "status"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "name": {
+      "type": "string"
+    },
+    "ownership": {
+      "additionalProperties": true,
+      "required": [
+        "owner_role",
+        "approval_role",
+        "maintenance"
+      ],
+      "type": "object"
+    },
+    "phrases": {
+      "items": {
+        "$ref": "#/$defs/status_item"
+      },
+      "type": "array"
+    },
+    "positioning": {
+      "additionalProperties": true,
+      "properties": {
+        "intent": {
+          "additionalProperties": false,
+          "properties": {
+            "core_idea": {
+              "type": "string"
+            },
+            "emotional_outcome": {
+              "type": "string"
+            },
+            "forbidden_perceptions": {
+              "type": "array"
+            },
+            "functional_truth": {
+              "type": "string"
+            },
+            "intended_perceptions": {
+              "type": "array"
+            },
+            "proof_cues": {
+              "type": "array"
+            },
+            "sibling_distinction": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "approved",
+                "provisional",
+                "missing",
+                "retired"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "core_idea",
+            "functional_truth",
+            "emotional_outcome",
+            "intended_perceptions",
+            "forbidden_perceptions",
+            "proof_cues",
+            "sibling_distinction"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "category",
+        "hero_headline",
+        "hero_support",
+        "product_promise",
+        "audience",
+        "intent"
+      ],
+      "type": "object"
+    },
+    "product": {
+      "type": "string"
+    },
+    "production_specs": {
+      "additionalProperties": true,
+      "properties": {
+        "accessibility": {
+          "additionalProperties": false,
+          "properties": {
+            "contrast": {
+              "type": "object"
+            },
+            "images_of_text": {
+              "type": "object"
+            },
+            "reduced_motion_static_equivalence": {
+              "type": "object"
+            },
+            "relative_sizing": {
+              "type": "object"
+            },
+            "semantic_headings": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "contrast",
+            "images_of_text",
+            "semantic_headings",
+            "relative_sizing",
+            "reduced_motion_static_equivalence"
+          ],
+          "type": "object"
+        },
+        "generation_gate": {
+          "additionalProperties": false,
+          "properties": {
+            "approval_owner": {
+              "type": "string"
+            },
+            "generation_allowed": {
+              "type": "boolean"
+            },
+            "predicates": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "rule": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "approved",
+                "provisional",
+                "missing",
+                "blocked"
+              ]
+            },
+            "unresolved": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "generation_allowed",
+            "approval_owner",
+            "rule",
+            "predicates",
+            "unresolved"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "cinematic",
+        "still_and_reduced_motion",
+        "delivery",
+        "accessibility",
+        "generation_gate"
+      ],
+      "type": "object"
+    },
+    "provenance": {
+      "additionalProperties": true,
+      "properties": {
+        "differentiation_matrix": {
+          "type": "object"
+        },
+        "market_reference_ledger": {
+          "items": {
+            "$ref": "#/$defs/market_reference"
+          },
+          "type": "array"
+        },
+        "regeneration_chain": {
+          "additionalProperties": false,
+          "properties": {
+            "sampling_rationale": {
+              "type": "string"
+            },
+            "source_artifacts": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "stages": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "evidence": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "complete",
+                      "settled",
+                      "provisional_review",
+                      "pending",
+                      "blocked"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "status",
+                  "evidence"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "in_progress",
+                "awaiting_approval",
+                "approved",
+                "blocked"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "stages",
+            "sampling_rationale",
+            "source_artifacts"
+          ],
+          "type": "object"
+        },
+        "regeneration_gate": {
+          "additionalProperties": false,
+          "properties": {
+            "next_gate": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "skill_id": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "blocked",
+                "approved"
+              ]
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "zero_category_definitions_verified": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "next_gate",
+            "task_id",
+            "skill_id",
+            "zero_category_definitions_verified"
+          ],
+          "type": "object"
+        },
+        "research": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "canonical_storage",
+        "sources",
+        "boundary",
+        "regeneration_gate",
+        "research",
+        "market_reference_ledger",
+        "differentiation_matrix",
+        "regeneration_chain"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "scope": {
+      "additionalProperties": true,
+      "required": [
+        "owns",
+        "does_not_own"
+      ],
+      "type": "object"
+    },
+    "slug": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "approved",
+        "provisional",
+        "missing",
+        "retired"
+      ]
+    },
+    "terminology": {
+      "items": {
+        "$ref": "#/$defs/status_item"
+      },
+      "type": "array"
+    },
+    "updated_at": {
+      "type": "string"
+    },
+    "visibility": {
+      "enum": [
+        "private_source",
+        "public"
+      ]
+    },
+    "visual_concepts": {
+      "items": {
+        "$ref": "#/$defs/status_item"
+      },
+      "type": "array"
+    },
+    "visual_styles": {
+      "additionalProperties": true,
+      "properties": {
+        "aesthetic_territory": {
+          "additionalProperties": false,
+          "properties": {
+            "camera_motion": {
+              "type": "string"
+            },
+            "convergence_tests": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "reference": {
+                    "type": "string"
+                  },
+                  "test": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reference",
+                  "test"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "identity": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "originality_basis": {
+              "type": "string"
+            },
+            "palette_material_light": {
+              "type": "string"
+            },
+            "product_truth": {
+              "type": "string"
+            },
+            "rejected_alternatives": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "scope_statement": {
+              "type": "string"
+            },
+            "source_artifact": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "approved",
+                "provisional",
+                "missing",
+                "retired"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "typography_layout": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "name",
+            "summary",
+            "product_truth",
+            "identity",
+            "palette_material_light",
+            "typography_layout",
+            "camera_motion",
+            "rejected_alternatives",
+            "convergence_tests",
+            "originality_basis",
+            "source_artifact",
+            "scope_statement"
+          ],
+          "type": "object"
+        },
+        "logo_system": {
+          "additionalProperties": false,
+          "properties": {
+            "background_rules": {
+              "type": "object"
+            },
+            "clear_space": {
+              "type": "object"
+            },
+            "co_branding": {
+              "type": "object"
+            },
+            "colorway_rules": {
+              "type": "object"
+            },
+            "export_formats": {
+              "type": "array"
+            },
+            "minimum_size": {
+              "type": "object"
+            },
+            "misuse_rules": {
+              "type": "array"
+            },
+            "source_formats": {
+              "type": "array"
+            },
+            "variants": {
+              "additionalProperties": false,
+              "properties": {
+                "application": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "favicon": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "horizontal": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "lockup": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "monochrome": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "primary_mark": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "reversed": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "small_scale": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "stacked": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "symbol_only": {
+                  "$ref": "#/$defs/logo_variant"
+                },
+                "wordmark": {
+                  "$ref": "#/$defs/logo_variant"
+                }
+              },
+              "required": [
+                "primary_mark",
+                "wordmark",
+                "lockup",
+                "symbol_only",
+                "horizontal",
+                "stacked",
+                "monochrome",
+                "reversed",
+                "small_scale",
+                "favicon",
+                "application"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "variants",
+            "clear_space",
+            "minimum_size",
+            "background_rules",
+            "colorway_rules",
+            "co_branding",
+            "source_formats",
+            "export_formats",
+            "misuse_rules"
+          ],
+          "type": "object"
+        },
+        "typography_system": {
+          "additionalProperties": false,
+          "properties": {
+            "examples": {
+              "type": "array"
+            },
+            "fallbacks": {
+              "type": "object"
+            },
+            "forbidden_use": {
+              "type": "array"
+            },
+            "hierarchy": {
+              "type": "array"
+            },
+            "licensing": {
+              "type": "object"
+            },
+            "responsive": {
+              "type": "object"
+            },
+            "roles": {
+              "type": "object"
+            },
+            "status": {
+              "enum": [
+                "approved",
+                "provisional",
+                "missing",
+                "retired"
+              ]
+            },
+            "weights_styles": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "roles",
+            "hierarchy",
+            "weights_styles",
+            "responsive",
+            "fallbacks",
+            "licensing",
+            "examples",
+            "forbidden_use"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "symbol",
+        "palette",
+        "typography",
+        "material",
+        "light",
+        "camera",
+        "motion",
+        "composition",
+        "anti_patterns",
+        "logo_system",
+        "typography_system",
+        "aesthetic_territory"
+      ],
+      "type": "object"
+    },
+    "voice": {
+      "additionalProperties": true,
+      "required": [
+        "attributes",
+        "rules",
+        "grammar"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "name",
+    "product",
+    "slug",
+    "schema_version",
+    "status",
+    "visibility",
+    "ownership",
+    "scope",
+    "positioning",
+    "phrases",
+    "terminology",
+    "voice",
+    "visual_styles",
+    "visual_concepts",
+    "asset_inventory",
+    "production_specs",
+    "provenance",
+    "downstream_contracts",
+    "completeness",
+    "updated_at"
+  ],
+  "title": "Reusable product brand system v1.2",
+  "type": "object"
+}

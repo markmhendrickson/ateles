@@ -1,0 +1,9 @@
+{
+  "_source": {"path": "docs/foundation/planning_model.md"},
+  "layout": "hierarchy",
+  "eyebrow": "Priorities travel with the work",
+  "headline": "A task can read the reason above it.",
+  "lede": "Each piece of work inherits a clear line back to the mission, so an agent can decide what matters without inventing context.",
+  "levels": ["Mission", "Strategy", "Project", "Plan", "Task"],
+  "proof_note": "When an ancestor is missing, the organization surfaces the gap instead of silently creating a new reason."
+}

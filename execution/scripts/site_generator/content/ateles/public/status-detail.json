@@ -1,0 +1,14 @@
+{
+  "_source": {"path": "docs/foundation/status.md"},
+  "layout": "comparison",
+  "eyebrow": "Vision and execution status",
+  "headline": "The design and the running system are separate claims.",
+  "lede": "The current reference is useful today. Shared multi-person authority has nothing built yet and remains design direction rather than enforced behavior.",
+  "columns": ["Capability", "Current reference", "Design direction"],
+  "rows": [
+    ["Agent identity", "Distinct agent identities and attributed writes are in use", "Every action binds the acting role to the person it represents"],
+    ["Coordinated work", "Declared workflows and review gates run across repository work", "Any kind of work moves through the same durable organization"],
+    ["Authority", "Some consequential actions already stop for approval", "Every action is checked against explicit, revocable authority"],
+    ["Multiple people", "The public reference assumes one operator", "Several accountable people share roles, delegation, and approval"]
+  ]
+}

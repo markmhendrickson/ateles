@@ -1,0 +1,12 @@
+{
+  "layout": "steps",
+  "eyebrow": "Start with one useful record",
+  "headline": "Install locally. Connect one agent. Prove one correction holds.",
+  "lede": "The first useful test is not how much Neotoma can remember. It is whether one important fact can be written, corrected, and read back traceably across the tools you already use.",
+  "items": [
+    {"title": "Install the local service", "body": "Use the current repository instructions so the data and runtime remain under your control."},
+    {"title": "Connect an MCP-capable agent", "body": "Begin with one client, then add the second tool that currently forces you to re-explain context."},
+    {"title": "Choose one bounded domain", "body": "A decision register, contact context, or project state is enough. Avoid importing everything before the read path proves useful."},
+    {"title": "Correct a value and read it back", "body": "Verify the current value, its provenance, and the superseded value. That is the smallest end-to-end test of a record rather than recall."}
+  ]
+}
