@@ -592,7 +592,8 @@ def _in_command_position(segment: str, start: int) -> bool:
             words = words[1:]
         if not words:
             return True
-        name = words[0].rsplit("/", 1)[-1]
+        command_word = words[0]
+        name = command_word.rsplit("/", 1)[-1]
         if name == "env":
             program = _env_program(shlex.join(words[1:]))
             if program is None:
@@ -601,16 +602,19 @@ def _in_command_position(segment: str, start: int) -> bool:
                 return True
             words = program
             continue
-        if name in _ARGUMENT_ONLY_PROGRAMS:
+        # Only an exact bare command earns the argument-only exemption. An
+        # arbitrary executable such as `./ls` can have entirely different
+        # behaviour despite sharing an allowlisted basename.
+        if command_word == name and name in _ARGUMENT_ONLY_PROGRAMS:
             return False
-        if name == "git":
+        if command_word == name and name == "git":
             return not _git_is_argument_only(words[1:])
-        if name == "rg":
+        if command_word == name and name == "rg":
             return any(
                 word.split("=", 1)[0] in ("--pre", "--hostname-bin")
                 for word in words[1:]
             )
-        if re.fullmatch(r"python[0-9.]*", name):
+        if command_word == name and re.fullmatch(r"python[0-9.]*", name):
             return words[1:3] != ["-m", "venv"]
         return True
 
@@ -626,8 +630,20 @@ def _env_word_matches(pattern: re.Pattern, segment: str):
             yield match
 
 
-def _printenv_invoked(segment: str) -> bool:
-    return next(_env_word_matches(_PRINTENV_RE, segment), None) is not None
+def _printenv_invoked(segment: str, *, strict: bool = False) -> bool:
+    """True when `segment` invokes printenv.
+
+    Before a credential source, command-position filtering avoids treating a
+    harmless path argument as an invocation. After a source, argument position
+    is not a safety boundary: a function, later segment, or renamed runner can
+    execute it, so every match fails closed.
+    """
+    matches = (
+        _PRINTENV_RE.finditer(segment)
+        if strict
+        else _env_word_matches(_PRINTENV_RE, segment)
+    )
+    return next(matches, None) is not None
 
 
 # A later pipeline stage, or a file written and then run, can execute a
@@ -814,8 +830,10 @@ def _is_inline_program_flag(interpreter: str, word: str) -> bool:
 def _env_dumps_after_source(segment: str) -> bool:
     """Stricter than `_env_dumps_ambient`, for a segment that follows a
     credential source: also refuse an `env` whose program can itself print
-    the inherited environment (see `_ENV_DUMPING_PROGRAMS`)."""
-    for match in _env_word_matches(_ENV_RE, segment):
+    the inherited environment (see `_ENV_DUMPING_PROGRAMS`). Argument-position
+    exemptions are deliberately unavailable here: after sourcing, indirect
+    execution makes an apparent data operand unsafe."""
+    for match in _ENV_RE.finditer(segment):
         program = _env_program(segment[match.end() :])
         if program is None:
             return True
@@ -914,6 +932,72 @@ def _env_program(tail: str):
                 return None
         return operands[index:]
     return None
+
+
+_CANONICAL_GIT_COMMANDS = frozenset({"git", "/bin/git", "/usr/bin/git"})
+
+
+def _git_config_post_source(segment: str) -> tuple[bool, str]:
+    """Inspect Git configuration values that Git executes after a source.
+
+    `alias.*` values beginning with `!` are shell commands and `core.pager`
+    values are pager commands. Return whether either command dumps the
+    environment, plus a copy of the Git invocation with every parsed `-c`
+    operand masked so the generic strict matcher judges only the remaining
+    shell command. This is intentionally structural: arbitrary config values
+    containing the word `env` are data, not executable commands.
+    """
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return False, segment
+    while words and _ASSIGNMENT_WORD_RE.fullmatch(words[0]):
+        words = words[1:]
+    if not words or words[0] not in _CANONICAL_GIT_COMMANDS:
+        return False, segment
+
+    masked = list(words)
+    index = 1
+    while index < len(words):
+        config_index = None
+        config = None
+        if words[index] == "-c":
+            if index + 1 >= len(words):
+                return False, segment
+            config_index = index + 1
+            config = words[config_index]
+            index += 2
+        elif words[index].startswith("-c") and len(words[index]) > 2:
+            config_index = index
+            config = words[index][2:]
+            index += 1
+        else:
+            index += 1
+            continue
+
+        key, separator, value = config.partition("=")
+        if not separator:
+            continue
+        key = key.lower()
+        executable = None
+        if key.startswith("alias.") and value.lstrip().startswith("!"):
+            executable = value.lstrip()[1:].lstrip()
+        elif key == "core.pager":
+            executable = value.lstrip()
+        if executable and (
+            _env_dumps_after_source(executable)
+            or _printenv_invoked(executable, strict=True)
+        ):
+            return True, segment
+
+        prefix = (
+            "-c"
+            if config_index == index - 1 and words[config_index].startswith("-c")
+            else ""
+        )
+        masked[config_index] = f"{prefix}{key}=CONFIG_VALUE"
+
+    return False, shlex.join(masked)
 
 
 def _ambient_process_or_service_hit(segment: str) -> str | None:
@@ -1432,7 +1516,12 @@ def check_bash(command: str):
         if _is_text_bearing(normalized):
             continue
 
-        hit = _ambient_process_or_service_hit(normalized)
+        git_config_dump = False
+        post_source_segment = normalized
+        if sourced_a_credential:
+            git_config_dump, post_source_segment = _git_config_post_source(normalized)
+
+        hit = _ambient_process_or_service_hit(post_source_segment)
         if hit:
             return hit
 
@@ -1457,8 +1546,9 @@ def check_bash(command: str):
         # auth token)` form, 2026-09-29). `_env_dumps_after_source` still
         # refuses an env whose program can itself print the environment.
         if sourced_a_credential and (
-            _printenv_invoked(normalized)
-            or _env_dumps_after_source(normalized)
+            git_config_dump
+            or _printenv_invoked(post_source_segment, strict=True)
+            or _env_dumps_after_source(post_source_segment)
             or _BARE_SET_DUMP_RE.search(normalized)
             or _DECLARE_DUMP_RE.search(normalized)
             or _VAR_PRINT_RE.search(normalized)

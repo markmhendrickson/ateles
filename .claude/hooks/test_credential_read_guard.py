@@ -449,6 +449,62 @@ BASH_BLOCK = [
         "env -u running perl -pe after source",
         f"source {ENV}; env -u X perl -pe 1",
     ),
+    # Review round 3 (Falco): once a credential file has been sourced,
+    # argument position is not a safety boundary. A later shell segment,
+    # a shadowing function, or an arbitrary executable with an allowlisted
+    # basename can execute a path that the first command only appeared to
+    # consume as data.
+    (
+        "post-source path argument executed through last-argument parameter",
+        f'source {ENV}; ls /usr//bin/env; "$_"',
+    ),
+    (
+        "post-source path argument executed by shadowed allowlisted function",
+        f'source {ENV}; ls() {{ "$@"; }}; ls /usr//bin/env',
+    ),
+    (
+        "post-source path argument passed to arbitrary allowlisted basename",
+        f"source {ENV}; ./ls /usr//bin/env",
+    ),
+    (
+        "arbitrary executable cannot inherit argument-only trust by basename",
+        "./ls /usr//bin/env",
+    ),
+    # The post-source branch fails closed for ambiguous path arguments even
+    # when the same shapes remain allowed before credentials are sourced.
+    ("ls path ending in env after source", f"source {ENV}; ls config/env"),
+    (
+        "git diff path ending in env after source",
+        f"source {ENV}; git diff -- src/env",
+    ),
+    ("rm path ending in env after source", f"source {ENV}; rm -rf build/env"),
+    # Review round 3 (Phoenicurus): Git executes selected `-c` values. The
+    # words after `env` here are Git's subcommand/arguments, not an env
+    # program operand, so each configured command dumps the sourced values.
+    (
+        "git alias executes bare env after source",
+        f"source {ENV}; git -c alias.x=!env x",
+    ),
+    (
+        "git alias executes canonical env after source",
+        f"source {ENV}; git -c alias.x=!/usr/bin/env x",
+    ),
+    (
+        "pathed git alias executes env after source",
+        f"source {ENV}; /usr/bin/git -c alias.x=!env x",
+    ),
+    (
+        "git pager executes bare env after source",
+        f"source {ENV}; git -c core.pager=env log",
+    ),
+    (
+        "git pager executes canonical env after source",
+        f"source {ENV}; git -c core.pager=/usr/bin/env log",
+    ),
+    (
+        "pathed git pager executes env after source",
+        f"source {ENV}; /usr/bin/git -c core.pager=env log",
+    ),
 ]
 
 BASH_ALLOW = [
@@ -604,12 +660,6 @@ BASH_ALLOW = [
     ("rg on a path ending in env", "rg foo docker/env"),
     ("ls a path ending in env, stderr discarded", "ls config/env 2>/dev/null"),
     ("quoted parens before a path ending in env", 'git log --grep "x (y)" -- src/env'),
-    ("ls a path ending in env after source", f"source {ENV}; ls config/env"),
-    (
-        "git diff a path ending in env after source",
-        f"source {ENV}; git diff -- src/env",
-    ),
-    ("rm a path ending in env after source", f"source {ENV}; rm -rf build/env"),
     # Round 2 (ux and qa non-blocking notes): an interpreter flag counts as
     # an inline program only for that interpreter's own inline flags.
     (
@@ -627,6 +677,14 @@ BASH_ALLOW = [
     (
         "env -u running pytest with a -p plugin flag after source",
         f"source {ENV}; env -u X python3 -m pytest -p no:cacheprovider",
+    ),
+    (
+        "git alias env -u runs a program after source",
+        f"source {ENV}; git -c alias.x='!env -u X gh pr list' x",
+    ),
+    (
+        "git pager env -u runs a program after source",
+        f"source {ENV}; git -c core.pager='env -u X less' log",
     ),
     (
         "sourced variable used as a request header, response discarded",
