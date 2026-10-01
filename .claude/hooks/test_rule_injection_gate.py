@@ -53,6 +53,7 @@ Cases:
 """
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import socket
@@ -97,6 +98,7 @@ def _row(entity_id, rule="Do the thing.", applies_when="always", scope="global",
 class _FakeNeotomaHandler(http.server.BaseHTTPRequestHandler):
     rows: list[dict] = []
     stored_requests: list[dict] = []
+    stored_entity_ids: list[str] = []
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
@@ -104,6 +106,13 @@ class _FakeNeotomaHandler(http.server.BaseHTTPRequestHandler):
         request = json.loads(raw.decode()) if raw else {}
         if self.path.endswith("/store"):
             self.stored_requests.append(request)
+            entity = request["entities"][0]
+            canonical = entity.get("title") or entity.get(
+                "governed_call_correlation", ""
+            )
+            self.stored_entity_ids.append(
+                "ent_" + hashlib.sha256(canonical.encode()).hexdigest()[:24]
+            )
         body = json.dumps({"entities": self.rows}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -118,7 +127,9 @@ class _FakeNeotomaHandler(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def fake_neotoma():
     handler = type(
-        "Handler", (_FakeNeotomaHandler,), {"rows": [], "stored_requests": []}
+        "Handler",
+        (_FakeNeotomaHandler,),
+        {"rows": [], "stored_requests": [], "stored_entity_ids": []},
     )
     port = _free_port()
     server = http.server.HTTPServer(("127.0.0.1", port), handler)
@@ -827,6 +838,61 @@ class TestRuleInjectionAuditEvent:
         assert event["correlation_basis"] == "turn_id"
         assert event["governed_call_correlation"].startswith("sha256:")
         assert "turn-safe-2" not in json.dumps(event)
+
+    @pytest.mark.parametrize(
+        ("shared_identifiers", "expected_basis", "expected_correlation_prefix"),
+        [
+            (
+                {"session_id": "same-session", "turn_id": "same-turn"},
+                "turn_id",
+                "sha256:",
+            ),
+            ({}, "unavailable", "unavailable"),
+        ],
+    )
+    def test_each_governed_action_persists_a_distinct_audit_entity(
+        self,
+        fake_neotoma,
+        shared_identifiers,
+        expected_basis,
+        expected_correlation_prefix,
+    ):
+        """One turn/session fallback may join actions, never identify them.
+
+        The fake store derives the persisted entity id from the same public
+        identity material Neotoma sees. Two governed actions with identical
+        fallback correlation — including no available correlation at all —
+        must still persist as two distinct audit entities.
+        """
+        base_url, handler = fake_neotoma
+        handler.rows = [
+            _row("ent_c4d33237ff2d12b4aaec71af", rule="FULL_RULE_CANARY")
+        ]
+        event = {
+            **shared_identifiers,
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/tmp/.cursor/mcp.json"},
+        }
+
+        first = _run(event, base_url=base_url)
+        second = _run(event, base_url=base_url)
+
+        assert first.returncode == 0, first.stderr
+        assert second.returncode == 0, second.stderr
+        events = [
+            request["entities"][0]
+            for request in handler.stored_requests
+            if request.get("entities", [{}])[0].get("event_type")
+            == "rule_injection"
+        ]
+        assert len(events) == 2
+        assert {item["correlation_basis"] for item in events} == {expected_basis}
+        correlations = {
+            item["governed_call_correlation"] for item in events
+        }
+        assert len(correlations) == 1
+        assert next(iter(correlations)).startswith(expected_correlation_prefix)
+        assert len(set(handler.stored_entity_ids)) == 2
 
     def test_retrieval_failure_is_observable_and_stays_fail_open(
         self, fake_neotoma
