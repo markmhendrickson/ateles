@@ -83,7 +83,7 @@ def _isolate_harness_usage_snapshot(_hermetic_host_env, monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _default_usage_gate_and_probe_off(monkeypatch):
+def _default_usage_gate_and_probe_off(_hermetic_host_env, monkeypatch):
     """Keep the usage gate and its live probe out of tests that do not target them.
 
     The gate fails closed on a missing snapshot and the probe would launch the
