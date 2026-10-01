@@ -780,6 +780,7 @@ class TestCheck4ScopedToInteractiveSessions:
         rows = {200: "1 claude --print --permission-prompt-tool mcp__host__approve"}
         assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows(rows)) is False
 
+
     def test_desktop_style_stream_session_is_not_headless(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 200)
         rows = {200: "1 claude --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio"}
@@ -808,3 +809,66 @@ class TestCheck4ScopedToInteractiveSessions:
         ev = {"transcript_path": self._prose_decision_transcript(tmp_path), "session_id": "h2"}
         monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
         assert dsg.main() == 2
+
+
+class TestCodexStopContinuation:
+    """Codex supplies the final text directly and expects JSON continuation.
+
+    These are adapter tests around the shared evaluator, not a second policy
+    implementation. They were red before Codex Stop support: ``main()``
+    ignored ``last_assistant_message`` and therefore returned no finding.
+    """
+
+    @staticmethod
+    def _run(monkeypatch, capsys, event):
+        calls = _no_emit(monkeypatch)
+        monkeypatch.setattr(dsg, "ENFORCE", False)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+        code = dsg.main()
+        return code, capsys.readouterr(), calls
+
+    def test_codex_stop_blocks_from_stable_last_message_field(
+        self, monkeypatch, capsys
+    ):
+        code, captured, calls = self._run(
+            monkeypatch,
+            capsys,
+            {
+                "session_id": "codex-main",
+                "turn_id": "turn-1",
+                "hook_event_name": "Stop",
+                "model": "codex-test-model",
+                "transcript_path": "/nonexistent/unstable-transcript.jsonl",
+                "last_assistant_message": "Should I fix the failing test now?",
+            },
+        )
+
+        assert code == 0
+        payload = json.loads(captured.out)
+        assert payload["decision"] == "block"
+        assert "asking permission" in payload["reason"]
+        assert calls and calls[0][0][1]["enforced"] is True
+
+    def test_codex_subagent_stop_uses_subagent_message_and_transcript_fields(
+        self, monkeypatch, capsys
+    ):
+        code, captured, calls = self._run(
+            monkeypatch,
+            capsys,
+            {
+                "session_id": "codex-parent",
+                "turn_id": "turn-2",
+                "hook_event_name": "SubagentStop",
+                "model": "codex-test-model",
+                "agent_id": "agent-1",
+                "agent_type": "worker",
+                "agent_transcript_path": "/nonexistent/subagent-transcript.jsonl",
+                "last_assistant_message": "The carried decision is unchanged.",
+            },
+        )
+
+        assert code == 0
+        payload = json.loads(captured.out)
+        assert payload["decision"] == "block"
+        assert "unchanged" in payload["reason"]
+        assert calls and calls[0][0][1]["enforced"] is True

@@ -677,6 +677,56 @@ class TestCodexGuardEffect(unittest.TestCase):
         self.assertEqual(payload["decision"], "block")
         self.assertIn("per-tool narration", payload["reason"])
 
+    def test_configured_stop_command_continues_a_noncompliant_turn(self) -> None:
+        command = next(
+            c for c in _hook_commands("Stop") if "decision_shape_gate.py" in c
+        )
+        result = _run(
+            command,
+            {
+                "session_id": "codex-stop-session",
+                "turn_id": "turn-stop",
+                "hook_event_name": "Stop",
+                "model": "codex-test-model",
+                "transcript_path": None,
+                "last_assistant_message": "Want me to run the focused tests?",
+                "stop_hook_active": False,
+                "cwd": str(REPO_ROOT),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("asking permission", payload["reason"])
+
+    def test_configured_subagent_stop_continues_a_noncompliant_turn(self) -> None:
+        command = next(
+            c
+            for c in _hook_commands("SubagentStop")
+            if "decision_shape_gate.py" in c
+        )
+        result = _run(
+            command,
+            {
+                "session_id": "codex-parent-session",
+                "turn_id": "turn-subagent-stop",
+                "hook_event_name": "SubagentStop",
+                "model": "codex-test-model",
+                "agent_id": "agent-1",
+                "agent_type": "worker",
+                "agent_transcript_path": None,
+                "last_assistant_message": "The carried decision is unchanged.",
+                "stop_hook_active": False,
+                "cwd": str(REPO_ROOT),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("unchanged", payload["reason"])
+
     def test_configured_git_stash_guard_returns_a_codex_deny(self) -> None:
         commands = _hook_commands("PreToolUse")
         command = next(c for c in commands if "git_stash_guard.py" in c)
