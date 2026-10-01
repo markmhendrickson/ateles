@@ -325,7 +325,193 @@ BASH_BLOCK = [
     # tokenizer change can't silently reopen it.
     (
         "awk getline reads the file via its program string",
-        f'awk \'BEGIN{{while((getline line < "{ENV}") > 0) print line}}\'',
+        f"awk 'BEGIN{{while((getline line < \"{ENV}\") > 0) print line}}'",
+    ),
+    # Neotoma task ent_32394756032dd7a59e9311b6: `env -u NAME <command>` is
+    # now allowed after a credential source (see BASH_ALLOW), so each env
+    # shape that still prints the environment must stay refused.
+    ("env with only -u after source", f"set -a && source {ENV} && set +a && env -u X"),
+    (
+        "env -i after source with no program",
+        f"set -a && source {ENV} && set +a && env -i",
+    ),
+    ("env running a bare env after source", f"source {ENV}; env -u X env"),
+    ("env running a bare env, no source", "env -u X env"),
+    ("env running printenv after source", f"source {ENV}; env -u X printenv"),
+    (
+        "env -u dump inside command substitution",
+        f'source {ENV}; echo "$(env -u X) trailing"',
+    ),
+    ("env -u dump inside shell wrapper", f"source {ENV}; sh -c 'env -u X'"),
+    # Self-review findings on the same change: a redirection is not a
+    # program operand, `--` does not end assignment parsing, and a program
+    # that can print its inherited environment is still a dump after source.
+    ("env -u with stderr redirect after source", f"source {ENV}; env -u X 2>/dev/null"),
+    ("env with fd-dup redirect after source", f"source {ENV}; env >&2"),
+    ("env with spaced file redirect after source", f"source {ENV}; env > /tmp/o.txt"),
+    ("bare env with stderr redirect", "env 2>/dev/null"),
+    ("env -- assignment only after source", f"source {ENV}; env -- A=1"),
+    ("env -u running bash -c set after source", f"source {ENV}; env -u X bash -c set"),
+    (
+        "env -u running awk over ENVIRON after source",
+        f"source {ENV}; env -u X awk 'BEGIN{{for(k in ENVIRON)print k}}'",
+    ),
+    (
+        "env -u running python3 -c after source",
+        f"source {ENV}; env -u X python3 -c 'import os; print(os.environ)'",
+    ),
+    # Security review of ateles#1346 (ent_a447f6f9062e19f3454278de): a dump
+    # invoked through a non-canonical path must stay refused after a source,
+    # not only `env` and `/usr/bin/env`.
+    ("doubled-slash env path after source", f"source {ENV}; //usr/bin/env"),
+    ("dot-dot env path after source", f"source {ENV}; /usr/bin/../bin/env"),
+    (
+        "non-standard bin env path after source",
+        f"source {ENV}; /opt/homebrew/bin/env",
+    ),
+    ("relative printenv path after source", f"source {ENV}; ./printenv"),
+    (
+        "dot-dot printenv path after source",
+        f"source {ENV}; /usr/bin/../bin/printenv",
+    ),
+    ("doubled-slash env path, no source", "//usr/bin/env"),
+    ("non-standard printenv path, no source", "/opt/homebrew/bin/printenv"),
+    # Combined and long inline-program flags (qa and security non-blocking
+    # notes on the same review).
+    (
+        "env -u running bash -lc set after source",
+        f"source {ENV}; env -u X bash -lc set",
+    ),
+    (
+        "env -u running perl -E after source",
+        f"source {ENV}; env -u X perl -E 'print %ENV'",
+    ),
+    (
+        "env -u running node --eval after source",
+        f"source {ENV}; env -u X node --eval 'console.log(process.env)'",
+    ),
+    # Round 2 (ux and arch review of ateles#1346): a non-canonical path now
+    # counts only in command position. These pin that every way of RUNNING
+    # one stays refused: through a wrapper, as env's program, inside a shell
+    # string, after an assignment, or with an expansion prefix.
+    ("sudo running a pathed env", "sudo -u root /opt/homebrew/bin/env"),
+    ("env -u running a pathed env", "env -u X //usr/bin/env"),
+    ("shell string running a relative printenv", 'sh -c "./printenv"'),
+    ("assignment before a relative printenv", "A=1 ./printenv"),
+    ("quoted expansion prefix on env", '"$D"/env'),
+    ("timeout running a pathed env after source", f"source {ENV}; timeout 5 /x/env"),
+    ("if-condition running a relative printenv", "if ./printenv; then :; fi"),
+    # Self-review of the round-2 change: each of these was allowed by its
+    # first version. Secret-injecting wrappers run a program that inherits
+    # the injected secrets; `elif` starts a command; a quoted operand must
+    # not hide the runner before it.
+    ("op run running a pathed printenv", "op run -- /opt/homebrew/bin/printenv"),
+    (
+        "sops exec-env running a pathed printenv",
+        "sops exec-env s.enc /opt/homebrew/bin/printenv",
+    ),
+    (
+        "elif-condition running a pathed env",
+        "if false; then :; elif /opt/x/env; then :; fi",
+    ),
+    ("quoted paren hiding the runner", 'sudo -u "a(b" /opt/x/env'),
+    ("quoted semicolon hiding the runner", 'sudo -u "a;b" /opt/x/env'),
+    # Second self-review: a runner LIST can never be complete, so the check
+    # is an allowlist of argument-only programs. Each of these was allowed
+    # by the runner-list version.
+    ("unlisted runner mise exec", "mise exec -- /opt/x/env"),
+    ("unlisted runner bundle exec", "bundle exec ./env"),
+    ("coproc keyword", "coproc ./env"),
+    ("runner held in a variable", "R=sudo; $R ./env"),
+    ("runner from a command substitution", "$(echo sudo) ./env"),
+    ("pipe into xargs running the path", "echo ./env | xargs -I{} {}"),
+    ("pipe into a shell running the path", "ls ./printenv | sh"),
+    ("substitution output run as a command", "$(ls ./env)"),
+    ("git bisect run on a pathed env", "git bisect run ./env"),
+    ("git rebase -x on a pathed env", "git rebase -x ./env"),
+    # Third self-review: argument-only programs with an option that runs an
+    # operand, and later pipe stages or files that run printed output. The
+    # reviewed head refused all of these; the runner-list pipe check did not.
+    ("tar compress program", "tar -c --use-compress-program ./env -f - f"),
+    ("rg preprocessor", "rg --pre ./env '' f"),
+    ("git grep pager", "git grep -O./env -e x"),
+    ("pipe with stderr into a shell", "ls ./env |& sh"),
+    ("pipe into a wrapped shell", "ls ./env | nice sh"),
+    ("pipe into a brace group", "ls ./env | { sh; }"),
+    ("pipe into awk system", "ls ./env | awk '{system($0)}'"),
+    ("output written to a file then run", "ls ./env > /tmp/x; sh /tmp/x"),
+    # Fourth self-review: vim runs `+!cmd`, and cp/ln rename the binary out
+    # of the match's sight before a later segment runs it.
+    ("vim running a pathed printenv", "vim -es '+!/usr//bin/printenv' '+qa!'"),
+    ("cp a pathed printenv then run it", "cp /usr//bin/printenv /tmp/p && /tmp/p"),
+    ("ln a pathed printenv then run it", "ln -s /usr/bin/./printenv /tmp/p; /tmp/p"),
+    (
+        "env -u running perl -pe after source",
+        f"source {ENV}; env -u X perl -pe 1",
+    ),
+    # Review round 3 (Falco): once a credential file has been sourced,
+    # argument position is not a safety boundary. A later shell segment,
+    # a shadowing function, or an arbitrary executable with an allowlisted
+    # basename can execute a path that the first command only appeared to
+    # consume as data.
+    (
+        "post-source path argument executed through last-argument parameter",
+        f'source {ENV}; ls /usr//bin/env; "$_"',
+    ),
+    (
+        "post-source path argument executed by shadowed allowlisted function",
+        f'source {ENV}; ls() {{ "$@"; }}; ls /usr//bin/env',
+    ),
+    (
+        "post-source path argument passed to arbitrary allowlisted basename",
+        f"source {ENV}; ./ls /usr//bin/env",
+    ),
+    (
+        "arbitrary executable cannot inherit argument-only trust by basename",
+        "./ls /usr//bin/env",
+    ),
+    # The post-source branch fails closed for ambiguous path arguments even
+    # when the same shapes remain allowed before credentials are sourced.
+    ("ls path ending in env after source", f"source {ENV}; ls config/env"),
+    (
+        "git diff path ending in env after source",
+        f"source {ENV}; git diff -- src/env",
+    ),
+    ("rm path ending in env after source", f"source {ENV}; rm -rf build/env"),
+    # Review round 3 (Phoenicurus): Git executes selected `-c` values. The
+    # words after `env` here are Git's subcommand/arguments, not an env
+    # program operand, so each configured command dumps the sourced values.
+    (
+        "git alias executes bare env after source",
+        f"source {ENV}; git -c alias.x=!env x",
+    ),
+    (
+        "git alias executes canonical env after source",
+        f"source {ENV}; git -c alias.x=!/usr/bin/env x",
+    ),
+    (
+        "pathed git alias executes env after source",
+        f"source {ENV}; /usr/bin/git -c alias.x=!env x",
+    ),
+    (
+        "nonstandard git path alias executes env after source",
+        f"source {ENV}; /opt/homebrew/bin/git -c alias.x=!env x",
+    ),
+    (
+        "git pager executes bare env after source",
+        f"source {ENV}; git -c core.pager=env log",
+    ),
+    (
+        "git pager executes canonical env after source",
+        f"source {ENV}; git -c core.pager=/usr/bin/env log",
+    ),
+    (
+        "pathed git pager executes env after source",
+        f"source {ENV}; /usr/bin/git -c core.pager=env log",
+    ),
+    (
+        "normalized git path pager executes env after source",
+        f"source {ENV}; /opt/homebrew/bin/../bin//git -c core.pager=env log",
     ),
 ]
 
@@ -432,6 +618,95 @@ BASH_ALLOW = [
     (
         "fly ssh console with a case statement printing only a label",
         'fly ssh console -C "case \\"$ENVIRONMENT\\" in prod) echo PROD;; *) echo OTHER;; esac"',
+    ),
+    # Neotoma task ent_32394756032dd7a59e9311b6: `env` with -u/-i/VAR=value
+    # and a program operand runs that program and prints nothing itself.
+    # Both shapes below were refused on 2026-09-29.
+    (
+        "env -u running a command after source (swarm approve-as-App form)",
+        f"set -a && source {ENV} && set +a && "
+        "export GITHUB_TOKEN=$(env -u GITHUB_TOKEN -u GH_TOKEN gh auth token)",
+    ),
+    (
+        "env -u running gh directly after source",
+        f"set -a && source {ENV} && set +a && env -u GITHUB_TOKEN gh pr list",
+    ),
+    (
+        "env -i running a program after source",
+        f"source {ENV}; env -i python3 script.py",
+    ),
+    (
+        "env -u running a command with a quoted trailing argument",
+        "env -u GITHUB_TOKEN -u GH_TOKEN gh pr view 1 --json files "
+        "-q '.updatedAt, .files[].path'",
+    ),
+    (
+        "env -u in a shell wrapper running a command",
+        'sh -c "env -u GITHUB_TOKEN gh pr list"',
+    ),
+    # The any-path match for env/printenv (ateles#1346 security review) must
+    # not turn a URL path segment or a pathed program run into a dump.
+    ("URL whose last segment is env", "curl -s https://example.test/v1/env"),
+    (
+        "pathed env running a program after source",
+        f"source {ENV}; /opt/homebrew/bin/env -u X gh pr list",
+    ),
+    # Round 2 (ux and arch review of ateles#1346): a path ARGUMENT whose
+    # last segment is env or printenv is not an invocation. The any-path
+    # match refused all of these as an ambient dump, with or without a
+    # source; main allowed them.
+    ("ls a path ending in env", "ls config/env"),
+    ("git diff a path ending in env", "git diff -- src/env"),
+    ("rm a path ending in env", "rm -rf build/env"),
+    ("python3 -m venv into a path ending in env", "python3 -m venv .venv/env"),
+    ("mkdir a path ending in printenv", "mkdir -p tmp/printenv"),
+    ("ls an expansion-prefixed path ending in env", "ls $(pwd)/env"),
+    ("env -u running ls on a path ending in env", "env -u X ls config/env"),
+    ("ls a quoted path ending in env", 'ls "config/env"'),
+    ("git -C diff a path ending in env", "git -C repo diff -- src/env"),
+    ("ls piped to a non-runner", "ls config/env | wc -l"),
+    ("rg on a path ending in env", "rg foo docker/env"),
+    ("ls a path ending in env, stderr discarded", "ls config/env 2>/dev/null"),
+    ("quoted parens before a path ending in env", 'git log --grep "x (y)" -- src/env'),
+    # Round 2 (ux and qa non-blocking notes): an interpreter flag counts as
+    # an inline program only for that interpreter's own inline flags.
+    (
+        "env -u running python3 -E on a script after source",
+        f"source {ENV}; env -u X python3 -E script.py",
+    ),
+    (
+        "env -u running bash -p on a script after source",
+        f"source {ENV}; env -u X bash -p script.sh",
+    ),
+    (
+        "env -u running perl -Mstrict on a script after source",
+        f"source {ENV}; env -u X perl -Mstrict x.pl",
+    ),
+    (
+        "env -u running pytest with a -p plugin flag after source",
+        f"source {ENV}; env -u X python3 -m pytest -p no:cacheprovider",
+    ),
+    (
+        "git alias env -u runs a program after source",
+        f"source {ENV}; git -c alias.x='!env -u X gh pr list' x",
+    ),
+    (
+        "git pager env -u runs a program after source",
+        f"source {ENV}; git -c core.pager='env -u X less' log",
+    ),
+    (
+        "nonstandard git path keeps ordinary config data after source",
+        f"source {ENV}; /opt/homebrew/bin/git -c user.name=env status",
+    ),
+    (
+        "normalized git path pager env -u runs a program after source",
+        f"source {ENV}; /opt/homebrew/bin/../bin//git "
+        "-c core.pager='env -u X less' log",
+    ),
+    (
+        "sourced variable used as a request header, response discarded",
+        f"set -a && source {ENV} && set +a && curl -s -o /dev/null "
+        "-w '%{http_code}' -H \"x-api-key: $API_KEY\" https://example.test/v1",
     ),
 ]
 
@@ -784,7 +1059,7 @@ def test_awk_getline_bypass_has_a_real_canary_effect_then_is_blocked():
     change can't silently reopen this call shape even though _SED_AWK_RE
     already matches bare `awk`."""
     canary = "fake_test_token_not_real_0000"
-    command = f'awk \'BEGIN{{while((getline line < "{ENV}") > 0) print line}}\''
+    command = f"awk 'BEGIN{{while((getline line < \"{ENV}\") > 0) print line}}'"
 
     unguarded = subprocess.run(
         ["bash", "-c", command], capture_output=True, text=True, check=True
