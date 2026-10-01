@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -686,10 +687,14 @@ def test_missing_repo_path_env_refuses_local_launch_and_falls_over(tmp_path, mon
     assert LOCAL in harness_router.cooling_providers()
 
 
-def test_repo_path_env_present_logs_which_path_was_read(tmp_path, monkeypatch, caplog):
-    """The success path names the exact ATELES_REPO_PATH it bound guards
-    from, so a stale-checkout diagnosis does not require re-deriving it from
-    the daemon's ambient environment after the fact."""
+def test_repo_path_env_present_logs_source_without_requiring_raw_host_path(
+    tmp_path, monkeypatch, caplog
+):
+    """The diagnostic names ATELES_REPO_PATH as its configuration source.
+
+    Its value may be redacted when it aliases a host value captured before
+    collection, such as GITHUB_WORKSPACE on CI.
+    """
     _write_config(tmp_path)
     monkeypatch.setenv("ATELES_REPO_PATH", str(_REPO_ROOT))
     spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
@@ -697,10 +702,13 @@ def test_repo_path_env_present_logs_which_path_was_read(tmp_path, monkeypatch, c
         result = _run(spawns, events, work_class="rebase")
 
     assert result.ok and result.provider == LOCAL
+    prefix = "claude-local guards read from ATELES_REPO_PATH="
+    messages = [rec.message for rec in caplog.records if prefix in rec.message]
+    assert messages
     assert any(
-        "claude-local guards read from ATELES_REPO_PATH=" in rec.message
-        and str(_REPO_ROOT) in rec.message
-        for rec in caplog.records
+        prefix + str(_REPO_ROOT) in message
+        or re.search(re.escape(prefix) + r"<redacted:[^>]+>", message)
+        for message in messages
     )
 
 

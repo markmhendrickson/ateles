@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ DUMMY_NAME = "DUMMY_SECRET_TOKEN"
 DUMMY_VALUE = "DUMMYSECRETVALUE_abcdef123456"
 DUMMY_PATH_NAME = "NEOTOMA_AAUTH_PRIVATE_JWK_PATH"
 DUMMY_PATH_VALUE = "/dummy/host/keys/DUMMYHOST.jwk.json"
+DUMMY_WORKSPACE_PATH = "/dummy/host/workspaces/ateles-checkout"
 
 
 # ── unit level ────────────────────────────────────────────────────────────────
@@ -342,7 +344,14 @@ _WARNING_AND_LOG_LEAKS = textwrap.dedent(
 )
 
 
-def _child(tmp_path: Path, files: dict, *, with_guard: bool, args=()) -> str:
+def _child(
+    tmp_path: Path,
+    files: dict,
+    *,
+    with_guard: bool,
+    args=(),
+    extra_env: dict | None = None,
+) -> str:
     for name, src in files.items():
         (tmp_path / name).write_text(src)
     conftest = ""
@@ -361,6 +370,7 @@ def _child(tmp_path: Path, files: dict, *, with_guard: bool, args=()) -> str:
         DUMMY_NAME: DUMMY_VALUE,
         MULTI_NAME: MULTI_VALUE,
     }
+    env.update(extra_env or {})
     done = subprocess.run(
         [
             sys.executable,
@@ -451,6 +461,50 @@ def test_guard_redacts_warnings_summary_and_live_logging(tmp_path):
     )
     assert DUMMY_VALUE not in out
     assert "2 passed" in out
+
+
+_ALIASED_WORKSPACE_LOG = textwrap.dedent(
+    """
+    import logging, os
+
+    def test_aliased_workspace_path_log():
+        logging.getLogger("probe").warning(
+            "ATELES_REPO_PATH=%s", os.environ["ATELES_REPO_PATH"]
+        )
+    """
+)
+
+
+def test_control_aliased_workspace_path_leaks_without_the_guard(tmp_path):
+    """Instrument check: the control must expose the dummy aliased path."""
+    out = _child(
+        tmp_path,
+        {"test_workspace_log.py": _ALIASED_WORKSPACE_LOG},
+        with_guard=False,
+        args=("--log-cli-level=INFO",),
+        extra_env={
+            "GITHUB_WORKSPACE": DUMMY_WORKSPACE_PATH,
+            "ATELES_REPO_PATH": DUMMY_WORKSPACE_PATH,
+        },
+    )
+    assert "ATELES_REPO_PATH=%s" % DUMMY_WORKSPACE_PATH in out
+
+
+def test_guard_redacts_an_aliased_workspace_path_but_keeps_its_source(tmp_path):
+    """Equal startup values may use either variable name in the marker."""
+    out = _child(
+        tmp_path,
+        {"test_workspace_log.py": _ALIASED_WORKSPACE_LOG},
+        with_guard=True,
+        args=("--log-cli-level=INFO",),
+        extra_env={
+            "GITHUB_WORKSPACE": DUMMY_WORKSPACE_PATH,
+            "ATELES_REPO_PATH": DUMMY_WORKSPACE_PATH,
+        },
+    )
+    assert DUMMY_WORKSPACE_PATH not in out
+    assert re.search(r"ATELES_REPO_PATH=<redacted:[^>]+>", out)
+    assert "1 passed" in out
 
 
 def test_scrub_report_withholds_when_it_meets_an_object_it_cannot_walk():
