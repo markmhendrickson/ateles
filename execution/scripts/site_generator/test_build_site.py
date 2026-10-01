@@ -342,10 +342,15 @@ def test_concept_film_local_assets_are_validated_rendered_and_copied(tmp_repo):
     out_dir = repo_root / "dist" / "site"
     assert build_site.build("testproduct", out_dir) == []
     html = (out_dir / "testproduct" / "index.html").read_text()
-    assert '<video class="concept-film-media" muted autoplay playsinline loop' in html
+    assert (
+        '<video class="concept-film-media" id="hero-concept-film-media" '
+        "muted playsinline loop preload=\"none\"" in html
+    )
+    assert 'data-concept-film-control' in html
+    assert '<source data-src="/assets/testproduct/hero.webm"' in html
+    assert '<source data-src="/assets/testproduct/hero.mp4"' in html
     assert 'poster="/assets/testproduct/hero.avif"' in html
-    assert 'src="/assets/testproduct/hero.webm" type="video/webm"' in html
-    assert 'src="/assets/testproduct/hero.mp4" type="video/mp4"' in html
+    assert '<source src=' not in html
     assert (
         out_dir / "testproduct" / "assets/testproduct/hero.webm"
     ).read_bytes() == b"webm"
@@ -986,6 +991,39 @@ def test_neotoma_cinematic_hero_has_no_semantic_svg_or_overlay(tmp_path):
     assert any(
         "must not contain a semantic overlay" in item for item in overlay_blockers
     )
+
+
+def test_neotoma_hero_motion_is_controllable_and_defers_video_for_reduced_motion(
+    tmp_path,
+):
+    assert build_site.build("neotoma", tmp_path) == []
+    document = (tmp_path / "neotoma" / "index.html").read_text()
+    hero_match = re.search(
+        r'(?s)<section class="takeover-hero record-hero" id="hero">(.*?)</section>',
+        document,
+    )
+    assert hero_match is not None
+    hero = hero_match.group(1)
+
+    assert 'id="hero-concept-film-media"' in hero
+    assert 'data-concept-film-control' in hero
+    assert 'aria-controls="hero-concept-film-media"' in hero
+    assert 'data-reduced-motion-equivalent="static-poster"' in hero
+    assert "Pause motion" in hero
+    assert " autoplay" not in hero
+    assert '<source data-src="/assets/neotoma/hero-concept.webm"' in hero
+    assert '<source data-src="/assets/neotoma/hero-concept.mp4"' in hero
+    assert '<source src=' not in hero
+    assert '<img class="concept-film-poster-media"' in hero
+    assert "matchMedia('(prefers-reduced-motion: reduce)')" in document
+    assert "removeAttribute('src')" in document
+
+
+def test_ateles_reduced_motion_does_not_freeze_temporary_paths(tmp_path):
+    assert build_site.build("ateles", tmp_path) == []
+    document = (tmp_path / "ateles" / "index.html").read_text()
+
+    assert ".handoff-signal, .visual-signal { display: none; }" in document
 
 
 def test_generated_html_shows_product_motifs(tmp_path):

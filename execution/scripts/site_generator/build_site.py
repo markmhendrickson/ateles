@@ -733,11 +733,26 @@ def _validate_site(
                 )
         for marker in (
             'data-concept-film-active="true"',
+            'data-reduced-motion-equivalent="static-poster"',
             '<video class="concept-film-media"',
             '<img class="concept-film-poster-media"',
+            "data-concept-film-control",
+            'aria-controls="hero-concept-film-media"',
         ):
             if marker not in hero_html:
                 blockers.append(f"Neotoma cinematic hero is missing media: {marker}")
+        if '<source src=' in hero_html:
+            blockers.append(
+                "Neotoma cinematic hero must defer video sources until motion is allowed"
+            )
+        for marker in (
+            "matchMedia('(prefers-reduced-motion: reduce)')",
+            "removeAttribute('src')",
+        ):
+            if marker not in home_html:
+                blockers.append(
+                    f"Neotoma cinematic hero is missing reduced-motion control: {marker}"
+                )
         banned_claims = (
             "your agent forgot",
             "your agents forgot",

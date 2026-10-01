@@ -233,6 +233,9 @@ th, td {{ padding: 11px 13px; border: 1px solid var(--line); text-align: left; v
 .concept-film-media {{ position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; border: 0; object-fit: cover; background: var(--paper-2); }}
 .concept-film-overlay {{ position: absolute; inset: 0; z-index: 3; pointer-events: none; }}
 .concept-film-overlay svg {{ display: block; width: 100%; height: 100%; }}
+.concept-film-control {{ position: absolute; right: clamp(16px, 3vw, 36px); bottom: clamp(16px, 3vw, 36px); z-index: 4; min-height: 44px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: color-mix(in srgb, var(--paper) 92%, transparent); font: 650 .76rem/1 var(--mono); cursor: pointer; box-shadow: var(--shadow-soft); }}
+.concept-film-control:focus-visible {{ outline: 3px solid var(--accent); outline-offset: 3px; }}
+.concept-film-control[hidden] {{ display: none; }}
 .visual-section {{ padding-block: clamp(76px, 11vw, 144px); }}
 .section-visual {{ position: relative; min-height: clamp(330px, 48vw, 620px); margin: 0 0 clamp(34px, 5vw, 64px); overflow: hidden; border: 1px solid var(--line); border-radius: calc(var(--radius) * 1.35); background: color-mix(in srgb, var(--paper-2) 88%, var(--accent-wash)); box-shadow: var(--shadow-soft); }}
 .section-visual svg {{ display: block; width: 100%; height: 100%; min-height: inherit; }}
@@ -403,7 +406,7 @@ footer {{ border-top: 1px solid var(--line); padding-block: 42px; }} .footer-in 
 .grant-row[data-state="GRANTED"] .authorization-seal, .grant-row[data-state="GRANTED"] .grant-state {{ color: var(--grant, var(--accent)); }}
 .grant-row[data-state="WITHHELD"] .authorization-seal, .grant-row[data-state="WITHHELD"] .grant-state {{ color: var(--revoked, var(--accent)); }}
 .grant-state {{ color: var(--accent); font-family: var(--mono); font-size: .66rem; letter-spacing: .05em; }}
-@media (prefers-reduced-motion: reduce) {{ .swarm-member, .handoff-signal, .visual-pulse, .visual-swarm-member, .visual-signal, .motion-dot {{ animation: none; }} .concept-film-media, .concept-film-overlay {{ display: none; }} }}
+@media (prefers-reduced-motion: reduce) {{ .swarm-member, .handoff-signal, .visual-pulse, .visual-swarm-member, .visual-signal, .motion-dot {{ animation: none; }} .handoff-signal, .visual-signal {{ display: none; }} .concept-film-media, .concept-film-overlay {{ display: none; }} }}
 .product-ateles .source-section > .source-inner {{ padding-left: clamp(20px, 5vw, 72px); border-left: 4px solid var(--accent); }}
 .product-ateles .capability-list {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 38px; }}
 .product-ateles .capability {{ position: relative; min-height: 220px; padding: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2); }}
@@ -566,12 +569,19 @@ def _concept_film(poster: str, data: dict, label: str, overlay: str = "") -> str
     poster_attr = f' poster="{_esc(poster_src)}"' if poster_src else ""
     sources = ""
     if video_src:
-        sources += f'<source src="{_esc(video_src)}" type="video/webm">'
+        sources += f'<source data-src="{_esc(video_src)}" type="video/webm">'
     if fallback_src:
-        sources += f'<source src="{_esc(fallback_src)}" type="video/mp4">'
+        sources += f'<source data-src="{_esc(fallback_src)}" type="video/mp4">'
     video = (
-        f'<video class="concept-film-media" muted autoplay playsinline loop preload="metadata"{poster_attr} aria-hidden="true">{sources}</video>'
+        f'<video class="concept-film-media" id="hero-concept-film-media" muted playsinline loop preload="none"{poster_attr} aria-hidden="true">{sources}</video>'
         if sources
+        else ""
+    )
+    control = (
+        '<button class="concept-film-control" type="button" '
+        'data-concept-film-control aria-controls="hero-concept-film-media" hidden>'
+        "Pause motion</button>"
+        if video
         else ""
     )
     duration = brief.get("duration_seconds", "")
@@ -579,7 +589,7 @@ def _concept_film(poster: str, data: dict, label: str, overlay: str = "") -> str
     overlay_html = (
         f'<div class="concept-film-overlay">{overlay}</div>' if overlay else ""
     )
-    return f'<figure class="concept-film" aria-label="{_esc(label)}" data-concept-film-ready="true" data-concept-film-active="{active}" data-duration-seconds="{_esc(duration)}"><div class="concept-film-poster">{poster}</div>{video}{overlay_html}</figure>'
+    return f'<figure class="concept-film" aria-label="{_esc(label)}" data-concept-film-ready="true" data-concept-film-active="{active}" data-duration-seconds="{_esc(duration)}" data-reduced-motion-equivalent="static-poster"><div class="concept-film-poster">{poster}</div>{video}{overlay_html}</figure>{control}'
 
 
 def _authorization_seal_svg(state: str) -> str:
@@ -1444,5 +1454,5 @@ def render_page(
 {_font_link(tokens)}<style>{css}</style></head><body class="{body_class}"{review_attr}>
 <header class="nav" id="site-nav"><div class="nav-in"><a class="brand" href="/">{brand_mark}{_esc(product.title())}<small>{identity}</small></a><nav class="nav-links" aria-label="Primary">{site_nav}</nav>{nav_cta}{theme_toggle}</div></header>
 <main>{body_sections}</main><footer><div class="wrap footer-in"><p class="footer-noun">{noun}</p><div class="flinks">{site_nav}</div></div></footer>
-<script>const nav=document.getElementById('site-nav');const syncNav=()=>nav.classList.toggle('scrolled',scrollY>12);syncNav();addEventListener('scroll',syncNav,{{passive:true}});</script></body></html>
+<script>const nav=document.getElementById('site-nav');const syncNav=()=>nav.classList.toggle('scrolled',scrollY>12);syncNav();addEventListener('scroll',syncNav,{{passive:true}});const motionPreference=matchMedia('(prefers-reduced-motion: reduce)');document.querySelectorAll('[data-concept-film-control]').forEach(button=>{{const video=document.getElementById(button.getAttribute('aria-controls'));if(!video)return;const sources=[...video.querySelectorAll('source[data-src]')];const syncControl=()=>button.textContent=video.paused?'Play motion':'Pause motion';const disableMotion=()=>{{video.pause();sources.forEach(source=>source.removeAttribute('src'));video.load();button.hidden=true;}};const enableMotion=()=>{{sources.forEach(source=>source.src=source.dataset.src);video.load();button.hidden=false;video.play().catch(syncControl);}};const applyMotionPreference=()=>motionPreference.matches?disableMotion():enableMotion();button.addEventListener('click',()=>{{if(video.paused)video.play().catch(syncControl);else video.pause();}});video.addEventListener('play',syncControl);video.addEventListener('pause',syncControl);applyMotionPreference();if(motionPreference.addEventListener)motionPreference.addEventListener('change',applyMotionPreference);else motionPreference.addListener(applyMotionPreference);}});</script></body></html>
 """
