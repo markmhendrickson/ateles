@@ -5,6 +5,12 @@ entity_id: ent_f2f10ae2c6e4869327831d78
 entity_type: agent_definition
 name: ciconia
 description: Marketing and GTM strategist. Owns launch sequencing, channel selection, content strategy, developer community development, and the structured progression from interesting project to trusted infrastructure.
+observation_ids:
+  name: 795c9b40-02f8-2065-a9fa-de91a4a2575a
+  description: 9515f52b-8810-a360-5578-da8c852704a9
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 0aaca628-68e2-b5e2-790d-17b8b16238b0
 ---
 
 <!-- Claude Code adapter for agent `ciconia`. Canonical file: docs/agents/ciconia.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

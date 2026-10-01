@@ -5,6 +5,12 @@ entity_id: ent_31d6f2d61d836f52583bf686
 entity_type: agent_definition
 name: concierge
 description: Personal scheduling + language agent (DRAFT, planned). Owns personal calendar slotting/sync and EN/ES/CA fluency/translation. Chartered 2026-07-07 to fill the personal-scheduling + language gap from the skill owner audit (analysis ent_9c57e1028b9f5ae68168daf6). Genus TBD by operator.
+observation_ids:
+  name: c8b37b6e-e626-dcd4-3f25-0a4734644ec4
+  description: c8b37b6e-e626-dcd4-3f25-0a4734644ec4
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: c8b37b6e-e626-dcd4-3f25-0a4734644ec4
 ---
 
 <!-- Claude Code adapter for agent `concierge`. Canonical file: docs/agents/concierge.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

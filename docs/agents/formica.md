@@ -23,6 +23,22 @@ operational_entity_types:
   - task
   - participation_record
   - daemon_report
+observation_ids:
+  name: 1d893a38-a713-8720-87d5-abc61890f0f0
+  description: dbe0a852-aece-68a6-6693-22bd90d5e1d9
+  tier: 1d893a38-a713-8720-87d5-abc61890f0f0
+  genus: 1d893a38-a713-8720-87d5-abc61890f0f0
+  status: 1d893a38-a713-8720-87d5-abc61890f0f0
+  aauth_sub: 1d893a38-a713-8720-87d5-abc61890f0f0
+  agent_grant: 1d893a38-a713-8720-87d5-abc61890f0f0
+  observation_source_default: 4a7938fe-e0f9-743e-abc7-b04e6c22a9dd
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: 3890ac14-dd7b-da9a-55b1-036367e9aad6
+  context_entity_types: 88365738-1ef8-94ec-eb10-9728a576718d
+  operational_entity_types: b52ce8ce-bf51-800d-89a6-0554a55b8274
+  user_invocable: unknown
+  prompt_markdown: 2710bcee-9d9a-7bf3-5fbf-192ccf796f56
 ---
 
 # formica
