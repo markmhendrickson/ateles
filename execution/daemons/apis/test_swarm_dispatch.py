@@ -5185,11 +5185,11 @@ def test_github_trigger_lanius_issue_passes_contract(monkeypatch):
         captured_kwargs.append({"skill": skill, **kwargs})
         return SkillResult(skill, True, 0, "ok", "")
 
-    monkeypatch.setattr(swarm_dispatch, "run_skill", spy_run_skill)
-
-    # select_expectation_agents returns lenses; stub it to return empty so only
-    # lanius and pavo dispatches occur (simpler to assert on).
-    monkeypatch.setattr(swarm_dispatch, "select_expectation_agents", lambda *a, **kw: [])
+    # The write-readiness gate has its own natural-call-shape tests. This test
+    # exercises the downstream dispatch contract with readiness explicitly met.
+    _install_pipeline_stubs(
+        monkeypatch, spy_run_skill, select_agents=lambda *a, **kw: []
+    )
 
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
@@ -5231,6 +5231,8 @@ def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
                         lambda self, t, **kw: _async_none())
     monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight",
                         lambda self, t: _async_none())
+    monkeypatch.setattr(SwarmDispatcher, "_mirror_spec_to_issue",
+                        lambda self, t, state: _async_none())
 
     notifier = _StubNotifier()
     cfg = _config()
@@ -7392,6 +7394,19 @@ def _install_pipeline_stubs(monkeypatch, run_skill_impl, *, select_agents=None):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_mirror_spec_to_issue", fake_mirror)
+    # The readiness gate is proven separately against the real POST/GET/PATCH
+    # call shape. Pipeline-behaviour tests inject a successful readiness result
+    # so they do not depend on ambient credentials or live GitHub.
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_mark_pipeline_inflight",
+        lambda self, trigger, **kwargs: _async_none(),
+    )
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_clear_pipeline_inflight",
+        lambda self, trigger: _async_none(),
+    )
 
 
 def test_issue_pipeline_runs_sections_in_canonical_order(monkeypatch):
