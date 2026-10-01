@@ -262,6 +262,20 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 
+      # Decision 114: when register row 114 is ruled, data_model.md#concepts'
+      # `agent behavioural rule` row must carry exactly one GOVERNS -> agent
+      # edge and exactly one `scope` and one `agent_sub` entry, each equal to
+      # the approved text held in the checker (exact match, no prose reading),
+      # with no HTML comment, raw HTML tag or ~~ on that row or on register
+      # row 114. Prevents ruled-without-registration drift: the one table a
+      # reader consults for the rule's fields and edges must say what was ruled.
+      - name: Decision 114 — ruled GOVERNS-edge shape in data_model
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_114.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
       # Decision 119: a ruled commissioning design must carry its authority,
       # dependency frontier, completion evidence, recovery, and planted
       # negatives into the canonical corpus. Prevents a mutable status or a
