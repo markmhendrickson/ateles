@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input  # noqa: E402
+from decision_shape_gate import is_codex_stop_event  # noqa: E402
 
 
 ENFORCE = os.environ.get("ATELES_REPORTING_QUALITY_ENFORCE", "1").lower() not in {
@@ -206,7 +207,11 @@ def main() -> int:
         return 0
     print(json.dumps({"decision": "block", "reason": reason}))
     sys.stderr.write(reason + "\n")
-    return 2
+    # Both harnesses consume the same forward-compatible JSON payload, but
+    # Codex accepts a Stop continuation only from a successful command hook.
+    # Reuse the decision gate's event-shape discriminator so the two handlers
+    # wired into Codex's shared Stop array cannot drift apart again.
+    return 0 if is_codex_stop_event(event) else 2
 
 
 if __name__ == "__main__":
