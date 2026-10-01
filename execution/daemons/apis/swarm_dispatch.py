@@ -11969,7 +11969,9 @@ class SwarmDispatcher:
             "a verdict line anywhere, and add no artifact or attribution line of "
             "your own after the last block. The dispatcher posts each block "
             "under its head marker ("
-            + ", ".join(f"`{compose_lens_review_marker(l.lens, head)}`" for l in lenses)
+            + ", ".join(
+                f"`{compose_lens_review_marker(lens.lens, head)}`" for lens in lenses
+            )
             + "); do not write a marker yourself. A block whose second line is "
             f"not its own verdict is read as not passing. {GATE_VERDICT_POSITION_RULE}.\n\n"
             + "\n".join(sections)

@@ -418,6 +418,7 @@ class TestDispatcherCombinedPass:
         )
         assert len(calls) == 1, "one dispatch for the three lenses"
         assert provider_reads == 1, "combined pass awaits the refreshed provider view once"
+        assert calls[0]["preferred_provider"] is None
         assert calls[0]["action_class"] == "lens_review:pm"
         assert set(results) == {"pm", "qa", "ux"}
         assert len(posted) == 3
@@ -683,8 +684,8 @@ class TestCombinedPassPartialFailures:
         reply = _combined_reply({"pm": "SIGNED_OFF", "qa": "SIGNED_OFF", "ux": "SIGNED_OFF"})
         # qa's block loses its verdict line: unreadable.
         reply = reply.replace(
-            f"**\U0001f916 Phoenicurus — Ateles swarm, qa lens panelist**\n**SIGNED_OFF**\n",
-            f"**\U0001f916 Phoenicurus — Ateles swarm, qa lens panelist**\nno verdict here\n",
+            "**\U0001f916 Phoenicurus — Ateles swarm, qa lens panelist**\n**SIGNED_OFF**\n",
+            "**\U0001f916 Phoenicurus — Ateles swarm, qa lens panelist**\nno verdict here\n",
         )
         client = _PostClient()
         out = await self._run(
