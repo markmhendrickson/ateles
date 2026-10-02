@@ -244,6 +244,27 @@ class ExecutionPolicy:
         # No action type declared at all → the policy's default.
         return self.blast_radius_default
 
+    def action_type_kind(self, action_type: str | None) -> str:
+        """Classify the declaration, without collapsing two safety meanings.
+
+        ``operator_only`` means that the work itself is reserved to a human.
+        A non-empty value that the policy does not know means the policy is
+        incomplete.  Both fail closed as ``BlastRadius.NEVER``, but reporting
+        the latter as operator-only hides the repair that would make the task
+        routable.  Callers that surface a checkpoint reason need this
+        distinction.
+        """
+        normalized = str(action_type or "").strip().lower()
+        if not normalized:
+            return "absent"
+        if normalized in NEVER_AUTO_EXECUTE_ACTION_TYPES:
+            return "operator_only"
+        if normalized in self.low_blast_action_types:
+            return "low"
+        if normalized in self.high_blast_action_types:
+            return "high"
+        return "unrecognized"
+
     def posture_for(self, boundary: str | None) -> CheckpointPosture:
         """Resolve a checkpoint boundary's on-check-failure posture.
 
@@ -565,16 +586,27 @@ def evaluate_gate(
     # Never-auto-executable: returns before the confidence axis and before
     # recurrence graduation are consulted at all.
     if blast == BlastRadius.NEVER:
+        action_kind = policy.action_type_kind(action_type)
+        if action_kind == "operator_only":
+            reason = (
+                "operator-only action — never auto-executable at any "
+                "confidence or recurrence count"
+            )
+        elif action_kind == "unrecognized":
+            declared = str(action_type).strip().lower()
+            reason = (
+                f"unrecognized declared action type {declared!r} — policy "
+                "classification required before any execution"
+            )
+        else:
+            reason = "policy default is never-auto-executable"
         return GateDecision(
             action=GateAction.CHECKPOINT,
             blast_radius=blast,
             confidence=confidence,
             threshold=threshold,
             policy_id=policy.entity_id,
-            reason=(
-                "operator-only action — never auto-executable at any "
-                "confidence or recurrence count"
-            ),
+            reason=reason,
             confidence_unscored=confidence_unscored,
         )
 

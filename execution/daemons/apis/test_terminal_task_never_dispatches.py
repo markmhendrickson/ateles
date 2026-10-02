@@ -228,6 +228,64 @@ def test_verified_effect_is_reserved_for_reconciliation(writes, briefs, spawns):
     assert spawns == []
 
 
+def test_unpersisted_checkpoint_blocks_task_and_never_spawns(monkeypatch, spawns):
+    """A failed checkpoint write is a dispatcher failure, not an approval hold.
+
+    Before ateles#1067's repair the gate wrote ``awaiting_approval`` first,
+    then accepted ``write_checkpoint_brief() -> None`` and returned.  The task
+    was left in an operator queue with no artifact to approve, no runner, and
+    no executor.  This exercises the real dispatch entrypoint: the recovery
+    must replace that hold with a read-back-proven BLOCKED reason, page once,
+    and stop before the harness spawn boundary.
+    """
+    from lib.daemon_runtime.gating import ExecutionPolicy
+    from lib.daemon_runtime.task_lifecycle import TaskStatus
+
+    task_id = "ent_checkpoint_failure"
+    record = {
+        "entity_id": task_id,
+        "entity_type": "task",
+        "snapshot": {
+            **_task("pending"),
+            "action_type": "code_change",  # declared but not policy-classified
+            "user_id": "tenant-a",
+        },
+    }
+    writes: list[tuple[str, str, str | None]] = []
+
+    def set_status(entity_id, status, *, reason=None, **_kwargs):
+        value = status.value if hasattr(status, "value") else str(status)
+        writes.append((entity_id, value, reason))
+        record["snapshot"]["status"] = value
+        if reason is not None:
+            record["snapshot"]["blocked_reason"] = reason
+        return True
+
+    monkeypatch.setattr(apis, "READINESS_GATE", False)
+    monkeypatch.setattr(apis, "set_task_status", set_status)
+    monkeypatch.setattr(apis, "fetch_task_record", lambda _task_id: record)
+    monkeypatch.setattr(apis, "fetch_entity_user_id", lambda _task_id: "tenant-a")
+    monkeypatch.setattr(
+        apis,
+        "resolve_policy_for_agent",
+        lambda _skill: ExecutionPolicy(entity_id="policy", loaded=True),
+    )
+    monkeypatch.setattr(apis, "write_checkpoint_brief", lambda **_kwargs: None)
+
+    notifier = _Notifier()
+    _dispatch(task_id, record["snapshot"], notifier=notifier)
+
+    assert record["snapshot"]["status"] == TaskStatus.BLOCKED.value
+    assert (
+        "checkpoint persistence/read-back failed"
+        in record["snapshot"]["blocked_reason"]
+    )
+    assert writes[-1][1] == TaskStatus.BLOCKED.value
+    assert spawns == [], "a task with no approvable checkpoint must never spawn"
+    assert len(notifier.sent) == 1
+    assert "checkpoint was not persisted" in notifier.sent[0]
+
+
 # ── The guard must not over-reach ────────────────────────────────────────────
 
 
