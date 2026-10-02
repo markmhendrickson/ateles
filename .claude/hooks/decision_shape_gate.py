@@ -46,8 +46,11 @@ WHAT IT CHECKS, all string-detectable in the assistant's own final message:
    - Numbered lists are not option markers, so a "1. ... I recommend yes"
      list with no letters and no decision cue does not fire.
 
-MODE: BLOCK, set by the operator 2026-09-11 via ATELES_DECISION_SHAPE_ENFORCE=1
-in .claude/settings.json.
+MODE: BLOCK. Claude Code sets ATELES_DECISION_SHAPE_ENFORCE=1 in
+.claude/settings.json. Codex Stop/SubagentStop commands run through
+``codex_stop_adapter.py``; its immutable command arguments select Codex's
+successful structured-continuation contract rather than any event-controlled
+field.
 
 The operator chose BLOCK over WARN knowing the cost, and the reasoning is worth
 keeping. A Stop hook fires AFTER the message renders, so blocking does not
@@ -73,7 +76,10 @@ agent brief, a legitimate consent question, a well-formed turn) all produced ZER
 findings; the real failing list produced all three. Re-run those before widening
 any pattern here.
 
-Fail-open (stdlib only; any error exits 0), matching every hook here.
+Malformed input and evaluation errors fail closed. Claude Code receives its
+established exit-2 block response; Codex receives a successful structured
+continuation response from the dedicated adapter. A re-entered stop still
+short-circuits through ``stop_hook_active`` so the correction cannot loop.
 
 OBSERVABILITY: a `harness_event` is emitted per finding, in BOTH modes, via the
 same `emit_harness_event_raw` POST helper the sibling `stop_finalizer.py` hook
@@ -90,6 +96,7 @@ two checks report genuinely different things and forcing one shape on both
 would misrepresent whichever didn't fit. Best-effort and fail-open: no bearer
 token or a network error is logged and swallowed, never blocks the hook.
 """
+
 from __future__ import annotations
 
 import json
@@ -99,7 +106,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _session_integrity import emit_harness_event_raw, read_hook_input  # noqa: E402
+from _session_integrity import emit_harness_event_raw  # noqa: E402
+from stop_gate_contract import (  # noqa: E402
+    GateResult,
+    read_event_strict,
+    respond_claude,
+)
 
 ENFORCE = os.environ.get("ATELES_DECISION_SHAPE_ENFORCE", "") in ("1", "true", "yes")
 
@@ -155,7 +167,9 @@ RECOMMEND_CUE_RE = re.compile(
     re.I,
 )
 # Words that, just before a decision cue on the same line, empty it.
-NEGATED_CUE_RE = re.compile(r"\b(?:no|zero|nothing|none|without)\b[^.\n?!]{0,20}$", re.I)
+NEGATED_CUE_RE = re.compile(
+    r"\b(?:no|zero|nothing|none|without)\b[^.\n?!]{0,20}$", re.I
+)
 # An empty decisions section can also put the negation AFTER the cue:
 # "Open decisions: none." (qa lens, PR 1344).
 NEGATED_AFTER_CUE_RE = re.compile(r"^\s*[:\u2014-]?\s*(?:none|n/a|nothing)\b", re.I)
@@ -182,11 +196,12 @@ def poses_decision_in_prose(tail: str) -> bool:
     # section, and a recommendation elsewhere in the tail must not turn them
     # into a finding.
     for m in DECISION_CUE_RE.finditer(tail):
-        before = tail[max(0, m.start() - 25):m.start()]
-        after = tail[m.end():m.end() + 25]
+        before = tail[max(0, m.start() - 25) : m.start()]
+        after = tail[m.end() : m.end() + 25]
         if not NEGATED_CUE_RE.search(before) and not NEGATED_AFTER_CUE_RE.search(after):
             return True
     return False
+
 
 # ONE definition of "a sentence ends here", used for BOTH ends of the scoping
 # window in `findings()`. The two ends were written as two separate
@@ -253,6 +268,23 @@ def last_assistant_text(transcript_path: str | None) -> str:
     return last
 
 
+def event_transcript_path(ev: dict) -> str | None:
+    """Select the transcript field documented for this Stop event."""
+    if ev.get("hook_event_name") == "SubagentStop":
+        value = ev.get("agent_transcript_path")
+    else:
+        value = ev.get("transcript_path")
+    return value if isinstance(value, str) else None
+
+
+def event_assistant_text(ev: dict, transcript_path: str | None) -> str:
+    """Prefer Codex's stable final-message field over transcript parsing."""
+    value = ev.get("last_assistant_message")
+    if isinstance(value, str):
+        return value
+    return last_assistant_text(transcript_path)
+
+
 def _is_operator_prompt(row: dict) -> bool:
     """A user row that is a real prompt, not a tool_result the harness files
     under role "user". The turn starts at the last such row."""
@@ -280,7 +312,11 @@ def _is_operator_prompt(row: dict) -> bool:
         if "tool_result" in kinds or not kinds:
             return False
         first = next(
-            (b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"),
+            (
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ),
             "",
         )
         return not str(first).lstrip().startswith("<task-notification>")
@@ -418,7 +454,9 @@ def _process_row(pid: int) -> str:
     try:
         return subprocess.run(
             ["ps", "-o", "ppid=,command=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         ).stdout.strip()
     except Exception:
         return ""
@@ -452,8 +490,11 @@ def launched_in_print_mode(max_depth: int = 6, row=_process_row) -> bool:
             # person, so the session is attended even if it runs in print
             # mode. (Verified 2026-09-29: the desktop app's Code sessions run
             # with --permission-prompt-tool and stream-json I/O, not --print.)
-            attended = any(a == "--permission-prompt-tool" or a.startswith("--permission-prompt-tool=")
-                           for a in argv)
+            attended = any(
+                a == "--permission-prompt-tool"
+                or a.startswith("--permission-prompt-tool=")
+                for a in argv
+            )
             return headless and not attended
         try:
             pid = int(ppid_s)
@@ -521,11 +562,12 @@ def findings(text: str, asked_via_tool: bool = True) -> list[str]:
     if om:
         ls = tail.rfind("\n", 0, om.start()) + 1
         le = tail.find("\n", om.end())
-        line = tail[ls:(le if le >= 0 else len(tail))]
+        line = tail[ls : (le if le >= 0 else len(tail))]
         explanatory = re.search(
             r"\b(by design|which is why|by rule,? so|rather than|instead of|"
             r"i (?:have |already )?(?:dispatched|filed|fixed|told|briefed))\b",
-            line, re.I,
+            line,
+            re.I,
         )
         op_actionable = not explanatory
     if op_actionable and not FENCED_SHELL_RE.search(text):
@@ -562,58 +604,78 @@ def emit_finding_event(session_id: str, found: list[str], enforced: bool) -> Non
     mode. Own vocabulary (`enforced` + `findings`), not the session-integrity
     `integral|violated|exempt` enum — see the OBSERVABILITY docstring note.
     """
-    emit_harness_event_raw(f"decision-shape-{session_id}", {
-        "event_type": "decision_shape_check",
-        "session_id": session_id,
-        "enforced": enforced,
-        "findings_count": len(found),
-        "findings": found,
-    }, log_tag="decision-shape", session_id=session_id)
+    emit_harness_event_raw(
+        f"decision-shape-{session_id}",
+        {
+            "event_type": "decision_shape_check",
+            "session_id": session_id,
+            "enforced": enforced,
+            "findings_count": len(found),
+            "findings": found,
+        },
+        log_tag="decision-shape",
+        session_id=session_id,
+    )
 
 
-def main() -> int:
-    # Shared stdin-parsing helper (also fail-opens to {} on non-dict JSON —
-    # see its docstring) rather than a local copy, matching every other hook
-    # in this directory.
-    ev = read_hook_input()
-
-    # One nudge per stop. Never trap a turn that cannot satisfy the check.
-    if ev.get("stop_hook_active"):
-        return 0
-
-    try:
-        transcript = ev.get("transcript_path")
-        text = last_assistant_text(transcript)
-        # Check 4 is session conduct; headless dispatched runs are out of its scope.
-        asked = True if launched_in_print_mode() else turn_used_question_tool(transcript)
-        found = findings(text, asked_via_tool=asked)
-    except Exception:
-        return 0
-
+def evaluate_event(ev: dict, *, enforced: bool) -> GateResult:
+    """Evaluate one event without choosing a harness response contract."""
+    transcript = event_transcript_path(ev)
+    text = event_assistant_text(ev, transcript)
+    if not text.strip():
+        return GateResult.indeterminate("assistant closing text is unavailable")
+    # Check 4 is session conduct; headless dispatched runs are out of its scope.
+    asked = True if launched_in_print_mode() else turn_used_question_tool(transcript)
+    found = findings(text, asked_via_tool=asked)
     if not found:
-        return 0
+        return GateResult.allow()
 
-    detail = "Standing-rule check on this turn's closing section:\n- " + "\n- ".join(found)
+    detail = "Standing-rule check on this turn's closing section:\n- " + "\n- ".join(
+        found
+    )
 
     # Emit a durable record in BOTH modes — see OBSERVABILITY note above. A
     # finding that only reaches stderr (WARN) or the model's return channel
     # (BLOCK) vanishes once ATELES_DECISION_SHAPE_ENFORCE changes or the
     # session ends; the harness_event is what a later audit can check against.
     try:
-        emit_finding_event(ev.get("session_id", ""), found, ENFORCE)
+        emit_finding_event(ev.get("session_id", ""), found, enforced)
     except Exception:
         pass
 
-    if not ENFORCE:
-        sys.stderr.write(f"[decision-shape] WARN: {detail}\n")
+    return GateResult.block(detail)
+
+
+def main() -> int:
+    event = read_event_strict(sys.stdin)
+    if isinstance(event, GateResult):
+        return respond_claude(event)
+
+    # One nudge per stop. Never trap a turn that is already correcting itself.
+    if event.get("stop_hook_active") is True:
         return 0
 
-    print(json.dumps({"decision": "block", "reason": detail}))
-    return 2
+    try:
+        result = evaluate_event(event, enforced=ENFORCE)
+    except Exception as exc:  # noqa: BLE001 - parse/evaluation errors are restrictive
+        result = GateResult.indeterminate(
+            f"decision-shape evaluator raised {type(exc).__name__}"
+        )
+
+    if result.disposition == "block" and not ENFORCE:
+        sys.stderr.write(f"[decision-shape] WARN: {result.reason}\n")
+        return 0
+    return respond_claude(result)
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception:
-        sys.exit(0)
+    except Exception as exc:  # noqa: BLE001 - never turn a gate crash into allow
+        sys.exit(
+            respond_claude(
+                GateResult.indeterminate(
+                    f"decision-shape gate crashed with {type(exc).__name__}"
+                )
+            )
+        )

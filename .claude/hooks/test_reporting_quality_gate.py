@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import report_quality_gate as gate
+import codex_stop_adapter as codex_adapter
 
 
 def _claude_row(role: str, text: str) -> dict:
@@ -42,12 +43,22 @@ def _write(tmp_path: Path, rows: list[dict]) -> str:
 @pytest.mark.parametrize(
     "rows",
     [
-        [_claude_row("assistant", "I’ll inspect the file next."),
-         _claude_row("assistant", "I’ll run the focused test next."),
-         _claude_row("assistant", "Implemented. This prevents duplicate work. Next: review owns verification.")],
-        [_codex_row("commentary", "I’ll inspect the file next."),
-         _codex_row("commentary", "I’ll run the focused test next."),
-         _codex_row("final_answer", "Implemented. This prevents duplicate work. Next: review owns verification.")],
+        [
+            _claude_row("assistant", "I’ll inspect the file next."),
+            _claude_row("assistant", "I’ll run the focused test next."),
+            _claude_row(
+                "assistant",
+                "Implemented. This prevents duplicate work. Next: review owns verification.",
+            ),
+        ],
+        [
+            _codex_row("commentary", "I’ll inspect the file next."),
+            _codex_row("commentary", "I’ll run the focused test next."),
+            _codex_row(
+                "final_answer",
+                "Implemented. This prevents duplicate work. Next: review owns verification.",
+            ),
+        ],
     ],
 )
 def test_claude_and_codex_fixtures_block_per_tool_narration(tmp_path, rows):
@@ -58,13 +69,23 @@ def test_claude_and_codex_fixtures_block_per_tool_narration(tmp_path, rows):
 @pytest.mark.parametrize(
     "rows",
     [
-        [_claude_row("assistant", "The capacity reader now covers every configured provider. "
-          "That removes the false exhausted state blocking the parent reliability plan. "
-          "Next: the reviewer verifies recovery from stale readings.")],
-        [_codex_row("commentary", "Capacity moved from stale to live."),
-         _codex_row("final_answer", "The capacity reader now covers every configured provider. "
-          "That removes the false exhausted state blocking the parent reliability plan. "
-          "Next: the reviewer verifies recovery from stale readings.")],
+        [
+            _claude_row(
+                "assistant",
+                "The capacity reader now covers every configured provider. "
+                "That removes the false exhausted state blocking the parent reliability plan. "
+                "Next: the reviewer verifies recovery from stale readings.",
+            )
+        ],
+        [
+            _codex_row("commentary", "Capacity moved from stale to live."),
+            _codex_row(
+                "final_answer",
+                "The capacity reader now covers every configured provider. "
+                "That removes the false exhausted state blocking the parent reliability plan. "
+                "Next: the reviewer verifies recovery from stale readings.",
+            ),
+        ],
     ],
 )
 def test_claude_and_codex_operator_altitude_reports_pass(tmp_path, rows):
@@ -83,6 +104,40 @@ def test_mechanism_dense_final_without_impact_or_next_action_blocks():
     found = gate.findings(transcript)
     assert any("mechanism-dense" in item for item in found)
     assert any("next owner/action" in item for item in found)
+
+
+def test_impact_language_does_not_count_as_a_next_action():
+    transcript = gate.Transcript(
+        commentary=(),
+        final=(
+            "Changed execution/daemons/apis/router.py at 21d60ce0; PID 4821, "
+            "rc=0, 37 tests passed. This will prevent regressions.",
+        ),
+    )
+    found = gate.findings(transcript)
+    assert any("next owner/action" in item for item in found)
+
+
+@pytest.mark.parametrize(
+    "next_state",
+    [
+        "Next: review owns verification.",
+        "Owner: the review team.",
+        "The reviewer will verify the change.",
+        "The PR remains blocked on review.",
+        "No further action is needed.",
+    ],
+)
+def test_explicit_next_action_or_settled_stop_state_is_accepted(next_state):
+    transcript = gate.Transcript(
+        commentary=(),
+        final=(
+            "Changed execution/daemons/apis/router.py at 21d60ce0; PID 4821, "
+            f"rc=0, 37 tests passed. This prevents regressions. {next_state}",
+        ),
+    )
+    found = gate.findings(transcript)
+    assert not any("next owner/action" in item for item in found)
 
 
 def test_jargon_dense_final_without_translation_blocks():
@@ -109,7 +164,7 @@ def test_short_settled_final_after_commentary_is_self_contained():
     assert gate.findings(transcript) == []
 
 
-def test_stop_hook_is_blocking_by_default(tmp_path, monkeypatch, capsys):
+def test_claude_stop_hook_preserves_exit_two_contract(tmp_path, monkeypatch, capsys):
     path = _write(
         tmp_path,
         [
@@ -118,7 +173,9 @@ def test_stop_hook_is_blocking_by_default(tmp_path, monkeypatch, capsys):
             _codex_row("final_answer", "Done — see above."),
         ],
     )
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"transcript_path": path})))
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"transcript_path": path}))
+    )
     assert gate.main() == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["decision"] == "block"
@@ -130,11 +187,13 @@ def test_codex_stable_last_message_field_owns_final(tmp_path, monkeypatch, capsy
         [_codex_row("commentary", "The transcript wire format could change.")],
     )
     event = {
+        "hook_event_name": "Stop",
+        "model": "codex-test-model",
         "transcript_path": path,
         "last_assistant_message": "Done — see the updates above.",
     }
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
-    assert gate.main() == 2
+    assert codex_adapter.main(["--gate", "report-quality", "--event", "Stop"]) == 0
     assert "self-contained" in json.loads(capsys.readouterr().out)["reason"]
 
 
@@ -149,19 +208,86 @@ def test_codex_last_message_preserves_all_phased_commentary(
         ],
     )
     event = {
+        "hook_event_name": "Stop",
+        "model": "codex-test-model",
         "transcript_path": path,
         "last_assistant_message": (
             "Review complete. This confirms the behavior. No changes are needed."
         ),
     }
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
-    assert gate.main() == 2
+    assert codex_adapter.main(["--gate", "report-quality", "--event", "Stop"]) == 0
     assert "per-tool narration" in json.loads(capsys.readouterr().out)["reason"]
 
 
-def test_missing_transcript_fails_open(monkeypatch):
+def test_missing_transcript_is_restrictive_for_claude(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
-    assert gate.main() == 0
+    assert gate.main() == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "block"
+    assert "indeterminate" in payload["reason"].lower()
+
+
+def test_codex_reporting_evaluator_exception_blocks(monkeypatch, capsys):
+    event = {
+        "hook_event_name": "Stop",
+        "model": "codex-test-model",
+        "last_assistant_message": "Done.",
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+
+    def broken_evaluator(_gate):
+        def raise_error(_event):
+            raise RuntimeError("planted reporting evaluator failure")
+
+        return raise_error
+
+    monkeypatch.setattr(codex_adapter, "_evaluator", broken_evaluator)
+    assert codex_adapter.main(["--gate", "report-quality", "--event", "Stop"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "block"
+    assert "indeterminate" in payload["reason"].lower()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model", None),
+        ("model", ""),
+        ("model", "   "),
+        ("model", 42),
+        ("hook_event_name", None),
+        ("hook_event_name", "Unknown"),
+        ("hook_event_name", "stop"),
+        ("hook_event_name", 42),
+        ("last_assistant_message", None),
+        ("last_assistant_message", 42),
+    ],
+)
+def test_codex_reporting_invalid_event_fields_block(monkeypatch, capsys, field, value):
+    event = {
+        "hook_event_name": "Stop",
+        "model": "codex-test-model",
+        "last_assistant_message": "Done.",
+    }
+    if value is None:
+        event.pop(field)
+    else:
+        event[field] = value
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+    assert codex_adapter.main(["--gate", "report-quality", "--event", "Stop"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "block"
+    assert "indeterminate" in payload["reason"].lower()
+
+
+@pytest.mark.parametrize("stdin_text", ["not json", "[]", "null"])
+def test_codex_reporting_malformed_or_non_object_input_blocks(
+    monkeypatch, capsys, stdin_text
+):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_text))
+    assert codex_adapter.main(["--gate", "report-quality", "--event", "Stop"]) == 0
+    assert json.loads(capsys.readouterr().out)["decision"] == "block"
 
 
 def test_prior_turn_narration_does_not_poison_current_turn(tmp_path):

@@ -31,11 +31,13 @@ MANAGED_SCRIPT_NAMES = frozenset(
         "session_rule_index.py",
         "session_rule_delivery.py",
         "rule_injection_gate.py",
+        "decision_shape_gate.py",
         "sibling_repo_worktree_guard.py",
         "gmail_send_gate.py",
         "git_stash_guard.py",
         "gh_identity_guard.py",
         "reporting_contract.py",
+        "codex_stop_adapter.py",
         "report_quality_gate.py",
     }
 )
@@ -64,10 +66,23 @@ def _absolute_handler(handler: dict, repo_root: Path) -> dict:
             "each managed Codex hook command must name exactly one shared "
             f"Ateles script; got {matching!r} in {command!r}"
         )
-    script = repo_root / ".claude" / "hooks" / matching[0]
+    script_name = matching[0]
+    script = repo_root / ".claude" / "hooks" / script_name
     if not script.is_file():
         raise FileNotFoundError(f"managed hook script does not exist: {script}")
-    rendered["command"] = f"python3 {shlex.quote(os.fspath(script))}"
+    argv = shlex.split(command)
+    script_positions = [
+        index for index, value in enumerate(argv) if value.endswith(script_name)
+    ]
+    if len(script_positions) != 1:
+        raise ValueError(
+            "managed Codex hook command must contain its script as one argv; "
+            f"got {argv!r}"
+        )
+    suffix = argv[script_positions[0] + 1 :]
+    rendered["command"] = " ".join(
+        shlex.quote(value) for value in ["python3", os.fspath(script), *suffix]
+    )
     return rendered
 
 

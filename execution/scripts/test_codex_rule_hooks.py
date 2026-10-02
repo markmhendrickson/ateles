@@ -77,6 +77,16 @@ def _hook_commands(event: str) -> list[str]:
     ]
 
 
+def _stop_adapter_command(event: str, gate: str) -> str:
+    return next(
+        command
+        for command in _hook_commands(event)
+        if "codex_stop_adapter.py" in command
+        and f"--gate {gate}" in command
+        and f"--event {event}" in command
+    )
+
+
 def _run(command: str, event: dict, *, env: dict[str, str] | None = None):
     run_env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
@@ -95,6 +105,83 @@ def _run(command: str, event: dict, *, env: dict[str, str] | None = None):
 
 
 class TestCodexRuleDeliveryEffect(unittest.TestCase):
+    def test_installed_stop_hooks_continue_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "codex-home" / "hooks.json"
+            outside = root / "outside-any-repo"
+            outside.mkdir()
+            installed = subprocess.run(
+                [
+                    os.fspath(Path(os.sys.executable)),
+                    os.fspath(INSTALLER),
+                    "--out",
+                    os.fspath(out),
+                ],
+                text=True,
+                capture_output=True,
+                cwd=REPO_ROOT,
+                timeout=20,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            data = json.loads(out.read_text(encoding="utf-8"))
+
+            cases = (
+                (
+                    "Stop",
+                    {
+                        "session_id": "installed-main-stop",
+                        "turn_id": "turn-main",
+                        "hook_event_name": "Stop",
+                        "model": "codex-test-model",
+                        "transcript_path": None,
+                        "last_assistant_message": "Should I fix this now?",
+                        "stop_hook_active": False,
+                        "cwd": os.fspath(outside),
+                    },
+                ),
+                (
+                    "SubagentStop",
+                    {
+                        "session_id": "installed-parent-stop",
+                        "turn_id": "turn-subagent",
+                        "hook_event_name": "SubagentStop",
+                        "model": "codex-test-model",
+                        "agent_id": "agent-1",
+                        "agent_type": "worker",
+                        "agent_transcript_path": None,
+                        "last_assistant_message": "The decision is unchanged.",
+                        "stop_hook_active": False,
+                        "cwd": os.fspath(outside),
+                    },
+                ),
+            )
+            for event, payload in cases:
+                with self.subTest(event=event):
+                    command = next(
+                        hook["command"]
+                        for group in data["hooks"][event]
+                        for hook in group.get("hooks", [])
+                        if "codex_stop_adapter.py" in hook["command"]
+                        and "--gate decision-shape" in hook["command"]
+                    )
+                    self.assertNotIn("git rev-parse", command)
+                    self.assertIn(os.fspath(REPO_ROOT), command)
+                    self.assertIn("--gate decision-shape", command)
+                    self.assertIn(f"--event {event}", command)
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", command],
+                        input=json.dumps(payload),
+                        text=True,
+                        capture_output=True,
+                        cwd=outside,
+                        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                        timeout=20,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    decision = json.loads(result.stdout)
+                    self.assertEqual(decision["decision"], "block")
+
     def test_installed_user_hooks_render_live_policy_outside_repo(self) -> None:
         with _FakeNeotoma() as fake, tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "codex-home" / "hooks.json"
@@ -233,10 +320,7 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CODEX_NO_PROJECT_DIR_CANARY_5F2C", result.stdout)
         state_file = (
-            REPO_ROOT
-            / ".claude"
-            / ".session_state"
-            / "no-project-dir-session.json"
+            REPO_ROOT / ".claude" / ".session_state" / "no-project-dir-session.json"
         )
         try:
             self.assertTrue(
@@ -407,9 +491,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         self,
     ) -> None:
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = [
@@ -470,9 +552,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         injected nothing) — this is the reproduction of Falco's non-blocking
         finding, now closed."""
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = [
@@ -521,9 +601,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         path must not match — same "affirmative shape, not blanket
         apply_patch coverage" posture as sibling_repo_worktree_guard.py."""
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = []
@@ -633,31 +711,44 @@ class TestCodexGuardEffect(unittest.TestCase):
         self.assertIn("final answer self-contained", result.stdout)
 
     def test_reporting_gate_blocks_low_level_codex_turn(self) -> None:
-        command = next(
-            c for c in _hook_commands("Stop") if "report_quality_gate.py" in c
-        )
+        command = _stop_adapter_command("Stop", "report-quality")
         with tempfile.TemporaryDirectory() as tmp:
             transcript = Path(tmp) / "rollout.jsonl"
             rows = [
                 {
                     "type": "response_item",
                     "payload": {
-                        "type": "message", "role": "assistant", "phase": "commentary",
-                        "content": [{"type": "output_text", "text": "I’ll inspect the file next."}],
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "I’ll inspect the file next.",
+                            }
+                        ],
                     },
                 },
                 {
                     "type": "response_item",
                     "payload": {
-                        "type": "message", "role": "assistant", "phase": "commentary",
-                        "content": [{"type": "output_text", "text": "I’ll run the test next."}],
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [
+                            {"type": "output_text", "text": "I’ll run the test next."}
+                        ],
                     },
                 },
                 {
                     "type": "response_item",
                     "payload": {
-                        "type": "message", "role": "assistant", "phase": "final_answer",
-                        "content": [{"type": "output_text", "text": "Done — see above."}],
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [
+                            {"type": "output_text", "text": "Done — see above."}
+                        ],
                     },
                 },
             ]
@@ -667,12 +758,13 @@ class TestCodexGuardEffect(unittest.TestCase):
                 {
                     "session_id": "codex-reporting-session",
                     "hook_event_name": "Stop",
+                    "model": "codex-test-model",
                     "transcript_path": str(transcript),
                     "last_assistant_message": "Done — see above.",
                     "cwd": str(REPO_ROOT),
                 },
             )
-        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["decision"], "block")
         self.assertIn("per-tool narration", payload["reason"])
@@ -808,6 +900,144 @@ class TestCodexGuardEffect(unittest.TestCase):
         output = payload["hookSpecificOutput"]
         self.assertEqual(output["permissionDecision"], "deny")
         self.assertIn("shared main clone", output["permissionDecisionReason"].lower())
+
+
+class TestCodexStopContinuationEffect(unittest.TestCase):
+    def test_configured_stop_command_continues_a_noncompliant_turn(self) -> None:
+        command = _stop_adapter_command("Stop", "decision-shape")
+        result = _run(
+            command,
+            {
+                "session_id": "codex-stop-session",
+                "turn_id": "turn-stop",
+                "hook_event_name": "Stop",
+                "model": "codex-test-model",
+                "transcript_path": None,
+                "last_assistant_message": "Want me to run the focused tests?",
+                "stop_hook_active": False,
+                "cwd": str(REPO_ROOT),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("asking permission", payload["reason"])
+
+    def test_configured_subagent_stop_continues_a_noncompliant_turn(self) -> None:
+        command = _stop_adapter_command("SubagentStop", "decision-shape")
+        result = _run(
+            command,
+            {
+                "session_id": "codex-parent-session",
+                "turn_id": "turn-subagent-stop",
+                "hook_event_name": "SubagentStop",
+                "model": "codex-test-model",
+                "agent_id": "agent-1",
+                "agent_type": "worker",
+                "agent_transcript_path": None,
+                "last_assistant_message": "The carried decision is unchanged.",
+                "stop_hook_active": False,
+                "cwd": str(REPO_ROOT),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("unchanged", payload["reason"])
+
+    def test_configured_stop_restricts_invalid_event_fields(self) -> None:
+        commands = (
+            _stop_adapter_command("Stop", "decision-shape"),
+            _stop_adapter_command("Stop", "report-quality"),
+        )
+        base = {
+            "session_id": "codex-invalid-session",
+            "hook_event_name": "Stop",
+            "model": "codex-test-model",
+            "last_assistant_message": "Done.",
+        }
+        cases = (
+            (
+                "missing-model",
+                {key: value for key, value in base.items() if key != "model"},
+            ),
+            ("empty-model", {**base, "model": ""}),
+            ("whitespace-model", {**base, "model": "   "}),
+            ("non-string-model", {**base, "model": 42}),
+            (
+                "missing-event-name",
+                {key: value for key, value in base.items() if key != "hook_event_name"},
+            ),
+            ("unknown-event-name", {**base, "hook_event_name": "Unknown"}),
+            ("wrong-case-event-name", {**base, "hook_event_name": "stop"}),
+            ("non-string-event-name", {**base, "hook_event_name": 42}),
+            (
+                "missing-last-message",
+                {
+                    key: value
+                    for key, value in base.items()
+                    if key != "last_assistant_message"
+                },
+            ),
+            ("non-string-last-message", {**base, "last_assistant_message": 42}),
+        )
+        for command in commands:
+            for name, event in cases:
+                with self.subTest(command=command, case=name):
+                    result = _run(command, event)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["decision"], "block")
+                    self.assertIn("indeterminate", payload["reason"].lower())
+
+    def test_configured_stop_restricts_malformed_and_non_object_json(self) -> None:
+        commands = (
+            _stop_adapter_command("Stop", "decision-shape"),
+            _stop_adapter_command("Stop", "report-quality"),
+        )
+        for command in commands:
+            for raw in ("not json", "[]", "null"):
+                with self.subTest(command=command, raw=raw):
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", command],
+                        input=raw,
+                        text=True,
+                        capture_output=True,
+                        cwd=REPO_ROOT,
+                        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                        timeout=20,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout)["decision"], "block")
+
+    def test_adapter_restricts_unrecognized_immutable_configuration(self) -> None:
+        adapter = REPO_ROOT / ".claude" / "hooks" / "codex_stop_adapter.py"
+        event = {
+            "hook_event_name": "Stop",
+            "model": "codex-test-model",
+            "last_assistant_message": "Done.",
+        }
+        result = subprocess.run(
+            [
+                os.fspath(Path(os.sys.executable)),
+                os.fspath(adapter),
+                "--gate",
+                "unknown",
+                "--event",
+                "Stop",
+            ],
+            input=json.dumps(event),
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("indeterminate", payload["reason"].lower())
 
 
 if __name__ == "__main__":

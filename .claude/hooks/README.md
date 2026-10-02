@@ -16,7 +16,10 @@ Starts in BLOCK mode and catches three measurable violations of that contract:
 repeated per-tool narration, a final that points back to collapsed commentary,
 and mechanism/jargon-dense finals that omit impact or the next owner. It reads
 both Claude Code transcript rows and Codex rollout `response_item` rows, scopes
-classification to the current user turn, and fails open on unknown input.
+classification to the current user turn, and returns an indeterminate result on
+unknown input. Claude Code formats that as its exit-2 block response; Codex runs
+the evaluator through `codex_stop_adapter.py`, which emits successful structured
+continuation JSON. Event fields never select the harness response contract.
 
 ## `ateles-session-start.sh` (SessionStart)
 

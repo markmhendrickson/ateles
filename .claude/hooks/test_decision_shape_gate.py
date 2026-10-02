@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import decision_shape_gate as dsg
+import codex_stop_adapter as codex_adapter
 import _session_integrity as si
 
 
@@ -220,7 +221,9 @@ class TestSentenceStartBoundarySymmetry:
         # scoped sentence is exactly the permission question in both
         # directions, so a future edit to one end cannot silently widen only
         # that end.
-        prior_q = "Is the deploy scheduled? Should I fix the parser bug? A merge landed."
+        prior_q = (
+            "Is the deploy scheduled? Should I fix the parser bug? A merge landed."
+        )
         m = dsg.PERMISSION_RE.search(prior_q)
         assert dsg.sentence_around(prior_q, m.start(), m.end()).strip() == (
             "Should I fix the parser bug?"
@@ -275,12 +278,9 @@ class TestStopHookActiveShortCircuit:
 
 
 # ---------------------------------------------------------------------------
-# Malformed / non-JSON stdin — graceful handling, never an unhandled
-# exception, matching the sibling hooks' fail-open convention. Routed through
-# the shared `read_hook_input()` in _session_integrity.py (not a local copy
-# in this hook) — see that function's docstring for why the non-dict case
-# (e.g. a JSON array) is coerced to {} there rather than here, so every
-# caller of the shared helper gets the same guard.
+# Malformed / non-JSON stdin — restrictive rather than a silent allow.
+# This gate uses its own strict reader so the sibling hooks that intentionally
+# use read_hook_input() keep their established behavior.
 # ---------------------------------------------------------------------------
 class TestMalformedStdin:
     @pytest.mark.parametrize(
@@ -291,10 +291,13 @@ class TestMalformedStdin:
             "[1, 2, 3]",  # valid JSON, but not the object shape every caller assumes
         ],
     )
-    def test_exits_zero_without_raising(self, monkeypatch, stdin_text):
+    def test_claude_blocks_without_raising(self, monkeypatch, capsys, stdin_text):
         _no_emit(monkeypatch)
         monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_text))
-        assert dsg.main() == 0
+        assert dsg.main() == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block"
+        assert "indeterminate" in payload["reason"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +426,7 @@ class TestQuotedProseDoesNotFire:
             "Here is the evidence table of what the gate blocked earlier:\n\n"
             "| turn | phrase | outcome |\n"
             "|---|---|---|\n"
-            "| 14 | \"Want me to\" | blocked |\n\n"
+            '| 14 | "Want me to" | blocked |\n\n'
             + ("Filler narrative about the session. " * 60)
             + "\n\nOn balance the matcher is too broad, and the evidence above "
             "shows it firing on its own documentation."
@@ -477,8 +480,7 @@ class TestTrailingFooterStillCaught:
 
     def test_question_then_bullet_list_still_blocks(self):
         text = (
-            "Decisions:\n\nWant me to file the issue?\n\n"
-            "- #1118 next\n- #1123 blocked"
+            "Decisions:\n\nWant me to file the issue?\n\n- #1118 next\n- #1123 blocked"
         )
         assert dsg.findings(text) != []
 
@@ -596,8 +598,7 @@ class TestDecisionPosedAsProse:
             "The agent was told:\n\n> Decisions for you: (a) cap reviews; (b) "
             "no cap. I recommend (a).\n\nIt is working on it now.",
             # The standard empty decisions section beside a recommendation.
-            "No open decisions right now. I recommend we let the canary run "
-            "overnight.",
+            "No open decisions right now. I recommend we let the canary run overnight.",
             "Nothing needs your decision this turn. I recommend leaving the "
             "sweep to finish.",
             # The negation can also FOLLOW the cue (qa lens, PR 1344).
@@ -620,7 +621,9 @@ class TestDecisionPosedAsProse:
     def test_numbered_list_without_letters_is_a_pinned_negative(self):
         # Deliberate limit (see the module docstring): numbers are not option
         # markers. Widening this must be a deliberate change, not a drift.
-        text = "Decisions:\n1. Merge #12? I recommend yes.\n2. Close #13? I recommend no."
+        text = (
+            "Decisions:\n1. Merge #12? I recommend yes.\n2. Close #13? I recommend no."
+        )
         assert dsg.findings(text, asked_via_tool=False) == []
 
     def test_finding_text_lets_sequential_steps_be_dismissed(self):
@@ -641,7 +644,12 @@ class TestTurnUsedQuestionTool:
     def test_tool_use_in_this_turn_counts(self, tmp_path):
         path = _write_turn(
             tmp_path,
-            [_user("go"), _ask_tool_use(), _tool_result(), _assistant_text(PLANTED_RED)],
+            [
+                _user("go"),
+                _ask_tool_use(),
+                _tool_result(),
+                _assistant_text(PLANTED_RED),
+            ],
         )
         assert dsg.turn_used_question_tool(path) is True
 
@@ -660,35 +668,62 @@ class TestTurnUsedQuestionTool:
         assert dsg.turn_used_question_tool(path) is False
 
     def test_tool_result_row_does_not_start_a_new_turn(self, tmp_path):
-        path = _write_turn(
-            tmp_path, [_user("go"), _ask_tool_use(), _tool_result()]
-        )
+        path = _write_turn(tmp_path, [_user("go"), _ask_tool_use(), _tool_result()])
         assert dsg.turn_used_question_tool(path) is True
 
     @pytest.mark.parametrize(
         "injected",
         [
-            {"type": "user", "isMeta": True, "message": {"role": "user", "content": [
-                {"type": "text", "text": "Base directory for this skill: /x"}]}},
-            {"type": "user", "message": {"role": "user", "content":
-                "<task-notification>agent finished</task-notification>"}},
+            {
+                "type": "user",
+                "isMeta": True,
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Base directory for this skill: /x"}
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<task-notification>agent finished</task-notification>",
+                },
+            },
         ],
     )
     def test_harness_injected_rows_do_not_start_a_new_turn(self, tmp_path, injected):
         path = _write_turn(
             tmp_path,
-            [_user("go"), _ask_tool_use(), _tool_result(), injected,
-             _assistant_text(PLANTED_RED)],
+            [
+                _user("go"),
+                _ask_tool_use(),
+                _tool_result(),
+                injected,
+                _assistant_text(PLANTED_RED),
+            ],
         )
         assert dsg.turn_used_question_tool(path) is True
 
     def test_compaction_summary_does_not_start_a_new_turn(self, tmp_path):
-        compact = {"type": "user", "isCompactSummary": True, "message": {
-            "role": "user", "content": "This session is being continued..."}}
+        compact = {
+            "type": "user",
+            "isCompactSummary": True,
+            "message": {
+                "role": "user",
+                "content": "This session is being continued...",
+            },
+        }
         path = _write_turn(
             tmp_path,
-            [_user("go"), _ask_tool_use(), _tool_result(), compact,
-             _assistant_text(PLANTED_RED)],
+            [
+                _user("go"),
+                _ask_tool_use(),
+                _tool_result(),
+                compact,
+                _assistant_text(PLANTED_RED),
+            ],
         )
         assert dsg.turn_used_question_tool(path) is True
 
@@ -725,7 +760,10 @@ class TestProseDecisionEndToEnd:
 
     def test_prose_decisions_block_the_stop(self, tmp_path, monkeypatch, capsys):
         code, out = self._run(
-            tmp_path, monkeypatch, capsys, [_user("status?"), _assistant_text(PLANTED_RED)]
+            tmp_path,
+            monkeypatch,
+            capsys,
+            [_user("status?"), _assistant_text(PLANTED_RED)],
         )
         assert code == 2
         assert "posed as prose" in json.loads(out)["reason"]
@@ -735,7 +773,12 @@ class TestProseDecisionEndToEnd:
             tmp_path,
             monkeypatch,
             capsys,
-            [_user("status?"), _ask_tool_use(), _tool_result(), _assistant_text(PLANTED_RED)],
+            [
+                _user("status?"),
+                _ask_tool_use(),
+                _tool_result(),
+                _assistant_text(PLANTED_RED),
+            ],
         )
         assert code == 0
         assert out == ""
@@ -751,13 +794,17 @@ class TestCheck4ScopedToInteractiveSessions:
 
     def test_claude_print_ancestor_is_headless(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
-        rows = {300: "200 /bin/sh -c python3 hook.py",
-                200: "100 /opt/homebrew/bin/claude --print --model x"}
+        rows = {
+            300: "200 /bin/sh -c python3 hook.py",
+            200: "100 /opt/homebrew/bin/claude --print --model x",
+        }
         assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows(rows)) is True
 
     def test_claude_short_p_flag_is_headless(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 200)
-        assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows({200: "1 claude -p"})) is True
+        assert (
+            _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows({200: "1 claude -p"})) is True
+        )
 
     def test_interactive_claude_is_not_headless(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 300)
@@ -782,12 +829,19 @@ class TestCheck4ScopedToInteractiveSessions:
 
     def test_desktop_style_stream_session_is_not_headless(self, monkeypatch):
         monkeypatch.setattr(dsg.os, "getppid", lambda: 200)
-        rows = {200: "1 claude --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio"}
+        rows = {
+            200: "1 claude --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio"
+        }
         assert _REAL_LAUNCHED_IN_PRINT_MODE(row=self._rows(rows)) is False
 
     def _prose_decision_transcript(self, tmp_path):
-        row = {"type": "assistant", "message": {"role": "assistant",
-               "content": [{"type": "text", "text": PLANTED_RED}]}}
+        row = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": PLANTED_RED}],
+            },
+        }
         p = tmp_path / "t.jsonl"
         p.write_text(json.dumps(row) + "\n")
         return str(p)
@@ -796,15 +850,163 @@ class TestCheck4ScopedToInteractiveSessions:
         calls = _no_emit(monkeypatch)
         monkeypatch.setattr(dsg, "ENFORCE", True)
         monkeypatch.setattr(dsg, "launched_in_print_mode", lambda: True)
-        ev = {"transcript_path": self._prose_decision_transcript(tmp_path), "session_id": "h1"}
+        ev = {
+            "transcript_path": self._prose_decision_transcript(tmp_path),
+            "session_id": "h1",
+        }
         monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
         assert dsg.main() == 0
         assert calls == []
 
-    def test_interactive_session_still_blocks_end_to_end(self, tmp_path, monkeypatch, capsys):
+    def test_interactive_session_still_blocks_end_to_end(
+        self, tmp_path, monkeypatch, capsys
+    ):
         _no_emit(monkeypatch)
         monkeypatch.setattr(dsg, "ENFORCE", True)
         monkeypatch.setattr(dsg, "launched_in_print_mode", lambda: False)
-        ev = {"transcript_path": self._prose_decision_transcript(tmp_path), "session_id": "h2"}
+        ev = {
+            "transcript_path": self._prose_decision_transcript(tmp_path),
+            "session_id": "h2",
+        }
         monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
         assert dsg.main() == 2
+
+
+class TestCodexStopContinuation:
+    """Codex supplies the final text directly and expects JSON continuation.
+
+    These are adapter tests around the shared evaluator, not a second policy
+    implementation. They were red before Codex Stop support: ``main()``
+    ignored ``last_assistant_message`` and therefore returned no finding.
+    """
+
+    @staticmethod
+    def _run(monkeypatch, capsys, event):
+        calls = _no_emit(monkeypatch)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+        code = codex_adapter.main(
+            ["--gate", "decision-shape", "--event", event["hook_event_name"]]
+        )
+        return code, capsys.readouterr(), calls
+
+    def test_codex_stop_blocks_from_stable_last_message_field(
+        self, monkeypatch, capsys
+    ):
+        code, captured, calls = self._run(
+            monkeypatch,
+            capsys,
+            {
+                "session_id": "codex-main",
+                "turn_id": "turn-1",
+                "hook_event_name": "Stop",
+                "model": "codex-test-model",
+                "transcript_path": "/nonexistent/unstable-transcript.jsonl",
+                "last_assistant_message": "Should I fix the failing test now?",
+            },
+        )
+
+        assert code == 0
+        payload = json.loads(captured.out)
+        assert payload["decision"] == "block"
+        assert "asking permission" in payload["reason"]
+        assert calls and calls[0][0][1]["enforced"] is True
+
+    def test_codex_subagent_stop_uses_subagent_message_and_transcript_fields(
+        self, monkeypatch, capsys
+    ):
+        code, captured, calls = self._run(
+            monkeypatch,
+            capsys,
+            {
+                "session_id": "codex-parent",
+                "turn_id": "turn-2",
+                "hook_event_name": "SubagentStop",
+                "model": "codex-test-model",
+                "agent_id": "agent-1",
+                "agent_type": "worker",
+                "agent_transcript_path": "/nonexistent/subagent-transcript.jsonl",
+                "last_assistant_message": "The carried decision is unchanged.",
+            },
+        )
+
+        assert code == 0
+        payload = json.loads(captured.out)
+        assert payload["decision"] == "block"
+        assert "unchanged" in payload["reason"]
+        assert calls and calls[0][0][1]["enforced"] is True
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("model", None),
+            ("model", ""),
+            ("model", "   "),
+            ("model", 42),
+            ("hook_event_name", None),
+            ("hook_event_name", "unknown"),
+            ("hook_event_name", "stop"),
+            ("hook_event_name", 42),
+            ("last_assistant_message", None),
+            ("last_assistant_message", 42),
+        ],
+    )
+    def test_codex_invalid_event_fields_block(self, monkeypatch, capsys, field, value):
+        event = {
+            "session_id": "codex-invalid",
+            "hook_event_name": "Stop",
+            "model": "codex-test-model",
+            "last_assistant_message": "Done.",
+        }
+        if value is None:
+            event.pop(field)
+        else:
+            event[field] = value
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+        assert codex_adapter.main(["--gate", "decision-shape", "--event", "Stop"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block"
+        assert "indeterminate" in payload["reason"].lower()
+
+    @pytest.mark.parametrize("stdin_text", ["not json", "[]", "null"])
+    def test_codex_malformed_or_non_object_input_blocks(
+        self, monkeypatch, capsys, stdin_text
+    ):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_text))
+        assert codex_adapter.main(["--gate", "decision-shape", "--event", "Stop"]) == 0
+        assert json.loads(capsys.readouterr().out)["decision"] == "block"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            [],
+            ["--gate", "unknown", "--event", "Stop"],
+            ["--gate", "decision-shape", "--event", "stop"],
+            ["--event", "Stop", "--gate", "decision-shape"],
+        ],
+    )
+    def test_codex_malformed_adapter_configuration_blocks(
+        self, monkeypatch, capsys, argv
+    ):
+        monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+        assert codex_adapter.main(argv) == 0
+        assert json.loads(capsys.readouterr().out)["decision"] == "block"
+
+    def test_codex_evaluator_exception_blocks(self, monkeypatch, capsys):
+        event = {
+            "hook_event_name": "Stop",
+            "model": "codex-test-model",
+            "last_assistant_message": "Done.",
+        }
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+
+        def broken_evaluator(_gate):
+            def raise_error(_event):
+                raise RuntimeError("planted evaluator failure")
+
+            return raise_error
+
+        monkeypatch.setattr(codex_adapter, "_evaluator", broken_evaluator)
+        assert codex_adapter.main(["--gate", "decision-shape", "--event", "Stop"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block"
+        assert "indeterminate" in payload["reason"].lower()

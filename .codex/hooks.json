@@ -1,5 +1,5 @@
 {
-  "description": "Ateles live rule delivery and pre-action guards for Codex. Rule content remains canonical in Neotoma agent_policy; these hooks only render or enforce it.",
+  "description": "Ateles live rule delivery and action/turn guards for Codex. Rule content remains canonical in Neotoma agent_policy; these hooks only render or enforce it.",
   "hooks": {
     "SessionStart": [
       {
@@ -53,9 +53,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/report_quality_gate.py\"",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/codex_stop_adapter.py\" --gate report-quality --event Stop",
             "timeout": 30,
             "statusMessage": "Checking operator-altitude reporting"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/codex_stop_adapter.py\" --gate decision-shape --event Stop",
+            "timeout": 30,
+            "statusMessage": "Checking the turn-ending decision contract"
           }
         ]
       }
@@ -103,6 +109,18 @@
             "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/gh_identity_guard.py\"",
             "timeout": 30,
             "statusMessage": "Checking GitHub identity"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/codex_stop_adapter.py\" --gate decision-shape --event SubagentStop",
+            "timeout": 30,
+            "statusMessage": "Checking the subagent decision contract"
           }
         ]
       }
