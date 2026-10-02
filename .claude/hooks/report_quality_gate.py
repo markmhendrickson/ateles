@@ -8,7 +8,9 @@ per-tool narration, a final that delegates its meaning to collapsed
 commentary, and mechanism-dense finals that omit impact or the next owner.
 
 Both Claude Code JSONL and Codex rollout ``response_item`` rows are accepted.
-Unreadable or unrecognised transcripts fail open.
+Malformed input, unavailable final text, and evaluator errors are
+indeterminate and therefore restrictive. Claude keeps exit-2 blocking;
+Codex formatting is owned by ``codex_stop_adapter.py``.
 """
 
 from __future__ import annotations
@@ -21,12 +23,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _session_integrity import read_hook_input  # noqa: E402
-from decision_shape_gate import is_codex_stop_event  # noqa: E402
+from stop_gate_contract import (  # noqa: E402
+    GateResult,
+    read_event_strict,
+    respond_claude,
+)
 
 
 ENFORCE = os.environ.get("ATELES_REPORTING_QUALITY_ENFORCE", "1").lower() not in {
-    "0", "false", "no",
+    "0",
+    "false",
+    "no",
 }
 
 TOOL_NARRATION_RE = re.compile(
@@ -115,7 +122,9 @@ def _operator_user_row(row: dict) -> bool:
     """True for a real user prompt, false for tool results and metadata."""
     if not isinstance(row, dict) or row.get("isMeta") or row.get("isCompactSummary"):
         return False
-    message = row.get("payload") if row.get("type") == "response_item" else row.get("message")
+    message = (
+        row.get("payload") if row.get("type") == "response_item" else row.get("message")
+    )
     if not isinstance(message, dict) or message.get("role") != "user":
         return False
     content = message.get("content")
@@ -165,7 +174,9 @@ def findings(transcript: Transcript) -> list[str]:
     if not transcript.final:
         return []
     found: list[str] = []
-    narrated = [text for text in transcript.commentary if TOOL_NARRATION_RE.search(text)]
+    narrated = [
+        text for text in transcript.commentary if TOOL_NARRATION_RE.search(text)
+    ]
     if len(narrated) >= 2:
         found.append(
             "repeated per-tool narration: report only material state changes, not each "
@@ -185,7 +196,9 @@ def findings(transcript: Transcript) -> list[str]:
             "the parent plan or strategy"
         )
     if _mechanism_count(final) >= 4 and not NEXT_RE.search(final):
-        found.append("mechanism-dense final omits the next owner/action or settled stop state")
+        found.append(
+            "mechanism-dense final omits the next owner/action or settled stop state"
+        )
     if len(JARGON_RE.findall(final)) >= 5 and not IMPACT_RE.search(final):
         found.append(
             "final is jargon-dense without translating the result into operator terms"
@@ -193,10 +206,8 @@ def findings(transcript: Transcript) -> list[str]:
     return found
 
 
-def main() -> int:
-    event = read_hook_input()
-    if event.get("stop_hook_active"):
-        return 0
+def evaluate_event(event: dict) -> GateResult:
+    """Evaluate one event without choosing a harness response contract."""
     transcript = read_transcript(event.get("transcript_path"))
     # Codex documents last_assistant_message as the stable Stop-event field;
     # transcript_path is explicitly convenience-only and its wire format may
@@ -205,25 +216,43 @@ def main() -> int:
     last_message = event.get("last_assistant_message")
     if isinstance(last_message, str) and last_message.strip():
         transcript = Transcript(transcript.commentary, (last_message.strip(),))
+    if not transcript.final:
+        return GateResult.indeterminate("assistant final text is unavailable")
     found = findings(transcript)
     if not found:
-        return 0
+        return GateResult.allow()
     reason = "Reporting contract violation: " + "; ".join(found) + "."
-    if not ENFORCE:
-        sys.stderr.write("[report-quality] WARN: " + reason + "\n")
+    return GateResult.block(reason)
+
+
+def main() -> int:
+    event = read_event_strict(sys.stdin)
+    if isinstance(event, GateResult):
+        return respond_claude(event)
+    if event.get("stop_hook_active") is True:
         return 0
-    print(json.dumps({"decision": "block", "reason": reason}))
-    sys.stderr.write(reason + "\n")
-    # Both harnesses consume the same forward-compatible JSON payload, but
-    # Codex accepts a Stop continuation only from a successful command hook.
-    # Reuse the decision gate's event-shape discriminator so the two handlers
-    # wired into Codex's shared Stop array cannot drift apart again.
-    return 0 if is_codex_stop_event(event) else 2
+    try:
+        result = evaluate_event(event)
+    except Exception as exc:  # noqa: BLE001 - parse/evaluation errors are restrictive
+        result = GateResult.indeterminate(
+            f"report-quality evaluator raised {type(exc).__name__}"
+        )
+    if result.disposition == "block" and not ENFORCE:
+        sys.stderr.write("[report-quality] WARN: " + result.reason + "\n")
+        return 0
+    if result.disposition == "block":
+        sys.stderr.write(result.reason + "\n")
+    return respond_claude(result)
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001 -- a broken classifier fails open
-        sys.stderr.write(f"[report-quality] error (fail-open): {exc}\n")
-        raise SystemExit(0)
+    except Exception as exc:  # noqa: BLE001 - never turn a gate crash into allow
+        raise SystemExit(
+            respond_claude(
+                GateResult.indeterminate(
+                    f"report-quality gate crashed with {type(exc).__name__}"
+                )
+            )
+        )

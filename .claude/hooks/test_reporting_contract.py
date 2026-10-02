@@ -38,4 +38,10 @@ def test_codex_delivers_and_blocks_with_shared_scripts():
     hooks = json.loads((REPO_ROOT / ".codex" / "hooks.json").read_text())["hooks"]
     assert "reporting_contract.py" in json.dumps(hooks["SessionStart"])
     assert "startup|resume|clear|compact" in json.dumps(hooks["SessionStart"])
-    assert "report_quality_gate.py" in json.dumps(hooks["Stop"])
+    stop_hooks = json.dumps(hooks["Stop"])
+    assert "codex_stop_adapter.py" in stop_hooks
+    assert "--gate report-quality --event Stop" in stop_hooks
+    assert "--gate decision-shape --event Stop" in stop_hooks
+    assert "--gate decision-shape --event SubagentStop" in json.dumps(
+        hooks["SubagentStop"]
+    )

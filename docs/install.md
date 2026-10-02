@@ -98,9 +98,11 @@ python3 <ateles-checkout>/execution/scripts/install_codex_hooks.py
 The installer merges only the Ateles handlers into the user's existing `hooks.json`, resolves their scripts
 to that checkout, and leaves unrelated hooks intact. It copies no rule body: `SessionStart`,
 `SubagentStart`, and `UserPromptSubmit` render the canonical live `agent_policy` rows, `PreToolUse`
-uses the shared Ateles guards, and `Stop`/`SubagentStop` use the shared decision-shape evaluator to
-continue a turn that violates the operator-decision contract. Codex requires a separate trust decision
-for non-managed hooks; open `/hooks`, review the Ateles definitions, and trust them.
+uses the shared Ateles guards, and `Stop`/`SubagentStop` use an installed Codex adapter around the
+shared decision-shape and reporting evaluators. The adapter fixes the expected event and Codex response
+contract in the installed command, so missing or malformed event fields continue restrictively rather
+than selecting a fail-open path. Codex requires a separate trust decision for non-managed hooks; open
+`/hooks`, review the Ateles definitions, and trust them.
 
 **Verify:** start a new Codex session and list its MCP servers; the Ateles tools are available. The hook
 panel shows the trusted Ateles entries, and session start reports `Loading live Ateles rules`. Then run:
@@ -111,8 +113,8 @@ python3 <ateles-checkout>/execution/scripts/test_codex_rule_hooks.py
 ```
 
 The first command reports the installed entries current. The second executes the configured commands
-against a synthetic local rule corpus and checks both model-context renderers and blocking guard decisions;
-config presence alone is not treated as proof. The user-scope path is the measured path in Codex CLI
+against a synthetic local rule corpus and checks model-context renderers, blocking guard decisions, and
+restrictive continuation for malformed `Stop` inputs; config presence alone is not treated as proof. The user-scope path is the measured path in Codex CLI
 0.153.4. A generated `AGENTS.md` remains a fallback for installations that have not trusted the hook, not a
 second policy source.
 

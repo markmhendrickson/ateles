@@ -77,6 +77,16 @@ def _hook_commands(event: str) -> list[str]:
     ]
 
 
+def _stop_adapter_command(event: str, gate: str) -> str:
+    return next(
+        command
+        for command in _hook_commands(event)
+        if "codex_stop_adapter.py" in command
+        and f"--gate {gate}" in command
+        and f"--event {event}" in command
+    )
+
+
 def _run(command: str, event: dict, *, env: dict[str, str] | None = None):
     run_env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
@@ -152,10 +162,13 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                         hook["command"]
                         for group in data["hooks"][event]
                         for hook in group.get("hooks", [])
-                        if "decision_shape_gate.py" in hook["command"]
+                        if "codex_stop_adapter.py" in hook["command"]
+                        and "--gate decision-shape" in hook["command"]
                     )
                     self.assertNotIn("git rev-parse", command)
                     self.assertIn(os.fspath(REPO_ROOT), command)
+                    self.assertIn("--gate decision-shape", command)
+                    self.assertIn(f"--event {event}", command)
                     result = subprocess.run(
                         ["/bin/sh", "-c", command],
                         input=json.dumps(payload),
@@ -307,10 +320,7 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CODEX_NO_PROJECT_DIR_CANARY_5F2C", result.stdout)
         state_file = (
-            REPO_ROOT
-            / ".claude"
-            / ".session_state"
-            / "no-project-dir-session.json"
+            REPO_ROOT / ".claude" / ".session_state" / "no-project-dir-session.json"
         )
         try:
             self.assertTrue(
@@ -481,9 +491,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         self,
     ) -> None:
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = [
@@ -544,9 +552,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         injected nothing) — this is the reproduction of Falco's non-blocking
         finding, now closed."""
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = [
@@ -595,9 +601,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         path must not match — same "affirmative shape, not blanket
         apply_patch coverage" posture as sibling_repo_worktree_guard.py."""
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = []
@@ -707,31 +711,44 @@ class TestCodexGuardEffect(unittest.TestCase):
         self.assertIn("final answer self-contained", result.stdout)
 
     def test_reporting_gate_blocks_low_level_codex_turn(self) -> None:
-        command = next(
-            c for c in _hook_commands("Stop") if "report_quality_gate.py" in c
-        )
+        command = _stop_adapter_command("Stop", "report-quality")
         with tempfile.TemporaryDirectory() as tmp:
             transcript = Path(tmp) / "rollout.jsonl"
             rows = [
                 {
                     "type": "response_item",
                     "payload": {
-                        "type": "message", "role": "assistant", "phase": "commentary",
-                        "content": [{"type": "output_text", "text": "I’ll inspect the file next."}],
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "I’ll inspect the file next.",
+                            }
+                        ],
                     },
                 },
                 {
                     "type": "response_item",
                     "payload": {
-                        "type": "message", "role": "assistant", "phase": "commentary",
-                        "content": [{"type": "output_text", "text": "I’ll run the test next."}],
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [
+                            {"type": "output_text", "text": "I’ll run the test next."}
+                        ],
                     },
                 },
                 {
                     "type": "response_item",
                     "payload": {
-                        "type": "message", "role": "assistant", "phase": "final_answer",
-                        "content": [{"type": "output_text", "text": "Done — see above."}],
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [
+                            {"type": "output_text", "text": "Done — see above."}
+                        ],
                     },
                 },
             ]
@@ -887,9 +904,7 @@ class TestCodexGuardEffect(unittest.TestCase):
 
 class TestCodexStopContinuationEffect(unittest.TestCase):
     def test_configured_stop_command_continues_a_noncompliant_turn(self) -> None:
-        command = next(
-            c for c in _hook_commands("Stop") if "decision_shape_gate.py" in c
-        )
+        command = _stop_adapter_command("Stop", "decision-shape")
         result = _run(
             command,
             {
@@ -910,11 +925,7 @@ class TestCodexStopContinuationEffect(unittest.TestCase):
         self.assertIn("asking permission", payload["reason"])
 
     def test_configured_subagent_stop_continues_a_noncompliant_turn(self) -> None:
-        command = next(
-            c
-            for c in _hook_commands("SubagentStop")
-            if "decision_shape_gate.py" in c
-        )
+        command = _stop_adapter_command("SubagentStop", "decision-shape")
         result = _run(
             command,
             {
@@ -935,6 +946,98 @@ class TestCodexStopContinuationEffect(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["decision"], "block")
         self.assertIn("unchanged", payload["reason"])
+
+    def test_configured_stop_restricts_invalid_event_fields(self) -> None:
+        commands = (
+            _stop_adapter_command("Stop", "decision-shape"),
+            _stop_adapter_command("Stop", "report-quality"),
+        )
+        base = {
+            "session_id": "codex-invalid-session",
+            "hook_event_name": "Stop",
+            "model": "codex-test-model",
+            "last_assistant_message": "Done.",
+        }
+        cases = (
+            (
+                "missing-model",
+                {key: value for key, value in base.items() if key != "model"},
+            ),
+            ("empty-model", {**base, "model": ""}),
+            ("whitespace-model", {**base, "model": "   "}),
+            ("non-string-model", {**base, "model": 42}),
+            (
+                "missing-event-name",
+                {key: value for key, value in base.items() if key != "hook_event_name"},
+            ),
+            ("unknown-event-name", {**base, "hook_event_name": "Unknown"}),
+            ("wrong-case-event-name", {**base, "hook_event_name": "stop"}),
+            ("non-string-event-name", {**base, "hook_event_name": 42}),
+            (
+                "missing-last-message",
+                {
+                    key: value
+                    for key, value in base.items()
+                    if key != "last_assistant_message"
+                },
+            ),
+            ("non-string-last-message", {**base, "last_assistant_message": 42}),
+        )
+        for command in commands:
+            for name, event in cases:
+                with self.subTest(command=command, case=name):
+                    result = _run(command, event)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["decision"], "block")
+                    self.assertIn("indeterminate", payload["reason"].lower())
+
+    def test_configured_stop_restricts_malformed_and_non_object_json(self) -> None:
+        commands = (
+            _stop_adapter_command("Stop", "decision-shape"),
+            _stop_adapter_command("Stop", "report-quality"),
+        )
+        for command in commands:
+            for raw in ("not json", "[]", "null"):
+                with self.subTest(command=command, raw=raw):
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", command],
+                        input=raw,
+                        text=True,
+                        capture_output=True,
+                        cwd=REPO_ROOT,
+                        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                        timeout=20,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout)["decision"], "block")
+
+    def test_adapter_restricts_unrecognized_immutable_configuration(self) -> None:
+        adapter = REPO_ROOT / ".claude" / "hooks" / "codex_stop_adapter.py"
+        event = {
+            "hook_event_name": "Stop",
+            "model": "codex-test-model",
+            "last_assistant_message": "Done.",
+        }
+        result = subprocess.run(
+            [
+                os.fspath(Path(os.sys.executable)),
+                os.fspath(adapter),
+                "--gate",
+                "unknown",
+                "--event",
+                "Stop",
+            ],
+            input=json.dumps(event),
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("indeterminate", payload["reason"].lower())
 
 
 if __name__ == "__main__":
