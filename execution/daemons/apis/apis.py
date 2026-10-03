@@ -641,15 +641,24 @@ def resolve_artifact_ref(parsed: ParsedRef, *, repo: str | None = None) -> str:
         if not owner or not name or parsed.number is None:
             return "unavailable"
         cmd = [
-            "gh", "pr", "view", str(parsed.number),
-            "--repo", f"{owner}/{name}", "--json", "number",
+            "gh",
+            "pr",
+            "view",
+            str(parsed.number),
+            "--repo",
+            f"{owner}/{name}",
+            "--json",
+            "number",
         ]
     elif parsed.kind == "sha":
         if not owner or not name or not parsed.sha:
             return "unavailable"
         cmd = [
-            "gh", "api", f"repos/{owner}/{name}/commits/{parsed.sha}",
-            "--jq", ".sha",
+            "gh",
+            "api",
+            f"repos/{owner}/{name}/commits/{parsed.sha}",
+            "--jq",
+            ".sha",
         ]
     else:
         return "unavailable"
@@ -1085,9 +1094,13 @@ async def dispatch_task(
         # ent_22fd6f25159f1f2689726780) instead of the gate reading an absent
         # field as a silent 0.0 — and marks it unscored so the checkpoint
         # reason says "never scored", not "low confidence".
-        action_type_recognized = bool(action_type) and (
-            action_type.strip().lower()
-            in (policy.low_blast_action_types | policy.high_blast_action_types)
+        # A declared ``operator_only`` is recognized safety intent, not an
+        # unclassified action.  It still fails closed at the gate, but keeping
+        # it distinct from an unknown declaration prevents the checkpoint
+        # reason from falsely saying that a human-owned task merely needs a
+        # policy vocabulary entry.
+        action_type_recognized = (
+            bool(action_type) and policy.action_type_kind(action_type) != "unrecognized"
         )
         confidence, confidence_unscored = _resolve_confidence(
             snapshot,
@@ -1157,27 +1170,62 @@ async def dispatch_task(
                     ),
                 )
             if not hold_proven or not tenant_id or not brief_id:
-                log.error(
-                    f"[{DAEMON_NAME}] task {entity_id} was held but its "
-                    "authenticated checkpoint could not be proven — refusing "
-                    "execution"
+                checkpoint_failure_reason = (
+                    "checkpoint persistence/read-back failed — no authenticated "
+                    "approval artifact exists; execution refused"
                 )
-            notifier.send(
-                f"PLAN checkpoint: {title[:70]}\n"
-                f"  agent={skill} blast={decision.blast_radius.value} "
-                f"conf={confidence:.2f} — {decision.reason}\n"
-                f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
-                priority=Priority.BLOCKER,
-                handler=DAEMON_NAME,
-            )
-            log.info(
-                f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
-                f"(checkpoint_brief={brief_id})"
-            )
-            job.escalated(
-                f"task {entity_id} → {skill} held for operator "
-                f"(blast={decision.blast_radius.value}, conf={confidence:.2f})"
-            )
+                blocked_written = set_task_status(
+                    entity_id,
+                    TaskStatus.BLOCKED,
+                    handler=DAEMON_NAME,
+                    from_status=TaskStatus.AWAITING_APPROVAL.value,
+                    reason=checkpoint_failure_reason,
+                    key_suffix=f"{trigger}-checkpoint-failure",
+                )
+                blocked_record = fetch_task_record(entity_id)
+                blocked_snapshot = _record_snapshot(blocked_record)
+                blocked_proven = (
+                    blocked_written
+                    and blocked_snapshot is not None
+                    and normalize_status(blocked_snapshot.get("status"))
+                    == TaskStatus.BLOCKED.value
+                    and blocked_snapshot.get("blocked_reason")
+                    == checkpoint_failure_reason
+                )
+                log.error(
+                    f"[{DAEMON_NAME}] task {entity_id} has no authenticated "
+                    "checkpoint; blocked it instead of leaving an orphaned "
+                    f"approval hold (blocked_readback={blocked_proven})"
+                )
+                notifier.send(
+                    f"BLOCKED — checkpoint was not persisted: {title[:70]}\n"
+                    f"  agent={skill} task={entity_id} "
+                    f"recovery_readback={'ok' if blocked_proven else 'failed'}\n"
+                    "  No agent was spawned; repair Neotoma checkpoint persistence before retrying.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                job.escalated(
+                    f"task {entity_id} → {skill} blocked: checkpoint persistence "
+                    f"failed (readback={blocked_proven})"
+                )
+            else:
+                notifier.send(
+                    f"PLAN checkpoint: {title[:70]}\n"
+                    f"  agent={skill} blast={decision.blast_radius.value} "
+                    f"conf={confidence:.2f} — {decision.reason}\n"
+                    f"  task={entity_id} brief={brief_id}",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                log.info(
+                    f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
+                    f"(checkpoint_brief={brief_id})"
+                )
+                job.escalated(
+                    f"task {entity_id} → {skill} held for operator "
+                    f"(blast={decision.blast_radius.value}, conf={confidence:.2f})"
+                )
             return
 
     log.info(
@@ -1248,9 +1296,7 @@ async def dispatch_task(
                     "required conversation/agent_session provenance could not be "
                     "persisted and verified"
                 )
-                log.error(
-                    f"[{DAEMON_NAME}] task {entity_id} {reason} — not spawning"
-                )
+                log.error(f"[{DAEMON_NAME}] task {entity_id} {reason} — not spawning")
                 set_task_status(
                     entity_id,
                     TaskStatus.FAILED,
@@ -1363,8 +1409,11 @@ async def dispatch_task(
             if run_session and fail_session:
                 update_run_session_status(run_session, status="failed")
             set_task_status(
-                entity_id, status, handler=DAEMON_NAME,
-                from_status=from_status, reason=reason,
+                entity_id,
+                status,
+                handler=DAEMON_NAME,
+                from_status=from_status,
+                reason=reason,
                 key_suffix=run_key,
             )
             heads = {
@@ -1456,8 +1505,10 @@ async def dispatch_task(
                     limit=2048,
                 )
                 reason = _gate_reason(
-                    "missing_header", role=contract.role,
-                    kind=contract.artifact_kind, task_id=entity_id,
+                    "missing_header",
+                    role=contract.role,
+                    kind=contract.artifact_kind,
+                    task_id=entity_id,
                 )
                 _artifact_fail(
                     TaskStatus.FAILED,
@@ -1471,8 +1522,10 @@ async def dispatch_task(
                 _artifact_fail(
                     TaskStatus.FAILED,
                     _gate_reason(
-                        "empty_body", role=contract.role,
-                        kind=contract.artifact_kind, task_id=entity_id,
+                        "empty_body",
+                        role=contract.role,
+                        kind=contract.artifact_kind,
+                        task_id=entity_id,
                     ),
                     stage="failed",
                 )
@@ -1486,7 +1539,9 @@ async def dispatch_task(
                 _artifact_fail(
                     TaskStatus.BLOCKED,
                     _gate_reason(
-                        "blocked", role=contract.role, kind=contract.artifact_kind,
+                        "blocked",
+                        role=contract.role,
+                        kind=contract.artifact_kind,
                         task_id=entity_id,
                         verbatim_body=header.body[:800],
                     ),
@@ -1528,7 +1583,9 @@ async def dispatch_task(
                 _artifact_fail(
                     TaskStatus.FAILED,
                     _gate_reason(
-                        "empty_body", role=contract.role, kind=contract.artifact_kind,
+                        "empty_body",
+                        role=contract.role,
+                        kind=contract.artifact_kind,
                         task_id=entity_id,
                         extra="bare ENG_SPEC_SECTION with no content",
                     ),
@@ -1542,7 +1599,13 @@ async def dispatch_task(
                 # it happens to contain a link. Nothing to look up.
                 # The idempotency key embeds this identity, so agent TEXT is hashed
                 # rather than embedded (up to 200 agent-chosen characters).
-                return header, _text_identity(stored_line), f"{shape} ok", stored_line, shape
+                return (
+                    header,
+                    _text_identity(stored_line),
+                    f"{shape} ok",
+                    stored_line,
+                    shape,
+                )
 
             dispatch_repo = _dispatch_repo_from_snapshot(snapshot)
             # No inner handler: anything `parse_github_ref` raises is an unexpected
@@ -1634,7 +1697,9 @@ async def dispatch_task(
                 # in EXECUTING with no status and an unclosed run session.
                 log.error(
                     "[%s] artifact gate raised for %s\n%s",
-                    DAEMON_NAME, entity_id, _redact_agent_text(traceback.format_exc()),
+                    DAEMON_NAME,
+                    entity_id,
+                    _redact_agent_text(traceback.format_exc()),
                 )
                 _artifact_fail(
                     TaskStatus.BLOCKED,
@@ -1683,8 +1748,7 @@ async def dispatch_task(
                 run_session, status="completed"
             ):
                 reason = (
-                    "terminal agent_session state could not be persisted and "
-                    "verified"
+                    "terminal agent_session state could not be persisted and verified"
                 )
                 _run_stage(
                     "assistant",
@@ -1706,9 +1770,7 @@ async def dispatch_task(
                     priority=Priority.BLOCKER,
                     handler=DAEMON_NAME,
                 )
-                job.failed(
-                    f"task {entity_id} → {skill} completion withheld: {reason}"
-                )
+                job.failed(f"task {entity_id} → {skill} completion withheld: {reason}")
                 return
             done_from = (
                 TaskStatus.VERIFIED.value if run_session else TaskStatus.EXECUTING.value
@@ -1722,9 +1784,12 @@ async def dispatch_task(
                 # claims the task finished. A 2xx from `/correct` is not that
                 # evidence.
                 outcome = complete_task_with_result(
-                    entity_id, handler=DAEMON_NAME, result=stored_line,
+                    entity_id,
+                    handler=DAEMON_NAME,
+                    result=stored_line,
                     fetch_snapshot=fetch_task_snapshot,
-                    from_status=done_from, key_suffix=run_key,
+                    from_status=done_from,
+                    key_suffix=run_key,
                     artifact_identity=identity,
                 )
                 saved = bool(outcome)
