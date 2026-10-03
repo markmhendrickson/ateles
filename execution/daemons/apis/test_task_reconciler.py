@@ -914,6 +914,10 @@ def test_pending_task_beyond_the_first_query_page_reaches_dispatch(monkeypatch):
         low_blast_action_types = frozenset({"local_edit"})
         high_blast_action_types = frozenset()
 
+        @staticmethod
+        def action_type_kind(action_type):
+            return "recognized" if action_type == "local_edit" else "unrecognized"
+
     writes = []
 
     def record_status(entity_id, status, **kwargs):
