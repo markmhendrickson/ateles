@@ -442,6 +442,7 @@ def test_spec_mirror_patch_403_records_failure_and_stops_pipeline(
     """A real spec-mirror refusal is contained by the issue handler."""
     planted_payload = "planted-sensitive-github-response"
     stored: list[dict] = []
+    failure_events: list[str] = []
     mirror_calls: list[str] = []
     cleanup_calls: list[int] = []
     implementation_calls: list[int] = []
@@ -501,7 +502,7 @@ def test_spec_mirror_patch_403_records_failure_and_stops_pipeline(
     monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight", spy_clear)
     monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", spy_open_pr)
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
-    _install_durable_failure_store(monkeypatch, stored)
+    _install_durable_failure_store(monkeypatch, stored, failure_events)
 
     dispatcher = _dispatcher()
     dispatcher.config.auto_build = True
@@ -513,6 +514,7 @@ def test_spec_mirror_patch_403_records_failure_and_stops_pipeline(
     assert mirror_calls == (["GET"] if failure_method == "GET" else ["GET", "PATCH"])
 
     assert len(stored) == 1
+    assert failure_events == ["failure-stored", "failure-read-back"]
     event = stored[0]
     assert event["event_type"] == "github.issue_pipeline_failed"
     assert event["summary"] == (
