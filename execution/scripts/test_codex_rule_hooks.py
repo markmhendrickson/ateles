@@ -15,6 +15,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -624,6 +625,20 @@ class TestCodexPreToolUseMatcherSurfaces(unittest.TestCase):
         group = _group_for("credential_read_guard.py")
         self.assertIn("exec_command", group["matcher"])
         self.assertIn("Bash", group["matcher"])
+
+    def test_rule_injection_covers_current_and_legacy_mutation_aliases(self) -> None:
+        group = _group_for("rule_injection_gate.py")
+        for tool_name in (
+            "exec_command",
+            "Bash",
+            "mcp__neotoma__store",
+            "mcp__mcpsrv_neotoma__store",
+            "mcp__neotoma__correct",
+            "mcp__mcpsrv_neotoma__correct",
+            "mcp__neotoma__publish_rendered_page",
+        ):
+            with self.subTest(tool_name=tool_name):
+                self.assertIsNotNone(re.fullmatch(group["matcher"], tool_name))
 
 
 class TestInstalledCodexCredentialGuard(unittest.TestCase):

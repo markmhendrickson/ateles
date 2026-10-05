@@ -106,6 +106,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input  # noqa: E402
+from action_capabilities import classify_tool_call  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Single data source: every credential-path check in this file resolves
@@ -1174,12 +1175,20 @@ def check_glob(tool_input: dict):  # noqa: ARG001 — intentionally unused
 
 def main() -> int:
     payload = read_hook_input()
-    tool = payload.get("tool_name")
+    raw_tool = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input") or {}
     if not isinstance(tool_input, dict):
         return 0
+    capabilities = classify_tool_call(
+        raw_tool,
+        tool_input,
+        hook_event_name=str(payload.get("hook_event_name") or ""),
+    )
+    if not capabilities.has("credential_read_candidate"):
+        return 0
+    tool = capabilities.canonical_tool_id
 
-    if tool in {"Bash", "exec_command"}:
+    if tool == "shell":
         # Claude's legacy shell tool uses ``command``; current Codex uses
         # ``exec_command`` with a ``cmd`` field.  Accept both field names on
         # both aliases so a harness rename cannot silently remove the guard.
@@ -1190,21 +1199,21 @@ def main() -> int:
             return deny(_safe_alternative(hit, tool="Bash"))
         return 0
 
-    if tool == "Read":
+    if tool == "read":
         hit = check_read(tool_input)
         if hit:
             log(f"blocking Read of credential file: {hit}")
             return deny(_safe_alternative(hit, tool="Read"))
         return 0
 
-    if tool == "Grep":
+    if tool == "grep":
         hit = check_grep(tool_input)
         if hit:
             log(f"blocking Grep content-mode read of credential file: {hit}")
             return deny(_safe_alternative(hit, tool="Grep"))
         return 0
 
-    if tool == "Glob":
+    if tool == "glob":
         check_glob(tool_input)
         return 0
 
