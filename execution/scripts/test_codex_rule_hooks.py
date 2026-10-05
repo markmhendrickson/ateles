@@ -613,6 +613,97 @@ class TestCodexPreToolUseMatcherSurfaces(unittest.TestCase):
         sibling_index = group_index("sibling_repo_worktree_guard.py")
         self.assertNotIn(sibling_index, shell_guard_indices)
 
+    def test_credential_guard_covers_current_and_legacy_shell_tool_names(self) -> None:
+        """The installed Codex binding must cover the shell tool name used by
+        current Codex (``exec_command``) as well as the legacy ``Bash`` alias.
+
+        This is deliberately a template assertion beside the recipient-path
+        effect test below: a correct guard script that the installed matcher
+        never invokes is not a control.
+        """
+        group = _group_for("credential_read_guard.py")
+        self.assertIn("exec_command", group["matcher"])
+        self.assertIn("Bash", group["matcher"])
+
+
+class TestInstalledCodexCredentialGuard(unittest.TestCase):
+    def test_installed_user_hook_denies_synthetic_secret_environment_dump(
+        self,
+    ) -> None:
+        """Recipient-path planted red: install the committed template into a
+        synthetic user home, then execute the installed handler from outside
+        the repository with Codex's current ``exec_command`` event shape.
+
+        Before the fix this fails while selecting the handler because the
+        managed installer/template do not carry ``credential_read_guard.py``.
+        The canary is a name only; no real credential value is read.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "codex-home" / "hooks.json"
+            installed = subprocess.run(
+                [
+                    os.fspath(Path(os.sys.executable)),
+                    os.fspath(INSTALLER),
+                    "--out",
+                    os.fspath(out),
+                ],
+                text=True,
+                capture_output=True,
+                cwd=REPO_ROOT,
+                timeout=20,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            data = json.loads(out.read_text(encoding="utf-8"))
+            group = next(
+                group
+                for group in data["hooks"]["PreToolUse"]
+                if any(
+                    "credential_read_guard.py" in hook.get("command", "")
+                    for hook in group.get("hooks", [])
+                )
+            )
+            self.assertIn("exec_command", group["matcher"])
+            command = next(
+                hook["command"]
+                for hook in group["hooks"]
+                if "credential_read_guard.py" in hook["command"]
+            )
+            outside = Path(tmp) / "outside-any-repo"
+            outside.mkdir()
+            result = subprocess.run(
+                ["/bin/sh", "-c", command],
+                input=json.dumps(
+                    {
+                        "session_id": "credential-recipient-path",
+                        "turn_id": "turn-1",
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "exec_command",
+                        "tool_use_id": "call-secret-canary",
+                        "tool_input": {
+                            "cmd": "env",
+                            "command": "env",
+                        },
+                        "cwd": os.fspath(outside),
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                cwd=outside,
+                env={
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
+                    "SYNTHETIC_SECRET_CANARY": "must-not-appear",
+                },
+                timeout=20,
+            )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("must-not-appear", result.stdout)
+        self.assertNotIn("must-not-appear", result.stderr)
+        payload = json.loads(result.stdout)
+        output = payload["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "deny")
+
 
 class TestCodexGuardEffect(unittest.TestCase):
     def test_configured_git_stash_guard_returns_a_codex_deny(self) -> None:

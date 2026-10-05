@@ -1179,11 +1179,14 @@ def main() -> int:
     if not isinstance(tool_input, dict):
         return 0
 
-    if tool == "Bash":
-        command = tool_input.get("command")
+    if tool in {"Bash", "exec_command"}:
+        # Claude's legacy shell tool uses ``command``; current Codex uses
+        # ``exec_command`` with a ``cmd`` field.  Accept both field names on
+        # both aliases so a harness rename cannot silently remove the guard.
+        command = tool_input.get("command") or tool_input.get("cmd")
         hit = check_bash(command)
         if hit:
-            log(f"blocking Bash read of credential content: {hit}")
+            log(f"blocking shell read of credential content: {hit}")
             return deny(_safe_alternative(hit, tool="Bash"))
         return 0
 
