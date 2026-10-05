@@ -18,7 +18,6 @@ from lib.notify import Priority
 from skill_runner import SkillResult
 from swarm_dispatch import (
     DispatchConfig,
-    IssuePipelineWriteError,
     SwarmDispatcher,
 )
 from test_swarm_dispatch import (
@@ -266,7 +265,7 @@ def test_unrelated_422_does_not_prove_issue_write_readiness(monkeypatch):
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
 
-    with pytest.raises(IssuePipelineWriteError) as raised:
+    with pytest.raises(swarm_dispatch.IssuePipelineWriteError) as raised:
         asyncio.run(
             _dispatcher()._mark_pipeline_inflight(
                 _issue_trigger(), stage="inflight"
@@ -306,7 +305,7 @@ def test_issue_body_patch_403_is_a_bounded_write_error(monkeypatch):
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", Client)
 
-    with pytest.raises(IssuePipelineWriteError) as raised:
+    with pytest.raises(swarm_dispatch.IssuePipelineWriteError) as raised:
         asyncio.run(
             _dispatcher()._mark_pipeline_inflight(
                 _issue_trigger(), stage="inflight"
