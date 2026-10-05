@@ -51,6 +51,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -654,6 +655,66 @@ CHECKPOINT_REQUIRED_APPROVER_JKT = os.environ.get(
 ).strip()
 CHECKPOINT_PRODUCER_JKT = os.environ.get("APIS_CHECKPOINT_PRODUCER_JKT", "").strip()
 
+_EFFECT_BINDING_KEYS = frozenset(
+    {
+        "action_class",
+        "artifact_digest",
+        "destination",
+        "idempotency_key",
+        "expires_at",
+    }
+)
+_ARTIFACT_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_ACTION_CLASS_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _parse_effect_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _validated_effect_binding(value: object) -> dict[str, str] | None:
+    """Return one canonical exact-effect binding, or ``None`` if malformed.
+
+    The closed field set prevents two producers from assigning different
+    meanings to extra receipt fields.  Values are rejected rather than
+    normalized: approval binds the bytes the principal saw, so silently
+    trimming or case-folding would create a second representation.
+    """
+    if not isinstance(value, dict) or set(value) != _EFFECT_BINDING_KEYS:
+        return None
+    if not all(isinstance(value[key], str) for key in _EFFECT_BINDING_KEYS):
+        return None
+    binding = {key: value[key] for key in _EFFECT_BINDING_KEYS}
+    if not _ACTION_CLASS_RE.fullmatch(binding["action_class"]):
+        return None
+    if not _ARTIFACT_DIGEST_RE.fullmatch(binding["artifact_digest"]):
+        return None
+    if (
+        not binding["destination"]
+        or binding["destination"] != binding["destination"].strip()
+        or len(binding["destination"]) > 2048
+        or any(ord(char) < 32 for char in binding["destination"])
+    ):
+        return None
+    if (
+        not binding["idempotency_key"]
+        or binding["idempotency_key"] != binding["idempotency_key"].strip()
+        or len(binding["idempotency_key"]) > 256
+        or any(ord(char) < 32 for char in binding["idempotency_key"])
+    ):
+        return None
+    if _parse_effect_timestamp(binding["expires_at"]) is None:
+        return None
+    return binding
+
 
 def _checkpoint_producer_http_signer(handler: str):
     """Load only the checkpoint producer's existing RFC 9421 JWK."""
@@ -685,6 +746,7 @@ def build_checkpoint_authorization_envelope(
     required_approver_sub: str = CHECKPOINT_REQUIRED_APPROVER_SUB,
     required_approver_jkt: str = CHECKPOINT_REQUIRED_APPROVER_JKT,
     producer_jkt: str | None = None,
+    effect_binding: dict[str, str] | None = None,
 ) -> str:
     """Serialize the exact task and policy revisions shown for approval."""
     resolved_producer_jkt = (
@@ -710,7 +772,67 @@ def build_checkpoint_authorization_envelope(
         "gate_action": decision.action.value,
         "blast_radius": decision.blast_radius.value,
     }
+    if effect_binding is not None:
+        validated_binding = _validated_effect_binding(effect_binding)
+        if validated_binding is None:
+            raise ValueError("effect_binding must be a complete canonical binding")
+        payload["effect_binding"] = validated_binding
     return _canonical_json(payload)
+
+
+def checkpoint_authorization_matches_effect(
+    authority: object,
+    authenticated_resolution: object,
+    *,
+    approving_principal: str,
+    action_class: str,
+    artifact_digest: str,
+    destination: str,
+    idempotency_key: str,
+    now: str,
+) -> bool:
+    """Whether authenticated approval permits this exact outward effect.
+
+    ``authority`` must come from
+    :func:`read_authenticated_checkpoint_authorization`, and
+    ``authenticated_resolution`` from
+    :func:`read_authenticated_checkpoint_resolution`.  The function does not
+    reconstruct either proof from mutable snapshot fields.  Every malformed,
+    missing, expired, or mismatched value denies the action.
+    """
+    if not isinstance(authority, dict) or not isinstance(
+        authenticated_resolution, dict
+    ):
+        return False
+    binding = _validated_effect_binding(authority.get("effect_binding"))
+    if binding is None:
+        return False
+    principal = str(approving_principal or "")
+    required_sub = authority.get("required_approver_sub")
+    required_jkt = authority.get("required_approver_jkt")
+    if (
+        not principal
+        or principal != required_sub
+        or authenticated_resolution.get("principal_sub") != principal
+        or authenticated_resolution.get("agent_thumbprint") != required_jkt
+        or authenticated_resolution.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
+        or not isinstance(authenticated_resolution.get("observation_id"), str)
+        or not authenticated_resolution["observation_id"]
+    ):
+        return False
+    expected = {
+        "action_class": action_class,
+        "artifact_digest": artifact_digest,
+        "destination": destination,
+        "idempotency_key": idempotency_key,
+    }
+    if any(binding[key] != value for key, value in expected.items()):
+        return False
+    attempted_at = _parse_effect_timestamp(now)
+    expires_at = _parse_effect_timestamp(binding["expires_at"])
+    if attempted_at is None or expires_at is None or attempted_at >= expires_at:
+        return False
+    return True
 
 
 def read_authenticated_checkpoint_authorization(

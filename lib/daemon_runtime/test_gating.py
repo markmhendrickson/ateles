@@ -21,6 +21,7 @@ from lib.daemon_runtime.gating import (
     fetch_checkpoint_snapshot,
     fetch_task_snapshot,
     read_checkpoint_resolution,
+    checkpoint_authorization_matches_effect,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
     write_checkpoint_brief,
@@ -58,6 +59,147 @@ def _default() -> ExecutionPolicy:
     # loaded=False uses the conservative fallback (threshold 0.85, default low,
     # fallback high-blast set incl. open_pr/payment/release/...).
     return ExecutionPolicy(entity_id="default", loaded=False)
+
+
+def test_effect_bound_checkpoint_authorization_rejects_destination_or_content_drift():
+    """Planted red for the publication boundary.
+
+    The authenticated checkpoint receipt must be reusable only for the exact
+    outward effect the principal approved.  A changed page body, destination,
+    or idempotency key is a new action and therefore needs a new approval.
+    """
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 2,
+        "last_observation_at": "2026-10-05T10:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+    policy = ExecutionPolicy(entity_id="policy", loaded=True)
+    decision = evaluate_gate(confidence=0.99, action_type="publish", policy=policy)
+    authority = gating_module.json.loads(
+        gating_module.build_checkpoint_authorization_envelope(
+            task_record=task_record,
+            policy=policy,
+            decision=decision,
+            action_type="publish",
+            user_id="tenant-a",
+            required_approver_sub="operator@ateles-swarm",
+            required_approver_jkt="A" * 43,
+            producer_jkt="P" * 43,
+            effect_binding={
+                "action_class": "publication",
+                "artifact_digest": "sha256:" + "1" * 64,
+                "destination": "rendered-page:synthetic-preview",
+                "idempotency_key": "publish-synthetic-preview-v1",
+                "expires_at": "2026-10-05T11:00:00Z",
+            },
+        )
+    )
+    resolution = {
+        "principal_sub": "operator@ateles-swarm",
+        "observation_id": "obs-resolution",
+        "attribution_tier": "operator_attested",
+        "agent_thumbprint": "A" * 43,
+    }
+
+    expected = {
+        "approving_principal": "operator@ateles-swarm",
+        "action_class": "publication",
+        "artifact_digest": "sha256:" + "1" * 64,
+        "destination": "rendered-page:synthetic-preview",
+        "idempotency_key": "publish-synthetic-preview-v1",
+        "now": "2026-10-05T10:30:00Z",
+    }
+    assert checkpoint_authorization_matches_effect(authority, resolution, **expected)
+
+    for field, changed in (
+        ("artifact_digest", "sha256:" + "2" * 64),
+        ("destination", "rendered-page:other-preview"),
+        ("idempotency_key", "publish-synthetic-preview-v2"),
+    ):
+        attempted = dict(expected)
+        attempted[field] = changed
+        assert not checkpoint_authorization_matches_effect(
+            authority, resolution, **attempted
+        ), field
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_binding",
+        "malformed_digest",
+        "expired",
+        "wrong_principal",
+        "unverified_resolution",
+    ],
+)
+def test_effect_bound_checkpoint_authorization_fails_closed(mutation):
+    authority = {
+        "required_approver_sub": "operator@ateles-swarm",
+        "required_approver_jkt": "A" * 43,
+        "effect_binding": {
+            "action_class": "publication",
+            "artifact_digest": "sha256:" + "1" * 64,
+            "destination": "rendered-page:synthetic-preview",
+            "idempotency_key": "publish-synthetic-preview-v1",
+            "expires_at": "2026-10-05T11:00:00Z",
+        },
+    }
+    resolution = {
+        "principal_sub": "operator@ateles-swarm",
+        "observation_id": "obs-resolution",
+        "attribution_tier": "operator_attested",
+        "agent_thumbprint": "A" * 43,
+    }
+    if mutation == "missing_binding":
+        authority.pop("effect_binding")
+    elif mutation == "malformed_digest":
+        authority["effect_binding"]["artifact_digest"] = "sha256:not-a-digest"
+    elif mutation == "expired":
+        authority["effect_binding"]["expires_at"] = "2026-10-05T10:00:00Z"
+    elif mutation == "wrong_principal":
+        resolution["principal_sub"] = "other@ateles-swarm"
+    else:
+        resolution.pop("observation_id")
+
+    assert not checkpoint_authorization_matches_effect(
+        authority,
+        resolution,
+        approving_principal="operator@ateles-swarm",
+        action_class="publication",
+        artifact_digest="sha256:" + "1" * 64,
+        destination="rendered-page:synthetic-preview",
+        idempotency_key="publish-synthetic-preview-v1",
+        now="2026-10-05T10:30:00Z",
+    )
+
+
+def test_checkpoint_authorization_builder_rejects_partial_effect_binding():
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-10-05T10:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+    policy = ExecutionPolicy(entity_id="policy", loaded=True)
+    decision = evaluate_gate(confidence=0.99, action_type="publish", policy=policy)
+
+    with pytest.raises(ValueError, match="complete canonical binding"):
+        gating_module.build_checkpoint_authorization_envelope(
+            task_record=task_record,
+            policy=policy,
+            decision=decision,
+            action_type="publish",
+            user_id="tenant-a",
+            effect_binding={
+                "action_class": "publication",
+                "artifact_digest": "sha256:" + "1" * 64,
+                "destination": "rendered-page:synthetic-preview",
+            },
+        )
 
 
 def test_high_conf_low_blast_auto_executes():
