@@ -1,33 +1,218 @@
-"""Look-alike letters in review text must fold to their Latin letter.
+"""Look-alike characters must not hide a blocking token from the veto scans.
 
-`_normalize_for_blocking_scan` feeds `output_has_blocking_verdict` and
-`body_has_blocking_findings`. Both look for ASCII tokens, so a token spelled
-with a single look-alike letter from another script has to be folded back first
-or it reads as clean (principles.md, principle 5: fail closed on the field that
-carries the safety meaning).
+`output_has_blocking_verdict`, `body_has_blocking_findings` and the second
+verdict-line veto in `lens_own_verdict` look for ASCII tokens, so a token
+spelled with a look-alike character from another script has to be folded back
+first or it reads as clean (principles.md, principle 5: fail closed on the field
+that carries the safety meaning).
 
-The fold table is derived at import time from Unicode character names rather
-than listed by hand, so these tests pin three things: the cases that were
-missing, the cases the old fixed table already covered, and that ordinary
-Greek and Cyrillic prose is not turned into a false block.
+What is pinned here:
+
+* the fold itself: every derived character is pinned individually below, so a
+  deleted table entry deletes nothing from this file;
+* the veto scans see every spelling, including characters no table lists (the
+  bounded wildcard backstop) and a look-alike glued to a token;
+* the header and verdict-line recognisers do NOT use the wide fold, so a
+  look-alike in a clearing position stays unreadable;
+* ordinary Greek and Cyrillic prose is not turned into a false block.
 """
 
+import logging
 import unicodedata
 
 import pytest
 
 import swarm_dispatch
 from swarm_dispatch import (
-    _CONFUSABLE_TO_ASCII,
     _normalize_for_blocking_scan,
     body_has_blocking_findings,
+    lens_own_verdict,
     output_has_blocking_verdict,
+    sign_off_is_warranted,
 )
 
-GREEK_CAPITAL_BETA = "Β"
-GREEK_CAPITAL_OMICRON = "Ο"
-CYRILLIC_CAPITAL_IE = "Е"
-SMALL_CAPITAL_D = "ᴅ"
+
+def _veto_table():
+    return swarm_dispatch._VETO_CONFUSABLE_TO_ASCII
+
+
+def _tables():
+    return swarm_dispatch._CONFUSABLE_TABLES
+
+
+# Every character the derivation produces, written out by code point. Reviewed
+# by hand and NOT generated from the table: removing a table entry (or its
+# name) fails here, and adding one means adding it here.
+PINNED = [
+    (0x0131, "i"),
+    (0x0196, "I"),
+    (0x01C0, "I"),
+    (0x0261, "g"),
+    (0x0262, "G"),
+    (0x026A, "I"),
+    (0x0274, "N"),
+    (0x0280, "R"),
+    (0x028F, "Y"),
+    (0x0299, "B"),
+    (0x029C, "H"),
+    (0x029F, "L"),
+    (0x02CD, "_"),
+    (0x037F, "J"),
+    (0x0391, "A"),
+    (0x0392, "B"),
+    (0x0395, "E"),
+    (0x0396, "Z"),
+    (0x0397, "H"),
+    (0x0399, "I"),
+    (0x039A, "K"),
+    (0x039C, "M"),
+    (0x039D, "N"),
+    (0x039F, "O"),
+    (0x03A1, "P"),
+    (0x03A4, "T"),
+    (0x03A5, "Y"),
+    (0x03A7, "X"),
+    (0x03B1, "a"),
+    (0x03B9, "i"),
+    (0x03BA, "k"),
+    (0x03BD, "n"),
+    (0x03BF, "o"),
+    (0x03C1, "p"),
+    (0x03C5, "u"),
+    (0x03C7, "x"),
+    (0x03F2, "c"),
+    (0x03F3, "j"),
+    (0x03F9, "C"),
+    (0x0405, "S"),
+    (0x0406, "I"),
+    (0x0408, "J"),
+    (0x0410, "A"),
+    (0x0412, "B"),
+    (0x0415, "E"),
+    (0x041A, "K"),
+    (0x041C, "M"),
+    (0x041D, "H"),
+    (0x041E, "O"),
+    (0x0420, "P"),
+    (0x0421, "C"),
+    (0x0422, "T"),
+    (0x0423, "Y"),
+    (0x0425, "X"),
+    (0x0430, "a"),
+    (0x0432, "b"),
+    (0x0435, "e"),
+    (0x043A, "k"),
+    (0x043E, "o"),
+    (0x0440, "p"),
+    (0x0441, "c"),
+    (0x0443, "y"),
+    (0x0445, "x"),
+    (0x0455, "s"),
+    (0x0456, "i"),
+    (0x0458, "j"),
+    (0x04BA, "H"),
+    (0x04BB, "h"),
+    (0x04C0, "L"),
+    (0x04CF, "L"),
+    (0x0500, "D"),
+    (0x0501, "d"),
+    (0x050C, "G"),
+    (0x051A, "Q"),
+    (0x051B, "q"),
+    (0x051C, "W"),
+    (0x051D, "w"),
+    (0x054D, "U"),
+    (0x0555, "O"),
+    (0x0570, "h"),
+    (0x0578, "n"),
+    (0x057D, "u"),
+    (0x0585, "o"),
+    (0x13A0, "D"),
+    (0x13A1, "R"),
+    (0x13A2, "T"),
+    (0x13A9, "Y"),
+    (0x13AA, "A"),
+    (0x13AC, "E"),
+    (0x13B3, "W"),
+    (0x13B7, "M"),
+    (0x13BB, "H"),
+    (0x13C0, "G"),
+    (0x13D2, "R"),
+    (0x13DA, "S"),
+    (0x13F4, "B"),
+    (0x1D00, "A"),
+    (0x1D04, "C"),
+    (0x1D05, "D"),
+    (0x1D07, "E"),
+    (0x1D0A, "J"),
+    (0x1D0B, "K"),
+    (0x1D0D, "M"),
+    (0x1D0F, "O"),
+    (0x1D18, "P"),
+    (0x1D1B, "T"),
+    (0x1D1C, "U"),
+    (0x1D20, "V"),
+    (0x1D21, "W"),
+    (0x1D22, "Z"),
+    (0x2017, "_"),
+    (0x203F, "_"),
+    (0x2045, "["),
+    (0x2046, "]"),
+    (0x222A, "U"),
+    (0x22A4, "T"),
+    (0x23BD, "_"),
+    (0x2574, "_"),
+    (0x2581, "_"),
+    (0x2758, "I"),
+    (0x27E6, "["),
+    (0x27E7, "]"),
+    (0x2C80, "A"),
+    (0x2C81, "a"),
+    (0x2C88, "E"),
+    (0x2C8C, "Z"),
+    (0x2C8E, "H"),
+    (0x2C92, "I"),
+    (0x2C94, "K"),
+    (0x2C98, "M"),
+    (0x2C9A, "N"),
+    (0x2C9E, "O"),
+    (0x2C9F, "o"),
+    (0x2CA2, "P"),
+    (0x2CA3, "p"),
+    (0x2CA4, "C"),
+    (0x2CA5, "c"),
+    (0x2CA6, "T"),
+    (0x2CA8, "Y"),
+    (0x2CAC, "X"),
+    (0x2D4F, "I"),
+    (0x3007, "O"),
+    (0x301A, "["),
+    (0x301B, "]"),
+    (0xA4D0, "B"),
+    (0xA4D1, "P"),
+    (0xA4D3, "D"),
+    (0xA4D4, "T"),
+    (0xA4D6, "G"),
+    (0xA4D7, "K"),
+    (0xA4DA, "C"),
+    (0xA4DF, "M"),
+    (0xA4E0, "N"),
+    (0xA4E2, "S"),
+    (0xA4EE, "A"),
+    (0xA4F0, "E"),
+    (0xA4F2, "I"),
+    (0xA4F3, "O"),
+    (0xA4F4, "U"),
+    (0xA730, "F"),
+    (0xA731, "S"),
+    (0xA7AF, "Q"),
+    (0x10309, "I"),
+]
+
+GREEK_CAPITAL_BETA = "\u0392"
+GREEK_CAPITAL_OMICRON = "\u039f"
+CYRILLIC_CAPITAL_IE = "\u0415"
+SMALL_CAPITAL_D = "\u1d05"
 
 MISSING = {
     GREEK_CAPITAL_BETA: "B",
@@ -36,22 +221,37 @@ MISSING = {
     SMALL_CAPITAL_D: "D",
 }
 
-# Every pair the previous fixed table folded, written out by character so a
-# derivation that drops one fails here.
+# Every pair the first hand-written table folded, written out by character.
 LEGACY_PAIRS = {
-    "В": "B", "в": "b",
-    "О": "O", "о": "o",
-    "С": "C", "с": "c",
-    "К": "K", "к": "k",
-    "І": "I", "і": "i",
-    "Ι": "I", "ι": "i",
-    "Ν": "N", "ν": "n",
-    "Ⲛ": "N",
-    "Ԍ": "G",
-    "Ꮐ": "G",
+    "\u0412": "B",
+    "\u0432": "b",
+    "\u041e": "O",
+    "\u043e": "o",
+    "\u0421": "C",
+    "\u0441": "c",
+    "\u041a": "K",
+    "\u043a": "k",
+    "\u0406": "I",
+    "\u0456": "i",
+    "\u0399": "I",
+    "\u03b9": "i",
+    "\u039d": "N",
+    "\u03bd": "n",
+    "\u2c9a": "N",
+    "\u050c": "G",
+    "\u13c0": "G",
 }
 
 VERDICT_WORDS = ("BLOCKED", "REQUEST_CHANGES", "CHANGES_REQUESTED")
+MARKER = "[BLOCKING]"
+ALL_TOKENS = (*VERDICT_WORDS, MARKER)
+
+
+def _detected(token: str, variant: str) -> bool:
+    """Whether the veto scan that owns *token* detects *variant*."""
+    if token == MARKER:
+        return body_has_blocking_findings(f"**COMMENT**\n\n{variant} scope: summary")
+    return output_has_blocking_verdict(f"summary\n\n{variant}\n")
 
 
 def _swaps(token: str, ascii_letter: str, look_alike: str):
@@ -66,107 +266,357 @@ def _cases(tokens):
         for look_alike, ascii_letter in MISSING.items():
             for variant in _swaps(token, ascii_letter, look_alike):
                 yield pytest.param(
+                    token,
                     variant,
                     id=f"{token}-U+{ord(look_alike):04X}-{token.index(ascii_letter)}",
                 )
 
 
-@pytest.mark.parametrize("variant", list(_cases(VERDICT_WORDS)))
-def test_bare_verdict_with_one_swapped_letter_is_detected(variant):
-    assert output_has_blocking_verdict(f"**🤖 Lens — Ateles swarm, qa**\n\n{variant}\n")
+# ── the four letters the first table was missing ─────────────────────────────
 
 
-@pytest.mark.parametrize("variant", list(_cases(VERDICT_WORDS)))
-def test_bold_verdict_with_one_swapped_letter_is_detected(variant):
+@pytest.mark.parametrize(("token", "variant"), list(_cases(ALL_TOKENS)))
+def test_one_swapped_letter_is_detected(token, variant):
+    assert _detected(token, variant)
+
+
+@pytest.mark.parametrize(("token", "variant"), list(_cases(VERDICT_WORDS)))
+def test_bold_verdict_with_one_swapped_letter_is_detected(token, variant):
     assert output_has_blocking_verdict(f"summary\n\n**{variant}**\n")
 
 
-@pytest.mark.parametrize("variant", list(_cases(["[BLOCKING]"])))
-def test_severe_finding_marker_with_one_swapped_letter_is_detected(variant):
-    assert body_has_blocking_findings(f"**COMMENT**\n\n{variant} scope: summary")
-
-
-def test_each_missing_confusable_is_covered_in_each_token_it_can_appear_in():
-    """The matrix above must actually exercise all four letters against all
-    three families, or a skipped case would pass silently (principle 3)."""
+def test_each_missing_confusable_is_exercised_against_a_token_it_fits():
+    """The matrix above must exercise all four letters, or a skipped case would
+    pass silently (principle 3)."""
     for look_alike, ascii_letter in MISSING.items():
-        families = [t for t in (*VERDICT_WORDS, "[BLOCKING]") if ascii_letter in t]
+        families = [t for t in ALL_TOKENS if ascii_letter in t]
         assert families, f"{look_alike!r} -> {ascii_letter!r} appears in no token"
         for token in families:
             assert list(_swaps(token, ascii_letter, look_alike))
-    assert {c for c in MISSING} == {
-        GREEK_CAPITAL_BETA,
-        GREEK_CAPITAL_OMICRON,
-        CYRILLIC_CAPITAL_IE,
-        SMALL_CAPITAL_D,
+
+
+# ── the derived table ────────────────────────────────────────────────────────
+
+
+def test_every_pinned_character_folds_to_its_letter():
+    table = {**_veto_table(), **_tables().pre_nfkc}
+    wrong = {
+        hex(cp): table.get(chr(cp))
+        for cp, letter in PINNED
+        if table.get(chr(cp)) != letter
     }
+    assert not wrong
+
+
+def test_the_table_holds_nothing_that_is_not_pinned():
+    table = {**_veto_table(), **_tables().pre_nfkc}
+    assert {ord(c) for c in table} == {cp for cp, _ in PINNED}
+
+
+def test_table_is_at_least_as_large_as_when_it_was_written():
+    assert swarm_dispatch._VETO_CONFUSABLE_FLOOR == 89
+    assert len(_veto_table()) >= swarm_dispatch._VETO_CONFUSABLE_FLOOR
 
 
 def test_derived_mapping_covers_the_explicit_missing_cases():
     for look_alike, ascii_letter in MISSING.items():
-        assert _CONFUSABLE_TO_ASCII.get(look_alike) == ascii_letter, hex(ord(look_alike))
+        assert _veto_table().get(look_alike) == ascii_letter, hex(ord(look_alike))
 
 
-def test_derived_mapping_covers_everything_the_old_table_folded():
+def test_derived_mapping_covers_everything_the_first_table_folded():
     for look_alike, ascii_letter in LEGACY_PAIRS.items():
-        assert _CONFUSABLE_TO_ASCII.get(look_alike) == ascii_letter, hex(ord(look_alike))
-    assert _normalize_for_blocking_scan("Ｂ") == "B"  # fullwidth, folded by NFKC
+        assert _veto_table().get(look_alike) == ascii_letter, hex(ord(look_alike))
+    assert _normalize_for_blocking_scan("\uff22") == "B"  # fullwidth, folded by NFKC
 
 
-def test_every_derived_key_is_a_stable_non_ascii_letter_mapped_to_an_ascii_letter():
-    """A key NFKC rewrites would never reach the table, so it would be dead;
-    an ASCII key or a non-letter value would be a different table entirely."""
-    assert len(_CONFUSABLE_TO_ASCII) > len(LEGACY_PAIRS)
-    for src, dst in _CONFUSABLE_TO_ASCII.items():
+def test_recogniser_table_is_a_subset_of_the_veto_table():
+    """The narrow table must never fold something to a different letter than
+    the wide one: one source of truth, defined once (principle 9)."""
+    for src, dst in swarm_dispatch._CONFUSABLE_TO_ASCII.items():
+        if src in _veto_table():
+            assert _veto_table()[src] == dst, hex(ord(src))
+
+
+def test_table_keys_are_stable_single_characters_mapped_to_one_ascii_character():
+    for src, dst in _veto_table().items():
         assert len(src) == 1 and not src.isascii(), hex(ord(src))
-        assert len(dst) == 1 and dst.isascii() and dst.isalpha(), (src, dst)
+        assert len(dst) == 1 and dst.isascii(), (src, dst)
+        assert dst.isalpha() or dst in "[]_", (src, dst)
         assert unicodedata.normalize("NFKC", src) == src, hex(ord(src))
+    for src, dst in _tables().pre_nfkc.items():
+        assert unicodedata.normalize("NFKC", src) != src, hex(ord(src))
+        assert dst.isascii() and len(dst) == 1
 
 
-def test_derived_names_are_all_resolved_here():
-    """Import-time derivation skips a name this Python's Unicode data lacks.
-    Name the ones the fix is about so a skip cannot hide on this interpreter."""
+def test_the_four_names_the_fix_is_about_resolve_here():
     for name in (
         "GREEK CAPITAL LETTER BETA",
         "GREEK CAPITAL LETTER OMICRON",
         "CYRILLIC CAPITAL LETTER IE",
         "LATIN LETTER SMALL CAPITAL D",
     ):
-        assert _CONFUSABLE_TO_ASCII.get(unicodedata.lookup(name)), name
+        assert _veto_table().get(unicodedata.lookup(name)), name
 
 
-@pytest.mark.parametrize("token", ["[BLOCKING]", *VERDICT_WORDS])
-def test_every_derived_look_alike_is_detected_in_every_token_it_fits(token):
-    """The generic form of the matrix: any derived upper-case look-alike of a
-    letter in the token, swapped in at each position."""
+def test_derivation_is_a_function_not_a_second_hand_list():
+    assert swarm_dispatch._derive_confusable_table() == _veto_table()
+    assert swarm_dispatch._derive_confusable_tables().pre_nfkc == _tables().pre_nfkc
+
+
+def test_an_unknown_name_is_logged_not_swallowed(caplog):
+    with caplog.at_level(logging.WARNING, logger="apis.swarm_dispatch"):
+        tables = swarm_dispatch._derive_confusable_tables(
+            {"NOT A REAL CHARACTER NAME": "Z"}
+        )
+    assert "NOT A REAL CHARACTER NAME" in caplog.text
+    assert tables.stable == _veto_table()  # the unknown name added nothing
+
+
+def test_import_derivation_logged_no_skipped_names_on_this_interpreter(caplog):
+    with caplog.at_level(logging.WARNING, logger="apis.swarm_dispatch"):
+        swarm_dispatch._derive_confusable_tables()
+    assert "not in this Unicode data" not in caplog.text
+
+
+# ── gaps found in review ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("look_alike", ["\u03f9", "\u03f2"])
+def test_greek_lunate_sigma_stands_in_for_c(look_alike):
+    for token in ("REQUEST_CHANGES", "CHANGES_REQUESTED"):
+        for variant in _swaps(token, "C", look_alike):
+            assert _detected(token, variant)
+    assert output_has_blocking_verdict(
+        "**changes_requested**".replace("c", look_alike, 1)
+    )
+    assert body_has_blocking_findings(f"[BLO{look_alike}KING] scope: x")
+
+
+@pytest.mark.parametrize("palochka", ["\u04c0", "\u04cf"])
+def test_palochka_reads_as_l_and_as_i(palochka):
+    assert body_has_blocking_findings(f"[B{palochka}OCKING] scope: x")  # as L
+    assert body_has_blocking_findings(f"[BLOCK{palochka}NG] scope: x")  # as I
+    assert output_has_blocking_verdict(f"B{palochka}OCKED")
+    # one of each in the same word: the backstop sees both
+    assert body_has_blocking_findings(f"[B{palochka}OCK{palochka}NG] scope: x")
+
+
+@pytest.mark.parametrize(
+    "stroke", ["\u01c0", "\u2c92", "\ua4f2", "\U00010309", "\u2d4f", "\u2758", "\u0196"]
+)
+def test_plain_stroke_look_alikes_read_as_i_and_as_l(stroke):
+    assert body_has_blocking_findings(f"[BLOCK{stroke}NG] scope: x")  # as I
+    assert body_has_blocking_findings(f"[B{stroke}OCKING] scope: x")  # as L
+    assert output_has_blocking_verdict(f"B{stroke}OCKED")
+    assert body_has_blocking_findings(f"[B{stroke}OCK{stroke}NG] scope: x")
+
+
+def test_latin_script_g_and_dotless_i():
+    assert body_has_blocking_findings("[BLOCKIN\u0261] scope: x")
+    assert body_has_blocking_findings("[BLOCK\u0131NG] scope: x")
+
+
+@pytest.mark.parametrize(
+    ("token", "variant"),
+    [
+        ("REQUEST_CHANGES", "REQ\u054dEST_CHANGES"),  # Armenian Seh as U
+        ("BLOCKED", "BL\u0555CKED"),  # Armenian capital Oh
+        ("REQUEST_CHANGES", "\u13a1EQUEST_CHANGES"),  # Cherokee E as R
+        ("BLOCKED", "BLOCK\u13acD"),  # Cherokee GV as E
+        ("REQUEST_CHANGES", "REQUE\u13daT_CHANGES"),  # Cherokee DU as S
+        ("BLOCKED", "BLOCKE\u13a0"),  # Cherokee A as D
+        ("REQUEST_CHANGES", "REQ\u222aEST_CHANGES"),  # union as U
+        ("REQUEST_CHANGES", "REQUES\u22a4_CHANGES"),  # down tack as T
+        ("BLOCKED", "BL\u3007CKED"),  # ideographic zero as O
+        ("BLOCKED", "\ua4d0LOCKED"),  # Lisu BA as B
+        ("REQUEST_CHANGES", "REQUEST_CHANGES".replace("A", "\u2c80")),  # Coptic Alfa
+        ("BLOCKED", "BLOCKE\u1d05"),  # small capital D
+    ],
+)
+def test_other_scripts_and_symbols_are_detected(token, variant):
+    assert _detected(token, variant)
+
+
+@pytest.mark.parametrize(
+    "underscore",
+    [
+        "\u2581",
+        "\u23bd",
+        "\u02cd",
+        "\u2017",
+        "\u203f",
+        "\u2574",
+        "\uff3f",
+        " \u0332",
+        "\u00a0\u0332",
+    ],
+)
+def test_underscore_stand_ins(underscore):
+    for token in ("REQUEST_CHANGES", "CHANGES_REQUESTED"):
+        assert _detected(token, token.replace("_", underscore))
+        assert _detected(
+            token, token.replace("_", underscore).replace("E", "\u0415", 1)
+        )
+    assert output_has_blocking_verdict(f"**changes{underscore}requested**")
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("\u2045", "\u2046"),
+        ("\u27e6", "\u27e7"),
+        ("\u301a", "\u301b"),
+        ("\uff3b", "\uff3d"),
+        ("[", "\u2046"),
+    ],
+)
+def test_bracket_stand_ins(left, right):
+    assert body_has_blocking_findings(f"{left}BLOCKING{right} scope: x")
+    assert body_has_blocking_findings(f"**{left}BLOCKING{right} scope:** x")
+
+
+def test_underlined_blocked_with_a_trailing_underlined_space_is_still_detected():
+    """A space plus a combining low line reads as an underscore, which would end
+    BLOCKED's word boundary; the other forms keep it detected."""
+    assert output_has_blocking_verdict("the verdict is BLOCKED\u00a0\u0332 for now")
+
+
+# ── bounded wildcard backstop ────────────────────────────────────────────────
+
+# Characters no table names and no prose fixture below uses as a look-alike;
+# plus one that IS in the table, standing where a different letter belongs.
+ARBITRARY = ["\u0416", "\u03a9", "\ua66e", "\u16a0", "\u3042", "\u2d63", "\u03b1"]
+
+
+@pytest.mark.parametrize("token", ALL_TOKENS)
+def test_every_position_replaced_by_an_arbitrary_character_is_detected(token):
     checked = 0
-    for look_alike, ascii_letter in _CONFUSABLE_TO_ASCII.items():
-        if not ascii_letter.isupper():
-            continue
-        for variant in _swaps(token, ascii_letter, look_alike):
+    for pos in range(len(token)):
+        for ch in ARBITRARY:
+            variant = token[:pos] + ch + token[pos + 1 :]
             checked += 1
-            if token.startswith("["):
-                assert body_has_blocking_findings(f"{variant} scope: x"), (token, hex(ord(look_alike)))
-            else:
-                assert output_has_blocking_verdict(variant), (token, hex(ord(look_alike)))
-    assert checked
+            assert _detected(token, variant), (token, pos, hex(ord(ch)))
+    assert checked == len(token) * len(ARBITRARY)
+
+
+@pytest.mark.parametrize("token", ALL_TOKENS)
+def test_any_two_positions_replaced_are_detected(token):
+    for i in range(len(token)):
+        for j in range(i + 1, len(token)):
+            variant = list(token)
+            variant[i], variant[j] = ARBITRARY[0], ARBITRARY[1]
+            assert _detected(token, "".join(variant)), (token, i, j)
+
+
+def test_bold_lower_case_verdict_with_an_arbitrary_character_is_detected():
+    assert output_has_blocking_verdict("**bloc\u0416ed**")
+    assert output_has_blocking_verdict("**request_chang\u0416s**")
+
+
+def test_three_unknown_characters_are_beyond_the_bound():
+    """The backstop is bounded on purpose: more unknown characters than this
+    and the word is no longer recognisably the token."""
+    assert not output_has_blocking_verdict("\u0416\u0416\u0416CKED")
+
+
+def test_the_backstop_does_not_fire_without_the_rest_of_the_word():
+    assert not output_has_blocking_verdict("BLOCK\u0416DX")  # a different word
+    assert not output_has_blocking_verdict("blocked by \u0416")  # lower case, not bold
+
+
+@pytest.mark.parametrize("dash", ["\u2212", "\u2013", "\u2011", "\u2012"])
+def test_non_blocking_with_an_unusual_dash_is_not_flagged(dash):
+    assert not body_has_blocking_findings(f"[NON{dash}BLOCKING] naming: nit")
+
+
+# ── forms that used to be detected stay detected ─────────────────────────────
+
+
+@pytest.mark.parametrize("glue", ["\u03b1", "\u0416", "\u03bf"])
+def test_a_look_alike_glued_to_a_token_is_still_detected(glue):
+    assert output_has_blocking_verdict(f"REQUEST_CHANGES{glue}")
+    assert output_has_blocking_verdict(f"{glue}BLOCKED")
+    assert output_has_blocking_verdict(f"**BLOCKED**{glue}")
+    assert body_has_blocking_findings(f"[BLOCKING]{glue} scope: x")
 
 
 def test_zero_width_split_and_spaced_forms_still_detected():
-    zwj = "‍"
+    zwj = "\u200d"
     assert body_has_blocking_findings(f"[BLOC{zwj}KING] scope: x")
     assert body_has_blocking_findings("[ B L O C K I N G ] scope: x")
     assert output_has_blocking_verdict(f"REQU{zwj}EST_CHANGES")
-    # the new letters combined with the older evasions
     assert body_has_blocking_findings(f"[{GREEK_CAPITAL_BETA}L{zwj}OCKING] scope: x")
-    assert body_has_blocking_findings(f"[ {GREEK_CAPITAL_BETA} L O C K I N G ] scope: x")
+    assert body_has_blocking_findings(
+        f"[ {GREEK_CAPITAL_BETA} L O C K I N G ] scope: x"
+    )
     assert output_has_blocking_verdict(f"{GREEK_CAPITAL_BETA}LOCKE{SMALL_CAPITAL_D}")
 
 
 def test_non_blocking_marker_with_look_alike_letters_is_still_not_flagged():
-    assert not body_has_blocking_findings(f"[NON-{GREEK_CAPITAL_BETA}LOCKING] naming: nit")
-    assert not body_has_blocking_findings("[ΝΟΝ-BLOCKING] naming: nit")
+    assert not body_has_blocking_findings(
+        f"[NON-{GREEK_CAPITAL_BETA}LOCKING] naming: nit"
+    )
+    assert not body_has_blocking_findings("[\u039d\u039f\u039d-BLOCKING] naming: nit")
 
+
+# ── the recognisers stay narrow: a look-alike in a clearing position is unreadable ──
+
+HEADER = "**\U0001f916 Waxwing \u2014 Ateles swarm, arch**"
+
+
+def _reply(header=HEADER, verdict="**SIGNED_OFF**", rest="\n\nNo findings.\n"):
+    return f"{header}\n{verdict}{rest}"
+
+
+def test_the_plain_clear_reply_is_still_readable():
+    assert lens_own_verdict(_reply(), lens_agent="waxwing") == "signed_off"
+    assert sign_off_is_warranted(_reply(), lens_agent="waxwing")
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        "**SIGN\u0395D_OFF**",  # Greek capital Epsilon: not in the recogniser table
+        "**APPROV\u0415**",  # Cyrillic Ie
+        "**SIGNED_OFF**".replace("_", "\u2581"),
+    ],
+)
+def test_a_look_alike_clearing_verdict_stays_unreadable(verdict):
+    assert lens_own_verdict(_reply(verdict=verdict), lens_agent="waxwing") is None
+    assert not sign_off_is_warranted(_reply(verdict=verdict), lens_agent="waxwing")
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "**\U0001f916 W\u0430xwing \u2014 Ateles swarm, arch**",  # Cyrillic a
+        "**\U0001f916 \u03a9axwing \u2014 Ateles swarm, arch**",
+        "**\U0001f916 Wax\u0561ing \u2014 Ateles swarm, arch**",
+        "**\U0001f916 Waxwing \u2014 At\u0435les swarm, arch**",  # Cyrillic e in the fixed words
+    ],
+)
+def test_a_look_alike_agent_name_stays_unreadable(header):
+    assert lens_own_verdict(_reply(header=header), lens_agent="waxwing") is None
+    assert not sign_off_is_warranted(_reply(header=header), lens_agent="waxwing")
+
+
+def test_a_look_alike_second_verdict_line_vetoes_a_clear_reply():
+    """The veto side IS wide: a later look-alike verdict line makes the reply
+    unreadable (fail closed), where the narrow recogniser would have missed it."""
+    reply = _reply(rest="\n\n**SIGN\u0395D_OFF**\n")
+    assert lens_own_verdict(reply, lens_agent="waxwing") is None
+    reply = _reply(rest="\n\n**C\u041eMMENT**\n")
+    assert lens_own_verdict(reply, lens_agent="waxwing") is None
+
+
+def test_the_veto_fold_is_not_used_by_the_recogniser_normaliser():
+    assert _normalize_for_blocking_scan("\u0395") == "\u0395"  # Greek Epsilon survives
+    assert (
+        _normalize_for_blocking_scan("\u0412") == "B"
+    )  # a frozen-table letter still folds
+
+
+# ── ordinary prose is not turned into a false block ──────────────────────────
 
 RUSSIAN = (
     "Эта проверка не нашла проблем: тесты проходят, ветка актуальна, "
@@ -179,23 +629,22 @@ GREEK = (
     "ΟΛΑ ΕΝΤΑΞΕΙ. Ευχαριστώ πολύ, Βασίλειος Οικονόμου."
 )
 UKRAINIAN_BELARUSIAN = "Блокування не потрібне, дякуємо. Заблакіравана не было, дзякуй."
+MIXED = "Всё хорошо, no findings. Ο κώδικας is fine; Блок не нужен."
+ARMENIAN_CHEROKEE_COPTIC = "Շնորհակալություն, ստուգումը անցավ։ ᎠᏍᎦᏯ ᎤᏲᎢ ⲁⲛⲟⲕ ⲡⲉ ⲡⲛⲟⲩⲧⲉ."
 
 
-@pytest.mark.parametrize("prose", [RUSSIAN, GREEK, UKRAINIAN_BELARUSIAN])
-def test_ordinary_greek_and_cyrillic_prose_does_not_trip(prose):
+@pytest.mark.parametrize(
+    "prose", [RUSSIAN, GREEK, UKRAINIAN_BELARUSIAN, MIXED, ARMENIAN_CHEROKEE_COPTIC]
+)
+def test_ordinary_non_latin_prose_does_not_trip(prose):
     assert not output_has_blocking_verdict(prose)
     assert not body_has_blocking_findings(prose)
     assert not output_has_blocking_verdict(f"**{prose}**")
     assert not body_has_blocking_findings(f"[{prose}] scope: x")
+    assert not output_has_blocking_verdict(f"{prose}\n\n{prose}")
 
 
-def test_prose_mixing_scripts_with_ordinary_words_does_not_trip():
-    mixed = "Всё хорошо, no findings. Ο κώδικας is fine; Блок не нужен."
-    assert not output_has_blocking_verdict(mixed)
-    assert not body_has_blocking_findings(mixed)
-
-
-def test_derivation_is_import_time_not_a_second_hand_list():
-    """Principle 9: one source. The mapping is built by a function, not typed."""
-    assert callable(swarm_dispatch._derive_confusable_table)
-    assert swarm_dispatch._derive_confusable_table() == _CONFUSABLE_TO_ASCII
+def test_ordinary_english_with_accents_and_symbols_does_not_trip():
+    text = "Na\u00efve caf\u00e9 \u2014 r\u00e9sum\u00e9: the \u201cblocked\u201d state, a \u2192 b, x \u2208 S, 5 \u00d7 3 \u2713 \u2026"
+    assert not output_has_blocking_verdict(text)
+    assert not body_has_blocking_findings(text)
