@@ -99,5 +99,6 @@ def _isolate_lens_comment_identities(monkeypatch):
     monkeypatch.setenv(lens_authors.ENV_AUTHORS, "swarm-lens-account")
     for name in lens_authors.PAT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: set())
+    monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
+    monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: "")
     lens_authors.clear_cache()

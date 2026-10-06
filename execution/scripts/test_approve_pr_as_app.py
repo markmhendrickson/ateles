@@ -87,7 +87,7 @@ def _lens_comment_identities(monkeypatch):
     monkeypatch.setenv(lens_authors.ENV_AUTHORS, SWARM_LOGIN)
     for name in lens_authors.PAT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: set())
+    monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
     lens_authors.clear_cache()
 
 
@@ -288,9 +288,9 @@ def _install_app_mint(monkeypatch, *, token: str | None = "fake-installation-tok
     monkeypatch.setattr(target, "_mint_reviewer_app_installation_token", _fake_mint)
 
 
-def _all_clear_comments(lenses: list[str]) -> list[dict]:
+def _all_clear_comments(lenses: list[str], *, author: str = SWARM_LOGIN) -> list[dict]:
     return [
-        _comment(i, _lens_comment_body(lens, target.LENS_AGENTS[lens]))
+        _comment(i, _lens_comment_body(lens, target.LENS_AGENTS[lens]), author=author)
         for i, lens in enumerate(lenses)
     ]
 
@@ -2605,6 +2605,10 @@ def test_help_documents_carrying_and_no_carry(monkeypatch, capsys):
 # Every case drives `run()` end to end rather than a helper, so the tests keep
 # their meaning whichever function does the filtering.
 
+def sd_marker_only(lens: str) -> str:
+    return swarm_dispatch.compose_lens_review_marker(lens, HEAD) + "\nhello"
+
+
 HAND_RUN_LOGIN = "hand-run-panel-account"
 APP_BOT_LOGIN = "swarm-app[bot]"
 
@@ -2640,7 +2644,8 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
         out = capsys.readouterr().out
         assert code == 1
         assert client.posted == []
-        assert "ignored 1 lens-marked comment(s) not written by a swarm identity" in out
+        assert "ignored 1 lens-marked comment(s) not written by a configured swarm identity" in out
+        assert "review:arch" in out and "add it to" in out and lens_authors.ENV_AUTHORS in out
         assert OTHER_LOGIN in out
 
     async def test_a_forged_approve_after_a_real_objection_does_not_retire_it(
@@ -2665,12 +2670,48 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
         assert code == 0
         assert len(client.posted) == 1
 
-    async def test_a_forged_objection_from_another_account_blocks_nothing(
-        self, monkeypatch
+    async def test_an_objection_from_a_non_admitted_account_holds_approval(
+        self, monkeypatch, capsys
     ):
+        # It can only DELAY: the account is not a configured swarm identity, so
+        # its comment is never read as a verdict, but a real objection must not
+        # vanish just because its author is missing from the setting.
         comments = _all_clear_comments(["pm", "qa"])
         comments.append(_comment(64, _arch("REQUEST_CHANGES"), author=OTHER_LOGIN))
         code, client = await self._run(monkeypatch, comments)
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == []
+        assert "arch (waxwing)" in out and OTHER_LOGIN in out and "REQUEST_CHANGES" in out
+        assert f"https://github.com/{REPO}/pull/{PR}#issuecomment-64" in out
+        assert lens_authors.ENV_AUTHORS in out and "non-swarm objections: HELD" in out
+
+    async def test_a_swarm_account_missing_from_the_setting_cannot_make_its_objection_vanish(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setenv(lens_authors.ENV_AUTHORS, "an-unrelated-account")
+        comments = _all_clear_comments(["pm", "qa"], author="an-unrelated-account")
+        comments.append(_comment(65, _arch("REQUEST_CHANGES", "[BLOCKING] real finding")))
+        code, client = await self._run(monkeypatch, comments)
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert SWARM_LOGIN in out and "issuecomment-65" in out
+
+    async def test_an_objection_on_a_required_lens_from_a_non_admitted_account_holds(
+        self, monkeypatch
+    ):
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(_comment(66, _lens_comment_body("qa", "phoenicurus", verdict="REQUEST_CHANGES"), author=OTHER_LOGIN))
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 1 and client.posted == []
+
+    async def test_an_unreadable_comment_from_a_non_admitted_account_does_not_hold(
+        self, monkeypatch
+    ):
+        comments = _all_clear_comments(["pm", "qa"])
+        junk = _comment(67, sd_marker_only("arch"), author=OTHER_LOGIN)
+        comments.append(junk)
+        code, _ = await self._run(monkeypatch, comments)
         assert code == 0
 
     async def test_a_forged_comment_cannot_supply_a_missing_required_lens(
@@ -2729,7 +2770,7 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
 
     async def test_the_swarm_apps_bot_login_is_read_without_any_setting(self, monkeypatch):
         monkeypatch.delenv(lens_authors.ENV_AUTHORS, raising=False)
-        monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: {APP_BOT_LOGIN})
+        monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: ({APP_BOT_LOGIN}, False))
         comments = [
             _comment(1, _lens_comment_body("pm", "pavo"), author="Swarm-App[bot]"),
             _comment(2, _lens_comment_body("qa", "phoenicurus"), author=APP_BOT_LOGIN),
@@ -2767,7 +2808,12 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
         assert code == 1
         assert client.posted == []
         assert lens_authors.ENV_AUTHORS in out
-        assert "no comment can be read as a lens verdict" in out
+        assert "no swarm lens-comment identity could be resolved" in out
+        # the cause is identity, never "wait for the lens to review"
+        assert "Wait for it to review" not in out
+        # genuine swarm comments are not described as foreign
+        assert "not written by a configured swarm identity" not in out
+        assert "were NOT read because no swarm identity could be resolved" in out
 
     async def test_an_unreadable_identity_lookup_reads_every_lens_as_having_no_verdict(
         self, monkeypatch
@@ -2783,9 +2829,22 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
     @pytest.mark.parametrize("setting", ["*", "all", "", "   ", "a/b", ",,"])
     async def test_a_malformed_setting_admits_nobody(self, monkeypatch, setting):
         monkeypatch.setenv(lens_authors.ENV_AUTHORS, setting)
-        monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: set())
+        monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
         code, client = await self._run(monkeypatch, _all_clear_comments(ALL_FOUR), lenses=ALL_FOUR)
         # "all" is a syntactically valid login, so it admits an account named
         # "all" and nobody else; the swarm's own comments are still unread.
         assert code == 1
         assert client.posted == []
+
+    async def test_the_ignored_list_names_the_lens_and_is_capped(self, monkeypatch, capsys):
+        comments = _all_clear_comments(["pm", "qa"])
+        for n in range(8):
+            comments.append(
+                _comment(80 + n, _lens_comment_body("arch", "waxwing"), author=f"stranger-{n}")
+            )
+        code, _ = await self._run(monkeypatch, comments)
+        out = capsys.readouterr().out
+        assert "ignored 8 lens-marked comment(s)" in out
+        assert out.count("review:arch by stranger-") == 5
+        assert "(+3 more)" in out
+        assert code == 0

@@ -176,6 +176,7 @@ from swarm_dispatch import (  # noqa: E402
     body_has_blocking_findings,
     compose_lens_review_marker,
     lens_comment_authors,
+    lens_explicit_objection,
     lens_own_verdict,
     lens_records,
     output_has_blocking_verdict,
@@ -710,10 +711,13 @@ async def evaluate_lens(
                 "(--panel required, or omit it from --lenses)."
             )
         if not authors:
-            reason += (
-                f" No swarm lens-comment identity is configured or readable "
-                f"(set {lens_authors.ENV_AUTHORS}), so no comment can be read "
-                "as a verdict."
+            # The real cause is identity, not a slow lens: say so instead of
+            # telling the operator to wait for a review that may already exist.
+            reason = (
+                "no swarm lens-comment identity could be resolved, so no comment "
+                f"is read as a verdict, including {lens} ({agent})'s. Set "
+                f"{lens_authors.ENV_AUTHORS} to the account(s) the swarm posts as, "
+                "then re-run."
             )
         return LensOutcome(
             lens, agent=agent, head_matched=False, verdict=None, passed=False,
@@ -936,6 +940,90 @@ def find_non_required_blocks(
             )
         )
     return blocks
+
+
+class UnadmittedObjection:
+    """An objecting lens comment at the current head from an account that is
+    not an admitted swarm identity. It can only HOLD approval: a clearing
+    verdict from such an account is never read."""
+
+    def __init__(
+        self, lens: str, *, agent: str, author: str, why: str, comment_url: str
+    ) -> None:
+        self.lens = lens
+        self.agent = agent
+        self.author = author
+        self.why = why
+        self.comment_url = comment_url
+
+
+def find_unadmitted_objections(
+    *, comments: list[dict], head_sha: str, authors: frozenset[str]
+) -> list[UnadmittedObjection]:
+    """Every lens-marked comment at the CURRENT head that objects explicitly
+    (`REQUEST_CHANGES` / `BLOCKED` / `[BLOCKING]` / a blocking token) and was
+    written by an account that is NOT in `authors`.
+
+    The author filter keeps such a comment from clearing anything; it must not
+    also let it vanish when it is real. A swarm account missing from the
+    configured set would otherwise have a genuine objection read as no
+    objection at all. Reads every lens in `LENS_AGENTS`, required or not. An
+    unreadable verdict is not an objection here (only a plain one holds).
+    """
+    out: list[UnadmittedObjection] = []
+    for lens, agent in LENS_AGENTS.items():
+        marker = compose_lens_review_marker(lens, head_sha)
+        for c in comments:
+            if marker not in (c.get("body") or ""):
+                continue
+            if lens_authors.is_swarm_comment(c, authors):
+                continue
+            why = lens_explicit_objection(c.get("body") or "", lens_agent=agent)
+            if why:
+                out.append(
+                    UnadmittedObjection(
+                        lens,
+                        agent=agent,
+                        author=lens_authors.comment_author(c) or "an unreadable author",
+                        why=why,
+                        comment_url=c.get("html_url", ""),
+                    )
+                )
+    return out
+
+
+_IGNORED_LIST_CAP = 5
+
+
+def _print_ignored(ignored: list[dict], authors: frozenset[str]) -> None:
+    """Say which lens-marked comments were not read, and why, in terms of what
+    the operator can do about it (capped like the dispatcher's log)."""
+    if not ignored:
+        return
+    if not authors:
+        print(
+            f"{len(ignored)} lens-marked comment(s) were NOT read because no swarm "
+            f"identity could be resolved (they may be the swarm's own). Set "
+            f"{lens_authors.ENV_AUTHORS} to the account(s) the swarm posts as, then re-run:"
+        )
+    else:
+        print(
+            f"ignored {len(ignored)} lens-marked comment(s) not written by a "
+            "configured swarm identity:"
+        )
+    for c in ignored[:_IGNORED_LIST_CAP]:
+        print(
+            f"  - {lens_authors.claimed_marker(c.get('body')) or 'a lens marker'} "
+            f"by {lens_authors.comment_author(c) or 'an unreadable author'}: "
+            f"{c.get('html_url') or c.get('id')}"
+        )
+    if len(ignored) > _IGNORED_LIST_CAP:
+        print(f"  (+{len(ignored) - _IGNORED_LIST_CAP} more)")
+    if authors:
+        print(
+            f"  If one of these accounts is the swarm's, add it to "
+            f"{lens_authors.ENV_AUTHORS} and re-run."
+        )
 
 
 def _contexts_from_required_status_checks(payload: object) -> set[str] | None:
@@ -1639,23 +1727,7 @@ async def run(
         except Exception as exc:  # noqa: BLE001 — unreadable identities admit nobody
             print(f"lens comment identities unreadable ({exc.__class__.__name__})")
             authors = frozenset()
-        if not authors:
-            print(
-                "no swarm lens-comment identity is configured or readable "
-                f"(set {lens_authors.ENV_AUTHORS}): no comment can be read as a "
-                "lens verdict, so every lens reads as having no verdict"
-            )
-        ignored = lens_authors.ignored_lens_comments(comments, authors)
-        if ignored:
-            print(
-                f"ignored {len(ignored)} lens-marked comment(s) not written by a "
-                "swarm identity:"
-            )
-            for c in ignored:
-                print(
-                    f"  - {c.get('html_url') or c.get('id')} "
-                    f"(by {lens_authors.comment_author(c) or 'an unreadable author'})"
-                )
+        _print_ignored(lens_authors.ignored_lens_comments(comments, authors), authors)
 
         lens_outcomes: list[LensOutcome] = []
         for lens in lenses:
@@ -1686,6 +1758,14 @@ async def run(
             authors=authors,
         )
 
+        # A real objection from an account the configuration does not admit still
+        # HOLDS approval (it can only delay; a clearing verdict from it is never
+        # read), so a swarm account missing from the setting cannot make an
+        # objection vanish.
+        unadmitted = find_unadmitted_objections(
+            comments=comments, head_sha=head_sha, authors=authors
+        )
+
         base_ref = str((pr_data.get("base") or {}).get("ref") or "")
         if carry:
             lens_outcomes = await carry_earlier_signoffs(
@@ -1709,9 +1789,31 @@ async def run(
                 print(f"  - {b.lens} ({b.agent}): {b.reason or b.verdict} — {b.comment_url}")
             print()
 
+        if unadmitted:
+            print(
+                "objecting lens comments from accounts that are not configured "
+                "swarm identities (held: they can only delay approval, and a "
+                "clearing verdict from them is never read):"
+            )
+            for u in unadmitted:
+                print(
+                    f"  - {u.lens} ({u.agent}) by {u.author}: {u.why} — {u.comment_url}"
+                )
+            print(
+                f"  If the account is the swarm's, add it to "
+                f"{lens_authors.ENV_AUTHORS} and re-run; otherwise resolve the "
+                "objection or remove the comment."
+            )
+            print()
+
         all_lenses_pass = all(o.passed for o in lens_outcomes)
         no_non_required_blocks = not non_required_blocks
-        overall_pass = all_lenses_pass and no_non_required_blocks and checks_green
+        overall_pass = (
+            all_lenses_pass
+            and no_non_required_blocks
+            and not unadmitted
+            and checks_green
+        )
 
         print(f"head_sha={head_sha}")
         print(f"lenses: {'ALL PASS' if all_lenses_pass else 'FAIL'}")
@@ -1719,6 +1821,7 @@ async def run(
             "non-required lens blocks: "
             f"{'NONE' if no_non_required_blocks else 'BLOCKED'}"
         )
+        print(f"non-swarm objections: {'HELD' if unadmitted else 'NONE'}")
         print(f"checks: {'GREEN' if checks_green else 'NOT GREEN'}")
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
 
