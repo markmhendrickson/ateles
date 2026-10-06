@@ -71,7 +71,17 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(apis, "READINESS_GATE", False)
     monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
 
-    rec = {"briefs": [], "spawns": [], "statuses": [], "runner_calls": []}
+    rec = {
+        "briefs": [], "spawns": [], "statuses": [], "runner_calls": [],
+        "assessments": [], "events": [], "assessment_ok": True,
+    }
+
+    def _assess(**kw):
+        rec["assessments"].append(kw)
+        rec["events"].append("assessment")
+        return "ent_assessment" if rec["assessment_ok"] else None
+
+    monkeypatch.setattr(apis, "write_producer_assessment", _assess)
 
     def _set_status(entity_id, status, **kw):
         rec["statuses"].append((entity_id, status, kw.get("reason")))
@@ -97,6 +107,7 @@ def world(monkeypatch, tmp_path):
     )
 
     async def _spawn(skill, entity_id, *a, **kw):
+        rec["events"].append("spawn")
         rec["spawns"].append((skill, entity_id))
         return _SpawnResult()
 
@@ -622,3 +633,114 @@ def test_an_over_long_task_is_not_run_on_its_estimate(world, scorer):
     _dispatch(_task(body="b" * (producer_confidence.MAX_TASK_TEXT_CHARS + 1), **RICH))
     assert world["spawns"] == []
     assert world["runner_calls"] == []
+
+
+# ── 12. a score that authorises a run is recorded durably, before the run ────
+
+
+def test_the_score_is_recorded_with_its_exact_value_before_dispatch(world, scorer):
+    scorer('{"confidence": 0.8501, "rationale": "well specified"}')
+    _dispatch(_task())
+    assert world["spawns"] == [("cicada", "ent_task_1")]
+    (record,) = world["assessments"]
+    assert record["value"] == 0.8501  # exact, not rounded
+    assert record["source"] == producer_confidence.PRODUCER_SOURCE
+    assert record["threshold"] == 0.85
+    assert record["action_type"] == "local_edit"
+    assert record["tier"] == "mid" and record["model"] == "m-mid"
+    assert record["run_id"] and record["rationale"] == "well specified"
+    assert record["task_entity_id"] == "ent_task_1"
+    assert world["events"] == ["assessment", "spawn"], "must be written before dispatch"
+
+
+@pytest.mark.parametrize("value", [0.93, 0.85, 0.8501])
+def test_an_unrecordable_score_never_auto_executes(world, scorer, value):
+    scorer('{"confidence": %r}' % value)
+    world["assessment_ok"] = False
+    _dispatch(_task())
+    assert world["spawns"] == [], "run on a judgment Neotoma cannot explain"
+    brief = _only_brief(world)["decision"]
+    assert brief.action.value.startswith("checkpoint")
+    assert "could not be recorded durably" in brief.reason
+    assert brief.confidence == value
+    assert brief.confidence_source == producer_confidence.PRODUCER_SOURCE
+
+
+def test_a_score_that_checkpoints_needs_no_assessment_record(world, scorer):
+    scorer('{"confidence": 0.40}')
+    _dispatch(_task())
+    assert world["assessments"] == []
+
+
+def test_a_task_with_its_own_score_writes_no_assessment(world, scorer):
+    scorer('{"confidence": 0.10}')
+    _dispatch(_task(confidence=0.95))
+    assert world["assessments"] == []
+    assert world["spawns"] == [("cicada", "ent_task_1")]
+
+
+# ── 13. operator-facing details: floors and failure reasons ──────────────────
+
+FLOORED = {"body": "Re-sort the local notes index. There is an unresolved conflict about which file is meant."}
+
+
+def test_a_floor_capped_score_says_so_next_to_the_explanation(world, scorer):
+    scorer('{"confidence": 0.99, "rationale": "looks straightforward"}')
+    notifier = _dispatch(_task(**FLOORED))
+    summary = _only_brief(world)["plan_summary"]
+    for text in (summary, notifier.sent[-1]):
+        assert "The scorer reported 0.99" in text
+        assert "hard floor" in text
+        assert "looks straightforward" in text
+        assert "0.50" in text
+
+
+def test_an_uncapped_score_makes_no_floor_claim(world, scorer):
+    scorer('{"confidence": 0.40, "rationale": "ambiguous"}')
+    notifier = _dispatch(_task())
+    assert "hard floor" not in _only_brief(world)["plan_summary"]
+    assert "hard floor" not in notifier.sent[-1]
+
+
+def test_the_scorer_failure_reason_is_in_the_operator_notification(world, scorer):
+    scorer("", ok=False)
+    notifier = _dispatch(_task())
+    assert "scorer was unavailable" in notifier.sent[-1]
+    scorer("not a score")
+    notifier = _dispatch(_task())
+    assert "not a valid score" in notifier.sent[-1]
+
+
+def test_an_ordinary_hold_notification_is_unchanged_in_shape(world, scorer, monkeypatch):
+    monkeypatch.setenv("APIS_PRODUCER_SCORER", "0")
+    notifier = _dispatch(_task(action_type="open_or_merge_pr"))
+    assert "\n\n" not in notifier.sent[-1]
+
+
+def test_a_capped_score_is_recorded_with_both_numbers(world, scorer):
+    scorer('{"confidence": 0.99}')
+    _dispatch(_task(**FLOORED))
+    assert world["assessments"] == []  # capped to 0.50: held, so no run to record
+    attempt = asyncio.run(
+        producer_confidence.score_unscored_task(
+            _task(**FLOORED), action_type="local_edit",
+            policy=ExecutionPolicy(entity_id="fallback", loaded=False),
+            mechanical_value=0.4,
+            runner=lambda p, t, i: _async_reply('{"confidence": 0.99}'),
+        )
+    )
+    assert attempt.score.value == 0.4 and attempt.score.capped_from == 0.99
+
+
+async def _async_reply(text):
+    return True, text, "claude"
+
+
+def test_the_score_log_carries_the_exact_value_and_rationale(world, scorer, caplog):
+    import logging
+
+    scorer('{"confidence": 0.8501, "rationale": "well specified"}')
+    with caplog.at_level(logging.INFO):
+        _dispatch(_task())
+    line = next(r.getMessage() for r in caplog.records if "producer score 0.8501" in r.getMessage())
+    assert "well specified" in line and "run=" in line

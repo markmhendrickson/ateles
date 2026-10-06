@@ -17,7 +17,11 @@
       },
       "expect": {
         "outcome": "executed",
-        "scorer_called": true
+        "scorer_called": true,
+        "assessment": {
+          "recorded": true,
+          "exact_value": 0.93
+        }
       }
     },
     {
@@ -43,7 +47,10 @@
           "ambiguous target file",
           "apis_producer_scorer"
         ],
-        "persisted_confidence_source": "apis_producer_scorer"
+        "persisted_confidence_source": "apis_producer_scorer",
+        "assessment": {
+          "recorded": false
+        }
       }
     },
     {
@@ -106,6 +113,9 @@
         "reason": "mechanical estimate",
         "summary_contains": [
           "not a valid score"
+        ],
+        "notification_contains": [
+          "not a valid score"
         ]
       }
     },
@@ -164,6 +174,9 @@
         "confidence_unscored": true,
         "reason": "mechanical estimate",
         "summary_contains": [
+          "scorer was unavailable"
+        ],
+        "notification_contains": [
           "scorer was unavailable"
         ]
       }
@@ -385,7 +398,17 @@
         "outcome": "held",
         "scorer_called": true,
         "confidence": 0.5,
-        "confidence_source": "apis_producer_scorer"
+        "confidence_source": "apis_producer_scorer",
+        "summary_contains": [
+          "The scorer reported 0.99",
+          "hard floor",
+          "trust me"
+        ],
+        "notification_contains": [
+          "The scorer reported 0.99",
+          "hard floor",
+          "trust me"
+        ]
       }
     },
     {
@@ -481,6 +504,90 @@
         "scorer_called": true,
         "confidence": 0.3,
         "confidence_unscored": false
+      }
+    },
+    {
+      "id": "auto_execution_is_recorded_durably_with_the_exact_value_before_dispatch",
+      "why": "a producer score that authorises a run is written to Neotoma, with the unrounded value, source, threshold, action type, tier, model, run id and rationale, and read back, before the worker is dispatched",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.8501, \"rationale\": \"well specified\"}"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": true,
+        "assessment": {
+          "recorded": true,
+          "exact_value": 0.8501,
+          "summary_contains": [
+            "source=apis_producer_scorer",
+            "threshold=0.85",
+            "action_type=local_edit",
+            "tier=mid",
+            "model=m-mid",
+            "run="
+          ]
+        }
+      }
+    },
+    {
+      "id": "failed_assessment_write_checkpoints_instead_of_executing",
+      "why": "if the score cannot be written, the task is held, not run",
+      "config": {
+        "assessment": "store_fails"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.93}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence_source": "apis_producer_scorer",
+        "reason": "could not be recorded durably",
+        "assessment": {
+          "recorded": false
+        }
+      }
+    },
+    {
+      "id": "unproven_assessment_readback_checkpoints_instead_of_executing",
+      "why": "a write whose read-back does not match is not proof: the task is held",
+      "config": {
+        "assessment": "readback_mismatch"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.93}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "reason": "could not be recorded durably",
+        "assessment": {
+          "recorded": false,
+          "allow_written": true
+        }
+      }
+    },
+    {
+      "id": "missing_assessment_readback_checkpoints_instead_of_executing",
+      "why": "a record that cannot be read back is not proven: the task is held",
+      "config": {
+        "assessment": "readback_missing"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.93}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "reason": "could not be recorded durably",
+        "assessment": {
+          "recorded": false,
+          "allow_written": true
+        }
       }
     }
   ]

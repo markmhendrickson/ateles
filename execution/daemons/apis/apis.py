@@ -257,6 +257,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     mark_task_declined,
     read_authenticated_checkpoint_authorization,
     read_authenticated_checkpoint_resolution,
+    write_producer_assessment,
     read_checkpoint_resolution,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
@@ -793,14 +794,27 @@ def _shown_confidence(confidence: float, source: str) -> str:
     return f"{confidence:.2f}"
 
 
-def _scoring_summary(source: str, confidence: float, rationale: str, note: str) -> str:
+def _scoring_summary(
+    source: str,
+    confidence: float,
+    rationale: str,
+    note: str,
+    capped_from: float | None = None,
+) -> str:
     """What the operator is told about the score, appended to the checkpoint
     summary and notification. A producer score carries its source and the
     scorer's own explanation, or says plainly that none was given; a task the
     scorer did not score says why when that is known."""
     if source:
+        capped = (
+            f" The scorer reported {producer_confidence.display_confidence(capped_from)}; "
+            "the rubric's hard floor (a missing input or an unresolved conflict) "
+            "capped it."
+            if capped_from is not None
+            else ""
+        )
         return (
-            f" Scored {_shown_confidence(confidence, source)} by {source}. "
+            f" Scored {_shown_confidence(confidence, source)} by {source}.{capped} "
             "Scorer's assessment: "
             f"{rationale or 'no explanation was supplied'}."
         )
@@ -1122,7 +1136,9 @@ async def dispatch_task(
         # snapshot as it was, which is the unscored path below, unchanged.
         confidence_source = ""
         confidence_rationale = ""
+        confidence_capped_from = None
         scoring_note = ""
+        produced_score = None
         gate_snapshot = snapshot
         if not _confidence_is_explicit(snapshot):
             attempt = await producer_confidence.score_unscored_task(
@@ -1140,15 +1156,24 @@ async def dispatch_task(
             )
             scoring_note = attempt.note
             produced = attempt.score
+            produced_score = produced
             if produced is not None:
                 # The validated value, unrounded: it is what the gate compares.
                 gate_snapshot = {**snapshot, "confidence": produced.value}
                 confidence_source = produced.source
                 confidence_rationale = produced.rationale
+                confidence_capped_from = produced.capped_from
                 log.info(
                     f"[{DAEMON_NAME}] confidence: task={entity_id} producer score "
-                    f"{produced.display} from {produced.source} "
-                    f"(tier={produced.tier}, provider={produced.provider or '?'})"
+                    f"{produced.value!r} from {produced.source} "
+                    f"(tier={produced.tier}, provider={produced.provider or '?'}, "
+                    f"run={produced.run_id}"
+                    + (
+                        f", capped from {produced.capped_from!r}"
+                        if produced.capped_from is not None
+                        else ""
+                    )
+                    + f") rationale={produced.rationale!r}"
                 )
         confidence, confidence_unscored = _resolve_confidence(
             gate_snapshot,
@@ -1179,6 +1204,45 @@ async def dispatch_task(
             )
             if withheld.action != GateAction.AUTO_EXECUTE:
                 decision = dataclasses.replace(withheld, confidence=confidence)
+        if decision.action == GateAction.AUTO_EXECUTE and produced_score is not None:
+            # A producer score is about to authorise a run. Record it durably
+            # and prove it by read-back BEFORE the worker is dispatched; if that
+            # cannot be proven, hold the task rather than run on a judgment
+            # Neotoma cannot explain.
+            assessment_id = await asyncio.to_thread(
+                write_producer_assessment,
+                task_entity_id=entity_id,
+                value=produced_score.value,
+                threshold=decision.threshold,
+                source=produced_score.source,
+                action_type=action_type or "",
+                policy_id=decision.policy_id,
+                tier=produced_score.tier,
+                model=produced_score.model,
+                run_id=produced_score.run_id,
+                rationale=produced_score.rationale,
+                gate_action=decision.action.value,
+                handler=DAEMON_NAME,
+                capped_from=produced_score.capped_from,
+            )
+            if assessment_id:
+                log.info(
+                    f"[{DAEMON_NAME}] confidence: task={entity_id} producer score "
+                    f"recorded as {assessment_id} before dispatch"
+                )
+            else:
+                log.error(
+                    f"[{DAEMON_NAME}] task {entity_id}: producer score could not be "
+                    "recorded and proven — holding instead of auto-executing"
+                )
+                decision = dataclasses.replace(
+                    decision,
+                    action=GateAction.CHECKPOINT,
+                    reason=(
+                        "producer score could not be recorded durably — held for "
+                        "operator approval rather than run on an unrecorded judgment"
+                    ),
+                )
         log.info(
             f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
             f"action={action_type} blast={decision.blast_radius.value} "
@@ -1222,6 +1286,7 @@ async def dispatch_task(
                             confidence,
                             confidence_rationale,
                             scoring_note,
+                            confidence_capped_from,
                         )
                     ),
                     handler=DAEMON_NAME,
@@ -1252,12 +1317,14 @@ async def dispatch_task(
                 f"{decision.reason}\n"
                 + (
                     _scoring_summary(
-                        confidence_source, confidence, confidence_rationale, ""
+                        confidence_source,
+                        confidence,
+                        confidence_rationale,
+                        scoring_note,
+                        confidence_capped_from,
                     ).strip()
                     + "\n"
-                    if confidence_source
-                    else ""
-                )
+                ).lstrip("\n")
                 + f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,

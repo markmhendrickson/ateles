@@ -45,6 +45,8 @@ def test_the_eval_covers_every_required_behaviour():
         "operator_override_is_not_scored", "tier_mapped_to_top_switches_scorer_off",
         "hard_floor_caps_a_producer_score", "just_below_threshold_is_held_unrounded",
         "over_long_task_is_declined_not_partially_scored",
+        "auto_execution_is_recorded_durably_with_the_exact_value_before_dispatch",
+        "failed_assessment_write_checkpoints_instead_of_executing",
     }
     assert required <= set(IDS)
 
@@ -58,6 +60,16 @@ PRODUCER_DEPENDENT = [s for s in SCENARIOS if s["expect"]["scorer_called"]]
 def test_checks_go_red_without_the_producer(scenario):
     obs = harness.run_scenario(scenario, BASE, mutation="no_producer")
     assert harness.check(scenario, obs), "this scenario cannot detect the producer's absence"
+
+
+def test_checks_go_red_if_the_assessment_is_not_actually_written():
+    """A dispatcher that claims the record landed without writing it is caught."""
+    scenario = next(
+        s for s in SCENARIOS
+        if s["id"] == "auto_execution_is_recorded_durably_with_the_exact_value_before_dispatch"
+    )
+    obs = harness.run_scenario(scenario, BASE, mutation="skip_assessment")
+    assert harness.check(scenario, obs)
 
 
 def test_checks_go_red_if_the_score_is_rounded_before_the_gate():

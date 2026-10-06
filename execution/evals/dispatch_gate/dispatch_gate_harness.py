@@ -37,7 +37,7 @@ from lib.daemon_runtime import gating  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
-MUTATIONS = ("none", "no_producer", "round_before_gate")
+MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment")
 BINDING = {"claude": {"local": "m-local", "mechanical": "m-mech", "mid": "m-mid", "top": "m-top"}}
 
 
@@ -63,14 +63,17 @@ class _Spawned:
 
 
 class _Posted:
-    def __init__(self, store: list):
-        self._store = store
+    def __init__(self, store: list, entity_id: str = "ent_brief", snapshot: dict | None = None):
+        self._entity_id = entity_id
+        self._snapshot = snapshot
 
     def raise_for_status(self):
         pass
 
     def json(self):
-        return {"entities": [{"entity_id": "ent_brief"}]}
+        if self._snapshot is not None:
+            return {"entity_id": self._entity_id, "snapshot": self._snapshot}
+        return {"entities": [{"entity_id": self._entity_id}]}
 
 
 def build_task(base: dict, overrides: dict | None) -> dict:
@@ -90,11 +93,13 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
     obs: dict = {
         "briefs": [], "spawns": [], "statuses": [], "runner_calls": [],
         "notifications": [], "persisted": [], "scorer_tier": None,
+        "assessments": [], "events": [],
     }
     config = scenario.get("config") or {}
     scorer = scenario.get("scorer") or {"kind": "none"}
     task = build_task(base_task, scenario.get("task"))
     gate_override = bool((scenario.get("dispatch") or {}).get("gate_override"))
+    assessment_mode = config.get("assessment", "ok")
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(apis, "_unroutable", UnroutableLedger(path=_tmp_ledger()))
@@ -125,11 +130,31 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
         mp.setattr(gating, "NEOTOMA_BEARER_TOKEN", "eval-token")
         mp.setattr(gating, "NEOTOMA_BASE_URL", "http://eval.invalid")
 
+        stored: dict = {}
+
         def _post(url, headers=None, json=None, content=None, timeout=None):
-            obs["persisted"].append((json or {})["entities"][0])
-            return _Posted(obs["persisted"])
+            entity = (json or {})["entities"][0]
+            if entity["entity_type"] == "harness_event":
+                if assessment_mode == "store_fails":
+                    raise RuntimeError("neotoma unavailable")
+                obs["assessments"].append(entity)
+                obs["events"].append("assessment_written")
+                stored["ent_assessment"] = dict(entity)
+                return _Posted(obs["persisted"], "ent_assessment")
+            obs["persisted"].append(entity)
+            return _Posted(obs["persisted"], "ent_brief")
+
+        def _get(url, headers=None, params=None, timeout=None):
+            entity_id = url.rsplit("/", 1)[-1]
+            if assessment_mode == "readback_missing":
+                raise RuntimeError("not found")
+            snap = dict(stored.get(entity_id) or {})
+            if assessment_mode == "readback_mismatch":
+                snap["output_summary"] = "producer_confidence=0.0 (altered)"
+            return _Posted(obs["persisted"], entity_id, snapshot=snap)
 
         mp.setattr(gating.httpx, "post", _post)
+        mp.setattr(gating.httpx, "get", _get)
         real_writer = gating.write_checkpoint_brief
 
         def _writer(**kw):
@@ -142,6 +167,7 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
 
         async def _spawn(skill, entity_id, *a, **kw):
             obs["spawns"].append((skill, entity_id))
+            obs["events"].append("spawn")
             return _Spawned()
 
         mp.setattr(apis, "_spawn_harness_skill", _spawn)
@@ -185,6 +211,8 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
                 return producer_confidence.ScoreAttempt(None)
 
             mp.setattr(producer_confidence, "score_unscored_task", _nothing)
+        elif mutation == "skip_assessment":
+            mp.setattr(apis, "write_producer_assessment", lambda **kw: "ent_unwritten")
         elif mutation == "round_before_gate":
             real_gate = apis.evaluate_gate
 
@@ -256,8 +284,39 @@ def check(scenario: dict, obs: dict) -> list[str]:
                 fails.append("a mechanical estimate was persisted with a producer source")
     elif exp.get("summary_contains") or exp.get("notification_contains"):
         fails.append("no checkpoint was written to carry the expected text")
+    if "assessment" in exp:
+        fails += _check_assessment(exp["assessment"], obs)
     if "scorer_tier" in exp and obs["scorer_tier"] != exp["scorer_tier"]:
         fails.append(f"scorer ran at {obs['scorer_tier']!r}, expected {exp['scorer_tier']!r}")
     if obs["scorer_tier"] == "top":
         fails.append("the scorer ran on the top tier")
+    return fails
+
+
+def _check_assessment(want: dict, obs: dict) -> list[str]:
+    """The durable assessment record: present, exact, and written BEFORE dispatch."""
+    fails: list[str] = []
+    stored = obs["assessments"]
+    if not want.get("recorded"):
+        if stored and not want.get("allow_written"):
+            fails.append("an assessment was written where none was expected")
+        return fails
+    if len(stored) != 1:
+        return [f"expected one durable assessment, found {len(stored)}"]
+    record = stored[0]
+    summary = record.get("output_summary", "")
+    if "exact_value" in want:
+        needle = f"producer_confidence={want['exact_value']!r} "
+        if needle not in summary:
+            fails.append(f"assessment lacks the exact value {needle!r}: {summary!r}")
+        if record.get("confidence") != want["exact_value"]:
+            fails.append(f"assessment confidence field {record.get('confidence')!r}")
+    for needle in want.get("summary_contains", []):
+        if needle not in summary:
+            fails.append(f"assessment lacks {needle!r}: {summary!r}")
+    if record.get("task_entity_id") != "ent_eval_task":
+        fails.append("assessment is not linked to the task")
+    events = obs["events"]
+    if "spawn" in events and events.index("assessment_written") > events.index("spawn"):
+        fails.append("the assessment was written after the worker was dispatched")
     return fails

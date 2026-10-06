@@ -56,7 +56,10 @@ Provenance
 ``PRODUCER_SOURCE`` is stamped on the score so a producer score can be told
 apart from a mechanical estimate: dispatch records it on the gate decision and
 the checkpoint brief, and a task that reaches the gate unscored carries no
-source at all.
+source at all. A score that leads to an auto-execution is also written as a
+durable assessment record (``gating.write_producer_assessment``) and proven by
+read-back BEFORE the worker is dispatched; if that cannot be proven, dispatch
+holds the task for the operator instead.
 """
 
 from __future__ import annotations
@@ -68,6 +71,7 @@ import math
 import os
 import re
 import tempfile
+import uuid
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -117,6 +121,9 @@ class ProducerScore:
     tier: str = ""
     provider: str = ""
     rationale: str = ""
+    model: str = ""   # the model the tier is bound to for the provider, if known
+    run_id: str = ""  # one id per scoring attempt, carried on the durable record
+    capped_from: float | None = None  # the scorer's own value, when a floor lowered it
 
     @property
     def display(self) -> str:
@@ -271,8 +278,7 @@ async def _default_runner(
     the tier that runs (a policy edit between the check and the launch cannot
     change it). The run is tool-free on the single adapter that supports that
     (``skill_runner.INFERENCE_ONLY_PROVIDER``), pinned, so no other provider is
-    ever a candidate. ``task_entity_id`` links the run's harness_event to the
-    task, which is the durable record of a score that auto-executes.
+    ever a candidate. ``task_entity_id`` links the run's own harness_event to the task.
 
     Imported lazily: ``skill_runner`` pulls the whole dispatch stack, and a
     unit test of the parser or the eligibility rules must not need it.
@@ -295,6 +301,14 @@ async def _default_runner(
             resolved_tier=tier,
         )
     return bool(result.ok), result.stdout or "", result.provider or ""
+
+
+def _model_for(provider: str, tier: str) -> str:
+    """The model bound to ``tier`` for ``provider``, or "" when not known."""
+    try:
+        return model_tiering.model_for_tier(provider or "claude", tier) or ""
+    except Exception:  # noqa: BLE001 — a record detail, never a reason to fail
+        return ""
 
 
 def _eligible(
@@ -363,14 +377,18 @@ async def score_unscored_task(
             log.warning("producer score rejected: reply was not a valid score")
             return ScoreAttempt(None, "the scorer's reply was not a valid score")
         value, rationale = parsed
-        if mechanical_value <= HARD_FLOOR:
-            value = min(value, mechanical_value)
+        capped_from = None
+        if mechanical_value <= HARD_FLOOR and value > mechanical_value:
+            capped_from, value = value, mechanical_value
         return ScoreAttempt(
             ProducerScore(
                 value=value,  # unrounded: this is what the gate compares
                 tier=resolved.tier,
                 provider=provider,
                 rationale=rationale,
+                model=_model_for(provider, resolved.tier),
+                run_id=uuid.uuid4().hex,
+                capped_from=capped_from,
             )
         )
     except asyncio.CancelledError:
