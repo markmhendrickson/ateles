@@ -2895,11 +2895,15 @@ async def _run_skill_once(
     # the model actually requested. An un-tiered dispatch is logged as such
     # (`tiering=untiered(no_action_class)`), never omitted, so a call site that
     # forgot to name an action class shows up here instead of hiding.
+    # The id ties this start row to the spend row appended when the dispatch
+    # ends (`record_dispatch_usage`), so attribution survives a provider failover
+    # that records one start row per provider tried.
+    _ledger_dispatch_id = model_tiering.new_dispatch_id()
     log.info(
         f"[apis] {skill} via {provider}: "
         + model_tiering.record_dispatch(
             skill=skill, provider=provider, resolved=resolved_tier,
-            model=resolved_model,
+            model=resolved_model, dispatch_id=_ledger_dispatch_id,
         )
     )
 
@@ -3061,6 +3065,20 @@ async def _run_skill_once(
             except Exception as exc:
                 log.debug(f"[apis] timeout harness_event write failed: {exc}")
 
+            # A timed-out dispatch still spent something; its spend row carries
+            # the provider and requested model with every count null.
+            model_tiering.record_dispatch_usage(
+                dispatch_id=_ledger_dispatch_id,
+                skill=skill,
+                provider=provider,
+                resolved=resolved_tier,
+                requested_model=_requested_model(provider, cmd),
+                usage=parse_dispatch_usage(
+                    provider, "", requested_model=_requested_model(provider, cmd)
+                ),
+                ok=False,
+            )
+
             # ateles#257 — a timed-out dispatch is the same silent failure class;
             # route it through the same rate-limited operator notification.
             notify_dispatch_failure(
@@ -3149,6 +3167,19 @@ async def _run_skill_once(
             provider,
             _stdout_text,
             requested_model=_requested_model(provider, cmd),
+            stderr=_stderr_text,
+        )
+        # The same attribution, appended to the tier ledger so spend is read
+        # per provider / model / tier / work class from one file.
+        await asyncio.to_thread(
+            model_tiering.record_dispatch_usage,
+            dispatch_id=_ledger_dispatch_id,
+            skill=skill,
+            provider=provider,
+            resolved=resolved_tier,
+            requested_model=_requested_model(provider, cmd),
+            usage=_usage,
+            ok=(proc.returncode == 0),
         )
 
         result = SkillResult(

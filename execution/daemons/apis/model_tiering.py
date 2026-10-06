@@ -54,6 +54,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -544,21 +545,47 @@ def describe_tiering(
     return UNTIERED, "no_action_class"
 
 
+USAGE_EVENT = "usage"
+DISPATCH_EVENT = "dispatch"
+
+
+def new_dispatch_id() -> str:
+    """A key tying one dispatch's start row to its usage row in the ledger."""
+    return uuid.uuid4().hex
+
+
+def _append_ledger_row(row: dict) -> None:
+    """Best-effort append; a write failure is logged, never raised into a dispatch."""
+    try:
+        path = tier_ledger_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError as exc:
+        log.warning(f"[apis] model_tiering: tier ledger write failed (non-fatal): {exc}")
+
+
 def record_dispatch(
     *,
     skill: str,
     provider: str,
     resolved: "ResolvedTier | None",
     model: str | None,
+    dispatch_id: str | None = None,
 ) -> str:
     """Log and ledger one dispatch's tiering; return the log marker.
 
     The marker (``tiering=<tier>(<source>) model=<model|default>``) is what the
     caller logs, so the log line and the ledger row cannot disagree.
+
+    ``dispatch_id`` ties this start row to the usage row ``record_dispatch_usage``
+    appends when the dispatch ends (tokens and cost are not known until then).
     """
     tier, source = describe_tiering(resolved, model)
     marker = f"tiering={tier}({source}) model={model or 'default'}"
     row = {
+        "event": DISPATCH_EVENT,
+        "dispatch_id": dispatch_id or "",
         "ts": datetime.now(timezone.utc).isoformat(),
         "skill": skill,
         "provider": provider,
@@ -568,14 +595,62 @@ def record_dispatch(
         "model": model or "",
         "escalation_reasons": list(resolved.escalation_reasons) if resolved else [],
     }
-    try:
-        path = tier_ledger_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, sort_keys=True) + "\n")
-    except OSError as exc:
-        log.warning(f"[apis] model_tiering: tier ledger write failed (non-fatal): {exc}")
+    _append_ledger_row(row)
     return marker
+
+
+# Token fields a usage row carries, in the order they are reported. Each is
+# written as an explicit ``null`` when the harness did not report it: a reader
+# must be able to tell "not reported" from "measured zero", and the ledger must
+# never hold an estimate.
+USAGE_TOKEN_FIELDS: tuple[str, ...] = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
+
+
+def record_dispatch_usage(
+    *,
+    dispatch_id: str,
+    skill: str,
+    provider: str,
+    resolved: "ResolvedTier | None",
+    requested_model: str | None,
+    usage: object,
+    ok: bool | None = None,
+) -> None:
+    """Append the end-of-dispatch spend row for one dispatch.
+
+    ``usage`` is a ``dispatch_usage.DispatchUsage``. Read by attribute so this
+    module stays import-light. Everything the provider did not report is
+    ``null``; nothing is derived or estimated. ``model`` is the model the
+    harness reported when it named one, else the model that was requested, and
+    ``model_source`` says which (``reported`` / ``requested`` / ``default``).
+    ``ok`` is the dispatch's outcome, so a failed or timed-out dispatch's spend
+    is attributable too.
+    """
+    tier, source = describe_tiering(resolved, requested_model)
+    row: dict = {
+        "event": USAGE_EVENT,
+        "dispatch_id": dispatch_id or "",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "skill": skill,
+        "provider": provider,
+        "action_class": resolved.action_class if resolved else "",
+        "tier": tier,
+        "source": source,
+        "model": getattr(usage, "model", None) or requested_model or "",
+        "model_source": getattr(usage, "model_source", None),
+        "ok": ok,
+    }
+    for name in USAGE_TOKEN_FIELDS:
+        row[name] = getattr(usage, name, None)
+    row["total_cost_usd"] = getattr(usage, "total_cost_usd", None)
+    _append_ledger_row(row)
 
 
 def reason_name(reason: str) -> str:
@@ -622,6 +697,8 @@ def tier_counts(
             when = datetime.fromisoformat(str(row["ts"]))
         except (ValueError, KeyError, TypeError):
             continue
+        if row.get("event") == USAGE_EVENT:
+            continue  # a spend row for a dispatch already counted by its start row
         if cutoff is not None and when < cutoff:
             continue
         total += 1
@@ -641,6 +718,67 @@ def tier_counts(
     if with_reasons:
         report["by_reason"] = by_reason
     return report
+
+
+USAGE_GROUPS: tuple[str, ...] = ("provider", "model", "tier", "action_class")
+
+
+def usage_totals(
+    *, group_by: str = "provider", since_hours: float | None = None
+) -> dict:
+    """Spend per ``group_by`` from the ledger's usage rows.
+
+    ``{"group_by": g, "rows": n, "groups": {key: {"dispatches": n,
+    "reported_token_rows": n, "unreported_token_rows": n, <token fields>: sum,
+    "cost_reported_rows": n, "total_cost_usd": sum | None}}}``.
+
+    A sum covers ONLY the rows that reported that field, and the report says
+    how many that was, so a partial total is never mistaken for a full one.
+    ``total_cost_usd`` is ``None`` (not 0) when no row in the group reported a
+    cost. Malformed lines and start rows are skipped; a missing ledger is an
+    empty report.
+    """
+    if group_by not in USAGE_GROUPS:
+        raise ValueError(f"group_by must be one of {', '.join(USAGE_GROUPS)}")
+    cutoff = None
+    if since_hours is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    groups: dict[str, dict] = {}
+    rows = 0
+    try:
+        lines = tier_ledger_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+            when = datetime.fromisoformat(str(row["ts"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not isinstance(row, dict) or row.get("event") != USAGE_EVENT:
+            continue
+        if cutoff is not None and when < cutoff:
+            continue
+        rows += 1
+        key = str(row.get(group_by) or "(none)")
+        entry = groups.setdefault(key, {
+            "dispatches": 0, "reported_token_rows": 0, "unreported_token_rows": 0,
+            "cost_reported_rows": 0, "total_cost_usd": None,
+            **{name: 0 for name in USAGE_TOKEN_FIELDS},
+        })
+        entry["dispatches"] += 1
+        reported = False
+        for name in USAGE_TOKEN_FIELDS:
+            value = row.get(name)
+            if isinstance(value, int) and not isinstance(value, bool):
+                entry[name] += value
+                reported = True
+        entry["reported_token_rows" if reported else "unreported_token_rows"] += 1
+        cost = row.get("total_cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            entry["cost_reported_rows"] += 1
+            entry["total_cost_usd"] = (entry["total_cost_usd"] or 0.0) + float(cost)
+    return {"group_by": group_by, "rows": rows, "groups": groups}
 
 
 # ── Config validation: `model_tiering.py --check <file> [<file> ...]` ─────────
