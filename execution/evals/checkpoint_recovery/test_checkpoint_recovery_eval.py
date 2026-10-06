@@ -91,7 +91,12 @@ def test_exact_replay_creates_nothing(world, monkeypatch, capsys):
     assert code == 0
     assert set(world.entities) == entities
     assert world.write_log == writes
-    assert all(outcomes(lines)[t] == "skipped" for t in HELD)
+    got = outcomes(lines)
+    expected = {
+        "ent_task_operator_only": "needs_operator",
+        "ent_task_unclassified": "needs_classification",
+    }
+    assert all(got[t] == expected.get(t, "skipped") for t in HELD)
 
 
 def test_changed_task_keeps_one_resolvable_current_checkpoint(
@@ -207,3 +212,139 @@ def test_recovered_checkpoint_passes_the_resolver_authority_gate_and_a_legacy_on
     assert "no authenticated required-resolver authority" not in passed["error"]
     # Exactly one resolvable checkpoint stands for the task: one possible release.
     assert resolvable(world, "ent_task_held_plain") == [new_id]
+
+
+# ── Recovery-state contract: a failed read is not evidence ──────────────────
+
+
+def _checkpoint_states(world, task_id):
+    return {
+        i: world.entities[i]["fields"]["status"]
+        for i, e in world.entities.items()
+        if e["type"] == CHECKPOINT and e["fields"].get("task_entity_id") == task_id
+    }
+
+
+def test_unreadable_existing_checkpoint_is_a_failure_and_nothing_is_retired(
+    world, monkeypatch, capsys
+):
+    """A signed brief whose record or authorization observations cannot be read is
+    neither replaced nor retired: failure to read is not evidence that the
+    authority is stale."""
+    run(monkeypatch, capsys, "--apply")  # every held task now has a signed checkpoint
+    signed = world.pending_checkpoints("ent_task_held_plain")[0]
+    before = _checkpoint_states(world, "ent_task_held_plain")
+    writes = list(world.write_log)
+
+    world.fail_get = {signed}  # the checkpoint itself is unreadable
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", "ent_task_held_plain")
+    assert code == 1
+    assert outcomes(lines) == {"ent_task_held_plain": "failed"}
+    assert world.write_log == writes, "nothing created or retired"
+    assert _checkpoint_states(world, "ent_task_held_plain") == before
+
+    world.fail_get = set()
+    world.fail_observations = {signed}  # its authorization observations are not
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", "ent_task_held_plain")
+    assert code == 1
+    assert outcomes(lines) == {"ent_task_held_plain": "failed"}
+    assert world.write_log == writes
+    assert _checkpoint_states(world, "ent_task_held_plain") == before
+
+    world.fail_observations = set()
+
+    # Once reads recover, the same checkpoint is simply still current.
+    world.fail_get = set()
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", "ent_task_held_plain")
+    assert code == 0
+    assert outcomes(lines) == {"ent_task_held_plain": "skipped"}
+    assert world.pending_checkpoints("ent_task_held_plain") == [signed]
+
+
+def test_unreadable_legacy_checkpoint_is_preserved_not_replaced(
+    world, monkeypatch, capsys
+):
+    world.fail_get = {"ent_legacy_held"}
+
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", "ent_task_held_legacy")
+
+    assert code == 1
+    assert outcomes(lines) == {"ent_task_held_legacy": "failed"}
+    assert world.write_log == []
+    assert world.pending_checkpoints("ent_task_held_legacy") == ["ent_legacy_held"]
+
+
+def test_failed_verification_read_after_replacement_is_incomplete_not_skipped(
+    world, monkeypatch, capsys
+):
+    task = "ent_task_held_legacy"
+    world.fail_get_after_store = {task}
+
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", task)
+
+    assert code == 1, lines
+    assert outcomes(lines) == {task: "incomplete"}
+    record = lines[0]
+    replacement = record["checkpoint_id"]
+    assert replacement and replacement != "ent_legacy_held"
+    assert record["remaining"] == ["ent_legacy_held"]
+    # The replacement stands; the stale brief is still pending, not retired.
+    assert world.entities[replacement]["fields"]["status"] == "awaiting_operator"
+    assert world.entities["ent_legacy_held"]["fields"]["status"] == "awaiting_operator"
+
+    world.fail_get_after_store = set()
+    stores = world.store_count
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", task)
+
+    assert code == 0
+    assert outcomes(lines) == {task: "retired_stale"}
+    assert lines[0]["checkpoint_id"] == replacement, "the replacement is reused"
+    assert world.store_count == stores, "no second replacement is created"
+    assert world.pending_checkpoints(task) == [replacement]
+    assert world.entities["ent_legacy_held"]["fields"]["status"] == "superseded"
+
+
+# ── Tasks whose approval can never release them ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "task_id,outcome,needle",
+    [
+        ("ent_task_operator_only", "needs_operator", "reserved to the operator"),
+        ("ent_task_unclassified", "needs_classification", "Classification repair"),
+    ],
+)
+def test_tasks_approval_cannot_release_get_an_honest_outcome_and_summary(
+    world, monkeypatch, capsys, task_id, outcome, needle
+):
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", task_id)
+
+    assert code == 0, lines
+    assert outcomes(lines) == {task_id: outcome}
+    checkpoint = world.pending_checkpoints(task_id)
+    assert len(checkpoint) == 1 and resolvable(world, task_id) == checkpoint
+    summary = world.entities[checkpoint[0]]["fields"]["plan_summary"]
+    assert needle in summary
+    assert "will NOT release" in summary
+    assert "Approval releases the task" not in summary
+    assert world.entities[task_id]["fields"]["status"] == "awaiting_approval"
+
+
+def test_ordinary_held_tasks_still_say_approval_releases_them(
+    world, monkeypatch, capsys
+):
+    run(monkeypatch, capsys, "--apply", "--task", "ent_task_held_plain")
+
+    checkpoint = world.pending_checkpoints("ent_task_held_plain")[0]
+    assert (
+        "Approval releases the task"
+        in world.entities[checkpoint]["fields"]["plan_summary"]
+    )
+
+
+def test_dry_run_flags_the_tasks_approval_cannot_release(world, monkeypatch, capsys):
+    code, lines = run(monkeypatch, capsys, "--task", "ent_task_operator_only")
+
+    assert code == 0
+    assert "will NOT release" in lines[0]["detail"]
+    assert world.write_log == []

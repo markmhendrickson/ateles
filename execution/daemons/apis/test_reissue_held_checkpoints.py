@@ -39,15 +39,14 @@ class _Record:
         self.writes = 0
         self.persist = True
         self.fail_supersede: set[str] = set()
+        self.unreadable: set[str] = set()
         policy = ExecutionPolicy(entity_id="policy", loaded=True)
         monkeypatch.setattr(apis, "fetch_task_record", self.fetch_task)
         monkeypatch.setattr(apis, "fetch_entity_user_id", lambda _id: "tenant-a")
         monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _skill: policy)
         monkeypatch.setattr(apis, "checkpoints_for_task", self.for_task)
         monkeypatch.setattr(apis, "fetch_checkpoint_record", self.fetch_checkpoint)
-        monkeypatch.setattr(
-            apis, "read_authenticated_checkpoint_authorization", self.authority
-        )
+        monkeypatch.setattr(apis, "_checkpoint_authority_state", self.authority_state)
         monkeypatch.setattr(apis, "write_checkpoint_brief", self.write_brief)
         monkeypatch.setattr(apis, "supersede_checkpoint", self.supersede)
 
@@ -89,10 +88,14 @@ class _Record:
     def fetch_checkpoint(self, checkpoint_id):
         return self.checkpoints.get(checkpoint_id)
 
-    def authority(self, checkpoint_id, record):
+    def authority_state(self, checkpoint_id, task_record):
+        if checkpoint_id in self.unreadable:
+            return "unreadable"
+        record = self.checkpoints[checkpoint_id]
         if not record.get("signed"):
-            return None  # a pre-signing brief has no authority envelope
-        return {"task_revision": record["revision"]}
+            return "stale"  # a pre-signing brief has no authority envelope
+        current = record["revision"] == gating.entity_record_digest(task_record)
+        return "current" if current else "stale"
 
     def write_brief(self, *, task_entity_id, idempotency_context, task_record, **_kw):
         self.writes += 1
@@ -535,3 +538,138 @@ def test_iter_held_task_ids_rejects_a_non_positive_limit():
     for bad in (0, -1):
         with pytest.raises(ValueError):
             list(apis.iter_held_task_ids(limit=bad))
+
+
+# ── a failed read is not evidence that authority is stale ───────────────────
+
+
+class TestAuthorityState:
+    TASK = {"entity_id": "ent_t1", "observation_count": 3}
+
+    def _patch(self, monkeypatch, *, record, observations, authority):
+        monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda _id: record)
+        monkeypatch.setattr(
+            apis, "fetch_entity_observations_strict", lambda _id: observations
+        )
+        monkeypatch.setattr(
+            apis,
+            "read_authenticated_checkpoint_authorization",
+            lambda _id, _record, *, observations=None: authority,
+        )
+
+    def test_unreadable_record_is_unreadable_not_stale(self, monkeypatch):
+        self._patch(monkeypatch, record=None, observations=[], authority=None)
+        assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "unreadable"
+
+    def test_unreadable_observations_are_unreadable_not_stale(self, monkeypatch):
+        self._patch(
+            monkeypatch,
+            record={"snapshot": {"body": "{}"}},
+            observations=None,
+            authority=None,
+        )
+        assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "unreadable"
+
+    def test_a_brief_with_no_envelope_is_positively_stale(self, monkeypatch):
+        self._patch(
+            monkeypatch, record={"snapshot": {}}, observations=None, authority=None
+        )
+        assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "stale"
+
+    def test_readable_but_unauthenticated_envelope_is_stale(self, monkeypatch):
+        self._patch(
+            monkeypatch,
+            record={"snapshot": {"body": "{}"}},
+            observations=[],
+            authority=None,
+        )
+        assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "stale"
+
+    def test_envelope_bound_to_another_revision_is_stale_and_to_this_one_current(
+        self, monkeypatch
+    ):
+        self._patch(
+            monkeypatch,
+            record={"snapshot": {"body": "{}"}},
+            observations=[],
+            authority={"task_revision": "someone-else"},
+        )
+        assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "stale"
+        self._patch(
+            monkeypatch,
+            record={"snapshot": {"body": "{}"}},
+            observations=[],
+            authority={"task_revision": gating.entity_record_digest(self.TASK)},
+        )
+        assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "current"
+
+
+def test_unreadable_pending_checkpoint_fails_without_replacing_or_retiring(record):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_signed", "ent_t1", signed=True)
+    record.add_checkpoint("ent_legacy", "ent_t1", signed=False)
+    record.unreadable = {"ent_signed"}
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "failed"
+    assert record.writes == 0
+    assert record.checkpoints["ent_signed"]["snapshot"]["status"] == "awaiting_operator"
+    assert record.checkpoints["ent_legacy"]["snapshot"]["status"] == "awaiting_operator"
+
+
+def test_failed_task_reread_after_replacement_is_incomplete_and_retires_nothing(
+    record, monkeypatch
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_legacy", "ent_t1", signed=False)
+    original = record.fetch_task
+
+    def reread_fails(task_id):
+        return None if record.writes > 0 else original(task_id)
+
+    monkeypatch.setattr(apis, "fetch_task_record", reread_fails)
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "incomplete"
+    assert result.checkpoint_id and result.remaining == ["ent_legacy"]
+    assert record.checkpoints["ent_legacy"]["snapshot"]["status"] == "awaiting_operator"
+
+    monkeypatch.setattr(apis, "fetch_task_record", original)
+    writes = record.writes
+    second = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+    assert second.outcome == "retired_stale"
+    assert second.checkpoint_id == result.checkpoint_id
+    assert record.writes == writes
+    assert record.checkpoints["ent_legacy"]["snapshot"]["status"] == "superseded"
+
+
+@pytest.mark.parametrize(
+    "fields,outcome",
+    [
+        ({"action_type": "operator_only"}, "needs_operator"),
+        ({"action_type": "not_in_any_policy_set"}, "needs_classification"),
+    ],
+)
+def test_task_approval_cannot_release_is_a_distinct_outcome(record, fields, outcome):
+    record.add_task("ent_t1", **fields)
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == outcome
+    assert "will NOT release" in result.detail
+    assert result.checkpoint_id
+
+
+def test_cli_exits_zero_for_needs_operator_and_nonzero_for_incomplete(
+    record, monkeypatch, capsys
+):
+    record.add_task("ent_op", action_type="operator_only")
+    assert _run_cli(monkeypatch, "--task", "ent_op", "--apply") == 0
+    assert '"outcome": "needs_operator"' in capsys.readouterr().out
+
+    record.add_task("ent_t2")
+    record.add_checkpoint("ent_legacy2", "ent_t2", signed=False)
+    record.fail_supersede = {"ent_legacy2"}
+    assert _run_cli(monkeypatch, "--task", "ent_t2", "--apply") == 1

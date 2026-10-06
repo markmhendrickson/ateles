@@ -44,6 +44,18 @@
       "title": "Held and to be rejected"
     },
     {
+      "id": "ent_task_operator_only",
+      "status": "awaiting_approval",
+      "title": "Reserved to the operator",
+      "action_type": "operator_only"
+    },
+    {
+      "id": "ent_task_unclassified",
+      "status": "awaiting_approval",
+      "title": "Action type the policy does not know",
+      "action_type": "mystery_action"
+    },
+    {
       "id": "ent_task_done",
       "status": "done",
       "title": "Finished work",

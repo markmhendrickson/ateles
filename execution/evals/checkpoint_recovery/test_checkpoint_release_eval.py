@@ -223,3 +223,18 @@ def test_an_approval_without_the_pinned_resolver_never_releases(
     assert world.dispatches.calls == []
     assert task_fields(world, "ent_task_twin_b")["status"] == "awaiting_approval"
     assert task_fields(world, "ent_task_held_last")["status"] == "awaiting_approval"
+
+
+def test_approving_a_never_tier_recovered_checkpoint_releases_nothing(
+    world, monkeypatch, capsys
+):
+    """What the honest summary says is what happens: approval records the
+    decision and dispatches nothing."""
+    checkpoints = recover(world, monkeypatch, capsys)
+
+    for task_id in ("ent_task_operator_only", "ent_task_unclassified"):
+        result = asyncio.run(mcp_resolve(world, checkpoints[task_id], "approve"))
+        assert "no agent dispatch" in result["action_taken"], result
+        assert task_fields(world, task_id)["status"] == "awaiting_approval"
+
+    assert world.dispatches.calls == []

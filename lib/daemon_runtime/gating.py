@@ -452,6 +452,31 @@ def _fetch_entity_observations(entity_id: str, *, limit: int = 100) -> list[dict
         return []
 
 
+def fetch_entity_observations_strict(entity_id: str, *, limit: int = 100) -> list[dict] | None:
+    """Observations of an entity, or ``None`` when the read FAILED.
+
+    ``_fetch_entity_observations`` folds a failed read into an empty list, which
+    callers that decide "is this authority valid" cannot tell from "there are no
+    observations".  A recovery decision must not treat an outage as evidence.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        return None
+    try:
+        resp = httpx.get(
+            f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            params={"limit": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        observations = data.get("observations") if isinstance(data, dict) else None
+        return observations if isinstance(observations, list) else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[gating] could not read observations for %s: %s", entity_id, exc)
+        return None
+
+
 def fetch_entity_user_id(entity_id: str) -> str | None:
     """Resolve tenant provenance from immutable observation ownership."""
     user_ids = {
@@ -714,7 +739,10 @@ def build_checkpoint_authorization_envelope(
 
 
 def read_authenticated_checkpoint_authorization(
-    checkpoint_id: str, checkpoint_record: dict
+    checkpoint_id: str,
+    checkpoint_record: dict,
+    *,
+    observations: list[dict] | None = None,
 ) -> dict | None:
     """Read an authorization envelope only from its AAuth-backed observation.
 
@@ -743,7 +771,11 @@ def read_authenticated_checkpoint_authorization(
     observation = next(
         (
             item
-            for item in _fetch_entity_observations(checkpoint_id)
+            for item in (
+                observations
+                if observations is not None
+                else _fetch_entity_observations(checkpoint_id)
+            )
             if item.get("id") == observation_id
         ),
         None,

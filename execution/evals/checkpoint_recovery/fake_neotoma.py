@@ -40,6 +40,10 @@ class FakeNeotoma:
         self.fail_query_types: set[str] = set()
         self.fail_correct_ids: set[str] = set()
         self.correction_keys: set[str] = set()
+        self.fail_get: set[str] = set()
+        self.fail_observations: set[str] = set()
+        self.fail_get_after_store: set[str] = set()
+        self.store_count = 0
         self._obs = 0
         for task in scenario["tasks"]:
             self._put(
@@ -49,7 +53,7 @@ class FakeNeotoma:
                     "title": task["title"],
                     "status": task["status"],
                     "assigned_to": "cicada",
-                    "action_type": "local_edit",
+                    "action_type": task.get("action_type", "local_edit"),
                     "confidence": task.get("confidence", 0.3),
                 },
                 signed=False,
@@ -172,10 +176,16 @@ class FakeNeotoma:
         parts = [p for p in path.split("/") if p]
         if len(parts) >= 2 and parts[0] == "entities":
             entity_id = parts[1]
+            if entity_id in self.fail_get or (
+                entity_id in self.fail_get_after_store and self.store_count > 0
+            ):
+                return self._response(500, {"error_code": "DB_QUERY_FAILED"}, url)
             e = self.entities.get(entity_id)
             if e is None:
                 return self._response(404, {"error_code": "NOT_FOUND"}, url)
             if len(parts) == 3 and parts[2] == "observations":
+                if entity_id in self.fail_observations:
+                    return self._response(500, {"error_code": "DB_QUERY_FAILED"}, url)
                 return self._response(
                     200, {"observations": list(e["observations"])}, url
                 )
@@ -296,5 +306,6 @@ class FakeNeotoma:
         self.by_title[title] = entity_id
         self.by_key[key] = (entity_id, digest)
         self.write_log.append(f"store {entity_id}")
+        self.store_count += 1
         self._put(entity_id, entity_type, entity, signed=signed)
         return self._response(200, {"entities": [{"entity_id": entity_id}]}, url)
