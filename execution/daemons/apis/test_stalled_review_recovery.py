@@ -328,7 +328,7 @@ def _comments_response(bodies: list[str]):
             return None
 
         def json(self):
-            return [{"body": b} for b in self._bodies]
+            return [{"body": b, "user": {"login": "swarm-lens-account"}} for b in self._bodies]
 
     return _Resp(bodies)
 

@@ -285,3 +285,29 @@ multiplying accounts.
 
 Note: the machine accounts need **classic** repo-scope PATs — fine-grained
 PATs 403 on public repos they collaborate on but do not own.
+
+### Which accounts' comments the swarm reads (`ATELES_LENS_COMMENT_AUTHORS`)
+
+Lens verdicts, the Vanellus aggregation, review deferrals and the
+once-only notice markers are plain text in PR comments, so the marker alone
+does not say who wrote one. The dispatcher (`swarm_dispatch.py`) and the
+approval tool (`execution/scripts/approve_pr_as_app.py`) read such a comment
+only when its author is an admitted swarm identity. The admitted set is
+resolved by `execution/daemons/apis/lens_authors.py`, never typed into code:
+
+- `ATELES_LENS_COMMENT_AUTHORS`: comma- or space-separated GitHub logins. Set
+  it to the account(s) the swarm, or a hand-run bootstrap panel, posts as.
+- the swarm GitHub App's bot login, when `ATELES_REVIEWER_APP_*` is set;
+- the account each agent token resolves to (`GET /user`):
+  `ATELES_AGENT_PAT`, `NEOTOMA_AGENT_PAT`, `GITHUB_TOKEN`, and each lens
+  agent's own `<AGENT>_AGENT_PAT`. A login is never guessed from an agent's
+  name; a token that does not resolve admits nobody.
+
+It fails closed. With an empty set no lens verdict, aggregation or notice
+marker is read: reviews do not clear, the approval tool refuses, and
+auto-merge holds. Auto-merge also holds while any identity source is
+unresolved, and when a lens comment from a non-admitted account objects at the
+current head (such a comment can only delay, never clear). Apis logs an ERROR
+at startup when the set is empty; the approval tool names the setting and each
+ignored comment in its output.
+

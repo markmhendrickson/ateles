@@ -99,6 +99,7 @@ from review_panel import (
     select_panel,
 )
 import model_tiering
+import lens_authors
 import review_carry
 import review_delta
 from skill_runner import (
@@ -1872,6 +1873,48 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
         return agent_pat
     # Tier 2 → 3 already implemented by _token_for_repo.
     return _token_for_repo(repo)
+
+
+def lens_comment_authors_resolution() -> lens_authors.Resolution:
+    """The GitHub identities the swarm posts lens verdict comments as, and the
+    identity sources that could not be read.
+
+    The one source every reader of lens verdict comments uses (the dispatcher's
+    own and `approve_pr_as_app.py`): see `lens_authors` for where each
+    identity comes from. A lens agent's own `<AGENT>_AGENT_PAT` is resolved
+    through `GET /user` like the shared tokens; its login is not derived from
+    the agent's name, so a token that does not resolve admits nobody. May read
+    from GitHub (cached): call from async code through `asyncio.to_thread`.
+    """
+    return lens_authors.resolve(
+        extra_token_envs=[f"{lens.agent.upper()}_AGENT_PAT" for lens in LENSES]
+    )
+
+
+def lens_comment_authors() -> frozenset[str]:
+    """`lens_comment_authors_resolution().authors`; empty means no comment is
+    read as a lens verdict."""
+    return lens_comment_authors_resolution().authors
+
+
+def lens_explicit_objection(body: str, *, lens_agent: str) -> str | None:
+    """Why a lens comment EXPLICITLY objects, or None.
+
+    Explicit means a parsed `REQUEST_CHANGES` / `BLOCKED` verdict, a
+    `[BLOCKING]` finding, or a blocking verdict token in the body. An unreadable
+    verdict is not an explicit objection here: this is the test applied to a
+    comment from an account that is not an admitted swarm identity, where an
+    objection can only delay (hold a merge or an approval) and never clear
+    anything, so only a plain objection is worth a hold.
+    """
+    verdict = lens_own_verdict(body, lens_agent=lens_agent)
+    if verdict in {"request_changes", "blocked"}:
+        return verdict.upper()
+    if body_has_blocking_findings(body):
+        return "[BLOCKING] finding"
+    if output_has_blocking_verdict(body):
+        return "blocking verdict token in body"
+    return None
 
 
 # ── QE3: eval-authoring affordance — PR-branch worktree for the qa lens ───────
@@ -4522,7 +4565,7 @@ class SwarmDispatcher:
         # the newest marker. Do NOT "optimise" this into an early return on the
         # first match — that is exactly the bug #430 fixed at the two sites that
         # did so. The ordering assumption is the same; the traversal is not.
-        for c in cresp.json():
+        for c in await self._swarm_authored(repository, number, cresp.json()):
             body = c.get("body", "")
             m = self._REVIEW_DEFERRED_RE.search(body)
             if m:
@@ -4772,7 +4815,7 @@ class SwarmDispatcher:
                     continue
                 number = int(pr.get("number"))
                 try:
-                    comments = await self._all_issue_comments(
+                    comments = await self._lens_scoped_comments(
                         repository, number, client
                     )
                 except Exception as exc:
@@ -4881,7 +4924,7 @@ class SwarmDispatcher:
                 # old deferral is superseded and the PR stops being "due", so a
                 # resolved PR is not re-dispatched forever (Loxia #264 review).
                 latest_iso = None  # ISO of the most-recent still-live deferral
-                for c in cresp.json():
+                for c in await self._swarm_authored(repository, num, cresp.json()):
                     body = c.get("body", "")
                     m = self._REVIEW_DEFERRED_RE.search(body)
                     if m:
@@ -7743,7 +7786,7 @@ class SwarmDispatcher:
             return {}
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                comments = await self._all_issue_comments(
+                comments = await self._lens_scoped_comments(
                     trigger.repository, trigger.number, client
                 )
         except Exception as exc:
@@ -8055,12 +8098,33 @@ class SwarmDispatcher:
         #1293's sibling PR. A lens with no comment on this head, or whose
         latest comment clears, is not a block.
 
-        Fails CLOSED on any read error: an unreadable comment list must never
-        be silently treated as "nothing objects" on a path that can merge.
+        Fails CLOSED, on a path that can merge:
+          - an unreadable comment list is a hold, never "nothing objects";
+          - so is an EMPTY admitted-identity set, or any identity source that
+            could not be resolved: a real objection from a swarm account that
+            is missing from the set would otherwise read as no objection at
+            all (the guard must not depend on identity resolution succeeding);
+          - and so is an explicit objection at the current head from an account
+            that is NOT admitted. Such a comment can only delay a merge, never
+            clear one: a clearing verdict from a non-admitted account is never
+            read.
         """
         head = _normalise_full_sha(reviewed_head)
         if not head:
             return "unreadable reviewed head — refusing to auto-merge blind"
+        try:
+            resolution = await asyncio.to_thread(lens_comment_authors_resolution)
+        except Exception as exc:  # noqa: BLE001
+            return (
+                f"swarm lens-comment identities could not be read "
+                f"({exc.__class__.__name__}) — holding the merge rather than "
+                "merging past an objection that cannot be seen"
+            )
+        if not resolution.complete:
+            return (
+                f"{resolution.describe_gap()} — holding the merge rather than "
+                "merging past an objection that cannot be seen"
+            )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 comments = await self._all_issue_comments(
@@ -8069,25 +8133,41 @@ class SwarmDispatcher:
         except Exception as exc:
             return f"could not read PR comments to check for a live block: {exc}"
 
+        authors = resolution.authors
+        admitted = lens_authors.scope_lens_comments(comments, authors)
         for lens_def in LENSES:
             lens = lens_def.lens
             if lens in panel_lenses:
                 continue  # judged by the panel's own required-floor path
             marker = compose_lens_review_marker(lens, head)
             comment = None
-            for c in reversed(comments):
+            for c in reversed(admitted):
                 if marker in (c.get("body") or ""):
                     comment = c
                     break
-            if comment is None:
-                continue
-            body = comment.get("body") or ""
-            if sign_off_is_warranted(body, lens_agent=lens_def.agent):
-                continue
-            return (
-                f"{lens} ({lens_def.agent}) has a live blocking verdict on "
-                f"this head — {comment.get('html_url', '(no url)')}"
-            )
+            if comment is not None:
+                body = comment.get("body") or ""
+                if not sign_off_is_warranted(body, lens_agent=lens_def.agent):
+                    return (
+                        f"{lens} ({lens_def.agent}) has a live blocking verdict on "
+                        f"this head — {comment.get('html_url', '(no url)')}"
+                    )
+            for c in comments:
+                if marker not in (c.get("body") or ""):
+                    continue
+                if lens_authors.is_swarm_comment(c, authors):
+                    continue
+                why = lens_explicit_objection(
+                    c.get("body") or "", lens_agent=lens_def.agent
+                )
+                if why:
+                    return (
+                        f"{lens} ({lens_def.agent}) has an objection ({why}) on this "
+                        f"head from an account that is not a configured swarm "
+                        f"identity ({lens_authors.comment_author(c) or 'unreadable'}) "
+                        f"— {c.get('html_url', '(no url)')}; add that account to "
+                        f"{lens_authors.ENV_AUTHORS} if it is the swarm's"
+                    )
         return None
 
     async def _gate_merge_readiness(
@@ -9223,7 +9303,7 @@ class SwarmDispatcher:
                 # ateles#430: page the full list, then select the NEWEST
                 # aggregation client-side. GitHub ignores sort/direction here,
                 # so position in the response says nothing about recency.
-                comments = await self._all_issue_comments(
+                comments = await self._lens_scoped_comments(
                     t.repository, t.number, client
                 )
                 # #764: head pin is the authoritative HTML commit= marker, never
@@ -9321,7 +9401,7 @@ class SwarmDispatcher:
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                comments = await self._all_issue_comments(
+                comments = await self._lens_scoped_comments(
                     repository, pr_number, client
                 )
                 comment = latest_aggregation_comment(comments, head_sha=head_sha)
@@ -9722,6 +9802,103 @@ class SwarmDispatcher:
                 "newest aggregation may lie beyond it"
             )
         return out
+
+    async def _swarm_comment_authors(self, repository: str, number: int) -> frozenset[str]:
+        """The admitted swarm identities; empty (fail closed, logged) when
+        they cannot be established."""
+        try:
+            authors = await asyncio.to_thread(lens_comment_authors)
+        except Exception as exc:  # noqa: BLE001 — unreadable identities admit nobody
+            log.error(
+                f"[{DAEMON_NAME}] {repository}#{number}: lens comment identities "
+                f"unreadable ({exc.__class__.__name__}) — no lens comment is read"
+            )
+            return frozenset()
+        if not authors:
+            log.error(
+                f"[{DAEMON_NAME}] {repository}#{number}: no swarm lens-comment "
+                f"identity is configured (set {lens_authors.ENV_AUTHORS}) — no "
+                "lens comment is read as a verdict"
+            )
+        return authors
+
+    async def _swarm_authored(
+        self, repository: str, number: int, comments: list[dict]
+    ) -> list[dict]:
+        """`comments` minus swarm-state-shaped comments no swarm identity wrote.
+
+        Applies to lens verdicts, the Vanellus aggregation, review deferrals and
+        the notice markers the dispatcher uses to avoid posting twice
+        (`lens_authors._VERDICT_SHAPED_RE`). Fails CLOSED: with no identities
+        every such comment is dropped, so a verdict reads as absent and a notice
+        reads as not yet posted.
+        """
+        authors = await self._swarm_comment_authors(repository, number)
+        ignored = lens_authors.ignored_lens_comments(comments, authors)
+        if ignored:
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{number}: ignored {len(ignored)} "
+                "swarm-marker comment(s) not written by a swarm identity: "
+                + ", ".join(str(c.get("html_url") or c.get("id")) for c in ignored[:5])
+                + (f" (+{len(ignored) - 5} more)" if len(ignored) > 5 else "")
+            )
+        return lens_authors.scope_lens_comments(comments, authors)
+
+    async def _lens_scoped_comments(
+        self, repository: str, number: int, client: httpx.AsyncClient
+    ) -> list[dict]:
+        """`_all_issue_comments`, minus swarm-marker comments no swarm identity wrote.
+
+        THE read for anything that treats a comment as a lens's verdict or as
+        the aggregation (`lens_records`, `last_reviewed_head`,
+        `has_new_blocking_finding`, `lens_comment_satisfies_presence`,
+        `latest_aggregation_comment`, a blocking-verdict check): a marker alone
+        does not say who wrote a comment, and any account can post one on a
+        public repository. Raises on HTTP error exactly as `_all_issue_comments`
+        does, so each caller keeps its own failure posture.
+        """
+        comments = await self._all_issue_comments(repository, number, client)
+        return await self._swarm_authored(repository, number, comments)
+
+    async def check_lens_comment_identities(self) -> lens_authors.Resolution:
+        """Say loudly at boot when the swarm's own lens comments cannot be read.
+
+        With no resolvable identity every lens verdict, aggregation and notice
+        marker reads as absent, so reviews never clear and auto-merge holds: a
+        deployment that has not set `ATELES_LENS_COMMENT_AUTHORS` (and has no
+        App or token to derive one from) is broken, and silence would read as
+        a swarm that is merely idle. Fail-open: a lookup error is logged and
+        never stops the daemon booting.
+        """
+        try:
+            resolution = await asyncio.to_thread(lens_comment_authors_resolution)
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                f"[{DAEMON_NAME}] lens comment identity check failed "
+                f"({exc.__class__.__name__}) — treating as unresolved"
+            )
+            return lens_authors.Resolution(frozenset(), ("the identity lookup",))
+        if not resolution.authors:
+            log.error(
+                f"[{DAEMON_NAME}] no swarm lens-comment identity is configured or "
+                f"readable — NO lens verdict, aggregation or notice marker will be "
+                f"read, reviews will not clear and auto-merge will hold. Set "
+                f"{lens_authors.ENV_AUTHORS} to the GitHub login(s) the swarm "
+                "posts as (comma-separated), or configure the swarm App / agent "
+                "tokens so they resolve."
+            )
+        elif resolution.failed:
+            log.error(
+                f"[{DAEMON_NAME}] swarm lens-comment identity sources could not be "
+                f"resolved: {', '.join(resolution.failed)} — auto-merge holds "
+                f"until they resolve; admitted so far: {len(resolution.authors)}"
+            )
+        else:
+            log.info(
+                f"[{DAEMON_NAME}] lens-comment identities resolved "
+                f"({len(resolution.authors)} admitted)"
+            )
+        return resolution
 
     async def _fetch_pr(self, repository: str, pr_number: int) -> dict | None:
         """Fetch a PR object from the GitHub API; None on error (fail-open)."""
@@ -10333,7 +10510,9 @@ class SwarmDispatcher:
                     list_url, params={"per_page": 100}, headers=headers
                 )
                 resp.raise_for_status()
-                for comment in resp.json():
+                for comment in await self._swarm_authored(
+                    trigger.repository, trigger.number, resp.json()
+                ):
                     if _CONFIRMATION_MARKER in comment.get("body", ""):
                         existing_id = comment["id"]
                         break
@@ -10429,7 +10608,9 @@ class SwarmDispatcher:
                         list_url, params={"per_page": 100}, headers=headers
                     )
                     resp.raise_for_status()
-                    for comment in resp.json():
+                    for comment in await self._swarm_authored(
+                        trigger.repository, trigger.number, resp.json()
+                    ):
                         if _BYPASS_MARKER in comment.get("body", ""):
                             existing_id = comment["id"]
                             break
@@ -10833,7 +11014,9 @@ class SwarmDispatcher:
                     list_url, params={"per_page": 100}, headers=headers
                 )
                 resp.raise_for_status()
-                for comment in resp.json():
+                for comment in await self._swarm_authored(
+                    trigger.repository, trigger.number, resp.json()
+                ):
                     if _WAIVE_MARKER in comment.get("body", ""):
                         existing_id = comment["id"]
                         break
@@ -11719,7 +11902,7 @@ class SwarmDispatcher:
         try:
             head = await self._review_head(trigger)
             async with httpx.AsyncClient(timeout=30) as client:
-                comments = await self._all_issue_comments(
+                comments = await self._lens_scoped_comments(
                     trigger.repository, trigger.number, client
                 )
         except Exception as exc:
@@ -11758,7 +11941,7 @@ class SwarmDispatcher:
             if not head:
                 return None
             async with httpx.AsyncClient(timeout=30) as client:
-                comments = await self._all_issue_comments(
+                comments = await self._lens_scoped_comments(
                     trigger.repository, trigger.number, client
                 )
                 previous = last_reviewed_head(comments, exclude_head=head)
@@ -11806,7 +11989,7 @@ class SwarmDispatcher:
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                comments = await self._all_issue_comments(
+                comments = await self._lens_scoped_comments(
                     trigger.repository, trigger.number, client
                 )
                 records = lens_records(comments)
@@ -12991,7 +13174,14 @@ class SwarmDispatcher:
                     url, params={"per_page": 100}, headers=self._github_headers(t.repository)
                 )
                 resp.raise_for_status()
-                bodies = [c.get("body", "") for c in resp.json()]
+                # Only a swarm identity's comment counts as a lens's posted
+                # review: a lens-marked comment from any other account must not
+                # suppress the fallback post (fail closed on an empty identity
+                # set — every lens then reads as not yet posted).
+                posted_comments = lens_authors.scope_lens_comments(
+                    resp.json(), await asyncio.to_thread(lens_comment_authors)
+                )
+                bodies = [c.get("body", "") for c in posted_comments]
                 captured = dict(reviews)
                 agents = agents_by_lens or {}
                 head_sha = _normalise_full_sha(reviewed_head)
@@ -13662,7 +13852,8 @@ class SwarmDispatcher:
                     headers=self._github_headers(t.repository),
                 )
                 resp.raise_for_status()
-                if not vanellus_comment_missing([c.get("body", "") for c in resp.json()]):
+                landed = await self._swarm_authored(t.repository, t.number, resp.json())
+                if not vanellus_comment_missing([c.get("body", "") for c in landed]):
                     return  # an aggregation comment already landed
                 post = await client.post(
                     url, json={"body": compose_auth_failure_comment(agent)},
@@ -13878,7 +14069,8 @@ class SwarmDispatcher:
                     headers=self._github_headers(t.repository),
                 )
                 resp.raise_for_status()
-                bodies = [c.get("body", "") for c in resp.json()]
+                landed = await self._swarm_authored(t.repository, t.number, resp.json())
+                bodies = [c.get("body", "") for c in landed]
                 head_sha = _normalise_full_sha(
                     reviewed_head if reviewed_head is not None else t.head_sha
                 )
