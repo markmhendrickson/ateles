@@ -934,6 +934,30 @@ def test_verdict_keyword_delimiter_then_a_long_run_is_fast(entry, run):
 # cost of normalising a large text matters as much as a regex's shape. The
 # text below is NFKC-expanding (ligatures) but pure ASCII afterwards.
 
+# A time limit written on one machine is wrong on a slower one (CI took 1.9 s
+# for what takes 0.6 s here), and a limit that is merely raised stops meaning
+# anything. The limit is scaled by how much slower this machine runs a fixed
+# amount of plain Python than the machine the limits were written on.
+_CALIBRATION_SECONDS_WHERE_WRITTEN = 0.045
+
+
+def _machine_scale():
+    best = None
+    for _ in range(3):
+        start = time.perf_counter()
+        sum(len(str(i)) for i in range(1_000_000))
+        elapsed = time.perf_counter() - start
+        best = elapsed if best is None else min(best, elapsed)
+    return max(1.0, best / _CALIBRATION_SECONDS_WHERE_WRITTEN)
+
+
+MACHINE_SCALE = _machine_scale()
+
+
+def _budget(seconds):
+    return seconds * MACHINE_SCALE
+
+
 # U+FDFA expands to eighteen non-ASCII letters under NFKC, the worst expansion
 # the scans meet; the mix adds the ligatures and compatibility forms that expand
 # a little. 65,000 characters is just under GitHub's comment limit.
@@ -962,7 +986,7 @@ def test_a_compatibility_form_heavy_comment_is_scanned_quickly(entry, unit):
     body = _expanding_reply(EXPANDING_UNITS[unit])
     start = time.perf_counter()
     _entry_points()[entry](body)
-    assert time.perf_counter() - start < 1.5, (entry, unit)
+    assert time.perf_counter() - start < _budget(1.5), (entry, unit)
 
 
 @pytest.mark.parametrize("unit", list(EXPANDING_UNITS))
@@ -974,7 +998,7 @@ def test_the_veto_predicates_on_an_expanding_text_are_each_quick(unit):
     ):
         start = time.perf_counter()
         fn(body)
-        assert time.perf_counter() - start < 1.5, fn.__name__
+        assert time.perf_counter() - start < _budget(1.5), fn.__name__
 
 
 def test_the_forms_of_a_text_are_built_once_for_the_predicates_that_share_it():
