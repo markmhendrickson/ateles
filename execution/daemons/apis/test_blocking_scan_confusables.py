@@ -779,6 +779,8 @@ def test_large_pathological_input_finishes_in_a_subprocess(text):
 
 
 # The rewritten regexes must accept exactly what the originals accepted.
+# The `_OLD_*` expressions below are FROZEN COPIES of the pre-change
+# expressions, kept only as the reference for these comparisons: never edit them.
 
 _OLD_OWN_HEADER_RE = __import__("re").compile(
     r"^\*\*\U0001f916\s*(?P<name>[^\s\u2014\u2013-][^\u2014\u2013\-\n]*?)\s*[\u2014\u2013-]+\s*Ateles swarm,"

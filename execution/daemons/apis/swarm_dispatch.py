@@ -161,7 +161,9 @@ _PARENTAGE_KEYWORDS = _label_gate.PARENTAGE_KEYWORDS
 # Optional `owner/repo` qualifier so a cross-repo parent is expressible.
 _ISSUE_REF = _label_gate.ISSUE_REF
 
-_CLOSURE_VERB = re.compile(rf"\b(?:{_CLOSING_KEYWORDS})\s*:?\s+{_ISSUE_REF}", re.I)
+# `(?:\s*:)?\s+` is the same language as `\s*:?\s+` without the two adjacent
+# whitespace runs, which took quadratic time on a keyword followed by many spaces.
+_CLOSURE_VERB = re.compile(rf"\b(?:{_CLOSING_KEYWORDS})(?:\s*:)?\s+{_ISSUE_REF}", re.I)
 _PARENT_LINK = _label_gate.PARENT_LINK
 
 # Back-compat alias: `_PARENT_ISSUE` was the single conflated pattern. It now
@@ -738,7 +740,9 @@ _BLOCKING_COUNT_RE = re.compile(r"Blocking:\s*(\d+)", re.IGNORECASE)
 # name with the token.
 _NOT_RECEIVED_RE = re.compile(
     r"\b(?P<lens>" + "|".join(sorted(_KNOWN_LENS_NAMES)) + r")\b"
-    r"\s*\**\s*[:=]\s*\**\s*" + NOT_RECEIVED_TOKEN,
+    # `\s*(?:\*+\s*)?` is the same language as `\s*\**\s*` without the two
+    # whitespace runs that were separated only by an optional star run.
+    r"\s*(?:\*+\s*)?[:=]\s*(?:\*+\s*)?" + NOT_RECEIVED_TOKEN,
     re.IGNORECASE,
 )
 
@@ -905,7 +909,7 @@ _VERDICT_LINE_RE = re.compile(r"^\*\*(" + _VERDICT_TOKEN_ALT + r")\*\*\s*$", re.
 # `** COMMENT **` (second security run at bf97b1a4). Upper-case tokens only, so
 # prose that happens to start with "Approve" is not counted.
 _VERDICT_LIKE_RE = re.compile(
-    r"^[#*_\s]*(?:(?i:verdict)\s*[:=—–-]\s*[#*_\s]*)?(?:"
+    r"^[#*_\s]*(?:(?i:verdict)\s*[:=—–-][#*_\s]*)?(?:"
     + _VERDICT_TOKEN_ALT
     + r")(?![A-Za-z0-9]|_[A-Za-z0-9])"
 )
@@ -2580,7 +2584,7 @@ def compose_fallback_comment(
 _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 _AGGREGATION_MARKER_RE = re.compile(
-    r"<!--\s*vanellus-aggregation(?P<attrs>(?:\s+[^>]*)?)-->", re.IGNORECASE
+    r"<!--\s*vanellus-aggregation(?P<attrs>(?:\s[^>]*)?)-->", re.IGNORECASE
 )
 _AGGREGATION_SUPERSEDED_RE = re.compile(
     r"<!--\s*vanellus-aggregation-superseded\s+by=(?P<sha>[0-9a-f]{40})\s*-->",

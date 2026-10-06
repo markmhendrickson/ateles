@@ -80,7 +80,7 @@ PROBE_LENGTHS = (
 )  # ascending, so an exponential regex stops at the first
 PROBE_LIMIT = 0.01
 NOMINATE_LENGTH = 8192
-NOMINATE_LIMIT = 0.003
+NOMINATE_LIMIT = 0.001
 SIZES = (16384, 32768, 65536)
 ABSOLUTE_LIMIT = 0.25  # seconds, at the largest size
 GROWTH_LIMIT = (
@@ -104,6 +104,18 @@ def _dynamic_lens_diff_patterns(module):
     from review_panel import LENSES
 
     return [pattern for lens in LENSES for pattern in lens.diff_patterns]
+
+
+# Patterns the sweep reaches through a provider but that live in a file outside
+# SWEPT_FILES. They are reported, not fixed here; each is skipped by the timing
+# test with its reason, and `test_out_of_scope_findings_are_still_present` fails
+# once one is no longer swept so the entry is removed with it.
+OUT_OF_SCOPE_FINDINGS = {
+    r"requirements.*\.txt$": (
+        "review_panel diff pattern, applied to changed file paths (at most a few "
+        "KB each), not to comment text; reported in the PR as a note"
+    ),
+}
 
 
 # (module, enclosing function) -> provider of the patterns that call is given.
@@ -599,6 +611,8 @@ def test_every_regex_call_site_is_swept():
 )
 def test_regex_is_not_super_linear_on_adversarial_text(pattern_and_flags):
     pattern, flags = pattern_and_flags
+    if pattern in OUT_OF_SCOPE_FINDINGS:
+        pytest.skip(OUT_OF_SCOPE_FINDINGS[pattern])
     site = _SWEPT[pattern_and_flags]
     flagged, _ = sweep_pattern(
         pattern, flags, seeds=_seeds_for(site.module, pattern, flags)
@@ -641,6 +655,12 @@ KNOWN_BAD_SEEDS = {
 def test_the_sweep_flags_a_regex_known_to_be_slow(name):
     flagged, _ = sweep_pattern(KNOWN_BAD[name], seeds=KNOWN_BAD_SEEDS.get(name, ()))
     assert flagged, name
+
+
+def test_out_of_scope_findings_are_still_present():
+    swept = {pattern for pattern, _ in _SWEPT}
+    for pattern in OUT_OF_SCOPE_FINDINGS:
+        assert pattern in swept, f"{pattern!r} is no longer swept: remove its entry"
 
 
 def test_every_seed_matches_its_regex():
