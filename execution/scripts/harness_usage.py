@@ -245,11 +245,21 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command in ("spend", "cost"):
-        print(json.dumps(
-            model_tiering.usage_totals(group_by=args.by, since_hours=args.since_hours),
-            indent=2,
-            sort_keys=True,
-        ))
+        try:
+            report = model_tiering.usage_totals(
+                group_by=args.by, since_hours=args.since_hours
+            )
+        except model_tiering.LedgerReadError as exc:
+            # A ledger that cannot be read is not an empty ledger: say so on
+            # both streams (JSON stays parseable) and exit nonzero.
+            print(json.dumps(
+                {"error": {"kind": "ledger_unreadable", "path": str(exc.path),
+                           "cause": exc.cause}},
+                indent=2, sort_keys=True,
+            ))
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(report, indent=2, sort_keys=True))
         return 0
     if args.command == "tiers":
         print(json.dumps(

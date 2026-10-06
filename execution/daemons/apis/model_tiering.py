@@ -724,6 +724,15 @@ def tier_counts(
     return report
 
 
+class LedgerReadError(Exception):
+    """The ledger exists but could not be read (not merely absent or empty)."""
+
+    def __init__(self, path: Path, cause: BaseException) -> None:
+        self.path = path
+        self.cause = f"{type(cause).__name__}: {cause}"
+        super().__init__(f"cannot read tier ledger {path}: {self.cause}")
+
+
 USAGE_GROUPS: tuple[str, ...] = ("provider", "model", "tier", "action_class", "skill")
 
 
@@ -741,7 +750,8 @@ def usage_totals(
     number of dispatches that field's sum covers, so a total built from only
     some of a group's ``dispatches`` is visibly partial, field by field.
     Malformed lines and start rows are skipped; a missing ledger is an empty
-    report.
+    report. A ledger that exists but cannot be read raises ``LedgerReadError``
+    rather than reporting as empty.
     """
     if group_by not in USAGE_GROUPS:
         raise ValueError(f"group_by must be one of {', '.join(USAGE_GROUPS)}")
@@ -750,10 +760,13 @@ def usage_totals(
         cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
     groups: dict[str, dict] = {}
     rows = 0
+    path = tier_ledger_path()
     try:
-        lines = tier_ledger_path().read_text(encoding="utf-8").splitlines()
-    except OSError:
-        lines = []
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []  # no ledger yet is "no spend", not a failure
+    except (OSError, UnicodeError) as exc:
+        raise LedgerReadError(path, exc) from exc
 
     def _number(value: object) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)

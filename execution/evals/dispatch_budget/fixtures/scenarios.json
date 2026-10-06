@@ -180,5 +180,67 @@
         "reported_rows": 1
       }
     ]
+  },
+  "spend_empty_ledger_is_no_spend": {
+    "meta": {
+      "id": "dispatch_budget.spend_empty_ledger_is_no_spend",
+      "description": "A ledger that is missing, or present and empty, reports as no spend: exit 0, zero rows, no error."
+    },
+    "events": [
+      {
+        "op": "ledger",
+        "state": "missing"
+      },
+      {
+        "op": "ledger",
+        "state": "empty"
+      }
+    ],
+    "assertions": [
+      {
+        "type": "spend_outcome",
+        "after_event": 1,
+        "exit": 0,
+        "rows": 0
+      },
+      {
+        "type": "spend_outcome",
+        "after_event": 2,
+        "exit": 0,
+        "rows": 0
+      }
+    ]
+  },
+  "spend_unreadable_ledger_is_an_error": {
+    "meta": {
+      "id": "dispatch_budget.spend_unreadable_ledger_is_an_error",
+      "description": "A ledger that exists but cannot be read is reported as an error naming the path and cause, with a nonzero exit and parseable JSON, never as an empty ledger."
+    },
+    "events": [
+      {
+        "op": "ledger",
+        "state": "directory"
+      },
+      {
+        "op": "ledger",
+        "state": "undecodable"
+      }
+    ],
+    "assertions": [
+      {
+        "type": "spend_outcome",
+        "after_event": 1,
+        "exit": 1,
+        "error_kind": "ledger_unreadable",
+        "cause_contains": "IsADirectoryError"
+      },
+      {
+        "type": "spend_outcome",
+        "after_event": 2,
+        "exit": 1,
+        "error_kind": "ledger_unreadable",
+        "cause_contains": "UnicodeDecodeError"
+      }
+    ]
   }
 }

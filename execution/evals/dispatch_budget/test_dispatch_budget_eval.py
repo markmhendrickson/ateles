@@ -121,6 +121,20 @@ def _apply(event: dict, tmp_path: Path) -> None:
             requested_model="m",
             usage=dispatch_usage.DispatchUsage(provider=event["provider"], **fields),
         )
+    elif event["op"] == "ledger":
+        path = model_tiering.tier_ledger_path()
+        if path.is_dir():
+            path.rmdir()
+        path.unlink(missing_ok=True)
+        state = event["state"]
+        if state == "empty":
+            path.write_text("")
+        elif state == "directory":
+            path.mkdir()
+        elif state == "undecodable":
+            path.write_bytes(b"\xff\xfe not utf-8 \xff\n")
+        elif state != "missing":  # pragma: no cover
+            raise AssertionError(f"unknown ledger state {state!r}")
     else:  # pragma: no cover - a fixture typo must not pass silently
         raise AssertionError(f"unknown event op {event['op']!r}")
 
@@ -146,6 +160,23 @@ def _check(assertion: dict, capsys) -> None:
         groups = json.loads(capsys.readouterr().out)["groups"]
         field = groups[assertion["group"]]["tokens"][assertion["field"]]
         assert field == {"sum": assertion["sum"], "reported_rows": assertion["reported_rows"]}
+    elif kind == "spend_outcome":
+        for command in ("spend", "cost"):
+            capsys.readouterr()
+            exit_code = harness_usage.main([command])
+            captured = capsys.readouterr()
+            report = json.loads(captured.out)  # machine-readable either way
+            assert exit_code == assertion["exit"], (command, captured.out)
+            if "error_kind" in assertion:
+                error = report["error"]
+                assert error["kind"] == assertion["error_kind"]
+                assert error["path"] == str(model_tiering.tier_ledger_path())
+                assert assertion["cause_contains"] in error["cause"]
+                assert "error" in captured.err  # also said on stderr
+                assert "groups" not in report  # never mistaken for an empty report
+            else:
+                assert "error" not in report and report["rows"] == assertion["rows"]
+                assert report["groups"] == {}
     else:  # pragma: no cover
         raise AssertionError(f"unknown assertion type {kind!r}")
 

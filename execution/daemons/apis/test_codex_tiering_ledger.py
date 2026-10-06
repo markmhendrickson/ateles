@@ -317,3 +317,33 @@ def test_ledger_write_failure_never_reaches_the_dispatch(monkeypatch, tmp_path) 
         dispatch_id="d", skill="s", provider="codex", resolved=None,
         requested_model=None, usage=dispatch_usage.DispatchUsage(provider="codex"),
     )
+
+
+@pytest.mark.parametrize("failure", [PermissionError("denied"), OSError("io error")])
+def test_a_ledger_that_cannot_be_read_is_an_error_not_an_empty_report(
+    ledger, monkeypatch, failure, capsys
+) -> None:
+    ledger.write_text("")
+    real = Path.read_text
+
+    def _fail(self, *a, **k):
+        if self == ledger:
+            raise failure
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _fail)
+    with pytest.raises(model_tiering.LedgerReadError) as raised:
+        model_tiering.usage_totals()
+    assert str(ledger) in str(raised.value) and type(failure).__name__ in raised.value.cause
+    scripts = str(_DAEMON_DIR.parents[1] / "scripts")
+    monkeypatch.syspath_prepend(scripts)
+    import harness_usage
+
+    assert harness_usage.main(["spend"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["kind"] == "ledger_unreadable"
+
+
+def test_a_missing_or_empty_ledger_is_no_spend(ledger) -> None:
+    assert model_tiering.usage_totals()["rows"] == 0
+    ledger.write_text("")
+    assert model_tiering.usage_totals() == {"group_by": "provider", "rows": 0, "groups": {}}
