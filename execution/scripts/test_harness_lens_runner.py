@@ -103,12 +103,29 @@ def _default_full_headroom(monkeypatch, tmp_path):
     # their mocked dispatch assumes. Tests for exhaustion replace this file.
     observed_at = time.time()
     for provider in harness_router.FRONTIER_PROVIDERS:
-        harness_router.record_probe_available(
-            provider,
-            source="test_fixture",
-            detail="mocked provider is available",
-            observed_at=observed_at,
-        )
+        if provider in harness_router.WEEKLY_PACED_PROVIDERS:
+            # A paced provider is only dispatchable on a valid, fresh weekly
+            # reading (a bare availability observation does not authorize it).
+            harness_router.record_usage(
+                provider,
+                [{
+                    "name": "weekly_all",
+                    "used_percent": 1.0,
+                    "resets_at": harness_router._iso_from_wall(
+                        observed_at + 5 * 24 * 3600
+                    ),
+                }],
+                observed_at=observed_at,
+                provider_probe=True,
+                probe_source="test_fixture",
+            )
+        else:
+            harness_router.record_probe_available(
+                provider,
+                source="test_fixture",
+                detail="mocked provider is available",
+                observed_at=observed_at,
+            )
 
 
 @pytest.fixture(autouse=True)
