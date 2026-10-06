@@ -267,3 +267,37 @@ def test_summary_names_model_and_its_source():
     s = u.summary()
     assert "model=claude-opus-5(reported)" in s
     assert "cost_usd=0.0421" in s
+
+
+# ── codex text mode: the `tokens used` trailer on stderr ─────────────────────
+# Captured from `codex exec` (text mode) on 2026-10-06, codex-cli 0.157.1: the
+# stderr ends with the words "tokens used" and one thousands-separated total.
+# There is no input/output/cache split in this mode.
+
+CODEX_TEXT_STDERR = "codex\nok\ntokens used\n31,255\n"
+
+
+def test_codex_text_mode_reports_a_total_and_no_split() -> None:
+    usage = parse_dispatch_usage(
+        "codex", "ok", stderr=CODEX_TEXT_STDERR, requested_model="gpt-6-luna"
+    )
+    assert usage.reported_total_tokens == 31255 and usage.total_tokens == 31255
+    assert usage.input_tokens is None and usage.output_tokens is None
+    assert usage.cache_read_tokens is None
+    assert usage.as_event_fields()["total_tokens"] == 31255
+    assert "no split reported" in usage.summary()
+
+
+def test_codex_json_usage_wins_over_the_stderr_total() -> None:
+    usage = parse_dispatch_usage("codex", CODEX_JSONL, stderr=CODEX_TEXT_STDERR)
+    assert usage.input_tokens == 18492 and usage.reported_total_tokens is None
+
+
+@pytest.mark.parametrize("stderr", ["", "no trailer here", "tokens used\nmany\n", "tokens used\n"])
+def test_a_missing_or_unreadable_total_stays_unreported(stderr) -> None:
+    usage = parse_dispatch_usage("codex", "ok", stderr=stderr)
+    assert usage.total_tokens is None and not usage.has_tokens
+
+
+def test_only_codex_stderr_is_read_for_a_total() -> None:
+    assert parse_dispatch_usage("claude", "ok", stderr=CODEX_TEXT_STDERR).total_tokens is None

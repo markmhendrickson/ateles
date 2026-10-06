@@ -495,6 +495,7 @@ def record_usage(
     *,
     observed_at: float | None = None,
     provider_probe: bool = False,
+    probe_source: str = "provider_usage_report",
 ) -> None:
     """Record a live plan-usage observation for one provider.
 
@@ -529,7 +530,7 @@ def record_usage(
         entry["probe"] = {
             "status": "available",
             "observed_at": _iso_from_wall(at),
-            "source": "provider_usage_report",
+            "source": probe_source,
             "detail": None,
         }
     _write_usage_entry(

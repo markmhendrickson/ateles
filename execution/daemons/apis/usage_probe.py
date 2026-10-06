@@ -23,12 +23,31 @@ under a lock so concurrent dispatches share one probe, and it records nothing
 when the output is not a well-formed report: a failed probe leaves the old
 reading to age out, which the gate then refuses on (fail closed).
 
-Codex and Cursor do not expose numeric plan windows.  Their adapters instead
-run the smallest provider-native request in an isolated temporary directory:
-success is positive recovery evidence, an explicit limit refusal with a reset
-is exhaustion evidence, and every other result is ``unknown``.  All adapters
-receive the subscription-only environment built by ``skill_runner``; this
-module never adds a metered credential or reads one directly.
+Codex DOES expose numeric plan windows, but not through ``codex exec`` (verified
+2026-10-06 against codex-cli 0.157.1): ``codex app-server`` speaks JSON-RPC over
+stdio, and its ``account/rateLimits/read`` request returns the account's windows
+with no model turn, for example::
+
+    {"rateLimits": {"limitId": "codex", "planType": "pro",
+        "primary": {"usedPercent": 78, "windowDurationMins": 10080,
+                    "resetsAt": 1791580428},
+        "secondary": null}, "ordinaryUsageAllowed": true}
+
+``windowDurationMins`` names the window (10080 is the weekly one, 300 the
+five-hour one).  Interactive Codex sessions record the same ``rate_limits`` on
+every ``token_count`` event in their rollout files, which is the same data.
+``codex exec --json`` emits no rate-limit event, so the app-server request is
+the only turn-free source.  ``read_codex_rate_limits`` uses it; a reading that
+is absent, malformed, or has no weekly window is INCONCLUSIVE, never a verdict,
+and the adapter then falls through to the native request probe below.
+
+Cursor does not expose numeric plan windows.  Its adapter (and Codex's
+fallback) run the smallest provider-native request in an isolated temporary
+directory: success is positive recovery evidence, an explicit limit refusal
+with a reset is exhaustion evidence, and every other result is ``unknown``.
+All adapters receive the subscription-only environment built by
+``skill_runner``; this module never adds a metered credential or reads one
+directly.
 """
 
 from __future__ import annotations
@@ -39,10 +58,11 @@ import logging
 import math
 import os
 import re
+import select
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -222,6 +242,177 @@ def provider_probe_command(provider: str, binary: str) -> tuple[list[str], str |
     raise ValueError(f"unsupported provider probe: {provider!r}")
 
 
+# Codex window lengths, in minutes, and the snapshot names they map to.
+_CODEX_WEEK_MINUTES = 7 * 24 * 60
+_CODEX_SESSION_MINUTES = 5 * 60
+CODEX_RATE_LIMITS_SOURCE = "codex_app_server_rate_limits"
+
+
+def _codex_window_name(minutes: int) -> str:
+    """Name a codex window by its length, so the gate finds the weekly one.
+
+    An unrecognised length keeps a descriptive name rather than being guessed
+    into the weekly slot: the gate then reports "no weekly window", which is
+    inconclusive, instead of pacing against the wrong window.
+    """
+    if abs(minutes - _CODEX_WEEK_MINUTES) <= 60:
+        return "weekly_all"
+    if abs(minutes - _CODEX_SESSION_MINUTES) <= 15:
+        return "five_hour"
+    return f"window_{minutes}m"
+
+
+def parse_codex_rate_limits(result: object) -> tuple[list[dict[str, object]], str | None]:
+    """Windows from an ``account/rateLimits/read`` result, and why not if none.
+
+    Returns ``(windows, None)`` for a usable reading, else ``([], reason)``.
+    Every window is validated (finite non-negative percent, whole-minute
+    duration, finite reset) so a malformed report cannot reach the snapshot; a
+    percent above 100 is capped.  A reading with no weekly-length window is
+    refused here, because the gate cannot pace without one.  An account the
+    server says may not use Codex (``ordinaryUsageAllowed`` false) while its
+    weekly window shows room is contradictory, so it is inconclusive too.
+    """
+    if not isinstance(result, dict):
+        return [], "result is not an object"
+    snapshot = None
+    by_id = result.get("rateLimitsByLimitId")
+    if isinstance(by_id, dict) and isinstance(by_id.get("codex"), dict):
+        snapshot = by_id["codex"]
+    elif isinstance(result.get("rateLimits"), dict):
+        snapshot = result["rateLimits"]
+    if snapshot is None:
+        return [], "no rateLimits snapshot"
+    windows: list[dict[str, object]] = []
+    for key in ("primary", "secondary"):
+        raw = snapshot.get(key)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            return [], f"{key} window is not an object"
+        used, minutes, resets = (
+            raw.get("usedPercent"), raw.get("windowDurationMins"), raw.get("resetsAt"),
+        )
+        if any(isinstance(v, bool) for v in (used, minutes, resets)):
+            return [], f"{key} window carries a boolean where a number belongs"
+        try:
+            percent = float(used)  # type: ignore[arg-type]
+            length = int(minutes)  # type: ignore[arg-type]
+            reset_wall = float(resets)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return [], f"{key} window is missing a number (usedPercent/windowDurationMins/resetsAt)"
+        if not (math.isfinite(percent) and percent >= 0 and math.isfinite(reset_wall) and length > 0):
+            return [], f"{key} window has an out-of-range value"
+        windows.append(
+            {
+                "name": _codex_window_name(length),
+                "used_percent": round(min(percent, 100.0), 4),
+                "resets_at": harness_router._iso_from_wall(reset_wall),
+            }
+        )
+    if not windows:
+        return [], "no usage windows"
+    weekly = next((w for w in windows if w["name"] == "weekly_all"), None)
+    if weekly is None:
+        return [], "no weekly-length window, so the weekly pace cannot be computed"
+    if result.get("ordinaryUsageAllowed") is False and float(weekly["used_percent"]) < 100.0:  # type: ignore[arg-type]
+        return [], "server reports ordinary usage not allowed while the weekly window shows room"
+    return windows, None
+
+
+def read_codex_rate_limits(
+    binary: str,
+    *,
+    env: Mapping[str, str],
+    timeout: float = 20.0,
+    spawn=subprocess.Popen,
+) -> ProbeResult:
+    """Read Codex's plan windows from ``codex app-server`` (no model turn).
+
+    Speaks the minimal JSON-RPC handshake (``initialize``, ``initialized``,
+    ``account/rateLimits/read``) in an empty temporary directory under the
+    caller's subscription-only environment, then closes the server.  The server
+    exits on stdin EOF before replying, so stdin stays open until the answer
+    arrives.  Never raises: any failure is an ``unknown`` result whose detail
+    says why, and the caller falls back to the native request probe.
+    """
+    def unknown(detail: str) -> ProbeResult:
+        return ProbeResult(
+            False, detail, status="unknown", source=CODEX_RATE_LIMITS_SOURCE
+        )
+
+    requests = (
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "clientInfo": {"name": "ateles-usage-probe", "version": "1"},
+            "capabilities": None}},
+        {"jsonrpc": "2.0", "method": "initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": None},
+    )
+    proc = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="usage-probe-codex-rl-") as cwd:
+            proc = spawn(
+                [binary, "app-server"],
+                cwd=cwd,
+                env=dict(env),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            assert proc.stdin is not None and proc.stdout is not None
+            proc.stdin.write(
+                ("\n".join(json.dumps(r) for r in requests) + "\n").encode()
+            )
+            proc.stdin.flush()
+            deadline = time.monotonic() + timeout
+            fd, buffer, reply = proc.stdout.fileno(), b"", None
+            while reply is None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return unknown(f"app-server did not answer within {timeout:.0f}s")
+                ready, _, _ = select.select([fd], [], [], min(left, 1.0))
+                if not ready:
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    return unknown("app-server closed without answering")
+                buffer += chunk
+                *lines, buffer = buffer.split(b"\n")
+                for line in lines:
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(message, dict) and message.get("id") == 2:
+                        reply = message
+                        break
+    except (OSError, subprocess.SubprocessError, AssertionError) as exc:
+        return unknown(f"app-server did not run: {type(exc).__name__}: {str(exc)[:120]}")
+    finally:
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001 - cleanup must not mask the result
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+    if "error" in reply:
+        text = " ".join(str((reply.get("error") or {}).get("message", "error")).split())
+        return unknown(f"app-server refused the read: {_TOKEN_LIKE.sub('<masked>', text)[:160]}")
+    windows, problem = parse_codex_rate_limits(reply.get("result"))
+    if problem is not None:
+        return unknown(f"app-server reading unusable: {problem}")
+    return ProbeResult(
+        True,
+        "codex plan windows read from app-server",
+        tuple(windows),
+        status="available",
+        source=CODEX_RATE_LIMITS_SOURCE,
+    )
+
+
 def probe_claude(
     binary: str,
     *,
@@ -296,10 +487,48 @@ def probe_provider(
     now_wall: float | None = None,
     timeout: float = 60.0,
     run=subprocess.run,
+    codex_rate_limits: Callable[..., ProbeResult] | None = None,
 ) -> ProbeResult:
-    """Run one provider adapter and return capacity evidence without writing it."""
+    """Run one provider adapter and return capacity evidence without writing it.
+
+    Codex first tries its numeric plan windows (``read_codex_rate_limits``); a
+    reading that is inconclusive falls through to the native request probe, and
+    if that is inconclusive too the result is ``unknown`` carrying both reasons.
+    """
     if provider == "claude":
         return probe_claude(binary, env=env, timeout=timeout, run=run)
+    numeric_unknown = ""
+    if provider == "codex":
+        reader = codex_rate_limits or read_codex_rate_limits
+        numeric = reader(binary, env=env)
+        if numeric.status == "available" and numeric.windows:
+            return numeric
+        numeric_unknown = numeric.detail
+        log.info(
+            f"[apis] codex plan windows unavailable ({numeric_unknown}); "
+            "falling back to the native request probe"
+        )
+    result = _native_probe(provider, binary, env=env, now_wall=now_wall, timeout=timeout, run=run)
+    if numeric_unknown and result.status == "unknown":
+        return ProbeResult(
+            False,
+            f"{result.detail}; plan windows: {numeric_unknown}",
+            status="unknown",
+            source=result.source,
+        )
+    return result
+
+
+def _native_probe(
+    provider: str,
+    binary: str,
+    *,
+    env: Mapping[str, str],
+    now_wall: float | None,
+    timeout: float,
+    run,
+) -> ProbeResult:
+    """The smallest provider-native request, read as available/exhausted/unknown."""
     source = {"codex": "codex_exec", "cursor": "cursor_agent_print"}.get(
         provider, f"{provider}_native_probe"
     )
@@ -526,12 +755,18 @@ def _refresh_provider(
                 harness_router.render_wall(result.exhausted_until),
             )
             return "exhausted"
-        if provider == "claude" and result.windows:
+        if result.windows:
             harness_router.record_usage(
-                provider, result.windows, observed_at=moment, provider_probe=True
+                provider,
+                result.windows,
+                observed_at=moment,
+                provider_probe=True,
+                probe_source=(
+                    "provider_usage_report" if provider == "claude" else result.source
+                ),
             )
             log.info(
-                "[apis] claude usage refreshed: "
+                f"[apis] {provider} usage refreshed: "
                 + ", ".join(
                     f"{w['name']}={w['used_percent']}%" for w in result.windows
                 )

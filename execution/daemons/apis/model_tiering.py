@@ -41,7 +41,8 @@ operator-neutral ``action-policy.json`` (kept equal to
 ``DEFAULT_ACTION_POLICY_HINT`` by a test) and ``vendor-binding.json``.
 Validate any live file before installing it with
 ``python3 execution/daemons/apis/model_tiering.py --check <file> [<file>]``.
-``execution/scripts/harness_usage.py tiers`` reports dispatches per tier.
+``execution/scripts/harness_usage.py tiers`` reports dispatches per tier and
+``harness_usage.py spend`` reports what they spent.
 
 Escalation signals (below) can only RAISE the resolved tier, never lower it —
 they are cheap, deterministic, measured facts about the dispatch (diff size,
@@ -509,9 +510,12 @@ def model_for_tier(
 
 # ── Observability: which tier did each dispatch actually run at ──────────────
 #
-# Every dispatch appends one JSON line here and logs the same facts, so "how
-# much of the week ran on each tier" is answerable from one file instead of a
-# Neotoma query per harness_event. Best-effort by construction: a ledger write
+# Every dispatch appends one ``event: "dispatch"`` line here when it starts and
+# logs the same facts, and one ``event: "usage"`` line when it ends (tokens and
+# cost as the provider reported them, ``null`` otherwise), tied by
+# ``dispatch_id``. So "how much of the week ran on each tier" and "what did it
+# spend" are answerable from one file instead of a Neotoma query per
+# harness_event. Rows from before ``event`` existed are start rows. Best-effort by construction: a ledger write
 # failure is logged and swallowed, never raised into a dispatch. The Neotoma
 # ``harness_event`` (skill_runner) stays the durable audit row; this is the
 # cheap local read for budget pacing.
