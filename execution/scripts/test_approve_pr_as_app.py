@@ -1504,6 +1504,131 @@ class TestFindNonRequiredBlocksStaleHeadUnit:
         assert blocks == []
 
 
+# ── ateles#1394: only an ACTIVE objection from a non-required lens blocks ───
+#
+# `find_non_required_blocks` used `not sign_off_is_warranted(...)` as its
+# block test, which is true for a plain COMMENT (no clearing verdict) — so the
+# automatic pipeline's non-blocking content-lens COMMENT refused an approval
+# whose every required lens had cleared. A non-required lens now blocks only
+# on an explicit objection (REQUEST_CHANGES / BLOCKED / a blocking token or
+# [BLOCKING] anywhere), and, fail-closed, on anything it cannot read. Only an
+# explicit, parsed COMMENT with no blocking token is exempt.
+
+
+def _non_required_blocks(body: str) -> list:
+    comments = _all_clear_comments(["pm", "qa"])
+    comments.append(_comment(70, body))
+    return target.find_non_required_blocks(
+        comments=comments, head_sha=HEAD, required_lenses={"pm", "qa"}
+    )
+
+
+class TestNonRequiredLensBlocksOnlyOnActiveObjection:
+    def test_comment_without_blocking_token_does_not_block(self):
+        body = _lens_comment_body(
+            "content", "corvus", verdict="COMMENT", extra="Minor wording observations only."
+        )
+        assert _non_required_blocks(body) == []
+
+    def test_request_changes_blocks(self):
+        body = _lens_comment_body("arch", "waxwing", verdict="REQUEST_CHANGES")
+        assert [b.lens for b in _non_required_blocks(body)] == ["arch"]
+
+    def test_blocked_blocks(self):
+        body = _lens_comment_body("arch", "waxwing", verdict="BLOCKED")
+        assert [b.lens for b in _non_required_blocks(body)] == ["arch"]
+
+    def test_blocking_finding_inside_a_comment_body_blocks(self):
+        body = _lens_comment_body(
+            "arch", "waxwing", verdict="COMMENT",
+            extra="[BLOCKING] contract_mappings not updated for the new endpoint.",
+        )
+        assert [b.lens for b in _non_required_blocks(body)] == ["arch"]
+
+    def test_blocking_verdict_token_inside_a_comment_body_blocks(self):
+        body = _lens_comment_body(
+            "arch", "waxwing", verdict="COMMENT", extra="Earlier round said **BLOCKED**."
+        )
+        assert [b.lens for b in _non_required_blocks(body)] == ["arch"]
+
+    def test_unparseable_verdict_still_blocks(self):
+        marker = swarm_dispatch.compose_lens_review_marker("content", HEAD)
+        body = f"{marker}\n**\U0001f916 Corvus — Ateles swarm, content review**\n**MAYBE**\n"
+        assert [b.lens for b in _non_required_blocks(body)] == ["content"]
+
+    def test_missing_verdict_line_still_blocks(self):
+        marker = swarm_dispatch.compose_lens_review_marker("content", HEAD)
+        body = f"{marker}\n**\U0001f916 Corvus — Ateles swarm, content review**\nLooks fine to me.\n"
+        assert [b.lens for b in _non_required_blocks(body)] == ["content"]
+
+    def test_verdict_before_header_still_blocks(self):
+        marker = swarm_dispatch.compose_lens_review_marker("content", HEAD)
+        body = f"{marker}\n**COMMENT**\n**\U0001f916 Corvus — Ateles swarm, content review**\n"
+        assert [b.lens for b in _non_required_blocks(body)] == ["content"]
+
+    def test_header_naming_another_agent_still_blocks(self):
+        marker = swarm_dispatch.compose_lens_review_marker("content", HEAD)
+        body = f"{marker}\n**\U0001f916 Pavo — Ateles swarm, pm review**\n**COMMENT**\n"
+        assert [b.lens for b in _non_required_blocks(body)] == ["content"]
+
+    def test_comment_with_a_second_verdict_line_still_blocks(self):
+        body = _lens_comment_body(
+            "content", "corvus", verdict="COMMENT", extra="**APPROVE**"
+        )
+        assert [b.lens for b in _non_required_blocks(body)] == ["content"]
+
+    def test_approve_does_not_block(self):
+        assert _non_required_blocks(_lens_comment_body("content", "corvus", verdict="APPROVE")) == []
+
+    def test_signed_off_does_not_block(self):
+        assert _non_required_blocks(_lens_comment_body("content", "corvus", verdict="SIGNED_OFF")) == []
+
+    def test_approve_carrying_a_blocking_finding_blocks(self):
+        body = _lens_comment_body(
+            "content", "corvus", verdict="APPROVE", extra="[BLOCKING] leaks a token."
+        )
+        assert [b.lens for b in _non_required_blocks(body)] == ["content"]
+
+
+@pytest.mark.asyncio
+class TestNonRequiredLensCommentDoesNotRefuseApproval:
+    """End to end: every required lens clears, the pipeline's content lens
+    posts a non-blocking COMMENT on the same head, and the approval goes
+    through; the same lens posting REQUEST_CHANGES refuses it (ateles#1293)."""
+
+    async def test_content_lens_comment_does_not_refuse(self, monkeypatch):
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(71, _lens_comment_body("content", "corvus", verdict="COMMENT"))
+        )
+        client = _FakeClient(
+            comments=comments, check_runs=_green_checks(), changed_files=NEUTRAL_FILES
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 0
+        assert len(client.posted) == 1
+
+    async def test_content_lens_request_changes_refuses(self, monkeypatch):
+        comments = _all_clear_comments(["pm", "qa"])
+        comments.append(
+            _comment(72, _lens_comment_body("content", "corvus", verdict="REQUEST_CHANGES"))
+        )
+        client = _FakeClient(
+            comments=comments, check_runs=_green_checks(), changed_files=NEUTRAL_FILES
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+
 # ── --panel all: the bootstrap-mode default ──────────────────────────────────
 
 

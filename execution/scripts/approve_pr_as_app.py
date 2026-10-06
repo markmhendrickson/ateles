@@ -41,9 +41,11 @@ posted ten minutes earlier. The required-lens floor decides who MUST clear;
 it was silently read as deciding who is even LOOKED AT. Fix, two parts:
   - `find_non_required_blocks` reads every lens in `LENS_AGENTS` — not only
     the ones in the resolved `lenses` list — for a comment on the PR's
-    CURRENT head, and reports any of them that reads as REQUEST_CHANGES or
-    carries `[BLOCKING]`, with the same `lens_own_verdict` fixed-position
-    parser `evaluate_lens` already uses for required lenses. `run()` refuses
+    CURRENT head, and reports any of them that actively objects (REQUEST_CHANGES,
+    BLOCKED, or `[BLOCKING]`; an unreadable verdict also counts, fail closed),
+    with the same `lens_own_verdict` fixed-position parser `evaluate_lens`
+    already uses for required lenses. A plain non-blocking `COMMENT` from a
+    non-required lens is NOT an objection (ateles#1394). `run()` refuses
     the approval if this ever finds anything, independent of whether every
     required lens itself passed.
   - `--panel {required,all}` (`all` is the default while bootstrap mode is
@@ -163,9 +165,11 @@ from swarm_dispatch import (  # noqa: E402
     _normalise_full_sha,
     _normalise_github_review_id,
     _reviewer_app_private_key_pem,
+    body_has_blocking_findings,
     compose_lens_review_marker,
     lens_own_verdict,
     lens_records,
+    output_has_blocking_verdict,
     sign_off_is_warranted,
 )
 
@@ -762,12 +766,40 @@ async def carry_earlier_signoffs(
     return out
 
 
+def _non_required_lens_objects(body: str, *, lens_agent: str) -> bool:
+    """True when a lens OUTSIDE the required set objects to the current head.
+
+    Read with the same functions `evaluate_lens` uses for a required lens
+    (`sign_off_is_warranted`, `lens_own_verdict`, the blocking-token and
+    `[BLOCKING]` vetoes), so the two kinds of lens differ only in what
+    absence of a clearing verdict means: for a required lens it fails the
+    gate; for a non-required lens it does not.
+
+    Not an objection, and only these two shapes:
+      - a clearing verdict (`sign_off_is_warranted`: `APPROVE` / `SIGNED_OFF`
+        at the fixed position, no blocking token, no `[BLOCKING]` finding);
+      - an explicit, parsed `COMMENT` at the fixed position with no blocking
+        token and no `[BLOCKING]` finding.
+    Everything else objects: `REQUEST_CHANGES`, `BLOCKED`, a blocking token or
+    `[BLOCKING]` finding anywhere in the body, AND any reply whose verdict
+    cannot be read (missing, misplaced, unrecognised, a second verdict line).
+    Unknown is not clear (`docs/foundation/principles.md#5-fail-closed-on-the-
+    field-that-carries-the-safety-meaning`).
+    """
+    if sign_off_is_warranted(body, lens_agent=lens_agent):
+        return False
+    if lens_own_verdict(body, lens_agent=lens_agent) != "comment":
+        return True
+    return output_has_blocking_verdict(body) or body_has_blocking_findings(body)
+
+
 def find_non_required_blocks(
     *, comments: list[dict], head_sha: str, required_lenses: set[str]
 ) -> list[NonRequiredBlock]:
     """Every lens NOT in `required_lenses` whose comment on the CURRENT head
-    (`compose_lens_review_marker`) reads as REQUEST_CHANGES or carries a
-    `[BLOCKING]` finding.
+    (`compose_lens_review_marker`) actively objects: REQUEST_CHANGES, BLOCKED,
+    or a blocking token / `[BLOCKING]` finding anywhere in the body — or a
+    reply whose verdict cannot be read at all (fail closed).
 
     Reads every lens registered in `LENS_AGENTS` — not only the derived
     floor — because ateles#1293 was approved with 'lenses: ALL PASS' while a
@@ -775,9 +807,12 @@ def find_non_required_blocks(
     Parsed with `swarm_dispatch.lens_own_verdict`, the identical fixed-
     position parser `evaluate_lens` already uses for required lenses, so a
     non-required lens cannot be held to a looser or stricter reading than a
-    required one. A lens with no comment on this head, or whose comment
-    reads as a clearing verdict, is not a block — this function reports
-    ONLY lenses that actively object, never absence.
+    required one (`_non_required_lens_objects`). A lens with no comment on
+    this head, a lens whose comment reads as a clearing verdict, and a lens
+    whose comment is an explicit `COMMENT` with no blocking token (ateles#1394:
+    the automatic pipeline's content lens) are not blocks — this function
+    reports ONLY lenses that actively object, never absence or a plain
+    non-blocking comment.
     """
     blocks: list[NonRequiredBlock] = []
     for lens, agent in LENS_AGENTS.items():
@@ -788,7 +823,7 @@ def find_non_required_blocks(
         if comment is None:
             continue
         body = comment.get("body") or ""
-        if sign_off_is_warranted(body, lens_agent=agent):
+        if not _non_required_lens_objects(body, lens_agent=agent):
             continue
         verdict = lens_own_verdict(body, lens_agent=agent)
         blocks.append(
@@ -1538,7 +1573,10 @@ async def run(
         if non_required_blocks:
             print("non-required lenses with a LIVE BLOCKING verdict on this head:")
             for b in non_required_blocks:
-                print(f"  - {b.lens} ({b.agent}): {b.verdict or '[BLOCKING] finding'} — {b.comment_url}")
+                print(
+                    f"  - {b.lens} ({b.agent}): "
+                    f"{b.verdict or 'unreadable verdict or [BLOCKING] finding'} — {b.comment_url}"
+                )
             print()
 
         all_lenses_pass = all(o.passed for o in lens_outcomes)
@@ -1630,7 +1668,10 @@ def main() -> int:
             "uses only the diff-derived floor from review_panel.select_panel "
             "(plus --lenses additions, where content can still appear). "
             "Either way, a live blocking verdict from ANY lens — required "
-            "or not — always refuses the approval."
+            "or not — always refuses the approval. A lens outside the "
+            "required set blocks only when it objects (REQUEST_CHANGES, "
+            "BLOCKED, a [BLOCKING] finding) or its verdict cannot be read; "
+            "a plain COMMENT from it does not."
         ),
     )
     parser.add_argument(
