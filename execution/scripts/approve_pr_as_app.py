@@ -57,6 +57,13 @@ it was silently read as deciding who is even LOOKED AT. Fix, two parts:
     floor only). The non-required-block check above stays on regardless of
     `--panel`, as defense in depth for when `required` is explicitly chosen.
 
+Whose comments count: a lens verdict is read only from a comment a swarm
+identity wrote (`lens_authors`, taken from configuration — never a login typed
+into this file). The head marker is text any account can post on a public
+repository, so a marker from any other account neither clears nor objects; an
+empty or unreadable identity set reads every lens as having no verdict
+(docs/foundation/principles.md#5-fail-closed-on-the-field-that-carries-the-safety-meaning).
+
 Reuse, not rebuild:
   - Lens verdict parsing: `swarm_dispatch.lens_own_verdict` /
     `swarm_dispatch.sign_off_is_warranted` — the security-reviewed fixed-
@@ -157,6 +164,7 @@ import httpx  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 
 import review_carry  # noqa: E402
+import lens_authors  # noqa: E402
 from review_panel import LENSES, Lens, select_panel  # noqa: E402
 from swarm_dispatch import (  # noqa: E402
     EXPECTATION_MARKER,
@@ -167,6 +175,7 @@ from swarm_dispatch import (  # noqa: E402
     _reviewer_app_private_key_pem,
     body_has_blocking_findings,
     compose_lens_review_marker,
+    lens_comment_authors,
     lens_own_verdict,
     lens_records,
     output_has_blocking_verdict,
@@ -370,24 +379,38 @@ async def _fetch_issue_comments(client: httpx.AsyncClient, repo: str, pr: int) -
 
 
 def _latest_matching_comment(
-    comments: list[dict], *, marker: str
+    comments: list[dict], *, marker: str, authors: frozenset[str]
 ) -> dict | None:
-    """The LATEST comment carrying *marker* verbatim in its body, or None.
+    """The LATEST comment a swarm identity wrote that carries *marker*, or None.
 
     Latest, not first: a lens can post more than once for the same head (a
     correction after its own comment), and the most recent word is the one
     that should govern. Comments are returned by GitHub in creation order, so
     scanning in reverse gives the latest.
+
+    Only a comment whose author is in *authors* (`lens_authors`) counts: the
+    marker is text any account can post. `authors` is required, with no
+    default, so a caller cannot read lens comments without deciding whose
+    they are; an empty set matches nothing.
     """
     for c in reversed(comments):
-        if marker in (c.get("body") or ""):
+        if marker in (c.get("body") or "") and lens_authors.is_swarm_comment(c, authors):
             return c
     return None
 
 
-def _matching_comments(comments: list[dict], *, marker: str) -> list[dict]:
-    """EVERY comment carrying *marker* verbatim, in creation order."""
-    return [c for c in comments if marker in (c.get("body") or "")]
+def _matching_comments(
+    comments: list[dict], *, marker: str, authors: frozenset[str]
+) -> list[dict]:
+    """EVERY swarm-written comment carrying *marker*, in creation order.
+
+    Same author rule as `_latest_matching_comment`.
+    """
+    return [
+        c
+        for c in comments
+        if marker in (c.get("body") or "") and lens_authors.is_swarm_comment(c, authors)
+    ]
 
 
 class RequiredLens:
@@ -643,6 +666,7 @@ async def evaluate_lens(
     head_sha: str,
     comments: list[dict],
     lens: str,
+    authors: frozenset[str],
     diff_derived: bool = True,
 ) -> LensOutcome:
     """Evaluate one required lens's verdict on `head_sha`.
@@ -666,7 +690,7 @@ async def evaluate_lens(
         )
 
     marker = compose_lens_review_marker(lens, head_sha)
-    comment = _latest_matching_comment(comments, marker=marker)
+    comment = _latest_matching_comment(comments, marker=marker, authors=authors)
     if comment is None:
         if diff_derived:
             reason = (
@@ -684,6 +708,12 @@ async def evaluate_lens(
                 "this PR. To clear this row: dispatch the lens yourself and "
                 "have it post a review, or drop it from the required set "
                 "(--panel required, or omit it from --lenses)."
+            )
+        if not authors:
+            reason += (
+                f" No swarm lens-comment identity is configured or readable "
+                f"(set {lens_authors.ENV_AUTHORS}), so no comment can be read "
+                "as a verdict."
             )
         return LensOutcome(
             lens, agent=agent, head_matched=False, verdict=None, passed=False,
@@ -721,6 +751,7 @@ async def carry_earlier_signoffs(
     head_sha: str,
     comments: list[dict],
     lens_outcomes: list[LensOutcome],
+    authors: frozenset[str],
 ) -> list[LensOutcome]:
     """Replace a failing lens outcome with a carried sign-off where that is safe.
 
@@ -733,7 +764,8 @@ async def carry_earlier_signoffs(
     lens). An unreadable delta carries nothing. A lens that reviewed the
     current head is never carried, whatever it said.
     """
-    records = lens_records(comments)
+    # Only a swarm identity's comments are verdicts, earlier heads included.
+    records = lens_records(lens_authors.scope_lens_comments(comments, authors))
     pending = [o for o in lens_outcomes if not o.passed and not o.head_matched]
     if not pending:
         return lens_outcomes
@@ -849,7 +881,11 @@ def _non_required_lens_block(
 
 
 def find_non_required_blocks(
-    *, comments: list[dict], head_sha: str, required_lenses: set[str]
+    *,
+    comments: list[dict],
+    head_sha: str,
+    required_lenses: set[str],
+    authors: frozenset[str],
 ) -> list[NonRequiredBlock]:
     """Every lens NOT in `required_lenses` that actively objects on the
     CURRENT head (`compose_lens_review_marker`): its latest comment is
@@ -872,13 +908,16 @@ def find_non_required_blocks(
     non-blocking comment. A `COMMENT` posted AFTER an objection does not
     retire it. A comment edited in place shows its current body, which is read
     as the lens's updated verdict.
+
+    Only comments written by a swarm identity (`authors`) are read: a
+    lens-marked comment from any other account neither objects nor clears.
     """
     blocks: list[NonRequiredBlock] = []
     for lens, agent in LENS_AGENTS.items():
         if lens in required_lenses:
             continue
         marker = compose_lens_review_marker(lens, head_sha)
-        matching = _matching_comments(comments, marker=marker)
+        matching = _matching_comments(comments, marker=marker, authors=authors)
         if not matching:
             continue
         found = _non_required_lens_block(
@@ -1591,6 +1630,33 @@ async def run(
 
         comments = await _fetch_issue_comments(client, repo, pr)
 
+        # Whose comments are lens verdicts. The head marker is text any account
+        # can post on a public repo, so a lens comment counts only when a swarm
+        # identity wrote it (`lens_authors`; fails closed). Resolved once for
+        # the whole run so every read below agrees.
+        try:
+            authors = await asyncio.to_thread(lens_comment_authors)
+        except Exception as exc:  # noqa: BLE001 — unreadable identities admit nobody
+            print(f"lens comment identities unreadable ({exc.__class__.__name__})")
+            authors = frozenset()
+        if not authors:
+            print(
+                "no swarm lens-comment identity is configured or readable "
+                f"(set {lens_authors.ENV_AUTHORS}): no comment can be read as a "
+                "lens verdict, so every lens reads as having no verdict"
+            )
+        ignored = lens_authors.ignored_lens_comments(comments, authors)
+        if ignored:
+            print(
+                f"ignored {len(ignored)} lens-marked comment(s) not written by a "
+                "swarm identity:"
+            )
+            for c in ignored:
+                print(
+                    f"  - {c.get('html_url') or c.get('id')} "
+                    f"(by {lens_authors.comment_author(c) or 'an unreadable author'})"
+                )
+
         lens_outcomes: list[LensOutcome] = []
         for lens in lenses:
             outcome = await evaluate_lens(
@@ -1600,6 +1666,7 @@ async def run(
                 head_sha=head_sha,
                 comments=comments,
                 lens=lens,
+                authors=authors,
                 diff_derived=lens in floor_names,
             )
             lens_outcomes.append(outcome)
@@ -1613,7 +1680,10 @@ async def run(
         # is defense in depth rather than something panel_all could
         # silently make redundant and later regress without a failing test.
         non_required_blocks = find_non_required_blocks(
-            comments=comments, head_sha=head_sha, required_lenses=set(lenses)
+            comments=comments,
+            head_sha=head_sha,
+            required_lenses=set(lenses),
+            authors=authors,
         )
 
         base_ref = str((pr_data.get("base") or {}).get("ref") or "")
@@ -1625,6 +1695,7 @@ async def run(
                 head_sha=head_sha,
                 comments=comments,
                 lens_outcomes=lens_outcomes,
+                authors=authors,
             )
         check_outcomes, checks_green = await evaluate_checks(
             client, repo=repo, head_sha=head_sha, base_ref=base_ref

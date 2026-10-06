@@ -81,3 +81,23 @@ def _isolate_tiering_config(monkeypatch, tmp_path):
     """
     monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "isolated-action-policy.json"))
     monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "isolated-vendor-binding.json"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_lens_comment_identities(monkeypatch):
+    """Keep the swarm-identity lookups for lens comments off the network and off
+    the host's real tokens and App.
+
+    `lens_authors.resolve_authors` reads the App's bot login and, live, the
+    account each shared agent token belongs to. A unit test must never do either:
+    the default identity is "swarm-lens-account", which a test's lens comments
+    carry as their author; a test of another identity sets
+    `ATELES_LENS_COMMENT_AUTHORS` itself.
+    """
+    import lens_authors
+
+    monkeypatch.setenv(lens_authors.ENV_AUTHORS, "swarm-lens-account")
+    for name in lens_authors.PAT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: set())
+    lens_authors.clear_cache()

@@ -655,6 +655,7 @@ def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
     async def fake_comments(self, repository, number, client):
         return [
             {
+                "user": {"login": "swarm-lens-account"},
                 "body": (
                     f"<!-- review:security commit={stale_head} -->\n"
                     "review:security\n**REQUEST_CHANGES**\n"
@@ -662,6 +663,7 @@ def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
                 )
             },
             {
+                "user": {"login": "swarm-lens-account"},
                 "body": (
                     f"<!-- review:security commit={reviewed_head} -->\n"
                     "review:security\n**REQUEST_CHANGES**\n"
@@ -2319,6 +2321,7 @@ class TestLiveBlockingVerdictOutsidePanel:
         async def fake_comments(self, repository, number, client):
             return [
                 {
+                    "user": {"login": "swarm-lens-account"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
                     ),
@@ -2502,6 +2505,7 @@ class TestGateMergeReadinessRefusesOnOutsidePanelBlock:
         async def fake_comments(self, repository, number, client):
             return [
                 {
+                    "user": {"login": "swarm-lens-account"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
                     ),
