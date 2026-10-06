@@ -1403,3 +1403,270 @@ def test_checkpoint_resolution_requires_authenticated_matching_principal(
     )
 
     assert (result or {}).get("principal_sub") == expected
+
+
+# ── Signed checkpoint persistence against a faithful Neotoma stand-in ───────
+#
+# 643 signed checkpoint writes failed between 2026-09-28 and 2026-10-06, every
+# one of them leaving its task held with nothing for the operator to approve.
+# The stand-in below reproduces the two server rules that did it, so these
+# tests fail on the pre-fix code for the reason production failed:
+#   * a signed (AAuth-admitted) store is judged against the producer's grant,
+#     which covers entity types but no edges, so ANY relationship in the same
+#     request refuses the whole write (403 capability_denied);
+#   * an idempotency key reused with different content is a 400
+#     ERR_IDEMPOTENCY_MISMATCH.
+# It also folds two entities with the same checkpoint title into one, as the
+# schema's title-keyed identity does.
+
+
+class _FakeNeotoma:
+    def __init__(self, monkeypatch, signer):
+        self.signer = signer
+        self.stores: list[dict] = []
+        self.edges: list[dict] = []
+        self.by_key: dict[str, str] = {}
+        self.by_title: dict[str, str] = {}
+        self.entities: dict[str, dict] = {}
+        self.fail_edge = False
+        monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+        monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
+        monkeypatch.setattr(
+            gating_module, "CHECKPOINT_PRODUCER_JKT", signer.thumbprint, raising=False
+        )
+        monkeypatch.setattr(
+            gating_module, "_checkpoint_producer_http_signer", lambda handler: signer
+        )
+        monkeypatch.setattr(gating_module.httpx, "post", self.post)
+        monkeypatch.setattr(gating_module, "_fetch_entity", self.fetch_entity)
+        monkeypatch.setattr(
+            gating_module, "_fetch_entity_observations", self.fetch_observations
+        )
+
+    def _response(self, status, payload):
+        import httpx
+
+        request = httpx.Request("POST", "https://neotoma.test/store")
+        return httpx.Response(status, json=payload, request=request)
+
+    def post(self, url, **kwargs):
+        if url.endswith("/create_relationship"):
+            self.edges.append(kwargs["json"])
+            if self.fail_edge:
+                return self._response(500, {"error_code": "DB_QUERY_FAILED"})
+            return self._response(200, {"success": True})
+        signed = "signature" in kwargs["headers"]
+        body = (
+            gating_module.json.loads(kwargs["content"])
+            if "content" in kwargs
+            else kwargs["json"]
+        )
+        self.stores.append({"signed": signed, "body": body})
+        if signed and body.get("relationships"):
+            return self._response(
+                403,
+                {
+                    "error_code": "capability_denied",
+                    "message": 'Agent "apis" is not permitted to create_relationship',
+                },
+            )
+        entity = body["entities"][0]
+        key = body["idempotency_key"]
+        digest = gating_module._canonical_json(body["entities"])
+        if key in self.by_key:
+            prior_id = self.by_key[key]
+            if self.entities[prior_id]["digest"] != digest:
+                return self._response(
+                    400,
+                    {
+                        "error_code": "ERR_STORE_RESOLUTION_FAILED",
+                        "message": "ERR_IDEMPOTENCY_MISMATCH: key reused",
+                    },
+                )
+            return self._response(
+                200, {"replayed": True, "entities": [{"entity_id": prior_id}]}
+            )
+        entity_id = self.by_title.get(entity["title"]) or f"ent_cp_{len(self.entities)}"
+        self.by_title[entity["title"]] = entity_id
+        self.by_key[key] = entity_id
+        self.entities[entity_id] = {"fields": entity, "digest": digest}
+        return self._response(200, {"entities": [{"entity_id": entity_id}]})
+
+    def fetch_entity(self, entity_id):
+        stored = self.entities.get(entity_id)
+        if stored is None:
+            return None
+        return {
+            "entity_id": entity_id,
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": stored["fields"],
+            "provenance": {
+                field: "obs-create"
+                for field in (
+                    "body",
+                    "task_entity_id",
+                    "policy_entity_id",
+                    "blast_radius",
+                    "gate_action",
+                    "handler",
+                )
+            },
+        }
+
+    def fetch_observations(self, entity_id):
+        stored = self.entities.get(entity_id)
+        if stored is None:
+            return []
+        return [
+            {
+                "id": "obs-create",
+                "fields": stored["fields"],
+                "user_id": "tenant-a",
+                "provenance": {
+                    "agent_sub": "apis@ateles-swarm",
+                    "agent_thumbprint": self.signer.thumbprint,
+                    "attribution_tier": "software",
+                },
+            }
+        ]
+
+
+def _hold(task_id="ent_task", *, observation_count=4, title="Bounded work", **extra):
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    task_record = {
+        "entity_id": task_id,
+        "entity_type": "task",
+        "observation_count": observation_count,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"title": title, "status": "awaiting_approval"},
+    }
+    return write_checkpoint_brief(
+        task_entity_id=task_id,
+        decision=decision,
+        title=title,
+        plan_summary="Bounded work",
+        handler="apis",
+        user_id="tenant-a",
+        action_type="local_edit",
+        task_record=task_record,
+        policy=policy,
+        **extra,
+    )
+
+
+def test_signed_checkpoint_write_carries_no_edge_so_the_producer_grant_admits_it(
+    monkeypatch,
+):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    brief_id = _hold()
+
+    assert brief_id is not None, "a signed checkpoint must persist and be proven"
+    signed = [s for s in server.stores if s["signed"]]
+    assert len(signed) == 1
+    assert "relationships" not in signed[0]["body"]
+    # The edge is added afterwards, outside the signed write, over bearer only.
+    assert server.edges == [
+        {
+            "relationship_type": "REFERS_TO",
+            "source_entity_id": brief_id,
+            "target_entity_id": "ent_task",
+        }
+    ]
+
+
+def test_failed_edge_never_undoes_a_proven_checkpoint(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    server.fail_edge = True
+
+    assert _hold() is not None
+
+
+def test_signed_checkpoint_still_fails_closed_when_the_store_refuses(
+    monkeypatch, caplog
+):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    original = server.post
+
+    def refuse(url, **kwargs):
+        if url.endswith("/store"):
+            return server._response(
+                403, {"error_code": "capability_denied", "message": "no grant"}
+            )
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(gating_module.httpx, "post", refuse)
+
+    with caplog.at_level("WARNING"):
+        assert _hold() is None
+    # The server's own reason is in the log, not just the status line.
+    assert "capability_denied" in caplog.text
+    assert server.edges == [], "no edge is written for an unproven checkpoint"
+
+
+def test_rehold_of_a_changed_task_is_a_new_checkpoint_not_a_key_mismatch(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    first = _hold(observation_count=4)
+    second = _hold(observation_count=9)  # task changed since the first hold
+
+    assert first is not None
+    assert second is not None, "a re-hold must not be refused as a key reuse"
+    keys = [s["body"]["idempotency_key"] for s in server.stores]
+    assert keys[0] != keys[1]
+
+
+def test_exact_retry_is_an_idempotent_replay_of_one_checkpoint(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    first = _hold()
+    again = _hold()
+
+    assert first == again
+    assert len(server.entities) == 1
+
+
+def test_two_tasks_with_one_title_get_two_checkpoints(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    first = _hold("ent_task_a", title="Serialize lens fetches")
+    second = _hold("ent_task_b", title="Serialize lens fetches")
+
+    assert first and second and first != second
+    assert {
+        e["fields"]["task_entity_id"] for e in server.entities.values()
+    } == {"ent_task_a", "ent_task_b"}
+
+
+def test_legacy_bearer_checkpoint_keeps_its_edge_in_the_same_request(monkeypatch):
+    posted: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_cp"}]}
+
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        gating_module.httpx,
+        "post",
+        lambda url, **kwargs: posted.append(kwargs["json"]) or _Response(),
+    )
+    decision = evaluate_gate(
+        confidence=0.3, action_type="local_edit", policy=_default()
+    )
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Legacy",
+            plan_summary="x",
+            handler="apis",
+        )
+        == "ent_cp"
+    )
+    assert posted[0]["relationships"][0]["target_entity_id"] == "ent_task"

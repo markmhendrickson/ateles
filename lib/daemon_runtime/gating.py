@@ -855,6 +855,58 @@ def read_authenticated_checkpoint_resolution(
     }
 
 
+def _server_error_detail(exc: Exception) -> str:
+    """The server's own error code and message, when it sent one.
+
+    ``httpx`` renders an HTTP failure as status line plus URL only, which is why
+    643 failed checkpoint writes read identically in the log for a week.  Only
+    the two named fields are surfaced, never the body wholesale.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    code = str(payload.get("error_code") or payload.get("code") or "")[:80]
+    message = str(payload.get("message") or "")[:300]
+    return f" [server: {code} {message}]" if code or message else ""
+
+
+def _link_checkpoint_task(checkpoint_id: str, task_entity_id: str) -> bool:
+    """Best-effort REFERS_TO edge from a proven checkpoint to its task.
+
+    Deliberately outside the signed write and outside the proof: the edge is
+    navigation for readers of the graph, never authority.  A failure is logged
+    and ignored, so it cannot undo or block an already proven checkpoint.
+    """
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL.rstrip('/')}/create_relationship",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json={
+                "relationship_type": "REFERS_TO",
+                "source_entity_id": checkpoint_id,
+                "target_entity_id": task_entity_id,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[gating] checkpoint %s proven, but its REFERS_TO edge to %s was "
+            "not written: %s",
+            checkpoint_id,
+            task_entity_id,
+            exc,
+        )
+        return False
+
+
 def write_checkpoint_brief(
     *,
     task_entity_id: str,
@@ -897,7 +949,11 @@ def write_checkpoint_brief(
                 "checkpoint_name": "PLAN",
                 "blocking": True,
                 "task_entity_id": task_entity_id,
-                "title": f"PLAN checkpoint: {title}",
+                # Neotoma resolves a checkpoint_brief's identity from its
+                # title, so two tasks sharing a title would write onto ONE
+                # checkpoint (the second silently re-pointing it).  The task id
+                # makes the identity per-task.
+                "title": f"PLAN checkpoint: {title} [{task_entity_id}]",
                 "plan_summary": plan_summary,
                 "confidence": decision.confidence,
                 "confidence_threshold": decision.threshold,
@@ -911,14 +967,12 @@ def write_checkpoint_brief(
                 "handler": handler,
             }
         ],
-        "relationships": [
-            {
-                "relationship_type": "REFERS_TO",
-                "source_index": 0,
-                "target_entity_id": task_entity_id,
-            }
-        ],
         "idempotency_key": f"checkpoint-{handler}-{task_entity_id}-plan",
+    }
+    task_edge = {
+        "relationship_type": "REFERS_TO",
+        "source_index": 0,
+        "target_entity_id": task_entity_id,
     }
     normalized_action = str(action_type or "").strip().lower()
     authorization_expected = task_record is not None and policy is not None
@@ -949,8 +1003,30 @@ def write_checkpoint_brief(
         )
         body["entities"][0]["body"] = encoded_authorization
         expected_authorization = json.loads(encoded_authorization)
+    if not authorization_expected:
+        # Legacy bearer-only write: nothing capability-gates it, so the edge
+        # rides in the same request as before.
+        body["relationships"] = [task_edge]
+    # A signed write is judged against the producer's AAuth grant, and that
+    # grant is scoped to entity types, not edges: a REFERS_TO edge in the same
+    # request makes the server refuse the WHOLE store (HTTP 500
+    # DB_QUERY_FAILED before neotoma#2525, 403 capability_denied after), so
+    # every signed checkpoint failed and its task was left held with nothing to
+    # approve.  The authority-bearing write therefore carries no edge: the
+    # checkpoint binds its task through the signed ``task_entity_id`` field and
+    # the envelope, and nothing reads the edge as authority.  The edge is added
+    # afterwards, best-effort, over the bearer path (see _link_checkpoint_task).
     if idempotency_context:
         body["idempotency_key"] += f"-{idempotency_context}"
+    # Neotoma refuses an idempotency key reused with different content (HTTP
+    # 400 ERR_IDEMPOTENCY_MISMATCH).  A task held a second time carries a new
+    # revision and reason, so a content-blind key made every re-hold a 400
+    # (97 of them in the 2026-09 log, each on a task that had already been
+    # checkpointed once).  Binding the key to the content keeps an exact retry
+    # an idempotent replay while a changed hold becomes a new checkpoint.
+    body["idempotency_key"] += "-" + hashlib.sha256(
+        _canonical_json(body["entities"]).encode()
+    ).hexdigest()[:16]
     try:
         headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
         encoded_request_body: bytes | None = None
@@ -999,9 +1075,13 @@ def write_checkpoint_brief(
                     entity_id,
                 )
                 return None
+            _link_checkpoint_task(entity_id, task_entity_id)
         return entity_id
     except Exception as exc:  # noqa: BLE001
-        log.warning(f"[gating] failed to persist checkpoint_brief: {exc}")
+        log.warning(
+            f"[gating] failed to persist checkpoint_brief: {exc}"
+            f"{_server_error_detail(exc)}"
+        )
         return None
 
 
@@ -1274,6 +1354,82 @@ def _transition_checkpoint_status(
             exc,
         )
         return False
+
+
+CHECKPOINT_SUPERSEDED = "superseded"
+
+
+def supersede_checkpoint(
+    checkpoint_entity_id: str, *, handler: str, reason: str
+) -> bool:
+    """Retire a pending checkpoint that a proven replacement has taken over.
+
+    ``superseded`` is neither an approved nor a rejected state, so it releases
+    nothing and drops the brief out of the ``awaiting_operator`` queue.
+    """
+    return _transition_checkpoint_status(
+        checkpoint_entity_id,
+        handler=handler,
+        reason=reason,
+        status=CHECKPOINT_SUPERSEDED,
+        idempotency_label="superseded",
+    )
+
+
+def query_entities(
+    entity_type: str,
+    *,
+    snapshot_filters: dict,
+    cursor: str | None = None,
+    limit: int = 100,
+) -> dict | None:
+    """One page of ``POST /entities/query``; ``None`` when the read failed.
+
+    A failed read must stay distinguishable from an empty page: callers that
+    decide whether a task already has a checkpoint would otherwise read an
+    outage as "no checkpoint" and file a duplicate.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        return None
+    body: dict = {
+        "entity_type": entity_type,
+        "snapshot_filters": snapshot_filters,
+        "limit": limit,
+        "include_snapshots": True,
+    }
+    if cursor:
+        body["cursor"] = cursor
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL.rstrip('/')}/entities/query",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[gating] entity query for {entity_type} failed: {exc}")
+        return None
+
+
+def checkpoints_for_task(task_entity_id: str) -> list[dict] | None:
+    """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read."""
+    found: list[dict] = []
+    cursor: str | None = None
+    while True:
+        page = query_entities(
+            "checkpoint_brief",
+            snapshot_filters={"task_entity_id": {"op": "eq", "value": task_entity_id}},
+            cursor=cursor,
+        )
+        if page is None:
+            return None
+        found.extend(e for e in page.get("entities") or [] if isinstance(e, dict))
+        cursor = page.get("next_cursor")
+        if not cursor:
+            return found
 
 
 def close_checkpoint_without_release(
