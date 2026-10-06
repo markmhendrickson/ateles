@@ -63,7 +63,15 @@ WHAT IS REFUSED (would put file content into context):
     and an explicit
     `ps -p PID -o pid=,comm=` field allowlist remain available. A boolean
     check (`[ -n "$VAR" ]`, `test -n`) or a `case` statement printing only a
-    fixed label is NOT refused.
+    fixed label is NOT refused. Also shell tracing (`set -x`, `set -o xtrace`,
+    `setopt xtrace`, a shell started with `-x`, `SHELLOPTS=xtrace`) in a
+    command that sources a credential file, since xtrace prints every
+    expanded assignment and command. Also launchd job definitions: a plist
+    under `Library/LaunchAgents` is a credential path, `plutil`,
+    `PlistBuddy` and `defaults` count as readers, and `launchctl list
+    <label>`, `dumpstate` and `procinfo` are refused alongside `print` and
+    `getenv`. The whole `~/.config/neotoma/` directory is a credential path,
+    not only its dotenv files.
 
 WHAT IS ALLOWED (mirrors the task spec — none of these print a value):
   - `grep -c '^NAME='  <file>`             — existence, a count, no value.
