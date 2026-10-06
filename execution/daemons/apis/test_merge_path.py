@@ -183,17 +183,19 @@ def test_spaced_non_blocking_still_not_flagged():
     assert not body_has_blocking_findings(f"**COMMENT**\n\n{spaced}")
 
 
-def test_confusables_table_is_narrow_and_covers_named_letters():
-    """The confusables table is deliberately scoped to the letters in
-    BLOCKING, not a general Unicode-TR39 confusables table."""
+def test_confusables_table_maps_look_alikes_to_ascii_letters():
+    """The confusables table folds non-Latin look-alikes to Latin letters.
+
+    It used to be scoped to the letters in BLOCKING; the verdict tokens
+    (BLOCKED, REQUEST_CHANGES, CHANGES_REQUESTED) need other letters too, so
+    the scope is now "a letter drawn like a Latin one". The full coverage
+    checks are in test_blocking_scan_confusables.py.
+    """
     from swarm_dispatch import _CONFUSABLE_TO_ASCII
 
     assert _CONFUSABLE_TO_ASCII, "table must not be empty for the fix to apply"
     for src, dst in _CONFUSABLE_TO_ASCII.items():
-        assert dst.upper() in "BLOCKING", (
-            f"{src!r} -> {dst!r} maps to a letter outside BLOCKING — the "
-            "table must stay scoped to the marker it defends"
-        )
+        assert dst.isascii() and dst.isalpha() and len(dst) == 1, (src, dst)
         assert src != dst, "no-op identity entries add nothing and confuse intent"
 
 

@@ -1372,11 +1372,15 @@ def _normalize_for_blocking_scan(text: str) -> str:
          character that still follows it, and step 2 already removed every
          such character. It only normalizes width/compatibility variants that
          survived decomposition unmarked.
-      4. A small confusables table maps the Cyrillic/Greek look-alikes of the
-         ASCII letters in `BLOCKING` (e.g. Cyrillic `І` U+0406, `В` U+0412) to
-         their ASCII originals, closing the homoglyph form Falco's finding
-         named as a PLAUSIBLE miss. Runs after recomposition so it sees single
-         code points, matching the table's keys.
+      4. A confusables table, derived at import from Unicode character names
+         (`_derive_confusable_table`), maps the Greek and Cyrillic look-alikes
+         of Latin letters, and the Latin small capitals, to their ASCII
+         originals — for every Latin letter, not only those in `BLOCKING`,
+         since the verdict tokens need `D`, `E`, `Q`, `S`, `T`, ... too. This
+         closes the homoglyph form Falco's finding named as a PLAUSIBLE miss.
+         Letters with no Latin twin are left alone, so ordinary Greek and
+         Cyrillic prose never folds into a token. Runs after recomposition so
+         it sees single code points, matching the table's keys.
       5. Runs of plain spaces inside an otherwise-bracketed token are collapsed
          (`[ B L O C K I N G ]` -> `[BLOCKING]`) so a spaced-out rendering does
          not evade the marker either. This must run last: it operates on the
@@ -1433,30 +1437,111 @@ _ZERO_WIDTH_CHARS = frozenset(
 #        that could be spliced onto or decomposed out of a letter.
 _STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn", "Mc", "Me"})
 
-# Common Cyrillic/Greek confusables of the ASCII letters appearing in
-# "BLOCKING", mapped to their ASCII originals. Deliberately narrow — this is
-# NOT a general confusables table (Unicode TR39 has thousands of entries);
-# it covers exactly the letters `_BLOCKING_MARKER_RE` needs, both cases, so an
-# attacker cannot swap one letter in the token for a visually-identical
-# Cyrillic/Greek one and have it read as clean. Extend this table, never add a
-# second one, if another marker needs the same treatment.
-_CONFUSABLE_TO_ASCII: dict[str, str] = {
-    # Cyrillic
-    "В": "B", "в": "b",  # U+0412 / U+0432 (Cyrillic VE)
-    "Ｂ": "B",  # defensive: NFKC already folds fullwidth, kept for clarity
-    "О": "O", "о": "o",  # U+041E / U+043E (Cyrillic O) — visually identical to Latin O
-    "С": "C", "с": "c",  # U+0421 / U+0441 (Cyrillic ES)
-    "К": "K", "к": "k",  # U+041A / U+043A (Cyrillic KA)
-    "І": "I", "і": "i",  # U+0406 / U+0456 (Ukrainian/Belarusian I) — Falco's named example
-    "Ι": "I", "ι": "i",  # U+0399 / U+03B9 (Greek Iota)
-    "Ⲛ": "N",  # U+2C9B (Coptic Capital N) — visually identical to Latin N
-    "Ν": "N", "ν": "n",  # U+039D / U+03BD (Greek Nu) — visually identical to Latin N
-    "Ԍ": "G",  # U+0524 (Cyrillic Komi Ge) — visually close to Latin G
-    "Ꮐ": "G",  # U+13C8 (Cherokee Nah) — visually close to Latin G in some fonts
-    # No entry for "L": no common single-codepoint Cyrillic/Greek confusable
-    # reads as a bare Latin "L" (deliberately considered and excluded, not an
-    # oversight).
+# Look-alike letters from other scripts, folded to the Latin letter they are
+# drawn like (principles.md, principle 5: fail closed on the field that carries
+# the safety meaning). The scan looks for ASCII tokens, so one swapped letter
+# would otherwise read as clean.
+#
+# The mapping is DERIVED at import time from Unicode character names, not typed
+# as a list of characters: a hand list always misses a letter (this one missed
+# Greek Beta and Omicron, Cyrillic Ie and the small-capital D). What is written
+# here is only the judgement of which letter NAMES look like which Latin
+# letter; each name is resolved with `unicodedata.lookup`, so the code points
+# come from the Unicode data the interpreter ships.
+#
+# Folding is by script, and only for letters that are genuinely drawn like a
+# Latin letter. A Greek or Cyrillic letter with no Latin twin (`Δ`, `Ж`, ...)
+# is left alone, so ordinary prose in those scripts still contains no Latin
+# token after the fold; the table is not a general TR39 skeleton.
+#
+# letter name -> (upper-case Latin letter or None, lower-case or None)
+_GREEK_LOOK_ALIKES: dict[str, tuple[str | None, str | None]] = {
+    "ALPHA": ("A", "a"),
+    "BETA": ("B", None),
+    "EPSILON": ("E", None),
+    "ZETA": ("Z", None),
+    "ETA": ("H", None),
+    "IOTA": ("I", "i"),
+    "KAPPA": ("K", "k"),
+    "MU": ("M", None),
+    "NU": ("N", "n"),
+    "OMICRON": ("O", "o"),
+    "RHO": ("P", "p"),
+    "TAU": ("T", None),
+    "UPSILON": ("Y", "u"),
+    "CHI": ("X", "x"),
 }
+_CYRILLIC_LOOK_ALIKES: dict[str, tuple[str | None, str | None]] = {
+    "A": ("A", "a"),
+    "VE": ("B", "b"),
+    "IE": ("E", "e"),
+    "ES": ("C", "c"),
+    "TE": ("T", None),
+    "ER": ("P", "p"),
+    "O": ("O", "o"),
+    "KA": ("K", "k"),
+    "EN": ("H", None),
+    "HA": ("X", "x"),
+    "EM": ("M", None),
+    "U": ("Y", "y"),
+    "BYELORUSSIAN-UKRAINIAN I": ("I", "i"),
+    "JE": ("J", "j"),
+    "DZE": ("S", "s"),
+    "KOMI DE": ("D", "d"),
+    "QA": ("Q", "q"),
+    "WE": ("W", "w"),
+    "SHHA": ("H", "h"),
+}
+# Whole character names whose Latin twin is not a plain upper/lower pair.
+# Small capitals are folded to the UPPER-case letter they are drawn as, which
+# is also what the bare verdict tokens are matched against. The palochka is
+# drawn as a bare vertical stroke and is the only non-Latin stand-in for `L`.
+_OTHER_LOOK_ALIKE_NAMES: dict[str, str] = {
+    "GREEK CAPITAL LETTER YOT": "J",
+    "GREEK LETTER YOT": "j",
+    "CYRILLIC LETTER PALOCHKA": "L",
+    "CYRILLIC SMALL LETTER PALOCHKA": "L",
+    "CYRILLIC CAPITAL LETTER KOMI SJE": "G",
+    "COPTIC CAPITAL LETTER NI": "N",
+    "CHEROKEE LETTER NAH": "G",
+}
+
+
+def _derive_confusable_table() -> dict[str, str]:
+    """Build the look-alike fold table from Unicode character names.
+
+    A name this interpreter's Unicode data does not know is skipped rather than
+    raised: this runs at import in the dispatcher, and a daemon that cannot
+    start is a worse outcome than a narrower fold. The tests name the cases
+    that must resolve so a skip cannot hide.
+    """
+    table: dict[str, str] = {}
+
+    def add(name: str, latin: str | None) -> None:
+        if not latin:
+            return
+        try:
+            ch = unicodedata.lookup(name)
+        except KeyError:
+            return
+        # The fold runs AFTER NFKC, so a character NFKC rewrites never reaches
+        # it; an ASCII key would be a no-op.
+        if ch.isascii() or unicodedata.normalize("NFKC", ch) != ch:
+            return
+        table[ch] = latin
+
+    for script, letters in (("GREEK", _GREEK_LOOK_ALIKES), ("CYRILLIC", _CYRILLIC_LOOK_ALIKES)):
+        for letter_name, (upper, lower) in letters.items():
+            add(f"{script} CAPITAL LETTER {letter_name}", upper)
+            add(f"{script} SMALL LETTER {letter_name}", lower)
+    for latin in map(chr, range(ord("A"), ord("Z") + 1)):
+        add(f"LATIN LETTER SMALL CAPITAL {latin}", latin)
+    for name, latin in _OTHER_LOOK_ALIKE_NAMES.items():
+        add(name, latin)
+    return table
+
+
+_CONFUSABLE_TO_ASCII: dict[str, str] = _derive_confusable_table()
 _CONFUSABLE_TRANSLATION = str.maketrans(_CONFUSABLE_TO_ASCII)
 
 # A run of single characters separated by plain ASCII spaces, inside brackets
