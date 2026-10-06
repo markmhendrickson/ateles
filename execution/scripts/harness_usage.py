@@ -34,7 +34,7 @@ at its reported reset without a hand edit of the headroom file.
     # What dispatches spent, per provider / model / tier / work class, from the
     # same ledger (tokens and cost only where the provider reported them; every
     # sum says how many dispatches it covers and how many reported nothing):
-    harness_usage.py spend --since-hours 24 --by model
+    harness_usage.py spend --since-hours 24 --by model   # alias: cost; also --by skill
 
 ``show`` also reports, per gated provider, the reading's age, the weekly
 ceiling, the pace line (ceiling x elapsed fraction of the week + burst), and
@@ -228,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
 
     spend = sub.add_parser(
         "spend",
+        aliases=["cost"],
         help=(
             "print what dispatches spent (tokens, cost) from the tier ledger's "
             "usage rows; a field no provider reported stays null, never estimated"
@@ -243,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-    if args.command == "spend":
+    if args.command in ("spend", "cost"):
         print(json.dumps(
             model_tiering.usage_totals(group_by=args.by, since_hours=args.since_hours),
             indent=2,

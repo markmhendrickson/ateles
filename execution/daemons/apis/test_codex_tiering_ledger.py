@@ -221,3 +221,14 @@ def test_ledger_write_failure_never_reaches_the_dispatch(monkeypatch, tmp_path) 
         dispatch_id="d", skill="s", provider="codex", resolved=None,
         requested_model=None, usage=dispatch_usage.DispatchUsage(provider="codex"),
     )
+
+
+def test_spend_report_groups_by_skill_and_the_cost_alias_works(ledger, capsys) -> None:
+    model_tiering.record_dispatch_usage(
+        dispatch_id="x", skill="pavo", provider="codex", resolved=None,
+        requested_model="m", usage=dispatch_usage.DispatchUsage(provider="codex"),
+    )
+    import harness_usage
+
+    assert harness_usage.main(["cost", "--by", "skill"]) == 0
+    assert json.loads(capsys.readouterr().out)["groups"]["pavo"]["dispatches"] == 1

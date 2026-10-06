@@ -724,7 +724,7 @@ def tier_counts(
     return report
 
 
-USAGE_GROUPS: tuple[str, ...] = ("provider", "model", "tier", "action_class")
+USAGE_GROUPS: tuple[str, ...] = ("provider", "model", "tier", "action_class", "skill")
 
 
 def usage_totals(
