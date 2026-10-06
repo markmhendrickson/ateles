@@ -223,11 +223,13 @@ def test_ledger_write_failure_never_reaches_the_dispatch(monkeypatch, tmp_path) 
     )
 
 
-def test_spend_report_groups_by_skill_and_the_cost_alias_works(ledger, capsys) -> None:
+def test_spend_report_groups_by_skill_and_the_cost_alias_works(ledger, capsys, monkeypatch) -> None:
     model_tiering.record_dispatch_usage(
         dispatch_id="x", skill="pavo", provider="codex", resolved=None,
         requested_model="m", usage=dispatch_usage.DispatchUsage(provider="codex"),
     )
+    scripts = str(_DAEMON_DIR.parents[1] / "scripts")
+    monkeypatch.syspath_prepend(scripts)  # undone at teardown: no leaked sys.path
     import harness_usage
 
     assert harness_usage.main(["cost", "--by", "skill"]) == 0
