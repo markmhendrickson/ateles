@@ -385,6 +385,11 @@ def _latest_matching_comment(
     return None
 
 
+def _matching_comments(comments: list[dict], *, marker: str) -> list[dict]:
+    """EVERY comment carrying *marker* verbatim, in creation order."""
+    return [c for c in comments if marker in (c.get("body") or "")]
+
+
 class RequiredLens:
     """One lens in the derived floor, with why it is required."""
 
@@ -408,11 +413,23 @@ class NonRequiredBlock:
     object.
     """
 
-    def __init__(self, lens: str, *, agent: str, verdict: str | None, comment_url: str) -> None:
+    def __init__(
+        self,
+        lens: str,
+        *,
+        agent: str,
+        verdict: str | None,
+        comment_url: str,
+        reason: str = "",
+    ) -> None:
         self.lens = lens
         self.agent = agent
         self.verdict = verdict
         self.comment_url = comment_url
+        # Why this lens blocks, precisely: the objecting verdict token,
+        # "unreadable verdict", "[BLOCKING] finding", or
+        # "earlier objection not retired by a clearing verdict".
+        self.reason = reason
 
 
 async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[str]:
@@ -766,8 +783,12 @@ async def carry_earlier_signoffs(
     return out
 
 
-def _non_required_lens_objects(body: str, *, lens_agent: str) -> bool:
-    """True when a lens OUTSIDE the required set objects to the current head.
+_OBJECTING_VERDICTS = frozenset({"request_changes", "blocked"})
+EARLIER_OBJECTION_REASON = "earlier objection not retired by a clearing verdict"
+
+
+def _objection_reason(body: str, *, lens_agent: str) -> str | None:
+    """Why one comment from a lens OUTSIDE the required set objects, or None.
 
     Read with the same functions `evaluate_lens` uses for a required lens
     (`sign_off_is_warranted`, `lens_own_verdict`, the blocking-token and
@@ -775,7 +796,7 @@ def _non_required_lens_objects(body: str, *, lens_agent: str) -> bool:
     absence of a clearing verdict means: for a required lens it fails the
     gate; for a non-required lens it does not.
 
-    Not an objection, and only these two shapes:
+    Not an objection (None), and only these two shapes:
       - a clearing verdict (`sign_off_is_warranted`: `APPROVE` / `SIGNED_OFF`
         at the fixed position, no blocking token, no `[BLOCKING]` finding);
       - an explicit, parsed `COMMENT` at the fixed position with no blocking
@@ -787,19 +808,55 @@ def _non_required_lens_objects(body: str, *, lens_agent: str) -> bool:
     field-that-carries-the-safety-meaning`).
     """
     if sign_off_is_warranted(body, lens_agent=lens_agent):
-        return False
-    if lens_own_verdict(body, lens_agent=lens_agent) != "comment":
-        return True
-    return output_has_blocking_verdict(body) or body_has_blocking_findings(body)
+        return None
+    verdict = lens_own_verdict(body, lens_agent=lens_agent)
+    if verdict in _OBJECTING_VERDICTS:
+        return verdict.upper()
+    if body_has_blocking_findings(body):
+        return "[BLOCKING] finding"
+    if output_has_blocking_verdict(body):
+        return "blocking verdict token in body"
+    if verdict is None:
+        return "unreadable verdict"
+    if verdict == "comment":
+        return None
+    return f"verdict {verdict!r} is not a clearing verdict"
+
+
+def _non_required_lens_block(
+    bodies: list[str], *, lens_agent: str
+) -> tuple[str, str | None] | None:
+    """(reason, verdict) when a non-required lens blocks on this head, else None.
+
+    `bodies` is every comment the lens posted for the CURRENT head, in order.
+    The lens blocks when its LATEST comment objects (or cannot be read), or
+    when an EARLIER one objected and no comment after that objection is a
+    clearing verdict: only an explicit clearing verdict (`APPROVE` /
+    `SIGNED_OFF`) retires an objection; a later plain `COMMENT` does not.
+    """
+    if not bodies:
+        return None
+    reasons = [_objection_reason(b, lens_agent=lens_agent) for b in bodies]
+    if reasons[-1] is not None:
+        return reasons[-1], lens_own_verdict(bodies[-1], lens_agent=lens_agent)
+    last_objection = max((i for i, r in enumerate(reasons) if r is not None), default=None)
+    if last_objection is None:
+        return None
+    for later in bodies[last_objection + 1 :]:
+        if sign_off_is_warranted(later, lens_agent=lens_agent):
+            return None
+    return EARLIER_OBJECTION_REASON, lens_own_verdict(bodies[-1], lens_agent=lens_agent)
 
 
 def find_non_required_blocks(
     *, comments: list[dict], head_sha: str, required_lenses: set[str]
 ) -> list[NonRequiredBlock]:
-    """Every lens NOT in `required_lenses` whose comment on the CURRENT head
-    (`compose_lens_review_marker`) actively objects: REQUEST_CHANGES, BLOCKED,
-    or a blocking token / `[BLOCKING]` finding anywhere in the body — or a
-    reply whose verdict cannot be read at all (fail closed).
+    """Every lens NOT in `required_lenses` that actively objects on the
+    CURRENT head (`compose_lens_review_marker`): its latest comment is
+    REQUEST_CHANGES, BLOCKED, carries a blocking token / `[BLOCKING]` finding
+    anywhere in the body, or has a verdict that cannot be read (fail closed);
+    or an earlier comment on this head objected and no later comment is a
+    clearing verdict (`APPROVE` / `SIGNED_OFF`).
 
     Reads every lens registered in `LENS_AGENTS` — not only the derived
     floor — because ateles#1293 was approved with 'lenses: ALL PASS' while a
@@ -807,31 +864,36 @@ def find_non_required_blocks(
     Parsed with `swarm_dispatch.lens_own_verdict`, the identical fixed-
     position parser `evaluate_lens` already uses for required lenses, so a
     non-required lens cannot be held to a looser or stricter reading than a
-    required one (`_non_required_lens_objects`). A lens with no comment on
-    this head, a lens whose comment reads as a clearing verdict, and a lens
-    whose comment is an explicit `COMMENT` with no blocking token (ateles#1394:
+    required one (`_objection_reason`). A lens with no comment on this head,
+    a lens whose comments read as a clearing verdict, and a lens that only
+    ever posted an explicit `COMMENT` with no blocking token (ateles#1394:
     the automatic pipeline's content lens) are not blocks — this function
     reports ONLY lenses that actively object, never absence or a plain
-    non-blocking comment.
+    non-blocking comment. A `COMMENT` posted AFTER an objection does not
+    retire it. A comment edited in place shows its current body, which is read
+    as the lens's updated verdict.
     """
     blocks: list[NonRequiredBlock] = []
     for lens, agent in LENS_AGENTS.items():
         if lens in required_lenses:
             continue
         marker = compose_lens_review_marker(lens, head_sha)
-        comment = _latest_matching_comment(comments, marker=marker)
-        if comment is None:
+        matching = _matching_comments(comments, marker=marker)
+        if not matching:
             continue
-        body = comment.get("body") or ""
-        if not _non_required_lens_objects(body, lens_agent=agent):
+        found = _non_required_lens_block(
+            [c.get("body") or "" for c in matching], lens_agent=agent
+        )
+        if found is None:
             continue
-        verdict = lens_own_verdict(body, lens_agent=agent)
+        reason, verdict = found
         blocks.append(
             NonRequiredBlock(
                 lens,
                 agent=agent,
                 verdict=verdict,
-                comment_url=comment.get("html_url", ""),
+                comment_url=matching[-1].get("html_url", ""),
+                reason=reason,
             )
         )
     return blocks
@@ -1573,10 +1635,7 @@ async def run(
         if non_required_blocks:
             print("non-required lenses with a LIVE BLOCKING verdict on this head:")
             for b in non_required_blocks:
-                print(
-                    f"  - {b.lens} ({b.agent}): "
-                    f"{b.verdict or 'unreadable verdict or [BLOCKING] finding'} — {b.comment_url}"
-                )
+                print(f"  - {b.lens} ({b.agent}): {b.reason or b.verdict} — {b.comment_url}")
             print()
 
         all_lenses_pass = all(o.passed for o in lens_outcomes)
@@ -1671,7 +1730,9 @@ def main() -> int:
             "or not — always refuses the approval. A lens outside the "
             "required set blocks only when it objects (REQUEST_CHANGES, "
             "BLOCKED, a [BLOCKING] finding) or its verdict cannot be read; "
-            "a plain COMMENT from it does not."
+            "a plain COMMENT from it does not, but a later COMMENT never retires "
+            "an earlier objection on the same head; only a clearing verdict "
+            "does."
         ),
     )
     parser.add_argument(
