@@ -122,18 +122,22 @@ fi
 if [ "${1:-}" = "--load-prepare" ]; then
   PLIST="com.ateles.phoenicurus-prepare.plist"
   DEST="$HOME/Library/LaunchAgents/$PLIST"
-  # The live .plist is gitignored (repo convention); render it from the tracked
-  # .tmpl if it isn't already present locally.
-  if [ ! -f "$SCRIPT_DIR/$PLIST" ] && [ -f "$SCRIPT_DIR/$PLIST.tmpl" ]; then
-    cp "$SCRIPT_DIR/$PLIST.tmpl" "$SCRIPT_DIR/$PLIST"
-    echo "Rendered $PLIST from template."
+  # The live .plist is gitignored (repo convention); render from the tracked
+  # .tmpl if there is no local copy to render from.
+  SRC="$SCRIPT_DIR/$PLIST"
+  if [ ! -f "$SRC" ] && [ -f "$SCRIPT_DIR/$PLIST.tmpl" ]; then
+    SRC="$SCRIPT_DIR/$PLIST.tmpl"
   fi
   mkdir -p "$HOME/Library/LaunchAgents"
   if launchctl list 2>/dev/null | grep -q "com.ateles.phoenicurus-prepare"; then
     echo "Unloading existing phoenicurus-prepare agent..."
     launchctl unload "$DEST" 2>/dev/null || true
   fi
-  cp "$SCRIPT_DIR/$PLIST" "$DEST"
+  # Render through the shared renderer rather than copying: it leaves
+  # credential-named variables out of the installed plist (daemons load them
+  # from the secrets store at start) and refuses a template it cannot render
+  # safely.
+  python3 "$SCRIPT_DIR/../../scripts/render_daemon_plist.py" "$SRC" "$DEST"
   launchctl load "$DEST"
   echo "✓ phoenicurus-prepare scheduled (Mon-Thu 07:00 local)."
 else

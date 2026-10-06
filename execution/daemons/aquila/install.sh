@@ -16,7 +16,11 @@ if launchctl list 2>/dev/null | grep -q "com.ateles.aquila"; then
   launchctl unload "$DEST" 2>/dev/null || true
 fi
 
-cp "$SCRIPT_DIR/$PLIST" "$DEST"
+# Render through the shared renderer rather than copying: it leaves
+# credential-named variables out of the installed plist (daemons load them
+# from the secrets store at start) and refuses a template it cannot render
+# safely.
+python3 "$SCRIPT_DIR/../../scripts/render_daemon_plist.py" "$SCRIPT_DIR/$PLIST" "$DEST"
 launchctl load "$DEST"
 
 echo "✓ aquila installed."
