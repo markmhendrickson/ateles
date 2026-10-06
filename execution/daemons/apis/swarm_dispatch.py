@@ -161,7 +161,9 @@ _PARENTAGE_KEYWORDS = _label_gate.PARENTAGE_KEYWORDS
 # Optional `owner/repo` qualifier so a cross-repo parent is expressible.
 _ISSUE_REF = _label_gate.ISSUE_REF
 
-_CLOSURE_VERB = re.compile(rf"\b(?:{_CLOSING_KEYWORDS})\s*:?\s+{_ISSUE_REF}", re.I)
+# `(?:\s*:)?\s+` is the same language as `\s*:?\s+` without the two adjacent
+# whitespace runs, which took quadratic time on a keyword followed by many spaces.
+_CLOSURE_VERB = re.compile(rf"\b(?:{_CLOSING_KEYWORDS})(?:\s*:)?\s+{_ISSUE_REF}", re.I)
 _PARENT_LINK = _label_gate.PARENT_LINK
 
 # Back-compat alias: `_PARENT_ISSUE` was the single conflated pattern. It now
@@ -738,7 +740,9 @@ _BLOCKING_COUNT_RE = re.compile(r"Blocking:\s*(\d+)", re.IGNORECASE)
 # name with the token.
 _NOT_RECEIVED_RE = re.compile(
     r"\b(?P<lens>" + "|".join(sorted(_KNOWN_LENS_NAMES)) + r")\b"
-    r"\s*\**\s*[:=]\s*\**\s*" + NOT_RECEIVED_TOKEN,
+    # `\s*(?:\*+\s*)?` is the same language as `\s*\**\s*` without the two
+    # whitespace runs that were separated only by an optional star run.
+    r"\s*(?:\*+\s*)?[:=]\s*(?:\*+\s*)?" + NOT_RECEIVED_TOKEN,
     re.IGNORECASE,
 )
 
@@ -886,9 +890,13 @@ _BLOCKING_VERDICT_BARE_RE = re.compile(
 # The contract's attribution header (skill_runner.SWARM_GITHUB_CONTRACT,
 # "Attribution header"): `**🤖 <Agent> — Ateles swarm, <role>**`. A gate
 # verdict is read only from a reply whose FIRST line is this header.
+# Each group starts and ends on a non-space character, so no whitespace run can
+# be split between a `\s*` and a neighbouring group in more than one way: the
+# earlier shape (`[^\n]*?\S` straight after `\s*`) took quadratic time on a long
+# run of spaces.
 _OWN_HEADER_RE = re.compile(
-    r"^\*\*🤖\s*(?P<name>[^\s—–-][^—–\-\n]*?)\s*[—–-]+\s*Ateles swarm,"
-    r"\s*(?P<role>[^\n]*?\S)\s*\*\*\s*$"
+    r"^\*\*🤖\s*(?P<name>[^\s—–-](?:[^—–\-\n]*[^\s—–\-\n])?)\s*[—–-]+\s*Ateles swarm,"
+    r"\s*(?P<role>\S(?:[^\n]*?\S)?)\s*\*\*\s*$"
 )
 # The header's emoji. More than one in a reply is an extra header.
 _HEADER_EMOJI = "\U0001f916"
@@ -901,7 +909,7 @@ _VERDICT_LINE_RE = re.compile(r"^\*\*(" + _VERDICT_TOKEN_ALT + r")\*\*\s*$", re.
 # `** COMMENT **` (second security run at bf97b1a4). Upper-case tokens only, so
 # prose that happens to start with "Approve" is not counted.
 _VERDICT_LIKE_RE = re.compile(
-    r"^[#*_\s]*(?:(?i:verdict)\s*[:=—–-]\s*)?[#*_\s]*(?:"
+    r"^[#*_\s]*(?:(?i:verdict)\s*[:=—–-][#*_\s]*)?(?:"
     + _VERDICT_TOKEN_ALT
     + r")(?![A-Za-z0-9]|_[A-Za-z0-9])"
 )
@@ -1154,8 +1162,12 @@ def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
     for i, (line, _) in enumerate(lines):
         if i == verdict_at:
             continue
-        body = _LINE_DECORATION_RE.sub("", _normalize_for_blocking_scan(line))
-        if _VERDICT_LIKE_RE.match(body):
+        # A veto scan: a look-alike spelling of a verdict token still counts
+        # as a second verdict line (the recognisers above stay narrow).
+        if any(
+            _VERDICT_LIKE_RE.match(_LINE_DECORATION_RE.sub("", form))
+            for form in _veto_scan_forms_uncached(line)
+        ):
             return None
     return verdict.group(1).lower()
 
@@ -1167,14 +1179,20 @@ def output_has_blocking_verdict(stdout: str | None) -> bool:
     (`REQUEST_CHANGES`). A quotation of another lens's or an earlier round's
     blocking verdict counts: this predicate cannot tell a quote from a
     verdict, so it treats both as "not clear" (principles §§5 and 7). The text
-    is normalized the way `body_has_blocking_findings` normalizes it before
-    matching.
+    is scanned in every form `_veto_scan_forms` produces, widened by the
+    look-alike fold, and then by `_wildcard_token_hit` for a token with up to
+    two unknown characters in it.
     """
     if not stdout:
         return False
-    text = _normalize_for_blocking_scan(stdout)
-    return bool(
+    forms = _veto_scan_forms(stdout)
+    if any(
         _BLOCKING_VERDICT_BOLD_RE.search(text) or _BLOCKING_VERDICT_BARE_RE.search(text)
+        for text in forms
+    ):
+        return True
+    return any(
+        _wildcard_token_hit(text, word) for text in forms for word in _BLOCKING_VERDICT_WORDS
     )
 
 
@@ -1392,11 +1410,7 @@ def _normalize_for_blocking_scan(text: str) -> str:
     confusable-form siblings in test_merge_path.py, which pin exactly this).
     """
     decomposed = unicodedata.normalize("NFKD", text)
-    stripped = "".join(
-        ch
-        for ch in decomposed
-        if ch not in _ZERO_WIDTH_CHARS and unicodedata.category(ch) not in _STRIPPED_UNICODE_CATEGORIES
-    )
+    stripped = _strip_marks_and_format(decomposed)
     recomposed = unicodedata.normalize("NFKC", stripped)
     folded = recomposed.translate(_CONFUSABLE_TRANSLATION)
     return _SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, folded)
@@ -1434,6 +1448,24 @@ _ZERO_WIDTH_CHARS = frozenset(
 #        that could be spliced onto or decomposed out of a letter.
 _STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn", "Mc", "Me"})
 
+def _strip_marks_and_format(decomposed: str) -> str:
+    """*decomposed* without its format and combining characters.
+
+    ASCII has none, so text with no non-ASCII is returned as it is. Otherwise
+    each DISTINCT character is classified once and the doomed ones are deleted
+    in one pass, so the cost follows the number of distinct characters rather
+    than the length of the text.
+    """
+    if decomposed.isascii():
+        return decomposed
+    doomed = {
+        ord(ch): None
+        for ch in set(decomposed)
+        if not ch.isascii()
+        and (ch in _ZERO_WIDTH_CHARS or unicodedata.category(ch) in _STRIPPED_UNICODE_CATEGORIES)
+    }
+    return decomposed.translate(doomed) if doomed else decomposed
+
 # Common Cyrillic/Greek confusables of the ASCII letters appearing in
 # "BLOCKING", mapped to their ASCII originals. Deliberately narrow — this is
 # NOT a general confusables table (Unicode TR39 has thousands of entries);
@@ -1441,6 +1473,15 @@ _STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn", "Mc", "Me"})
 # attacker cannot swap one letter in the token for a visually-identical
 # Cyrillic/Greek one and have it read as clean. Extend this table, never add a
 # second one, if another marker needs the same treatment.
+#
+# This table is now FROZEN to the header and verdict-line RECOGNISERS (see
+# `_normalize_for_blocking_scan`): widening it would let more look-alike
+# spellings of a clearing token or an agent name read as the real thing. It is
+# not a guarantee that no look-alike reads as real there: the letters listed
+# here (for example Cyrillic O and Es, Greek iota and nu, Komi Sje) still fold
+# to the Latin letter in a recogniser, as they did before the veto scans got
+# their own wider table. The veto scans use `_VETO_CONFUSABLE_TO_ASCII` below;
+# extend THAT one.
 _CONFUSABLE_TO_ASCII: dict[str, str] = {
     # Cyrillic
     "В": "B", "в": "b",  # U+0412 / U+0432 (Cyrillic VE)
@@ -1466,11 +1507,457 @@ _CONFUSABLE_TRANSLATION = str.maketrans(_CONFUSABLE_TO_ASCII)
 # evasion Falco's finding raised as plausible, without turning unrelated
 # bracketed prose into a false match (the collapsed text still has to satisfy
 # `_BLOCKING_MARKER_RE` afterwards).
-_SPACED_LETTER_RUN_RE = re.compile(r"\[(?:\s*[A-Za-z\-]\s*){2,}\]")
+_SPACED_LETTER_RUN_RE = re.compile(r"\[\s*(?:[A-Za-z\-]\s*){2,}\]")
 
 
 def _collapse_spaced_run(match: "re.Match[str]") -> str:
     return "[" + re.sub(r"\s+", "", match.group(0)[1:-1]) + "]"
+
+
+# ── Scan-side fold: look-alike letters for the veto scans ────────────────────
+#
+# `_normalize_for_blocking_scan` above is the normalisation the header and
+# verdict-line RECOGNISERS use, with the small frozen table above. It stays
+# narrow on purpose: a recogniser that read a look-alike spelling of a clearing
+# token or an agent name as the real thing would clear a gate on text no human
+# wrote that way, so the set of look-alikes it accepts must not grow.
+#
+# The VETO scans (a blocking verdict token, the `[BLOCKING]` marker, a second
+# verdict line) fail the other way: they must see a blocking token however it
+# is spelled (principles.md, principle 5: fail closed on the field that carries
+# the safety meaning). They therefore fold much more widely, using the table
+# below, and look at several forms of the text, any one of which may match.
+#
+# The table is DERIVED at import time from Unicode character names, not typed
+# as a list of characters: a hand list always misses a letter. What is written
+# here is only the judgement of which NAMES look like which Latin letter; each
+# name is resolved with `unicodedata.lookup`. Extend this table, never add a
+# second one, if another marker needs the same treatment.
+#
+# Folding is by script, and only for letters genuinely drawn like a Latin
+# letter. A Greek or Cyrillic letter with no Latin twin (`Δ`, `Ж`, ...) is left
+# alone, so ordinary prose in those scripts contains no Latin token after the
+# fold; this is not a general TR39 skeleton. What a table cannot know is caught
+# by `_wildcard_token_hit`, the bounded backstop below.
+#
+# letter name -> (upper-case Latin letter or None, lower-case or None)
+_GREEK_LOOK_ALIKES: dict[str, tuple[str | None, str | None]] = {
+    "ALPHA": ("A", "a"),
+    "BETA": ("B", None),
+    "EPSILON": ("E", None),
+    "ZETA": ("Z", None),
+    "ETA": ("H", None),
+    "IOTA": ("I", "i"),
+    "KAPPA": ("K", "k"),
+    "MU": ("M", None),
+    "NU": ("N", "n"),
+    "OMICRON": ("O", "o"),
+    "RHO": ("P", "p"),
+    "TAU": ("T", None),
+    "UPSILON": ("Y", "u"),
+    "CHI": ("X", "x"),
+}
+_CYRILLIC_LOOK_ALIKES: dict[str, tuple[str | None, str | None]] = {
+    "A": ("A", "a"),
+    "VE": ("B", "b"),
+    "IE": ("E", "e"),
+    "ES": ("C", "c"),
+    "TE": ("T", None),
+    "ER": ("P", "p"),
+    "O": ("O", "o"),
+    "KA": ("K", "k"),
+    "EN": ("H", None),
+    "HA": ("X", "x"),
+    "EM": ("M", None),
+    "U": ("Y", "y"),
+    "BYELORUSSIAN-UKRAINIAN I": ("I", "i"),
+    "JE": ("J", "j"),
+    "DZE": ("S", "s"),
+    "KOMI DE": ("D", "d"),
+    "QA": ("Q", "q"),
+    "WE": ("W", "w"),
+    "SHHA": ("H", "h"),
+}
+# Whole character names with one obvious Latin twin. Reviewed by hand, because
+# the names of these scripts' letters (Cherokee, Lisu and Coptic syllables, ...)
+# say nothing about how they are drawn. Small capitals are folded to the
+# UPPER-case letter they are drawn as, which is also what the bare verdict
+# tokens are matched against. Letters of these scripts that are not listed are
+# left to the bounded wildcard backstop.
+_OTHER_LOOK_ALIKE_NAMES: dict[str, str] = {
+    # Greek: the lunate sigma is drawn as `C`; NFKC rewrites it to sigma first,
+    # so these are folded BEFORE NFKC (see `_derive_confusable_tables`).
+    "GREEK CAPITAL LUNATE SIGMA SYMBOL": "C",
+    "GREEK LUNATE SIGMA SYMBOL": "c",
+    "GREEK CAPITAL LETTER YOT": "J",
+    "GREEK LETTER YOT": "j",
+    # Latin-script letters that no decomposition reaches.
+    "LATIN SMALL LETTER SCRIPT G": "g",
+    "LATIN SMALL LETTER DOTLESS I": "i",
+    # Cyrillic / Coptic / Cherokee letters the old table already carried.
+    "CYRILLIC CAPITAL LETTER KOMI SJE": "G",
+    "COPTIC CAPITAL LETTER NI": "N",
+    "CHEROKEE LETTER NAH": "G",
+    # Armenian.
+    "ARMENIAN CAPITAL LETTER SEH": "U",
+    "ARMENIAN SMALL LETTER SEH": "u",
+    "ARMENIAN CAPITAL LETTER OH": "O",
+    "ARMENIAN SMALL LETTER OH": "o",
+    "ARMENIAN SMALL LETTER VO": "n",
+    "ARMENIAN SMALL LETTER HO": "h",
+    # Cherokee.
+    "CHEROKEE LETTER A": "D",
+    "CHEROKEE LETTER E": "R",
+    "CHEROKEE LETTER I": "T",
+    "CHEROKEE LETTER GO": "A",
+    "CHEROKEE LETTER GI": "Y",
+    "CHEROKEE LETTER GV": "E",
+    "CHEROKEE LETTER LA": "W",
+    "CHEROKEE LETTER LU": "M",
+    "CHEROKEE LETTER MI": "H",
+    "CHEROKEE LETTER SV": "R",
+    "CHEROKEE LETTER DU": "S",
+    "CHEROKEE LETTER YV": "B",
+    # Lisu.
+    "LISU LETTER BA": "B",
+    "LISU LETTER PA": "P",
+    "LISU LETTER DA": "D",
+    "LISU LETTER TA": "T",
+    "LISU LETTER GA": "G",
+    "LISU LETTER KA": "K",
+    "LISU LETTER CA": "C",
+    "LISU LETTER MA": "M",
+    "LISU LETTER NA": "N",
+    "LISU LETTER SA": "S",
+    "LISU LETTER A": "A",
+    "LISU LETTER E": "E",
+    "LISU LETTER O": "O",
+    "LISU LETTER U": "U",
+    # Coptic.
+    "COPTIC CAPITAL LETTER ALFA": "A",
+    "COPTIC SMALL LETTER ALFA": "a",
+    "COPTIC CAPITAL LETTER EIE": "E",
+    "COPTIC CAPITAL LETTER ZATA": "Z",
+    "COPTIC CAPITAL LETTER HATE": "H",
+    "COPTIC CAPITAL LETTER KAPA": "K",
+    "COPTIC CAPITAL LETTER MI": "M",
+    "COPTIC CAPITAL LETTER O": "O",
+    "COPTIC SMALL LETTER O": "o",
+    "COPTIC CAPITAL LETTER RO": "P",
+    "COPTIC SMALL LETTER RO": "p",
+    "COPTIC CAPITAL LETTER SIMA": "C",
+    "COPTIC SMALL LETTER SIMA": "c",
+    "COPTIC CAPITAL LETTER TAU": "T",
+    "COPTIC CAPITAL LETTER UA": "Y",
+    "COPTIC CAPITAL LETTER KHI": "X",
+    # Symbols drawn as a letter.
+    "UNION": "U",
+    "DOWN TACK": "T",
+    "IDEOGRAPHIC NUMBER ZERO": "O",
+    # Stand-ins for the underscore of `REQUEST_CHANGES`. DOUBLE LOW LINE is
+    # rewritten by NFKC to a space plus a combining mark, so it is folded
+    # before NFKC like the lunate sigma.
+    "LOWER ONE EIGHTH BLOCK": "_",
+    "HORIZONTAL SCAN LINE-9": "_",
+    "MODIFIER LETTER LOW MACRON": "_",
+    "DOUBLE LOW LINE": "_",
+    "UNDERTIE": "_",
+    "BOX DRAWINGS LIGHT LEFT": "_",
+    # Stand-ins for the brackets of `[BLOCKING]`.
+    "LEFT SQUARE BRACKET WITH QUILL": "[",
+    "RIGHT SQUARE BRACKET WITH QUILL": "]",
+    "MATHEMATICAL LEFT WHITE SQUARE BRACKET": "[",
+    "MATHEMATICAL RIGHT WHITE SQUARE BRACKET": "]",
+    "LEFT WHITE SQUARE BRACKET": "[",
+    "RIGHT WHITE SQUARE BRACKET": "]",
+}
+# Characters drawn as a bare vertical stroke, which reads as `I` or as `L`
+# depending on the font. Name -> (first reading, second reading). The scan
+# looks at both readings, and a token that uses both in one word is caught by
+# the bounded wildcard backstop.
+_AMBIGUOUS_STROKE_NAMES: dict[str, tuple[str, str]] = {
+    "CYRILLIC LETTER PALOCHKA": ("L", "I"),
+    "CYRILLIC SMALL LETTER PALOCHKA": ("L", "I"),
+    "LATIN CAPITAL LETTER IOTA": ("I", "L"),
+    "LATIN LETTER DENTAL CLICK": ("I", "L"),
+    "COPTIC CAPITAL LETTER IAUDA": ("I", "L"),
+    "LISU LETTER I": ("I", "L"),
+    "OLD ITALIC LETTER I": ("I", "L"),
+    "TIFINAGH LETTER YAN": ("I", "L"),
+    "LIGHT VERTICAL BAR": ("I", "L"),
+}
+
+
+@dataclass(frozen=True)
+class _ConfusableTables:
+    """The derived look-alike tables.
+
+    `stable`: characters NFKC leaves alone, folded AFTER normalisation.
+    `pre_nfkc`: characters NFKC would rewrite to something that is not the
+    Latin letter, folded BEFORE normalisation.
+    `alternates`: for the ambiguous strokes in `stable`, their second reading.
+    """
+
+    stable: dict[str, str]
+    pre_nfkc: dict[str, str]
+    alternates: dict[str, str]
+
+
+def _derive_confusable_tables(extra_names: "dict[str, str] | None" = None) -> _ConfusableTables:
+    """Build the look-alike fold tables from Unicode character names.
+
+    A name this interpreter's Unicode data does not know is skipped and LOGGED,
+    never raised: this runs at import in the dispatcher, and a daemon that
+    cannot start is a worse outcome than a narrower fold. The tests pin the
+    names that matter, so a skip cannot hide there either.
+    """
+    stable: dict[str, str] = {}
+    pre_nfkc: dict[str, str] = {}
+    alternates: dict[str, str] = {}
+
+    def add(name: str, latin: str | None, alternate: str | None = None) -> None:
+        if not latin:
+            return
+        try:
+            ch = unicodedata.lookup(name)
+        except KeyError:
+            log.warning("confusable name %r is not in this Unicode data; skipped", name)
+            return
+        if ch.isascii():
+            return
+        if unicodedata.normalize("NFKC", ch) != ch:
+            pre_nfkc[ch] = latin
+        else:
+            stable[ch] = latin
+        if alternate:
+            alternates[ch] = alternate
+
+    for script, letters in (("GREEK", _GREEK_LOOK_ALIKES), ("CYRILLIC", _CYRILLIC_LOOK_ALIKES)):
+        for letter_name, (upper, lower) in letters.items():
+            add(f"{script} CAPITAL LETTER {letter_name}", upper)
+            add(f"{script} SMALL LETTER {letter_name}", lower)
+    # Unicode has a small capital for every letter but X.
+    for latin in "ABCDEFGHIJKLMNOPQRSTUVWYZ":
+        add(f"LATIN LETTER SMALL CAPITAL {latin}", latin)
+    for name, latin in {**_OTHER_LOOK_ALIKE_NAMES, **(extra_names or {})}.items():
+        add(name, latin)
+    for name, (first, second) in _AMBIGUOUS_STROKE_NAMES.items():
+        add(name, first, second)
+    return _ConfusableTables(stable, pre_nfkc, alternates)
+
+
+def _derive_confusable_table() -> dict[str, str]:
+    return _derive_confusable_tables().stable
+
+
+_CONFUSABLE_TABLES = _derive_confusable_tables()
+_VETO_CONFUSABLE_TO_ASCII: dict[str, str] = _CONFUSABLE_TABLES.stable
+# A floor, not a target: a little under the number of entries the derivation
+# produces today (160), asserted by a test as well as logged here. Fewer means the Unicode data here lacks names, and the fold is
+# narrower than intended (each skipped name was logged above).
+_VETO_CONFUSABLE_FLOOR = 150
+if len(_VETO_CONFUSABLE_TO_ASCII) < _VETO_CONFUSABLE_FLOOR:
+    log.error(
+        "look-alike fold table has %d entries, expected at least %d; "
+        "the blocking-token scan is narrower than intended",
+        len(_VETO_CONFUSABLE_TO_ASCII),
+        _VETO_CONFUSABLE_FLOOR,
+    )
+_VETO_PRE_NFKC_TRANSLATION = str.maketrans(_CONFUSABLE_TABLES.pre_nfkc)
+_VETO_TRANSLATIONS = {
+    "primary": str.maketrans(_VETO_CONFUSABLE_TO_ASCII),
+    "alternate": str.maketrans({**_VETO_CONFUSABLE_TO_ASCII, **_CONFUSABLE_TABLES.alternates}),
+    "keep": str.maketrans(
+        {k: v for k, v in _VETO_CONFUSABLE_TO_ASCII.items() if k not in _CONFUSABLE_TABLES.alternates}
+    ),
+}
+# A space followed by a combining low line is how an underscore is drawn when
+# the mark is stripped to nothing and a plain space is left behind.
+_SPACE_THEN_LOW_LINE_RE = re.compile(r"[  ][̲̳]")
+
+
+def _veto_base(text: str, underscores: bool) -> str:
+    """*text* decomposed, stripped of marks and format characters, and
+    recomposed: everything the veto folds share, before a table is applied."""
+    if underscores:
+        text = _SPACE_THEN_LOW_LINE_RE.sub("_", text)
+    text = text.translate(_VETO_PRE_NFKC_TRANSLATION)
+    return unicodedata.normalize("NFKC", _strip_marks_and_format(unicodedata.normalize("NFKD", text)))
+
+
+def _fold_for_veto_scan(text: str, *, reading: str = "primary", underscores: bool = True) -> str:
+    """*text* normalised for the veto scans.
+
+    The same five passes as `_normalize_for_blocking_scan`, with the wide
+    look-alike table. *reading* picks how an ambiguous stroke is read:
+    ``primary``, ``alternate`` (its other reading) or ``keep`` (left as it is,
+    which the bounded wildcard backstop then treats as an unknown character).
+    *underscores* reads a space plus combining low line as ``_``.
+    """
+    folded = _veto_base(text, underscores).translate(_VETO_TRANSLATIONS[reading])
+    return _SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, folded)
+
+
+def _veto_scan_forms_uncached(text: str) -> tuple[str, ...]:
+    """Every form of *text* a veto scan looks at; a match in ANY of them counts.
+
+    More than one form because no single normalisation is right for all
+    spellings: a character folded to a letter can also glue itself to a
+    neighbouring word and break its boundary, an ambiguous stroke has two
+    readings, and an underscore stand-in is sometimes a space. Looking at the
+    previous recogniser form and the bare NFKC form as well means a spelling
+    that was detected before this fold existed is still detected.
+
+    Text that is pure ASCII once NFKC has run (the usual case, including
+    ligatures and width variants) has nothing for the wide fold to do: every
+    form is the NFKC text or its spaced-letter collapse, so only those two are
+    built. Otherwise the shared decomposition is done once per underscore
+    reading rather than once per form.
+    """
+    nfkc = unicodedata.normalize("NFKC", text)
+    if nfkc.isascii():
+        return tuple(dict.fromkeys((_SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, nfkc), nfkc)))
+    forms = [_normalize_for_blocking_scan(text), nfkc]
+    bases = [_veto_base(text, True)]
+    if _SPACE_THEN_LOW_LINE_RE.search(text):
+        bases.append(_veto_base(text, False))
+    for base in bases:
+        for reading in ("primary", "alternate", "keep"):
+            forms.append(_SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, base.translate(_VETO_TRANSLATIONS[reading])))
+    return tuple(dict.fromkeys(forms))
+
+
+_VETO_FORMS_CACHE: dict[str, tuple[str, ...]] = {}
+_VETO_FORMS_CACHE_SIZE = 4
+
+
+def _veto_scan_forms(text: str) -> tuple[str, ...]:
+    """`_veto_scan_forms_uncached`, remembered for the last few texts.
+
+    One reply is scanned by several predicates in a row (the verdict token, the
+    marker, the clearing check), each of which would otherwise normalise the
+    same text again.
+    """
+    cached = _VETO_FORMS_CACHE.get(text)
+    if cached is not None:
+        return cached
+    forms = _veto_scan_forms_uncached(text)
+    while len(_VETO_FORMS_CACHE) >= _VETO_FORMS_CACHE_SIZE:
+        try:
+            _VETO_FORMS_CACHE.pop(next(iter(_VETO_FORMS_CACHE)))
+        except (KeyError, StopIteration, RuntimeError):
+            break
+    _VETO_FORMS_CACHE[text] = forms
+    return forms
+
+
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
+_WILDCARD_LIMIT = 2
+
+
+def _is_unknown_character(ch: str) -> bool:
+    return not ch.isascii() and not ch.isspace()
+
+
+def _bold_before(text: str, end: int) -> bool:
+    """True when the text just before *end*, past any whitespace, is `**`."""
+    while end > 0 and text[end - 1].isspace():
+        end -= 1
+    return text[max(0, end - 2) : end] == "**"
+
+
+def _bold_after(text: str, start: int) -> bool:
+    """True when the text from *start*, past any whitespace, begins `**`."""
+    while start < len(text) and text[start].isspace():
+        start += 1
+    return text[start : start + 2] == "**"
+
+
+def _wildcard_window_matches(text: str, start: int, token: str, *, marker: bool) -> bool:
+    n = len(token)
+    window = text[start : start + n]
+    unknown = 0
+    lower_case_letter = False
+    for got, want in zip(window, token):
+        if got == want:
+            continue
+        if got.isascii() and got.upper() == want and want.isalpha():
+            lower_case_letter = True
+            continue
+        if _is_unknown_character(got):
+            unknown += 1
+            if unknown > _WILDCARD_LIMIT:
+                return False
+            continue
+        return False
+    if unknown == 0:
+        return False  # exact spelling: the regexes' job, not this backstop's
+    before = text[start - 1] if start else ""
+    after = text[start + n] if start + n < len(text) else ""
+    if marker:
+        lead = text[max(0, start - 4) : start].upper()
+        if lead in ("NON-", "NON_"):
+            return False
+        if _is_unknown_character(window[0]) and lead[-3:] == "NON":
+            return False  # `NON` plus a dash-like character, then BLOCKING]
+        # Lower case only counts when a real bracket anchors the token.
+        return not lower_case_letter or window[0] == "[" or window[-1] == "]"
+    if (before and (before.isalnum() or before == "_")) or (after and (after.isalnum() or after == "_")):
+        return False
+    if lower_case_letter:
+        return _bold_before(text, start) and _bold_after(text, start + n)
+    return True
+
+
+def _wildcard_token_hit(text: str, token: str, *, marker: bool = False) -> bool:
+    """True when *text* holds a word the length of *token* that is the token
+    with at most two characters replaced by non-ASCII, non-space characters.
+
+    The backstop under the look-alike table (principles.md, principle 5): the
+    table cannot name every character that is drawn like a letter, but a
+    verdict token with one or two unknown characters in it is still, for a
+    scan that must not clear a blocked review, that token. It only fires when
+    the rest of the word is the token's exact ASCII letters, so prose in
+    another script, which has none, cannot match.
+    """
+    n = len(token)
+    if len(text) < n or not _NON_ASCII_RE.search(text):
+        return False
+    # A hit needs at least n - 2 of the token's own ASCII characters in the
+    # text; counting them is cheap and spares prose in other scripts the scan.
+    token_chars = set(token.upper() + token.lower())
+    if sum(text.count(ch) for ch in token_chars) < n - _WILDCARD_LIMIT:
+        return False
+    # A window has at most two unknown characters, so its n - 2 or more exact
+    # letters form at most three runs and one of them is at least two letters
+    # long: some aligned pair of the token's letters appears in the text. Only
+    # windows around such a pair can match, which keeps the scan off the long
+    # stretches of non-ASCII text that have no ASCII letters in them at all.
+    pair_re, offsets = _wildcard_pairs(token)
+    starts: set[int] = set()
+    last = len(text) - n
+    for hit in pair_re.finditer(text):
+        for offset in offsets[hit.group(1).upper()]:
+            start = hit.start() - offset
+            if 0 <= start <= last:
+                starts.add(start)
+    return any(_wildcard_window_matches(text, start, token, marker=marker) for start in sorted(starts))
+
+
+_WILDCARD_PAIRS: dict[str, tuple["re.Pattern[str]", dict[str, list[int]]]] = {}
+
+
+def _wildcard_pairs(token: str) -> tuple["re.Pattern[str]", dict[str, list[int]]]:
+    """A pattern finding every (overlapping) pair of adjacent token letters, and
+    the offsets within *token* at which each pair occurs."""
+    cached = _WILDCARD_PAIRS.get(token)
+    if cached is None:
+        offsets: dict[str, list[int]] = {}
+        for k in range(len(token) - 1):
+            offsets.setdefault(token[k : k + 2].upper(), []).append(k)
+        pattern = re.compile("(?=(" + "|".join(re.escape(pair) for pair in offsets) + "))", re.I | re.A)
+        cached = _WILDCARD_PAIRS[token] = (pattern, offsets)
+    return cached
 
 
 def body_has_blocking_findings(body: str | None) -> bool:
@@ -1495,7 +1982,10 @@ def body_has_blocking_findings(body: str | None) -> bool:
     """
     if not body:
         return False
-    return bool(_BLOCKING_MARKER_RE.search(_normalize_for_blocking_scan(body)))
+    forms = _veto_scan_forms(body)
+    if any(_BLOCKING_MARKER_RE.search(text) for text in forms):
+        return True
+    return any(_wildcard_token_hit(text, "[BLOCKING]", marker=True) for text in forms)
 
 
 # `[BLOCKING] category: summary`, optionally wrapped in markdown emphasis as
@@ -2165,7 +2655,7 @@ def compose_fallback_comment(
 _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 _AGGREGATION_MARKER_RE = re.compile(
-    r"<!--\s*vanellus-aggregation(?P<attrs>(?:\s+[^>]*)?)-->", re.IGNORECASE
+    r"<!--\s*vanellus-aggregation(?P<attrs>(?:\s[^>]*)?)-->", re.IGNORECASE
 )
 _AGGREGATION_SUPERSEDED_RE = re.compile(
     r"<!--\s*vanellus-aggregation-superseded\s+by=(?P<sha>[0-9a-f]{40})\s*-->",

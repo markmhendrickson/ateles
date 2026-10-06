@@ -4082,7 +4082,7 @@ async def run_review_prompt(
                 )
                 if result.ok:
                     verdicts = re.findall(
-                        r"(?im)^\s*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
+                        r"(?im)^[^\S\n]*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
                         out.replace("**", ""),
                     )
                     if len(verdicts) != 1:
