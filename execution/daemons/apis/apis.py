@@ -2737,6 +2737,21 @@ async def main() -> None:
                 exc_info=True,
             )
 
+    # 7c. Swarm lens-comment identity check. Every lens verdict, the Vanellus
+    #     aggregation and the notice markers are read only from comments a swarm
+    #     identity wrote; with none resolvable they all read as absent, reviews
+    #     never clear and auto-merge holds. Say so at boot, loudly, rather than
+    #     leave a misconfigured deployment looking idle. Fire-and-forget and
+    #     fail-open like the checks around it.
+    async def lens_identity_check() -> None:
+        try:
+            await dispatcher.check_lens_comment_identities()
+        except Exception as exc:  # never let a config check kill startup
+            log.error(
+                f"[{DAEMON_NAME}] lens-comment identity check failed: {exc}",
+                exc_info=True,
+            )
+
     # 8. Deferred-review resume sweep: a PR review throttled by a usage limit
     #    posts a `review-deferred-until:<ISO>` marker instead of a verdict. The
     #    reset is often hours out, so unlike the one-shot pipeline resume this
@@ -2869,6 +2884,7 @@ async def main() -> None:
         clear_closed_issue_markers_sweep(),
         deferred_review_sweep(),
         workflow_drift_check(),
+        lens_identity_check(),
         unroutable_flush(),
     )
 

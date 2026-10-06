@@ -618,6 +618,7 @@ def test_ci_green_merge_gate_does_not_clear_on_a_blocking_aggregation(monkeypatc
 
     aggregation = {
         "id": 1,
+        "user": {"login": "swarm-lens-account"},
         "created_at": "2026-08-19T09:00:00Z",
         "body": (
             f"{MARKER}\n**Vanellus**\n\n**COMMENT**\n\nBlocking: 1\n\n"
@@ -636,6 +637,7 @@ def test_ci_green_merge_gate_still_clears_a_genuinely_clean_aggregation(monkeypa
 
     aggregation = {
         "id": 1,
+        "user": {"login": "swarm-lens-account"},
         "created_at": "2026-08-19T09:00:00Z",
         "body": (
             f"{MARKER}\n**Vanellus**\n\n**APPROVE**\n\nBlocking: 0\n\n"

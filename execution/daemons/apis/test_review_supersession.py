@@ -624,6 +624,7 @@ async def test_periodic_sweep_paginates_and_supersedes_page_two_stale_verdict(
 
 @pytest.mark.asyncio
 async def test_merge_gate_ignores_stale_block_and_requires_current_clear(monkeypatch):
+    monkeypatch.setenv("ATELES_LENS_COMMENT_AUTHORS", "github-actions[bot]")
     comments = [
         _comment(
             sd.compose_vanellus_fallback_comment("**REQUEST_CHANGES**", HEAD_A), cid=1
@@ -651,6 +652,7 @@ async def test_merge_gate_ignores_stale_block_and_requires_current_clear(monkeyp
 async def test_495_dismissal_does_not_open_merge_window_before_current_clear(
     monkeypatch,
 ):
+    monkeypatch.setenv("ATELES_LENS_COMMENT_AUTHORS", "github-actions[bot]")
     """Retiring A cannot clear B until B has its own head-pinned approval."""
     comments = [
         _comment(

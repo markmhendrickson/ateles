@@ -62,6 +62,7 @@ def _comment(i: int, lens: str, head: str, verdict: str = "SIGNED_OFF", finding:
         "id": i,
         "created_at": f"2026-09-29T10:{i:02d}:00Z",
         "html_url": f"https://github.com/o/r/pull/1#issuecomment-{i}",
+        "user": {"login": "swarm-lens-account"},
         "body": _body(lens, head, verdict, finding),
     }
 

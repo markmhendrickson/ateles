@@ -655,6 +655,7 @@ def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
     async def fake_comments(self, repository, number, client):
         return [
             {
+                "user": {"login": "swarm-lens-account"},
                 "body": (
                     f"<!-- review:security commit={stale_head} -->\n"
                     "review:security\n**REQUEST_CHANGES**\n"
@@ -662,6 +663,7 @@ def test_reviewed_head_blocker_recovery_ignores_stale_webhook_head(monkeypatch):
                 )
             },
             {
+                "user": {"login": "swarm-lens-account"},
                 "body": (
                     f"<!-- review:security commit={reviewed_head} -->\n"
                     "review:security\n**REQUEST_CHANGES**\n"
@@ -2319,6 +2321,7 @@ class TestLiveBlockingVerdictOutsidePanel:
         async def fake_comments(self, repository, number, client):
             return [
                 {
+                    "user": {"login": "swarm-lens-account"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
                     ),
@@ -2432,11 +2435,13 @@ class TestLiveBlockingVerdictOutsidePanel:
         async def fake_comments(self, repository, number, client):
             return [
                 {
+                    "user": {"login": "swarm-lens-account"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
                     )
                 },
                 {
+                    "user": {"login": "swarm-lens-account"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="SIGNED_OFF"
                     )
@@ -2502,6 +2507,7 @@ class TestGateMergeReadinessRefusesOnOutsidePanelBlock:
         async def fake_comments(self, repository, number, client):
             return [
                 {
+                    "user": {"login": "swarm-lens-account"},
                     "body": _outside_lens_comment_body(
                         "arch", "waxwing", head=head, verdict="REQUEST_CHANGES"
                     ),
@@ -3465,11 +3471,13 @@ def test_pr_review_is_clear_reads_newest_first(monkeypatch):
             rows = [
                 {
                     "id": 1,
+                    "user": {"login": "swarm-lens-account"},
                     "created_at": "2026-08-10T09:00:00Z",
                     "body": "<!-- vanellus-aggregation -->\n**REQUEST_CHANGES**\nold",
                 },
                 {
                     "id": 2,
+                    "user": {"login": "swarm-lens-account"},
                     "created_at": "2026-08-19T09:00:00Z",
                     "body": "<!-- vanellus-aggregation -->\n**APPROVE**\nlgtm",
                 },
@@ -3900,7 +3908,13 @@ def test_post_bypass_comment_fail_closed_when_duplicate_patch_errors(monkeypatch
             pass
 
         def json(self):
-            return [{"id": 5, "body": "<!-- pipeline-bypass-notice -->"}]
+            return [
+                {
+                    "id": 5,
+                    "user": {"login": "swarm-lens-account"},
+                    "body": "<!-- pipeline-bypass-notice -->",
+                }
+            ]
 
     class _FailPatchClient:
         async def __aenter__(self):
@@ -5801,7 +5815,11 @@ def test_post_swarm_run_comment_edits_existing_when_marker_found(monkeypatch):
     _CONFIRMATION_MARKER = "<!-- swarm-run-confirmation -->"
 
     existing_comments = [
-        {"id": 999, "body": f"{_CONFIRMATION_MARKER}\nOld confirmation text."},
+        {
+            "id": 999,
+            "user": {"login": "swarm-lens-account"},
+            "body": f"{_CONFIRMATION_MARKER}\nOld confirmation text.",
+        },
     ]
 
     class FakeClient:
@@ -6974,7 +6992,7 @@ class _FakeHttpxClientForVanellus:
         class _Resp:
             def raise_for_status(self): pass
             def json(inner_self):
-                return [{"body": b} for b in self.existing_bodies]
+                return [{"user": {"login": "swarm-lens-account"}, "body": b} for b in self.existing_bodies]
         return _Resp()
 
     async def post(self, url, **kwargs):
@@ -9774,11 +9792,19 @@ def _run_deferral_scan(monkeypatch, prs, comments, now):
 
 
 def _defer(iso):
-    return {"id": 1, "body": f"<!-- review-deferred-until:{iso} -->\ndeferred"}
+    return {
+        "id": 1,
+        "user": {"login": "swarm-lens-account"},
+        "body": f"<!-- review-deferred-until:{iso} -->\ndeferred",
+    }
 
 
 def _verdict():
-    return {"id": 2, "body": "<!-- vanellus-aggregation -->\n**APPROVE**"}
+    return {
+        "id": 2,
+        "user": {"login": "swarm-lens-account"},
+        "body": "<!-- vanellus-aggregation -->\n**APPROVE**",
+    }
 
 
 def test_matured_deferral_is_due(monkeypatch):
@@ -10010,6 +10036,7 @@ def _comments_client(monkeypatch, bodies, *, calls=None, raises=None):
                     return [
                         {
                             "id": i + 1,
+                            "user": {"login": "swarm-lens-account"},
                             "created_at": f"2026-08-{10 + i:02d}T09:00:00Z",
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                             "body": b if "Reviewed commit:" in b else b + "\nReviewed commit: " + "a" * 40,
@@ -11786,6 +11813,7 @@ def test_same_head_historical_comment_is_not_from_current_run(monkeypatch):
     d = _resolver(monkeypatch)
     async def comments(*args):
         return [{"id": 1, "created_at":"2026-09-01T00:00:00Z", "updated_at":"2026-09-01T00:00:00Z",
+                 "user": {"login": "swarm-lens-account"},
                  "body":f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"}]
     monkeypatch.setattr(d, "_all_issue_comments", comments)
     assert asyncio.run(d._resolve_review_verdict(
@@ -11798,6 +11826,7 @@ def test_fresh_comment_at_current_head_is_recovered(monkeypatch):
     d = _resolver(monkeypatch)
     async def comments(*args):
         return [{"id": 1, "created_at":"2026-09-14T01:00:00Z", "updated_at":"2026-09-14T01:00:00Z",
+                 "user": {"login": "swarm-lens-account"},
                  "body":f"{compose_aggregation_marker('a' * 40)}\n**APPROVE**"}]
     monkeypatch.setattr(d, "_all_issue_comments", comments)
     assert asyncio.run(d._resolve_review_verdict(

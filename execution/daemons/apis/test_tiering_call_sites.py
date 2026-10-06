@@ -898,7 +898,7 @@ def _lens_comment(lens: str, sha_char: str, when: str, findings: list[str]) -> d
     body = f"<!-- review:{lens} commit={sha_char * 40} -->\n**REQUEST_CHANGES**\n" + "\n".join(
         f"[BLOCKING] {f}\ndetail" for f in findings
     )
-    return {"body": body, "created_at": when}
+    return {"body": body, "created_at": when, "user": {"login": "swarm-lens-account"}}
 
 
 def test_a_finding_repeated_on_the_next_head_is_not_new():
@@ -991,7 +991,11 @@ def _lens_marker(lens: str, sha: str, blocking: tuple[str, ...] = ()) -> dict:
     body = f"<!-- review:{lens} commit={sha} -->\n**REQUEST_CHANGES**\n" + "\n".join(
         f"[BLOCKING] {b}\ndetail" for b in blocking
     )
-    return {"body": body, "created_at": f"2026-09-29T0{int(sha[0])}:00:00Z"}
+    return {
+        "body": body,
+        "created_at": f"2026-09-29T0{int(sha[0])}:00:00Z",
+        "user": {"login": "swarm-lens-account"},
+    }
 
 
 class _Github:
