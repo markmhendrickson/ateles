@@ -187,31 +187,127 @@ def test_usage_row_carries_reported_counts_and_cost(ledger) -> None:
     assert (row["model"], row["model_source"]) == ("claude-opus-5", "reported")
 
 
-def test_spend_report_sums_only_what_was_reported_and_says_how_much(ledger) -> None:
-    resolved = model_tiering.ResolvedTier("mid", "policy", "lens_review:pm")
+def _usage_row(provider="codex", **fields):
+    model_tiering.record_dispatch_usage(
+        dispatch_id="x", skill="s", provider=provider,
+        resolved=model_tiering.ResolvedTier("mid", "policy", "lens_review:pm"),
+        requested_model="m", usage=dispatch_usage.DispatchUsage(provider=provider, **fields),
+    )
 
-    def row(provider, tokens, cost=None):
-        model_tiering.record_dispatch_usage(
-            dispatch_id="x", skill="s", provider=provider, resolved=resolved,
-            requested_model="m",
-            usage=dispatch_usage.DispatchUsage(
-                provider=provider, reported_total_tokens=tokens, total_cost_usd=cost
-            ),
-        )
 
-    row("codex", 1000)
-    row("codex", 500)
-    row("codex", None)
-    row("claude", None, 0.25)
-    report = model_tiering.usage_totals(group_by="provider")
-    codex, claude = report["groups"]["codex"], report["groups"]["claude"]
-    assert codex["dispatches"] == 3
-    assert (codex["reported_token_rows"], codex["unreported_token_rows"]) == (2, 1)
-    assert codex["total_tokens"] == 1500
-    assert codex["total_cost_usd"] is None  # nobody reported a cost: null, not 0
-    assert claude["total_cost_usd"] == 0.25 and claude["unreported_token_rows"] == 1
+def _spend(capsys, command, *args):
+    scripts = str(_DAEMON_DIR.parents[1] / "scripts")
+    sys.path.insert(0, scripts)
+    try:
+        import harness_usage
+
+        assert harness_usage.main([command, *args]) == 0
+    finally:
+        sys.path.remove(scripts)
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("command", ["spend", "cost"])
+def test_spend_report_keeps_unknown_apart_from_zero_per_field(ledger, capsys, command) -> None:
+    # all-unknown, total-only, measured zero, and a split reading
+    _usage_row("unknown")
+    _usage_row("totalonly", reported_total_tokens=31255)
+    _usage_row("zero", input_tokens=0, output_tokens=0)
+    _usage_row("split", input_tokens=100, output_tokens=20)
+    groups = _spend(capsys, command, "--by", "provider")["groups"]
+
+    def field(group, name):
+        return groups[group]["tokens"][name]
+
+    assert field("unknown", "total_tokens") == {"sum": None, "reported_rows": 0}
+    assert field("unknown", "input_tokens") == {"sum": None, "reported_rows": 0}
+    # A total-only row keeps its total and leaves every split unknown, not zero.
+    assert field("totalonly", "total_tokens") == {"sum": 31255, "reported_rows": 1}
+    for name in ("input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens"):
+        assert field("totalonly", name) == {"sum": None, "reported_rows": 0}
+    # A measured zero stays a zero.
+    assert field("zero", "input_tokens") == {"sum": 0, "reported_rows": 1}
+    assert field("split", "input_tokens") == {"sum": 100, "reported_rows": 1}
+    assert groups["unknown"]["cost"] == {"total_usd": None, "reported_rows": 0}
+
+
+@pytest.mark.parametrize("command", ["spend", "cost"])
+def test_a_mixed_group_says_how_many_dispatches_each_total_covers(ledger, capsys, command) -> None:
+    _usage_row(reported_total_tokens=1000)
+    _usage_row(input_tokens=100, output_tokens=20)
+    _usage_row()
+    _usage_row(total_cost_usd=0.25)
+    group = _spend(capsys, command, "--by", "provider")["groups"]["codex"]
+    assert group["dispatches"] == 4
+    assert group["tokens"]["total_tokens"] == {"sum": 1120, "reported_rows": 2}
+    assert group["tokens"]["input_tokens"] == {"sum": 100, "reported_rows": 1}
+    assert group["cost"] == {"total_usd": 0.25, "reported_rows": 1}
+
+
+def test_spend_report_rejects_an_unknown_grouping() -> None:
     with pytest.raises(ValueError):
         model_tiering.usage_totals(group_by="nonsense")
+
+
+def test_spend_report_groups_by_skill(ledger, capsys) -> None:
+    model_tiering.record_dispatch_usage(
+        dispatch_id="x", skill="pavo", provider="codex", resolved=None,
+        requested_model="m", usage=dispatch_usage.DispatchUsage(provider="codex"),
+    )
+    assert _spend(capsys, "cost", "--by", "skill")["groups"]["pavo"]["dispatches"] == 1
+
+
+# -- the ledger records the same outcome the dispatch result carries -----------
+
+
+@pytest.mark.parametrize(
+    "returncode,delivery_denial,postcondition,expected",
+    [
+        (0, "", None, True),
+        (1, "", None, False),
+        (0, "could not push", None, False),  # exit 0, but delivery was denied
+        (0, "", "count mismatch", False),    # exit 0, but the post-condition failed
+        (None, "", None, False),
+    ],
+)
+def test_one_definition_of_a_successful_dispatch(
+    returncode, delivery_denial, postcondition, expected
+) -> None:
+    import skill_runner
+
+    assert skill_runner._dispatch_succeeded(returncode, delivery_denial, postcondition) is expected
+
+
+def test_an_exit_zero_delivery_failure_is_a_failure_in_the_ledger_too(
+    captured_codex_dispatches, ledger, monkeypatch
+) -> None:
+    _configure(monkeypatch)
+
+    async def _spawn(*cmd, **kwargs):
+        class _Process:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                return b"done", (
+                    b"fatal: unable to access 'https://github.com/o/r/': "
+                    b"could not resolve host: github.com\n"
+                )
+
+        return _Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    results: list = []
+    real = dispatch_role.dispatch
+
+    async def _capture(*a, **k):
+        results.append(await real(*a, **k))
+        return results[-1]
+
+    monkeypatch.setattr(dispatch_role, "dispatch", _capture)
+    dispatch_role.main(["--role", "cicada", "--task", "t", "--action-class", "build"])
+    usage = [r for r in _rows(ledger) if r["event"] == "usage"][0]
+    assert results[0].ok is False
+    assert usage["ok"] is results[0].ok
 
 
 def test_ledger_write_failure_never_reaches_the_dispatch(monkeypatch, tmp_path) -> None:
@@ -221,16 +317,3 @@ def test_ledger_write_failure_never_reaches_the_dispatch(monkeypatch, tmp_path) 
         dispatch_id="d", skill="s", provider="codex", resolved=None,
         requested_model=None, usage=dispatch_usage.DispatchUsage(provider="codex"),
     )
-
-
-def test_spend_report_groups_by_skill_and_the_cost_alias_works(ledger, capsys, monkeypatch) -> None:
-    model_tiering.record_dispatch_usage(
-        dispatch_id="x", skill="pavo", provider="codex", resolved=None,
-        requested_model="m", usage=dispatch_usage.DispatchUsage(provider="codex"),
-    )
-    scripts = str(_DAEMON_DIR.parents[1] / "scripts")
-    monkeypatch.syspath_prepend(scripts)  # undone at teardown: no leaked sys.path
-    import harness_usage
-
-    assert harness_usage.main(["cost", "--by", "skill"]) == 0
-    assert json.loads(capsys.readouterr().out)["groups"]["pavo"]["dispatches"] == 1

@@ -733,14 +733,15 @@ def usage_totals(
     """Spend per ``group_by`` from the ledger's usage rows.
 
     ``{"group_by": g, "rows": n, "groups": {key: {"dispatches": n,
-    "reported_token_rows": n, "unreported_token_rows": n, <token fields>: sum,
-    "cost_reported_rows": n, "total_cost_usd": sum | None}}}``.
+    "tokens": {field: {"sum": int | None, "reported_rows": n}},
+    "cost": {"total_usd": float | None, "reported_rows": n}}}}``.
 
-    A sum covers ONLY the rows that reported that field, and the report says
-    how many that was, so a partial total is never mistaken for a full one.
-    ``total_cost_usd`` is ``None`` (not 0) when no row in the group reported a
-    cost. Malformed lines and start rows are skipped; a missing ledger is an
-    empty report.
+    Unknown is not zero. A field's ``sum`` is ``None`` when no row in the group
+    reported it, and a measured zero stays ``0``. ``reported_rows`` is the
+    number of dispatches that field's sum covers, so a total built from only
+    some of a group's ``dispatches`` is visibly partial, field by field.
+    Malformed lines and start rows are skipped; a missing ledger is an empty
+    report.
     """
     if group_by not in USAGE_GROUPS:
         raise ValueError(f"group_by must be one of {', '.join(USAGE_GROUPS)}")
@@ -753,6 +754,10 @@ def usage_totals(
         lines = tier_ledger_path().read_text(encoding="utf-8").splitlines()
     except OSError:
         lines = []
+
+    def _number(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
     for line in lines:
         try:
             row = json.loads(line)
@@ -766,22 +771,23 @@ def usage_totals(
         rows += 1
         key = str(row.get(group_by) or "(none)")
         entry = groups.setdefault(key, {
-            "dispatches": 0, "reported_token_rows": 0, "unreported_token_rows": 0,
-            "cost_reported_rows": 0, "total_cost_usd": None,
-            **{name: 0 for name in USAGE_TOKEN_FIELDS},
+            "dispatches": 0,
+            "tokens": {
+                name: {"sum": None, "reported_rows": 0} for name in USAGE_TOKEN_FIELDS
+            },
+            "cost": {"total_usd": None, "reported_rows": 0},
         })
         entry["dispatches"] += 1
-        reported = False
         for name in USAGE_TOKEN_FIELDS:
             value = row.get(name)
-            if isinstance(value, int) and not isinstance(value, bool):
-                entry[name] += value
-                reported = True
-        entry["reported_token_rows" if reported else "unreported_token_rows"] += 1
+            if _number(value):
+                field = entry["tokens"][name]
+                field["sum"] = (field["sum"] or 0) + int(value)
+                field["reported_rows"] += 1
         cost = row.get("total_cost_usd")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-            entry["cost_reported_rows"] += 1
-            entry["total_cost_usd"] = (entry["total_cost_usd"] or 0.0) + float(cost)
+        if _number(cost):
+            entry["cost"]["total_usd"] = (entry["cost"]["total_usd"] or 0.0) + float(cost)
+            entry["cost"]["reported_rows"] += 1
     return {"group_by": group_by, "rows": rows, "groups": groups}
 
 

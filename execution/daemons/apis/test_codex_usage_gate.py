@@ -98,9 +98,9 @@ def _env(mode: str | dict) -> dict:
             ENV_MODE: mode if isinstance(mode, str) else json.dumps(mode)}
 
 
-def _refresh(fake_codex, mode, *, run=None):
+def _refresh(fake_codex, mode, *, run=None, now=NOW):
     return usage_probe.refresh_usage_if_stale(
-        {"codex": fake_codex}, env=_env(mode), now_wall=NOW, force=True,
+        {"codex": fake_codex}, env=_env(mode), now_wall=now, force=True,
         **({"run": run} if run else {}),
     )
 
@@ -232,19 +232,68 @@ def test_unknown_is_neither_exhaustion_nor_headroom(fake_codex) -> None:
     assert not entry.get("exhausted_until")
 
 
-def test_an_unreadable_app_server_falls_back_to_the_native_probe(fake_codex) -> None:
-    """Today's behaviour is kept when the numeric read is unavailable."""
+def test_capacity_without_a_weekly_reading_does_not_authorize_dispatch(fake_codex) -> None:
+    """The native request still runs, but its success is capacity evidence, not
+    budget evidence: with no weekly reading the gate refuses and says why."""
     native = _native_probe(0, '{"type":"result","result":"ok"}')
-    assert _refresh(fake_codex, "crash", run=native) == {"codex": "refreshed"}
+    outcome = _refresh(fake_codex, "crash", run=native)
+    assert outcome["codex"].startswith("probe failed: no weekly reading")
     assert native.calls and native.calls[0][1] == "exec"
     gate = hr.usage_gate("codex", now_wall=NOW)
-    assert gate is not None and gate.allowed and gate.code == hr.GATE_OK
+    assert gate is not None and not gate.allowed and gate.code == hr.GATE_UNKNOWN
+    assert "weekly budget reading unavailable" in gate.message
+    assert "plan windows:" in gate.message  # the reading's own failure reason
+    assert hr.usage_gate_refusals_all({"codex": fake_codex}, now_wall=NOW) is not None
 
 
-def test_a_reading_with_no_weekly_window_falls_back_rather_than_pacing_on_the_wrong_one(
-    fake_codex,
-) -> None:
+def test_a_reading_with_no_weekly_window_is_not_paced_on_the_wrong_one(fake_codex) -> None:
     native = _native_probe(0, '{"type":"result","result":"ok"}')
-    assert _refresh(fake_codex, _snapshot(95, minutes=300), run=native) == {"codex": "refreshed"}
+    outcome = _refresh(fake_codex, _snapshot(95, minutes=300), run=native)
+    assert outcome["codex"].startswith("probe failed: no weekly reading")
     assert native.calls  # the numeric reading was inconclusive, so the probe ran
     assert not hr.usage_windows("codex")  # and the five-hour window was not recorded
+    assert not hr.usage_gate("codex", now_wall=NOW).allowed
+
+
+# -- budget evidence handling tightened per security review --------------------
+
+
+def _ok_native():
+    return _native_probe(0, '{"type":"result","result":"ok"}')
+
+
+def test_budget_evidence_survives_a_failed_refresh(fake_codex) -> None:
+    _refresh(fake_codex, _snapshot(78))
+    before = hr.usage_gate("codex", now_wall=NOW)
+    assert before is not None and before.code == hr.GATE_PACED and not before.allowed
+    later = NOW + 601  # an ordinary refresh interval, still inside the stale bound
+    outcome = _refresh(fake_codex, "crash", run=_ok_native(), now=later)
+    assert outcome["codex"].startswith("probe failed")
+    after = hr.usage_gate("codex", now_wall=later)
+    assert after is not None and not after.allowed
+    assert after.code == hr.GATE_PACED and after.weekly_used_percent == 78.0
+    assert [w["used_percent"] for w in hr.usage_windows("codex")] == [78.0]
+    assert hr.provider_candidates({"codex": fake_codex}, now_wall=later) == []
+
+
+def test_budget_evidence_that_ages_out_is_refused_until_refreshed(fake_codex) -> None:
+    _refresh(fake_codex, _snapshot(9))
+    assert hr.usage_gate("codex", now_wall=NOW).allowed
+    later = NOW + hr.usage_stale_seconds() + 60
+    _refresh(fake_codex, "crash", run=_ok_native(), now=later)
+    gate = hr.usage_gate("codex", now_wall=later)
+    assert gate is not None and not gate.allowed and gate.code == hr.GATE_STALE
+
+
+def test_capacity_only_evidence_does_not_authorize(fake_codex) -> None:
+    hr.record_probe_available("codex", source="codex_exec", observed_at=NOW)
+    gate = hr.usage_gate("codex", now_wall=NOW)
+    assert gate is not None and not gate.allowed and gate.code == hr.GATE_UNKNOWN
+
+
+def test_a_later_good_reading_replaces_the_kept_evidence(fake_codex) -> None:
+    _refresh(fake_codex, _snapshot(78))
+    _refresh(fake_codex, "crash", run=_ok_native(), now=NOW + 601)
+    _refresh(fake_codex, _snapshot(9), now=NOW + 1200)
+    gate = hr.usage_gate("codex", now_wall=NOW + 1200)
+    assert gate is not None and gate.allowed and gate.weekly_used_percent == 9.0

@@ -85,6 +85,9 @@ class ProbeResult:
     status: str = "unknown"
     source: str = "provider_native_probe"
     exhausted_until: float | None = None
+    # Why a weekly reading could not be taken, when a capacity observation
+    # succeeded without one.
+    reading_failure: str = ""
 
 
 def parse_rate_limit_windows(stdout: str) -> list[dict[str, object]]:
@@ -516,6 +519,11 @@ def probe_provider(
             status="unknown",
             source=result.source,
         )
+    if numeric_unknown and result.status == "available":
+        return ProbeResult(
+            True, result.detail, status="available", source=result.source,
+            reading_failure=f"plan windows: {numeric_unknown}",
+        )
     return result
 
 
@@ -770,6 +778,25 @@ def _refresh_provider(
                 + ", ".join(
                     f"{w['name']}={w['used_percent']}%" for w in result.windows
                 )
+            )
+        elif provider in harness_router.WEEKLY_PACED_PROVIDERS:
+            # Capacity evidence only: earlier budget evidence is kept, and the
+            # missing weekly reading is reported rather than treated as a pass.
+            harness_router.record_capacity_observation(
+                provider,
+                source=result.source,
+                detail=result.detail,
+                observed_at=moment,
+                reading_failure=result.reading_failure
+                or "no weekly reading in the provider's report",
+            )
+            log.warning(
+                f"[apis] {provider} capacity observed from {result.source} but no "
+                f"weekly reading was obtained ({result.reading_failure or 'none in report'})"
+            )
+            return (
+                "probe failed: no weekly reading "
+                f"({result.reading_failure or 'none in report'})"
             )
         else:
             harness_router.record_probe_available(

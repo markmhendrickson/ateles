@@ -229,7 +229,12 @@ def live_headroom(provider: str, *, now_wall: float | None = None) -> float | No
     probe_fresh = (
         probe_observed is not None and 0 <= moment - probe_observed <= max_age
     )
-    if not windows and probe_status == "available" and probe_fresh:
+    if (
+        not windows
+        and probe_status == "available"
+        and probe_fresh
+        and provider not in WEEKLY_PACED_PROVIDERS
+    ):
         return 1.0
     if exhausted_until is not None and not windows:
         # The reported reset has passed and nothing newer was observed: the
@@ -597,6 +602,41 @@ def record_probe_available(
     )
 
 
+def record_capacity_observation(
+    provider: str,
+    *,
+    source: str,
+    detail: str = "provider-native probe succeeded",
+    observed_at: float | None = None,
+    reading_failure: str | None = None,
+) -> None:
+    """Record capacity evidence for a provider that is paced on a weekly budget.
+
+    Unlike ``record_probe_available`` this leaves the recorded usage windows and
+    their observation time untouched, so earlier budget evidence keeps governing
+    (and keeps aging) until a new weekly reading replaces it. ``reading_failure``
+    says why no weekly reading was obtained, which the gate and ``show`` surface.
+    """
+    normalized = provider.strip().lower()
+    if normalized not in FRONTIER_PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider!r}")
+    at = time.time() if observed_at is None else observed_at
+    update: dict[str, object] = {
+        "probe": {
+            "status": "available",
+            "observed_at": _iso_from_wall(at),
+            "source": source,
+            "detail": detail,
+        },
+    }
+    if reading_failure:
+        update["last_probe_failure"] = {
+            "at": _iso_from_wall(at),
+            "detail": " ".join(str(reading_failure).split())[:300],
+        }
+    _write_usage_entry(normalized, update=update, clear_keys=("cooling",))
+
+
 def record_probe_unknown(
     provider: str,
     *,
@@ -775,6 +815,11 @@ def render_wall(wall: float) -> str:
 
 WEEK_SECONDS = 7 * 24 * 3600.0
 WEEKLY_WINDOW_NAMES = ("weekly_all", "weekly")
+
+# Providers whose dispatch is paced against a weekly budget. Their gate needs a
+# valid, fresh weekly window; a bare capacity observation is not budget evidence.
+# (Budget evidence handling tightened per security review.)
+WEEKLY_PACED_PROVIDERS = ("claude", "codex")
 
 GATE_OK = "ok"
 GATE_MISSING = "missing"
@@ -964,6 +1009,15 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
                 f"capacity evidence stale for {normalized} from {probe_source} "
                 f"since {render_wall(probe_observed)} ({int(age // 60)} min old, "
                 f"bound {int(max_age // 60)} min)",
+                moment, entry=entry, **common,
+            )
+        if probe_status == "available" and normalized in WEEKLY_PACED_PROVIDERS:
+            return _refused(
+                normalized, GATE_UNKNOWN,
+                f"weekly budget reading unavailable for {normalized} (capacity "
+                f"observed from {probe_source}, which does not authorize "
+                "dispatch under the weekly ceiling); refusing new frontier "
+                "dispatch until a weekly reading is recorded",
                 moment, entry=entry, **common,
             )
         if probe_status == "available":

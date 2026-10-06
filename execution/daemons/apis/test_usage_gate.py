@@ -233,9 +233,9 @@ def test_ceiling_and_burst_are_configurable(monkeypatch) -> None:
 
 def test_gate_excludes_claude_and_leaves_other_providers() -> None:
     _record(66.0)
-    hr.record_probe_available("codex", source="codex_exec", observed_at=NOW)
-    avail = {"claude": "/bin/claude", "codex": "/bin/codex", "cursor": None}
-    assert hr.provider_candidates(avail, now_wall=NOW) == ["codex"]
+    hr.record_probe_available("cursor", source="cursor_agent_print", observed_at=NOW)
+    avail = {"claude": "/bin/claude", "codex": None, "cursor": "/bin/cursor"}
+    assert hr.provider_candidates(avail, now_wall=NOW) == ["cursor"]
     reason = hr.provider_exclusion_reason("claude", avail, now_wall=NOW)
     assert reason is not None and "pace line" in reason
 
@@ -318,7 +318,9 @@ def test_refresh_records_snapshot_and_reopens_the_gate() -> None:
     assert {w["name"] for w in hr.usage_windows("claude")} == {"five_hour", "weekly_all"}
 
 
-@pytest.mark.parametrize("provider", ["codex", "cursor"])
+# Codex is paced on a weekly budget, so a bare capacity success does not authorize
+# it; that is covered in test_codex_usage_gate.py.
+@pytest.mark.parametrize("provider", ["cursor"])
 def test_native_probe_success_records_current_availability(provider) -> None:
     calls: list = []
     outcome = usage_probe.refresh_usage_if_stale(
@@ -342,20 +344,20 @@ def test_native_probe_success_records_current_availability(provider) -> None:
 
 def test_current_success_supersedes_stale_exhaustion_and_dated_override(monkeypatch, tmp_path) -> None:
     headroom = tmp_path / "headroom.json"
-    headroom.write_text(json.dumps({"codex": {
+    headroom.write_text(json.dumps({"cursor": {
         "headroom": 0.0,
         "cooldown_until": hr._iso_from_wall(NOW + 7200),
         "cooldown_reason": "previous refusal",
     }}))
     os.utime(headroom, (NOW - 60, NOW - 60))
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(headroom))
-    hr.record_exhausted("codex", NOW + 7200, observed_at=NOW - 120)
-    hr.record_probe_available("codex", source="codex_exec", observed_at=NOW)
-    assert hr.headroom_resolution(now_wall=NOW)["codex"] == (
+    hr.record_exhausted("cursor", NOW + 7200, observed_at=NOW - 120)
+    hr.record_probe_available("cursor", source="cursor_agent_print", observed_at=NOW)
+    assert hr.headroom_resolution(now_wall=NOW)["cursor"] == (
         1.0, hr.HEADROOM_SOURCE_LIVE_PROBE,
     )
-    assert hr.persisted_cooling("codex", now_wall=NOW) is None
-    assert hr.provider_candidates({"codex": "/bin/codex"}, now_wall=NOW) == ["codex"]
+    assert hr.persisted_cooling("cursor", now_wall=NOW) is None
+    assert hr.provider_candidates({"cursor": "/bin/cursor"}, now_wall=NOW) == ["cursor"]
 
 
 def test_unknown_probe_is_distinct_from_exhaustion() -> None:
