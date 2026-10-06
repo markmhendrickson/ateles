@@ -514,6 +514,9 @@ def test_sandbox_build_claude_has_only_local_review_home_marker(tmp_path, monkey
         hlr, "probe_sandbox_exec_preserves_credential_binding", lambda *a, **k: True
     )
     monkeypatch.setattr(hlr, "probe_credential_helper_isolation", lambda *a, **k: True)
+    monkeypatch.setattr(
+        hlr, "probe_launchd_inspection_exec_denied", lambda *a, **k: True
+    )
     monkeypatch.setattr(hlr, "probe_review_write_confinement", lambda *a, **k: True)
     monkeypatch.setattr(
         hlr, "probe_stash_effect_denied_across_git_binaries", lambda *a, **k: True
