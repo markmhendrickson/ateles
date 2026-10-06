@@ -12,5 +12,6 @@
   "rebase": "mechanical",
   "regenerate_generated_files": "mechanical",
   "worktree_hygiene": "mechanical",
-  "ci_log_triage": "mechanical"
+  "ci_log_triage": "mechanical",
+  "confidence_scoring": "mechanical"
 }

@@ -521,6 +521,7 @@ from routing import (  # noqa: E402
 import github_gateway  # noqa: E402
 
 import model_tiering  # noqa: E402
+import producer_confidence  # noqa: E402
 from skill_runner import _redact_secrets, run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
@@ -1089,11 +1090,40 @@ async def dispatch_task(
             action_type.strip().lower()
             in (policy.low_blast_action_types | policy.high_blast_action_types)
         )
+        has_owner = bool(assigned_to) or skill is not None
+        relationship_count = int(snapshot.get("relationship_count", 0) or 0)
+        # ateles#1142: a task nobody scored gets a real producer score on a
+        # cheap tier BEFORE the gate reads it, so the gate decides on a
+        # judgment instead of the mechanical estimate. Any failure leaves the
+        # snapshot as it was, which is the unscored path below, unchanged.
+        confidence_source = ""
+        gate_snapshot = snapshot
+        if not _confidence_is_explicit(snapshot):
+            produced = await producer_confidence.score_unscored_task(
+                snapshot,
+                action_type=action_type,
+                policy=policy,
+                mechanical_value=score_confidence(
+                    snapshot,
+                    has_owner=has_owner,
+                    action_type_recognized=action_type_recognized,
+                    relationship_count=relationship_count,
+                    successful_recurrences=_successful_recurrences(snapshot),
+                ).value,
+            )
+            if produced is not None:
+                gate_snapshot = {**snapshot, "confidence": produced.value}
+                confidence_source = produced.source
+                log.info(
+                    f"[{DAEMON_NAME}] confidence: task={entity_id} producer score "
+                    f"{produced.value:.2f} from {produced.source} "
+                    f"(tier={produced.tier}, provider={produced.provider or '?'})"
+                )
         confidence, confidence_unscored = _resolve_confidence(
-            snapshot,
-            has_owner=bool(assigned_to) or skill is not None,
+            gate_snapshot,
+            has_owner=has_owner,
             action_type_recognized=action_type_recognized,
-            relationship_count=int(snapshot.get("relationship_count", 0) or 0),
+            relationship_count=relationship_count,
         )
         decision = evaluate_gate(
             confidence=confidence,
@@ -1102,6 +1132,7 @@ async def dispatch_task(
             successful_recurrences=_successful_recurrences(snapshot),
             confidence_unscored=confidence_unscored,
         )
+        decision.confidence_source = confidence_source
         log.info(
             f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
             f"action={action_type} blast={decision.blast_radius.value} "
@@ -1140,6 +1171,12 @@ async def dispatch_task(
                     plan_summary=(
                         f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
                         f"Trigger: {trigger}. {decision.reason}."
+                        + (
+                            f" Confidence {confidence:.2f} scored by "
+                            f"{decision.confidence_source}."
+                            if decision.confidence_source
+                            else ""
+                        )
                     ),
                     handler=DAEMON_NAME,
                     user_id=tenant_id,

@@ -274,6 +274,11 @@ class GateDecision:
     # happens to be low. Callers must not let the two read the same: an
     # unscored task says so; a scored-low task keeps saying "low confidence".
     confidence_unscored: bool = False
+    # Who produced `confidence`, when a producer did: "" for a score the task
+    # already carried or a mechanical estimate, the producer's name for a score
+    # obtained ahead of the gate (apis producer_confidence, ateles#1142). Lets a
+    # producer score be told apart from an estimate on the record.
+    confidence_source: str = ""
 
     @property
     def may_auto_execute(self) -> bool:
@@ -920,6 +925,10 @@ def write_checkpoint_brief(
         ],
         "idempotency_key": f"checkpoint-{handler}-{task_entity_id}-plan",
     }
+    if decision.confidence_source:
+        # Only when a producer scored it: an estimate carries no source, and a
+        # field written as "" on every brief would be noise on the whole queue.
+        body["entities"][0]["confidence_source"] = decision.confidence_source
     normalized_action = str(action_type or "").strip().lower()
     authorization_expected = task_record is not None and policy is not None
     expected_authorization: dict | None = None
