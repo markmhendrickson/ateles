@@ -56,8 +56,10 @@ on:
       - "scripts/linters/test_claude_verification_discipline.py"
       - "scripts/linters/test_*.py"
       - "docs/agents/**"
-      - ".github/workflows/canonical-rule-inventory.yml"
-      - ".github/workflows/ateles-tests.yml"
+      # Any workflow edit: execution/scripts/test_public_rule_sources.py
+      # fails on a PR-triggered job that needs a self-hosted runner (ateles#1333),
+      # so adding such a job must re-run this lane.
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:

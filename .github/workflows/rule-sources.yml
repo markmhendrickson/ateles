@@ -1,0 +1,116 @@
+name: public rule sources
+
+# ateles#1333 replaced the canonical rule inventory's pull_request_target
+# workflow, whose measurement job needed an operator-owned self-hosted runner,
+# production Neotoma, and the operator's local harness stores. That coupled
+# every rule or foundation pull request to one machine, and it failed on every
+# matching PR once the runner could not set up Python.
+#
+# The work is now split by what each half needs:
+#
+#   - Complete cross-store measurement (entity stores, harness files, the
+#     operator's other repositories) is a PRIVATE, milestone-driven audit run
+#     locally. See docs/runbooks/rule_inventory_audit.md. No pull request
+#     waits on it.
+#   - This workflow checks what is deliberately public and what a pull request
+#     can actually change, entirely on GitHub-hosted runners: the repository's
+#     own rule sources parse, a generated projection equals its public source,
+#     and applicable rules still reach the session and agent surfaces they are
+#     meant to reach (effect tests against synthetic stores, not config
+#     presence).
+#
+# Security: this is `pull_request`, never `pull_request_target`. It runs the
+# PR's own code with a read-only token and no repository secrets, so nothing
+# privileged is exposed to untrusted code. No step references a secret, and
+# no PR-controlled value is interpolated into a shell command.
+#
+# The foundation projections (reading projection, decision state) are held to
+# their sources by foundation-checks.yml; this workflow does not repeat them.
+# The SKILL.md and docs/agents mirrors are projections of private Neotoma
+# entities, so their freshness belongs to agent-config-validation.yml and the
+# private audit, not to a hosted check with no credential.
+
+on:
+  pull_request:
+    paths:
+      - "CLAUDE.md"
+      - ".claude/settings.json"
+      - ".claude/hooks/**"
+      - ".claude/skills/**"
+      - ".codex/**"
+      - "lib/daemon_runtime/agent_loader.py"
+      - "lib/daemon_runtime/policy_skill_renderer.py"
+      - "lib/daemon_runtime/test_agent_loader.py"
+      - "lib/daemon_runtime/test_policy_skill_renderer.py"
+      - "execution/evals/rule_delivery/**"
+      - "execution/scripts/check_public_rule_sources.py"
+      - "execution/scripts/test_public_rule_sources.py"
+      - "execution/scripts/render_rule_inventory.py"
+      - "execution/scripts/package_rule_inventory_inputs.py"
+      - "execution/scripts/install_codex_hooks.py"
+      - "execution/scripts/test_codex_rule_hooks.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/rule-sources.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-rule-sources:
+    name: public rule sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      # Each check is its own step so a red lane names which control failed.
+
+      # The inventory's own file-store reader, run over this checkout with an
+      # empty home: CLAUDE.md, the repository skills and the hooks must each
+      # parse to at least one rule statement, and no private store may be read.
+      - name: Public rule sources parse
+        if: always()
+        run: uv run --extra dev python execution/scripts/check_public_rule_sources.py
+
+      # Generated projection equals its public source: the hook-wiring
+      # reference snapshot is generated from .claude/settings.json.
+      - name: Hook-wiring reference matches .claude/settings.json
+        if: always()
+        run: uv run --extra dev python .claude/hooks/hook_wiring_reference.py --check
+
+      # Runtime rule delivery, by effect. Each suite feeds synthetic
+      # agent_policy rows to the real delivery path and asserts the rule
+      # arrives on its surface, so it goes red when an applicable rule stops
+      # reaching it.
+      - name: Rule delivery — Claude Code session hooks
+        if: always()
+        run: >-
+          uv run --extra dev python -m pytest -q
+          .claude/hooks/test_session_rule_index.py
+          .claude/hooks/test_session_rule_delivery.py
+          .claude/hooks/test_rule_injection_gate.py
+      - name: Rule delivery — daemon agent loader and policy renderer
+        if: always()
+        run: >-
+          uv run --extra dev python -m pytest -q
+          lib/daemon_runtime/test_agent_loader.py
+          lib/daemon_runtime/test_policy_skill_renderer.py
+      - name: Rule delivery — Codex hooks
+        if: always()
+        run: uv run --extra dev python -m pytest -q execution/scripts/test_codex_rule_hooks.py
+      - name: Rule delivery — offline eval harness
+        if: always()
+        run: uv run --extra dev python -m pytest -q execution/evals/rule_delivery/
+
+      # The coupling this workflow replaced must not come back: no PR-triggered
+      # job may need a self-hosted runner, and this workflow keeps its posture.
+      - name: No PR check needs a self-hosted runner
+        if: always()
+        run: uv run --extra dev python -m pytest -q execution/scripts/test_public_rule_sources.py

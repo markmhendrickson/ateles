@@ -1,5 +1,1 @@
-self-hosted-runner:
-  labels:
-    - canonical-rule-inventory
-
 config-variables: null
