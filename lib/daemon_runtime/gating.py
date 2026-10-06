@@ -876,37 +876,6 @@ def _server_error_detail(exc: Exception) -> str:
     return f" [server: {code} {message}]" if code or message else ""
 
 
-def _link_checkpoint_task(checkpoint_id: str, task_entity_id: str) -> bool:
-    """Best-effort REFERS_TO edge from a proven checkpoint to its task.
-
-    Deliberately outside the signed write and outside the proof: the edge is
-    navigation for readers of the graph, never authority.  A failure is logged
-    and ignored, so it cannot undo or block an already proven checkpoint.
-    """
-    try:
-        resp = httpx.post(
-            f"{NEOTOMA_BASE_URL.rstrip('/')}/create_relationship",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            json={
-                "relationship_type": "REFERS_TO",
-                "source_entity_id": checkpoint_id,
-                "target_entity_id": task_entity_id,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return True
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "[gating] checkpoint %s proven, but its REFERS_TO edge to %s was "
-            "not written: %s",
-            checkpoint_id,
-            task_entity_id,
-            exc,
-        )
-        return False
-
-
 def write_checkpoint_brief(
     *,
     task_entity_id: str,
@@ -949,10 +918,6 @@ def write_checkpoint_brief(
                 "checkpoint_name": "PLAN",
                 "blocking": True,
                 "task_entity_id": task_entity_id,
-                # Neotoma resolves a checkpoint_brief's identity from its
-                # title, so two tasks sharing a title would write onto ONE
-                # checkpoint (the second silently re-pointing it).  The task id
-                # makes the identity per-task.
                 "title": f"PLAN checkpoint: {title} [{task_entity_id}]",
                 "plan_summary": plan_summary,
                 "confidence": decision.confidence,
@@ -1007,17 +972,28 @@ def write_checkpoint_brief(
         # Legacy bearer-only write: nothing capability-gates it, so the edge
         # rides in the same request as before.
         body["relationships"] = [task_edge]
-    # A signed write is judged against the producer's AAuth grant, and that
-    # grant is scoped to entity types, not edges: a REFERS_TO edge in the same
-    # request makes the server refuse the WHOLE store (HTTP 500
-    # DB_QUERY_FAILED before neotoma#2525, 403 capability_denied after), so
-    # every signed checkpoint failed and its task was left held with nothing to
-    # approve.  The authority-bearing write therefore carries no edge: the
-    # checkpoint binds its task through the signed ``task_entity_id`` field and
-    # the envelope, and nothing reads the edge as authority.  The edge is added
-    # afterwards, best-effort, over the bearer path (see _link_checkpoint_task).
+    # A signed write is judged against the producer's AAuth grant, which covers
+    # entity types and no edges, and the server refuses the whole store when a
+    # relationship in it is outside the grant (every signed checkpoint failed
+    # this way from 2026-09-28).  The signed write therefore carries no
+    # relationship, and none is written by any other path: the checkpoint binds
+    # its task through the signed ``task_entity_id`` field and the envelope, and
+    # the relationship write stays within the producer's grant per security
+    # review.  Only the legacy bearer-only path below still carries its edge, as
+    # before.
     if idempotency_context:
         body["idempotency_key"] += f"-{idempotency_context}"
+    # Neotoma resolves a checkpoint_brief's identity from its title.  A title
+    # unique per task is not enough: a changed hold of the same task would
+    # resolve to the SAME entity, so a replacement would be the checkpoint it is
+    # meant to replace.  A digest of the hold's content makes the identity
+    # per-hold: an exact retry keeps it (same entity), a changed hold gets a
+    # new one (a distinct checkpoint), and earlier holds are preserved.
+    _entity = body["entities"][0]
+    _hold_identity = hashlib.sha256(
+        _canonical_json({k: v for k, v in _entity.items() if k != "title"}).encode()
+    ).hexdigest()[:12]
+    _entity["title"] = f"{_entity['title']} #{_hold_identity}"
     # Neotoma refuses an idempotency key reused with different content (HTTP
     # 400 ERR_IDEMPOTENCY_MISMATCH).  A task held a second time carries a new
     # revision and reason, so a content-blind key made every re-hold a 400
@@ -1075,7 +1051,6 @@ def write_checkpoint_brief(
                     entity_id,
                 )
                 return None
-            _link_checkpoint_task(entity_id, task_entity_id)
         return entity_id
     except Exception as exc:  # noqa: BLE001
         log.warning(

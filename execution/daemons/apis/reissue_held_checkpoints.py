@@ -8,8 +8,9 @@ releases, approves, or dispatches a task, and never touches a task that is not
 at ``awaiting_approval`` right now.
 
 One JSON object per task on stdout, then a summary object.  Exit status is
-non-zero when any task failed, so an operator can re-run (the operation is
-idempotent) until it is zero.
+non-zero when any task ``failed`` (a read or the replacement write did not
+succeed) or is ``incomplete`` (a stale brief could not be retired), so an
+operator can re-run (the operation is idempotent) until it is zero.
 """
 
 from __future__ import annotations
@@ -42,7 +43,28 @@ def main() -> int:
         args.task[: args.limit] if args.task else iter_held_task_ids(limit=args.limit)
     )
     counts: collections.Counter[str] = collections.Counter()
-    for task_id in task_ids:
+    enumeration_error: str | None = None
+    iterator = iter(task_ids)
+    while True:
+        try:
+            task_id = next(iterator)
+        except StopIteration:
+            break
+        except RuntimeError as exc:
+            # The held-task list itself could not be read: report it as a
+            # failure with its own record, never as an empty or complete run.
+            enumeration_error = str(exc)
+            counts["failed"] += 1
+            print(
+                json.dumps(
+                    {
+                        "outcome": "failed",
+                        "detail": f"enumeration: {enumeration_error}"[:200],
+                    },
+                    sort_keys=True,
+                )
+            )
+            break
         try:
             result = reissue_held_task_checkpoint(task_id, apply=args.apply)
             record = {
@@ -51,8 +73,9 @@ def main() -> int:
                 "detail": result.detail,
                 "checkpoint_id": result.checkpoint_id,
                 "superseded": result.superseded,
+                "remaining": result.remaining,
             }
-        except Exception as exc:  # noqa: BLE001 — one bad task must not stop the run
+        except Exception as exc:  # noqa: BLE001 - one bad task must not stop the run
             record = {
                 "task_id": task_id,
                 "outcome": "failed",
@@ -60,8 +83,19 @@ def main() -> int:
             }
         counts[record["outcome"]] += 1
         print(json.dumps(record, sort_keys=True))
-    print(json.dumps({"summary": dict(counts), "applied": args.apply}, sort_keys=True))
-    return 1 if counts.get("failed") else 0
+    print(
+        json.dumps(
+            {
+                "summary": dict(counts),
+                "examined": sum(counts.values()),
+                "applied": args.apply,
+            },
+            sort_keys=True,
+        )
+    )
+    # A read or write failure, or a partial retirement, means recovery is not
+    # complete: exit non-zero so "rerun until zero" is a reliable contract.
+    return 1 if counts.get("failed") or counts.get("incomplete") else 0
 
 
 if __name__ == "__main__":

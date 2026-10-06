@@ -2158,6 +2158,7 @@ class ReissueResult:
     detail: str = ""
     checkpoint_id: str | None = None
     superseded: list[str] = dataclasses.field(default_factory=list)
+    remaining: list[str] = dataclasses.field(default_factory=list)
 
 
 def _checkpoint_is_current_authority(
@@ -2182,28 +2183,41 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
     signed write was refused), or only a pre-signing one exists, which carries
     no authority envelope so ``resolve_checkpoint`` can never resolve it.
 
+    Outcomes (the CLI exits non-zero for ``failed`` and ``incomplete``):
+      * ``skipped`` - confirmed nothing to do: the task is not held, or it
+        already has exactly one resolvable checkpoint and no stale pending one;
+      * ``would_reissue`` / ``would_retire`` - dry run, nothing written;
+      * ``reissued`` - a replacement persisted and proved, stale briefs retired;
+      * ``retired_stale`` - a resolvable checkpoint already existed; stale
+        pending briefs were retired (the retry that finishes a partial run);
+      * ``incomplete`` - the task has a resolvable checkpoint but a stale brief
+        could not be retired; rerun to finish (identifiers in ``superseded``
+        are the ones retired, ``remaining`` the ones still pending);
+      * ``failed`` - a read or the replacement write failed: the task could not
+        be assessed or fixed.
+
     Guarantees, each pinned by a test:
-      * only a task that is at ``awaiting_approval`` right now is touched, so a
-        done, declined, superseded, blocked, or running task is never re-issued;
-      * idempotent: one checkpoint per task state.  A task that already has a
-        pending signed checkpoint bound to its current revision is left alone,
-        and an exact re-run replays the same write instead of adding another;
+      * only a task at ``awaiting_approval`` right now is touched, so a done,
+        declined, superseded, blocked, or running task is never re-issued;
+      * idempotent: one resolvable checkpoint per task state; a rerun reuses the
+        proven replacement and only finishes retirement;
       * fail closed: the replacement must persist and read back with its
-        authenticated envelope before anything old is retired, and nothing here
-        releases or dispatches the task;
+        authenticated envelope before anything old is retired, the replacement
+        is never retired, and nothing here releases or dispatches the task;
       * ``apply=False`` writes nothing.
     """
     record = fetch_task_record(task_id)
     snapshot = _record_snapshot(record)
     if record is None or snapshot is None:
-        return ReissueResult(task_id, "skipped", "task unreadable")
+        return ReissueResult(task_id, "failed", "task could not be read")
     status = normalize_status(snapshot.get("status"))
     if status != TaskStatus.AWAITING_APPROVAL.value:
         return ReissueResult(task_id, "skipped", f"not held (status={status or 'unset'})")
 
     existing = checkpoints_for_task(task_id)
     if existing is None:
-        return ReissueResult(task_id, "skipped", "checkpoint read failed")
+        return ReissueResult(task_id, "failed", "checkpoint list could not be read")
+    current_id: str | None = None
     stale_pending: list[str] = []
     for item in existing:
         checkpoint_id = str(item.get("entity_id") or "")
@@ -2222,67 +2236,103 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
             )
         if item_status != "awaiting_operator":
             continue
-        if _checkpoint_is_current_authority(checkpoint_id, record):
-            return ReissueResult(
-                task_id,
-                "skipped",
-                f"already has a resolvable checkpoint {checkpoint_id}",
-                checkpoint_id=checkpoint_id,
-            )
-        stale_pending.append(checkpoint_id)
+        if current_id is None and _checkpoint_is_current_authority(checkpoint_id, record):
+            current_id = checkpoint_id
+        else:
+            stale_pending.append(checkpoint_id)
+
+    if current_id and not stale_pending:
+        return ReissueResult(
+            task_id,
+            "skipped",
+            f"already has a resolvable checkpoint {current_id}",
+            checkpoint_id=current_id,
+        )
 
     if not apply:
+        if current_id:
+            return ReissueResult(
+                task_id,
+                "would_retire",
+                f"resolvable checkpoint {current_id} exists; would retire "
+                f"{len(stale_pending)} stale pending",
+                checkpoint_id=current_id,
+                remaining=stale_pending,
+            )
         return ReissueResult(
             task_id,
             "would_reissue",
-            "no resolvable checkpoint" + (
-                f"; would supersede {len(stale_pending)} unresolvable pending"
+            "no resolvable checkpoint"
+            + (
+                f"; would retire {len(stale_pending)} unresolvable pending"
                 if stale_pending
                 else ""
             ),
-            superseded=stale_pending,
+            remaining=stale_pending,
         )
 
-    replacement_id = _file_fresh_checkpoint(
-        prior_checkpoint_id="reissue",
-        task_id=task_id,
-        task_snapshot=snapshot,
-        notifier=None,
-        plan_summary=(
-            "Re-issued: this task was held at the gate without a checkpoint the "
-            "operator could resolve. Approval releases the task as it stands "
-            "now; the original gate reason is repeated below."
-        ),
-        reason="re-issued checkpoint; operator approval required",
-        context_label="reissue",
-    )
-    if not replacement_id:
-        return ReissueResult(
-            task_id, "failed", "replacement checkpoint did not persist and prove"
+    reissued = current_id is None
+    if reissued:
+        replacement_id = _file_fresh_checkpoint(
+            prior_checkpoint_id="reissue",
+            task_id=task_id,
+            task_snapshot=snapshot,
+            notifier=None,
+            plan_summary=(
+                "Re-issued: this task was held at the gate without a checkpoint "
+                "the operator could resolve. Approval releases the task as it "
+                "stands now; the original gate reason is repeated below."
+            ),
+            reason="re-issued checkpoint; operator approval required",
+            context_label="reissue",
         )
-    # The replacement is proven. Re-read the task: if it moved on while we were
-    # filing, leave the (harmless, unreleasable-by-itself) brief and say so.
-    after = _record_snapshot(fetch_task_record(task_id)) or {}
-    if normalize_status(after.get("status")) != TaskStatus.AWAITING_APPROVAL.value:
-        return ReissueResult(
-            task_id,
-            "reissued_task_moved",
-            "task left awaiting_approval during re-issue",
-            checkpoint_id=replacement_id,
-        )
+        if not replacement_id:
+            return ReissueResult(
+                task_id,
+                "failed",
+                "replacement checkpoint did not persist and prove",
+                remaining=stale_pending,
+            )
+        current_id = replacement_id
+        # The replacement is proven. Re-read the task: if it moved on while we
+        # were filing, leave the (harmless, unreleasable-by-itself) brief.
+        after = _record_snapshot(fetch_task_record(task_id)) or {}
+        if normalize_status(after.get("status")) != TaskStatus.AWAITING_APPROVAL.value:
+            return ReissueResult(
+                task_id,
+                "skipped",
+                "task left awaiting_approval during re-issue",
+                checkpoint_id=current_id,
+            )
     retired: list[str] = []
+    remaining: list[str] = []
     for checkpoint_id in stale_pending:
-        if checkpoint_id != replacement_id and supersede_checkpoint(
+        # Never retire the checkpoint that is the task's resolvable authority,
+        # even if the record hands the same id back under another name.
+        if checkpoint_id == current_id:
+            continue
+        if supersede_checkpoint(
             checkpoint_id,
             handler=DAEMON_NAME,
-            reason=f"replaced by signed checkpoint {replacement_id}",
+            reason=f"replaced by signed checkpoint {current_id}",
         ):
             retired.append(checkpoint_id)
+        else:
+            remaining.append(checkpoint_id)
+    if remaining:
+        return ReissueResult(
+            task_id,
+            "incomplete",
+            f"{len(remaining)} stale pending brief(s) could not be retired; rerun to finish",
+            checkpoint_id=current_id,
+            superseded=retired,
+            remaining=remaining,
+        )
     return ReissueResult(
         task_id,
-        "reissued",
-        "" if len(retired) == len(stale_pending) else "some stale briefs not retired",
-        checkpoint_id=replacement_id,
+        "reissued" if reissued else "retired_stale",
+        "",
+        checkpoint_id=current_id,
         superseded=retired,
     )
 

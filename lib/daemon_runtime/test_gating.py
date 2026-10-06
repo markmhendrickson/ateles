@@ -1566,21 +1566,32 @@ def test_signed_checkpoint_write_carries_no_edge_so_the_producer_grant_admits_it
     signed = [s for s in server.stores if s["signed"]]
     assert len(signed) == 1
     assert "relationships" not in signed[0]["body"]
-    # The edge is added afterwards, outside the signed write, over bearer only.
-    assert server.edges == [
-        {
-            "relationship_type": "REFERS_TO",
-            "source_entity_id": brief_id,
-            "target_entity_id": "ent_task",
-        }
-    ]
+    # No relationship is written by any other path either.
+    assert server.edges == []
 
 
-def test_failed_edge_never_undoes_a_proven_checkpoint(monkeypatch):
+def test_signed_relationship_denial_results_in_no_bearer_path_write(monkeypatch):
+    """The relationship write stays within the producer's grant (security review).
+
+    Admission refuses a relationship the producer signs for; the checkpoint
+    still persists and proves, and no relationship request is made at all.
+    """
     server = _FakeNeotoma(monkeypatch, _http_signer())
-    server.fail_edge = True
+    original = server.post
+    relationship_requests: list[bool] = []
 
-    assert _hold() is not None
+    def admission(url, **kwargs):
+        if url.endswith("/create_relationship"):
+            relationship_requests.append("signature" in kwargs["headers"])
+            if "signature" in kwargs["headers"]:
+                return server._response(403, {"error_code": "capability_denied"})
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(gating_module.httpx, "post", admission)
+
+    assert _hold() is not None, "the checkpoint is not invalidated by the missing edge"
+    assert relationship_requests == [], "no relationship request is made"
+    assert server.edges == [], "no relationship was written"
 
 
 def test_signed_checkpoint_still_fails_closed_when_the_store_refuses(
@@ -1615,6 +1626,12 @@ def test_rehold_of_a_changed_task_is_a_new_checkpoint_not_a_key_mismatch(monkeyp
     assert second is not None, "a re-hold must not be refused as a key reuse"
     keys = [s["body"]["idempotency_key"] for s in server.stores]
     assert keys[0] != keys[1]
+    # ... and it is a DIFFERENT checkpoint, not the first one overwritten: the
+    # record resolves identity from the title, so the title must differ too.
+    assert first != second
+    assert set(server.entities) == {first, second}
+    assert server.entities[second]["fields"]["status"] == "awaiting_operator"
+    assert server.entities[first]["fields"]["status"] == "awaiting_operator"
 
 
 def test_exact_retry_is_an_idempotent_replay_of_one_checkpoint(monkeypatch):
@@ -1625,6 +1642,25 @@ def test_exact_retry_is_an_idempotent_replay_of_one_checkpoint(monkeypatch):
 
     assert first == again
     assert len(server.entities) == 1
+
+
+def test_replacement_for_a_changed_hold_is_distinct_and_never_the_one_it_retires(
+    monkeypatch,
+):
+    """The replacement flow retires the PRIOR brief; with title-keyed identity
+    both holds used to be one entity, so it retired its own replacement."""
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    prior = _hold(observation_count=4)
+    replacement = _hold(observation_count=9, idempotency_context="fresh-x")
+    # The caller's retirement step, as _require_fresh_release_authority does it.
+    assert replacement != prior, "the replacement must not be the brief retired"
+    server.entities[prior]["fields"]["status"] = "approved_requires_fresh_approval"
+
+    assert server.entities[replacement]["fields"]["status"] == "awaiting_operator"
+    # An exact retry of the replacement creates nothing new.
+    assert _hold(observation_count=9, idempotency_context="fresh-x") == replacement
+    assert len(server.entities) == 2
 
 
 def test_two_tasks_with_one_title_get_two_checkpoints(monkeypatch):

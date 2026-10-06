@@ -37,6 +37,7 @@ class _Record:
         self.by_key: dict[str, str] = {}
         self.writes = 0
         self.persist = True
+        self.fail_supersede: set[str] = set()
         policy = ExecutionPolicy(entity_id="policy", loaded=True)
         monkeypatch.setattr(apis, "fetch_task_record", self.fetch_task)
         monkeypatch.setattr(apis, "fetch_entity_user_id", lambda _id: "tenant-a")
@@ -62,7 +63,9 @@ class _Record:
             },
         }
 
-    def add_checkpoint(self, checkpoint_id, task_id, *, signed, status="awaiting_operator"):
+    def add_checkpoint(
+        self, checkpoint_id, task_id, *, signed, status="awaiting_operator"
+    ):
         self.checkpoints[checkpoint_id] = {
             "entity_id": checkpoint_id,
             "entity_type": "checkpoint_" + "brief",
@@ -102,6 +105,8 @@ class _Record:
         return self.by_key[key]
 
     def supersede(self, checkpoint_id, *, handler, reason):
+        if checkpoint_id in self.fail_supersede:
+            return False
         self.checkpoints[checkpoint_id]["snapshot"]["status"] = "superseded"
         return True
 
@@ -205,14 +210,72 @@ def test_unpersisted_replacement_fails_closed_and_retires_nothing(record):
     assert record.tasks["ent_t1"]["snapshot"]["status"] == "awaiting_approval"
 
 
-def test_unreadable_checkpoint_list_is_not_read_as_no_checkpoint(record, monkeypatch):
+def test_unreadable_checkpoint_list_is_a_failure_not_a_skip(record, monkeypatch):
     record.add_task("ent_t1")
     monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id: None)
 
     result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
 
-    assert result.outcome == "skipped"
+    assert result.outcome == "failed"
     assert record.writes == 0
+
+
+def test_unreadable_task_is_a_failure_not_a_skip(record):
+    # ent_missing was never added: the read returns nothing.
+    result = apis.reissue_held_task_checkpoint("ent_missing", apply=True)
+
+    assert result.outcome == "failed"
+    assert record.writes == 0
+
+
+def test_failed_retirement_is_incomplete_and_a_rerun_finishes_it(record):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_legacy", "ent_t1", signed=False)
+    record.fail_supersede = {"ent_legacy"}
+
+    first = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert first.outcome == "incomplete"
+    assert first.remaining == ["ent_legacy"]
+    assert first.checkpoint_id is not None
+    writes_after_first = record.writes
+
+    record.fail_supersede = set()  # the transient failure clears
+    second = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert second.outcome == "retired_stale"
+    assert second.checkpoint_id == first.checkpoint_id, "the replacement is reused"
+    assert record.writes == writes_after_first, "no second replacement is created"
+    assert record.checkpoints["ent_legacy"]["snapshot"]["status"] == "superseded"
+    assert _awaiting(record) == [first.checkpoint_id]
+    assert record.tasks["ent_t1"]["snapshot"]["status"] == "awaiting_approval"
+
+    third = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+    assert third.outcome == "skipped"
+
+
+def test_replacement_is_never_retired_even_if_the_record_returns_its_id_as_stale(
+    record, monkeypatch
+):
+    """A replacement that comes back under an id already pending must survive."""
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_same", "ent_t1", signed=False)
+    retired: list[str] = []
+    original = record.supersede
+
+    def spy(checkpoint_id, **kwargs):
+        retired.append(checkpoint_id)
+        return original(checkpoint_id, **kwargs)
+
+    monkeypatch.setattr(apis, "supersede_checkpoint", spy)
+    # The writer hands back the already-pending id (identity collision).
+    monkeypatch.setattr(apis, "write_checkpoint_brief", lambda **_kw: "ent_same")
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert "ent_same" not in retired
+    assert record.checkpoints["ent_same"]["snapshot"]["status"] == "awaiting_operator"
+    assert result.checkpoint_id == "ent_same"
 
 
 def test_an_approved_unreleased_checkpoint_is_left_to_the_release_path(record):
@@ -238,20 +301,79 @@ def test_enumeration_pages_to_the_end(monkeypatch):
         "c1": {"entities": [{"entity_id": "ent_b"}], "next_cursor": None},
     }
     monkeypatch.setattr(
-        apis, "query_entities", lambda _t, *, snapshot_filters, cursor=None: pages[cursor]
+        apis,
+        "query_entities",
+        lambda _t, *, snapshot_filters, cursor=None: pages[cursor],
     )
 
     assert list(apis.iter_held_task_ids()) == ["ent_a", "ent_b"]
 
 
+def _run_cli(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["reissue_held_checkpoints.py", *argv])
+    return cli.main()
+
+
 def test_cli_dry_run_by_default_and_nonzero_on_failure(record, monkeypatch, capsys):
     record.add_task("ent_t1")
     record.persist = False
-    monkeypatch.setattr(sys, "argv", ["x", "--task", "ent_t1"])
-    assert cli.main() == 0  # dry run never fails a write
+    assert _run_cli(monkeypatch, "--task", "ent_t1") == 0  # dry run never fails a write
     assert record.writes == 0
 
-    monkeypatch.setattr(sys, "argv", ["x", "--task", "ent_t1", "--apply"])
-    assert cli.main() == 1
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 1
     out = capsys.readouterr().out
     assert '"outcome": "failed"' in out
+
+
+def test_cli_read_failures_exit_nonzero_and_confirmed_skips_exit_zero(
+    record, monkeypatch, capsys
+):
+    record.add_task("ent_done", status="done")
+    assert _run_cli(monkeypatch, "--task", "ent_done", "--apply") == 0  # confirmed skip
+
+    assert _run_cli(monkeypatch, "--task", "ent_missing") == 1  # dry run too
+    out = capsys.readouterr().out
+    assert '"task_id": "ent_missing"' in out and '"outcome": "failed"' in out
+
+    record.add_task("ent_t1")
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id: None)
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 1
+
+
+def test_cli_partial_retirement_exits_nonzero_then_zero_after_rerun(
+    record, monkeypatch, capsys
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_legacy", "ent_t1", signed=False)
+    record.fail_supersede = {"ent_legacy"}
+
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 1
+    first = capsys.readouterr().out
+    assert '"outcome": "incomplete"' in first and "ent_legacy" in first
+
+    record.fail_supersede = set()
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
+    assert '"outcome": "retired_stale"' in capsys.readouterr().out
+    assert (
+        _awaiting(record)
+        and record.checkpoints["ent_legacy"]["snapshot"]["status"] == "superseded"
+    )
+
+
+def test_cli_enumeration_failure_is_reported_and_nonzero_not_an_empty_run(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(apis, "query_entities", lambda *a, **k: None)
+
+    assert _run_cli(monkeypatch) == 1
+    out = capsys.readouterr().out
+    assert "enumeration" in out and '"failed": 1' in out
+
+
+def test_cli_empty_successful_enumeration_is_distinguishable(monkeypatch, capsys):
+    monkeypatch.setattr(
+        apis, "query_entities", lambda *a, **k: {"entities": [], "next_cursor": None}
+    )
+
+    assert _run_cli(monkeypatch) == 0
+    assert '"examined": 0' in capsys.readouterr().out
