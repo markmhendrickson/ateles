@@ -1166,7 +1166,7 @@ def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
         # as a second verdict line (the recognisers above stay narrow).
         if any(
             _VERDICT_LIKE_RE.match(_LINE_DECORATION_RE.sub("", form))
-            for form in _veto_scan_forms(line)
+            for form in _veto_scan_forms_uncached(line)
         ):
             return None
     return verdict.group(1).lower()
@@ -1410,11 +1410,7 @@ def _normalize_for_blocking_scan(text: str) -> str:
     confusable-form siblings in test_merge_path.py, which pin exactly this).
     """
     decomposed = unicodedata.normalize("NFKD", text)
-    stripped = "".join(
-        ch
-        for ch in decomposed
-        if ch not in _ZERO_WIDTH_CHARS and unicodedata.category(ch) not in _STRIPPED_UNICODE_CATEGORIES
-    )
+    stripped = _strip_marks_and_format(decomposed)
     recomposed = unicodedata.normalize("NFKC", stripped)
     folded = recomposed.translate(_CONFUSABLE_TRANSLATION)
     return _SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, folded)
@@ -1451,6 +1447,24 @@ _ZERO_WIDTH_CHARS = frozenset(
 #        a nonspacing one for this guard's purpose — both are strippable marks
 #        that could be spliced onto or decomposed out of a letter.
 _STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn", "Mc", "Me"})
+
+def _strip_marks_and_format(decomposed: str) -> str:
+    """*decomposed* without its format and combining characters.
+
+    ASCII has none, so text with no non-ASCII is returned as it is. Otherwise
+    each DISTINCT character is classified once and the doomed ones are deleted
+    in one pass, so the cost follows the number of distinct characters rather
+    than the length of the text.
+    """
+    if decomposed.isascii():
+        return decomposed
+    doomed = {
+        ord(ch): None
+        for ch in set(decomposed)
+        if not ch.isascii()
+        and (ch in _ZERO_WIDTH_CHARS or unicodedata.category(ch) in _STRIPPED_UNICODE_CATEGORIES)
+    }
+    return decomposed.translate(doomed) if doomed else decomposed
 
 # Common Cyrillic/Greek confusables of the ASCII letters appearing in
 # "BLOCKING", mapped to their ASCII originals. Deliberately narrow — this is
@@ -1762,6 +1776,15 @@ _VETO_TRANSLATIONS = {
 _SPACE_THEN_LOW_LINE_RE = re.compile(r"[  ][̲̳]")
 
 
+def _veto_base(text: str, underscores: bool) -> str:
+    """*text* decomposed, stripped of marks and format characters, and
+    recomposed: everything the veto folds share, before a table is applied."""
+    if underscores:
+        text = _SPACE_THEN_LOW_LINE_RE.sub("_", text)
+    text = text.translate(_VETO_PRE_NFKC_TRANSLATION)
+    return unicodedata.normalize("NFKC", _strip_marks_and_format(unicodedata.normalize("NFKD", text)))
+
+
 def _fold_for_veto_scan(text: str, *, reading: str = "primary", underscores: bool = True) -> str:
     """*text* normalised for the veto scans.
 
@@ -1771,20 +1794,11 @@ def _fold_for_veto_scan(text: str, *, reading: str = "primary", underscores: boo
     which the bounded wildcard backstop then treats as an unknown character).
     *underscores* reads a space plus combining low line as ``_``.
     """
-    if underscores:
-        text = _SPACE_THEN_LOW_LINE_RE.sub("_", text)
-    text = text.translate(_VETO_PRE_NFKC_TRANSLATION)
-    decomposed = unicodedata.normalize("NFKD", text)
-    stripped = "".join(
-        ch
-        for ch in decomposed
-        if ch not in _ZERO_WIDTH_CHARS and unicodedata.category(ch) not in _STRIPPED_UNICODE_CATEGORIES
-    )
-    folded = unicodedata.normalize("NFKC", stripped).translate(_VETO_TRANSLATIONS[reading])
+    folded = _veto_base(text, underscores).translate(_VETO_TRANSLATIONS[reading])
     return _SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, folded)
 
 
-def _veto_scan_forms(text: str) -> tuple[str, ...]:
+def _veto_scan_forms_uncached(text: str) -> tuple[str, ...]:
     """Every form of *text* a veto scan looks at; a match in ANY of them counts.
 
     More than one form because no single normalisation is right for all
@@ -1793,12 +1807,48 @@ def _veto_scan_forms(text: str) -> tuple[str, ...]:
     readings, and an underscore stand-in is sometimes a space. Looking at the
     previous recogniser form and the bare NFKC form as well means a spelling
     that was detected before this fold existed is still detected.
+
+    Text that is pure ASCII once NFKC has run (the usual case, including
+    ligatures and width variants) has nothing for the wide fold to do: every
+    form is the NFKC text or its spaced-letter collapse, so only those two are
+    built. Otherwise the shared decomposition is done once per underscore
+    reading rather than once per form.
     """
-    forms = [_normalize_for_blocking_scan(text), unicodedata.normalize("NFKC", text)]
-    for reading in ("primary", "alternate", "keep"):
-        for underscores in (True, False):
-            forms.append(_fold_for_veto_scan(text, reading=reading, underscores=underscores))
+    nfkc = unicodedata.normalize("NFKC", text)
+    if nfkc.isascii():
+        return tuple(dict.fromkeys((_SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, nfkc), nfkc)))
+    forms = [_normalize_for_blocking_scan(text), nfkc]
+    bases = [_veto_base(text, True)]
+    if _SPACE_THEN_LOW_LINE_RE.search(text):
+        bases.append(_veto_base(text, False))
+    for base in bases:
+        for reading in ("primary", "alternate", "keep"):
+            forms.append(_SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, base.translate(_VETO_TRANSLATIONS[reading])))
     return tuple(dict.fromkeys(forms))
+
+
+_VETO_FORMS_CACHE: dict[str, tuple[str, ...]] = {}
+_VETO_FORMS_CACHE_SIZE = 4
+
+
+def _veto_scan_forms(text: str) -> tuple[str, ...]:
+    """`_veto_scan_forms_uncached`, remembered for the last few texts.
+
+    One reply is scanned by several predicates in a row (the verdict token, the
+    marker, the clearing check), each of which would otherwise normalise the
+    same text again.
+    """
+    cached = _VETO_FORMS_CACHE.get(text)
+    if cached is not None:
+        return cached
+    forms = _veto_scan_forms_uncached(text)
+    while len(_VETO_FORMS_CACHE) >= _VETO_FORMS_CACHE_SIZE:
+        try:
+            _VETO_FORMS_CACHE.pop(next(iter(_VETO_FORMS_CACHE)))
+        except (KeyError, StopIteration, RuntimeError):
+            break
+    _VETO_FORMS_CACHE[text] = forms
+    return forms
 
 
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
@@ -1878,15 +1928,36 @@ def _wildcard_token_hit(text: str, token: str, *, marker: bool = False) -> bool:
     token_chars = set(token.upper() + token.lower())
     if sum(text.count(ch) for ch in token_chars) < n - _WILDCARD_LIMIT:
         return False
-    seen: set[int] = set()
-    for m in _NON_ASCII_RE.finditer(text):
-        for start in range(max(0, m.start() - n + 1), min(m.start(), len(text) - n) + 1):
-            if start in seen:
-                continue
-            seen.add(start)
-            if _wildcard_window_matches(text, start, token, marker=marker):
-                return True
-    return False
+    # A window has at most two unknown characters, so its n - 2 or more exact
+    # letters form at most three runs and one of them is at least two letters
+    # long: some aligned pair of the token's letters appears in the text. Only
+    # windows around such a pair can match, which keeps the scan off the long
+    # stretches of non-ASCII text that have no ASCII letters in them at all.
+    pair_re, offsets = _wildcard_pairs(token)
+    starts: set[int] = set()
+    last = len(text) - n
+    for hit in pair_re.finditer(text):
+        for offset in offsets[hit.group(1).upper()]:
+            start = hit.start() - offset
+            if 0 <= start <= last:
+                starts.add(start)
+    return any(_wildcard_window_matches(text, start, token, marker=marker) for start in sorted(starts))
+
+
+_WILDCARD_PAIRS: dict[str, tuple["re.Pattern[str]", dict[str, list[int]]]] = {}
+
+
+def _wildcard_pairs(token: str) -> tuple["re.Pattern[str]", dict[str, list[int]]]:
+    """A pattern finding every (overlapping) pair of adjacent token letters, and
+    the offsets within *token* at which each pair occurs."""
+    cached = _WILDCARD_PAIRS.get(token)
+    if cached is None:
+        offsets: dict[str, list[int]] = {}
+        for k in range(len(token) - 1):
+            offsets.setdefault(token[k : k + 2].upper(), []).append(k)
+        pattern = re.compile("(?=(" + "|".join(re.escape(pair) for pair in offsets) + "))", re.I | re.A)
+        cached = _WILDCARD_PAIRS[token] = (pattern, offsets)
+    return cached
 
 
 def body_has_blocking_findings(body: str | None) -> bool:

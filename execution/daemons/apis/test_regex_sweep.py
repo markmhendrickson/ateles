@@ -101,6 +101,13 @@ def _dynamic_delivery_signatures(module):
     return [pattern for pattern, _ in module._DELIVERY_DENIAL_SIGNATURES]
 
 
+def _dynamic_wildcard_pairs(module):
+    return [
+        module._wildcard_pairs(token)[0].pattern
+        for token in (*module._BLOCKING_VERDICT_WORDS, "[BLOCKING]")
+    ]
+
+
 def _dynamic_lens_diff_patterns(module):
     from review_panel import LENSES
 
@@ -126,6 +133,7 @@ DYNAMIC_SITES = {
     ("swarm_dispatch", "_find_open_pr_for_issue"): _dynamic_pr_reference,
     ("skill_runner", "_delivery_failure_reasons"): _dynamic_delivery_signatures,
     ("approve_pr_as_app", "_why_lens_selected"): _dynamic_lens_diff_patterns,
+    ("swarm_dispatch", "_wildcard_pairs"): _dynamic_wildcard_pairs,
 }
 
 
@@ -1042,3 +1050,43 @@ def test_mark_strip_helper_matches_the_per_character_strip():
             and unicodedata.category(ch) not in sd._STRIPPED_UNICODE_CATEGORIES
         )
         assert sd._strip_marks_and_format(decomposed) == expected, text
+
+
+def _reference_wildcard_hit(text, token, marker):
+    """FROZEN COPY of the wildcard scan before it looked only at windows around
+    an aligned pair of the token's letters: every window around a non-ASCII
+    character is tried."""
+    sd = swarm_dispatch
+    n = len(token)
+    if len(text) < n or not sd._NON_ASCII_RE.search(text):
+        return False
+    seen = set()
+    for m in sd._NON_ASCII_RE.finditer(text):
+        for start in range(
+            max(0, m.start() - n + 1), min(m.start(), len(text) - n) + 1
+        ):
+            if start in seen:
+                continue
+            seen.add(start)
+            if sd._wildcard_window_matches(text, start, token, marker=marker):
+                return True
+    return False
+
+
+def test_pair_anchored_wildcard_scan_agrees_with_trying_every_window():
+    tokens_by_scan = [(word, False) for word in swarm_dispatch._BLOCKING_VERDICT_WORDS]
+    tokens_by_scan.append(("[BLOCKING]", True))
+    alphabet = [
+        "BLOCKED", "BLOCK", "ED", "BL", "REQUEST_CHANGES", "CHANGES_REQUESTED", "_",
+        "[BLOCKING]", "BLOCKING", "[", "]", "NON-", "NON", "-", "**", " ", "\n",
+        "a", "e", "b", "o", "\u0416", "\u03a9", "\u2212", "\u0392", "\u2581", "x",
+    ]  # fmt: skip
+    seen_hit = seen_miss = 0
+    for text in _strings(alphabet, 31, longest=8):
+        for token, marker in tokens_by_scan:
+            got = swarm_dispatch._wildcard_token_hit(text, token, marker=marker)
+            want = _reference_wildcard_hit(text, token, marker)
+            assert got == want, (text, token)
+            seen_hit += got
+            seen_miss += not got
+    assert seen_hit > 100 and seen_miss > 100  # both outcomes are exercised
