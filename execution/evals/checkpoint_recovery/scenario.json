@@ -4,12 +4,57 @@
   "tenant": "tenant-a",
   "page_size": 2,
   "tasks": [
-    {"id": "ent_task_held_plain", "status": "awaiting_approval", "title": "Held with no checkpoint"},
-    {"id": "ent_task_held_legacy", "status": "awaiting_approval", "title": "Held with a pre-signing checkpoint", "legacy_checkpoints": ["ent_legacy_held"]},
-    {"id": "ent_task_twin_a", "status": "awaiting_approval", "title": "Two tasks, one title"},
-    {"id": "ent_task_twin_b", "status": "awaiting_approval", "title": "Two tasks, one title"},
-    {"id": "ent_task_held_last", "status": "awaiting_approval", "title": "Held, on the last page"},
-    {"id": "ent_task_done", "status": "done", "title": "Finished work", "legacy_checkpoints": ["ent_legacy_done"]},
-    {"id": "ent_task_declined", "status": "declined", "title": "Declined work"}
+    {
+      "id": "ent_task_held_plain",
+      "status": "awaiting_approval",
+      "title": "Held with no checkpoint"
+    },
+    {
+      "id": "ent_task_held_legacy",
+      "status": "awaiting_approval",
+      "title": "Held with a pre-signing checkpoint",
+      "legacy_checkpoints": [
+        "ent_legacy_held"
+      ]
+    },
+    {
+      "id": "ent_task_twin_a",
+      "status": "awaiting_approval",
+      "title": "Two tasks, one title"
+    },
+    {
+      "id": "ent_task_twin_b",
+      "status": "awaiting_approval",
+      "title": "Two tasks, one title"
+    },
+    {
+      "id": "ent_task_held_last",
+      "status": "awaiting_approval",
+      "title": "Held, on the last page"
+    },
+    {
+      "id": "ent_task_auto",
+      "status": "awaiting_approval",
+      "title": "Held though the gate would now let it through",
+      "confidence": 0.99
+    },
+    {
+      "id": "ent_task_reject",
+      "status": "awaiting_approval",
+      "title": "Held and to be rejected"
+    },
+    {
+      "id": "ent_task_done",
+      "status": "done",
+      "title": "Finished work",
+      "legacy_checkpoints": [
+        "ent_legacy_done"
+      ]
+    },
+    {
+      "id": "ent_task_declined",
+      "status": "declined",
+      "title": "Declined work"
+    }
   ]
 }

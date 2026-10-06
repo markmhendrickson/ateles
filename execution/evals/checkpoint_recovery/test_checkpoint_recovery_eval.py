@@ -1,139 +1,26 @@
 """Scenario eval: recovering held tasks into resolvable checkpoints.
 
-Drives the real recovery command (``reissue_held_checkpoints.main``) and the
-real signed checkpoint writer against a stateful record stand-in
-(``fake_neotoma.py``) that enforces the producer's grant, idempotency-key reuse,
-and title-keyed identity.  The scenario file declares the population; every
-assertion is about the resulting state of tasks and checkpoints, not about which
-functions ran.
-
-Each test names the behavior whose removal turns it red:
-* dry run performs zero writes;
-* applying leaves each held task held, with exactly one authenticated pending
-  checkpoint, and writes no relationship on any identity;
-* an exact replay creates nothing;
-* a changed task keeps one resolvable current checkpoint;
-* a failed persistence retires nothing;
-* finished tasks are untouched;
-* paging reaches every held task, and read failures are reported distinctly.
+See ``harness.py`` for the stand-in and fixtures.  Each test names the behavior
+whose removal turns it red.
 """
 
 from __future__ import annotations
 
-import base64
-import importlib.util
-import json
-import sys
-import types
-from pathlib import Path
+import pytest  # noqa: F401
 
-import pytest
-
-HERE = Path(__file__).resolve().parent
-REPO = HERE.parent.parent.parent
-sys.path.insert(0, str(REPO / "execution" / "daemons" / "apis"))
-sys.path.insert(0, str(REPO / "execution" / "mcp" / "ateles"))
-sys.path.insert(0, str(HERE))
-
-# The daemon test lane does not install the MCP SDK; the checkpoint authority
-# read exercised below is a plain function in server.py.
-if importlib.util.find_spec("mcp") is None:
-    _shapes = {
-        "mcp": types.ModuleType("mcp"),
-        "mcp.server": types.ModuleType("mcp.server"),
-        "mcp.server.stdio": types.ModuleType("mcp.server.stdio"),
-        "mcp.types": types.ModuleType("mcp.types"),
-    }
-
-    class _Shape:
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
-
-    _shapes["mcp.server"].Server = _Shape
-    _shapes["mcp.server.stdio"].stdio_server = None
-    _shapes["mcp.types"].TextContent = _Shape
-    _shapes["mcp.types"].Tool = _Shape
-    sys.modules.update(_shapes)
-
-import apis  # noqa: E402
-import reissue_held_checkpoints as cli  # noqa: E402
-import server  # noqa: E402
-from fake_neotoma import CHECKPOINT, FakeNeotoma  # noqa: E402
-from lib.daemon_runtime import gating  # noqa: E402
-from lib.daemon_runtime.aauth_httpsig import HttpSigSigner  # noqa: E402
-from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
-
-SCENARIO = json.loads((HERE / "scenario.json").read_text())
-HELD = [t["id"] for t in SCENARIO["tasks"] if t["status"] == "awaiting_approval"]
-FINISHED = [t["id"] for t in SCENARIO["tasks"] if t["status"] != "awaiting_approval"]
-
-
-def _signer() -> HttpSigSigner:
-    from cryptography.hazmat.primitives.asymmetric import ec
-
-    private = ec.generate_private_key(ec.SECP256R1()).private_numbers()
-
-    def b64u(value: int) -> str:
-        return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode()
-
-    return HttpSigSigner(
-        private_jwk={
-            "kty": "EC",
-            "crv": "P-256",
-            "d": b64u(private.private_value),
-            "x": b64u(private.public_numbers.x),
-            "y": b64u(private.public_numbers.y),
-            "sub": "apis@ateles-swarm",
-            "kid": "eval-apis-key",
-        },
-        sub="apis@ateles-swarm",
-        iss="https://markmhendrickson.com",
-        kid="eval-apis-key",
-    )
-
-
-@pytest.fixture
-def world(monkeypatch):
-    signer = _signer()
-    fake = FakeNeotoma(SCENARIO, signer.thumbprint)
-    monkeypatch.setattr(gating, "NEOTOMA_BASE_URL", "https://neotoma.test")
-    monkeypatch.setattr(gating, "NEOTOMA_BEARER_TOKEN", "eval-token")
-    monkeypatch.setattr(gating, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
-    monkeypatch.setattr(gating, "CHECKPOINT_PRODUCER_JKT", signer.thumbprint)
-    monkeypatch.setattr(
-        gating, "_checkpoint_producer_http_signer", lambda handler: signer
-    )
-    monkeypatch.setattr(gating.httpx, "post", fake.post)
-    monkeypatch.setattr(gating.httpx, "get", fake.get)
-    policy = ExecutionPolicy(
-        entity_id="policy",
-        low_blast_action_types=frozenset({"local_edit"}),
-        high_blast_action_types=frozenset(),
-        loaded=True,
-    )
-    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _skill: policy)
-    return fake
-
-
-def run(monkeypatch, capsys, *argv) -> tuple[int, list[dict]]:
-    monkeypatch.setattr(sys, "argv", ["reissue_held_checkpoints.py", *argv])
-    code = cli.main()
-    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
-    return code, lines
-
-
-def outcomes(lines) -> dict[str, str]:
-    return {line["task_id"]: line["outcome"] for line in lines if "task_id" in line}
-
-
-def resolvable(world, task_id) -> list[str]:
-    """Pending checkpoints whose authority the resolver surface will accept."""
-    found = []
-    for checkpoint_id in world.pending_checkpoints(task_id):
-        record = world.record(checkpoint_id)
-        if gating.read_authenticated_checkpoint_authorization(checkpoint_id, record):
-            found.append(checkpoint_id)
-    return found
+from harness import (  # noqa: F401
+    CHECKPOINT,
+    FINISHED,
+    HELD,
+    SCENARIO,
+    apis,
+    cli,
+    gating,
+    outcomes,
+    resolvable,
+    run,
+    server,
+)
 
 
 def test_dry_run_performs_zero_writes(world, monkeypatch, capsys):

@@ -17,9 +17,20 @@ from __future__ import annotations
 
 import argparse
 import collections
+import itertools
 import json
 
 from apis import iter_held_task_ids, reissue_held_task_checkpoint
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer (1 or more)")
+    return number
 
 
 def main() -> int:
@@ -36,11 +47,21 @@ def main() -> int:
         metavar="TASK_ID",
         help="restrict to these task ids (repeatable); default: every held task",
     )
-    parser.add_argument("--limit", type=int, default=None, help="stop after N tasks")
+    parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "examine at most N tasks, whether they are named with --task or "
+            "enumerated; must be a positive integer"
+        ),
+    )
     args = parser.parse_args()
 
-    task_ids = (
-        args.task[: args.limit] if args.task else iter_held_task_ids(limit=args.limit)
+    # One meaning for --limit in both modes: the first N tasks, in order.
+    task_ids = itertools.islice(
+        args.task if args.task else iter_held_task_ids(), args.limit
     )
     counts: collections.Counter[str] = collections.Counter()
     enumeration_error: str | None = None

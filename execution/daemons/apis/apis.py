@@ -2072,6 +2072,20 @@ def _require_fresh_release_authority(
         task_snapshot=task_snapshot,
         notifier=notifier,
     )
+    if replacement_id == checkpoint_id:
+        # Never retire the brief that is itself the replacement: that would
+        # leave the task with no resolvable checkpoint at all.
+        log.error(
+            f"[{DAEMON_NAME}] replacement for checkpoint {checkpoint_id} resolved "
+            "to the same entity — not retiring it"
+        )
+        notifier.send(
+            f"Fresh checkpoint for task {task_id} resolved to the checkpoint it "
+            "was meant to replace; it was not retired and no work was released",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+        return None
     if not replacement_id:
         notifier.send(
             f"Fresh checkpoint for changed task {task_id} could not be persisted; "
@@ -2343,6 +2357,8 @@ def iter_held_task_ids(*, limit: int | None = None):
     Raises ``RuntimeError`` on a failed page: a truncated enumeration read as
     complete would report a partial recovery as a whole one.
     """
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be a positive integer")
     cursor: str | None = None
     yielded = 0
     while True:
@@ -2365,6 +2381,29 @@ def iter_held_task_ids(*, limit: int | None = None):
         cursor = page.get("next_cursor")
         if not cursor:
             return
+
+
+def _decision_consistent_with_approval(
+    current_decision: GateDecision, *, gate_action: str, blast_radius: str
+) -> bool:
+    """Whether the gate's decision NOW is compatible with an approved checkpoint.
+
+    Blast radius must match exactly, and so must a checkpoint-requiring action.
+    One case also matches: the gate now permits automatic execution of an action
+    whose approval was requested.  That happens by construction when a
+    replacement checkpoint is filed for a task the gate would let through
+    (creation turns AUTO_EXECUTE into CHECKPOINT so the operator still decides),
+    and an explicit, authenticated approval of the exact task revision, policy
+    revision and action is stronger than the automatic permission, not weaker.
+    A decision that is stricter now (NEVER, or a different blast radius) never
+    matches, and every revision, tenant and approver check is unchanged.
+    """
+    if current_decision.blast_radius.value != blast_radius:
+        return False
+    return (
+        current_decision.action.value == gate_action
+        or current_decision.action == GateAction.AUTO_EXECUTE
+    )
 
 
 async def handle_checkpoint_brief(
@@ -2610,8 +2649,9 @@ async def handle_checkpoint_brief(
         == execution_policy_revision(current_policy)
         and authorization.get("gate_action") == gate_action
         and authorization.get("blast_radius") == blast_radius
-        and current_decision.action.value == gate_action
-        and current_decision.blast_radius.value == blast_radius
+        and _decision_consistent_with_approval(
+            current_decision, gate_action=gate_action, blast_radius=blast_radius
+        )
     )
     if not exact_authority:
         _require_fresh_release_authority(

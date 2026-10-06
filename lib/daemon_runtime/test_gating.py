@@ -1706,3 +1706,19 @@ def test_legacy_bearer_checkpoint_keeps_its_edge_in_the_same_request(monkeypatch
         == "ent_cp"
     )
     assert posted[0]["relationships"][0]["target_entity_id"] == "ent_task"
+
+
+def test_identical_replacement_content_is_still_a_distinct_checkpoint(monkeypatch):
+    """A fresh checkpoint for an unchanged task has the same content as the one
+    it replaces; its replacement context alone must make it a different entity,
+    or retiring the prior brief retires the replacement."""
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    prior = _hold(idempotency_context="fresh-prior")
+    replacement = _hold(idempotency_context="fresh-replaces-prior")
+
+    assert prior != replacement
+    assert set(server.entities) == {prior, replacement}
+    # An exact retry of the replacement is the same entity.
+    assert _hold(idempotency_context="fresh-replaces-prior") == replacement
+    assert len(server.entities) == 2

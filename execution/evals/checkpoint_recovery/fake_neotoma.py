@@ -39,6 +39,7 @@ class FakeNeotoma:
         self.fail_query = False
         self.fail_query_types: set[str] = set()
         self.fail_correct_ids: set[str] = set()
+        self.correction_keys: set[str] = set()
         self._obs = 0
         for task in scenario["tasks"]:
             self._put(
@@ -49,7 +50,7 @@ class FakeNeotoma:
                     "status": task["status"],
                     "assigned_to": "cicada",
                     "action_type": "local_edit",
-                    "confidence": 0.3,
+                    "confidence": task.get("confidence", 0.3),
                 },
                 signed=False,
             )
@@ -66,7 +67,7 @@ class FakeNeotoma:
                 )
 
     # -- state ---------------------------------------------------------------
-    def _put(self, entity_id, entity_type, fields, *, signed, agent=None):
+    def _put(self, entity_id, entity_type, fields, *, signed, attribution=None):
         self._obs += 1
         obs_id = f"obs-{self._obs}"
         entity = self.entities.setdefault(
@@ -81,7 +82,7 @@ class FakeNeotoma:
         entity["fields"].update(fields)
         for field in fields:
             entity["provenance"][field] = obs_id
-        provenance = (
+        provenance = attribution or (
             {
                 "agent_sub": "apis@ateles-swarm",
                 "agent_thumbprint": self.producer_jkt,
@@ -132,6 +133,40 @@ class FakeNeotoma:
     def _response(status: int, payload: dict, url: str = "https://neotoma.test/x"):
         return httpx.Response(status, json=payload, request=httpx.Request("POST", url))
 
+    def request(self, method, url, **kwargs):
+        """The MCP server's transport (``httpx.request``)."""
+        if method.upper() == "GET":
+            return self.get(url, **kwargs)
+        return self.post(url, **kwargs)
+
+    @staticmethod
+    def _signed_identity(headers: dict) -> dict | None:
+        """The identity Neotoma would record for a signed request.
+
+        The real server verifies the signature and records who signed; this
+        reads the agent token's own claims, checking the token verifies against
+        the key it carries.  (The MCP resolve path additionally verifies the
+        full request signature and pins before it forwards anything.)
+        """
+        import re
+
+        import jwt
+
+        match = re.search(r'jwt="([^"\s]+)"', headers.get("signature-key", ""))
+        if not match:
+            return None
+        token = match.group(1)
+        unverified = jwt.decode(token, options={"verify_signature": False})
+        key = jwt.PyJWK.from_dict(unverified["cnf"]["jwk"]).key
+        claims = jwt.decode(
+            token, key, algorithms=["ES256"], options={"verify_aud": False}
+        )
+        return {
+            "agent_sub": claims["sub"],
+            "agent_thumbprint": claims["jkt"],
+            "attribution_tier": "software",
+        }
+
     def get(self, url, **kwargs):
         path = url.split("neotoma.test", 1)[-1] if "neotoma.test" in url else url
         parts = [p for p in path.split("/") if p]
@@ -165,7 +200,7 @@ class FakeNeotoma:
         if url.endswith("/entities/query"):
             return self._query(body, url)
         if url.endswith("/correct"):
-            return self._correct(body, url)
+            return self._correct(body, url, headers)
         if url.endswith("/store"):
             return self._store(body, signed, url)
         return self._response(404, {"error_code": "NOT_FOUND"}, url)
@@ -203,18 +238,28 @@ class FakeNeotoma:
             url,
         )
 
-    def _correct(self, body, url):
+    def _correct(self, body, url, headers=None):
         entity_id = body["entity_id"]
         if entity_id in self.fail_correct_ids or entity_id not in self.entities:
             return self._response(500, {"error_code": "DB_QUERY_FAILED"}, url)
+        key = body.get("idempotency_key")
+        if key in self.correction_keys:
+            # Neotoma's idempotent duplicate path: accepted, nothing written,
+            # and no snapshot returned, so the caller did not acquire a claim.
+            return self._response(200, {"snapshot": None}, url)
+        self.correction_keys.add(key)
         self.write_log.append(f"correct {entity_id}.{body['field']}={body['value']}")
+        attribution = self._signed_identity(headers or {}) if headers else None
         self._put(
             entity_id,
             self.entities[entity_id]["type"],
             {body["field"]: body["value"]},
             signed=False,
+            attribution=attribution,
         )
-        return self._response(200, {"success": True}, url)
+        return self._response(
+            200, {"snapshot": dict(self.entities[entity_id]["fields"])}, url
+        )
 
     def _store(self, body, signed, url):
         if self.fail_store:

@@ -990,8 +990,17 @@ def write_checkpoint_brief(
     # per-hold: an exact retry keeps it (same entity), a changed hold gets a
     # new one (a distinct checkpoint), and earlier holds are preserved.
     _entity = body["entities"][0]
+    # The replacement context (which brief a fresh checkpoint replaces) is part
+    # of the identity: a replacement whose content is otherwise identical to the
+    # brief it replaces must still be a different entity, or retiring the prior
+    # brief would retire the replacement.
     _hold_identity = hashlib.sha256(
-        _canonical_json({k: v for k, v in _entity.items() if k != "title"}).encode()
+        _canonical_json(
+            {
+                "entity": {k: v for k, v in _entity.items() if k != "title"},
+                "context": idempotency_context or "",
+            }
+        ).encode()
     ).hexdigest()[:12]
     _entity["title"] = f"{_entity['title']} #{_hold_identity}"
     # Neotoma refuses an idempotency key reused with different content (HTTP

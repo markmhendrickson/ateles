@@ -15,6 +15,7 @@ the first test fails on ``failed``.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -377,3 +378,160 @@ def test_cli_empty_successful_enumeration_is_distinguishable(monkeypatch, capsys
 
     assert _run_cli(monkeypatch) == 0
     assert '"examined": 0' in capsys.readouterr().out
+
+
+# ── replacement retirement and release consistency ─────────────────────────
+
+
+def test_fresh_release_authority_never_retires_the_replacement_itself(monkeypatch):
+    retired: list[str] = []
+    monkeypatch.setattr(apis, "_file_fresh_checkpoint", lambda **_kw: "ent_same")
+    monkeypatch.setattr(
+        apis,
+        "require_fresh_checkpoint_approval",
+        lambda checkpoint_id, **_kw: retired.append(checkpoint_id) or True,
+    )
+
+    class _N:
+        sent: list = []
+
+        def send(self, *a, **k):
+            self.sent.append(a)
+
+    result = apis._require_fresh_release_authority(
+        "ent_same", task_id="ent_t1", task_snapshot={}, notifier=_N(), reason="x"
+    )
+
+    assert result is None
+    assert retired == [], "the replacement must not be retired as the brief it replaces"
+
+
+def test_a_distinct_replacement_still_retires_the_prior_brief(monkeypatch):
+    retired: list[str] = []
+    monkeypatch.setattr(apis, "_file_fresh_checkpoint", lambda **_kw: "ent_new")
+    monkeypatch.setattr(
+        apis,
+        "require_fresh_checkpoint_approval",
+        lambda checkpoint_id, **_kw: retired.append(checkpoint_id) or True,
+    )
+
+    class _N:
+        def send(self, *a, **k):
+            pass
+
+    result = apis._require_fresh_release_authority(
+        "ent_old", task_id="ent_t1", task_snapshot={}, notifier=_N(), reason="x"
+    )
+
+    assert result == "ent_new"
+    assert retired == ["ent_old"]
+
+
+@pytest.mark.parametrize(
+    "now_action,now_blast,approved_action,approved_blast,expected",
+    [
+        # Same decision: consistent.
+        ("checkpoint_plan_approval", "low", "checkpoint_plan_approval", "low", True),
+        # The gate would now let it through: an explicit approval still stands.
+        ("auto_execute", "low", "checkpoint_plan_approval", "low", True),
+        # Stricter now, or a different blast radius: never consistent.
+        ("checkpoint_plan_approval", "never", "checkpoint_plan_approval", "low", False),
+        ("auto_execute", "high", "checkpoint_plan_approval", "low", False),
+        ("checkpoint_plan_approval", "high", "checkpoint_plan_approval", "low", False),
+    ],
+)
+def test_release_consistency_with_the_creation_decision(
+    now_action, now_blast, approved_action, approved_blast, expected
+):
+    from lib.daemon_runtime.gating import BlastRadius, GateAction, GateDecision
+
+    decision = GateDecision(
+        action=GateAction(now_action),
+        blast_radius=BlastRadius(now_blast),
+        confidence=0.9,
+        threshold=0.85,
+        policy_id="p",
+        reason="r",
+    )
+
+    assert (
+        apis._decision_consistent_with_approval(
+            decision, gate_action=approved_action, blast_radius=approved_blast
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "-5", "abc", "1.5"])
+@pytest.mark.parametrize("apply_flag", [[], ["--apply"]])
+@pytest.mark.parametrize("selection", [[], ["--task", "ent_t1"]])
+def test_cli_limit_must_be_a_positive_integer_before_any_recovery_call(
+    record, monkeypatch, capsys, bad, apply_flag, selection
+):
+    record.add_task("ent_t1")
+    called: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "reissue_held_task_checkpoint",
+        lambda task_id, **_kw: called.append(task_id),
+    )
+    monkeypatch.setattr(
+        cli, "iter_held_task_ids", lambda **_kw: called.append("enumerated") or iter([])
+    )
+    monkeypatch.setattr(sys, "argv", ["x", "--limit", bad, *apply_flag, *selection])
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 2
+    assert called == [], "no recovery call is made for an invalid --limit"
+    assert record.writes == 0
+    err = capsys.readouterr().err
+    assert "positive integer" in err or "not an integer" in err
+
+
+@pytest.mark.parametrize("apply_flag", [[], ["--apply"]])
+def test_cli_limit_means_the_first_n_tasks_in_both_selection_modes(
+    record, monkeypatch, capsys, apply_flag
+):
+    for task_id in ("ent_a", "ent_b", "ent_c"):
+        record.add_task(task_id)
+    monkeypatch.setattr(
+        apis,
+        "query_entities",
+        lambda *_a, **_k: {
+            "entities": [{"entity_id": i} for i in ("ent_a", "ent_b", "ent_c")],
+            "next_cursor": None,
+        },
+    )
+
+    assert _run_cli(monkeypatch, "--limit", "2", *apply_flag) == 0
+    enumerated = [
+        json.loads(line)["task_id"]
+        for line in capsys.readouterr().out.splitlines()
+        if '"task_id"' in line
+    ]
+    assert enumerated == ["ent_a", "ent_b"]
+
+    assert (
+        _run_cli(
+            monkeypatch,
+            "--limit",
+            "2",
+            *apply_flag,
+            *[a for t in ("ent_a", "ent_b", "ent_c") for a in ("--task", t)],
+        )
+        == 0
+    )
+    named = [
+        json.loads(line)["task_id"]
+        for line in capsys.readouterr().out.splitlines()
+        if '"task_id"' in line
+    ]
+    assert named == ["ent_a", "ent_b"]
+
+
+def test_iter_held_task_ids_rejects_a_non_positive_limit():
+    for bad in (0, -1):
+        with pytest.raises(ValueError):
+            list(apis.iter_held_task_ids(limit=bad))
