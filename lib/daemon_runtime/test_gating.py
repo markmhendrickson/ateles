@@ -106,6 +106,21 @@ def test_unrecognized_action_type_never_auto_executes(caplog):
     assert d.action == GateAction.CHECKPOINT
 
 
+def test_unrecognized_declared_action_is_not_reported_as_operator_only():
+    """Failing closed must not fabricate human-only intent (ateles#1067)."""
+    d = evaluate_gate(confidence=0.99, action_type="code_change", policy=_default())
+    assert d.blast_radius == BlastRadius.NEVER
+    assert d.action == GateAction.CHECKPOINT
+    assert "unrecognized declared action type 'code_change'" in d.reason
+    assert "operator-only" not in d.reason
+
+
+def test_operator_only_keeps_its_distinct_reason():
+    d = evaluate_gate(confidence=0.99, action_type="operator_only", policy=_default())
+    assert d.blast_radius == BlastRadius.NEVER
+    assert "operator-only action" in d.reason
+
+
 def test_unrecognized_action_type_warns_by_name(caplog):
     """The fallthrough must be loud, naming the value, so a missing
     classification is visible rather than silently permissive."""
