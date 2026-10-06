@@ -1153,8 +1153,12 @@ def lens_own_verdict(stdout: str | None, *, lens_agent: str) -> str | None:
     for i, (line, _) in enumerate(lines):
         if i == verdict_at:
             continue
-        body = _LINE_DECORATION_RE.sub("", _normalize_for_blocking_scan(line))
-        if _VERDICT_LIKE_RE.match(body):
+        # A veto scan: a look-alike spelling of a verdict token still counts
+        # as a second verdict line (the recognisers above stay narrow).
+        if any(
+            _VERDICT_LIKE_RE.match(_LINE_DECORATION_RE.sub("", form))
+            for form in _veto_scan_forms(line)
+        ):
             return None
     return verdict.group(1).lower()
 
@@ -1166,14 +1170,20 @@ def output_has_blocking_verdict(stdout: str | None) -> bool:
     (`REQUEST_CHANGES`). A quotation of another lens's or an earlier round's
     blocking verdict counts: this predicate cannot tell a quote from a
     verdict, so it treats both as "not clear" (principles §§5 and 7). The text
-    is normalized the way `body_has_blocking_findings` normalizes it before
-    matching.
+    is scanned in every form `_veto_scan_forms` produces, widened by the
+    look-alike fold, and then by `_wildcard_token_hit` for a token with up to
+    two unknown characters in it.
     """
     if not stdout:
         return False
-    text = _normalize_for_blocking_scan(stdout)
-    return bool(
+    forms = _veto_scan_forms(stdout)
+    if any(
         _BLOCKING_VERDICT_BOLD_RE.search(text) or _BLOCKING_VERDICT_BARE_RE.search(text)
+        for text in forms
+    ):
+        return True
+    return any(
+        _wildcard_token_hit(text, word) for text in forms for word in _BLOCKING_VERDICT_WORDS
     )
 
 
@@ -1372,15 +1382,11 @@ def _normalize_for_blocking_scan(text: str) -> str:
          character that still follows it, and step 2 already removed every
          such character. It only normalizes width/compatibility variants that
          survived decomposition unmarked.
-      4. A confusables table, derived at import from Unicode character names
-         (`_derive_confusable_table`), maps the Greek and Cyrillic look-alikes
-         of Latin letters, and the Latin small capitals, to their ASCII
-         originals — for every Latin letter, not only those in `BLOCKING`,
-         since the verdict tokens need `D`, `E`, `Q`, `S`, `T`, ... too. This
-         closes the homoglyph form Falco's finding named as a PLAUSIBLE miss.
-         Letters with no Latin twin are left alone, so ordinary Greek and
-         Cyrillic prose never folds into a token. Runs after recomposition so
-         it sees single code points, matching the table's keys.
+      4. A small confusables table maps the Cyrillic/Greek look-alikes of the
+         ASCII letters in `BLOCKING` (e.g. Cyrillic `І` U+0406, `В` U+0412) to
+         their ASCII originals, closing the homoglyph form Falco's finding
+         named as a PLAUSIBLE miss. Runs after recomposition so it sees single
+         code points, matching the table's keys.
       5. Runs of plain spaces inside an otherwise-bracketed token are collapsed
          (`[ B L O C K I N G ]` -> `[BLOCKING]`) so a spaced-out rendering does
          not evade the marker either. This must run last: it operates on the
@@ -1437,22 +1443,75 @@ _ZERO_WIDTH_CHARS = frozenset(
 #        that could be spliced onto or decomposed out of a letter.
 _STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn", "Mc", "Me"})
 
-# Look-alike letters from other scripts, folded to the Latin letter they are
-# drawn like (principles.md, principle 5: fail closed on the field that carries
-# the safety meaning). The scan looks for ASCII tokens, so one swapped letter
-# would otherwise read as clean.
+# Common Cyrillic/Greek confusables of the ASCII letters appearing in
+# "BLOCKING", mapped to their ASCII originals. Deliberately narrow — this is
+# NOT a general confusables table (Unicode TR39 has thousands of entries);
+# it covers exactly the letters `_BLOCKING_MARKER_RE` needs, both cases, so an
+# attacker cannot swap one letter in the token for a visually-identical
+# Cyrillic/Greek one and have it read as clean. Extend this table, never add a
+# second one, if another marker needs the same treatment.
 #
-# The mapping is DERIVED at import time from Unicode character names, not typed
-# as a list of characters: a hand list always misses a letter (this one missed
-# Greek Beta and Omicron, Cyrillic Ie and the small-capital D). What is written
-# here is only the judgement of which letter NAMES look like which Latin
-# letter; each name is resolved with `unicodedata.lookup`, so the code points
-# come from the Unicode data the interpreter ships.
+# This table is now FROZEN to the header and verdict-line RECOGNISERS (see
+# `_normalize_for_blocking_scan`): widening it would let a look-alike spelling
+# of a clearing token or an agent name read as the real thing. The veto scans
+# use the much wider `_VETO_CONFUSABLE_TO_ASCII` below; extend THAT one.
+_CONFUSABLE_TO_ASCII: dict[str, str] = {
+    # Cyrillic
+    "В": "B", "в": "b",  # U+0412 / U+0432 (Cyrillic VE)
+    "Ｂ": "B",  # defensive: NFKC already folds fullwidth, kept for clarity
+    "О": "O", "о": "o",  # U+041E / U+043E (Cyrillic O) — visually identical to Latin O
+    "С": "C", "с": "c",  # U+0421 / U+0441 (Cyrillic ES)
+    "К": "K", "к": "k",  # U+041A / U+043A (Cyrillic KA)
+    "І": "I", "і": "i",  # U+0406 / U+0456 (Ukrainian/Belarusian I) — Falco's named example
+    "Ι": "I", "ι": "i",  # U+0399 / U+03B9 (Greek Iota)
+    "Ⲛ": "N",  # U+2C9B (Coptic Capital N) — visually identical to Latin N
+    "Ν": "N", "ν": "n",  # U+039D / U+03BD (Greek Nu) — visually identical to Latin N
+    "Ԍ": "G",  # U+0524 (Cyrillic Komi Ge) — visually close to Latin G
+    "Ꮐ": "G",  # U+13C8 (Cherokee Nah) — visually close to Latin G in some fonts
+    # No entry for "L": no common single-codepoint Cyrillic/Greek confusable
+    # reads as a bare Latin "L" (deliberately considered and excluded, not an
+    # oversight).
+}
+_CONFUSABLE_TRANSLATION = str.maketrans(_CONFUSABLE_TO_ASCII)
+
+# A run of single characters separated by plain ASCII spaces, inside brackets
+# — `[B L O C K I N G]` or `[ BLOCKING ]`. Collapsing interior spaces (but
+# never touching text outside a bracketed run) closes the "spaced letters"
+# evasion Falco's finding raised as plausible, without turning unrelated
+# bracketed prose into a false match (the collapsed text still has to satisfy
+# `_BLOCKING_MARKER_RE` afterwards).
+_SPACED_LETTER_RUN_RE = re.compile(r"\[(?:\s*[A-Za-z\-]\s*){2,}\]")
+
+
+def _collapse_spaced_run(match: "re.Match[str]") -> str:
+    return "[" + re.sub(r"\s+", "", match.group(0)[1:-1]) + "]"
+
+
+# ── Scan-side fold: look-alike letters for the veto scans ────────────────────
 #
-# Folding is by script, and only for letters that are genuinely drawn like a
-# Latin letter. A Greek or Cyrillic letter with no Latin twin (`Δ`, `Ж`, ...)
-# is left alone, so ordinary prose in those scripts still contains no Latin
-# token after the fold; the table is not a general TR39 skeleton.
+# `_normalize_for_blocking_scan` above is the normalisation the header and
+# verdict-line RECOGNISERS use, with the small frozen table above. It stays
+# narrow on purpose: a recogniser that read a look-alike spelling of a clearing
+# token or an agent name as the real thing would clear a gate on text no human
+# wrote that way, so a look-alike in a clearing position must stay unreadable.
+#
+# The VETO scans (a blocking verdict token, the `[BLOCKING]` marker, a second
+# verdict line) fail the other way: they must see a blocking token however it
+# is spelled (principles.md, principle 5: fail closed on the field that carries
+# the safety meaning). They therefore fold much more widely, using the table
+# below, and look at several forms of the text, any one of which may match.
+#
+# The table is DERIVED at import time from Unicode character names, not typed
+# as a list of characters: a hand list always misses a letter. What is written
+# here is only the judgement of which NAMES look like which Latin letter; each
+# name is resolved with `unicodedata.lookup`. Extend this table, never add a
+# second one, if another marker needs the same treatment.
+#
+# Folding is by script, and only for letters genuinely drawn like a Latin
+# letter. A Greek or Cyrillic letter with no Latin twin (`Δ`, `Ж`, ...) is left
+# alone, so ordinary prose in those scripts contains no Latin token after the
+# fold; this is not a general TR39 skeleton. What a table cannot know is caught
+# by `_wildcard_token_hit`, the bounded backstop below.
 #
 # letter name -> (upper-case Latin letter or None, lower-case or None)
 _GREEK_LOOK_ALIKES: dict[str, tuple[str | None, str | None]] = {
@@ -1492,69 +1551,310 @@ _CYRILLIC_LOOK_ALIKES: dict[str, tuple[str | None, str | None]] = {
     "WE": ("W", "w"),
     "SHHA": ("H", "h"),
 }
-# Whole character names whose Latin twin is not a plain upper/lower pair.
-# Small capitals are folded to the UPPER-case letter they are drawn as, which
-# is also what the bare verdict tokens are matched against. The palochka is
-# drawn as a bare vertical stroke and is the only non-Latin stand-in for `L`.
+# Whole character names with one obvious Latin twin. Reviewed by hand, because
+# the names of these scripts' letters (Cherokee, Lisu and Coptic syllables, ...)
+# say nothing about how they are drawn. Small capitals are folded to the
+# UPPER-case letter they are drawn as, which is also what the bare verdict
+# tokens are matched against. Letters of these scripts that are not listed are
+# left to the bounded wildcard backstop.
 _OTHER_LOOK_ALIKE_NAMES: dict[str, str] = {
+    # Greek: the lunate sigma is drawn as `C`; NFKC rewrites it to sigma first,
+    # so these are folded BEFORE NFKC (see `_derive_confusable_tables`).
+    "GREEK CAPITAL LUNATE SIGMA SYMBOL": "C",
+    "GREEK LUNATE SIGMA SYMBOL": "c",
     "GREEK CAPITAL LETTER YOT": "J",
     "GREEK LETTER YOT": "j",
-    "CYRILLIC LETTER PALOCHKA": "L",
-    "CYRILLIC SMALL LETTER PALOCHKA": "L",
+    # Latin-script letters that no decomposition reaches.
+    "LATIN SMALL LETTER SCRIPT G": "g",
+    "LATIN SMALL LETTER DOTLESS I": "i",
+    # Cyrillic / Coptic / Cherokee letters the old table already carried.
     "CYRILLIC CAPITAL LETTER KOMI SJE": "G",
     "COPTIC CAPITAL LETTER NI": "N",
     "CHEROKEE LETTER NAH": "G",
+    # Armenian.
+    "ARMENIAN CAPITAL LETTER SEH": "U",
+    "ARMENIAN SMALL LETTER SEH": "u",
+    "ARMENIAN CAPITAL LETTER OH": "O",
+    "ARMENIAN SMALL LETTER OH": "o",
+    "ARMENIAN SMALL LETTER VO": "n",
+    "ARMENIAN SMALL LETTER HO": "h",
+    # Cherokee.
+    "CHEROKEE LETTER A": "D",
+    "CHEROKEE LETTER E": "R",
+    "CHEROKEE LETTER I": "T",
+    "CHEROKEE LETTER GO": "A",
+    "CHEROKEE LETTER GI": "Y",
+    "CHEROKEE LETTER GV": "E",
+    "CHEROKEE LETTER LA": "W",
+    "CHEROKEE LETTER LU": "M",
+    "CHEROKEE LETTER MI": "H",
+    "CHEROKEE LETTER SV": "R",
+    "CHEROKEE LETTER DU": "S",
+    "CHEROKEE LETTER YV": "B",
+    # Lisu.
+    "LISU LETTER BA": "B",
+    "LISU LETTER PA": "P",
+    "LISU LETTER DA": "D",
+    "LISU LETTER TA": "T",
+    "LISU LETTER GA": "G",
+    "LISU LETTER KA": "K",
+    "LISU LETTER CA": "C",
+    "LISU LETTER MA": "M",
+    "LISU LETTER NA": "N",
+    "LISU LETTER SA": "S",
+    "LISU LETTER A": "A",
+    "LISU LETTER E": "E",
+    "LISU LETTER O": "O",
+    "LISU LETTER U": "U",
+    # Coptic.
+    "COPTIC CAPITAL LETTER ALFA": "A",
+    "COPTIC SMALL LETTER ALFA": "a",
+    "COPTIC CAPITAL LETTER EIE": "E",
+    "COPTIC CAPITAL LETTER ZATA": "Z",
+    "COPTIC CAPITAL LETTER HATE": "H",
+    "COPTIC CAPITAL LETTER KAPA": "K",
+    "COPTIC CAPITAL LETTER MI": "M",
+    "COPTIC CAPITAL LETTER O": "O",
+    "COPTIC SMALL LETTER O": "o",
+    "COPTIC CAPITAL LETTER RO": "P",
+    "COPTIC SMALL LETTER RO": "p",
+    "COPTIC CAPITAL LETTER SIMA": "C",
+    "COPTIC SMALL LETTER SIMA": "c",
+    "COPTIC CAPITAL LETTER TAU": "T",
+    "COPTIC CAPITAL LETTER UA": "Y",
+    "COPTIC CAPITAL LETTER KHI": "X",
+    # Symbols drawn as a letter.
+    "UNION": "U",
+    "DOWN TACK": "T",
+    "IDEOGRAPHIC NUMBER ZERO": "O",
+    # Stand-ins for the underscore of `REQUEST_CHANGES`. DOUBLE LOW LINE is
+    # rewritten by NFKC to a space plus a combining mark, so it is folded
+    # before NFKC like the lunate sigma.
+    "LOWER ONE EIGHTH BLOCK": "_",
+    "HORIZONTAL SCAN LINE-9": "_",
+    "MODIFIER LETTER LOW MACRON": "_",
+    "DOUBLE LOW LINE": "_",
+    "UNDERTIE": "_",
+    "BOX DRAWINGS LIGHT LEFT": "_",
+    # Stand-ins for the brackets of `[BLOCKING]`.
+    "LEFT SQUARE BRACKET WITH QUILL": "[",
+    "RIGHT SQUARE BRACKET WITH QUILL": "]",
+    "MATHEMATICAL LEFT WHITE SQUARE BRACKET": "[",
+    "MATHEMATICAL RIGHT WHITE SQUARE BRACKET": "]",
+    "LEFT WHITE SQUARE BRACKET": "[",
+    "RIGHT WHITE SQUARE BRACKET": "]",
+}
+# Characters drawn as a bare vertical stroke, which reads as `I` or as `L`
+# depending on the font. Name -> (first reading, second reading). The scan
+# looks at both readings, and a token that uses both in one word is caught by
+# the bounded wildcard backstop.
+_AMBIGUOUS_STROKE_NAMES: dict[str, tuple[str, str]] = {
+    "CYRILLIC LETTER PALOCHKA": ("L", "I"),
+    "CYRILLIC SMALL LETTER PALOCHKA": ("L", "I"),
+    "LATIN CAPITAL LETTER IOTA": ("I", "L"),
+    "LATIN LETTER DENTAL CLICK": ("I", "L"),
+    "COPTIC CAPITAL LETTER IAUDA": ("I", "L"),
+    "LISU LETTER I": ("I", "L"),
+    "OLD ITALIC LETTER I": ("I", "L"),
+    "TIFINAGH LETTER YAN": ("I", "L"),
+    "LIGHT VERTICAL BAR": ("I", "L"),
 }
 
 
-def _derive_confusable_table() -> dict[str, str]:
-    """Build the look-alike fold table from Unicode character names.
+@dataclass(frozen=True)
+class _ConfusableTables:
+    """The derived look-alike tables.
 
-    A name this interpreter's Unicode data does not know is skipped rather than
-    raised: this runs at import in the dispatcher, and a daemon that cannot
-    start is a worse outcome than a narrower fold. The tests name the cases
-    that must resolve so a skip cannot hide.
+    `stable`: characters NFKC leaves alone, folded AFTER normalisation.
+    `pre_nfkc`: characters NFKC would rewrite to something that is not the
+    Latin letter, folded BEFORE normalisation.
+    `alternates`: for the ambiguous strokes in `stable`, their second reading.
     """
-    table: dict[str, str] = {}
 
-    def add(name: str, latin: str | None) -> None:
+    stable: dict[str, str]
+    pre_nfkc: dict[str, str]
+    alternates: dict[str, str]
+
+
+def _derive_confusable_tables(extra_names: "dict[str, str] | None" = None) -> _ConfusableTables:
+    """Build the look-alike fold tables from Unicode character names.
+
+    A name this interpreter's Unicode data does not know is skipped and LOGGED,
+    never raised: this runs at import in the dispatcher, and a daemon that
+    cannot start is a worse outcome than a narrower fold. The tests pin the
+    names that matter, so a skip cannot hide there either.
+    """
+    stable: dict[str, str] = {}
+    pre_nfkc: dict[str, str] = {}
+    alternates: dict[str, str] = {}
+
+    def add(name: str, latin: str | None, alternate: str | None = None) -> None:
         if not latin:
             return
         try:
             ch = unicodedata.lookup(name)
         except KeyError:
+            log.warning("confusable name %r is not in this Unicode data; skipped", name)
             return
-        # The fold runs AFTER NFKC, so a character NFKC rewrites never reaches
-        # it; an ASCII key would be a no-op.
-        if ch.isascii() or unicodedata.normalize("NFKC", ch) != ch:
+        if ch.isascii():
             return
-        table[ch] = latin
+        if unicodedata.normalize("NFKC", ch) != ch:
+            pre_nfkc[ch] = latin
+        else:
+            stable[ch] = latin
+        if alternate:
+            alternates[ch] = alternate
 
     for script, letters in (("GREEK", _GREEK_LOOK_ALIKES), ("CYRILLIC", _CYRILLIC_LOOK_ALIKES)):
         for letter_name, (upper, lower) in letters.items():
             add(f"{script} CAPITAL LETTER {letter_name}", upper)
             add(f"{script} SMALL LETTER {letter_name}", lower)
-    for latin in map(chr, range(ord("A"), ord("Z") + 1)):
+    # Unicode has a small capital for every letter but X.
+    for latin in "ABCDEFGHIJKLMNOPQRSTUVWYZ":
         add(f"LATIN LETTER SMALL CAPITAL {latin}", latin)
-    for name, latin in _OTHER_LOOK_ALIKE_NAMES.items():
+    for name, latin in {**_OTHER_LOOK_ALIKE_NAMES, **(extra_names or {})}.items():
         add(name, latin)
-    return table
+    for name, (first, second) in _AMBIGUOUS_STROKE_NAMES.items():
+        add(name, first, second)
+    return _ConfusableTables(stable, pre_nfkc, alternates)
 
 
-_CONFUSABLE_TO_ASCII: dict[str, str] = _derive_confusable_table()
-_CONFUSABLE_TRANSLATION = str.maketrans(_CONFUSABLE_TO_ASCII)
-
-# A run of single characters separated by plain ASCII spaces, inside brackets
-# — `[B L O C K I N G]` or `[ BLOCKING ]`. Collapsing interior spaces (but
-# never touching text outside a bracketed run) closes the "spaced letters"
-# evasion Falco's finding raised as plausible, without turning unrelated
-# bracketed prose into a false match (the collapsed text still has to satisfy
-# `_BLOCKING_MARKER_RE` afterwards).
-_SPACED_LETTER_RUN_RE = re.compile(r"\[(?:\s*[A-Za-z\-]\s*){2,}\]")
+def _derive_confusable_table() -> dict[str, str]:
+    return _derive_confusable_tables().stable
 
 
-def _collapse_spaced_run(match: "re.Match[str]") -> str:
-    return "[" + re.sub(r"\s+", "", match.group(0)[1:-1]) + "]"
+_CONFUSABLE_TABLES = _derive_confusable_tables()
+_VETO_CONFUSABLE_TO_ASCII: dict[str, str] = _CONFUSABLE_TABLES.stable
+# A floor, not a target: the number of entries the table had when the derivation
+# was written. Fewer means the Unicode data here lacks names, and the fold is
+# narrower than intended (each skipped name was logged above).
+_VETO_CONFUSABLE_FLOOR = 89
+if len(_VETO_CONFUSABLE_TO_ASCII) < _VETO_CONFUSABLE_FLOOR:
+    log.error(
+        "look-alike fold table has %d entries, expected at least %d; "
+        "the blocking-token scan is narrower than intended",
+        len(_VETO_CONFUSABLE_TO_ASCII),
+        _VETO_CONFUSABLE_FLOOR,
+    )
+_VETO_PRE_NFKC_TRANSLATION = str.maketrans(_CONFUSABLE_TABLES.pre_nfkc)
+_VETO_TRANSLATIONS = {
+    "primary": str.maketrans(_VETO_CONFUSABLE_TO_ASCII),
+    "alternate": str.maketrans({**_VETO_CONFUSABLE_TO_ASCII, **_CONFUSABLE_TABLES.alternates}),
+    "keep": str.maketrans(
+        {k: v for k, v in _VETO_CONFUSABLE_TO_ASCII.items() if k not in _CONFUSABLE_TABLES.alternates}
+    ),
+}
+# A space followed by a combining low line is how an underscore is drawn when
+# the mark is stripped to nothing and a plain space is left behind.
+_SPACE_THEN_LOW_LINE_RE = re.compile(r"[  ][̲̳]")
+
+
+def _fold_for_veto_scan(text: str, *, reading: str = "primary", underscores: bool = True) -> str:
+    """*text* normalised for the veto scans.
+
+    The same five passes as `_normalize_for_blocking_scan`, with the wide
+    look-alike table. *reading* picks how an ambiguous stroke is read:
+    ``primary``, ``alternate`` (its other reading) or ``keep`` (left as it is,
+    which the bounded wildcard backstop then treats as an unknown character).
+    *underscores* reads a space plus combining low line as ``_``.
+    """
+    if underscores:
+        text = _SPACE_THEN_LOW_LINE_RE.sub("_", text)
+    text = text.translate(_VETO_PRE_NFKC_TRANSLATION)
+    decomposed = unicodedata.normalize("NFKD", text)
+    stripped = "".join(
+        ch
+        for ch in decomposed
+        if ch not in _ZERO_WIDTH_CHARS and unicodedata.category(ch) not in _STRIPPED_UNICODE_CATEGORIES
+    )
+    folded = unicodedata.normalize("NFKC", stripped).translate(_VETO_TRANSLATIONS[reading])
+    return _SPACED_LETTER_RUN_RE.sub(_collapse_spaced_run, folded)
+
+
+def _veto_scan_forms(text: str) -> tuple[str, ...]:
+    """Every form of *text* a veto scan looks at; a match in ANY of them counts.
+
+    More than one form because no single normalisation is right for all
+    spellings: a character folded to a letter can also glue itself to a
+    neighbouring word and break its boundary, an ambiguous stroke has two
+    readings, and an underscore stand-in is sometimes a space. Looking at the
+    previous recogniser form and the bare NFKC form as well means a spelling
+    that was detected before this fold existed is still detected.
+    """
+    forms = [_normalize_for_blocking_scan(text), unicodedata.normalize("NFKC", text)]
+    for reading in ("primary", "alternate", "keep"):
+        for underscores in (True, False):
+            forms.append(_fold_for_veto_scan(text, reading=reading, underscores=underscores))
+    return tuple(dict.fromkeys(forms))
+
+
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
+_WILDCARD_LIMIT = 2
+
+
+def _is_unknown_character(ch: str) -> bool:
+    return not ch.isascii() and not ch.isspace()
+
+
+def _wildcard_window_matches(text: str, start: int, token: str, *, marker: bool) -> bool:
+    n = len(token)
+    window = text[start : start + n]
+    unknown = 0
+    lower_case_letter = False
+    for got, want in zip(window, token):
+        if got == want:
+            continue
+        if got.isascii() and got.upper() == want and want.isalpha():
+            lower_case_letter = True
+            continue
+        if _is_unknown_character(got):
+            unknown += 1
+            if unknown > _WILDCARD_LIMIT:
+                return False
+            continue
+        return False
+    if unknown == 0:
+        return False  # exact spelling: the regexes' job, not this backstop's
+    before = text[start - 1] if start else ""
+    after = text[start + n] if start + n < len(text) else ""
+    if marker:
+        lead = text[max(0, start - 4) : start].upper()
+        if lead in ("NON-", "NON_"):
+            return False
+        if _is_unknown_character(window[0]) and lead[-3:] == "NON":
+            return False  # `NON` plus a dash-like character, then BLOCKING]
+        # Lower case only counts when a real bracket anchors the token.
+        return not lower_case_letter or window[0] == "[" or window[-1] == "]"
+    if (before and (before.isalnum() or before == "_")) or (after and (after.isalnum() or after == "_")):
+        return False
+    if lower_case_letter:
+        return text[:start].rstrip().endswith("**") and text[start + n :].lstrip().startswith("**")
+    return True
+
+
+def _wildcard_token_hit(text: str, token: str, *, marker: bool = False) -> bool:
+    """True when *text* holds a word the length of *token* that is the token
+    with at most two characters replaced by non-ASCII, non-space characters.
+
+    The backstop under the look-alike table (principles.md, principle 5): the
+    table cannot name every character that is drawn like a letter, but a
+    verdict token with one or two unknown characters in it is still, for a
+    scan that must not clear a blocked review, that token. It only fires when
+    the rest of the word is the token's exact ASCII letters, so prose in
+    another script, which has none, cannot match.
+    """
+    n = len(token)
+    if len(text) < n or not _NON_ASCII_RE.search(text):
+        return False
+    seen: set[int] = set()
+    for m in _NON_ASCII_RE.finditer(text):
+        for start in range(max(0, m.start() - n + 1), min(m.start(), len(text) - n) + 1):
+            if start in seen:
+                continue
+            seen.add(start)
+            if _wildcard_window_matches(text, start, token, marker=marker):
+                return True
+    return False
 
 
 def body_has_blocking_findings(body: str | None) -> bool:
@@ -1579,7 +1879,10 @@ def body_has_blocking_findings(body: str | None) -> bool:
     """
     if not body:
         return False
-    return bool(_BLOCKING_MARKER_RE.search(_normalize_for_blocking_scan(body)))
+    forms = _veto_scan_forms(body)
+    if any(_BLOCKING_MARKER_RE.search(text) for text in forms):
+        return True
+    return any(_wildcard_token_hit(text, "[BLOCKING]", marker=True) for text in forms)
 
 
 # `[BLOCKING] category: summary`, optionally wrapped in markdown emphasis as
