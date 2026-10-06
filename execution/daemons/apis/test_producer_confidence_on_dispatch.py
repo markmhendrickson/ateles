@@ -116,7 +116,7 @@ def world(monkeypatch, tmp_path):
 
 
 def _runner(world, reply: str | Exception, ok: bool = True):
-    async def run(prompt: str):
+    async def run(prompt: str, tier=None, task_entity_id: str = ""):
         world["runner_calls"].append(prompt)
         if isinstance(reply, Exception):
             raise reply
@@ -135,13 +135,15 @@ def scorer(monkeypatch, world):
     return install
 
 
-def _dispatch(snapshot: dict, entity_id: str = "ent_task_1"):
+def _dispatch(snapshot: dict, entity_id: str = "ent_task_1") -> _Notifier:
+    notifier = _Notifier()
     asyncio.run(
         apis.dispatch_task(
-            entity_id, snapshot, trigger="created", notifier=_Notifier(),
+            entity_id, snapshot, trigger="created", notifier=notifier,
             snapshot_hydrated=True,
         )
     )
+    return notifier
 
 
 def _task(**over) -> dict:
@@ -238,7 +240,7 @@ def test_scorer_crash_means_checkpointed(world, scorer):
 
 
 def test_scorer_timeout_means_checkpointed(world, monkeypatch):
-    async def wedged(prompt):
+    async def wedged(prompt, tier=None, task_entity_id=""):
         world["runner_calls"].append(prompt)
         await asyncio.sleep(30)
         return True, '{"confidence": 0.99}', "claude"
@@ -259,6 +261,10 @@ def test_usage_gate_refusal_through_the_real_runner_means_checkpointed(world, mo
         world["runner_calls"].append(prompt)
         assert kw["action_class"] == model_tiering.ACTION_CONFIDENCE_SCORING
         assert kw["local_review"] is True  # inference-only authority
+        assert kw["inference_only"] is True  # and no tools at all
+        assert kw["provider"] == "claude"
+        assert kw["resolved_tier"].tier in producer_confidence.ALLOWED_TIERS
+        assert kw["task_entity_id"] == "ent_task_1"
         return skill_runner.SkillResult(
             skill, False, None, "", "", error="usage gate refused",
             cooled_until="2026-10-06T20:00:00+02:00",
@@ -383,10 +389,10 @@ def test_a_producer_cannot_score_past_a_hard_floor(world, monkeypatch):
     monkeypatch.setattr(model_tiering, "configured_action_policy", lambda: {})
     monkeypatch.setattr(model_tiering, "configured_vendor_binding", lambda: BINDING)
 
-    async def run(prompt):
+    async def run(prompt, tier=None, task_entity_id=""):
         return True, '{"confidence": 0.99, "rationale": "trust me"}', "claude"
 
-    produced = asyncio.run(
+    attempt = asyncio.run(
         producer_confidence.score_unscored_task(
             _task(),
             action_type="local_edit",
@@ -395,10 +401,10 @@ def test_a_producer_cannot_score_past_a_hard_floor(world, monkeypatch):
             runner=run,
         )
     )
-    assert produced is not None and produced.value == 0.4
+    assert attempt.score is not None and attempt.score.value == 0.4
 
 
-# ── 6. the reply parser ──────────────────────────────────────────────────────
+# ── 6. the reply parser: the whole reply is one small object ─────────────────
 
 
 @pytest.mark.parametrize(
@@ -407,20 +413,212 @@ def test_a_producer_cannot_score_past_a_hard_floor(world, monkeypatch):
         ('{"confidence": 0.5}', 0.5),
         ('{"confidence": 0}', 0.0),
         ('{"confidence": 1}', 1.0),
-        ('Sure!\n{"confidence": 0.7, "rationale": "ok"}\n', 0.7),
-        ('{"confidence": 0.2} then {"confidence": 0.9}', 0.9),  # last wins
-        ('{"result": "{\\"confidence\\": 0.6}"}', 0.6),         # harness envelope
+        ('  {"confidence": 0.7, "rationale": "ok"}\n', 0.7),
+        ('```json\n{"confidence": 0.7}\n```', 0.7),
+        ('{"result": "{\\"confidence\\": 0.6}"}', 0.6),  # recognised envelope
     ],
 )
-def test_parse_reply_accepts_clean_scores(text, expected):
+def test_parse_reply_accepts_exactly_one_clean_object(text, expected):
     parsed = producer_confidence.parse_reply(text)
     assert parsed is not None and parsed[0] == expected
 
 
-@pytest.mark.parametrize(
-    "text",
-    ['{"confidence": 1.0001}', '{"confidence": "1"}', '{"confidence": null}',
-     '{"confidence": [0.5]}', "confidence: 0.9", "{", None],
-)
+STRUCTURALLY_INVALID = [
+    '{"confidence": 0.1, "rationale": {"confidence": 0.99}}',
+    '[{"confidence": 0.99}]',
+    '{"confidence": 0.99} {"confidence":}',
+    '{"confidence": 0.1} {"confidence": 0.99}',
+    '{"confidence": 0.1, "confidence": 0.99}',
+    'Sure! {"confidence": 0.99}',
+    '{"confidence": 0.99} Thanks.',
+    '{"confidence": 0.9, "extra": 1}',
+    '{"confidence": 0.9, "rationale": 5}',
+    '{"result": "{\\"confidence\\": 0.9}", "extra": 1}',
+    '{"result": "{\\"result\\": \\"{}\\"}"}',
+    '```json\n{"confidence": 0.9}\n``` and more',
+]
+
+SCALAR_INVALID = [
+    '{"confidence": 1.0001}', '{"confidence": "1"}', '{"confidence": null}',
+    '{"confidence": [0.5]}', '{"confidence": true}', '{"confidence": NaN}',
+    '{"confidence": Infinity}', '{"confidence": 1e999}', "confidence: 0.9", "{", "", None,
+]
+
+
+@pytest.mark.parametrize("text", STRUCTURALLY_INVALID + SCALAR_INVALID)
 def test_parse_reply_rejects_everything_else(text):
     assert producer_confidence.parse_reply(text) is None
+
+
+@pytest.mark.parametrize("text", STRUCTURALLY_INVALID)
+def test_structurally_invalid_reply_never_auto_executes(world, scorer, text):
+    """None of these is exactly one score object; none may reach the gate."""
+    scorer(text)
+    _dispatch(_task())
+    _assert_checkpointed_as_unscored(world)
+
+
+# ── 7. the gate compares the validated value, unrounded ──────────────────────
+
+
+@pytest.mark.parametrize("value", [0.8499, 0.8496, 0.84999999, 0.849])
+def test_a_score_below_the_threshold_cannot_cross_it(world, scorer, value):
+    scorer('{"confidence": %r}' % value)
+    _dispatch(_task())
+    brief = _only_brief(world)["decision"]
+    assert world["spawns"] == []
+    assert brief.confidence == value  # not rounded on the way to the gate
+    assert brief.confidence < brief.threshold
+    assert brief.reason == "below confidence threshold"
+
+
+@pytest.mark.parametrize("value", [0.85, 0.8501, 0.93])
+def test_a_score_at_or_above_the_threshold_still_executes(world, scorer, value):
+    scorer('{"confidence": %r}' % value)
+    _dispatch(_task())
+    assert world["spawns"] == [("cicada", "ent_task_1")]
+
+
+def test_a_displayed_figure_never_reads_as_meeting_the_threshold():
+    shown = producer_confidence.display_confidence(0.8499)
+    assert float(shown) < 0.85
+    assert producer_confidence.display_confidence(0.85) == "0.85"
+    assert producer_confidence.display_confidence(0.4) == "0.40"
+
+
+# ── 8. the checkpoint tells the operator what the scorer concluded ───────────
+
+
+def test_low_score_checkpoint_carries_the_scorers_explanation(world, scorer):
+    scorer('{"confidence": 0.40, "rationale": "ambiguous target file"}')
+    notifier = _dispatch(_task())
+    summary = _only_brief(world)["plan_summary"]
+    for text in (summary, notifier.sent[-1]):
+        assert "ambiguous target file" in text
+        assert producer_confidence.PRODUCER_SOURCE in text
+        assert "0.40" in text
+
+
+@pytest.mark.parametrize("reply", ['{"confidence": 0.40}', '{"confidence": 0.40, "rationale": ""}'])
+def test_missing_explanation_is_stated_not_implied(world, scorer, reply):
+    scorer(reply)
+    notifier = _dispatch(_task())
+    for text in (_only_brief(world)["plan_summary"], notifier.sent[-1]):
+        assert "no explanation was supplied" in text
+
+
+def test_explanation_is_bounded_plain_text(world, scorer):
+    long = "x" * 5000
+    scorer('{"confidence": 0.40, "rationale": "line one\\nline two %s"}' % long)
+    _dispatch(_task())
+    summary = _only_brief(world)["plan_summary"]
+    assert "\n" not in summary
+    assert len(summary) < 1000
+
+
+# ── 9. a task too long to assess whole is not scored on a partial reading ────
+
+
+def test_long_task_is_declined_and_held_with_the_reason(world, scorer):
+    scorer('{"confidence": 0.99, "rationale": "looks fine"}')
+    body = (
+        "Tidy the local notes index. " * 600
+        + "Required target file has not yet been selected; ask for it before starting."
+    )
+    assert len(body) > producer_confidence.MAX_TASK_TEXT_CHARS
+    _dispatch(_task(body=body))
+    assert world["runner_calls"] == [], "a partial reading must never be scored"
+    assert world["spawns"] == []
+    brief = _only_brief(world)
+    assert brief["decision"].confidence_unscored is True
+    assert "not scored" in brief["plan_summary"]
+    assert "longer than the scorer can assess" in brief["plan_summary"]
+
+
+def test_a_task_at_the_limit_is_scored_whole(world, scorer):
+    scorer('{"confidence": 0.93}')
+    _dispatch(_task(body="b" * producer_confidence.MAX_TASK_TEXT_CHARS))
+    assert len(world["runner_calls"]) == 1
+    assert "b" * producer_confidence.MAX_TASK_TEXT_CHARS in world["runner_calls"][0]
+
+
+def test_scorer_failure_states_why_in_the_hold(world, scorer):
+    scorer("", ok=False)
+    _dispatch(_task())
+    assert "scorer was unavailable" in _only_brief(world)["plan_summary"]
+
+
+# ── 10. one tier resolution, from the ceiling check to the launch ────────────
+
+
+def test_the_tier_checked_is_the_tier_run_even_if_policy_changes_between(
+    monkeypatch,
+):
+    """`run_skill` must use the tier the scorer validated, not resolve again."""
+    import skill_runner
+
+    seen = {}
+
+    async def attempt_only(skill, attempt, **kw):
+        # The policy flips to `top` after the scorer's ceiling check.
+        monkeypatch.setattr(
+            model_tiering, "configured_action_policy",
+            lambda: {model_tiering.ACTION_CONFIDENCE_SCORING: "top"},
+        )
+        async def fake_once(*a, **k):
+            seen["precomputed_tier"] = k.get("precomputed_tier")
+            return skill_runner.SkillResult(skill, True, 0, "{}", "", provider="claude")
+        monkeypatch.setattr(skill_runner, "_run_skill_once", fake_once)
+        return await attempt("claude")
+
+    monkeypatch.setattr(skill_runner, "_run_provider_attempts", attempt_only)
+    monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda *_: None)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/bin/true"})
+    monkeypatch.setattr(model_tiering, "configured_action_policy", lambda: {})
+    monkeypatch.setattr(model_tiering, "configured_vendor_binding", lambda: BINDING)
+
+    resolved = model_tiering.resolve_tier(model_tiering.ACTION_CONFIDENCE_SCORING)
+    assert resolved.tier == "mid"
+    asyncio.run(
+        skill_runner.run_skill(
+            "apis", "p", action_class=model_tiering.ACTION_CONFIDENCE_SCORING,
+            resolved_tier=resolved,
+        )
+    )
+    assert seen["precomputed_tier"] is resolved
+    assert seen["precomputed_tier"].tier == "mid"
+
+
+# ── 11. a missing score never runs a task, even on a high mechanical estimate ─
+
+
+RICH = {"relationship_count": 3}  # mechanical estimate 0.90, over the threshold
+
+
+def test_the_rich_task_would_run_on_its_estimate_alone_with_the_scorer_off(
+    world, scorer, monkeypatch
+):
+    """Control: unchanged prior behaviour when the scorer is not in play."""
+    monkeypatch.setenv("APIS_PRODUCER_SCORER", "0")
+    _dispatch(_task(**RICH))
+    assert world["spawns"] == [("cicada", "ent_task_1")]
+
+
+@pytest.mark.parametrize("reply, ok", [("", False), ("not a score", True), ('{"confidence": 3}', True)])
+def test_a_failed_scorer_withholds_a_pass_that_rested_on_the_estimate(
+    world, scorer, reply, ok
+):
+    scorer(reply, ok=ok)
+    _dispatch(_task(**RICH))
+    assert world["spawns"] == []
+    brief = _only_brief(world)["decision"]
+    assert brief.confidence_unscored is True
+    assert brief.confidence == 0.9
+    assert "mechanical estimate" in brief.reason
+
+
+def test_an_over_long_task_is_not_run_on_its_estimate(world, scorer):
+    scorer('{"confidence": 0.99}')
+    _dispatch(_task(body="b" * (producer_confidence.MAX_TASK_TEXT_CHARS + 1), **RICH))
+    assert world["spawns"] == []
+    assert world["runner_calls"] == []

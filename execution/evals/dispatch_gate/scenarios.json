@@ -1,0 +1,487 @@
+{
+  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; only Neotoma writes, the agent spawn and the model call are stubbed. The base task is a routable, low-blast, unscored task.",
+  "base_task": {
+    "title": "Tidy the notes index",
+    "body": "Re-sort the local notes index alphabetically. Local file only.",
+    "assigned_to": "cicada",
+    "action_type": "local_edit",
+    "status": "pending"
+  },
+  "scenarios": [
+    {
+      "id": "high_score_executes",
+      "why": "an unscored low-blast task is scored, then the normal gate decides on that score: high score runs",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.93, \"rationale\": \"well specified, local only\"}"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": true
+      }
+    },
+    {
+      "id": "low_score_checkpoints_with_explanation",
+      "why": "a low score is held with the honest reason, the scorer named, and its explanation shown to the operator",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.40, \"rationale\": \"ambiguous target file\"}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.4,
+        "confidence_unscored": false,
+        "confidence_source": "apis_producer_scorer",
+        "reason": "below confidence threshold",
+        "summary_contains": [
+          "ambiguous target file",
+          "apis_producer_scorer",
+          "0.40"
+        ],
+        "notification_contains": [
+          "ambiguous target file",
+          "apis_producer_scorer"
+        ],
+        "persisted_confidence_source": "apis_producer_scorer"
+      }
+    },
+    {
+      "id": "missing_explanation_is_stated",
+      "why": "no rationale: the hold says so rather than implying drivers were given",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.40}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "summary_contains": [
+          "no explanation was supplied"
+        ],
+        "notification_contains": [
+          "no explanation was supplied"
+        ]
+      }
+    },
+    {
+      "id": "just_below_threshold_is_held_unrounded",
+      "why": "a score strictly below the threshold cannot cross it: the gate sees the exact value",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.8499}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.8499,
+        "reason": "below confidence threshold"
+      }
+    },
+    {
+      "id": "exactly_at_threshold_executes",
+      "why": "the threshold itself still passes",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.85}"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": true
+      }
+    },
+    {
+      "id": "unparsable_reply_stays_unscored",
+      "why": "a reply that is not a score leaves the task unscored and checkpointed as before",
+      "scorer": {
+        "kind": "reply",
+        "reply": "I think this is fine"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.76,
+        "confidence_unscored": true,
+        "confidence_source": "",
+        "reason": "mechanical estimate",
+        "summary_contains": [
+          "not a valid score"
+        ]
+      }
+    },
+    {
+      "id": "out_of_range_reply_is_rejected_not_clamped",
+      "why": "1.5 is not clamped to 1.0",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 1.5}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.76,
+        "confidence_unscored": true
+      }
+    },
+    {
+      "id": "structurally_invalid_reply_stays_unscored",
+      "why": "a reply that is not exactly one score object is not a score",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.1, \"rationale\": {\"confidence\": 0.99}}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.76,
+        "confidence_unscored": true
+      }
+    },
+    {
+      "id": "trailing_material_stays_unscored",
+      "why": "a reply must be exactly one score object",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99} {\"confidence\":}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.76,
+        "confidence_unscored": true
+      }
+    },
+    {
+      "id": "scorer_refused_by_pace_gate_stays_unscored",
+      "why": "a refused or failed run (what the usage gate returns) leaves the task checkpointed",
+      "scorer": {
+        "kind": "not_ok"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.76,
+        "confidence_unscored": true,
+        "reason": "mechanical estimate",
+        "summary_contains": [
+          "scorer was unavailable"
+        ]
+      }
+    },
+    {
+      "id": "scorer_crash_stays_unscored",
+      "why": "an exception in the scorer never reaches the gate as a score",
+      "scorer": {
+        "kind": "raise"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.76,
+        "confidence_unscored": true
+      }
+    },
+    {
+      "id": "scorer_timeout_stays_unscored",
+      "why": "a wedged scorer is cut off and the task stays unscored",
+      "scorer": {
+        "kind": "hang"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.76,
+        "confidence_unscored": true
+      }
+    },
+    {
+      "id": "high_blast_is_never_scored",
+      "why": "a high-blast action is gated on blast radius as before and spends no scoring call",
+      "task": {
+        "action_type": "open_or_merge_pr"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "confidence": 0.76,
+        "confidence_unscored": true,
+        "confidence_source": "",
+        "reason": "propose alternatives"
+      }
+    },
+    {
+      "id": "payment_is_never_scored",
+      "why": "a money action stays gated exactly as before",
+      "task": {
+        "action_type": "payment",
+        "assigned_to": "monedula"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "reason": "propose alternatives"
+      }
+    },
+    {
+      "id": "operator_only_is_never_scored",
+      "why": "an operator-only action never reaches a scorer",
+      "task": {
+        "action_type": "operator_only"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "reason": "operator-only"
+      }
+    },
+    {
+      "id": "unrecognised_action_is_never_scored",
+      "why": "an action nobody classified is treated as never-auto-executable and not scored",
+      "task": {
+        "action_type": "a_brand_new_action_nobody_classified"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "reason": "operator-only"
+      }
+    },
+    {
+      "id": "explicit_score_is_not_rescored",
+      "why": "a task that already carries a score keeps it",
+      "task": {
+        "confidence": 0.95
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.10}"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "operator_override_is_not_scored",
+      "why": "an operator-approved re-dispatch skips the gate and the scorer",
+      "dispatch": {
+        "gate_override": true
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.10}"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "tier_mapped_to_top_switches_scorer_off",
+      "why": "the scorer never runs on the top tier",
+      "config": {
+        "tier_policy": "top"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "confidence": 0.76,
+        "confidence_unscored": true
+      }
+    },
+    {
+      "id": "cheap_tier_from_policy_is_accepted",
+      "why": "the live policy may choose any cheap tier",
+      "config": {
+        "tier_policy": "mechanical"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.93}"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": true,
+        "scorer_tier": "mechanical"
+      }
+    },
+    {
+      "id": "default_tier_is_mid_never_top",
+      "why": "with no policy entry the scorer defaults to mid",
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.93}"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": true,
+        "scorer_tier": "mid"
+      }
+    },
+    {
+      "id": "no_vendor_binding_switches_scorer_off",
+      "why": "with no model binding the provider's ambient model could run, so nothing is scored",
+      "config": {
+        "vendor_binding": false
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "confidence_unscored": true
+      }
+    },
+    {
+      "id": "kill_switch_restores_prior_behaviour",
+      "why": "APIS_PRODUCER_SCORER=0 leaves dispatch exactly as it was",
+      "config": {
+        "kill_switch": true
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "confidence": 0.76,
+        "confidence_unscored": true
+      }
+    },
+    {
+      "id": "hard_floor_caps_a_producer_score",
+      "why": "an unresolved conflict in the task text holds the rubric floor; the scorer cannot lift it",
+      "task": {
+        "body": "Re-sort the local notes index. There is an unresolved conflict about which index file is meant."
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99, \"rationale\": \"trust me\"}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.5,
+        "confidence_source": "apis_producer_scorer"
+      }
+    },
+    {
+      "id": "over_long_task_is_declined_not_partially_scored",
+      "why": "a required input stated late in a very long task must not be dropped: the scorer declines and the hold says so",
+      "task": {
+        "body_pad_chars": 12500,
+        "body_suffix": " Required target file has not yet been selected; ask for it before starting."
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "confidence_unscored": true,
+        "summary_contains": [
+          "longer than the scorer can assess",
+          "not scored"
+        ]
+      }
+    },
+    {
+      "id": "failed_scorer_does_not_let_a_high_mechanical_estimate_execute",
+      "why": "a task whose mechanical estimate alone would clear the threshold (rich linked context) is still held when the scorer was asked and failed: a missing score never runs a task",
+      "task": {
+        "relationship_count": 3
+      },
+      "scorer": {
+        "kind": "not_ok"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence_unscored": true,
+        "reason": "mechanical estimate",
+        "summary_contains": [
+          "scorer was unavailable"
+        ]
+      }
+    },
+    {
+      "id": "over_long_task_with_high_mechanical_estimate_is_held",
+      "why": "a task too long to assess whole is not run on its mechanical estimate",
+      "task": {
+        "relationship_count": 3,
+        "body_pad_chars": 12500
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.99}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "confidence_unscored": true,
+        "summary_contains": [
+          "longer than the scorer can assess"
+        ]
+      }
+    },
+    {
+      "id": "scorer_off_leaves_a_high_mechanical_estimate_executing_as_before",
+      "why": "with the scorer switched off the prior behaviour is unchanged: the estimate decides",
+      "config": {
+        "kill_switch": true
+      },
+      "task": {
+        "relationship_count": 3
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.10}"
+      },
+      "expect": {
+        "outcome": "executed",
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "high_mechanical_estimate_with_a_working_scorer_uses_the_score",
+      "why": "when the scorer works its score, not the estimate, decides",
+      "task": {
+        "relationship_count": 3
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.30, \"rationale\": \"target unclear\"}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "confidence": 0.3,
+        "confidence_unscored": false
+      }
+    }
+  ]
+}

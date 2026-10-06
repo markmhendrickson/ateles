@@ -785,6 +785,30 @@ async def _spawn_harness_skill(
     return result
 
 
+def _shown_confidence(confidence: float, source: str) -> str:
+    """Confidence for humans. A producer score is truncated, never rounded, so
+    a figure shown beside a below-threshold decision cannot read as meeting it."""
+    if source:
+        return producer_confidence.display_confidence(confidence)
+    return f"{confidence:.2f}"
+
+
+def _scoring_summary(source: str, confidence: float, rationale: str, note: str) -> str:
+    """What the operator is told about the score, appended to the checkpoint
+    summary and notification. A producer score carries its source and the
+    scorer's own explanation, or says plainly that none was given; a task the
+    scorer did not score says why when that is known."""
+    if source:
+        return (
+            f" Scored {_shown_confidence(confidence, source)} by {source}. "
+            "Scorer's assessment: "
+            f"{rationale or 'no explanation was supplied'}."
+        )
+    if note:
+        return f" Producer scoring was not applied: {note}."
+    return ""
+
+
 async def dispatch_task(
     entity_id: str,
     snapshot: dict,
@@ -1097,12 +1121,15 @@ async def dispatch_task(
         # judgment instead of the mechanical estimate. Any failure leaves the
         # snapshot as it was, which is the unscored path below, unchanged.
         confidence_source = ""
+        confidence_rationale = ""
+        scoring_note = ""
         gate_snapshot = snapshot
         if not _confidence_is_explicit(snapshot):
-            produced = await producer_confidence.score_unscored_task(
+            attempt = await producer_confidence.score_unscored_task(
                 snapshot,
                 action_type=action_type,
                 policy=policy,
+                task_entity_id=entity_id,
                 mechanical_value=score_confidence(
                     snapshot,
                     has_owner=has_owner,
@@ -1111,12 +1138,16 @@ async def dispatch_task(
                     successful_recurrences=_successful_recurrences(snapshot),
                 ).value,
             )
+            scoring_note = attempt.note
+            produced = attempt.score
             if produced is not None:
+                # The validated value, unrounded: it is what the gate compares.
                 gate_snapshot = {**snapshot, "confidence": produced.value}
                 confidence_source = produced.source
+                confidence_rationale = produced.rationale
                 log.info(
                     f"[{DAEMON_NAME}] confidence: task={entity_id} producer score "
-                    f"{produced.value:.2f} from {produced.source} "
+                    f"{produced.display} from {produced.source} "
                     f"(tier={produced.tier}, provider={produced.provider or '?'})"
                 )
         confidence, confidence_unscored = _resolve_confidence(
@@ -1133,6 +1164,21 @@ async def dispatch_task(
             confidence_unscored=confidence_unscored,
         )
         decision.confidence_source = confidence_source
+        if scoring_note and decision.action == GateAction.AUTO_EXECUTE:
+            # The scorer was asked and gave no usable score (or the task was too
+            # long to assess whole). A score that was missing or failed never
+            # lets a task run, so a pass that rested on the mechanical estimate
+            # alone is withheld. A recurrence-graduated pass does not depend on
+            # the confidence at all, so it is left as the policy decided it.
+            withheld = evaluate_gate(
+                confidence=0.0,
+                action_type=action_type,
+                policy=policy,
+                successful_recurrences=_successful_recurrences(snapshot),
+                confidence_unscored=True,
+            )
+            if withheld.action != GateAction.AUTO_EXECUTE:
+                decision = dataclasses.replace(withheld, confidence=confidence)
         log.info(
             f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
             f"action={action_type} blast={decision.blast_radius.value} "
@@ -1171,11 +1217,11 @@ async def dispatch_task(
                     plan_summary=(
                         f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
                         f"Trigger: {trigger}. {decision.reason}."
-                        + (
-                            f" Confidence {confidence:.2f} scored by "
-                            f"{decision.confidence_source}."
-                            if decision.confidence_source
-                            else ""
+                        + _scoring_summary(
+                            decision.confidence_source,
+                            confidence,
+                            confidence_rationale,
+                            scoring_note,
                         )
                     ),
                     handler=DAEMON_NAME,
@@ -1202,8 +1248,17 @@ async def dispatch_task(
             notifier.send(
                 f"PLAN checkpoint: {title[:70]}\n"
                 f"  agent={skill} blast={decision.blast_radius.value} "
-                f"conf={confidence:.2f} — {decision.reason}\n"
-                f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
+                f"conf={_shown_confidence(confidence, confidence_source)} — "
+                f"{decision.reason}\n"
+                + (
+                    _scoring_summary(
+                        confidence_source, confidence, confidence_rationale, ""
+                    ).strip()
+                    + "\n"
+                    if confidence_source
+                    else ""
+                )
+                + f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
             )
