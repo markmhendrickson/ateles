@@ -645,8 +645,11 @@ entity is a record in the record, not an artifact.
 **Successors:** none. A confirmation message to the payee is an outreach task, created at `reconcile`
 and routed by its own intake.
 
-**Fast paths:** none. A recurring payment graduates under the `action_policy`'s recurrence rule at the
-gate, which changes whether `consent` carries a checkpoint, not whether the step exists.
+**Fast paths:** none. A payment never graduates: no count of successful payments takes the next one
+unattended. A recurring obligation runs only under a standing consent the operator approved once, for its
+exact figures, with an expiry and a use count (decision 127,
+`gates_and_workflows.md#a-recurring-payment-runs-only-under-a-standing-consent-and-whether-other-classes-may-hold-one-is-open`),
+which changes whether `consent` waits on the operator for that occurrence, not whether the step exists.
 
 ## research and analysis
 

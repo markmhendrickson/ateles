@@ -53,10 +53,12 @@ below; steps and gates are `gates_and_workflows.md`; reference workflows and int
 - [Priority orders the claimable pool; it does not enter it](#priority-orders-the-claimable-pool-it-does-not-enter-it).
 - [A lapsed lease is not reaped; repeated lapse raises a checkpoint](#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint).
 - [At-least-once implies effect dedup](#at-least-once-implies-effect-dedup).
+- [Whether a held lease fences the take and every write made under it, and whether a runner id is minted per process start](#whether-a-held-lease-fences-the-take-and-every-write-made-under-it-and-whether-a-runner-id-is-minted-per-process-start).
 - [Operator-only tasks are claimed by the operator-facing agent](#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 - [A task is executed only through a workflow](#a-task-is-executed-only-through-a-workflow).
 - [Changing the swarm is work, and it goes through a workflow like any other](#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other).
 - [Whether a newly declared workflow is proven before it binds production work](#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work).
+- [Whether a change to an agent's or a skill's instructions is proven before it binds](#whether-a-change-to-an-agents-or-a-skills-instructions-is-proven-before-it-binds).
 - [What goes through a workflow is a batch of tasks](#what-goes-through-a-workflow-is-a-batch-of-tasks).
 - [How a batch is formed, and what chooses its workflow](#how-a-batch-is-formed-and-what-chooses-its-workflow).
 - [A batch may hold on a condition discovered mid-flight](#a-batch-may-hold-on-a-condition-discovered-mid-flight).
@@ -400,6 +402,47 @@ Lapse and re-claim is at-least-once. Every outbound effect is idempotent or dedu
 a re-claimed task is never replayed (`failure_posture.md`). The dedup key lives on the `action` entity
 (`gates_and_workflows.md`).
 
+### Whether a held lease fences the take and every write made under it, and whether a runner id is minted per process start
+
+**Open (decision 128, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Two questions about the one primitive
+(`#the-claim-and-the-lease-are-one-primitive`).
+
+**What a held lease is a condition of.** Decision 44 makes the lease load-bearing for the verdict: a
+verdict from a signer whose lease on the step is not held at the write is refused
+(`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`). The four
+conditions the gate checks at a take
+(`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`)
+do not include the taker's lease, and nothing fences the other writes a runner makes in a step's name — its
+findings, the child tasks it creates, its observations on artifacts. So a runner whose lease lapsed while
+it was still working can take an action whose key no confirmation yet names, and the runner that held a
+step and the runner that re-claimed it can both reach a take on the same key before either confirmation
+exists. Three candidates.
+
+- **The verdict only.** What the design states. Nothing new is built; the race above stays open until a
+  confirmation exists for the key, and dedup closes it only then
+  (`#at-least-once-implies-effect-dedup`).
+- **The verdict and the take.** A fifth take-time condition: the taker's lease on the step is held at the
+  take. It closes the race with one read the gate already makes, on decision 44's own reasoning that a close
+  from a lease not held is a close from nothing held.
+- **Every write made in a step's name.** The record refuses a write carrying a runner id whose lease is not
+  held. The strongest candidate, and it makes the record read the lease on every write — close to the
+  per-step ceiling decision 103 weighs, and a read decision 97's enforcement point does not make, since it
+  sees the requesting principal and not the step.
+
+**Whether a runner id is minted per process start, and never reused.** The read-back that decides who holds
+a lease presumes that a runner id names one process. A restarted process carrying its predecessor's id
+would read as the holder of a lease it never claimed, and no document says it cannot; gap G27
+(`migration.md#gaps-and-contradictions-the-mapping-exposed`) already records that the design does not say
+which record carries the runner id authoritatively. Two candidates: say nothing, and leave it to the
+implementation; or state that a runner id is minted once per process start and never reused, so that a
+restart is a new runner which must claim again.
+
+**Recommendation, unruled.** The second candidate on each question. The minting rule follows from principle
+2 by derivation, since a read-back that cannot tell two processes apart reads back nothing; fencing every
+write is left to decision 103. If unanswered, a lease excludes a second claim and does not fence a
+lapsed one.
+
 ### Operator-only tasks are claimed by the operator-facing agent
 
 A task with `operator_only` actions is an ordinary task claimed by the operator-facing agent — the agent
@@ -701,6 +744,31 @@ and an `enabled` field on it is the maintained state invariant 11 forbids
 (`principles.md#11-state-that-needs-a-watchdog-belongs-in-a-relationship-not-a-field`). So the state is an
 edge or the absence of a proving record, and this ruling does not choose between them. What it does settle
 is that the choice is between those two and not between them and a flag.
+
+### Whether a change to an agent's or a skill's instructions is proven before it binds
+
+**Open (decision 135, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Decision 100 proves a workflow declaration above a
+blast tier before it binds production work (`#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`).
+A change to an agent's prompt or to a skill's instructions is a governance write too
+(`#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`), and it changes every future
+step that agent owns; nothing proves it. A verdict pins the agent version it ran under
+(`data_model.md#concepts`), which makes the change attributable after the fact and tests nothing before it.
+The conformance suite does not reach it either: it tests whether the engine enforces the design's rules,
+never whether a particular declaration or instruction does useful work. Three candidates.
+
+- **Review only.** Nothing new is built; the review step and the correction loop are the whole of what
+  catches a harmful instruction change, as they are for a declaration below decision 100's threshold.
+- **Proven on decision 100's tier condition.** The proof object is a stored evaluation set — fixtures and
+  the verdicts expected on them — that the changed instructions must pass before they bind, recorded beside
+  the agent version a verdict pins, with a planted case the set must fail on so that a set that cannot go
+  red is not counted as proof (principle 3).
+- **An evaluation set that reports and never blocks.** The same set, run and read, with no refusal behind
+  it — cheaper, and a measurement rather than a control (principle 1).
+
+**Recommendation, unruled.** The second. It reuses decision 100's condition and refusal rather than standing
+a second gate beside them (principle 6). If unanswered, the instructions that decide how a step reasons are
+the one governance write nothing proves.
 
 ### A task no declaration fits is carried by one declared for it, and no task waits for similar tasks
 
@@ -1258,8 +1326,8 @@ series counts the class without regard to which task produced the member, recurr
 Graduation changes exactly one thing, and it
 is at the gate: whether the next action of that class is held at a checkpoint. It never changes whether
 the task recurs, which workflow its instance enters, or which steps that workflow has — `workflows.md#payment`
-states this for the case where it matters most, a recurring payment's `consent` step existing whether or
-not its action class has graduated. The converse also holds: the recurrence of a *task* is never an
+states this for the case where it matters most: a payment's class never graduates (decision 127), and a
+recurring payment's `consent` step exists whether or not a standing consent clears its occurrence. The converse also holds: the recurrence of a *task* is never an
 input to graduation, because a series is made of taken actions and an instance that completed without
 taking one added nothing to any series. Nothing about this pair is open; the documents already implied
 it, and this paragraph states it once.
@@ -1541,6 +1609,12 @@ a work-model record type" clause stands (`conformance_suite.md`).
 
 ## The four execution mechanisms
 
+**The rules in this section.**
+
+- [A step's outcome depends on which runner ran it, and `runner` already names that seat](#a-steps-outcome-depends-on-which-runner-ran-it-and-runner-already-names-that-seat).
+- [Whether the step path is a mechanism of its own, and what the engine is called](#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called).
+- [What starts a runner, how many may run for one role at once, and what a wake does when one is already live](#what-starts-a-runner-how-many-may-run-for-one-role-at-once-and-what-a-wake-does-when-one-is-already-live).
+
 (1) Task path above. (2) Dedicated daemons that self-trigger (a mail poller produces tasks and never
 receives one). (3) The **engine** (decision 34, `#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called`),
 which sequences steps for a batch and never writes task status — a
@@ -1630,6 +1704,28 @@ differently: a task by its creation, a step by the engine), the self-triggering 
 interactive session — so nothing that cites the count (`status.md`, the recorded decision
 `three_execution_mechanisms_not_one`, "a roster role reachable by none of these cannot receive work") needs
 to recheck what a reader checks against; only the name of the third mechanism's publisher changes.
+
+### What starts a runner, how many may run for one role at once, and what a wake does when one is already live
+
+**Open (decision 133, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Pull settles who takes work, and a subscription
+wakes an agent without delivering work to it (`#pull-is-the-only-delivery-assignment-constrains-eligibility`).
+The design says that the swarm starts a runner; it does not say when, or how many. A burst of writes to
+the record can wake as many runners, each spending model quota to find nothing it may claim. Pull keeps the
+duplicates harmless to correctness, since only one of them can hold a lease, and does nothing for their
+cost (decision 131). Three candidates.
+
+- **Left to the implementation.** Nothing is stated, and each runner host decides.
+- **A launch per wake, deduplicated by a wake key.** Each subscription event may start a runner, and a key
+  collapses events that arrive together. A count of coalesced wakes is then state some process has to keep
+  true.
+- **A launch driven by the live set.** A runner for a role is started only while the live partition
+  (decision 92, `#a-task-is-live-when-some-principal-could-claim-it-now`) holds work that role may claim and
+  fewer than a stated maximum of runners hold leases for it, the maximum a value on the role's
+  `vendor_binding` (decision 42). Coalescing is then a read, and no wake counter exists (principle 11).
+
+**Recommendation, unruled.** The third. If unanswered, what the swarm spends on waking runners is bounded by
+nothing the design names.
 
 ## Contradictions this document settles
 

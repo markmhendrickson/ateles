@@ -38,10 +38,12 @@ and the adapters that reach them: `adapters.md`.
 - [Whether the conclusion is a stored field or a read over the findings and the author](#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author).
 - [A finding is one-off or standing, and a standing one obliges a change to what produced it](#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
 - [Work is reviewed on the record, and a channel carries only what awaits the operator or cannot wait](#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait).
+- [What the operator's view must be able to show](#what-the-operators-view-must-be-able-to-show).
 - [Closed work is reviewed on the record and redone through intake, never reopened](#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened).
 - [One step set, defined once, tested for parity](#one-step-set-defined-once-tested-for-parity).
 - [Sequencing is data: successors and the chain](#sequencing-is-data-successors-and-the-chain).
 - [Two questions: who may claim a step, and whether an action may be taken](#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken).
+- [Whether a step's writes outside the subject it holds are capped while it runs](#whether-a-steps-writes-outside-the-subject-it-holds-are-capped-while-it-runs).
 - [Where the enforcement point for a governance write sits](#where-the-enforcement-point-for-a-governance-write-sits).
 - [A synced observation on a governance type is recorded, and never takes effect](#a-synced-observation-on-a-governance-type-is-recorded-and-never-takes-effect).
 - [Actions are entities; only actions are taken](#actions-are-entities-only-actions-are-taken).
@@ -49,6 +51,7 @@ and the adapters that reach them: `adapters.md`.
 - [The checkpoint is written where the gate first holds the action, and the permit is decided at the take](#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take).
 - [An `operator_only` action is taken by the operator, and the step that carries it closes on the confirmation, never on the resolution](#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution).
 - [Confidence and three blast tiers](#confidence-and-three-blast-tiers).
+- [A recurring payment runs only under a standing consent, and whether other classes may hold one is open](#a-recurring-payment-runs-only-under-a-standing-consent-and-whether-other-classes-may-hold-one-is-open).
 - [Blast radius selects the gate; nothing yet selects the model a step runs at](#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at).
 - [An unreadable workflow is unknown, and unknown holds](#an-unreadable-workflow-is-unknown-and-unknown-holds).
 - [Non-code deliverables go through the same gate](#non-code-deliverables-go-through-the-same-gate).
@@ -913,6 +916,35 @@ would reopen it:** a class of completion in practice that the operator needs car
 through either — a delivery step or the binding — which would be a gap in what the binding can name, not in
 the rule.
 
+### What the operator's view must be able to show
+
+**Open (decision 139, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Decision 37 rules where the operator's view lives —
+a read of the record, rendered for a principal, and nothing more — and names what a read of the work covers:
+batches and their chains, verdicts and their findings, checkpoints and who resolved them, artifacts by edge
+(`#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`). It
+states no minimum content for a view of the swarm itself. Evaluators of agent systems expect one: the agents
+at work, each with its role and status; the budget each has used against its cap; the checkpoints pending;
+and the provenance behind each action. Each is derivable from records the design already has — a runner's
+status from its lease and its activity (`work_model.md#liveness-is-derived-from-activity-at-read-time-never-declared`),
+the work some principal could take from the live partition (decision 92), consumption from decision 53 and,
+for inference, decision 131, the pending queue from `#the-checkpoint`, and an action's provenance from
+attribution (`authority_model.md#attribution`) — and none of it is stated as something a conforming view
+has to be able to show. Three candidates.
+
+- **No minimum.** Decision 37 as ruled: what a view shows is the renderer's to choose.
+- **A stated minimum content, as reads.** A conforming view can answer, from the record alone: which
+  runners hold leases, for which role and which step; each principal's consumption against each budget term
+  written on its grant or delegation; the checkpoints pending, read from the one queue; and, for any action,
+  its chain — the task, the step, the verdicts, the checkpoint and its resolver, the grant it was taken
+  under, and the observations it rests on. Each is a read the conformance suite can test, and no part of it
+  is a store beside the record (principle 11).
+- **A minimum stated as a rendered screen.** Specifies layout as well as content, and binds a renderer the
+  design otherwise leaves free.
+
+**Recommendation, unruled.** The second. If unanswered, the record holds every fact a view needs, and
+nothing says a view has to reach them.
+
 ### Closed work is reviewed on the record and redone through intake, never reopened
 
 **Ruled (decision 38, 2026-09-06): a closed batch is never reopened; the operator's input on it is a
@@ -1046,6 +1078,34 @@ Everything else stays an internal operational write and reaches no gate. The lin
 **what the write can destroy**, not where it goes — which is the distinction that separates the writes
 worth holding from the routine ones — and all three use the gate and the checkpoint queue that already exist
 rather than a second path for record writes (principle 6).
+
+### Whether a step's writes outside the subject it holds are capped while it runs
+
+**Open (decision 140, 2026-10-06), from a competitive review; a candidate raised against decision 103,
+registered as a row of its own.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+Decision 103 asks whether a step's declaration is a floor or a ceiling, and whether it covers writes as well
+as reads (`#declaration-batch-projection`). This row asks a narrower question that stands however 103 is
+answered: whether the writes a step makes to subjects other than the one it holds a lease on — other tasks,
+other artifacts' records — are capped while it runs, by a bounded allowance rather than a refusal of every
+such write. Three candidates.
+
+- **No cap.** A write outside the held subject is bounded by the principal's grant alone (decisions 41 and
+  94).
+- **A ceiling scoped to the held subject and the step's declared reads.** Writes to the leased subject and
+  to what the step declared it reads are admitted; writes to any other subject are admitted up to a stated
+  allowance per step, beyond which they are refused and the step raises a checkpoint. An allowance with no
+  grading refuses legitimate work — a scheduled sweep touches many subjects by design — so the allowance is a
+  value on the workflow's step, never a constant of the design.
+- **Reporting only.** Writes outside the held subject are counted and shown to review, and never refused.
+
+**How it relates to decision 103.** If 103 is answered with no ceiling at runtime, this row is the narrower
+ground on which that answer would be revisited; if 103 is answered with one, this row is the shape that
+ceiling takes for writes elsewhere. Either way the cost 103 names applies here too: the record's enforcement
+point sees the requesting principal and not the step (decision 97), so a cap scoped to a step needs the
+record to read the step's lease (decision 128).
+
+**Recommendation, unruled.** The second, with the allowance a value per step. If unanswered, a step may write
+across as many subjects as its principal's grant admits, and only review sees how many it touched.
 
 ### Where the enforcement point for a governance write sits
 
@@ -1294,8 +1354,11 @@ action series, and where it would hold, **the checkpoint is written then**, reas
 checkpoint the step carries to the operator and whose resolution it records (`workflows.md#outreach`,
 `workflows.md#payment`, `workflows.md#social-content`). Where the gate would not hold — the class is low
 blast at threshold, or its action series has graduated — no checkpoint is written and the step carries
-nothing, which is what `workflows.md#payment` means by a graduation changing whether `consent` carries a
-checkpoint and not whether the step exists. The second moment is the take: at `send`, `pay`, or `post`
+nothing: a graduation changes whether `consent` carries a checkpoint, and never whether the step exists. A
+payment is the class this never reaches, since its class never graduates and a recurring obligation is
+cleared only by a standing consent the operator approved for its exact figures (decision 127,
+`#a-recurring-payment-runs-only-under-a-standing-consent-and-whether-other-classes-may-hold-one-is-open`).
+The second moment is the take: at `send`, `pay`, or `post`
 the adapter asks the gate again, at the moment the action would be taken, as
 `#actions-are-entities-only-actions-are-taken` says of every action.
 
@@ -1418,6 +1481,77 @@ series clears its count; `NEVER` short-circuits ahead of the confidence axis and
 advisory path (`route_task`) and the enforcing path resolve identically, and a parity test holds the
 duplicated never-set equal across the two modules. An unreachable policy source is a halt
 (`failure_posture.md`), not a fallback policy with an empty low-blast set.
+
+### A recurring payment runs only under a standing consent, and whether other classes may hold one is open
+
+**Ruled in part (decision 127, 2026-10-06, the operator's): a payment never graduates by count, and a
+recurring obligation runs only under a standing consent for an exact figure, with an expiry and a use
+count, which the operator approves once.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+Opened from a competitive review (2026-10-06), which found two things the corpus had not said: it disagreed
+with itself on whether a recurring payment graduates, and it had no way to let one approval stand for one
+exact, repeated call without graduating a whole action class.
+
+**The contradiction this settles.** `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`
+places `payment` in the never-set, so that no series of successful payments graduates into taking one
+unattended, while `workflows.md#payment` said that a recurring payment graduates under the `action_policy`'s
+recurrence rule. Both could not hold. The ruling takes the never-set reading: no count of successful
+payments takes the next one unattended, and `workflows.md#payment` now says so.
+
+**What a standing consent is, for a payment.** A principal's decision, made once, that one recurring
+obligation may be paid on exactly the figures it names — payee, amount, currency, period, and rail, the
+figures decision 27 shows the approver (`payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`)
+— until an expiry and for a stated number of uses. The operator approves it once, through a checkpoint like
+any other (`#the-checkpoint`); under the never-set rule it is still a principal's decision, made for those
+figures and for nothing wider. At an occurrence's take it stands in for the first of the four take-time
+conditions (`#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`)
+only when all three of these hold: the parameters the action would be taken on equal its figures within
+the class's `consent_tolerance`, zero where absent (decision 28); it has not expired; and the payments
+confirmed under it are fewer than its use count — a read over confirmed actions, the way decision 53 reads
+consumption (`authority_model.md#budget-is-a-scope-term-that-attenuates`), and never a counter the swarm
+decrements. The other three take-time conditions apply unchanged. Anything else — a figure moved by the
+smallest unit, an expired consent, an exhausted use count, a payee the consent does not name — is an
+ordinary hold, and the occurrence waits on a new checkpoint.
+
+**What the ruling leaves unchanged.** Every occurrence is still a task that comes due and goes through the
+whole payment workflow (`payments.md#what-the-rails-offer-that-this-design-does-not-use`): `verify` checks
+the figures against the profile before the take, `reconcile` belongs to a principal disjoint from the
+payer, the dedup key is keyed on the obligation, and the confirmation is a read of the rail. A standing
+consent replaces only the operator's per-occurrence decision, and only for figures the operator has
+already approved exactly. It is not a policy — the third take-time condition's rule that a standing
+approval is not a policy holds, so reserving the class in the `action_policy` defeats it at the next take
+— and it is not graduation: no number of successful payments creates one or extends one.
+
+**What the ruling does not settle.** The record shape of a standing consent — which type holds it, how a
+checkpoint presents one for approval, and whether an occurrence taken under it writes a checkpoint the
+consent resolves or writes none — is mechanism, and is not chosen here. Neither is the open half below.
+
+**Open (the other half of decision 127): whether a standing consent for one exact call is available to any
+class other than payment.** A `HIGH` class graduates once its action series reaches the policy's count
+(`#confidence-and-three-blast-tiers`), and the one count then admits every later action of the class,
+whatever its parameters. A standing consent is narrower: one approval, for one exact parameter set or one
+stated parameter constraint, with an expiry and a use count, read at the take. Three candidates.
+
+- **Class graduation only.** What holds outside payment today. Nothing new is built; the coarse instrument
+  stays the only one, so an operator who wants one repeated send taken unattended graduates the whole
+  class to get it.
+- **A standing consent beside graduation, for `HIGH` classes.** The resolving principal writes it as a
+  governance write (decision 18) binding the exact parameters, the action class, and the version of the
+  adapter operation it would be taken through, and it lapses when any of the three changes or the policy
+  reserves the class. It is narrower than graduation and gives the operator a choice of instrument. Its
+  cost is a second way to clear a `HIGH` hold, which has to be read in the same take-time evaluation as
+  graduation and never beside it (principle 6).
+- **A standing consent in place of graduation.** Every `HIGH` hold is cleared by a checkpoint or by an
+  exact standing consent, and no action series graduates anything. The strictest candidate, and it retires
+  a count whose meaning the design otherwise has to keep; it costs the operator more approvals for classes
+  whose parameters genuinely vary from one action to the next.
+
+Whether a standing consent may reach any other class the never-set holds — `operator_only`, or a reserved
+governance class — is part of this half too: the payment ruling neither extends to them nor rules them out.
+
+**Recommendation, unruled.** The second candidate. It applies the payment ruling's shape where a count is
+the only instrument the design offers, and it leaves graduation in place for the operator to retire class
+by class if the narrower instrument proves enough. If this half is not ruled, the payment ruling stands on
+its own and every other class keeps class graduation as its only unattended path.
 
 ### Blast radius selects the gate; nothing yet selects the model a step runs at
 
