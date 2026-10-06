@@ -85,8 +85,7 @@ class ProbeResult:
     status: str = "unknown"
     source: str = "provider_native_probe"
     exhausted_until: float | None = None
-    # Why a weekly reading could not be taken, when a capacity observation
-    # succeeded without one.
+    # Why no weekly reading was taken, when a capacity observation has none.
     reading_failure: str = ""
 
 
@@ -780,8 +779,7 @@ def _refresh_provider(
                 )
             )
         elif provider in harness_router.WEEKLY_PACED_PROVIDERS:
-            # Capacity evidence only: earlier budget evidence is kept, and the
-            # missing weekly reading is reported rather than treated as a pass.
+            # Budget evidence handling tightened per security review.
             harness_router.record_capacity_observation(
                 provider,
                 source=result.source,

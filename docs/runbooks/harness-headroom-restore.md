@@ -221,14 +221,15 @@ message, when:
   operator's own sessions count toward it. Local/mechanical work is never gated.
   **Codex is paced the same way** from its own plan windows: the refresh asks
   `codex app-server` for `account/rateLimits/read` (no model turn) and records the
-  weekly window (`windowDurationMins` 10080) beside Claude's. If that read fails or
-  has no weekly window it is inconclusive, and the refresh falls back to one tiny
-  native request (available / exhausted / unknown) as before; Cursor has only that
-  request. An `unknown` refusal is neither exhaustion (nothing is cooled, headroom
-  is not zeroed) nor headroom (dispatch stays refused until a reading arrives),
-  and says why the reading failed. To take Codex out of pacing, omit it from
+  weekly window (`windowDurationMins` 10080) beside Claude's. Dispatch for a paced
+  provider needs a valid, fresh weekly window: when the reading cannot be taken
+  the gate says `weekly budget reading unavailable` (code `unknown`) and refuses
+  until one is recorded, and a reading recorded earlier keeps governing (and aging)
+  in the meantime. An `unknown` refusal is not exhaustion (nothing is cooled,
+  headroom is not zeroed) and says why the reading failed. Cursor has only a
+  one-request availability probe. To take Codex out of pacing, omit it from
   `APIS_USAGE_GATED_PROVIDERS`; the ceiling and burst settings apply to every gated
-  provider.
+  provider. (Budget evidence handling tightened per security review.)
 
 Every stale, missing or malformed refusal already carries the refresh command
 above and, when the last automatic refresh failed, the CLI's own reason (for

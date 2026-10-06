@@ -96,7 +96,7 @@
   "known_refusal_survives_a_failed_refresh": {
     "meta": {
       "id": "dispatch_budget.known_refusal_survives_a_failed_refresh",
-      "description": "A refusal already recorded is not lifted by a later refresh whose weekly reading failed, even when the provider answers a plain request."
+      "description": "Budget evidence recorded earlier keeps governing dispatch across a later refresh that obtains no weekly reading."
     },
     "events": [
       {

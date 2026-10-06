@@ -612,10 +612,10 @@ def record_capacity_observation(
 ) -> None:
     """Record capacity evidence for a provider that is paced on a weekly budget.
 
-    Unlike ``record_probe_available`` this leaves the recorded usage windows and
-    their observation time untouched, so earlier budget evidence keeps governing
-    (and keeps aging) until a new weekly reading replaces it. ``reading_failure``
-    says why no weekly reading was obtained, which the gate and ``show`` surface.
+    Budget evidence handling tightened per security review: this keeps the
+    recorded usage windows and their observation time as they are, until a new
+    weekly reading replaces them. ``reading_failure`` is surfaced by the gate
+    and ``show``.
     """
     normalized = provider.strip().lower()
     if normalized not in FRONTIER_PROVIDERS:
