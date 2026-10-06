@@ -759,7 +759,7 @@ def test_large_pathological_input_finishes_in_a_subprocess(text):
         "for name, fn in (('verdict', sd.output_has_blocking_verdict), "
         "('body', sd.body_has_blocking_findings), "
         "('own', lambda t: sd.lens_own_verdict(t, lens_agent='waxwing')), "
-        "('sign_off', lambda t: sd.sign_off_is_warranted(t, lens_agent='waxwing'))):\n"
+        "('clearing', lambda t: sd.sign_off_is_warranted(t, lens_agent='waxwing'))):\n"
         "    start = time.perf_counter(); fn(text); out[name] = time.perf_counter() - start\n"
         "print(json.dumps(out))\n"
     )
