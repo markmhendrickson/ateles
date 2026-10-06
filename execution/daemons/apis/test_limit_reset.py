@@ -173,3 +173,47 @@ def test_reset_is_clamped_to_the_kind_of_window() -> None:
     )
     assert weekly is not None and weekly.clamped
     assert weekly.until_wall == now + limit_reset.KIND_CAP_SECONDS["weekly"]
+
+
+# ── _RELATIVE_PART: cost on a long digit run, and unchanged meaning ──────────
+#
+# Provider text is outside our control. The original `(\d+)\s*(unit)s?\b` was
+# retried from every offset inside a digit run that no unit followed, rescanning
+# the rest of the run each time. Starting only where a digit run begins finds the
+# same parts: a start inside a run sees the same suffix as the start of the run.
+
+import random  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+
+_FROZEN_RELATIVE_PART = re.compile(r"(\d+)\s*(d|h|m|s|day|hour|hr|min|minute|sec|second)s?\b")
+
+
+def test_relative_part_finds_the_same_parts_as_the_original():
+    rng = random.Random(20261006)
+    tokens = ["1", "12", "007", "5", "٣", "d", "h", "m", "s", "day", "days", "hour",
+              "hours", "hr", "min", "mins", "minute", "sec", "second", "seconds", " ", "  ",
+              "\t", "\n", " ", ",", "and", " and ", "x", "-", "ds", "hs", "mm", "9"]
+    matched = 0
+    for _ in range(120_000):
+        text = "".join(rng.choice(tokens) for _ in range(rng.randint(1, 14)))
+        expected = [m.span() + m.groups() for m in _FROZEN_RELATIVE_PART.finditer(text)]
+        got = [m.span() + m.groups() for m in limit_reset._RELATIVE_PART.finditer(text)]
+        assert got == expected, repr(text)
+        assert limit_reset._RELATIVE_PART.findall(text) == _FROZEN_RELATIVE_PART.findall(text)
+        matched += bool(expected)
+    assert matched > 10_000
+
+
+@pytest.mark.parametrize("size", [16_384, 65_536])
+@pytest.mark.parametrize("shape", ["digits", "digits-space", "digits-then-letter", "digit-runs"])
+def test_relative_part_long_digit_runs_stay_cheap(shape, size):
+    text = {
+        "digits": "1" * size,
+        "digits-space": "1" * size + " ",
+        "digits-then-letter": "1" * size + "x",
+        "digit-runs": ("1" * 200 + " ") * (size // 201),
+    }[shape]
+    start = time.perf_counter()
+    limit_reset._RELATIVE_PART.findall(text)
+    assert time.perf_counter() - start < 0.5
