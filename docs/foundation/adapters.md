@@ -1342,9 +1342,12 @@ account that credential belongs to. Three parts, each with its own candidates.
 - **Acquiring a credential.** Candidates: decision 118 as ruled, the operator minting; or a carve-out, which
   would reopen 118 in part, for a credential whose issuer expires it on its own and whose reach is bounded by
   the account it was issued under — the class 118 already treats as closer to the swarm's self-issued case.
-- **Topping up.** A top-up moves money and is a payment: under decision 127 it never graduates by count, and a
-  recurring one runs only under a standing consent for its exact figure. Whether a top-up is instead the
-  funding of a metered resource is decision 137's question, not this one's.
+- **Topping up.** Which kind of thing a top-up is has not been ruled. Candidates: a payment over a payment
+  rail, in which case decision 127 applies — it never graduates by count, and a recurring one is taken
+  unattended only under a standing consent for its exact figure; the service's own action, where the
+  balance is bought on the service's own system, which `payments.md#scope` puts outside `payment` and
+  `transfer` and gives to that system's action class; or the funding payment of decision 137's
+  metered-resource candidate.
 
 Any answer keeps three things. The credential is held under custody (`authority_model.md#grants`) and never
 written into a process environment; it binds to the agent as one more credential of one identity
@@ -1352,7 +1355,7 @@ written into a process environment; it binds to the agent as one more credential
 outright.
 
 **Recommendation, unruled.** Keep minting the operator's (decision 118), admit sign-up as a governance class
-the operator grants system by system, and treat a top-up as decision 127 rules. If unanswered, an agent that
+the operator grants system by system, and leave the top-up's classification to be ruled with decision 137. If unanswered, an agent that
 needs an account it lacks raises `capability_denied` and waits, as the obligation above already says.
 
 ### When an adapter is wrong

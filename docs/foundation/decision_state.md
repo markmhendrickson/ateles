@@ -143,7 +143,7 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 135 | whether decision 100's proving obligation covers a change to an agent's or … | no | no | unknown | decision 100, which this would extend; decision 42 |
 | 136 | what a harness binding declares and demonstrates before work is routed to … | no | no | unknown | decision 87's unchosen mechanism; decisions 42, 60, 63, and 64; decisions 129 and 131, … |
 | 137 | whether paying a service per call, at the moment of the call, … | no | no | unknown | decision 127; decision 53 and decision 131, which would meter it as a resource; … |
-| 138 | whether an agent may provision an external service itself — sign up … | no | no | unknown | decision 118; decision 127, which rules the top-up; decision 137; decision 18 |
+| 138 | whether an agent may provision an external service itself — sign up … | no | no | unknown | decision 118; decision 127, which governs a top-up only if it is a payment … |
 | 139 | what the operator's view must be able to show — decision 37 … | no | no | unknown | decision 37, which this would add content to and not reopen; decisions 53, 92, … |
 | 140 | whether a step's writes to subjects other than the one it holds … | no | no | unknown | decision 103, for which it is either the ground of a revisit or the … |
 | 141 | whether every retrieval of a credential value is an observation on the … | no | no | unknown | decision 105, which it holds under whichever way 105 is answered; the custody rules … |

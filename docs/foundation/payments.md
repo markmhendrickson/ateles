@@ -113,9 +113,11 @@ an action a policy can never demote, a checkpoint a named approver must resolve,
 second principal that must have happened first. The recurrence path that lets a `HIGH`-blast class graduate
 into being taken without a checkpoint is unavailable to it, which is the specific property that matters —
 a payment that has been made correctly a hundred times is gated exactly as the hundred-and-first. A
-recurring obligation is not an exception: it runs only under a standing consent the operator approved once,
-for its exact figures, with an expiry and a use count — a principal's decision, never a count (decision
-127, `gates_and_workflows.md#a-recurring-payment-runs-only-under-a-standing-consent-and-whether-other-classes-may-hold-one-is-open`).
+recurring obligation is not an exception: it is taken unattended only under a standing consent the operator
+approved once, for its exact figures at zero tolerance — the class's `consent_tolerance` does not apply to a
+standing consent — with an expiry and a use count; that is a principal's decision, never a count, and without
+one each occurrence waits on an ordinary checkpoint (decision 127,
+`gates_and_workflows.md#a-recurring-payment-runs-only-under-a-standing-consent-and-whether-other-classes-may-hold-one-is-open`).
 
 **What a second gate would cost, stated because the temptation is real.** The instinct at this boundary is
 to add something: a second approver, a cooling-off period, a value ceiling above which a different path
@@ -802,7 +804,8 @@ not answered.** Registered in `conformance.md#the-register-of-open-design-decisi
 agent per call, at the moment of the call: the service answers a request with a demand for payment, the agent
 pays a small amount, and the call proceeds. The review asked whether an agent may pay such charges unattended
 below a threshold set per role, with an approval above it. Decision 127 bears on it directly — a payment never
-graduates by count, and a recurring obligation runs only under a standing consent for an exact figure — so the
+graduates by count, and a recurring obligation is taken unattended only under a standing consent for an exact
+figure — so the
 answer turns on which kind of thing a per-call charge is. Already out of scope, by this document's scope, is a
 purchase made on a merchant's own system, which is that system's action class (`#scope`). Three candidates.
 
@@ -815,10 +818,12 @@ purchase made on a merchant's own system, which is that system's action class (`
   account or balance the operator funds by an ordinary payment. The per-role threshold is a budget term that
   attenuates down a delegation, and a charge above it is a hold. Practical; money leaves without a decision
   per charge, bounded by the budget the operator funded.
-- **A class of its own.** A distinct action class the `action_policy` places where the operator chooses, with
-  a ceiling per call as a parameter constraint. Per-call charges leave the never-set by the operator's own
-  policy write — which decision 127 does not forbid for a class other than `payment` — and no count graduates
-  them.
+- **A class of its own.** A distinct action class for per-call charges, with a ceiling per call as a
+  parameter constraint. What decides whether such a class sits in the never-set is that it moves money, not
+  what the class is named (principle 5): naming a money-moving charge something other than `payment` never
+  takes it out of the never-set by itself. So this candidate stands only if the ruling on this row says, for
+  this class and on its own ground, that per-call charges below a ceiling may be taken outside the
+  never-set; it is never a precedent for any other class that moves money, and no count graduates it.
 
 What no candidate may do: clear a charge on a rail by a count, which decision 127 forbids; or pay from a
 credential the agent holds as its own value, which custody forbids (`authority_model.md#grants`).

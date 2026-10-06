@@ -1296,12 +1296,13 @@ it is not. Three candidates.
   48. Its cost is that some roles split in two.
 
 **Whether the reach's outbound traffic is observed.** A second question from the same review. Where a
-containment profile mediates egress, is what passes through it captured into the record as observations —
-each request's destination and time, and the principal and step it ran under — so that an effect a shell
-produced is attributable afterwards even where the allowlist permitted it? Candidates: no capture, the
-allowlist being the whole bound; capture as observations on the runner's session, carrying coverage like
-any other adapter-sourced read (`adapters.md#what-the-adapter-does-with-every-event`); and capture of
-refused egress only. No candidate makes the mediator an enforcement point for the record, which decision 97
+containment profile mediates egress, is what passes through it captured into the record — each request's
+destination and time, and the principal and step it ran under — so that an effect a shell produced is
+attributable afterwards even where the allowlist permitted it? Candidates: no capture, the allowlist being
+the whole bound; capture as metadata on the runner's session (`vocabulary.md#agent_session`) — the
+destination, the time, and the principal and step, never a request's content, since decision 40 keeps
+content off a session — carrying coverage like any other adapter-sourced read
+(`adapters.md#what-the-adapter-does-with-every-event`); and capture of refused egress only. No candidate makes the mediator an enforcement point for the record, which decision 97
 keeps at the record, and none stores a request's content where the minimization rules of
 `data_model.md#record-conventions` would refuse it.
 
@@ -1310,8 +1311,9 @@ candidate's profile can take, so a ruling on what decision 87's reopening condit
 answers part of this row and leaves the rest standing: the structural rule and the capture question hold
 under any reading of it.
 
-**Recommendation, unruled.** The third candidate, with outbound traffic captured as observations at the
-profile. It closes the gap between decisions 87 and 97 without making a proxy the enforcement point — the
+**Recommendation, unruled.** The third candidate, with outbound traffic captured as session metadata at the
+profile — in plain terms, a shell's direct network calls get an enforcement point and a trace, and an agent
+that can move money or send never also holds an unmediated shell. It closes the gap between decisions 87 and 97 without making a proxy the enforcement point — the
 profile mediates reach that is not a write to the record, which decision 97 never covered — and it makes a
 containment design the implementation of a rule rather than a convention. If unanswered, the question of
 what stops an agent with a shell keeps the answer the design already gives: nothing yet, by design.
@@ -1761,11 +1763,11 @@ which resources a budget may meter. Three candidates.
 
 - **Model use stays outside the design.** Bounded operationally, per provider, by whatever the provider
   itself enforces. The main cost stays unattributed in the record.
-- **A usage observation per runner.** Each runner writes what its harness reports it consumed onto its
-  session (`vocabulary.md#agent_session`), carrying the billing basis — a metered price, or units of a
-  subscription's quota window, and never a subscription priced at nothing — and `metered_resources[]` may
-  name it. Consumption is a derived read over those observations, attenuating down a delegation as decision
-  53 rules. Every harness binding then has to report usage (decision 136).
+- **Usage as session metadata per runner.** Each runner records what its harness reports it consumed as
+  metadata on its session (`vocabulary.md#agent_session`) — usage figures, never content, since decision 40
+  keeps content off a session — carrying the billing basis — a metered price, or units of a subscription's
+  quota window, and never a subscription priced at nothing — and `metered_resources[]` may name it.
+  Consumption is a derived read over that metadata, attenuating down a delegation as decision 53 rules. Every harness binding then has to report usage (decision 136).
 - **Metering at the harness binding's scope only.** Cheaper. It loses attenuation, since a delegate could
   spend the whole of its delegator's allowance.
 

@@ -646,8 +646,9 @@ entity is a record in the record, not an artifact.
 and routed by its own intake.
 
 **Fast paths:** none. A payment never graduates: no count of successful payments takes the next one
-unattended. A recurring obligation runs only under a standing consent the operator approved once, for its
-exact figures, with an expiry and a use count (decision 127,
+unattended. A recurring obligation is taken unattended only under a standing consent the operator approved
+once, for its exact figures at zero tolerance, with an expiry and a use count, and without one each occurrence
+waits on an ordinary checkpoint (decision 127,
 `gates_and_workflows.md#a-recurring-payment-runs-only-under-a-standing-consent-and-whether-other-classes-may-hold-one-is-open`),
 which changes whether `consent` waits on the operator for that occurrence, not whether the step exists.
 

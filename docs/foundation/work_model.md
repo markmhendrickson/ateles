@@ -1721,8 +1721,11 @@ cost (decision 131). Three candidates.
   true.
 - **A launch driven by the live set.** A runner for a role is started only while the live partition
   (decision 92, `#a-task-is-live-when-some-principal-could-claim-it-now`) holds work that role may claim and
-  fewer than a stated maximum of runners hold leases for it, the maximum a value on the role's
-  `vendor_binding` (decision 42). Coalescing is then a read, and no wake counter exists (principle 11).
+  fewer than a stated maximum of runners hold leases for it. Coalescing is then a read, and no wake counter
+  exists (principle 11). Where the maximum lives is part of this candidate and is not settled: the role's
+  `vendor_binding` (decision 42), which binds the role to a harness but addresses an external system rather
+  than how runners are started; the roster, which already resolves which principals fill a role; or the `action_policy`,
+  which already carries per-class values the operator writes.
 
 **Recommendation, unruled.** The third. If unanswered, what the swarm spends on waking runners is bounded by
 nothing the design names.
