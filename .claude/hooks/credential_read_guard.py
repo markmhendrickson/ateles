@@ -113,6 +113,9 @@ from _session_integrity import read_hook_input  # noqa: E402
 # (fnmatch), evaluated against the user-expanded, normalized path.
 # ---------------------------------------------------------------------------
 CREDENTIAL_PATH_GLOBS = [
+    # The whole credential directory, not only its dotenv files: backups,
+    # token caches and any other file kept beside them are the same hazard.
+    "*/.config/neotoma/*",
     "*/.config/neotoma/*.env",
     "*/.config/neotoma/.env",
     "*.env",
@@ -125,6 +128,9 @@ CREDENTIAL_PATH_GLOBS = [
     "*.jwks",
     "*private*.jwk*",
     "*/.netrc",
+    # Launchd job definitions embed a service's environment, so a plist is a
+    # credential-bearing file even though it is not named like one.
+    "*/Library/LaunchAgents/*.plist",
     "*1password*export*",
     "*1password*.csv",
     "*op-export*",
@@ -323,7 +329,7 @@ def _split_segments(command: str):
 # review (ateles#1302 round 5/Falco, non-blocking).
 _CONTENT_DUMP_CMDS = re.compile(
     r"\b(cat|head|tail|less|more|bat|nl|tac|od|hexdump|xxd|strings|"
-    r"base64|cut|dd|column)\b"
+    r"base64|cut|dd|column|plutil|PlistBuddy|defaults)\b"
 )
 
 # `while read ...; done < <path>` (and similarly `read line < <path>`) feeds
@@ -443,8 +449,12 @@ _COMMAND_END = r"(?![A-Za-z0-9_./-])"
 _BIN_PATH = r"(?:/(?:usr/)?bin/)?"
 _PRINTENV_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}printenv{_COMMAND_END}")
 _ENV_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}env{_COMMAND_END}")
+# `launchctl list <label>` prints that job's whole dictionary, environment
+# included; bare `launchctl list` prints only pid/status/label and stays
+# allowed. `dumpstate` and `procinfo` print manager and process state.
 _SERVICE_ENV_RE = re.compile(
-    rf"{_COMMAND_START}{_BIN_PATH}launchctl\s+(?:print|getenv){_COMMAND_END}"
+    rf"{_COMMAND_START}{_BIN_PATH}launchctl\s+"
+    rf"(?:(?:print|getenv|dumpstate|procinfo){_COMMAND_END}|list\s+[^\s|;&)])"
     rf"|{_COMMAND_START}{_BIN_PATH}systemctl\s+"
     rf"(?:show|show-environment){_COMMAND_END}"
 )
@@ -582,6 +592,69 @@ def _ambient_process_or_service_hit(segment: str) -> str | None:
     return None
 
 
+# Shell tracing re-creates an environment dump from inside a sourcing
+# command: with xtrace on, the shell prints every expanded assignment and
+# every command line with its variables substituted, so a sourced secret
+# reaches the transcript without any dump command. Refused only in a command
+# that sources a credential file; turning tracing OFF (`set +x`) and
+# unrelated `set` flags (`-e`, `-u`, `-o pipefail`) stay allowed.
+_INTERACTIVE_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+
+def _flag_cluster_has_x(word: str) -> bool:
+    return (
+        word.startswith("-") and not word.startswith("--") and "x" in word[1:].lower()
+    )
+
+
+def _xtrace_after_flags(words: list[str], start: int) -> bool:
+    """Scan the option words after `set` or a shell name for xtrace."""
+    index = start
+    while index < len(words):
+        word = words[index]
+        if word == "--" or not word.startswith(("-", "+")):
+            return False
+        if word.startswith("-"):
+            if _flag_cluster_has_x(word):
+                return True
+            if word.startswith("-o") and word[2:].lower() == "xtrace":
+                return True
+            if word.endswith("o") and not word.startswith("--"):
+                # `-o` (alone or as the last letter of a cluster) takes the
+                # next word as an option NAME.
+                index += 1
+                if index < len(words) and words[index].lower() == "xtrace":
+                    return True
+        index += 1
+    return False
+
+
+def _enables_xtrace(segment: str) -> bool:
+    """True when the segment turns shell tracing on (`set -x`, `set -o
+    xtrace`, `setopt xtrace`, a shell started with `-x`, `SHELLOPTS=xtrace`)."""
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        words = segment.split()
+    words = [_strip_wrapper_punctuation(w) for w in words]
+    for index, word in enumerate(words):
+        if word.startswith(("SHELLOPTS=", "export SHELLOPTS=")) and (
+            "xtrace" in word.lower()
+        ):
+            return True
+        name = word.rsplit("/", 1)[-1]
+        if name == "set" and _xtrace_after_flags(words, index + 1):
+            return True
+        if name == "setopt" and any(
+            w.lower().replace("_", "") == "xtrace" or _flag_cluster_has_x(w)
+            for w in words[index + 1 :]
+        ):
+            return True
+        if name in _INTERACTIVE_SHELLS and _xtrace_after_flags(words, index + 1):
+            return True
+    return False
+
+
 def _remote_shell_env_dump_hit(command: str) -> str | None:
     """Refuse a remote-execution wrapper whose carried command dumps an
     environment. Boolean checks (`[ -n "$VAR" ]`, `test -n "$VAR"`, a `case`
@@ -602,7 +675,9 @@ def _remote_shell_env_dump_hit(command: str) -> str | None:
     return None
 
 
-_SOURCE_RE = re.compile(r"(?:^|\s)(?:source|\.)\s+(\S+)")
+# A quote or bracket may sit directly before the keyword when the whole
+# sourcing statement is the argument of a wrapper (`bash -x -c 'source f'`).
+_SOURCE_RE = re.compile(r"(?:^|[\s'\"(`])(?:source|\.)\s+(\S+)")
 
 
 def _grep_is_safe_mode(segment: str) -> bool:
@@ -1104,6 +1179,13 @@ def check_bash(command: str):
             or _VAR_PRINT_RE.search(normalized)
         ):
             return "environment dump after sourcing a credential file"
+
+        # Shell tracing anywhere in a command that sources a credential
+        # file prints the expanded assignments and commands, which is the
+        # same disclosure as an environment dump. Checked in every segment
+        # because `set -x` and `source` are usually separate statements.
+        if sourced_a_credential and _enables_xtrace(normalized):
+            return "shell tracing in a command that sources a credential file"
 
         # An interpreter's inline program (`-c`/`-e`) that itself NAMES a
         # credential path is refused outright, regardless of what the

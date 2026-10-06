@@ -44,6 +44,12 @@ ENV_EXAMPLE_FILE = NEOTOMA_DIR / ".env.example"
 ENV_EXAMPLE_FILE.write_text(
     "NEOTOMA_BEARER_TOKEN=\nNEOTOMA_BASE_URL=\nANOTHER_SECRET=\n"
 )
+NEOTOMA_OTHER_FILE = NEOTOMA_DIR / "config.json"
+NEOTOMA_OTHER_FILE.write_text('{"synthetic": "not-a-real-value"}\n')
+LAUNCH_AGENTS_DIR = FIXTURE_ROOT / "Library" / "LaunchAgents"
+LAUNCH_AGENTS_DIR.mkdir(parents=True)
+PLIST_FILE = LAUNCH_AGENTS_DIR / "com.example.agent.plist"
+PLIST_FILE.write_text("<plist><dict>synthetic-not-real</dict></plist>\n")
 PLAIN_FILE = FIXTURE_ROOT / "notes.txt"
 PLAIN_FILE.write_text("nothing sensitive here\n")
 PLAIN_ENV_FILE = (
@@ -54,6 +60,8 @@ PLAIN_ENV_FILE.write_text("UNRELATED=1\n")
 ENV = str(ENV_FILE)
 ENV_EXAMPLE = str(ENV_EXAMPLE_FILE)
 PLAIN = str(PLAIN_FILE)
+NEOTOMA_OTHER = str(NEOTOMA_OTHER_FILE)
+PLIST = str(PLIST_FILE)
 PLAIN_ENV = str(PLAIN_ENV_FILE)
 
 
@@ -317,6 +325,80 @@ BASH_BLOCK = [
     # prints a credential file's content unconditionally, with no safe
     # flag-free invocation, and was simply absent from _CONTENT_DUMP_CMDS.
     ("column reformats and prints file content", f"column {ENV}"),
+    # --- Credential containment tightening -------------------------------
+    # Process-environment listings. The first group was already refused by the
+    # full-command checks; these pin the evasion spellings so a refactor of
+    # the option parser cannot silently reopen them.
+    ("pgrep -l then -f as separate flags", "pgrep -l -f example-agent"),
+    ("pgrep clustered -lf", "pgrep -lf example-agent"),
+    ("pgrep clustered -fil", "pgrep -fil example-agent"),
+    ("pgrep -af", "pgrep -af example-agent"),
+    ("absolute-path pgrep -fl", "/usr/bin/pgrep -fl example-agent"),
+    ("pgrep behind env wrapper", "env FOO=1 pgrep -fl example-agent"),
+    ("pgrep behind command substitution", 'echo "$(pgrep -fl example-agent)"'),
+    ("pgrep behind xargs", "echo example-agent | xargs pgrep -fl"),
+    ("ps -E environment flag", "ps -E -p 123"),
+    ("ps -E with a safe field list still prints env", "ps -E -p 123 -o pid=,comm="),
+    ("ps clustered -Eww", "ps -Eww -p 123"),
+    ("ps BSD e modifier", "ps e -p 123"),
+    ("ps BSD e modifier after the pid", "ps -p 123 e"),
+    ("ps BSD wwe cluster", "ps wwe -p 123"),
+    ("ps eww behind sudo", "sudo ps eww -p 123"),
+    ("ps eww behind command wrapper", "command ps eww -p 123"),
+    ("ps eww behind command substitution", 'echo "$(ps eww -p 123)"'),
+    ("ps eww behind xargs", "echo 123 | xargs ps eww -p"),
+    # Shell tracing prints every expanded assignment and command, so it
+    # re-creates an environment dump from inside a sourcing command.
+    ("set -x before sourcing", f"set -x; source {ENV}"),
+    ("set -x after sourcing", f"source {ENV}; set -x; curl -s https://example.test"),
+    ("set -o xtrace before sourcing", f"set -o xtrace; source {ENV}"),
+    ("set -oxtrace attached form", f"set -oxtrace; source {ENV}"),
+    ("set clustered -ax", f"set -ax; source {ENV}; set +a"),
+    ("set separate flags -a -x", f"set -a -x; source {ENV}; set +a"),
+    ("set clustered -eux", f"set -eux; . {ENV}; python3 script.py"),
+    ("set -vx", f"set -vx; source {ENV}"),
+    ("set -x on its own line", f"set -x\nsource {ENV}\npython3 script.py"),
+    ("set -x combined with -o pipefail", f"set -x -o pipefail; source {ENV}"),
+    ("zsh setopt xtrace", f"setopt xtrace; source {ENV}"),
+    ("zsh setopt XTRACE", f"setopt XTRACE; source {ENV}"),
+    (
+        "shell -x flag around a sourcing wrapper",
+        f"bash -x -c 'source {ENV}; python3 script.py'",
+    ),
+    (
+        "zsh -x flag around a sourcing wrapper",
+        f"zsh -x -c '. {ENV}; python3 script.py'",
+    ),
+    ("SHELLOPTS xtrace assignment", f"SHELLOPTS=xtrace; source {ENV}"),
+    ("set -x with a sourced *.env file", f"set -x; source {PLAIN_ENV}"),
+    # Launchd job definitions carry a service's environment; listings and
+    # plist printers expose it exactly as an environment dump does.
+    ("cat of a LaunchAgents plist", f"cat {PLIST}"),
+    ("plutil -p of a LaunchAgents plist", f"plutil -p {PLIST}"),
+    ("plutil convert to stdout", f"plutil -convert xml1 -o - {PLIST}"),
+    (
+        "plutil extract the environment dictionary",
+        f"plutil -extract EnvironmentVariables xml1 -o - {PLIST}",
+    ),
+    ("PlistBuddy print", f"/usr/libexec/PlistBuddy -c Print {PLIST}"),
+    ("defaults read of a plist", f"defaults read {PLIST}"),
+    ("grep content of a plist", f"grep -i token {PLIST}"),
+    (
+        "launchctl list with a job label prints its dictionary",
+        "launchctl list com.example.agent",
+    ),
+    ("launchctl dumpstate", "launchctl dumpstate"),
+    ("launchctl procinfo", "launchctl procinfo 123"),
+    (
+        "launchctl list with a label behind sudo",
+        "sudo launchctl list com.example.agent",
+    ),
+    # Any other file in the credential directory, not only the dotenv files.
+    ("cat of a non-dotenv file in the credential directory", f"cat {NEOTOMA_OTHER}"),
+    (
+        "head of a non-dotenv file in the credential directory",
+        f"head -3 {NEOTOMA_OTHER}",
+    ),
     # `awk ... getline < <path>` reaches the same sink as the tokenizer
     # defect above (the path lives inside the awk program string, corrupted
     # by the same interleaved quote/paren stripping) — already caught by
@@ -427,6 +509,33 @@ BASH_ALLOW = [
     ("unrelated hyphenated printenv command", "my-printenv --version"),
     ("unrelated hyphenated pgrep command", "my-pgrep -fl example-agent"),
     ("unrelated hyphenated ps command", "my-ps aux"),
+    # --- Credential containment tightening: must stay allowed -------------
+    ("set -x without any credential source", "set -x; echo hello"),
+    (
+        "set +x turns tracing off before sourcing",
+        f"set +x; source {ENV}; python3 script.py",
+    ),
+    ("set -e then source then a program", f"set -e; source {ENV}; python3 script.py"),
+    (
+        "set -euo pipefail then source then a program",
+        f"set -euo pipefail; source {ENV}; python3 script.py",
+    ),
+    (
+        "set -o pipefail is not tracing",
+        f"set -o pipefail; source {ENV}; python3 script.py",
+    ),
+    ("commit message naming set -x", 'git commit -m "refuse set -x with source"'),
+    ("echo of set -x text", f"echo 'set -x; source {ENV}'"),
+    ("bash -c without tracing", f"bash -c 'source {ENV}; python3 script.py'"),
+    ("listing a LaunchAgents directory", f"ls -la {LAUNCH_AGENTS_DIR}"),
+    ("launchctl list with no label", "launchctl list"),
+    ("counting matches in a plist", f"grep -c token {PLIST}"),
+    (
+        "reading a template in the credential directory",
+        f"cat {NEOTOMA_DIR}/.env.example",
+    ),
+    ("pgrep exact name still allowed", "pgrep -x example-agent"),
+    ("ps identity fields still allowed", "ps -p 123 -o pid=,comm="),
     ("ssh-keygen is not ssh", "ssh-keygen -t ed25519"),
     ("ssh-add is not ssh", "ssh-add ~/.ssh/id_ed25519"),
     (
@@ -457,6 +566,11 @@ def test_bash_allow(label, cmd):
 READ_BLOCK = [
     ("Read on .env via file_path", {"file_path": ENV}),
     ("Read on .env via path", {"path": ENV}),
+    ("Read on a LaunchAgents plist", {"file_path": PLIST}),
+    (
+        "Read on a non-dotenv file in the credential directory",
+        {"file_path": NEOTOMA_OTHER},
+    ),
 ]
 READ_ALLOW = [
     ("Read on .env.example", {"file_path": ENV_EXAMPLE}),
@@ -487,6 +601,14 @@ GREP_BLOCK = [
         "content mode with context flags",
         {"path": ENV, "output_mode": "content", "pattern": "TOKEN", "-A": 2},
     ),
+    (
+        "content mode on a LaunchAgents plist",
+        {"path": PLIST, "output_mode": "content", "pattern": "TOKEN"},
+    ),
+    (
+        "content mode on a non-dotenv file in the credential directory",
+        {"path": NEOTOMA_OTHER, "output_mode": "content", "pattern": "x"},
+    ),
 ]
 GREP_ALLOW = [
     ("files_with_matches default", {"path": ENV, "pattern": "TOKEN"}),
@@ -495,6 +617,10 @@ GREP_ALLOW = [
         {"path": ENV, "pattern": "TOKEN", "output_mode": "files_with_matches"},
     ),
     ("count mode", {"path": ENV, "pattern": "TOKEN", "output_mode": "count"}),
+    (
+        "count mode on a LaunchAgents plist",
+        {"path": PLIST, "pattern": "TOKEN", "output_mode": "count"},
+    ),
     (
         "content mode on plain file",
         {"path": PLAIN, "output_mode": "content", "pattern": "x"},
