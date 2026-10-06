@@ -132,9 +132,9 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 117 | whether a grant may say what a principal may do to an … | yes | yes | unknown | decision 41, whose tuple and default-deny shape this widens rather than replaces; decision 43, … |
 | 118 | whether credential rotation is one authority or several, split by who issues … | yes | yes | unknown | decision 105, open, on where a credential's value comes from and how it reaches … |
 | 119 | how an authorized principal commissions an entire plan or project for autonomous … | yes | yes | unknown | decisions 14, 18, 30, 41, 46, 47, 53, 56, 57, and 92; the existing … |
-| 122 | whether a login wall an adapter meets on a system reached through … | no | no | unknown | nothing in the design; an adapter for any system behind a login |
+| 122 | whether a login wall an adapter meets on a system reached through … | no | no | unknown | decision 105, open, on how a credential reaches the process that holds it — … |
 | 123 | what follows from decision 87's reopening condition when the harness is a … | no | no | unknown | decision 87, whose reopening clause names this condition and says it "would remove the … |
-| 124 | what an interface rendered inside a harness is — the Interface payload … | no | no | unknown | nothing in the design; the Interface row, which had no design behind it |
+| 124 | what an interface rendered inside a harness is — the Interface payload … | no | no | unknown | decision 37, whose delivery rule makes showing an interface to the operator take no … |
 | 125 | how an agent created by describing it in conversation, as hosted agent … | no | no | unknown | decision 18, which it keeps unchanged; decision 116, whose content-computed split of the `workflow` … |
-| 126 | what an execution environment may hold outside the record — the working … | no | no | unknown | nothing in the design; `vocabulary.md#scratch-state`, the proposed term it adds |
+| 126 | what an execution environment may hold outside the record — the working … | no | no | unknown | the custody rule in `authority_model.md#grants`, which governs credential material this row carves out of … |
 

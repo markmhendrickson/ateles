@@ -1903,13 +1903,23 @@ the record" says everything may — the sentences assert opposite things. Swap t
 [reconciler](#reconciler) and read to take a decision; "the step read its scratch state to decide" is the
 failure this term names, so the two cannot substitute. Swap test against [artifact](#artifact): an artifact is
 held by an [external system](#external-system) and read through its [adapter](#adapter) as a fact; scratch
-state is held by no system the record reads. Not "working state", which the corpus already uses for the
+state is held by no system the record reads. Swap test against diagnostic capture
+(`failure_posture.md`, rules 1 and 4): diagnostic capture is deliberate forensic output written to local disk
+while the record is unreachable, kept for a person to read as evidence of an outage; scratch state is working
+material the step itself reads while it runs. "The runner wrote diagnostic capture" says evidence was kept for
+someone; "the runner left it in scratch state" says nothing was kept for anyone — distinct, and the one
+sentence that names both (rule 4) says a [conclusion](#conclusion) parked in scratch state is reduced to diagnostic capture,
+never that the two are one thing. Not "working state", which the corpus already uses for the
 [leases](#lease), [checkpoints](#checkpoint), and [verdicts](#verdict) by which the swarm runs itself.
 **See:** [`data_model.md#what-a-step-holds-outside-the-record-is-scratch-state-and-scratch-state-is-never-read-as-truth`](data_model.md#what-a-step-holds-outside-the-record-is-scratch-state-and-scratch-state-is-never-read-as-truth),
 [`failure_posture.md#the-rules`](failure_posture.md#the-rules).
 **Never:** —
 **Not for:** working state for scratch state (that names record state); memory for an agent's scratch state
-(an agent's memory across runs is the record); a second record kept in a sandbox's filesystem.
+(an agent's memory across runs is the record); a second record kept in a sandbox's filesystem; credential
+material held under custody (`authority_model.md#grants`) — a token, a key, or a login session a host keeps
+between runs is neither scratch state nor record content, the custody rule governs it, and the loss test
+does not send it to the record; diagnostic capture (`failure_posture.md`, rule 1), which is neither either;
+a cache shared across principals (scratch state that outlives its step is held for one principal).
 
 ## Conformance (`conformance.md`)
 

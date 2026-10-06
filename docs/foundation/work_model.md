@@ -608,48 +608,88 @@ below is ruled until the operator rules it.
 **The rules in this section.**
 
 - A conversation is an intake source: it creates a task, and never an agent.
-- The swarm drafts the agent, its grant, and its workflow, and each is a governance write held at the gate.
-- The checkpoint presents the authority the agent would hold in plain terms, rendered from the drafted grant and resolved on it as drafted.
-- A narrower class may be loosened through `action_policy`, and the class is read from the drafted grant, never asserted by the drafter.
+- The swarm drafts the agent, its grant, its credential binding, and its workflow, and each is a governance write held at the gate.
+- The principal that drafted them never resolves their checkpoints, under any class.
+- The checkpoint presents the authority the agent would hold in plain terms, rendered from the drafted grant, beside the request it came from, and resolved on it as drafted.
+- Each write is resolved on its own, and the checkpoints say what a partial approval leaves.
+- A narrower class may be loosened through `action_policy`, and the gate computes the class from the drafted grant, never the drafter.
 
 **A conversation is an intake source: it creates a task, and never an agent.** An interactive session's
 output becomes tasks (`#the-four-execution-mechanisms`), and a request for a new agent is such output. It
 enters intake like any other task (`#intake-is-every-tasks-first-workflow`); no path writes an agent because
 someone described one.
 
-**The swarm drafts the agent, its grant, and its workflow, and each is a governance write held at the
-gate.** The task's workflow has steps that draft the `agent` entity, its `agent_grant`, the `workflow`
-declaration whose steps its role will own, and, where it fills a role, the `swarm_roster` change. Each is on the closed
-list (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), so
-each is an action, and under decision 18 each resolves to `operator_only` until the operator has written a
-policy value for its class. The drafting step proposes; it never grants, because an agent cannot widen a
-grant by writing one (above). A new workflow declaration also meets decision 100's proving rule at whatever
-tier the write resolves to (`#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`).
+**The swarm drafts the agent, its grant, its credential binding, and its workflow, and each is a governance
+write held at the gate.** The task's workflow has steps that draft the `agent` entity, its `agent_grant`, the
+`workflow` declaration whose steps its role will own, and, where it fills a role, the `swarm_roster` change.
+Each is on the closed list
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), so each is
+an action, and under decision 18 each resolves to `operator_only` until the operator has written a policy
+value for its class. An agent also cannot act until a credential is bound to act as it: the
+`principal_binding` edge, admitted under decision 117's `relationship_types[]`
+(`authority_model.md#grants`). It is drafted with the rest. Whether it joins the closed governance list is
+one of the questions decision 117 left open, and this proposal does not answer it; what this proposal does
+state is that no policy value written for a narrow agent class reaches the binding, which stays held as
+decision 18 reserves it whatever the operator loosens. The drafting step proposes; it never grants, because
+an agent cannot widen a grant by writing one (above). A new workflow declaration also meets decision 100's
+proving rule at whatever tier the write resolves to
+(`#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`).
 
-**The checkpoint presents the authority the agent would hold in plain terms, rendered from the drafted grant
-and resolved on it as drafted.** What the operator is shown is what the agent could read and write, which
+**The principal that drafted them never resolves their checkpoints, under any class.** The raiser of a
+checkpoint does not resolve it
+(`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`),
+and decision 116's split of the `workflow` class carries the same rule for the swarm's approval: it is never
+the proposer's (`workflows.md#who-approves-a-new-or-amended-declaration`). Loosening a class changes who may
+approve, never whether the drafter may: a narrow agent write the operator has loosened to the swarm is still
+approved by a principal other than the one that drafted it.
+
+**The checkpoint presents the authority the agent would hold in plain terms, rendered from the drafted grant,
+beside the request it came from, and resolved on it as drafted.** What the operator is shown is what the agent could read and write, which
 tools and surfaces it would hold — an unbounded shell named as one — which actions it could produce and at
 what tier, which external systems it would reach, and which approvals it would sit in. That description is a
 rendering of the drafted grant, never a second statement of it beside the grant (principle 9), so the two
 cannot disagree; and the resolution is on the grant as drafted, so a grant changed after it was shown is a
-new checkpoint — the shape decision 27 gives a payment's approver, shown exactly what will be taken. Each
-write keeps its own checkpoint; they may be shown together, and no resolution of one resolves another
-(`gates_and_workflows.md#the-checkpoint`).
+new checkpoint — the shape decision 27 gives a payment's approver, shown exactly what will be taken. Beside
+the rendering stands the operator's original request, read from the task the conversation created, and the
+rendering names anything the grant holds beyond what the request asked for. The largest risk at this point
+is the gap between what was asked for and what was drafted, and the operator should see that gap rather than
+have to reconstruct it.
+
+**Each write is resolved on its own, and the checkpoints say what a partial approval leaves.** Each write
+keeps its own checkpoint; they are shown together, and no resolution of one resolves another
+(`gates_and_workflows.md#the-checkpoint`). That is right for authority, and it has a consequence the operator
+must see before choosing: approving the agent and its grant while denying its workflow leaves an agent that
+exists and owns nothing, and approving the workflow while denying the grant leaves steps no one can take. So
+each checkpoint states what approving it alone would leave — "approving this alone creates an agent with no
+workflow" — and nothing is approved together by default.
 
 **A narrower class may be loosened through `action_policy`, and the class is read from the drafted grant,
 never asserted by the drafter.** An operator who trusts the swarm to create, say, an agent whose grant names
-reads only, may write a policy value for that class and leave every other agent write reserved — decision 18's
-loosening, class by class. The precedent is decision 116's, which already splits the `workflow` governance
+reads only, over named types none of which is sensitive, may write a policy value for that class and leave
+every other agent write reserved — decision 18's loosening, class by class. The precedent is decision 116's, which already splits the `workflow` governance
 class by what the declaration's steps take (`workflows.md#who-approves-a-new-or-amended-declaration`); this
 extends the same split to the `agent_grant` write. For it to hold, the classification must come from the
-grant's own content, computed when the action is created: a class the drafting principal asserted would let the drafter choose the loosened class for a grant that is not
-narrow, which is the safety field failing open (principle 5). A grant whose class cannot be computed is
-unclassified and fails closed. Writing that policy value is itself a governance write, reserved like the
+grant's own content, computed by the gate when the action is created and never by the drafter: a class the
+drafting principal asserted would let the drafter choose the loosened class for a grant that is not narrow,
+which is the safety field failing open (principle 5). A grant whose class cannot be computed is unclassified
+and fails closed. **Reading only is not narrow by itself.** The computed class reads the entity types and
+relationship types the grant reads and writes, not only its operations: a grant that reads a type carrying a
+credential (the `principal_binding` edge carries `credential_value`, decision 117), a type holding
+special-category personal data, any wildcard over types or relationship types, or any power to delegate is
+outside every loosened class, whatever its operations. **Narrow is computed against the drafter as well.** A
+drafted grant that names anything the drafting principal's own grant does not hold is outside every loosened
+class, so the swarm never extends authority it does not itself hold without the operator: a drafted grant
+is capped at the drafter's own authority for anything the swarm may approve, and beyond that cap it is the
+operator's as decision 18 reserves it. Writing that policy value is itself a governance write, reserved like the
 rest.
 
 **What this adds is nothing beyond a rendering.** No type, field, or path: intake, the gate, the checkpoint,
 and decision 18's per-class loosening exist. What ruling it would oblige is the plain-terms rendering of a
-grant as a declared presentation, and the computed class for a narrow agent write, each with a suite row.
+grant beside its originating request as a declared presentation, and the computed class for a narrow agent
+write, each with a suite row; the suite also gains rows in which the drafter's own resolution of a loosened
+write is refused, a reads-only grant over a credential-bearing type is not loosened, a drafted grant beyond
+the drafter's own is not loosened, and the credential binding is held whatever the narrow class's policy
+value says.
 **What would reopen it:** an instance whose operator loosens every agent class on its first day, which is
 decision 18's own signal that a default everyone overrides is the wrong default.
 

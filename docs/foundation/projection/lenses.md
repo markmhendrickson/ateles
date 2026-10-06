@@ -47,9 +47,9 @@ Which rules a lens reviewing for one kind of failure should select, by the confo
 - [`conformance.md`](conformance.md) — CF-2, CF-4
 
 
-## Class P — 4 rules
+## Class P — 5 rules
 
-- [`authority_model.md`](authority_model.md) — AU-6
+- [`authority_model.md`](authority_model.md) — AU-6, AU-29
 
 - [`planning_model.md`](planning_model.md) — PM-12
 
