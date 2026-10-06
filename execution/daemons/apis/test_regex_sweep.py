@@ -31,6 +31,7 @@ import importlib
 import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -730,7 +731,7 @@ def test_closure_verb_rewrite_matches_the_original():
         "o/r#3",
         "x",
         "owner/repo#4",
-        " ",
+        "\u2028",
     ]
     for text in _strings(tokens, 11):
         _same_search(original, swarm_dispatch._CLOSURE_VERB, text)
@@ -759,7 +760,7 @@ def test_not_received_rewrite_matches_the_original():
         "NOT RECEIVED",
         "not received",
         "x",
-        " ",
+        "\u00a0",
     ]
     for text in _strings(tokens, 12):
         _same_search(original, swarm_dispatch._NOT_RECEIVED_RE, text)
@@ -768,7 +769,7 @@ def test_not_received_rewrite_matches_the_original():
 def test_verdict_like_rewrite_matches_the_original():
     alternation = swarm_dispatch._VERDICT_TOKEN_ALT
     original = re.compile(
-        r"^[#*_\s]*(?:(?i:verdict)\s*[:=—–-]\s*[#*_\s]*)?(?:"
+        r"^[#*_\s]*(?:(?i:verdict)\s*[:=\u2014\u2013-]\s*[#*_\s]*)?(?:"
         + alternation
         + r")(?![A-Za-z0-9]|_[A-Za-z0-9])"
     )
@@ -784,7 +785,7 @@ def test_verdict_like_rewrite_matches_the_original():
         "verdict",
         ":",
         "=",
-        "—",
+        "\u2014",
         "-",
         "COMMENT",
         "APPROVE",
@@ -844,8 +845,8 @@ def test_verdict_findall_rewrite_matches_the_original():
         "\r",
         "x",
         "\x0b",
-        " ",
-        " ",
+        "\u2028",
+        "\u00a0",
         "\n\n",
     ]
     for text in _strings(tokens, 15, longest=14):
@@ -873,7 +874,7 @@ RUNS = {
 def _lens_reply(tail, *, lens="arch", agent_header="Waxwing"):
     marker = swarm_dispatch.compose_lens_review_marker(lens, HEAD_SHA)
     return (
-        f"{marker}\n**\U0001f916 {agent_header} — Ateles swarm, {lens} review**\n"
+        f"{marker}\n**\U0001f916 {agent_header} \u2014 Ateles swarm, {lens} review**\n"
         f"**SIGNED_OFF**\n\n{tail}\n"
     )
 
@@ -917,3 +918,127 @@ def test_verdict_keyword_delimiter_then_a_long_run_is_fast(entry, run):
         start = time.perf_counter()
         _entry_points()[entry](body)
         assert time.perf_counter() - start < TIME_LIMIT, (entry, run, delimiter)
+
+
+# ── cost of normalising a large text ─────────────────────────────────────────
+#
+# Every lens-marked comment from any account goes through the scans, so the
+# cost of normalising a large text matters as much as a regex's shape. The
+# text below is NFKC-expanding (ligatures) but pure ASCII afterwards.
+
+# U+FDFA expands to eighteen non-ASCII letters under NFKC, the worst expansion
+# the scans meet; the mix adds the ligatures and compatibility forms that expand
+# a little. 65,000 characters is just under GitHub's comment limit.
+EXPANDING_UNITS = {
+    "arabic ligature": chr(0xFDFA),
+    "mixed ligatures": chr(0xFB01)
+    + "nd "
+    + chr(0xFB02)
+    + "ow "
+    + chr(0xFB03)
+    + "x "
+    + chr(0xFDFA)
+    + " "
+    + chr(0x33FF)
+    + " ",
+}
+
+
+def _expanding_reply(unit, size=65_000):
+    return _lens_reply((unit * (size // len(unit) + 1))[:size])
+
+
+@pytest.mark.parametrize("unit", list(EXPANDING_UNITS))
+@pytest.mark.parametrize("entry", list(_entry_points()))
+def test_a_compatibility_form_heavy_comment_is_scanned_quickly(entry, unit):
+    body = _expanding_reply(EXPANDING_UNITS[unit])
+    start = time.perf_counter()
+    _entry_points()[entry](body)
+    assert time.perf_counter() - start < 1.5, (entry, unit)
+
+
+@pytest.mark.parametrize("unit", list(EXPANDING_UNITS))
+def test_the_veto_predicates_on_an_expanding_text_are_each_quick(unit):
+    body = _expanding_reply(EXPANDING_UNITS[unit])
+    for fn in (
+        swarm_dispatch.output_has_blocking_verdict,
+        swarm_dispatch.body_has_blocking_findings,
+    ):
+        start = time.perf_counter()
+        fn(body)
+        assert time.perf_counter() - start < 1.5, fn.__name__
+
+
+def test_the_forms_of_a_text_are_built_once_for_the_predicates_that_share_it():
+    body = _expanding_reply(EXPANDING_UNITS["mixed ligatures"], 2048)
+    first = swarm_dispatch._veto_scan_forms(body)
+    assert swarm_dispatch._veto_scan_forms(body) is first
+
+
+def _reference_forms(text):
+    """FROZEN COPY of `_veto_scan_forms` before it shared its normalisation:
+    every form built independently, with the per-character mark strip."""
+
+    def fold(reading, underscores):
+        sd = swarm_dispatch
+        t = sd._SPACE_THEN_LOW_LINE_RE.sub("_", text) if underscores else text
+        t = t.translate(sd._VETO_PRE_NFKC_TRANSLATION)
+        decomposed = unicodedata.normalize("NFKD", t)
+        stripped = "".join(
+            ch
+            for ch in decomposed
+            if ch not in sd._ZERO_WIDTH_CHARS
+            and unicodedata.category(ch) not in sd._STRIPPED_UNICODE_CATEGORIES
+        )
+        folded = unicodedata.normalize("NFKC", stripped).translate(
+            sd._VETO_TRANSLATIONS[reading]
+        )
+        return sd._SPACED_LETTER_RUN_RE.sub(sd._collapse_spaced_run, folded)
+
+    forms = [
+        swarm_dispatch._normalize_for_blocking_scan(text),
+        unicodedata.normalize("NFKC", text),
+    ]
+    for reading in ("primary", "alternate", "keep"):
+        for underscores in (True, False):
+            forms.append(fold(reading, underscores))
+    return set(forms)
+
+
+def test_shared_normalisation_builds_the_same_forms_as_building_each_alone():
+    tokens = [
+        "[BLOCKING]", "[", "]", "BLOCKED", "REQUEST_CHANGES", "_", " ", "\t", "\n", "a", "B",
+        "\ufb01", "\ufb03", "\u2460", "\uff22", "\u00e9", "e\u0301", "\u200d", "\u00ad",
+        "\u03f2", "\u03f9", "\u2017", " \u0332", "\u00a0\u0333", "\u0392", "\u0415", "\u1d05",
+        "\u04c0", "\u2581", "\u2045", "\u0416", "-", "*", "\u2024", "\u2025",
+    ]  # fmt: skip
+    for text in _strings(tokens, 21, longest=10):
+        assert set(swarm_dispatch._veto_scan_forms(text)) == _reference_forms(text), (
+            text
+        )
+
+
+def test_mark_strip_helper_matches_the_per_character_strip():
+    sd = swarm_dispatch
+    tokens = [
+        "a",
+        "e\u0301",
+        "\u200d",
+        "\u00ad",
+        "\u0332",
+        "\u20dd",
+        "\u0915\u093f",
+        "\u0416",
+        " ",
+        "\ufeff",
+        "-",
+    ]
+    for text in _strings(tokens, 22, longest=12):
+        decomposed = unicodedata.normalize("NFKD", text)
+        expected = "".join(
+            ch
+            for ch in decomposed
+            if ch not in sd._ZERO_WIDTH_CHARS
+            and unicodedata.category(ch) not in sd._STRIPPED_UNICODE_CATEGORIES
+        )
+        assert sd._strip_marks_and_format(decomposed) == expected, text
