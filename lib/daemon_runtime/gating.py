@@ -1092,6 +1092,7 @@ def write_producer_assessment(
         policy_id=policy_id, tier=tier, model=model, run_id=run_id,
         capped_from=capped_from,
     )
+    input_summary = f"rationale: {rationale or 'none supplied'}"[:500]
     entity = {
         "entity_type": "harness_event",
         "event_type": PRODUCER_ASSESSMENT_EVENT_TYPE,
@@ -1100,7 +1101,7 @@ def write_producer_assessment(
         "agent_sub": f"{handler}@ateles-swarm",
         "success": "true",
         "task_entity_id": task_entity_id,
-        "input_summary": f"rationale: {rationale or 'none supplied'}"[:500],
+        "input_summary": input_summary,
         "output_summary": summary,
         # Additive; dropped until the schema declares them.
         "confidence": value,
@@ -1144,6 +1145,7 @@ def write_producer_assessment(
             snap = snap["snapshot"]
         if (
             snap.get("output_summary") != summary
+            or snap.get("input_summary") != input_summary
             or snap.get("task_entity_id") != task_entity_id
             or snap.get("event_type") != PRODUCER_ASSESSMENT_EVENT_TYPE
         ):

@@ -94,6 +94,9 @@ def test_the_summary_distinguishes_a_value_just_below_a_threshold():
         lambda s: {**s, "task_entity_id": "ent_other"},
         lambda s: {k: v for k, v in s.items() if k != "output_summary"},
         lambda s: {**s, "event_type": "subprocess"},
+        lambda s: {k: v for k, v in s.items() if k != "input_summary"},  # explanation missing
+        lambda s: {**s, "input_summary": "rationale: something else"},   # explanation altered
+        lambda s: {**s, "input_summary": ""},
         lambda s: {},
     ],
 )
@@ -118,3 +121,9 @@ def test_a_capped_score_records_both_numbers(neotoma):
     assert gating.write_producer_assessment(**{**KW, "value": 0.5, "capped_from": 0.99}) == "ent_ev"
     summary = neotoma["posted"][0]["entities"][0]["output_summary"]
     assert "producer_confidence=0.5 " in summary and "capped_from=0.99" in summary
+
+
+def test_a_record_with_its_explanation_intact_is_proven(neotoma):
+    assert gating.write_producer_assessment(**KW) == "ent_ev"
+    assert gating.write_producer_assessment(**{**KW, "rationale": ""}) == "ent_ev"
+    assert neotoma["stored"]["input_summary"] == "rationale: none supplied"

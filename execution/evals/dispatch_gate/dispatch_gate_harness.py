@@ -151,6 +151,10 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
             snap = dict(stored.get(entity_id) or {})
             if assessment_mode == "readback_mismatch":
                 snap["output_summary"] = "producer_confidence=0.0 (altered)"
+            if assessment_mode == "explanation_missing":
+                snap.pop("input_summary", None)
+            if assessment_mode == "explanation_altered":
+                snap["input_summary"] = "rationale: something else"
             return _Posted(obs["persisted"], entity_id, snapshot=snap)
 
         mp.setattr(gating.httpx, "post", _post)

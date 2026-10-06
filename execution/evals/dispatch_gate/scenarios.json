@@ -589,6 +589,46 @@
           "allow_written": true
         }
       }
+    },
+    {
+      "id": "assessment_with_explanation_missing_checkpoints_instead_of_executing",
+      "why": "the stored record lost its explanation: that is not proof, so the task is held, not run",
+      "config": {
+        "assessment": "explanation_missing"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.93, \"rationale\": \"well specified\"}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "reason": "could not be recorded durably",
+        "assessment": {
+          "recorded": false,
+          "allow_written": true
+        }
+      }
+    },
+    {
+      "id": "assessment_with_explanation_altered_checkpoints_instead_of_executing",
+      "why": "the stored record's explanation differs from what was written: that is not proof, so the task is held, not run",
+      "config": {
+        "assessment": "explanation_altered"
+      },
+      "scorer": {
+        "kind": "reply",
+        "reply": "{\"confidence\": 0.93, \"rationale\": \"well specified\"}"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": true,
+        "reason": "could not be recorded durably",
+        "assessment": {
+          "recorded": false,
+          "allow_written": true
+        }
+      }
     }
   ]
 }
