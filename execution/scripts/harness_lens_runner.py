@@ -60,8 +60,10 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     ``sandbox-exec`` profile (``build_sandbox_exec_profile``) denies
     ``file-read*`` on the credential-file globs named in this task
     (Neotoma auth, GitHub CLI hosts, git credential stores, SSH private keys,
-    ``~/.claude.json``, ``~/.netrc``, and SOPS age keys), denies execution of
-    ordinary keychain/credential helpers, blocks the keychain service lookup,
+    ``~/.claude.json``, ``~/.netrc``, and SOPS age keys; dotenv files
+    anywhere; the whole Neotoma config directory; launchd job plists), denies
+    execution of ordinary keychain/credential helpers and of the launchd
+    inspection tools, blocks the keychain service lookup,
     and
     ``file-write*`` on the credential names and their narrow security-relevant
     config ancestors, plus ``~/.claude``, ``~/.cursor``, ``~/.codex``. The
@@ -74,6 +76,8 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     ``skill_runner._run_skill_once``'s ``command_wrapper`` parameter, added
     specifically so this could bind onto the actual subprocess rather than
     describe an intended mitigation beside code that runs unwrapped.
+    The runner also refuses to launch a child when the review worktree holds
+    any dotenv file (``refuse_if_credential_files_in_worktree``).
     The profile is positively exercised only against synthetic credential
     files and helper executables; it never opens a real credential store or
     keychain. **What this does NOT claim**: Codex's own ``workspace-write`` sandbox is
@@ -678,7 +682,16 @@ class Worktree:
 # path, anchored at the end — `$` — so a same-named file elsewhere is not
 # swept in). Mirrors the globs named in the coordinator's brief.
 _CREDENTIAL_READ_DENY_REGEXES: tuple[str, ...] = (
+    # Dotenv files anywhere: ``.env``, ``.env.<anything>``, ``.envrc`` and
+    # ``<name>.env``. A copy of a service's dotenv file in a checkout, a
+    # scratch directory or a backup holds the same values as the original.
+    r"/\.env[^/]*$",
+    r"/[^/]*\.env$",
+    # The whole credential directory, not only its dotenv files.
+    r"/\.config/neotoma(/.*)?$",
     r"/\.config/neotoma/\.env[^/]*$",
+    # Launchd job definitions embed the environment of the service they start.
+    r"/Library/LaunchAgents/.*\.plist$",
     r"/\.neotoma/aauth[^/]*/.*private.*",
     # Seatbelt's regex dialect does not honor the PCRE non-capturing-group
     # spelling ``(?:...)``; keep these as separate, simple expressions.
@@ -694,6 +707,17 @@ _CREDENTIAL_READ_DENY_REGEXES: tuple[str, ...] = (
 
 _SYNTHETIC_PUBLICATION_CREDENTIAL_PATHS: tuple[str, ...] = (
     ".config/neotoma/.env",
+    # One synthetic file per deny class added by the containment tightening;
+    # ``HarnessSandbox.build`` probes each, so a deny that does not bind
+    # leaves the sandbox reporting the read guard as unbound.
+    "project/.env",
+    "project/.env.development",
+    "project/.env.local",
+    "project/prod.env",
+    ".config/neotoma/config.json",
+    ".config/neotoma/.env.bak1",
+    ".config/neotoma/state/cache.db",
+    "Library/LaunchAgents/com.example.agent.plist",
     ".config/gh/hosts.yml",
     ".git-credentials",
     ".config/git/credentials",
@@ -709,6 +733,21 @@ _CREDENTIAL_HELPER_EXEC_PATHS: tuple[Path, ...] = (
     ),
     Path("/opt/homebrew/bin/git-credential-osxkeychain"),
     Path("/usr/local/bin/git-credential-osxkeychain"),
+)
+
+# Tools that print a launchd job's definition or live state, environment
+# included. Denied by executable path next to the credential helpers; the
+# plist files themselves are separately read-denied above, so these tools have
+# nothing to print from disk either. A byte-for-byte copy of one of these
+# binaries is not covered by a path match (the profile only reopens writes
+# under the isolated runtime root, and platform binaries copied elsewhere do
+# not launch on current macOS, but that is an observation about the platform,
+# not a property this profile enforces).
+_LAUNCHD_INSPECTION_EXEC_PATHS: tuple[Path, ...] = (
+    Path("/bin/launchctl"),
+    Path("/usr/bin/launchctl"),
+    Path("/usr/bin/plutil"),
+    Path("/usr/libexec/PlistBuddy"),
 )
 
 # Harmless system executables used to prove that Seatbelt's process-exec
@@ -881,6 +920,8 @@ def build_sandbox_exec_profile(
     * reads of the credential-file globs (``_CREDENTIAL_READ_DENY_REGEXES``),
     * writes that could replace those credential bindings or their narrow
       security-relevant config ancestors,
+    * execution of the launchd inspection tools
+      (``_LAUNCHD_INSPECTION_EXEC_PATHS``),
     * writes to the user-level harness config directories
       (``_USER_CONFIG_WRITE_DENY_REGEXES``),
     * reads AND writes of the git-stash ref and its reflog
@@ -1006,7 +1047,7 @@ def build_sandbox_exec_profile(
     )
     helper_denies = "\n".join(
         f'  (literal "{str(path.resolve()).replace(chr(34), chr(92) + chr(34))}")'
-        for path in credential_helper_exec_paths
+        for path in (*credential_helper_exec_paths, *_LAUNCHD_INSPECTION_EXEC_PATHS)
     )
     keychain_service_denies = "\n".join(
         f'  (global-name "{service}")' for service in _KEYCHAIN_MACH_SERVICES
@@ -1074,6 +1115,39 @@ def probe_credential_helper_isolation(
         text=True,
     )
     return control.returncode == 0
+
+
+def probe_launchd_inspection_exec_denied(profile_path: Path) -> bool:
+    """Prove the profile blocks the REAL launchd inspection executables.
+
+    Each existing tool is started with a help flag, which prints usage and
+    touches no job, so a profile that fails to deny it is harmless to test
+    against and the probe simply reports False. A denied exec must fail with
+    sandbox-exec's own denial diagnostic (not merely a nonzero status), and an
+    ordinary control executable must still run, so a profile that denies all
+    execution cannot pass. Fails closed when the sandbox launcher is missing.
+    """
+    sandbox_exec = trusted_sandbox_exec_path()
+    if sandbox_exec is None:
+        return False
+    control = subprocess.run(
+        [sandbox_exec, "-f", str(profile_path), str(_CREDENTIAL_HELPER_PROBE_CONTROL)],
+        capture_output=True,
+        text=True,
+    )
+    if control.returncode != 0:
+        return False
+    for tool in _LAUNCHD_INSPECTION_EXEC_PATHS:
+        if not tool.is_file():
+            continue
+        attempt = subprocess.run(
+            [sandbox_exec, "-f", str(profile_path), str(tool), "-h"],
+            capture_output=True,
+            text=True,
+        )
+        if attempt.returncode == 0 or "Operation not permitted" not in attempt.stderr:
+            return False
+    return True
 
 
 def probe_sandbox_exec_denies_read(
@@ -1620,7 +1694,7 @@ class HarnessSandbox:
                 profile_path,
                 denied_helper=denied_helper,
                 control_helper=control_helper,
-            )
+            ) and probe_launchd_inspection_exec_denied(profile_path)
 
             write_fixture = sandbox_home / "probe-fixtures" / ".claude" / "probe-write"
             write_control = (
@@ -1784,6 +1858,67 @@ class HarnessSandbox:
             authentication_ready=authentication_ready,
             unavailable_guards=tuple(unavailable),
         )
+
+
+_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
+def _is_dotenv_name(name: str) -> bool:
+    """True for ``.env``, ``.env.*``, ``.envrc`` and ``<name>.env`` file names,
+    except placeholder templates (``.env.example`` and its siblings), which
+    are tracked on purpose and hold no values."""
+    lowered = name.lower()
+    if lowered.endswith(_TEMPLATE_SUFFIXES):
+        return False
+    return lowered.startswith(".env") or lowered.endswith(".env")
+
+
+def refuse_if_credential_files_in_worktree(worktree: Path) -> str | None:
+    """Return a refusal reason when the review worktree holds any dotenv file.
+
+    A lens child reads the worktree, and a dotenv file there is a credential
+    store the child was never meant to see. The sandbox profile denies reading
+    such files, but a checkout should not contain one at all, so the launch is
+    refused rather than relying on the deny alone. Only names are inspected;
+    no file is opened. Placeholder templates (``.env.example`` and siblings)
+    are tracked in some repositories and are allowed. The ``.git`` entry is
+    skipped (a linked worktree's is a file; its hooks are not checkout
+    content). Fails closed: a tree that cannot be listed is a refusal.
+    """
+    found: list[str] = []
+    try:
+        if not worktree.is_dir():
+            raise OSError(f"{worktree} is not a directory")
+
+        def _raise(error: OSError) -> None:
+            raise error
+
+        for current, dirnames, filenames in os.walk(worktree, onerror=_raise):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            # A symlink to a directory is listed with the directories; it is
+            # still a name that points at a credential store, so it counts.
+            candidates = [
+                *filenames,
+                *(d for d in dirnames if (Path(current) / d).is_symlink()),
+            ]
+            for name in candidates:
+                if _is_dotenv_name(name):
+                    found.append(str((Path(current) / name).relative_to(worktree)))
+    except OSError as exc:
+        return (
+            "the review worktree could not be inspected for dotenv files "
+            f"({type(exc).__name__}) — refusing before a model call rather "
+            "than launching a child next to a possible credential file"
+        )
+    if found:
+        shown = ", ".join(sorted(found)[:5])
+        more = f" (+{len(found) - 5} more)" if len(found) > 5 else ""
+        return (
+            f"the review worktree contains dotenv file(s): {shown}{more} — "
+            "refusing before a model call; a lens child must not run next to "
+            "a credential store"
+        )
+    return None
 
 
 def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
@@ -2462,12 +2597,26 @@ async def run_one(
                 task_text=task_text,
                 worktree_path=worktree.path,
             )
+            dotenv_refusal = refuse_if_credential_files_in_worktree(worktree.path)
+            if dotenv_refusal:
+                report["ok"] = False
+                report["would_refuse"] = dotenv_refusal
+                report["reason"] = dotenv_refusal
         finally:
             worktree.remove()
         return report
 
     worktree.create(head=target.head)
     try:
+        dotenv_refusal = refuse_if_credential_files_in_worktree(worktree.path)
+        if dotenv_refusal:
+            return {
+                "ok": False,
+                "provider": provider,
+                "reason": dotenv_refusal,
+                "refusal_reason": dotenv_refusal,
+                "posted": False,
+            }
         sandbox = HarnessSandbox.build(
             provider,
             scratch_root,

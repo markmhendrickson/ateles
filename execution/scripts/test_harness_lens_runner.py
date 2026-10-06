@@ -3962,3 +3962,340 @@ def test_cli_help_states_dry_run_exit_trap_and_brief_reason(capsys):
     assert 'Exits 0 even when the preflight refuses: require "ok": true' in help_text
     assert "no canonical copy of the brief is checked in" in help_text
     assert "LENS_BRIEF_PATH comment" not in help_text
+
+
+# ── Credential containment: dotenv files, the credential directory, launchd ----
+#
+# Review children run with the daemon's reach, so every path that can hold a
+# service credential or its environment is denied by EFFECT in the sandbox
+# profile and proven bound by a live probe against a synthetic path.
+
+# The deny list as it stood before the containment tightening. The mutation
+# proofs below rebuild the profile from this tuple to show the probes go red
+# without the new entries.
+_PRE_TIGHTENING_DENY_REGEXES = (
+    r"/\.config/neotoma/\.env[^/]*$",
+    r"/\.neotoma/aauth[^/]*/.*private.*",
+    r"/\.config/gh/hosts\.yml$",
+    r"/\.config/gh/state\.yml$",
+    r"/\.git-credentials$",
+    r"/\.config/git/credentials$",
+    r"/\.ssh/.*$",
+    r"/\.claude\.json$",
+    r"/\.netrc$",
+    r"/\.config/sops/age/.*",
+)
+
+_NEW_DENY_SYNTHETIC_RELATIVE_PATHS = (
+    "project/.env",
+    "project/.env.development",
+    "project/.env.local",
+    "project/prod.env",
+    ".config/neotoma/config.json",
+    ".config/neotoma/.env.bak1",
+    ".config/neotoma/state/cache.db",
+    "Library/LaunchAgents/com.example.agent.plist",
+)
+
+_ORDINARY_PATHS_THAT_MUST_STAY_READABLE = (
+    "/usr/bin/env",
+    "/Users/fixture-user/repos/project/.venv/bin/python",
+    "/Users/fixture-user/repos/project/environment.py",
+    "/Users/fixture-user/repos/project/notes.txt",
+    "/Users/fixture-user/Library/Preferences/com.example.app.plist",
+    "/Users/fixture-user/.config/other-tool/config.json",
+)
+
+
+@pytest.mark.parametrize("relative_path", _NEW_DENY_SYNTHETIC_RELATIVE_PATHS)
+def test_new_credential_read_denies_cover_synthetic_locations(relative_path):
+    synthetic = f"/Users/fixture-user/{relative_path}"
+    assert any(
+        re.search(pattern, synthetic) for pattern in hlr._CREDENTIAL_READ_DENY_REGEXES
+    ), synthetic
+
+
+@pytest.mark.parametrize("path", _ORDINARY_PATHS_THAT_MUST_STAY_READABLE)
+def test_new_credential_read_denies_do_not_sweep_in_ordinary_paths(path):
+    assert not any(
+        re.search(pattern, path) for pattern in hlr._CREDENTIAL_READ_DENY_REGEXES
+    ), path
+
+
+def test_build_probe_fixtures_include_every_new_deny_class():
+    fixtures = set(hlr._SYNTHETIC_PUBLICATION_CREDENTIAL_PATHS)
+    assert fixtures >= set(_NEW_DENY_SYNTHETIC_RELATIVE_PATHS)
+    assert any(p.endswith(".env") for p in fixtures)
+    assert any(".env." in p for p in fixtures)
+    assert any(p.endswith(".config/neotoma/config.json") for p in fixtures)
+    assert any(p.startswith("Library/LaunchAgents/") for p in fixtures)
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+@pytest.mark.parametrize("relative_path", _NEW_DENY_SYNTHETIC_RELATIVE_PATHS)
+def test_real_profile_denies_each_new_credential_class(tmp_path, relative_path):
+    """Live proof, against disposable files only, that each new deny binds
+    while an ordinary sibling file still reads."""
+    aliased_root = Path(str(tmp_path).removeprefix("/private"))
+    fixture_home = aliased_root / "fixture-user"
+    profile = aliased_root / "profile.sb"
+    hlr.build_sandbox_exec_profile(profile, credential_home_roots=(fixture_home,))
+    control = aliased_root / "ordinary-control-read.txt"
+    control.write_text("control\n", encoding="utf-8")
+    fixture = fixture_home / relative_path
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_text("fixture-not-a-real-credential\n", encoding="utf-8")
+    assert hlr.probe_sandbox_exec_denies_read(profile, fixture, control_path=control)
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_build_probe_goes_red_when_new_denies_are_removed(tmp_path, monkeypatch):
+    """Mutation proof: with the pre-tightening deny list the live probe in
+    HarnessSandbox.build() must report the read guard unbound, and with the
+    real list it must report it bound."""
+    monkeypatch.setattr(
+        hlr, "_CREDENTIAL_READ_DENY_REGEXES", _PRE_TIGHTENING_DENY_REGEXES
+    )
+    mutated = hlr.HarnessSandbox.build("codex", tmp_path / "mutated")
+    assert mutated.credential_read_denied is False
+
+    monkeypatch.undo()
+    real = hlr.HarnessSandbox.build("codex", tmp_path / "real")
+    if not real.credential_read_denied:
+        pytest.skip("this host cannot apply the sandbox profile")
+    assert real.credential_read_denied is True
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_real_profile_denies_launchd_inspection_executables(tmp_path):
+    profile = tmp_path / "profile.sb"
+    hlr.build_sandbox_exec_profile(profile)
+    for path in hlr._LAUNCHD_INSPECTION_EXEC_PATHS:
+        if not path.is_file():
+            continue
+        attempt = subprocess.run(
+            ["/usr/bin/sandbox-exec", "-f", str(profile), str(path), "-h"],
+            capture_output=True,
+            text=True,
+        )
+        assert attempt.returncode != 0, path
+        assert "Operation not permitted" in attempt.stderr, path
+    assert hlr.probe_launchd_inspection_exec_denied(profile) is True
+    control = subprocess.run(
+        ["/usr/bin/sandbox-exec", "-f", str(profile), "/usr/bin/true"],
+        capture_output=True,
+        text=True,
+    )
+    assert control.returncode == 0
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="the trusted macOS sandbox executable is platform-specific",
+)
+def test_launchd_exec_probe_goes_red_without_the_exec_deny(tmp_path, monkeypatch):
+    """Mutation proof: a profile built without the launchd exec denies makes
+    the probe fail, and so the whole sandbox report the guard unbound."""
+    monkeypatch.setattr(hlr, "_LAUNCHD_INSPECTION_EXEC_PATHS", ())
+    profile = tmp_path / "profile.sb"
+    hlr.build_sandbox_exec_profile(profile)
+    monkeypatch.undo()
+    assert hlr.probe_launchd_inspection_exec_denied(profile) is False
+
+
+def test_launchd_exec_probe_fails_closed_without_sandbox_exec(tmp_path, monkeypatch):
+    monkeypatch.setattr(hlr, "trusted_sandbox_exec_path", lambda: None)
+    assert hlr.probe_launchd_inspection_exec_denied(tmp_path / "profile.sb") is False
+
+
+def test_profile_text_names_every_launchd_inspection_executable(tmp_path):
+    profile = tmp_path / "profile.sb"
+    hlr.build_sandbox_exec_profile(profile)
+    text = profile.read_text(encoding="utf-8")
+    for name in ("launchctl", "plutil", "PlistBuddy"):
+        assert any(
+            path.name == name for path in hlr._LAUNCHD_INSPECTION_EXEC_PATHS
+        ), name
+        assert name in text, name
+
+
+# ── Review worktree must hold no dotenv file ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".env",
+        ".env.development",
+        ".env.local",
+        ".env.production",
+        "prod.env",
+        "sub/dir/.env",
+        "sub/dir/service.env",
+        "apps/web/.env.test",
+        ".envrc",
+    ],
+)
+def test_worktree_with_a_dotenv_file_is_refused(tmp_path, relative):
+    worktree = tmp_path / "wt"
+    path = worktree / relative
+    path.parent.mkdir(parents=True)
+    path.write_text("SYNTHETIC=not-a-real-value\n", encoding="utf-8")
+    refusal = hlr.refuse_if_credential_files_in_worktree(worktree)
+    assert refusal is not None
+    assert relative in refusal
+    assert "synthetic" not in refusal.lower()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.development.example",
+        "scripts/service.env.example",
+        "README.md",
+        "src/environment.py",
+        ".venv/bin/python",
+        "envs/readme.txt",
+    ],
+)
+def test_worktree_with_only_templates_or_ordinary_files_is_allowed(tmp_path, relative):
+    worktree = tmp_path / "wt"
+    path = worktree / relative
+    path.parent.mkdir(parents=True)
+    path.write_text("placeholder\n", encoding="utf-8")
+    assert hlr.refuse_if_credential_files_in_worktree(worktree) is None
+
+
+def test_worktree_dotenv_check_ignores_the_git_directory(tmp_path):
+    worktree = tmp_path / "wt"
+    (worktree / ".git" / "hooks").mkdir(parents=True)
+    (worktree / ".git" / "hooks" / "prod.env").write_text("x\n", encoding="utf-8")
+    assert hlr.refuse_if_credential_files_in_worktree(worktree) is None
+
+
+def test_worktree_dotenv_symlink_is_refused(tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".env").symlink_to(tmp_path / "elsewhere")
+    assert hlr.refuse_if_credential_files_in_worktree(worktree) is not None
+
+
+def test_worktree_dotenv_check_fails_closed_when_the_tree_is_unreadable(
+    tmp_path, monkeypatch
+):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    def _boom(*args, **kwargs):
+        raise OSError("cannot list")
+
+    monkeypatch.setattr(hlr.os, "walk", _boom)
+    refusal = hlr.refuse_if_credential_files_in_worktree(worktree)
+    assert refusal is not None
+    assert "could not be inspected" in refusal
+
+
+def test_worktree_dotenv_check_fails_closed_on_a_missing_worktree(tmp_path):
+    assert hlr.refuse_if_credential_files_in_worktree(tmp_path / "absent") is not None
+
+
+def test_run_one_refuses_before_any_sandbox_or_dispatch_when_worktree_has_dotenv(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    dispatched = False
+    built = False
+
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+        (self.path / ".env.local").write_text("SYNTHETIC=1\n", encoding="utf-8")
+
+    removed = []
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: removed.append(self.path))
+
+    real_build = hlr.HarnessSandbox.build.__func__
+
+    def _tracking_build(cls, *args, **kwargs):
+        nonlocal built
+        built = True
+        return real_build(cls, *args, **kwargs)
+
+    monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(_tracking_build))
+
+    async def _dispatch(*args, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        raise AssertionError("dispatch must not start with a dotenv file present")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert dispatched is False
+    assert built is False
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert ".env.local" in report["refusal_reason"]
+    assert removed, "the review worktree must still be cleaned up"
+
+
+def test_dry_run_reports_a_dotenv_refusal(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+):
+    def _fake_create(self, *, head):
+        self._created = True
+        self.path.mkdir(parents=True, exist_ok=True)
+        agents_dir = self.path / "docs" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+        (self.path / "prod.env").write_text("SYNTHETIC=1\n", encoding="utf-8")
+
+    monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=True,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+    assert report["ok"] is False
+    assert "prod.env" in report["would_refuse"]
+    assert report["reason"] == report["would_refuse"]
