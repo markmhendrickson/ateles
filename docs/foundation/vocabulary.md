@@ -1891,6 +1891,26 @@ proved equal to its source by a [reconciler](#reconciler), such as `step_status`
 **Not for:** source of truth for a projection; history for a projection; cache for a projection; a
 projection for a [fast path](#fast-path) (a declared skip of steps).
 
+### scratch state
+**Definition:** what a harness, a sandbox, or a [runner](#runner) holds while a [step](#step) executes — a working copy, files,
+an intermediate result, a cache — which is disposable and which nothing reads as truth.
+**Proposed, unruled (decision 126).** The rule that turns on it: content whose loss would lose work or
+knowledge another [agent](#agent), a later session, or the [operator](#operator) needs is not scratch state and is written to
+the record before the step closes; progress, dedup state, and configuration are never scratch state. Swap
+test against record: "the step left it in scratch state" says nothing may rely on it; "the step left it in
+the record" says everything may — the sentences assert opposite things. Swap test against
+[projection](#projection): a projection is a stored copy proved equal to its source by a
+[reconciler](#reconciler) and read to take a decision; "the step read its scratch state to decide" is the
+failure this term names, so the two cannot substitute. Swap test against [artifact](#artifact): an artifact is
+held by an [external system](#external-system) and read through its [adapter](#adapter) as a fact; scratch
+state is held by no system the record reads. Not "working state", which the corpus already uses for the
+[leases](#lease), [checkpoints](#checkpoint), and [verdicts](#verdict) by which the swarm runs itself.
+**See:** [`data_model.md#what-a-step-holds-outside-the-record-is-scratch-state-and-scratch-state-is-never-read-as-truth`](data_model.md#what-a-step-holds-outside-the-record-is-scratch-state-and-scratch-state-is-never-read-as-truth),
+[`failure_posture.md#the-rules`](failure_posture.md#the-rules).
+**Never:** —
+**Not for:** working state for scratch state (that names record state); memory for an agent's scratch state
+(an agent's memory across runs is the record); a second record kept in a sandbox's filesystem.
+
 ## Conformance (`conformance.md`)
 
 ### kernel document

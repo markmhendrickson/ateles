@@ -96,7 +96,7 @@ authored once, in the record; a carrier holds a rendering of it, never a second 
 | Session-start context | What a session must know before its first turn: which agent it is, the consent gate, the operating contract. | The operator-facing agent's definition in the record. |
 | Guards | Checks that run before an action the session itself takes — a shell command, a file write, a message sent — and can refuse it. | The check's logic is harness plumbing (decision 42); the rule a guard enforces is a record entity like any other rule. |
 | Identity and credentials | The principal a harness presents to the record and to the Ateles server, and the credential that proves it. | The principal and its grant are in the record (`authority_model.md#where-a-harness-reaches-the-record-and-what-admits-the-request`); the credential is held by the host, never by a payload. |
-| Interface | Interactive surfaces rendered inside a harness (MCP Apps). | None built; the carrier is named so the matrix has a row for it. |
+| Interface | Interactive surfaces rendered inside a harness (MCP Apps). | None built; the carrier is named so the matrix has a row for it. A proposed design, unruled (decision 124): a rendering of record content and checkpoints, never a second home (`#an-interface-is-a-rendering-of-the-record-and-every-control-on-it-is-a-gated-write-or-an-attributed-resolution`). |
 | Long-lived work | Work that outlives one tool call and is polled for its result (MCP Tasks). | The swarm's `task` in the record; a protocol task would be a view of it, never a second record of its status. |
 | Operator decisions | A held action waiting on the operator, and the operator's answer. | The `checkpoint` (`gates_and_workflows.md#the-checkpoint`). |
 
@@ -365,6 +365,67 @@ is carried on that transport, never whether an existing credential path already 
 passes through as the principal's own; nothing in the path holds one of its own
 (`authority_model.md#a-proxy-passes-through-the-agents-own-credential-and-holds-none-of-its-own`). Sources:
 plan decision `agent_identity_is_carried_per_transport_not_by_one_mechanism`, ruled 2026-09-18.
+
+### An interface is a rendering of the record, and every control on it is a gated write or an attributed resolution
+
+**Open (decision 124, 2026-10-06): a proposed answer, unruled.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Hosted agent runtimes generate interfaces on request —
+a page, a dashboard, a form — and the [Interface](#payloads) row has had no design behind it. This is the
+proposed one. It changes no matrix cell, since the cells state delivery and this states what is delivered;
+nothing below is ruled until the operator rules it.
+
+**The rules in this section.**
+
+- An interface renders record content and checkpoints, and is never a second home for either.
+- Every control that changes anything is a gated write or an attributed checkpoint resolution.
+- A control acts as the principal viewing it, presented by the host, never as a credential the interface carries.
+- Generating an interface is a task like any other.
+- Publishing an interface to anyone other than the operator is an action with a blast tier.
+
+**An interface renders record content and checkpoints, and is never a second home for either.** It is a
+carrier's rendering like every other payload's (`#payloads`): what it shows is read from the record when it
+is shown, and what it holds of its own is scratch state
+(`data_model.md#what-a-step-holds-outside-the-record-is-scratch-state-and-scratch-state-is-never-read-as-truth`).
+An interface that kept something a reader relies on — a list edited in place and stored only in the page, a
+status toggled and remembered by the page — would be the second home principle 9 forbids, and the remedy is
+that the edit is a write to the record and the page renders it back.
+
+**Every control that changes anything is a gated write or an attributed checkpoint resolution.** A control
+that writes is a write to the record, admitted against the acting principal's grant and an action at the
+gate where its type or blast makes it one
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). A control
+that decides is a resolution of a checkpoint by the one protocol (`authority_model.md#approval`): authorized
+against the required approvers, attributed to the principal who resolved it, and read back. Silence never
+accepts — a page closed, a control never pressed, an option shown pre-selected is no resolution — and no
+interface has a state that means approved in advance. A control that does neither changes nothing and needs
+no rule.
+
+**A control acts as the principal viewing it, presented by the host, never as a credential the interface
+carries.** The principal is carried on the transport the interface is served over
+(`#identity-is-carried-per-transport`); an interface built with a credential inside it would act as that
+credential for every viewer, which is the shared credential the identity payload refuses
+(`#payloads`). So an interface shown to several people admits each by their own grant, and a viewer with no
+grant writes nothing through it.
+
+**Generating an interface is a task like any other.** It is created, enters intake, and is executed through
+a workflow (`work_model.md#a-task-is-executed-only-through-a-workflow`). What it produces is an entity the
+swarm writes, of its own type, when the record holds it, or an artifact when an external system does
+(`data_model.md#concepts`).
+
+**Publishing an interface to anyone other than the operator is an action with a blast tier.** Showing it to
+the operator is a delivery on the operator's channel and takes no action (decision 37,
+`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`).
+Showing it to anyone else discloses what it renders, and a disclosure cannot be recalled by unpublishing, so
+the weight sits before the take: the class and its tier are `action_policy` data, unclassified fails closed,
+and the fresh data-handling review this document's scope requires of any surface exposed to a person other
+than the operator (`#scope`) still applies beside the gate.
+
+**What ruling this would oblige.** The Interface row's "Where the content lives" cell, which points here as
+a proposal, states this section as its design; the suite gains rows for a control whose write is refused by the viewer's grant,
+for a resolution that silence did not make, and for a publication held at the gate. **What would reopen it:**
+an interface whose value depends on state the record cannot hold at the rate the interface changes it, which
+would be evidence for a projection with a reconciler (`vocabulary.md#projection`) rather than for state kept
+in the page.
 
 ## Measured Constraints and Open Questions
 

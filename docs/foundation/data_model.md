@@ -21,7 +21,10 @@ stored, the projections that are stored and reconciled, and, for each, what is d
 The concepts of the work model, the gate model, the failure posture, and the authority model. Neotoma is
 the record (principle 9): every type here is a Neotoma entity type or relationship type, and a concept
 with no row here is a concept the design does not persist. Field names are the design's; a checkout may
-carry older names, and the gap is `status.md`.
+carry older names, and the gap is `status.md`. What an execution environment holds instead, and what it may
+never hold, is proposed and unruled at
+`#what-a-step-holds-outside-the-record-is-scratch-state-and-scratch-state-is-never-read-as-truth`
+(decision 126).
 
 ## Concepts
 
@@ -580,6 +583,58 @@ runs through a second type, which stays true whether the per-type check is decla
   again, which silently drops every edge whose producer is gone, and edge loss after a merge is invisible
   because the survivor still looks well-formed. The bounded retrieval below is what keeps most merges from
   being necessary at all.
+
+### What a step holds outside the record is scratch state, and scratch state is never read as truth
+
+**Open (decision 126, 2026-10-06): a proposed answer, unruled.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Hosted agent runtimes give an agent working storage —
+files, a small database, a notes area — that often persists between its runs. This design keeps one record
+for anything durable: a concept with no row here is a concept the design does not persist (`#scope`). The
+proposal names what an execution environment holds instead, and draws the line between the two; nothing below
+is ruled until the operator rules it.
+
+**The rules in this section.**
+
+- What a harness, a sandbox, or a runner holds while a step executes is scratch state: disposable, and never read as truth.
+- If losing it would lose work or knowledge another agent, a later session, or the operator needs, it is not scratch state.
+- Progress, dedup state, and configuration are never scratch state.
+
+**What a harness, a sandbox, or a runner holds while a step executes is scratch state: disposable, and never
+read as truth.** A working copy, files written in a sandbox, an intermediate result, a cache: the step that
+made them reads them while it executes, and no other reader treats them as the state of anything. Scratch
+state may outlive the step only where losing it would cost time and nothing else — a dependency cache is the
+case — and a reader that would take something from it as a fact is reading a second record. The corpus
+already treats it so in one place: a conclusion parked in "the runner's own scratch state" is diagnostic
+capture that "asserts nothing about the record" (`failure_posture.md`, rule 4).
+
+**If losing it would lose work or knowledge another agent, a later session, or the operator needs, it is not
+scratch state.** That is the test, and it is applied to the content, not to where it happens to sit. Whatever
+passes it is written to the record before the step closes — an entity, an observation, a verdict naming what
+the step produced (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`),
+or an artifact through the adapter of the system that holds it — and a step whose close depended on
+something only scratch state held has not closed on the record. Working storage that persists between an
+agent's runs for the next run to read fails the test by construction, because the next run reads it as true;
+an agent's memory across runs is the record, reached through its definition's context types
+(`#what-each-actor-reads-and-writes`).
+
+**Progress, dedup state, and configuration are never scratch state.** Each fails the test whatever its size.
+Progress — which steps are done and what remains — is the batch's verdicts and the step state read from them
+(`#concepts`). Dedup state is the record's effect dedup: the `dedup_key` on the action
+(`work_model.md#at-least-once-implies-effect-dedup`), and a note in working storage that something was
+already sent is the second ledger principle 11 forbids, lost exactly when a re-claim on another runner needs
+it. Configuration — what an agent is, its rules, its grant, its bindings — is a governance or context entity,
+and configuration held in working storage is a change to the swarm that no gate saw.
+
+The name is chosen against a collision: `adapters.md` uses "the swarm's own working state" for the leases,
+checkpoints, and verdicts by which the swarm runs itself — record state — so this proposal uses scratch state,
+added to `vocabulary.md#scratch-state` as a proposed entry, and never working state, for what an execution
+environment holds.
+
+**What ruling this would oblige.** No row in `#concepts`, since scratch state is exactly what has none; the
+suite gains a row in which a step whose dedup note lived only in a disposable environment repeats no effect
+on re-claim, because the key it relies on was the record's. **What would reopen it:** a class of content
+that passes the test above and that the record cannot hold — a volume or a rate it cannot take — which would
+be evidence for a record-side home, never for working storage read as truth.
 
 ## What each actor reads and writes
 

@@ -1004,6 +1004,83 @@ design (`#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-dow
 that grants the adapter no send capability — is the narrower and simpler case, and needs nothing
 beyond an ordinary grant that confers no outbound capability (`#degrees-of-trust-the-design-distinguishes-and-grants-already-express-it`).
 
+#### A login wall is an `operator_only` action, and the session it leaves is a credential the host holds
+
+**Open (decision 122, 2026-10-06): a proposed answer, unruled.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Hosted agent runtimes offer a step in which a person
+takes over a live browser session to sign in, and the agent continues once they have. The question is
+whether this design has that step. The proposal is that it does, composed from rules already ruled, with no
+new type, field, or reason class; nothing below is ruled until the operator rules it.
+
+**The rules in this section.**
+
+- A login wall is an `operator_only` action, held at the gate with reason `gate_hold` and taken by the operator.
+- The operator signs in through a session the host holds, and nothing of that session enters a model's context or the record.
+- The step resumes on the adapter's read-back that the session is authenticated, never on the operator's resolution.
+- The record holds who authenticated to which system and until when, and whether the session is live is derived at read time.
+- An expired session re-raises the checkpoint, and nothing renews it with a secret the swarm does not hold.
+
+**A login wall is an `operator_only` action, held at the gate with reason `gate_hold` and taken by the
+operator.** When an adapter driving a rendered interface reaches a sign-in page — a password, a second
+factor, a consent screen — the effect it needs is that a person authenticates to that system, which an
+agent structurally cannot do (`vocabulary.md#operator_only`). The step therefore creates an `operator_only`
+action naming the system and the principal whose session is wanted; the gate resolves it to `NEVER` ahead of
+any policy and writes the checkpoint; and the step carries the checkpoint and holds on the effect, exactly as
+`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`
+states for every step-sized operator act. **No reason class is added, and the task classes were each
+weighed.** `capability_denied` is about the swarm's own grant, and here the grant may name the capability in
+full; what is missing is the external system's session. `underdetermined_inputs` asks the operator for an
+input the record lacks, and a credential is the one input that must never be answered into the record or the
+decision queue. `no_credential` (decision 65) names a write that names no principal, a different absence. The
+case is an effect on the external system — a session that did not exist and then does — which the adapter can
+read back, and that is `gate_hold` on an `operator_only` action.
+
+**The operator signs in through a session the host holds, and nothing of that session enters a model's
+context or the record.** The session the operator is shown is the one the host process holds for the
+adapter, the same one the adapter drives afterwards. While the operator holds it, the adapter neither reads
+the page nor renders it to a model, so the typed secret, the page that carried it, and the cookie or token
+the system returns all stay with the host. This is the identity rule every carrier already obeys — identity
+material never rides into a model's context (`harness_carriers.md#payloads`) — applied to a credential
+created mid-step rather than configured before it, and it is custody by revocability
+(`authority_model.md#grants`): a session can be withdrawn by signing out or by expiry, so the host may hold
+it materialized, returned as a value to the process that drives the interface and never written into an
+environment a child process inherits. The session is the operator's credential on that system, so whatever
+the adapter takes through it is the shared-credential case
+(`#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not`): attributed in
+the record to the agent, for the operator, and indistinguishable from the operator outside it.
+
+**The step resumes on the adapter's read-back that the session is authenticated, never on the operator's
+resolution.** Resolving the checkpoint `approved` records that the operator decided to sign in. The
+confirmation is the adapter's read of the interface finding the authenticated state, and the section above
+already supplies the instrument: the known-positive element an adapter of this kind asserts on every read,
+stated per surface in its document. A signed-in marker the document names is that element for a session —
+absent before, present after — so its presence is the confirmation and its absence is a failed read with a
+reason, never an empty one. Where an adapter exists, the operator's report that they signed in is not the
+confirmation: the report path is for a system no adapter reads, and this system has one.
+
+**The record holds who authenticated to which system and until when, and whether the session is live is
+derived at read time.** A session goes stale with no event — it expires, or the system revokes it — so a
+`logged_in` field on a binding, an agent, or the action would be the maintained state principle 11 forbids.
+The relation between the principal and the system's session is the confirmed action itself: attributed to
+the operator who took it, naming the system, its confirmation carrying the sourced time and, where the
+system states one, the expiry. Whether the session is live is a derived read over that confirmation and the
+adapter's later reads, whose known-positive check observes on every poll whether the signed-in marker is
+still there. The session's material is never part of the relation.
+
+**An expired session re-raises the checkpoint, and nothing renews it with a secret the swarm does not
+hold.** A read that finds the signed-in marker gone is a failed read with the reason the adapter's document
+names for it, counted as `interface_changed` is; the step that needs the session creates a new
+`operator_only` action, and the checkpoint is raised again. Where the system issues a renewal the host can
+present without the operator, renewing is ordinary custody of a revocable credential and raises nothing;
+where renewal needs the operator's sign-in secret, the swarm does not hold that secret, because provisioning
+stays the operator's and out of band (`authority_model.md#grants`), and the checkpoint is the path.
+
+**What ruling this would oblige.** An adapter document for a system behind a login names its signed-in
+marker per surface and the reason a lost session carries; the suite gains rows for the refusal to close on
+the resolution and for a model context that never holds the session. **What would reopen it:** a system
+whose sign-in a principal other than the operator may complete without the operator's own secret, which
+would make the act an outbound class of that system's adapter rather than an operator act.
+
 ### The admission contract
 
 Six obligations. Each names what must be true, and — the part that makes it a control — **what fails when

@@ -596,6 +596,63 @@ writing. And the failure is at least **loud**: an unreadable workflow halts rath
 condition presents as a checkpoint and an announcement rather than as work quietly not happening
 (`failure_posture.md` rule 2), which is what makes an operator-only recovery viable at all.
 
+### An agent created by conversation is drafted by the swarm and granted at the gate
+
+**Open (decision 125, 2026-10-06): a proposed answer, unruled.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Hosted agent runtimes let a person create an agent by
+describing it in conversation. The proposal keeps everything the section above rules — an agent, its grant,
+and its workflow are governance writes, reserved to the operator by default (decision 18) — and states how a
+conversation fits that: the experience can be conversational while the authority stays explicit. Nothing
+below is ruled until the operator rules it.
+
+**The rules in this section.**
+
+- A conversation is an intake source: it creates a task, and never an agent.
+- The swarm drafts the agent, its grant, and its workflow, and each is a governance write held at the gate.
+- The checkpoint presents the authority the agent would hold in plain terms, rendered from the drafted grant and resolved on it as drafted.
+- A narrower class may be loosened through `action_policy`, and the class is read from the drafted grant, never asserted by the drafter.
+
+**A conversation is an intake source: it creates a task, and never an agent.** An interactive session's
+output becomes tasks (`#the-four-execution-mechanisms`), and a request for a new agent is such output. It
+enters intake like any other task (`#intake-is-every-tasks-first-workflow`); no path writes an agent because
+someone described one.
+
+**The swarm drafts the agent, its grant, and its workflow, and each is a governance write held at the
+gate.** The task's workflow has steps that draft the `agent` entity, its `agent_grant`, the `workflow`
+declaration whose steps its role will own, and, where it fills a role, the `swarm_roster` change. Each is on the closed
+list (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), so
+each is an action, and under decision 18 each resolves to `operator_only` until the operator has written a
+policy value for its class. The drafting step proposes; it never grants, because an agent cannot widen a
+grant by writing one (above). A new workflow declaration also meets decision 100's proving rule at whatever
+tier the write resolves to (`#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`).
+
+**The checkpoint presents the authority the agent would hold in plain terms, rendered from the drafted grant
+and resolved on it as drafted.** What the operator is shown is what the agent could read and write, which
+tools and surfaces it would hold — an unbounded shell named as one — which actions it could produce and at
+what tier, which external systems it would reach, and which approvals it would sit in. That description is a
+rendering of the drafted grant, never a second statement of it beside the grant (principle 9), so the two
+cannot disagree; and the resolution is on the grant as drafted, so a grant changed after it was shown is a
+new checkpoint — the shape decision 27 gives a payment's approver, shown exactly what will be taken. Each
+write keeps its own checkpoint; they may be shown together, and no resolution of one resolves another
+(`gates_and_workflows.md#the-checkpoint`).
+
+**A narrower class may be loosened through `action_policy`, and the class is read from the drafted grant,
+never asserted by the drafter.** An operator who trusts the swarm to create, say, an agent whose grant names
+reads only, may write a policy value for that class and leave every other agent write reserved — decision 18's
+loosening, class by class. The precedent is decision 116's, which already splits the `workflow` governance
+class by what the declaration's steps take (`workflows.md#who-approves-a-new-or-amended-declaration`); this
+extends the same split to the `agent_grant` write. For it to hold, the classification must come from the
+grant's own content, computed when the action is created: a class the drafting principal asserted would let the drafter choose the loosened class for a grant that is not
+narrow, which is the safety field failing open (principle 5). A grant whose class cannot be computed is
+unclassified and fails closed. Writing that policy value is itself a governance write, reserved like the
+rest.
+
+**What this adds is nothing beyond a rendering.** No type, field, or path: intake, the gate, the checkpoint,
+and decision 18's per-class loosening exist. What ruling it would oblige is the plain-terms rendering of a
+grant as a declared presentation, and the computed class for a narrow agent write, each with a suite row.
+**What would reopen it:** an instance whose operator loosens every agent class on its first day, which is
+decision 18's own signal that a default everyone overrides is the wrong default.
+
 ### Whether a newly declared workflow is proven before it binds production work
 
 **Ruled, 2026-09-09.** Registered in `conformance.md#the-register-of-open-design-decisions`. **A
