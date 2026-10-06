@@ -885,9 +885,13 @@ _BLOCKING_VERDICT_BARE_RE = re.compile(
 # The contract's attribution header (skill_runner.SWARM_GITHUB_CONTRACT,
 # "Attribution header"): `**🤖 <Agent> — Ateles swarm, <role>**`. A gate
 # verdict is read only from a reply whose FIRST line is this header.
+# Each group starts and ends on a non-space character, so no whitespace run can
+# be split between a `\s*` and a neighbouring group in more than one way: the
+# earlier shape (`[^\n]*?\S` straight after `\s*`) took quadratic time on a long
+# run of spaces.
 _OWN_HEADER_RE = re.compile(
-    r"^\*\*🤖\s*(?P<name>[^\s—–-][^—–\-\n]*?)\s*[—–-]+\s*Ateles swarm,"
-    r"\s*(?P<role>[^\n]*?\S)\s*\*\*\s*$"
+    r"^\*\*🤖\s*(?P<name>[^\s—–-](?:[^—–\-\n]*[^\s—–\-\n])?)\s*[—–-]+\s*Ateles swarm,"
+    r"\s*(?P<role>\S(?:[^\n]*?\S)?)\s*\*\*\s*$"
 )
 # The header's emoji. More than one in a reply is an extra header.
 _HEADER_EMOJI = "\U0001f916"
@@ -900,7 +904,7 @@ _VERDICT_LINE_RE = re.compile(r"^\*\*(" + _VERDICT_TOKEN_ALT + r")\*\*\s*$", re.
 # `** COMMENT **` (second security run at bf97b1a4). Upper-case tokens only, so
 # prose that happens to start with "Approve" is not counted.
 _VERDICT_LIKE_RE = re.compile(
-    r"^[#*_\s]*(?:(?i:verdict)\s*[:=—–-]\s*)?[#*_\s]*(?:"
+    r"^[#*_\s]*(?:(?i:verdict)\s*[:=—–-]\s*[#*_\s]*)?(?:"
     + _VERDICT_TOKEN_ALT
     + r")(?![A-Za-z0-9]|_[A-Za-z0-9])"
 )
@@ -1452,9 +1456,13 @@ _STRIPPED_UNICODE_CATEGORIES = frozenset({"Cf", "Mn", "Mc", "Me"})
 # second one, if another marker needs the same treatment.
 #
 # This table is now FROZEN to the header and verdict-line RECOGNISERS (see
-# `_normalize_for_blocking_scan`): widening it would let a look-alike spelling
-# of a clearing token or an agent name read as the real thing. The veto scans
-# use the much wider `_VETO_CONFUSABLE_TO_ASCII` below; extend THAT one.
+# `_normalize_for_blocking_scan`): widening it would let more look-alike
+# spellings of a clearing token or an agent name read as the real thing. It is
+# not a guarantee that no look-alike reads as real there: the letters listed
+# here (for example Cyrillic O and Es, Greek iota and nu, Komi Sje) still fold
+# to the Latin letter in a recogniser, as they did before the veto scans got
+# their own wider table. The veto scans use `_VETO_CONFUSABLE_TO_ASCII` below;
+# extend THAT one.
 _CONFUSABLE_TO_ASCII: dict[str, str] = {
     # Cyrillic
     "В": "B", "в": "b",  # U+0412 / U+0432 (Cyrillic VE)
@@ -1480,7 +1488,7 @@ _CONFUSABLE_TRANSLATION = str.maketrans(_CONFUSABLE_TO_ASCII)
 # evasion Falco's finding raised as plausible, without turning unrelated
 # bracketed prose into a false match (the collapsed text still has to satisfy
 # `_BLOCKING_MARKER_RE` afterwards).
-_SPACED_LETTER_RUN_RE = re.compile(r"\[(?:\s*[A-Za-z\-]\s*){2,}\]")
+_SPACED_LETTER_RUN_RE = re.compile(r"\[\s*(?:[A-Za-z\-]\s*){2,}\]")
 
 
 def _collapse_spaced_run(match: "re.Match[str]") -> str:
@@ -1493,7 +1501,7 @@ def _collapse_spaced_run(match: "re.Match[str]") -> str:
 # verdict-line RECOGNISERS use, with the small frozen table above. It stays
 # narrow on purpose: a recogniser that read a look-alike spelling of a clearing
 # token or an agent name as the real thing would clear a gate on text no human
-# wrote that way, so a look-alike in a clearing position must stay unreadable.
+# wrote that way, so the set of look-alikes it accepts must not grow.
 #
 # The VETO scans (a blocking verdict token, the `[BLOCKING]` marker, a second
 # verdict line) fail the other way: they must see a blocking token however it
@@ -1725,10 +1733,10 @@ def _derive_confusable_table() -> dict[str, str]:
 
 _CONFUSABLE_TABLES = _derive_confusable_tables()
 _VETO_CONFUSABLE_TO_ASCII: dict[str, str] = _CONFUSABLE_TABLES.stable
-# A floor, not a target: the number of entries the table had when the derivation
-# was written. Fewer means the Unicode data here lacks names, and the fold is
+# A floor, not a target: a little under the number of entries the derivation
+# produces today (160), asserted by a test as well as logged here. Fewer means the Unicode data here lacks names, and the fold is
 # narrower than intended (each skipped name was logged above).
-_VETO_CONFUSABLE_FLOOR = 89
+_VETO_CONFUSABLE_FLOOR = 150
 if len(_VETO_CONFUSABLE_TO_ASCII) < _VETO_CONFUSABLE_FLOOR:
     log.error(
         "look-alike fold table has %d entries, expected at least %d; "
@@ -1796,6 +1804,20 @@ def _is_unknown_character(ch: str) -> bool:
     return not ch.isascii() and not ch.isspace()
 
 
+def _bold_before(text: str, end: int) -> bool:
+    """True when the text just before *end*, past any whitespace, is `**`."""
+    while end > 0 and text[end - 1].isspace():
+        end -= 1
+    return text[max(0, end - 2) : end] == "**"
+
+
+def _bold_after(text: str, start: int) -> bool:
+    """True when the text from *start*, past any whitespace, begins `**`."""
+    while start < len(text) and text[start].isspace():
+        start += 1
+    return text[start : start + 2] == "**"
+
+
 def _wildcard_window_matches(text: str, start: int, token: str, *, marker: bool) -> bool:
     n = len(token)
     window = text[start : start + n]
@@ -1828,7 +1850,7 @@ def _wildcard_window_matches(text: str, start: int, token: str, *, marker: bool)
     if (before and (before.isalnum() or before == "_")) or (after and (after.isalnum() or after == "_")):
         return False
     if lower_case_letter:
-        return text[:start].rstrip().endswith("**") and text[start + n :].lstrip().startswith("**")
+        return _bold_before(text, start) and _bold_after(text, start + n)
     return True
 
 
@@ -1845,6 +1867,11 @@ def _wildcard_token_hit(text: str, token: str, *, marker: bool = False) -> bool:
     """
     n = len(token)
     if len(text) < n or not _NON_ASCII_RE.search(text):
+        return False
+    # A hit needs at least n - 2 of the token's own ASCII characters in the
+    # text; counting them is cheap and spares prose in other scripts the scan.
+    token_chars = set(token.upper() + token.lower())
+    if sum(text.count(ch) for ch in token_chars) < n - _WILDCARD_LIMIT:
         return False
     seen: set[int] = set()
     for m in _NON_ASCII_RE.finditer(text):
