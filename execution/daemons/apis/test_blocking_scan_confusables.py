@@ -314,8 +314,11 @@ def test_the_table_holds_nothing_that_is_not_pinned():
 
 
 def test_table_is_at_least_as_large_as_when_it_was_written():
-    assert swarm_dispatch._VETO_CONFUSABLE_FLOOR == 89
-    assert len(_veto_table()) >= swarm_dispatch._VETO_CONFUSABLE_FLOOR
+    """A narrower fold on another interpreter (names missing from its Unicode
+    data) must fail a test, not just log: 160 entries today, so 150 leaves a
+    small margin."""
+    assert swarm_dispatch._VETO_CONFUSABLE_FLOOR == 150
+    assert len(_veto_table()) >= 150
 
 
 def test_derived_mapping_covers_the_explicit_missing_cases():
@@ -648,3 +651,228 @@ def test_ordinary_english_with_accents_and_symbols_does_not_trip():
     text = "Na\u00efve caf\u00e9 \u2014 r\u00e9sum\u00e9: the \u201cblocked\u201d state, a \u2192 b, x \u2208 S, 5 \u00d7 3 \u2713 \u2026"
     assert not output_has_blocking_verdict(text)
     assert not body_has_blocking_findings(text)
+
+
+# ── scan-path regexes stay linear on pathological text ───────────────────────
+#
+# The scans run on text any commenter can write, so a regex that backtracks
+# exponentially (or quadratically) on an unclosed bracket or a long run of
+# spaces is an availability problem, and the fold multiplies how often the
+# spaced-letter regex runs. Every input below is bounded so that the old
+# regexes finish, slowly, instead of hanging the test run.
+
+SCAN_FUNCTIONS = {
+    "output_has_blocking_verdict": output_has_blocking_verdict,
+    "body_has_blocking_findings": body_has_blocking_findings,
+    "lens_own_verdict": lambda text: lens_own_verdict(
+        HEADER + "\n" + text, lens_agent="waxwing"
+    ),
+    "sign_off_is_warranted": lambda text: sign_off_is_warranted(
+        _reply(rest="\n\n" + text), lens_agent="waxwing"
+    ),
+}
+TIME_LIMIT = 0.5
+
+BOUNDED_PATHOLOGICAL = {
+    "unclosed bracket, letters and spaces": "[" + "a " * 22,
+    "unclosed bracket, letters and tabs": "[" + "a\t" * 22,
+    "unclosed bracket, letters, hyphens and spaces": "[" + "a - " * 11,
+    "unclosed bracket, hyphens": "[" + "a-" * 40,
+}
+
+
+def _seconds(fn, text):
+    import time
+
+    start = time.perf_counter()
+    fn(text)
+    return time.perf_counter() - start
+
+
+@pytest.mark.parametrize("name", list(SCAN_FUNCTIONS))
+@pytest.mark.parametrize("label", list(BOUNDED_PATHOLOGICAL))
+def test_unclosed_bracket_followed_by_spaced_letters_is_fast(name, label):
+    text = BOUNDED_PATHOLOGICAL[label]
+    assert _seconds(SCAN_FUNCTIONS[name], text) < TIME_LIMIT
+
+
+# Whitespace and punctuation runs that made the header and verdict-line
+# regexes quadratic; each is long enough that the old shapes take over a
+# second and short enough that they still finish.
+QUADRATIC_SHAPES = {
+    "spaces inside the header name": lambda n: "**\U0001f916 a" + " " * n + "x",
+    "spaces before the header role": lambda n: (
+        "**\U0001f916 a \u2014 Ateles swarm," + " " * n + "x"
+    ),
+    "run of stars on a verdict-like line": lambda n: _reply(rest="\n\n" + "*" * n),
+    "run of hash, star, underscore and space on a verdict-like line": lambda n: _reply(
+        rest="\n\n" + "#*_ " * (n // 4) + "x"
+    ),
+}
+
+
+@pytest.mark.parametrize("label", list(QUADRATIC_SHAPES))
+def test_whitespace_and_marker_runs_are_not_quadratic(label):
+    text = QUADRATIC_SHAPES[label](30000)
+    assert (
+        _seconds(lambda t: lens_own_verdict(t, lens_agent="waxwing"), text) < TIME_LIMIT
+    )
+    assert (
+        _seconds(lambda t: sign_off_is_warranted(t, lens_agent="waxwing"), text)
+        < TIME_LIMIT
+    )
+    assert _seconds(output_has_blocking_verdict, text) < TIME_LIMIT
+    assert _seconds(body_has_blocking_findings, text) < TIME_LIMIT
+
+
+def test_a_comment_sized_body_of_non_latin_prose_is_scanned_quickly():
+    text = (RUSSIAN + " ") * 150  # about 60 KB, the size of GitHub's comment limit
+    assert _seconds(output_has_blocking_verdict, text) < 2
+    assert _seconds(body_has_blocking_findings, text) < 2
+
+
+LARGE_PATHOLOGICAL = [
+    "[" + "a " * 200,
+    "[" + "a " * 5000,
+    "[" + "a\t" * 5000,
+    "[" + "a - " * 5000,
+    "[" + "a-" * 5000,
+]
+
+
+@pytest.mark.parametrize(
+    "text", LARGE_PATHOLOGICAL, ids=lambda t: f"{len(t)}-{t[1:4]!r}"
+)
+def test_large_pathological_input_finishes_in_a_subprocess(text):
+    """The exact large shapes, run in a child process so that a regex that does
+    not return fails this test at the timeout instead of hanging the run."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import json, sys, time\n"
+        "import swarm_dispatch as sd\n"
+        "text = sys.stdin.read()\n"
+        "out = {}\n"
+        "for name, fn in (('verdict', sd.output_has_blocking_verdict), "
+        "('body', sd.body_has_blocking_findings), "
+        "('own', lambda t: sd.lens_own_verdict(t, lens_agent='waxwing')), "
+        "('sign_off', lambda t: sd.sign_off_is_warranted(t, lens_agent='waxwing'))):\n"
+        "    start = time.perf_counter(); fn(text); out[name] = time.perf_counter() - start\n"
+        "print(json.dumps(out))\n"
+    )
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", code],
+            input=HEADER + "\n**SIGNED_OFF**\n" + text,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("a scan did not return within 30 s")
+    assert done.returncode == 0, done.stderr[-500:]
+    assert all(seconds < TIME_LIMIT for seconds in json.loads(done.stdout).values())
+
+
+# The rewritten regexes must accept exactly what the originals accepted.
+
+_OLD_OWN_HEADER_RE = __import__("re").compile(
+    r"^\*\*\U0001f916\s*(?P<name>[^\s\u2014\u2013-][^\u2014\u2013\-\n]*?)\s*[\u2014\u2013-]+\s*Ateles swarm,"
+    r"\s*(?P<role>[^\n]*?\S)\s*\*\*\s*$"
+)
+_OLD_SPACED_LETTER_RUN_RE = __import__("re").compile(r"\[(?:\s*[A-Za-z\-]\s*){2,}\]")
+
+
+def _random_strings(alphabet, count, longest, seed):
+    import random
+
+    rng = random.Random(seed)
+    for _ in range(count):
+        yield "".join(rng.choice(alphabet) for _ in range(rng.randint(1, longest)))
+
+
+def test_rewritten_header_regex_matches_what_the_original_matched():
+    alphabet = [
+        "**",
+        "\U0001f916",
+        " ",
+        "  ",
+        "\t",
+        "\u2014",
+        "\u2013",
+        "-",
+        "a",
+        "Bob",
+        "Ateles swarm,",
+        "qa",
+        "\n",
+        ",",
+        "x y",
+    ]
+    seen = 0
+    for text in _random_strings(alphabet, 20000, 12, 1):
+        for candidate in (text, "**\U0001f916 " + text):
+            old, new = (
+                _OLD_OWN_HEADER_RE.match(candidate),
+                swarm_dispatch._OWN_HEADER_RE.match(candidate),
+            )
+            assert (old is None) == (new is None), candidate
+            if old:
+                seen += 1
+                assert old.group("name", "role") == new.group("name", "role"), candidate
+    assert seen
+    for header in (
+        "**\U0001f916 Waxwing \u2014 Ateles swarm, arch**",
+        "**\U0001f916  Agent Name  -  Ateles swarm,   qa lens  **  ",
+        "**\U0001f916 Waxwing\u2013Ateles swarm,arch**",
+    ):
+        assert _OLD_OWN_HEADER_RE.match(header).group(
+            "name", "role"
+        ) == swarm_dispatch._OWN_HEADER_RE.match(header).group("name", "role")
+
+
+def test_rewritten_spaced_letter_regex_matches_what_the_original_matched():
+    alphabet = ["[", "]", "a", "B", "-", " ", "\t", "1", "ab", "\n"]
+    for text in _random_strings(alphabet, 30000, 12, 2):
+        old, new = (
+            _OLD_SPACED_LETTER_RUN_RE.search(text),
+            swarm_dispatch._SPACED_LETTER_RUN_RE.search(text),
+        )
+        assert (old is None) == (new is None), text
+        if old:
+            assert old.group() == new.group(), text
+
+
+def test_rewritten_verdict_like_regex_matches_what_the_original_matched():
+    import re
+
+    tokens = "|".join(re.escape(t) for t in swarm_dispatch.REVIEW_VERDICT_TOKENS)
+    old_re = re.compile(
+        r"^[#*_\s]*(?:(?i:verdict)\s*[:=\u2014\u2013-]\s*)?[#*_\s]*(?:"
+        + tokens
+        + r")(?![A-Za-z0-9]|_[A-Za-z0-9])"
+    )
+    alphabet = [
+        "*",
+        "#",
+        "_",
+        " ",
+        "Verdict",
+        ":",
+        "COMMENT",
+        "APPROVE",
+        "\u2014",
+        "-",
+        "x",
+        "SIGNED_OFF",
+        "\t",
+        "1",
+    ]
+    for text in _random_strings(alphabet, 30000, 10, 3):
+        assert (old_re.match(text) is None) == (
+            swarm_dispatch._VERDICT_LIKE_RE.match(text) is None
+        ), text
