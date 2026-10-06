@@ -131,9 +131,32 @@ PARENTAGE_KEYWORDS = r"part\s+of|refs?|references?|parent|related\s+to"
 # Optional `owner/repo` qualifier so a cross-repo parent is expressible.
 ISSUE_REF = r"(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<number>\d+)"
 
+# `(?:\s*:)?\s+` accepts the same text as `\s*:?\s+` (optional whitespace, an
+# optional colon, then required whitespace) without two adjacent whitespace
+# quantifiers. The author of a PR or issue body controls this text, and with
+# adjacent quantifiers a long whitespace run could be split between them in
+# quadratically many ways before the engine gave up. Each whitespace run now
+# has exactly one place to be consumed. lib/daemon_runtime/test_label_gate_regex.py
+# holds the original pattern frozen and compares match spans and groups on
+# every input it generates.
 PARENT_LINK = re.compile(
-    rf"\b(?:{CLOSING_KEYWORDS}|{PARENTAGE_KEYWORDS})\s*:?\s+{ISSUE_REF}", re.I
+    rf"\b(?:{CLOSING_KEYWORDS}|{PARENTAGE_KEYWORDS})(?:\s*:)?\s+{ISSUE_REF}", re.I
 )
+
+
+# A real issue number has a handful of digits. The body is written by the PR
+# author, and `int()` raises on a digit string past the interpreter's
+# conversion limit, so a reference with an absurd number is read as no link
+# rather than allowed to raise inside the dispatcher or the approval tool.
+MAX_ISSUE_NUMBER_DIGITS = 12
+
+
+def linked_issue_number(match: re.Match[str]) -> int | None:
+    """The issue number a PARENT_LINK match names, or None when it is not one."""
+    digits = match.group("number")
+    if len(digits) > MAX_ISSUE_NUMBER_DIGITS:
+        return None
+    return int(digits)
 
 
 def parent_issue_number(pr_body: str, repository: str = "") -> int | None:
@@ -146,5 +169,8 @@ def parent_issue_number(pr_body: str, repository: str = "") -> int | None:
         qualifier = m.group("repo")
         if qualifier and qualifier.lower() != (repository or "").lower():
             continue
-        return int(m.group("number"))
+        number = linked_issue_number(m)
+        if number is None:
+            continue
+        return number
     return None

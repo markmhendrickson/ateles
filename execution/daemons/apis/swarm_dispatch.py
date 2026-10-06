@@ -11835,8 +11835,8 @@ class SwarmDispatcher:
             qualifier = m.group("repo")
             if qualifier and qualifier.lower() != (repository or "").lower():
                 continue
-            number = int(m.group("number"))
-            if number not in numbers:
+            number = _label_gate.linked_issue_number(m)
+            if number is not None and number not in numbers:
                 numbers.append(number)
         return numbers
 
