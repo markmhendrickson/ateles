@@ -184,4 +184,14 @@ def test_long_whitespace_runs_stay_cheap(shape, size):
     if shape == "trailing-nonmatch-after-match":
         assert first == 1 and len(links) == 1
     if shape == "long-digits":
-        assert first is not None
+        assert first is None
+
+
+def test_an_absurd_issue_number_is_no_link_not_an_error():
+    """`int()` raises past the interpreter's digit limit; a PR body must not be
+    able to make the parent lookup raise."""
+    huge = "7" * 5000
+    assert lg.parent_issue_number(f"Refs #{huge}", "o/r") is None
+    assert lg.parent_issue_number(f"Refs #{huge}\nCloses #12", "o/r") == 12
+    assert lg.parent_issue_number("Refs #" + "7" * lg.MAX_ISSUE_NUMBER_DIGITS, "o/r") is not None
+    assert lg.parent_issue_number("Refs #" + "7" * (lg.MAX_ISSUE_NUMBER_DIGITS + 1), "o/r") is None
