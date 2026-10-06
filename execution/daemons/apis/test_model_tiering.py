@@ -289,6 +289,26 @@ def test_model_for_tier_raises_on_partial_binding_missing_this_tier() -> None:
         model_tiering.model_for_tier("cursor", "top", binding=binding)
 
 
+def test_example_binding_resolves_codex_to_the_ruled_three_tier_map(monkeypatch) -> None:
+    """Operator ruling 2026-10-06: Codex top = gpt-6-astra, mid = gpt-6-sol,
+    mechanical = gpt-6-luna. Reads the committed example binding through the
+    real loader (the same path a daemon takes), so a Codex mid dispatch that
+    would raise UnboundTierError, or land on the wrong model, fails here.
+    Reverting the example's codex block turns this red."""
+    example = (
+        Path(__file__).resolve().parents[3]
+        / "docs" / "examples" / "model-tiering" / "vendor-binding.json"
+    )
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(example))
+    assert model_tiering.model_for_tier("codex", "top") == "gpt-6-astra"
+    assert model_tiering.model_for_tier("codex", "mid") == "gpt-6-sol"
+    assert model_tiering.model_for_tier("codex", "mechanical") == "gpt-6-luna"
+    # The example must also pass the strict validator used before install.
+    kind, _data, errors, _warnings = model_tiering.check_config_file(example)
+    assert kind == "vendor-binding"
+    assert errors == []
+
+
 def test_model_for_tier_is_case_insensitive_on_provider(monkeypatch) -> None:
     monkeypatch.setenv(
         "APIS_VENDOR_BINDING", json.dumps({"cursor": {"top": "opus-thing"}})
