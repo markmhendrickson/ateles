@@ -49,10 +49,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from lib.credential_env_names import (  # noqa: E402
-    CREDENTIAL_NAME_SUBSTRINGS,
-    is_credential_env_name,
-)
+from lib.credential_env_names import is_credential_env_name  # noqa: E402
 
 HOME_PLACEHOLDER = "<HOME>"
 
@@ -93,10 +90,27 @@ def _looks_like_opaque_secret(value: str) -> bool:
 def _credential_flag_with_value(arguments: list) -> str | None:
     """Return the flag name when a credential-shaped flag carries a value."""
     for index, argument in enumerate(arguments):
-        if not isinstance(argument, str) or not argument.startswith("--"):
+        if not isinstance(argument, str):
+            continue
+        # A credential assignment carried as one argument: `GITHUB_PAT=value`,
+        # `--env=API_TOKEN=value`. The name is judged by the same classifier.
+        for assignment in (argument.lstrip("-"), argument.partition("=")[2]):
+            key, equals, value = assignment.partition("=")
+            if (
+                equals
+                and value
+                and key
+                and re.fullmatch(r"[A-Za-z0-9_.-]+", key)
+                and is_credential_env_name(key.replace("-", "_"))
+            ):
+                return key
+        if not argument.startswith("--"):
             continue
         name, equals, inline_value = argument[2:].partition("=")
-        if not any(word in name.upper() for word in CREDENTIAL_NAME_SUBSTRINGS):
+        # Same classifier as the environment check (substring words AND the PAT
+        # segment), with dashes read as underscores so ``--github-pat`` and
+        # ``--token-file`` classify exactly as ``GITHUB_PAT`` / ``TOKEN_FILE``.
+        if not is_credential_env_name(name.replace("-", "_")):
             continue
         has_value = (
             bool(inline_value)

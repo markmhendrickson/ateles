@@ -212,6 +212,18 @@ def test_ordinary_values_are_not_mistaken_for_secrets(value):
         ["/bin/daemon", "--bearer-token", "canary-flag-value-0123456789"],
         ["/bin/daemon", "--api-key=canary-flag-value-0123456789"],
         ["/bin/daemon", "--client-secret", "canary-flag-value-0123456789"],
+        # Personal-access-token spellings: the argument check must classify
+        # names exactly as the environment check does, PAT segment included.
+        ["/bin/daemon", "--pat", "canary-flag-value-0123456789"],
+        ["/bin/daemon", "--PAT", "canary-flag-value-0123456789"],
+        ["/bin/daemon", "--GITHUB_PAT", "canary-flag-value-0123456789"],
+        ["/bin/daemon", "--github-pat=canary-flag-value-0123456789"],
+        ["/bin/daemon", "--pat=short"],
+        ["/bin/daemon", "--github_pat", "short"],
+        # A credential assignment carried inside one argument.
+        ["/bin/daemon", "GITHUB_PAT=canary-flag-value-0123456789"],
+        ["/bin/daemon", "--env=API_TOKEN=canary-flag-value-0123456789"],
+        ["/bin/daemon", "--set", "GH_PAT=canary-flag-value-0123456789"],
     ],
 )
 def test_credential_flag_with_a_value_in_program_arguments_is_refused(arguments):
@@ -225,6 +237,31 @@ def test_credential_flag_with_a_value_in_program_arguments_is_refused(arguments)
     with pytest.raises(rdp.PlistRenderError) as excinfo:
         rdp.render(template, home="/h")
     assert "canary-flag-value" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        # Location-valued flags carry a path, not key material, and the
+        # environment classifier exempts the same suffixes.
+        ["/bin/daemon", "--token-file", "/Users/example/token-path"],
+        ["/bin/daemon", "--pat-file=/Users/example/pat-path"],
+        ["/bin/daemon", "--api-key-dir", "/Users/example/keys"],
+        # PATH-like names are not PAT segments.
+        ["/bin/daemon", "--path", "/usr/bin"],
+        ["/bin/daemon", "--patch", "fix"],
+        ["/bin/daemon", "--workdir=/Users/example", "PATH=/usr/bin"],
+    ],
+)
+def test_ordinary_and_location_flags_are_not_mistaken_for_credentials(arguments):
+    items = "\n".join(f"        <string>{a}</string>" for a in arguments)
+    template = (
+        '<?xml version="1.0"?><plist version="1.0"><dict>'
+        "<key>Label</key><string>x</string>"
+        f"<key>ProgramArguments</key><array>{items}</array>"
+        "</dict></plist>"
+    )
+    rdp.render(template, home="/h")
 
 
 def test_credential_flag_without_a_value_is_allowed():

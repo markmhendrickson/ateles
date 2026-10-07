@@ -63,10 +63,18 @@ WHAT IS REFUSED (would put file content into context):
     and an explicit
     `ps -p PID -o pid=,comm=` field allowlist remain available. A boolean
     check (`[ -n "$VAR" ]`, `test -n`) or a `case` statement printing only a
-    fixed label is NOT refused. Also shell tracing (`set -x`, `set -o xtrace`,
-    `setopt xtrace`, a shell started with `-x`, `SHELLOPTS=xtrace`) in a
-    command that sources a credential file, since xtrace prints every
-    expanded assignment and command. Also launchd job definitions: a plist
+    fixed label is NOT refused. Also shell tracing (`set -x`/`set -v`,
+    `set -o xtrace`/`set -o verbose`, `setopt`, a shell started with
+    `-x`/`-v`, `SHELLOPTS=`) in a command that sources a credential file,
+    since xtrace prints every expanded assignment and verbose prints every
+    sourced line; turning either off (`+x`, `+v`) is allowed. Also a
+    symbolic link whose TARGET is a credential path (paths are matched as
+    written and with links followed, in Bash arguments, Read and Grep; Glob
+    returns names only and is never refused), creating such a link, an
+    interpreter or shell whose standard input is redirected from a
+    credential path, a shell run on a credential file, and a content-mode
+    Grep or a recursive grep/rg/`find -exec <reader>` rooted at a credential
+    directory or at any directory above one. Also launchd job definitions: a plist
     under `Library/LaunchAgents` is a credential path, `plutil`,
     `PlistBuddy` and `defaults` count as readers, and `launchctl list
     <label>`, `dumpstate` and `procinfo` are refused alongside `print` and
@@ -123,6 +131,7 @@ from _session_integrity import read_hook_input  # noqa: E402
 CREDENTIAL_PATH_GLOBS = [
     # The whole credential directory, not only its dotenv files: backups,
     # token caches and any other file kept beside them are the same hazard.
+    "*/.config/neotoma",
     "*/.config/neotoma/*",
     "*/.config/neotoma/*.env",
     "*/.config/neotoma/.env",
@@ -143,6 +152,20 @@ CREDENTIAL_PATH_GLOBS = [
     "*1password*.csv",
     "*op-export*",
 ]
+
+# Directories that hold credential files, each with one sample file that must
+# match CREDENTIAL_PATH_GLOBS (a test holds the two lists together). A
+# directory is not a credential FILE, but a recursive content search that
+# starts at one of these, or at any directory above one, reads the files
+# inside it, so `check_grep` and the recursive-search check treat the
+# directory, its ancestors and everything under it as credential territory.
+CREDENTIAL_DIRECTORIES = {
+    "~/.config/neotoma": ".env",
+    "~/.config/sops/age": "keys.txt",
+    "~/repos/ateles-private/keys": "any.key",
+    "~/.neotoma": "aauth/private.jwk",
+    "~/Library/LaunchAgents": "any.plist",
+}
 
 # Templates/placeholders are never real secrets, regardless of which
 # credential glob they'd otherwise match — a `.env.example` living right
@@ -231,10 +254,21 @@ def _safe_alternative(path_desc: str, tool: str = "Bash") -> str:
 
 def _normalize_path(raw: str) -> str:
     try:
-        expanded = os.path.expanduser(raw)
+        expanded = os.path.expandvars(os.path.expanduser(raw))
     except Exception:  # noqa: BLE001
         expanded = raw
     return expanded.replace("\\", "/")
+
+
+def _resolve_links(norm: str) -> str:
+    """The path with every symbolic link followed. A link with an innocuous
+    name that points at a credential path reads exactly like the credential,
+    so the link's TARGET is what gets matched. A path that does not exist
+    (or cannot be resolved) is returned unchanged."""
+    try:
+        return os.path.realpath(norm).replace("\\", "/")
+    except Exception:  # noqa: BLE001
+        return norm
 
 
 def _fnmatch_any(path: str, globs) -> bool:
@@ -257,13 +291,46 @@ def is_credential_path(raw: str) -> bool:
     if not raw or not isinstance(raw, str):
         return False
     norm = _normalize_path(raw)
-    if norm.lower().endswith(SAFE_TEMPLATE_SUFFIXES):
+    # Judged twice, as written and with links followed, and refused if either
+    # form is a credential: a template-looking link name must not launder a
+    # credential target, and an innocuous link name must not hide one.
+    for form in dict.fromkeys((norm, _resolve_links(norm))):
+        if form.lower().endswith(SAFE_TEMPLATE_SUFFIXES):
+            continue
+        # A path ending in one of the safe suffixes with an extra dotted
+        # segment after it (e.g. ".env.example") is also safe — checked above
+        # via endswith directly against the templated suffixes list, which
+        # already covers ".env.example" since ".example" is the final suffix.
+        if _fnmatch_any(form, CREDENTIAL_PATH_GLOBS):
+            return True
+    return False
+
+
+def is_credential_territory(raw: str) -> bool:
+    """True when *raw* is a credential directory, lies inside one, or is a
+    directory ABOVE one (including the home directory and the filesystem
+    root), judged as written and with links followed. A recursive content
+    search rooted there reads credential files it never names."""
+    if not raw or not isinstance(raw, str):
         return False
-    # A path ending in one of the safe suffixes with an extra dotted
-    # segment after it (e.g. ".env.example") is also safe — checked above
-    # via endswith directly against the templated suffixes list, which
-    # already covers ".env.example" since ".example" is the final suffix.
-    return _fnmatch_any(norm, CREDENTIAL_PATH_GLOBS)
+    if is_credential_path(raw):
+        return True
+    norm = _normalize_path(raw)
+    for form in dict.fromkeys((norm, _resolve_links(norm))):
+        form = form.rstrip("/") or "/"
+        for directory in CREDENTIAL_DIRECTORIES:
+            for known in {
+                _normalize_path(directory).rstrip("/"),
+                _resolve_links(_normalize_path(directory)).rstrip("/"),
+            }:
+                if (
+                    form == known
+                    or form.startswith(known + "/")
+                    or known.startswith(form.rstrip("/") + "/")
+                    or form == "/"
+                ):
+                    return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -609,9 +676,19 @@ def _ambient_process_or_service_hit(segment: str) -> str | None:
 _INTERACTIVE_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 
 
+# Both options print what the shell is about to run or read: xtrace prints
+# every expanded command, verbose prints each input line (including the
+# lines of a sourced file) as it is read. Either one puts a sourced
+# assignment's value on stderr.
+_TRACE_OPTION_NAMES = frozenset({"xtrace", "verbose"})
+
+
 def _flag_cluster_has_x(word: str) -> bool:
+    """True when a short-flag cluster enables xtrace (x) or verbose (v)."""
     return (
-        word.startswith("-") and not word.startswith("--") and "x" in word[1:].lower()
+        word.startswith("-")
+        and not word.startswith("--")
+        and any(letter in word[1:].lower() for letter in "xv")
     )
 
 
@@ -625,36 +702,39 @@ def _xtrace_after_flags(words: list[str], start: int) -> bool:
         if word.startswith("-"):
             if _flag_cluster_has_x(word):
                 return True
-            if word.startswith("-o") and word[2:].lower() == "xtrace":
+            if word.startswith("-o") and word[2:].lower() in _TRACE_OPTION_NAMES:
                 return True
             if word.endswith("o") and not word.startswith("--"):
                 # `-o` (alone or as the last letter of a cluster) takes the
                 # next word as an option NAME.
                 index += 1
-                if index < len(words) and words[index].lower() == "xtrace":
+                if index < len(words) and words[index].lower() in _TRACE_OPTION_NAMES:
                     return True
         index += 1
     return False
 
 
 def _enables_xtrace(segment: str) -> bool:
-    """True when the segment turns shell tracing on (`set -x`, `set -o
-    xtrace`, `setopt xtrace`, a shell started with `-x`, `SHELLOPTS=xtrace`)."""
+    """True when the segment turns shell tracing on: xtrace or verbose, via
+    `set -x`/`set -v`, `set -o xtrace`/`set -o verbose`, `setopt`, a shell
+    started with `-x`/`-v`, or `SHELLOPTS=`. Turning either OFF (`+x`, `+v`,
+    `set +o verbose`) is not tracing and stays allowed."""
     try:
         words = shlex.split(segment)
     except ValueError:
         words = segment.split()
     words = [_strip_wrapper_punctuation(w) for w in words]
     for index, word in enumerate(words):
-        if word.startswith(("SHELLOPTS=", "export SHELLOPTS=")) and (
-            "xtrace" in word.lower()
+        if word.startswith(("SHELLOPTS=", "export SHELLOPTS=")) and any(
+            option in word.lower() for option in _TRACE_OPTION_NAMES
         ):
             return True
         name = word.rsplit("/", 1)[-1]
         if name == "set" and _xtrace_after_flags(words, index + 1):
             return True
         if name == "setopt" and any(
-            w.lower().replace("_", "") == "xtrace" or _flag_cluster_has_x(w)
+            w.lower().replace("_", "") in _TRACE_OPTION_NAMES
+            or _flag_cluster_has_x(w)
             for w in words[index + 1 :]
         ):
             return True
@@ -967,9 +1047,19 @@ def _extract_paths(segment: str):
             after = cand[eq_idx + 1 :]
             if "/" in after or "." in after:
                 cand = after
-        if "/" in cand or "." in cand:
+        if "/" in cand or "." in cand or _is_existing_link(cand):
             out.append(cand)
     return out
+
+
+def _is_existing_link(candidate: str) -> bool:
+    """A bare word (no slash, no dot) that names a symbolic link in the
+    working directory: it has the shape of a command word but may point at a
+    credential, so it is a path candidate too."""
+    try:
+        return os.path.islink(os.path.expanduser(candidate))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # Path-shaped substrings ANYWHERE in a string, not just whitespace-delimited
@@ -1024,9 +1114,15 @@ def _segment_touches_credential(segment: str) -> str | None:
     paths = _extract_paths(segment)
     cred_paths = [p for p in paths if is_credential_path(p)]
     if not cred_paths:
-        return None
+        return _recursive_search_over_territory(segment, paths)
 
     if _CONTENT_DUMP_CMDS.search(segment) or _SED_AWK_RE.search(segment):
+        return cred_paths[0]
+
+    # A shell run on the file (`bash <file>`, `sh -v <file>`) executes it
+    # line by line and reports each line it cannot run, values included; a
+    # link created to a credential is a read path the next command takes.
+    if _runs_shell_or_links(segment):
         return cred_paths[0]
 
     if _GREP_RE.search(segment) and not _grep_is_safe_mode(segment):
@@ -1046,6 +1142,103 @@ def _segment_touches_credential(segment: str) -> str | None:
     if _GIT_DIFF_NO_INDEX_RE.search(segment):
         return cred_paths[0]
 
+    return None
+
+
+def _command_words(segment: str) -> list[str]:
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        words = segment.split()
+    return [_strip_wrapper_punctuation(w) for w in words]
+
+
+def _runs_shell_or_links(segment: str) -> bool:
+    """True for a segment that runs a shell on a credential file as a direct
+    argument (`bash <file>`; a `-c` program is a different case) or creates
+    a link (`ln -s <credential> <name>`). Sourcing is not covered here."""
+    words = _command_words(segment)
+    for index, word in enumerate(words):
+        name = word.rsplit("/", 1)[-1]
+        if name in ("ln", "link"):
+            return True
+        if name in _INTERACTIVE_SHELLS:
+            for argument in words[index + 1 :]:
+                if (
+                    argument.startswith("-")
+                    and not argument.startswith("--")
+                    and "c" in argument[1:].lower()
+                ):
+                    break  # `-c`: everything after is program text
+                if (
+                    argument
+                    and not argument.startswith("-")
+                    and not any(c.isspace() for c in argument)
+                    and is_credential_path(argument)
+                ):
+                    return True
+    return False
+
+
+_RECURSIVE_SEARCH_RE = re.compile(r"\b(?:grep|egrep|fgrep|rg|ag|ack)\b")
+_FIND_EXEC_RE = re.compile(r"\bfind\b[^|]*\s-(?:exec|execdir|ok|okdir)\b")
+
+
+def _recursive_search_over_territory(segment: str, paths: list[str]) -> str | None:
+    """A recursive content search (`grep -r`, `rg`, `find ... -exec cat`)
+    rooted at a credential directory, or a directory above one, reads
+    credential files it never names. Refused for the modes that print
+    matched text; names-only grep modes stay allowed."""
+    if _RECURSIVE_SEARCH_RE.search(segment) and not _grep_is_safe_mode(segment):
+        for candidate in paths:
+            if is_credential_territory(candidate):
+                return candidate
+    if _FIND_EXEC_RE.search(segment) and _CONTENT_DUMP_CMDS.search(segment):
+        for candidate in paths:
+            if is_credential_territory(candidate):
+                return candidate
+    return None
+
+
+# Interpreters that read a program from standard input when given no script,
+# or whose program may consume standard input in any way. Fed a credential
+# file by redirection, the program text never has to name the path, so the
+# inline-program check cannot see it.
+_INTERPRETER_NAMES = frozenset(
+    {
+        "python", "python2", "python3", "perl", "ruby", "node", "nodejs", "deno",
+        "bun", "php", "lua", "luajit", "osascript", "jq", "awk", "gawk", "mawk",
+        "sed", "tclsh", "Rscript", "swift", "bash", "sh", "zsh", "dash", "ksh",
+        "tee", "exec",
+    }
+)  # fmt: skip
+_INTERPRETER_VERSIONED_RE = re.compile(r"^(?:python|pypy)[0-9.]*$")
+
+
+def _is_interpreter_word(word: str) -> bool:
+    name = word.rsplit("/", 1)[-1]
+    return name in _INTERPRETER_NAMES or bool(_INTERPRETER_VERSIONED_RE.match(name))
+
+
+_STDIN_REDIRECT_RE = re.compile(r"(?:^|[\s;&|({])[0-9]*<(?![<(&])\s*(\S+)")
+
+
+def _interpreter_stdin_credential_hit(command: str) -> str | None:
+    """Refuse an interpreter command whose standard input is redirected from
+    a credential path (`python3 -c '<program>' < <path>`), whatever the
+    program text says. Judged on the WHOLE command text: the redirect often
+    trails a compound command (`{ python3 ...; } < <path>`), and `exec 3<
+    <path>` hands the open file to anything that follows."""
+    joined = _join_line_continuations(command)
+    redirected = [
+        _strip_wrapper_punctuation(m.group(1))
+        for m in _STDIN_REDIRECT_RE.finditer(joined)
+    ]
+    credential = next((r for r in redirected if is_credential_path(r)), None)
+    if credential is None:
+        return None
+    if any(_is_interpreter_word(w) for w in _command_words(joined)):
+        return credential
     return None
 
 
@@ -1144,6 +1337,10 @@ def check_bash(command: str):
     if hit:
         return hit
 
+    hit = _interpreter_stdin_credential_hit(command)
+    if hit:
+        return hit
+
     # No text-bearing exemption at the CHAIN level: `echo <path> | xargs
     # cat` legitimately starts with `echo`, which is the same leader this
     # hook otherwise treats as "just carrying text" for a lone segment —
@@ -1228,26 +1425,36 @@ def check_read(tool_input: dict):
 # ---------------------------------------------------------------------------
 
 
+def _glob_alternatives(glob: str):
+    """Yield *glob* with one level of ``{a,b}`` alternation expanded, so
+    ``{.env,notes.txt}`` is judged as ``.env`` and ``notes.txt``."""
+    match = re.search(r"\{([^{}]*)\}", glob)
+    if not match:
+        yield glob
+        return
+    for option in match.group(1).split(","):
+        yield from _glob_alternatives(glob[: match.start()] + option + glob[match.end() :])
+
+
 def check_grep(tool_input: dict):
     path = tool_input.get("path")
     glob = tool_input.get("glob")
-    target = None
-    if isinstance(path, str) and is_credential_path(path):
-        target = path
-    elif isinstance(glob, str) and is_credential_path(glob):
-        target = glob
-    if target is None:
-        return None
-
     output_mode = tool_input.get("output_mode") or "files_with_matches"
     if output_mode in ("files_with_matches", "count"):
         return None  # names or counts only — no content
-    if output_mode == "content":
-        # -A/-B/-C context or multiline widen the printed span but the base
-        # case is already unsafe; refuse regardless of those flags.
-        return target
-    # Unknown/unexpected mode: refuse conservatively rather than guess.
-    return target
+
+    # Content mode from here on (and any unexpected mode, refused
+    # conservatively rather than guessed at). -A/-B/-C context or multiline
+    # widen the printed span but the base case is already unsafe.
+    if isinstance(glob, str):
+        for alternative in _glob_alternatives(glob):
+            if is_credential_path(alternative):
+                return glob
+    # No path means the search starts at the working directory.
+    root = path if isinstance(path, str) and path else os.getcwd()
+    if is_credential_territory(root):
+        return root
+    return None
 
 
 # ---------------------------------------------------------------------------

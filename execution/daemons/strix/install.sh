@@ -9,18 +9,12 @@ DEST="$LAUNCH_AGENTS/$PLIST"
 
 mkdir -p "$LAUNCH_AGENTS"
 
-# Unload if already installed.
-if launchctl list | grep -q "com.ateles.strix" 2>/dev/null; then
-  echo "Unloading existing agent..."
-  launchctl unload "$DEST" 2>/dev/null || true
-fi
-
-# Render through the shared renderer rather than copying: it leaves
-# credential-named variables out of the installed plist (daemons load them
-# from the secrets store at start) and refuses a template it cannot render
-# safely.
-python3 "$SCRIPT_DIR/../../scripts/render_daemon_plist.py" "$SCRIPT_DIR/$PLIST" "$DEST"
-launchctl load "$DEST"
+# Render and validate first, then swap: the shared step renders through the
+# credential-free renderer into a scratch file, and only a clean render
+# unloads the running agent, replaces the plist and loads it again. A refused
+# template leaves the running agent and the installed plist untouched.
+source "$SCRIPT_DIR/../_install_plist.sh"
+install_rendered_plist "strix" "com.ateles.strix" "$SCRIPT_DIR/$PLIST" "$DEST"
 
 echo "✓ strix installed and started."
 echo "  Menu bar icon: 🔴 recording  ⚫ idle"

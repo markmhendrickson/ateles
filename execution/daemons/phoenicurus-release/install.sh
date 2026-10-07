@@ -129,16 +129,12 @@ if [ "${1:-}" = "--load-prepare" ]; then
     SRC="$SCRIPT_DIR/$PLIST.tmpl"
   fi
   mkdir -p "$HOME/Library/LaunchAgents"
-  if launchctl list 2>/dev/null | grep -q "com.ateles.phoenicurus-prepare"; then
-    echo "Unloading existing phoenicurus-prepare agent..."
-    launchctl unload "$DEST" 2>/dev/null || true
-  fi
-  # Render through the shared renderer rather than copying: it leaves
-  # credential-named variables out of the installed plist (daemons load them
-  # from the secrets store at start) and refuses a template it cannot render
-  # safely.
-  python3 "$SCRIPT_DIR/../../scripts/render_daemon_plist.py" "$SRC" "$DEST"
-  launchctl load "$DEST"
+  # Render and validate first, then swap: the shared step renders through the
+  # credential-free renderer into a scratch file, and only a clean render
+  # unloads the running agent, replaces the plist and loads it again. A refused
+  # template leaves the running agent and the installed plist untouched.
+  source "$SCRIPT_DIR/../_install_plist.sh"
+  install_rendered_plist "phoenicurus-prepare" "com.ateles.phoenicurus-prepare" "$SRC" "$DEST"
   echo "✓ phoenicurus-prepare scheduled (Mon-Thu 07:00 local)."
 else
   echo

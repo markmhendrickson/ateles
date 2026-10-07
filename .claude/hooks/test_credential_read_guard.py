@@ -1026,3 +1026,287 @@ def test_exact_names_only_and_count_modes_never_emit_fixture_canary():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# Credential-containment hardening: shell verbose tracing, links, stdin
+# redirection into an interpreter, directory-rooted searches. Every credential
+# file here is a FAKE in a temp directory; HOME points at that directory so the
+# home-relative credential directories resolve inside it.
+# ---------------------------------------------------------------------------
+
+HOME_ENV = {"HOME": str(FIXTURE_ROOT)}
+LINK_DIR = FIXTURE_ROOT / "links"
+LINK_DIR.mkdir()
+INNOCUOUS_LINK = LINK_DIR / "notes-link"
+INNOCUOUS_LINK.symlink_to(ENV_FILE)
+TEMPLATE_NAMED_LINK = LINK_DIR / "looks-safe.env.example"
+TEMPLATE_NAMED_LINK.symlink_to(ENV_FILE)
+DIR_LINK = LINK_DIR / "dir-link"
+DIR_LINK.symlink_to(NEOTOMA_DIR)
+PLAIN_LINK = LINK_DIR / "plain-link"
+PLAIN_LINK.symlink_to(PLAIN_FILE)
+EXAMPLE_LINK = LINK_DIR / "example-link"
+EXAMPLE_LINK.symlink_to(ENV_EXAMPLE_FILE)
+OTHER_DIR = FIXTURE_ROOT / "somewhere-else"
+OTHER_DIR.mkdir()
+(OTHER_DIR / "readme.txt").write_text("nothing sensitive\n")
+HOME_DIR = str(FIXTURE_ROOT)
+FAKE_VALUE = "fake_test_token_not_real_0000"
+
+
+def run_home(tool_name, tool_input):
+    return run(tool_name, tool_input, env=HOME_ENV)
+
+
+def run_bash_in(cmd, cwd):
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+    return subprocess.run(
+        [sys.executable, HOOK],
+        input=payload,
+        capture_output=True,
+        text=True,
+        cwd=str(cwd),
+    ).returncode
+
+
+VERBOSE_BLOCK = [
+    ("set -v", f"set -v; source {ENV}"),
+    ("set -o verbose", f"set -o verbose; source {ENV}"),
+    ("set -xv cluster", f"set -xv; source {ENV}"),
+    ("set -ev cluster", f"set -ev; source {ENV}"),
+    ("bash -v -c", f"bash -v -c 'source {ENV}'"),
+    ("bash -o verbose -c", f"bash -o verbose -c 'source {ENV}'"),
+    ("sh -v wrapper", f"sh -v -c '. {ENV}'"),
+    ("setopt verbose", f"setopt verbose; source {ENV}"),
+    ("SHELLOPTS verbose", f"SHELLOPTS=verbose bash -c 'source {ENV}'"),
+    ("verbose on a separate line", f"set -v\nsource {ENV}"),
+]
+VERBOSE_ALLOW = [
+    ("set +v", f"set +v; source {ENV}"),
+    ("set +o verbose", f"set +o verbose; source {ENV}"),
+    ("set -e", f"set -e; source {ENV}"),
+    ("set -o pipefail", f"set -o pipefail; source {ENV}"),
+    ("verbose with no credential source", "set -v; echo hello"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", VERBOSE_BLOCK, ids=[x for x, _ in VERBOSE_BLOCK])
+def test_verbose_tracing_after_credential_source_is_refused(label, cmd):
+    assert run_bash(cmd) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", VERBOSE_ALLOW, ids=[x for x, _ in VERBOSE_ALLOW])
+def test_disabling_or_unrelated_shell_options_stay_allowed(label, cmd):
+    assert run_bash(cmd) == 0, label
+
+
+def test_verbose_tracing_really_prints_sourced_values_so_the_refusal_is_not_cosmetic():
+    # Control: the shell effect the refusal exists to stop, on a fake file.
+    bash_env = {"PATH": "/usr/bin:/bin"}
+    on = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"set -v; source {ENV}"],
+        capture_output=True,
+        text=True,
+        env=bash_env,
+    )
+    assert FAKE_VALUE in on.stderr
+    off = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"set +v; source {ENV}"],
+        capture_output=True,
+        text=True,
+        env=bash_env,
+    )
+    assert FAKE_VALUE not in off.stderr
+
+
+LINK_BASH_BLOCK = [
+    ("cat through an innocuous link", f"cat {INNOCUOUS_LINK}"),
+    ("head through a link", f"head -3 {INNOCUOUS_LINK}"),
+    ("cat through a template-named link", f"cat {TEMPLATE_NAMED_LINK}"),
+    ("cat inside a linked credential directory", f"cat {DIR_LINK}/.env"),
+    ("grep through a link", f"grep TOKEN {INNOCUOUS_LINK}"),
+    ("sourcing then dumping through a link", f"source {INNOCUOUS_LINK}; env"),
+    ("link relative to the working directory", "cat ./notes-link"),
+    ("bare link word relative to the working directory", "cat notes-link"),
+]
+LINK_BASH_ALLOW = [
+    ("cat through a link to a plain file", f"cat {PLAIN_LINK}"),
+    ("cat through a link to a template", f"cat {EXAMPLE_LINK}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", LINK_BASH_BLOCK, ids=[x for x, _ in LINK_BASH_BLOCK])
+def test_link_to_credential_is_refused_in_bash(label, cmd):
+    # Relative cases need the hook process to share the working directory.
+    assert run_bash_in(cmd, LINK_DIR) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", LINK_BASH_ALLOW, ids=[x for x, _ in LINK_BASH_ALLOW])
+def test_link_to_ordinary_file_stays_allowed_in_bash(label, cmd):
+    assert run_bash_in(cmd, LINK_DIR) == 0, label
+
+
+def test_link_to_credential_is_refused_by_read_and_content_grep():
+    assert run("Read", {"file_path": str(INNOCUOUS_LINK)}) == 2
+    assert run("Read", {"file_path": str(TEMPLATE_NAMED_LINK)}) == 2
+    content = {"output_mode": "content", "pattern": "x"}
+    assert run("Grep", {"path": str(INNOCUOUS_LINK), **content}) == 2
+    assert run_home("Grep", {"path": str(DIR_LINK), **content}) == 2
+    # names-only stays allowed, and so do links to ordinary files
+    assert run("Grep", {"path": str(INNOCUOUS_LINK), "pattern": "x"}) == 0
+    assert run("Read", {"file_path": str(PLAIN_LINK)}) == 0
+    assert run("Read", {"file_path": str(EXAMPLE_LINK)}) == 0
+
+
+def test_glob_returns_names_only_so_a_link_is_not_refused():
+    assert run("Glob", {"pattern": "*", "path": str(LINK_DIR)}) == 0
+
+
+def test_creating_a_link_to_a_credential_is_refused():
+    assert run_bash(f"ln -s {ENV} {LINK_DIR}/new-link") == 2
+    assert run_bash(f"ln -s {PLAIN} {LINK_DIR}/new-plain-link") == 0
+
+
+STDIN_PROGRAM = "import sys; print(sys.stdin.read())"
+STDIN_BLOCK = [
+    ("python reads stdin", f"python3 -c '{STDIN_PROGRAM}' < {ENV}"),
+    ("python with no program", f"python3 < {ENV}"),
+    ("python script file", f"python3 helper.py < {ENV}"),
+    ("node reads stdin", f"node -e 'process.stdin.pipe(process.stdout)' < {ENV}"),
+    ("perl loop", f"perl -ne 'print' < {ENV}"),
+    ("ruby loop", f"ruby -e 'puts STDIN.read' < {ENV}"),
+    ("fd-prefixed redirect", f"python3 -c '{STDIN_PROGRAM}' 0< {ENV}"),
+    ("redirect first", f"< {ENV} python3 -c '{STDIN_PROGRAM}'"),
+    ("quoted path", f"python3 -c '{STDIN_PROGRAM}' < \"{ENV}\""),
+    ("compound command", f"{{ python3 helper.py; }} < {ENV}"),
+    ("through a link", f"python3 helper.py < {INNOCUOUS_LINK}"),
+    ("exec opens the file", f"exec 3< {ENV}"),
+    ("jq", f"jq . < {ENV}"),
+    ("home-relative path", "python3 helper.py < ~/.config/neotoma/.env"),
+    ("home variable", "python3 helper.py < $HOME/.config/neotoma/.env"),
+]
+STDIN_ALLOW = [
+    ("redirect from an ordinary file", f"python3 helper.py < {PLAIN}"),
+    ("redirect from a template", f"python3 helper.py < {ENV_EXAMPLE}"),
+    ("interpreter with no redirect", "python3 helper.py"),
+    ("count-only redirect", f"wc -l < {ENV}"),
+    ("heredoc is not a file redirect", "python3 helper.py <<'EOF'\nx = 1\nEOF"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", STDIN_BLOCK, ids=[x for x, _ in STDIN_BLOCK])
+def test_interpreter_fed_a_credential_on_stdin_is_refused(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", STDIN_ALLOW, ids=[x for x, _ in STDIN_ALLOW])
+def test_stdin_redirects_that_are_not_a_credential_read_stay_allowed(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 0, label
+
+
+def test_interpreter_stdin_read_really_prints_the_value_so_the_refusal_is_not_cosmetic():
+    with open(ENV_FILE) as handle:
+        probe = subprocess.run(
+            [sys.executable, "-c", STDIN_PROGRAM],
+            stdin=handle,
+            capture_output=True,
+            text=True,
+        )
+    assert FAKE_VALUE in probe.stdout
+
+
+def test_shell_run_on_a_credential_file_is_refused():
+    assert run_bash(f"bash {ENV}") == 2
+    assert run_bash(f"bash -v {ENV}") == 2
+    assert run_bash("bash helper.sh") == 0
+    assert run_bash(f"bash -c 'source {ENV}; python3 helper.py'") == 0
+
+
+TERRITORY_GREP_BLOCK = [
+    ("the credential directory itself", {"path": str(NEOTOMA_DIR)}),
+    ("a directory inside the credential tree", {"path": str(NEOTOMA_DIR / "sub")}),
+    ("the home directory above it", {"path": HOME_DIR}),
+    ("the filesystem root", {"path": "/"}),
+    ("a link to the credential directory", {"path": str(DIR_LINK)}),
+    ("a launch agents directory", {"path": str(LAUNCH_AGENTS_DIR)}),
+    ("a dotenv glob under a broad path", {"path": str(OTHER_DIR), "glob": "*.env"}),
+    (
+        "a braced glob naming a dotenv",
+        {"path": str(OTHER_DIR), "glob": "{notes.txt,.env}"},
+    ),
+    ("a dotenv variant glob", {"path": str(OTHER_DIR), "glob": "**/.env.local"}),
+]
+TERRITORY_GREP_ALLOW = [
+    (
+        "names only on the credential directory",
+        {"path": str(NEOTOMA_DIR), "output_mode": "files_with_matches"},
+    ),
+    ("count on the home directory", {"path": HOME_DIR, "output_mode": "count"}),
+    ("an unrelated directory", {"path": str(OTHER_DIR)}),
+    (
+        "an unrelated directory with an ordinary glob",
+        {"path": str(OTHER_DIR), "glob": "*.txt"},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "label,ti", TERRITORY_GREP_BLOCK, ids=[x for x, _ in TERRITORY_GREP_BLOCK]
+)
+def test_content_grep_rooted_at_credential_territory_is_refused(label, ti):
+    request = {"output_mode": "content", "pattern": "TOKEN", **ti}
+    assert run_home("Grep", request) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,ti", TERRITORY_GREP_ALLOW, ids=[x for x, _ in TERRITORY_GREP_ALLOW]
+)
+def test_grep_that_cannot_print_credential_text_stays_allowed(label, ti):
+    request = {"pattern": "TOKEN", "output_mode": "content", **ti}
+    assert run_home("Grep", request) == 0, label
+
+
+TERRITORY_BASH_BLOCK = [
+    ("recursive grep of the credential directory", f"grep -r TOKEN {NEOTOMA_DIR}"),
+    ("rg of the credential directory", f"rg TOKEN {NEOTOMA_DIR}"),
+    ("recursive grep of the home directory", f"grep -rn TOKEN {HOME_DIR}"),
+    ("rg through a directory link", f"rg TOKEN {DIR_LINK}"),
+    (
+        "find -exec cat from the home directory",
+        f"find {HOME_DIR} -name '*.env' -exec cat {{}} +",
+    ),
+    (
+        "find -exec cat in the credential directory",
+        f"find {NEOTOMA_DIR} -type f -exec cat {{}} \\;",
+    ),
+]
+TERRITORY_BASH_ALLOW = [
+    ("names-only recursive grep", f"grep -rl TOKEN {NEOTOMA_DIR}"),
+    ("count recursive grep", f"grep -rc TOKEN {HOME_DIR}"),
+    ("recursive grep of an unrelated directory", f"grep -r readme {OTHER_DIR}"),
+    ("find without a reader", f"find {NEOTOMA_DIR} -type f"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd", TERRITORY_BASH_BLOCK, ids=[x for x, _ in TERRITORY_BASH_BLOCK]
+)
+def test_recursive_search_over_credential_territory_is_refused(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,cmd", TERRITORY_BASH_ALLOW, ids=[x for x, _ in TERRITORY_BASH_ALLOW]
+)
+def test_searches_that_cannot_print_credential_text_stay_allowed(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 0, label
+
+
+def test_credential_directories_are_kept_in_step_with_the_path_globs():
+    sys.path.insert(0, str(Path(HOOK).parent))
+    import credential_read_guard as guard
+
+    for directory, sample in guard.CREDENTIAL_DIRECTORIES.items():
+        assert guard.is_credential_path(f"{directory}/{sample}"), directory
+    assert guard.is_credential_path("~/.config/neotoma")
