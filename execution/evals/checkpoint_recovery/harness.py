@@ -23,6 +23,7 @@ Each test names the behavior whose removal turns it red:
 from __future__ import annotations
 
 import base64
+import dataclasses
 import importlib.util
 import json
 import sys
@@ -39,7 +40,15 @@ sys.path.insert(0, str(HERE))
 
 # The daemon test lane does not install the MCP SDK; the checkpoint authority
 # read exercised below is a plain function in server.py.
-if importlib.util.find_spec("mcp") is None:
+def _mcp_sdk_missing() -> bool:
+    # A module already registered (the SDK, or a stand-in another test module
+    # put there, which has no import spec) is not a missing one.
+    if "mcp" in sys.modules:
+        return False
+    return importlib.util.find_spec("mcp") is None
+
+
+if _mcp_sdk_missing():
     _shapes = {
         "mcp": types.ModuleType("mcp"),
         "mcp.server": types.ModuleType("mcp.server"),
@@ -138,7 +147,15 @@ def world(monkeypatch, tmp_path):
         high_blast_action_types=frozenset(),
         loaded=True,
     )
-    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _skill: policy)
+    # The live policy the daemon would load.  It is a field of the world so a
+    # scenario can edit it mid-flight, the way an operator's policy repair does.
+    fake.policy = policy
+
+    def edit_policy(**changes) -> None:
+        fake.policy = dataclasses.replace(fake.policy, **changes)
+
+    fake.edit_policy = edit_policy
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _skill: fake.policy)
 
     # Release side: the real consumer runs; only the lifecycle writer, activity
     # log and notifier (observability, not the mechanism under test) are local.

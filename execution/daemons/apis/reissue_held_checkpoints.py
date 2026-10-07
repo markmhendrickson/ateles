@@ -3,7 +3,9 @@
 
 Dry run by default: prints what would happen per task and writes nothing.
 ``--apply`` files one fresh signed checkpoint per still-held task that lacks a
-resolvable one, then retires that task's unresolvable pending briefs.  It never
+current one (one that release would still accept for the task and policy as they
+are now), then retires that task's obsolete pending briefs.  Re-run it after
+repairing the policy: the checkpoints it filed under the old policy are replaced.  It never
 releases, approves, or dispatches a task, and never touches a task that is not
 at ``awaiting_approval`` right now.
 

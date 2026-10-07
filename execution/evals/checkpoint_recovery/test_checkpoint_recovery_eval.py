@@ -348,3 +348,39 @@ def test_dry_run_flags_the_tasks_approval_cannot_release(world, monkeypatch, cap
     assert code == 0
     assert "will NOT release" in lines[0]["detail"]
     assert world.write_log == []
+
+
+@pytest.mark.parametrize(
+    "task_id", ["ent_task_operator_only", "ent_task_unclassified"]
+)
+def test_summaries_never_offer_rejection_as_a_way_to_close_the_work(
+    world, monkeypatch, capsys, task_id
+):
+    """Rejecting declines the task, so it cannot be how finished work is closed.
+
+    The summary says what rejection does, and points to the task's own status as
+    the place to record the outcome."""
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", task_id)
+    assert code == 0, lines
+    checkpoint = world.pending_checkpoints(task_id)[0]
+    texts = [
+        world.entities[checkpoint]["fields"]["plan_summary"],
+        lines[0]["detail"],
+    ]
+
+    for text in texts:
+        assert "reject this checkpoint to close" not in text
+        assert "rejecting declines the task" in text.lower()
+        assert "status in Neotoma to done (or cancelled" in text
+        assert "no checkpoint action records that outcome" in text
+        assert "approving only closes the checkpoint" in text
+
+
+def test_ordinary_held_task_summary_states_what_rejecting_does(
+    world, monkeypatch, capsys
+):
+    run(monkeypatch, capsys, "--apply", "--task", "ent_task_held_plain")
+
+    checkpoint = world.pending_checkpoints("ent_task_held_plain")[0]
+    summary = world.entities[checkpoint]["fields"]["plan_summary"]
+    assert "Rejecting this checkpoint declines the task" in summary

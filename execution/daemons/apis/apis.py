@@ -2203,12 +2203,18 @@ class ReissueResult:
 def _checkpoint_authority_state(checkpoint_id: str, task_record: dict) -> str:
     """Classify a pending brief as ``current``, ``stale`` or ``unreadable``.
 
+    ``current`` means the brief would still be accepted for release as things
+    stand: its authenticated envelope binds the task as it is now AND the policy
+    and action context as they are now, judged the way release judges them.  A
+    task nobody touched can still hold an obsolete brief, because the policy it
+    was filed under has since changed.
+
     ``stale`` is a positive finding: the brief was read and carries no authority
-    envelope, or its authenticated envelope does not bind the task as it is now.
-    ``unreadable`` means the checkpoint or its authorization observations could
-    not be read at all.  A failed read is not evidence that authority is stale
-    (docs/foundation/failure_posture.md), so callers must never retire or
-    replace a brief on that basis.
+    envelope, or its authenticated envelope does not bind the task and policy as
+    they are now.  ``unreadable`` means the checkpoint, its authorization
+    observations, or the current policy could not be read at all.  A failed read
+    is not evidence that authority is stale (docs/foundation/failure_posture.md),
+    so callers must never retire or replace a brief on that basis.
     """
     record = fetch_checkpoint_record(checkpoint_id)
     if record is None:
@@ -2222,29 +2228,60 @@ def _checkpoint_authority_state(checkpoint_id: str, task_record: dict) -> str:
     authority = read_authenticated_checkpoint_authorization(
         checkpoint_id, record, observations=observations
     )
-    if authority and authority.get("task_revision") == entity_record_digest(
-        task_record
-    ):
-        return "current"
-    return "stale"
+    if not authority:
+        return "stale"
+    if authority.get("task_revision") != entity_record_digest(task_record):
+        return "stale"
+    # The task is as it was.  Whether the brief is still current now depends on
+    # the policy and action context release would judge it against.
+    _skill, action_type, policy, decision = _task_gate_context(
+        _record_snapshot(task_record) or {}
+    )
+    if not policy.loaded:
+        return "unreadable"
+    bound = (
+        authority.get("task_entity_id") == task_record.get("entity_id")
+        and authority.get("task_observation_count")
+        == task_record.get("observation_count")
+        and authority.get("task_last_observation_at")
+        == task_record.get("last_observation_at")
+        and str(authority.get("action_type") or "").strip().lower() == action_type
+        and authority.get("policy_entity_id") == policy.entity_id
+        and authority.get("policy_revision") == execution_policy_revision(policy)
+        and _decision_consistent_with_approval(
+            decision,
+            gate_action=str(authority.get("gate_action") or ""),
+            blast_radius=str(authority.get("blast_radius") or ""),
+        )
+    )
+    return "current" if bound else "stale"
 
 
 _BLOCKER_OUTCOMES = {
     "operator_only": "needs_operator",
     "unclassified": "needs_classification",
 }
+_OUTCOME_ON_THE_TASK = (
+    "set the task's status in Neotoma to done (or cancelled if you drop it); "
+    "no checkpoint action records that outcome. "
+    "Rejecting is not a way to close the work: rejecting declines the task."
+)
 _BLOCKER_SUMMARIES = {
     "operator_only": (
         "Operator action needed: this task is reserved to the operator, so "
-        "approving this checkpoint will NOT release it to an agent. Do the work "
-        "yourself, then reject this checkpoint to close it."
+        "approving this checkpoint will NOT release it to an agent; approving "
+        "only closes the checkpoint and leaves the task as it is. Do the work "
+        "yourself, then " + _OUTCOME_ON_THE_TASK
     ),
     "unclassified": (
         "Classification repair needed: this task's action type is not "
         "classified by the execution policy, so it is treated as never "
         "auto-executable and approving this checkpoint will NOT release it to "
-        "an agent. Add the classification (or correct the task's action type), "
-        "then re-run recovery; reject this checkpoint to close it."
+        "an agent; approving only closes the checkpoint and leaves the task as "
+        "it is. Add the classification (or correct the task's action type), "
+        "then re-run recovery, which replaces this checkpoint with one that "
+        "reflects the current policy. If you do the work yourself instead, "
+        + _OUTCOME_ON_THE_TASK
     ),
 }
 
@@ -2259,7 +2296,9 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
 
     Outcomes (the CLI exits non-zero for ``failed`` and ``incomplete``):
       * ``skipped`` - confirmed nothing to do: the task is not held, or it
-        already has exactly one resolvable checkpoint and no stale pending one;
+        already has exactly one checkpoint that release would still accept (it
+        binds the task, policy and action as they are now) and no stale pending
+        one;
       * ``would_reissue`` / ``would_retire`` - dry run, nothing written;
       * ``reissued`` - a replacement persisted and proved, stale briefs retired;
       * ``retired_stale`` - a resolvable checkpoint already existed; stale
@@ -2279,8 +2318,11 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
     Guarantees, each pinned by a test:
       * only a task at ``awaiting_approval`` right now is touched, so a done,
         declined, superseded, blocked, or running task is never re-issued;
-      * idempotent: one resolvable checkpoint per task state; a rerun reuses the
-        proven replacement and only finishes retirement;
+      * idempotent: one resolvable checkpoint per task and policy state; a rerun
+        reuses the proven replacement and only finishes retirement.  A policy
+        repair alone (task untouched) makes the earlier checkpoint obsolete, so
+        the rerun replaces it, retiring the old one only once the new one is
+        proven;
       * fail closed: the replacement must persist and read back with its
         authenticated envelope before anything old is retired, the replacement
         is never retired, nothing is retired on an unreadable record, and
@@ -2365,7 +2407,7 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
             "would_reissue",
             "no resolvable checkpoint"
             + (
-                f"; would retire {len(stale_pending)} unresolvable pending"
+                f"; would retire {len(stale_pending)} obsolete pending"
                 if stale_pending
                 else ""
             )
@@ -2387,7 +2429,7 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
                     "Re-issued: this task was held at the gate without a "
                     "checkpoint the operator could resolve. Approval releases "
                     "the task as it stands now; the original gate reason is "
-                    "repeated below."
+                    "repeated below. Rejecting this checkpoint declines the task."
                 )
             ),
             reason="re-issued checkpoint; operator approval required",

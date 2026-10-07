@@ -238,3 +238,178 @@ def test_approving_a_never_tier_recovered_checkpoint_releases_nothing(
         assert task_fields(world, task_id)["status"] == "awaiting_approval"
 
     assert world.dispatches.calls == []
+
+
+# ── Policy-only classification repair, as the published instructions say ────
+
+UNCLASSIFIED = "ent_task_unclassified"
+CLASSIFIED_LOW = frozenset({"local_edit", "mystery_action"})
+
+
+def _recover_one(world, monkeypatch, capsys, task_id, *extra):
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", task_id, *extra)
+    assert code == 0, lines
+    return lines[0]
+
+
+def _repair_policy_only(world, monkeypatch, capsys):
+    """Recover the unclassified task, then follow the instructions it carries:
+    add its action to the policy's low-blast set (the task is not touched) and
+    re-run recovery."""
+    first = _recover_one(world, monkeypatch, capsys, UNCLASSIFIED)
+    assert first["outcome"] == "needs_classification", first
+    old = first["checkpoint_id"]
+    assert world.entities[old]["fields"]["blast_radius"] == "never"
+    task_before = dict(task_fields(world, UNCLASSIFIED))
+
+    world.edit_policy(low_blast_action_types=CLASSIFIED_LOW)
+
+    assert task_fields(world, UNCLASSIFIED) == task_before, "the task is unchanged"
+    return old
+
+
+def test_policy_only_repair_replaces_the_obsolete_checkpoint(
+    world, monkeypatch, capsys
+):
+    old = _repair_policy_only(world, monkeypatch, capsys)
+
+    # A dry run reports the replacement it would make and writes nothing.
+    writes = list(world.write_log)
+    code, lines = run(monkeypatch, capsys, "--task", UNCLASSIFIED)
+    assert code == 0 and lines[0]["outcome"] == "would_reissue", lines
+    assert world.write_log == writes
+
+    result = _recover_one(world, monkeypatch, capsys, UNCLASSIFIED)
+
+    assert result["outcome"] == "reissued", result
+    new = result["checkpoint_id"]
+    assert new != old, "a distinct checkpoint bound to the current policy"
+    assert world.pending_checkpoints(UNCLASSIFIED) == [new]
+    assert resolvable(world, UNCLASSIFIED) == [new]
+    assert world.entities[old]["fields"]["status"] == "superseded"
+    assert world.entities[new]["fields"]["blast_radius"] == "low"
+    assert "Approval releases the task" in world.entities[new]["fields"]["plan_summary"]
+    # The old checkpoint is retired only after the replacement is stored.
+    stored = world.write_log.index(f"store {new}")
+    retired = world.write_log.index(f"correct {old}.status=superseded")
+    assert stored < retired
+    # Recovery itself never releases the task.
+    assert task_fields(world, UNCLASSIFIED)["status"] == "awaiting_approval"
+    assert world.dispatches.calls == []
+
+    # A rerun is a no-op: one checkpoint per task state.
+    writes = list(world.write_log)
+    again = _recover_one(world, monkeypatch, capsys, UNCLASSIFIED)
+    assert again["outcome"] == "skipped" and again["checkpoint_id"] == new
+    assert world.write_log == writes
+
+
+def test_repaired_checkpoint_releases_exactly_once_through_mcp(
+    world, monkeypatch, capsys
+):
+    old = _repair_policy_only(world, monkeypatch, capsys)
+    new = _recover_one(world, monkeypatch, capsys, UNCLASSIFIED)["checkpoint_id"]
+
+    # The retired checkpoint can no longer be resolved at all.
+    stale = asyncio.run(mcp_resolve(world, old, "approve"))
+    assert "not 'awaiting_operator'" in stale["error"], stale
+    assert world.dispatches.calls == []
+
+    result = asyncio.run(mcp_resolve(world, new, "approve"))
+
+    assert result["action_taken"] == "approved — task re-dispatched", result
+    assert world.dispatches.calls == [(UNCLASSIFIED, "approved", True)]
+    assert task_fields(world, UNCLASSIFIED)["status"] == "routed"
+
+    replay = asyncio.run(mcp_resolve(world, new, "approve"))
+    assert "not 'awaiting_operator'" in replay["error"]
+
+    async def redeliver():
+        for _ in range(3):
+            await sse_deliver(world, new, stale_status="approved")
+            await apis.handle_checkpoint_brief(
+                new, world.entities[new]["fields"], _Notifier()
+            )
+
+    asyncio.run(redeliver())
+    assert len(world.dispatches.calls) == 1, "exactly one dispatch"
+
+
+def test_repaired_checkpoint_releases_once_through_a_signed_sse_resolution(
+    world, monkeypatch, capsys
+):
+    _repair_policy_only(world, monkeypatch, capsys)
+    new = _recover_one(world, monkeypatch, capsys, UNCLASSIFIED)["checkpoint_id"]
+    from lib.daemon_runtime.checkpoint_protocol import checkpoint_resolution_body
+
+    body = server._canonical_body_bytes(checkpoint_resolution_body(new, "approve"))
+    response = world.post(
+        "https://neotoma.test/correct",
+        headers={
+            "Authorization": "Bearer eval-token",
+            **world.resolver_headers(new, "approve"),
+        },
+        content=body,
+    )
+    assert response.status_code == 200
+    assert world.dispatches.calls == [], "the resolution alone releases nothing"
+
+    async def deliver():
+        for _ in range(3):
+            await sse_deliver(world, new, stale_status="approved")
+
+    asyncio.run(deliver())
+
+    assert world.dispatches.calls == [(UNCLASSIFIED, "approved", True)]
+    assert task_fields(world, UNCLASSIFIED)["status"] == "routed"
+
+
+def test_an_unchanged_policy_keeps_the_never_tier_checkpoint(
+    world, monkeypatch, capsys
+):
+    """No repair, no replacement: the same checkpoint stands and still says so."""
+    first = _recover_one(world, monkeypatch, capsys, UNCLASSIFIED)
+    writes = list(world.write_log)
+
+    again = _recover_one(world, monkeypatch, capsys, UNCLASSIFIED)
+
+    assert again["outcome"] == "needs_classification"
+    assert again["checkpoint_id"] == first["checkpoint_id"]
+    assert world.write_log == writes
+
+
+def test_an_unreadable_policy_replaces_and_retires_nothing(
+    world, monkeypatch, capsys
+):
+    """If the current policy cannot be established the checkpoint is not judged
+    stale: the task reports a failure and nothing is written."""
+    first = _recover_one(world, monkeypatch, capsys, UNCLASSIFIED)
+    writes = list(world.write_log)
+    world.edit_policy(loaded=False)
+
+    code, lines = run(monkeypatch, capsys, "--apply", "--task", UNCLASSIFIED)
+
+    assert code == 1, lines
+    assert lines[0]["outcome"] == "failed"
+    assert world.write_log == writes
+    assert world.pending_checkpoints(UNCLASSIFIED) == [first["checkpoint_id"]]
+
+
+def test_closing_operator_work_by_task_status_keeps_its_outcome(
+    world, monkeypatch, capsys
+):
+    """The closure the summaries describe: the operator records the outcome on the
+    task, and approving the checkpoint then only closes it, never re-writes the
+    task.  Rejecting instead declines the task, as the summaries say."""
+    checkpoints = recover(world, monkeypatch, capsys)
+
+    for task_id in ("ent_task_operator_only", UNCLASSIFIED):
+        world.touch_task(task_id, status="done")
+        result = asyncio.run(mcp_resolve(world, checkpoints[task_id], "approve"))
+        assert "no agent dispatch" in result["action_taken"], result
+        assert task_fields(world, task_id)["status"] == "done"
+        assert world.entities[checkpoints[task_id]]["fields"]["status"] != (
+            "awaiting_operator"
+        ), "the checkpoint is closed"
+
+    assert world.dispatches.calls == []

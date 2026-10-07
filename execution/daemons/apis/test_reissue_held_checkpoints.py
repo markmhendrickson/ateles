@@ -40,10 +40,15 @@ class _Record:
         self.persist = True
         self.fail_supersede: set[str] = set()
         self.unreadable: set[str] = set()
-        policy = ExecutionPolicy(entity_id="policy", loaded=True)
+        self.policy = ExecutionPolicy(
+            entity_id="policy", loaded=True, authorization_revision="policy-v1"
+        )
+        self.events: list[str] = []
         monkeypatch.setattr(apis, "fetch_task_record", self.fetch_task)
         monkeypatch.setattr(apis, "fetch_entity_user_id", lambda _id: "tenant-a")
-        monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _skill: policy)
+        monkeypatch.setattr(
+            apis, "resolve_policy_for_agent", lambda _skill: self.policy
+        )
         monkeypatch.setattr(apis, "checkpoints_for_task", self.for_task)
         monkeypatch.setattr(apis, "fetch_checkpoint_record", self.fetch_checkpoint)
         monkeypatch.setattr(apis, "_checkpoint_authority_state", self.authority_state)
@@ -70,8 +75,9 @@ class _Record:
             "entity_id": checkpoint_id,
             "entity_type": "checkpoint_" + "brief",
             "signed": signed,
-            # The task revision the checkpoint's envelope was signed against.
+            # The task and policy revisions the envelope was signed against.
             "revision": gating.entity_record_digest(self.tasks[task_id]),
+            "policy_revision": gating.execution_policy_revision(self.policy),
             "snapshot": {"task_entity_id": task_id, "status": status},
         }
 
@@ -94,13 +100,20 @@ class _Record:
         record = self.checkpoints[checkpoint_id]
         if not record.get("signed"):
             return "stale"  # a pre-signing brief has no authority envelope
-        current = record["revision"] == gating.entity_record_digest(task_record)
+        if not self.policy.loaded:
+            return "unreadable"
+        current = record["revision"] == gating.entity_record_digest(
+            task_record
+        ) and record["policy_revision"] == gating.execution_policy_revision(
+            self.policy
+        )
         return "current" if current else "stale"
 
     def write_brief(self, *, task_entity_id, idempotency_context, task_record, **_kw):
         self.writes += 1
         if not self.persist:
             return None
+        self.events.append("store")
         key = f"{task_entity_id}-{idempotency_context}"
         if key not in self.by_key:
             checkpoint_id = f"ent_new_{len(self.by_key)}"
@@ -111,8 +124,14 @@ class _Record:
     def supersede(self, checkpoint_id, *, handler, reason):
         if checkpoint_id in self.fail_supersede:
             return False
+        self.events.append(f"retire {checkpoint_id}")
         self.checkpoints[checkpoint_id]["snapshot"]["status"] = "superseded"
         return True
+
+    def set_policy(self, **changes):
+        import dataclasses
+
+        self.policy = dataclasses.replace(self.policy, **changes)
 
 
 @pytest.fixture
@@ -585,23 +604,85 @@ class TestAuthorityState:
         )
         assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "stale"
 
-    def test_envelope_bound_to_another_revision_is_stale_and_to_this_one_current(
+    POLICY = ExecutionPolicy(
+        entity_id="policy",
+        loaded=True,
+        authorization_revision="policy-v1",
+        low_blast_action_types=frozenset({"local_edit"}),
+    )
+
+    def _authority(self, **overrides):
+        envelope = {
+            "task_entity_id": "ent_t1",
+            "task_revision": gating.entity_record_digest(self.TASK),
+            "task_observation_count": 3,
+            "task_last_observation_at": None,
+            "action_type": "local_edit",
+            "policy_entity_id": "policy",
+            "policy_revision": "policy-v1",
+            "gate_action": "checkpoint_plan_approval",
+            "blast_radius": "low",
+        }
+        return {**envelope, **overrides}
+
+    def _state(self, monkeypatch, *, authority, policy=None, action_type="local_edit"):
+        policy = policy or self.POLICY
+        decision = gating.evaluate_gate(
+            confidence=0.3, action_type=action_type, policy=policy
+        )
+        self._patch(
+            monkeypatch,
+            record={"snapshot": {"body": "{}"}},
+            observations=[],
+            authority=authority,
+        )
+        monkeypatch.setattr(
+            apis,
+            "_task_gate_context",
+            lambda _snapshot: ("cicada", action_type, policy, decision),
+        )
+        return apis._checkpoint_authority_state("ent_cp", self.TASK)
+
+    def test_envelope_bound_to_another_task_revision_is_stale(self, monkeypatch):
+        authority = self._authority(task_revision="someone-else")
+        assert self._state(monkeypatch, authority=authority) == "stale"
+
+    def test_envelope_bound_to_the_task_and_policy_as_they_are_is_current(
         self, monkeypatch
     ):
-        self._patch(
-            monkeypatch,
-            record={"snapshot": {"body": "{}"}},
-            observations=[],
-            authority={"task_revision": "someone-else"},
+        assert self._state(monkeypatch, authority=self._authority()) == "current"
+
+    def test_unchanged_task_under_a_changed_policy_revision_is_stale(
+        self, monkeypatch
+    ):
+        authority = self._authority(policy_revision="policy-v0")
+        assert self._state(monkeypatch, authority=authority) == "stale"
+
+    def test_unchanged_task_under_a_different_policy_entity_is_stale(
+        self, monkeypatch
+    ):
+        authority = self._authority(policy_entity_id="another-policy")
+        assert self._state(monkeypatch, authority=authority) == "stale"
+
+    def test_a_different_action_type_is_stale(self, monkeypatch):
+        authority = self._authority(action_type="send_email")
+        assert self._state(monkeypatch, authority=authority) == "stale"
+
+    def test_a_blast_radius_the_policy_no_longer_gives_is_stale(self, monkeypatch):
+        # Same policy revision on paper, but the classification now differs.
+        authority = self._authority(
+            blast_radius="never", gate_action="checkpoint_plan_approval"
         )
-        assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "stale"
-        self._patch(
-            monkeypatch,
-            record={"snapshot": {"body": "{}"}},
-            observations=[],
-            authority={"task_revision": gating.entity_record_digest(self.TASK)},
+        assert self._state(monkeypatch, authority=authority) == "stale"
+
+    def test_a_policy_that_cannot_be_established_is_unreadable_not_stale(
+        self, monkeypatch
+    ):
+        unloaded = ExecutionPolicy(entity_id="policy", loaded=False)
+        assert (
+            self._state(monkeypatch, authority=self._authority(), policy=unloaded)
+            == "unreadable"
         )
-        assert apis._checkpoint_authority_state("ent_cp", self.TASK) == "current"
 
 
 def test_unreadable_pending_checkpoint_fails_without_replacing_or_retiring(record):
@@ -673,3 +754,42 @@ def test_cli_exits_zero_for_needs_operator_and_nonzero_for_incomplete(
     record.add_checkpoint("ent_legacy2", "ent_t2", signed=False)
     record.fail_supersede = {"ent_legacy2"}
     assert _run_cli(monkeypatch, "--task", "ent_t2", "--apply") == 1
+
+
+def test_policy_only_change_replaces_a_checkpoint_the_task_did_not_change(record):
+    """The task is untouched; only the policy it was filed under changed.  The
+    obsolete checkpoint is replaced by one bound to the current policy, and
+    retired only after the replacement exists."""
+    record.add_task("ent_t1", action_type="local_edit")
+    first = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+    assert first.outcome == "reissued"
+    record.events.clear()
+
+    again = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+    assert again.outcome == "skipped", "same task, same policy: nothing to do"
+
+    record.set_policy(authorization_revision="policy-v2")
+    dry = apis.reissue_held_task_checkpoint("ent_t1", apply=False)
+    assert dry.outcome == "would_reissue" and record.events == []
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "reissued"
+    assert result.checkpoint_id != first.checkpoint_id
+    assert result.superseded == [first.checkpoint_id]
+    assert record.events == ["store", f"retire {first.checkpoint_id}"]
+    assert _awaiting(record) == [result.checkpoint_id]
+
+
+def test_an_unloaded_policy_neither_replaces_nor_retires(record):
+    record.add_task("ent_t1", action_type="local_edit")
+    first = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+    record.events.clear()
+    writes = record.writes
+    record.set_policy(loaded=False)
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "failed"
+    assert record.writes == writes and record.events == []
+    assert _awaiting(record) == [first.checkpoint_id]
