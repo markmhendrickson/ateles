@@ -194,7 +194,7 @@ dispatch started, completed, or failed.
 
 ## Usage gate: a refused frontier dispatch is not exhaustion
 
-Claude dispatch is also gated on the usage snapshot itself
+Frontier dispatch (Claude and Codex) is also gated on the usage snapshot itself
 (`harness_router.usage_gate`, Phase A3). A dispatch is refused, with its own
 message, when:
 
@@ -218,8 +218,18 @@ message, when:
   `APIS_USAGE_WEEKLY_CEILING_PERCENT` (60) x the elapsed fraction of the week +
   `APIS_USAGE_PACE_BURST_PERCENT` (10). The message states when capacity returns
   if nothing more is used. Note the weekly percent is the whole account, so the
-  operator's own sessions count toward it. Local/mechanical work is never gated;
-  Codex and Cursor have no automatic live source and are not gated.
+  operator's own sessions count toward it. Local/mechanical work is never gated.
+  **Codex is paced the same way** from its own plan windows: the refresh asks
+  `codex app-server` for `account/rateLimits/read` (no model turn) and records the
+  weekly window (`windowDurationMins` 10080) beside Claude's. Dispatch for a paced
+  provider needs a valid, fresh weekly window: when the reading cannot be taken
+  the gate says `weekly budget reading unavailable` (code `unknown`) and refuses
+  until one is recorded, and a reading recorded earlier keeps governing (and aging)
+  in the meantime. An `unknown` refusal is not exhaustion (nothing is cooled,
+  headroom is not zeroed) and says why the reading failed. Cursor has only a
+  one-request availability probe. To take Codex out of pacing, omit it from
+  `APIS_USAGE_GATED_PROVIDERS`; the ceiling and burst settings apply to every gated
+  provider. (Budget evidence handling tightened per security review.)
 
 Every stale, missing or malformed refusal already carries the refresh command
 above and, when the last automatic refresh failed, the CLI's own reason (for
