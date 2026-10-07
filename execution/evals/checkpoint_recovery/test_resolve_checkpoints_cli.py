@@ -469,3 +469,20 @@ def test_the_key_and_its_location_are_never_printed(ready, monkeypatch, capsys):
     shown = out.getvalue() + capsys.readouterr().err
     assert "secret-place" not in shown
     assert "not configured or not found" in shown
+
+
+def test_a_success_reply_that_did_not_happen_is_reported_as_unconfirmed(
+    ready, monkeypatch
+):
+    async def claims_success(checkpoint_id, action, resolver_aauth_headers=None):
+        return {"action_taken": "approved — task re-dispatched"}
+
+    monkeypatch.setattr(server, "_resolve_checkpoint", claims_success)
+    out = at_terminal(monkeypatch, "approve 1 checkpoints\n")
+    code = cli(
+        ready, "approve", "--checkpoint", ready.cp["ent_task_held_plain"], "--execute"
+    )
+
+    assert code == 1
+    assert "0 of 1 confirmed by read-back" in out.getvalue()
+    assert task_fields(ready, "ent_task_held_plain")["status"] == "awaiting_approval"
