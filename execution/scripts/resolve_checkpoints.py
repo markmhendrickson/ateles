@@ -44,6 +44,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,6 +84,25 @@ _NO_RELEASE = re.compile(
     r"will\s+not\s+release|can\s+never\s+release|cannot\s+release", re.IGNORECASE
 )
 _TITLE = re.compile(r"^PLAN checkpoint:\s*(?P<title>.*?)\s*\[ent_\w+\](?:\s*#[0-9a-f]+)?\s*$")
+
+
+READ_ATTEMPTS = 3
+READ_PAUSE_SECONDS = 2.0
+
+
+def _read_retrying(read, *args):
+    """A read that returns None on failure, tried a few times before giving up.
+
+    A long listing makes hundreds of reads; one timed-out request must not
+    abandon it.  Only a failure that persists is reported (by the caller).
+    """
+    for attempt in range(READ_ATTEMPTS):
+        result = read(*args)
+        if result is not None:
+            return result
+        if attempt + 1 < READ_ATTEMPTS:
+            time.sleep(READ_PAUSE_SECONDS)
+    return None
 
 
 class Fatal(Exception):
@@ -200,7 +220,7 @@ def validated_authority(checkpoint_id: str, record: dict) -> dict | None:
     snap = _snapshot(record)
     if not isinstance(snap.get("body"), str):
         return None  # a pre-signing brief: no envelope, cannot be resolved
-    observations = gating.fetch_entity_observations_strict(checkpoint_id)
+    observations = _read_retrying(gating.fetch_entity_observations_strict, checkpoint_id)
     if observations is None:
         raise Fatal(f"could not read the signing record of {checkpoint_id}")
     return gating.read_authenticated_checkpoint_authorization(
@@ -252,7 +272,7 @@ def fetch_pending(
             continue
         if progress:
             progress(n, len(found))
-        record = gating.fetch_checkpoint_record(checkpoint_id)
+        record = _read_retrying(gating.fetch_checkpoint_record, checkpoint_id)
         if record is None:
             raise Fatal(f"could not read checkpoint {checkpoint_id}")
         authority = validated_authority(checkpoint_id, record)
@@ -267,7 +287,7 @@ def fetch_pending(
 
 def fetch_entry(checkpoint_id: str, triage: tuple[dict, dict]) -> Entry | None:
     """One checkpoint, freshly read; None when it has no valid authority."""
-    record = gating.fetch_checkpoint_record(checkpoint_id)
+    record = _read_retrying(gating.fetch_checkpoint_record, checkpoint_id)
     if record is None:
         raise Fatal(f"could not read checkpoint {checkpoint_id}")
     authority = validated_authority(checkpoint_id, record)

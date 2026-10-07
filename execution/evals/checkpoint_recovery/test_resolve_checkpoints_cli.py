@@ -46,6 +46,7 @@ class Tty(io.StringIO):
 
 @pytest.fixture(autouse=True)
 def _no_agent_markers(monkeypatch):
+    monkeypatch.setattr(rc, "READ_PAUSE_SECONDS", 0)
     for name in rc.AGENT_ENV_MARKERS:
         monkeypatch.delenv(name, raising=False)
 
@@ -509,3 +510,26 @@ def test_a_rejection_that_did_not_decline_the_task_is_unconfirmed(ready, monkeyp
 
     assert code == 1
     assert "0 of 1 confirmed by read-back" in out.getvalue()
+
+
+def test_one_timed_out_read_does_not_abandon_a_long_listing(ready, monkeypatch, capsys):
+    real = rc.gating.fetch_checkpoint_record
+    failed_once: set[str] = set()
+
+    def flaky(checkpoint_id):
+        if checkpoint_id not in failed_once:
+            failed_once.add(checkpoint_id)
+            return None
+        return real(checkpoint_id)
+
+    monkeypatch.setattr(rc.gating, "fetch_checkpoint_record", flaky)
+    assert cli(ready, "list") == 0
+    assert "SAFE 3" in capsys.readouterr().out
+
+
+def test_a_read_that_keeps_failing_stops_the_listing(ready, monkeypatch, capsys):
+    monkeypatch.setattr(rc.gating, "fetch_checkpoint_record", lambda _id: None)
+    assert cli(ready, "list") == 2
+    captured = capsys.readouterr()
+    assert "could not read checkpoint" in captured.err
+    assert "SAFE" not in captured.out
