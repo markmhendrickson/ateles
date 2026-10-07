@@ -285,6 +285,34 @@ except Exception:  # pragma: no cover — degraded import path, handled at call 
 LENS_BRIEF_PATH = None
 
 HARNESSES = ("claude", "codex", "cursor")
+
+# Candidate provider kinds for replaying a labelled review set with models that
+# are not the swarm's own harnesses. They are written ``<kind>:<model>`` (the
+# model may itself contain ":" or "/", e.g. ``ollama:qwen3.6:35b``,
+# ``openrouter:vendor/model``). Existing harnesses also accept ``<kind>:<model>``
+# to pin a model. These run only through ``execution/scripts/review_replay``,
+# which hands ``run_one`` a ``child_runner``; the production dispatch path does
+# not launch them.
+CANDIDATE_KINDS = ("openrouter", "ollama")
+
+
+def parse_provider(provider: str) -> tuple[str, str | None]:
+    """Split ``kind[:model]`` into ``(kind, model)``; raise ``ValueError`` on an
+    unknown kind or a candidate kind with no model."""
+    kind, sep, model = (provider or "").partition(":")
+    model = model.strip() if sep else ""
+    if kind in CANDIDATE_KINDS:
+        if not model:
+            raise ValueError(f"provider {kind!r} needs a model, e.g. {kind}:<model>")
+        return kind, model
+    if kind in HARNESSES:
+        return kind, (model or None)
+    raise ValueError(
+        f"unknown provider {provider!r}; expected one of "
+        f"{', '.join((*HARNESSES, *(k + ':<model>' for k in CANDIDATE_KINDS)))}"
+    )
+
+
 TRUSTED_MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 
 # These are the two network-only delivery denials emitted by skill_runner.
@@ -538,13 +566,19 @@ def render_lens_task(target: LensTarget, brief_path: Path) -> str:
     return f"{launch}\n---\n\n{brief}"
 
 
-def read_agent_prompt(worktree: Path, agent: str) -> str:
+def read_agent_prompt(
+    worktree: Path, agent: str, *, fallback_root: Path | None = None
+) -> str:
     """Read docs/agents/<agent>.md from the worktree (i.e. from TARGET HEAD's
     own tree state at fetch time — the worktree is created from origin, and
     docs/agents is generated from Neotoma on origin/main, per the lens brief's
     own instruction to read it from ``origin/main`` rather than the PR branch).
     """
     path = worktree / "docs" / "agents" / f"{agent}.md"
+    if not path.is_file() and fallback_root is not None:
+        # A checkout of a repo that carries no docs/agents (replaying a review
+        # of another repo): the lens prompt comes from the swarm's own checkout.
+        path = fallback_root / "docs" / "agents" / f"{agent}.md"
     if not path.is_file():
         raise FileNotFoundError(f"{path} does not exist — unknown lens agent {agent!r}")
     return path.read_text(encoding="utf-8")
@@ -1498,6 +1532,8 @@ class HarnessSandbox:
         review_worktree: Path | None = None,
         verdict_path: Path | None = None,
     ) -> "HarnessSandbox":
+        provider_spec = provider
+        provider, _pinned_model = parse_provider(provider_spec)
         sandbox_home = tmp_root / f"{provider}-home"
         sandbox_home.mkdir(parents=True, exist_ok=True)
         review_worktree = review_worktree or (tmp_root / "probe-review-worktree")
@@ -1535,6 +1571,17 @@ class HarnessSandbox:
             authentication_ready = bool(
                 (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
             )
+        elif provider in CANDIDATE_KINDS:
+            # Claude CLI pointed at a metering proxy in the parent process; the
+            # child holds only a placeholder token, so there is no credential
+            # for the sandbox to guard here and nothing to authenticate.
+            env_extra = {
+                "ATELES_LOCAL_REVIEW_HOME": str(sandbox_home),
+                "TMPDIR": str(sandbox_home / "tmp"),
+                "TMP": str(sandbox_home / "tmp"),
+                "TEMP": str(sandbox_home / "tmp"),
+            }
+            authentication_ready = True
         else:
             raise ValueError(f"unsupported harness provider: {provider}")
 
@@ -2401,6 +2448,28 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
     raise last_error
 
 
+# ── Replay hooks -------------------------------------------------------------------
+
+
+@dataclass
+class ReplayHooks:
+    """Replay-mode seams for ``run_one`` (see its docstring).
+
+    ``worktree_factory(repo_name, path)`` returns an object with ``path``,
+    ``create(head=...)`` and ``remove()``. ``after_create(worktree, target)``
+    may return a target with a different head. ``child_runner(**launch)`` is an
+    async callable returning a ``SkillResult`` and recording its own metrics.
+    ``on_verdict(text, check, target)`` receives the child's verdict text and
+    the swarm reader's verdict even when the reader rejects it.
+    """
+
+    worktree_factory: "object"
+    child_runner: "object"
+    on_verdict: "object"
+    after_create: "object | None" = None
+    agent_prompt_root: "Path | None" = None
+
+
 # ── Single-provider run -----------------------------------------------------------
 
 
@@ -2414,19 +2483,41 @@ async def run_one(
     scratch_root: Path,
     brief_path: Path,
     timeout: int | None,
+    replay: "ReplayHooks | None" = None,
 ) -> dict:
     """Run the lens once on one provider. Returns a JSON-serializable report.
 
     Raises HeadroomExhausted before anything else (no worktree, no dispatch)
     when the provider's configured headroom is exactly 0 — the operator-reset
     gate named in the task.
-    """
-    check_headroom(provider)
 
+    ``replay`` (see ``ReplayHooks``) switches this one flow into replay mode for
+    the labelled-set test in ``execution/scripts/review_replay``: a different
+    checkout, a different child launcher that records metrics, and no live-head
+    or publication step. Everything between is the same code: the sandbox
+    build and refusal, the lens task text, the stash-ref check, the hardened
+    verdict read and the swarm's own verdict reader. ``replay`` is never
+    combined with ``post``.
+    """
+    provider_kind, _pinned_model = parse_provider(provider)
+    if replay is not None and post:
+        raise ValueError("replay mode never posts")
+    if replay is None and provider_kind in CANDIDATE_KINDS:
+        raise ValueError(
+            f"provider {provider!r} runs only through execution/scripts/review_replay"
+        )
+    if provider_kind not in CANDIDATE_KINDS:
+        check_headroom(provider_kind)
+
+    provider_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", provider)
     worktree_path = (
-        scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
+        scratch_root
+        / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider_slug}"
     )
-    worktree = Worktree(repo_name=repo_worktree_name, path=worktree_path)
+    if replay is not None:
+        worktree = replay.worktree_factory(repo_worktree_name, worktree_path)
+    else:
+        worktree = Worktree(repo_name=repo_worktree_name, path=worktree_path)
     verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
 
     if dry_run:
@@ -2447,7 +2538,11 @@ async def run_one(
                 review_worktree=worktree.path,
                 verdict_path=verdict_path,
             )
-            agent_prompt = read_agent_prompt(worktree.path, target.agent)
+            agent_prompt = read_agent_prompt(
+                worktree.path,
+                target.agent,
+                fallback_root=replay.agent_prompt_root if replay else None,
+            )
             task_text = (
                 render_lens_task(target, brief_path)
                 + "\n\n---\n\n"
@@ -2468,6 +2563,11 @@ async def run_one(
 
     worktree.create(head=target.head)
     try:
+        if replay is not None and replay.after_create is not None:
+            # May move the reviewed head (a patch committed on top), so the
+            # task text and the verdict check below use the returned target.
+            target = replay.after_create(worktree, target)
+            verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
         sandbox = HarnessSandbox.build(
             provider,
             scratch_root,
@@ -2477,7 +2577,11 @@ async def run_one(
         refusal = refuse_if_guard_required(sandbox)
         if refusal:
             return {"ok": False, "provider": provider, "reason": refusal}
-        agent_prompt = read_agent_prompt(worktree.path, target.agent)
+        agent_prompt = read_agent_prompt(
+                worktree.path,
+                target.agent,
+                fallback_root=replay.agent_prompt_root if replay else None,
+            )
         task_text = (
             render_lens_task(target, brief_path)
             + "\n\n---\n\n"
@@ -2502,19 +2606,30 @@ async def run_one(
             }
 
         try:
-            result: SkillResult = await dispatch_role.dispatch(
-                target.agent,
-                task_text,
-                provider=provider,
-                cwd=str(worktree.path),
-                timeout=timeout,
-                task_entity_id=target.task_entity_id,
-                env_extra=sandbox.env_extra,
-                seated_reviewer=False,  # see module docstring: no MCP grant requested
-                command_wrapper=sandbox.command_wrapper,
-                codex_outer_sandboxed=sandbox.codex_outer_sandbox_probed,
-                local_review=True,
-            )
+            if replay is not None:
+                result: SkillResult = await replay.child_runner(
+                    provider=provider,
+                    task_text=task_text,
+                    worktree=worktree.path,
+                    sandbox=sandbox,
+                    verdict_path=verdict_path,
+                    agent=target.agent,
+                    timeout=timeout,
+                )
+            else:
+                result = await dispatch_role.dispatch(
+                    target.agent,
+                    task_text,
+                    provider=provider,
+                    cwd=str(worktree.path),
+                    timeout=timeout,
+                    task_entity_id=target.task_entity_id,
+                    env_extra=sandbox.env_extra,
+                    seated_reviewer=False,  # see module docstring: no MCP grant requested
+                    command_wrapper=sandbox.command_wrapper,
+                    codex_outer_sandboxed=sandbox.codex_outer_sandbox_probed,
+                    local_review=True,
+                )
         except Exception as dispatch_error:
             stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
                 worktree.path, stash_ref_before
@@ -2599,6 +2714,8 @@ async def run_one(
             expected_lens=target.lens,
             expected_head=target.head,
         )
+        if replay is not None:
+            replay.on_verdict(verdict_text, check, target)
 
         report = {
             "ok": check.ok,
@@ -2623,6 +2740,10 @@ async def run_one(
         }
         if not check.ok:
             report["refusal_reason"] = check.reason
+            return report
+
+        if replay is not None:
+            report["delivery_status"] = "replay_not_posted"
             return report
 
         # Re-check the head before posting — the brief's own step 1, applied
@@ -2800,7 +2921,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument(
-        "--provider", choices=list(HARNESSES), help="Single-provider run"
+        "--provider",
+        choices=list(HARNESSES),
+        help="Single-provider run. (openrouter:<model> and ollama:<model> are "
+        "available through execution/scripts/review_replay/review_replay.py.)",
     )
     parser.add_argument(
         "--compare",
