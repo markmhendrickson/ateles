@@ -211,3 +211,178 @@ def test_non_credential_names_are_left_alone(name):
 def test_no_credential_named_variable_is_visible_in_this_test_process():
     """Runs under the repo-root scrub: nothing credential-named remains."""
     assert root_conftest.credential_env_names(os.environ) == []
+
+
+# ── Git's grouped configuration must stay valid after the scrub ----------------
+
+_GIT_CANARY = "canary-git-config-value-0042"
+
+
+def _git_env(extra: dict) -> dict:
+    base = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(_REPO_ROOT),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    base.update(extra)
+    return base
+
+
+def _git_group(entries) -> dict:
+    group = {"GIT_CONFIG_COUNT": str(len(entries))}
+    for index, (key, value) in enumerate(entries):
+        group[f"GIT_CONFIG_KEY_{index}"] = key
+        group[f"GIT_CONFIG_VALUE_{index}"] = value
+    return group
+
+
+def _git(args, environ):
+    return subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        env=environ,
+        cwd=str(_REPO_ROOT),
+    )
+
+
+_SAFE_ENTRIES = [
+    ("core.quotePath", "false"),
+    ("advice.detachedHead", "false"),
+    ("core.hooksPath", os.devnull),
+]
+_SENSITIVE_ENTRIES = [
+    ("http.extraHeader", f"Authorization: Bearer {_GIT_CANARY}"),
+    (
+        "url.https://user:" + _GIT_CANARY + "@example.test/.insteadOf",
+        "https://example.test/",
+    ),
+    ("credential.helper", f"!f() {{ echo password={_GIT_CANARY}; }}; f"),
+    ("example.apiToken", "plain"),
+    ("example.setting", _GIT_CANARY * 2),
+]
+
+
+@pytest.mark.parametrize("count", [0, 1, 3])
+def test_scrub_preserves_git_config_validity(count):
+    """Git still runs after the scrub for zero, one and several injected entries."""
+    entries = _SAFE_ENTRIES[:count]
+    environ = _git_env(_git_group(entries) if entries else {})
+    root_conftest.scrub_credential_env(environ)
+
+    probe = _git(["rev-parse", "--is-inside-work-tree"], environ)
+    assert probe.returncode == 0, probe.stderr
+    for key, value in entries:
+        got = _git(["config", "--get", key], environ)
+        assert got.returncode == 0 and got.stdout.strip() == value, key
+
+
+def test_the_partly_scrubbed_group_fails_git_so_the_check_has_teeth():
+    """Control: removing only the credential-named member (the old behavior) breaks git."""
+    environ = _git_env(_git_group(_SAFE_ENTRIES[:1]))
+    environ.pop("GIT_CONFIG_KEY_0")
+    broken = _git(["rev-parse", "--is-inside-work-tree"], environ)
+    assert broken.returncode == 128
+    assert "GIT_CONFIG_KEY_0" in broken.stderr
+
+
+@pytest.mark.parametrize("position", ["first", "middle", "last", "only"])
+def test_scrub_removes_sensitive_git_config_values_and_keeps_git_working(position):
+    safe = _SAFE_ENTRIES[:2]
+    sensitive = _SENSITIVE_ENTRIES[0]
+    entries = {
+        "first": [sensitive, *safe],
+        "middle": [safe[0], sensitive, safe[1]],
+        "last": [*safe, sensitive],
+        "only": [sensitive],
+    }[position]
+    environ = _git_env(_git_group(entries))
+    root_conftest.scrub_credential_env(environ)
+
+    assert _GIT_CANARY not in " ".join(environ.values())
+    probe = _git(["rev-parse", "--is-inside-work-tree"], environ)
+    assert probe.returncode == 0, probe.stderr
+    seen = _git(["config", "--list"], environ)
+    assert _GIT_CANARY not in seen.stdout
+    if position != "only":
+        for key, value in safe:
+            got = _git(["config", "--get", key], environ)
+            assert got.returncode == 0 and got.stdout.strip() == value, key
+
+
+@pytest.mark.parametrize("entry", _SENSITIVE_ENTRIES, ids=lambda e: e[0][:24])
+def test_every_kind_of_sensitive_git_config_entry_is_removed(entry):
+    environ = _git_env(_git_group([_SAFE_ENTRIES[0], entry]))
+    root_conftest.scrub_credential_env(environ)
+    assert _GIT_CANARY not in " ".join(environ.values())
+    assert environ["GIT_CONFIG_COUNT"] == "1"
+    assert _git(["rev-parse", "--is-inside-work-tree"], environ).returncode == 0
+
+
+def test_scrub_drops_the_whole_group_when_nothing_safe_remains():
+    environ = _git_env(_git_group([_SENSITIVE_ENTRIES[0]]))
+    root_conftest.scrub_credential_env(environ)
+    assert "GIT_CONFIG_COUNT" not in environ
+    assert not [n for n in environ if n.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))]
+    assert _git(["rev-parse", "--is-inside-work-tree"], environ).returncode == 0
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "-1"])
+def test_scrub_handles_an_unusable_git_config_count(bad):
+    environ = _git_env(
+        {"GIT_CONFIG_COUNT": bad, "GIT_CONFIG_KEY_0": "a.b", "GIT_CONFIG_VALUE_0": "c"}
+    )
+    root_conftest.scrub_credential_env(environ)
+    assert _git(["rev-parse", "--is-inside-work-tree"], environ).returncode == 0
+
+
+def test_scrub_drops_credential_bearing_git_config_parameters_only():
+    bearing = _git_env(
+        {"GIT_CONFIG_PARAMETERS": f"'http.extraheader'='Authorization: Bearer {_GIT_CANARY}'"}
+    )
+    root_conftest.scrub_credential_env(bearing)
+    assert "GIT_CONFIG_PARAMETERS" not in bearing
+    benign = _git_env({"GIT_CONFIG_PARAMETERS": "'core.quotepath'='false'"})
+    root_conftest.scrub_credential_env(benign)
+    assert benign["GIT_CONFIG_PARAMETERS"] == "'core.quotepath'='false'"
+
+
+def test_group_names_are_not_judged_one_by_one():
+    for name in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_12"):
+        assert not is_credential_env_name(name)
+    assert is_credential_env_name("GIT_CONFIG_KEYS_SECRET")
+
+
+def test_the_autouse_fixture_plan_keeps_a_valid_group_in_the_live_process(monkeypatch):
+    """The per-test fixture applies plan_env_scrub through monkeypatch; exercise it live."""
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.quotePath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "http.extraHeader")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", f"Authorization: Bearer {_GIT_CANARY}")
+    remove, updates = root_conftest.plan_env_scrub(os.environ)
+    for name in remove:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in updates.items():
+        monkeypatch.setenv(name, value)
+    assert _GIT_CANARY not in " ".join(os.environ.values())
+    assert _git(["rev-parse", "--is-inside-work-tree"], dict(os.environ)).returncode == 0
+
+
+def test_collection_that_runs_git_survives_injected_git_config():
+    """The plist suite runs `git ls-files` at collection; an injected grouped
+    configuration must not stop it (the scrub runs before collection)."""
+    child_env = dict(os.environ)
+    child_env.update(_git_group([("core.quotePath", "false")]))
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+            "execution/scripts/test_render_daemon_plist.py",
+        ],
+        capture_output=True,
+        text=True,
+        env=child_env,
+        cwd=str(_REPO_ROOT),
+    )
+    assert result.returncode == 0, result.stdout[-400:] + result.stderr[-400:]

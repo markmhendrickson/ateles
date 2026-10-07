@@ -40,7 +40,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from lib.credential_env_names import is_credential_env_name  # noqa: E402
+from lib.credential_env_names import is_credential_env_name, plan_env_scrub  # noqa: E402
 
 
 def credential_env_names(environ) -> list[str]:
@@ -49,11 +49,18 @@ def credential_env_names(environ) -> list[str]:
 
 
 def scrub_credential_env(environ) -> list[str]:
-    """Remove credential-named keys from *environ* in place; return the names removed."""
-    removed = credential_env_names(environ)
-    for name in removed:
+    """Scrub *environ* in place; return the names removed.
+
+    Credential-named variables are removed. Git's grouped configuration
+    (``GIT_CONFIG_COUNT`` / ``GIT_CONFIG_KEY_<n>`` / ``GIT_CONFIG_VALUE_<n>``)
+    is rewritten as one unit, never member by member, so it stays valid and
+    ``git`` keeps working while no credential-bearing entry survives.
+    """
+    remove, updates = plan_env_scrub(environ)
+    for name in remove:
         environ.pop(name, None)
-    return removed
+    environ.update(updates)
+    return remove
 
 
 def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
@@ -62,6 +69,9 @@ def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
 
 @pytest.fixture(autouse=True)
 def _scrub_credential_environment(monkeypatch):
-    """Start every test with no credential-named variable in ``os.environ``."""
-    for name in credential_env_names(os.environ):
+    """Start every test with no credential-bearing variable in ``os.environ``."""
+    remove, updates = plan_env_scrub(os.environ)
+    for name in remove:
         monkeypatch.delenv(name, raising=False)
+    for name, value in updates.items():
+        monkeypatch.setenv(name, value)

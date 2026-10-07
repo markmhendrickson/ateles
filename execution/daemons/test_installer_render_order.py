@@ -63,18 +63,47 @@ BAD_TEMPLATE = (
 )
 
 STUB_LAUNCHCTL = """#!/usr/bin/env bash
-# Stub: records every call, models a single loaded label, can refuse a load.
+# Stub: records every call and models ONE job as a `launchctl list` row
+# (PID, status, label) in $STUB_DIR/loaded. Flags are files in $STUB_DIR:
+#   refuse_unload  unload exits 1 and the job is left as it is
+#   unload_noop    unload exits 0 but the job stays listed
+#   refuse_new     load exits 1 for a plist carrying NEWMARK
+#   refuse_all     every load exits 1
+#   run_at_load    a successful load leaves a running process (pid 4242)
+#   list_fails     `list` exits 1
 echo "$*" >> "$STUB_DIR/calls.log"
 case "$1" in
-  list) cat "$STUB_DIR/loaded" 2>/dev/null; exit 0 ;;
-  unload) : > "$STUB_DIR/loaded"; exit 0 ;;
+  list)
+    if [ -f "$STUB_DIR/list_fails" ]; then exit 1; fi
+    cat "$STUB_DIR/loaded" 2>/dev/null; exit 0 ;;
+  unload)
+    if [ -f "$STUB_DIR/refuse_unload" ]; then exit 1; fi
+    if [ -f "$STUB_DIR/unload_noop" ]; then exit 0; fi
+    : > "$STUB_DIR/loaded"; exit 0 ;;
   load)
     if [ -f "$STUB_DIR/refuse_new" ] && grep -q NEWMARK "$2"; then exit 1; fi
     if [ -f "$STUB_DIR/refuse_all" ]; then exit 1; fi
-    echo "$LABEL" > "$STUB_DIR/loaded"; exit 0 ;;
+    if [ -f "$STUB_DIR/run_at_load" ]; then
+      printf '4242\t0\t%s\n' "$LABEL" > "$STUB_DIR/loaded"
+    else
+      printf -- '-\t0\t%s\n' "$LABEL" > "$STUB_DIR/loaded"
+    fi
+    exit 0 ;;
 esac
 exit 0
 """
+
+
+def _set_job(stub: Path, label: str, pid: str | None) -> None:
+    """Model the job as listed: a pid (running), "-" (registered, idle) or None (absent)."""
+    row = "" if pid is None else f"{pid}\t0\t{label}\n"
+    (stub / "loaded").write_text(row)
+
+
+def _job(stub: Path) -> str | None:
+    """The first column of the modelled listing, or None when the job is absent."""
+    text = (stub / "loaded").read_text().strip()
+    return text.split("\t")[0] if text else None
 
 
 def _tree(tmp_path: Path, installer_source: Path, name: str, plist: str, label: str):
@@ -98,7 +127,7 @@ def _tree(tmp_path: Path, installer_source: Path, name: str, plist: str, label: 
 
     stub = tmp_path / "stub"
     stub.mkdir()
-    (stub / "loaded").write_text(label + "\n")  # the agent is running
+    _set_job(stub, label, "123")  # the existing job is running (pid 123)
     launchctl = stub / "launchctl"
     launchctl.write_text(STUB_LAUNCHCTL)
     launchctl.chmod(launchctl.stat().st_mode | stat.S_IXUSR)
@@ -141,6 +170,10 @@ def installer(request, tmp_path):
     return name, plist, label, args, daemon_dir, home, installed, stub
 
 
+def _verbs(stub):
+    return [c.split()[0] for c in _calls(stub) if c.split()[0] != "list"]
+
+
 def test_refused_template_leaves_the_running_agent_and_plist_untouched(installer):
     name, plist, label, args, daemon_dir, home, installed, stub = installer
     (daemon_dir / plist).write_text(BAD_TEMPLATE.format(label=label))
@@ -148,33 +181,80 @@ def test_refused_template_leaves_the_running_agent_and_plist_untouched(installer
     result = _run(daemon_dir, home, stub, label, args)
 
     assert result.returncode != 0
-    assert not any(call.startswith("unload") for call in _calls(stub)), (
-        "the running agent was unloaded before the renderer accepted the template"
-    )
-    assert not any(call.startswith("load") for call in _calls(stub))
-    assert (stub / "loaded").read_text().strip() == label  # still running
+    assert _verbs(stub) == [], "launchd was touched before the renderer accepted the template"
+    assert _job(stub) == "123"  # still running
     assert installed.read_text() == OLD_PLIST  # installed config unchanged
     assert _leftovers(installed.parent) == []  # no scratch files left behind
-    assert "left untouched and keeps running" in result.stderr
+    assert "left untouched" in result.stderr
     assert "Ab3Ab3" not in result.stdout + result.stderr  # names, never values
 
 
-def test_clean_render_unloads_swaps_and_loads_in_that_order(installer):
+def test_clean_render_of_a_scheduled_template_is_reported_as_registered_not_running(installer):
     name, plist, label, args, daemon_dir, home, installed, stub = installer
     (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
 
     result = _run(daemon_dir, home, stub, label, args)
 
     assert result.returncode == 0, result.stderr
-    verbs = [call.split()[0] for call in _calls(stub) if call.split()[0] != "list"]
-    assert verbs == ["unload", "load"]
+    assert _verbs(stub) == ["unload", "load"]
     assert "NEWMARK" in installed.read_text()
-    assert (stub / "loaded").read_text().strip() == label
+    assert _job(stub) == "-"  # registered, idle: no process claimed
+    assert "registered (scheduled; runs at its next trigger)" in result.stdout
+    assert f"{name} job: running" not in result.stdout  # no process is claimed after the load
     assert stat.S_IMODE(installed.stat().st_mode) == 0o600
     assert _leftovers(installed.parent) == []
 
 
-def test_failed_load_restores_the_previous_plist_and_says_so(installer):
+def test_clean_render_that_leaves_a_live_process_is_reported_as_running(installer):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+    (stub / "run_at_load").write_text("")
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode == 0, result.stderr
+    assert "running (pid 4242)" in result.stdout
+
+
+def test_unload_failure_while_the_job_is_still_loaded_stops_and_reports_the_observed_state(
+    installer,
+):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+    (stub / "refuse_unload").write_text("")
+    # The old behavior: unload and both loads fail and the job keeps running.
+    (stub / "refuse_all").write_text("")
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode != 0
+    assert _verbs(stub) == ["unload"], "nothing may be loaded after a failed unload"
+    assert installed.read_text() == OLD_PLIST  # configuration not replaced
+    assert _job(stub) == "123"  # the existing job is untouched
+    assert "could not unload" in result.stderr
+    assert "NOT replaced" in result.stderr
+    assert "running (pid 123)" in result.stderr  # the observed state, not an inference
+    assert "NOT running" not in result.stderr
+    assert "launchctl load" not in result.stderr  # no reload prescribed for a live job
+    assert _leftovers(installed.parent) == []
+
+
+def test_unload_that_exits_zero_but_leaves_the_job_listed_also_stops(installer):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+    (stub / "unload_noop").write_text("")
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode != 0
+    assert _verbs(stub) == ["unload"]
+    assert installed.read_text() == OLD_PLIST
+    assert "running (pid 123)" in result.stderr
+
+
+def test_load_failure_after_unload_restores_the_previous_plist_and_reports_the_observed_state(
+    installer,
+):
     name, plist, label, args, daemon_dir, home, installed, stub = installer
     (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
     (stub / "refuse_new").write_text("")
@@ -182,13 +262,18 @@ def test_failed_load_restores_the_previous_plist_and_says_so(installer):
     result = _run(daemon_dir, home, stub, label, args)
 
     assert result.returncode != 0
-    assert installed.read_text() == OLD_PLIST  # previous config back in place
-    assert (stub / "loaded").read_text().strip() == label  # and running again
-    assert "restored and loaded" in result.stderr
+    assert installed.read_text() == OLD_PLIST  # previous configuration back in place
+    assert _job(stub) == "-"  # and registered again, as observed
+    assert "previous plist was put back" in result.stderr
+    assert "registered (scheduled; runs at its next trigger)" in result.stderr
+    assert "running as before" not in result.stderr + result.stdout
+    assert "NOT running" not in result.stderr
     assert _leftovers(installed.parent) == []
 
 
-def test_failed_load_with_no_way_back_names_the_recovery_command(installer):
+def test_load_failure_that_cannot_be_restored_names_the_observed_state_and_the_command(
+    installer,
+):
     name, plist, label, args, daemon_dir, home, installed, stub = installer
     (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
     (stub / "refuse_all").write_text("")
@@ -196,21 +281,54 @@ def test_failed_load_with_no_way_back_names_the_recovery_command(installer):
     result = _run(daemon_dir, home, stub, label, args)
 
     assert result.returncode != 0
-    assert "NOT running" in result.stderr
+    assert installed.read_text() == OLD_PLIST
+    assert _job(stub) is None
+    assert "Job state now observed: not registered" in result.stderr
     assert f"launchctl load {installed}" in result.stderr
 
 
-def test_first_install_with_nothing_loaded_does_not_unload(installer):
+def test_unknown_launchd_state_changes_nothing_and_says_so(installer):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+    (stub / "list_fails").write_text("")
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode != 0
+    assert [v for v in _verbs(stub)] == []
+    assert installed.read_text() == OLD_PLIST
+    assert "state of the existing job is unknown" in result.stderr
+    assert _leftovers(installed.parent) == []
+
+
+def test_first_install_with_nothing_registered_does_not_unload(installer):
     name, plist, label, args, daemon_dir, home, installed, stub = installer
     installed.unlink()
-    (stub / "loaded").write_text("")
+    _set_job(stub, label, None)
     (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
 
     result = _run(daemon_dir, home, stub, label, args)
 
     assert result.returncode == 0, result.stderr
-    assert not any(call.startswith("unload") for call in _calls(stub))
+    assert _verbs(stub) == ["load"]
     assert "NEWMARK" in installed.read_text()
+
+
+def test_first_install_load_failure_removes_the_new_plist_and_says_there_was_no_previous_one(
+    installer,
+):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    installed.unlink()
+    _set_job(stub, label, None)
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+    (stub / "refuse_all").write_text("")
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode != 0
+    assert not installed.exists()
+    assert "there was no previous plist" in result.stderr
+    assert "not registered" in result.stderr
 
 
 @pytest.mark.parametrize("name", ALL_INSTALLERS)
@@ -236,6 +354,6 @@ def test_phoenicurus_release_prepare_step_refuses_before_unloading(tmp_path):
     result = _run(daemon_dir, home, stub, label, ["--load-prepare"])
 
     assert result.returncode != 0
-    assert not any(call.startswith("unload") for call in _calls(stub))
-    assert (stub / "loaded").read_text().strip() == label
+    assert _verbs(stub) == []
+    assert _job(stub) == "123"
     assert installed.read_text() == OLD_PLIST

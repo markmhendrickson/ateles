@@ -74,7 +74,12 @@ WHAT IS REFUSED (would put file content into context):
     interpreter or shell whose standard input is redirected from a
     credential path, a shell run on a credential file, and a content-mode
     Grep or a recursive grep/rg/`find -exec <reader>` rooted at a credential
-    directory or at any directory above one. Also launchd job definitions: a plist
+    directory or at any directory above one. Redirections, `source`
+    operands and search roots are judged on shell-decoded words (compact
+    `cmd<file`, quoted or escaped operands, `source -- file`, `~`, omitted
+    roots, a literal `cd` earlier in the command), and `find -exec` is
+    refused for the same readers a direct path is (dump commands, sed/awk,
+    search tools, interpreters). Also launchd job definitions: a plist
     under `Library/LaunchAgents` is a credential path, `plutil`,
     `PlistBuddy` and `defaults` count as readers, and `launchctl list
     <label>`, `dumpstate` and `procinfo` are refused alongside `print` and
@@ -430,7 +435,7 @@ _SED_AWK_RE = re.compile(r"\b(sed|awk)\b")
 # semantically, so -o is allowed only per the documented safe form; see
 # `_grep_is_safe_mode`). In particular, grep `-L` prints file names, while rg
 # `-L` follows symlinks and leaves ordinary matching-line output enabled.
-_GREP_RE = re.compile(r"\b(?:egrep|fgrep|grep|rg)\b")
+_GREP_RE = re.compile(r"\b(?:egrep|fgrep|grep|rg|ag|ack)\b")
 
 # `env` / `printenv` with no args dumps the whole environment; `set` with no
 # args (POSIX builtin, bare) dumps every shell variable including anything
@@ -1242,10 +1247,464 @@ def _interpreter_stdin_credential_hit(command: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Shell-word parsing shared by the stdin-redirect, source and search checks.
+#
+# Regexes over the raw command text kept missing valid shell spellings:
+# a redirect with no space before `<` (`python3<file`), a quoted operand with
+# a space in it, `source -- file`, a path built from quoted pieces
+# (`demo.en'v'`), a bare `~` root. One small lexer decodes quoting and
+# escaping the way a shell does, separates operators from words, and the
+# checks below work on decoded words, so they cannot disagree with each
+# other about where a word starts and ends.
+# ---------------------------------------------------------------------------
+
+_OPERATORS = (
+    "<<<", "<<-", "&&", "||", ";;", ">>", "<<", "<&", ">&", "<>", "|&", "<(", ">(",
+    ";", "&", "|", "(", ")", "<", ">", "\n",
+)  # fmt: skip
+
+
+def _lex(command: str):
+    """Split *command* into ``(kind, text)`` tokens, kind ``"word"`` or ``"op"``.
+
+    Quotes and backslash escapes are decoded; a command or variable
+    substitution is kept verbatim inside its word. Raises ``ValueError`` on an
+    unterminated quote, so callers can fall back to their coarser checks.
+    """
+    tokens: list[tuple[str, str]] = []
+    i, n = 0, len(command)
+    word: list[str] = []
+    in_word = False
+
+    def flush():
+        nonlocal in_word
+        if in_word:
+            tokens.append(("word", "".join(word)))
+            word.clear()
+            in_word = False
+
+    while i < n:
+        ch = command[i]
+        if ch in " \t\r":
+            flush()
+            i += 1
+        elif ch == "\\":
+            if i + 1 < n and command[i + 1] == "\n":
+                i += 2  # line continuation
+                continue
+            if i + 1 < n:
+                word.append(command[i + 1])
+                in_word = True
+                i += 2
+            else:
+                i += 1
+        elif ch == "'":
+            end = command.find("'", i + 1)
+            if end < 0:
+                raise ValueError("unterminated single quote")
+            word.append(command[i + 1 : end])
+            in_word = True
+            i = end + 1
+        elif ch == '"':
+            i += 1
+            in_word = True
+            while True:
+                if i >= n:
+                    raise ValueError("unterminated double quote")
+                c = command[i]
+                if c == '"':
+                    i += 1
+                    break
+                if c == "\\" and i + 1 < n and command[i + 1] in '$`"\\\n':
+                    if command[i + 1] != "\n":
+                        word.append(command[i + 1])
+                    i += 2
+                    continue
+                word.append(c)
+                i += 1
+        elif ch == "#" and not in_word:
+            while i < n and command[i] != "\n":
+                i += 1
+        elif ch == "$" and command.startswith("$(", i):
+            depth, j = 0, i + 1
+            while j < n:
+                if command[j] == "(":
+                    depth += 1
+                elif command[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            word.append(command[i : j + 1])
+            in_word = True
+            i = j + 1
+        elif ch == "`":
+            end = command.find("`", i + 1)
+            if end < 0:
+                raise ValueError("unterminated backtick")
+            word.append(command[i : end + 1])
+            in_word = True
+            i = end + 1
+        else:
+            op = next((o for o in _OPERATORS if command.startswith(o, i)), None)
+            if op:
+                flush()
+                tokens.append(("op", op))
+                i += len(op)
+            else:
+                word.append(ch)
+                in_word = True
+                i += 1
+    flush()
+    return tokens
+
+
+_CONTROL_OPERATORS = frozenset({"\n", ";", ";;", "&", "&&", "||", "|", "|&", "(", ")"})
+_REDIRECT_FROM_FILE = frozenset({"<", "<>"})
+_LEADING_KEYWORDS = frozenset(
+    {"{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until",
+     "time", "coproc"}
+)  # fmt: skip
+_COMMAND_PREFIXES = frozenset(
+    {"sudo", "env", "nohup", "command", "builtin", "exec", "nice", "stdbuf", "xargs"}
+)
+_SHELL_EXPANSION_RE = re.compile(r"\$\(|`|\$\{?[A-Za-z_]")
+
+
+
+def _basename(word: str) -> str:
+    return word.rsplit("/", 1)[-1]
+
+
+def _simple_commands(command: str):
+    """Decode *command* into simple commands: ``(words, redirects)`` pairs,
+    where each redirect is ``(operator, operand-or-None)``. Control operators
+    and process-substitution brackets end a command; heredoc bodies are lexed
+    as ordinary text, which can only add commands to inspect."""
+    tokens = _lex(command)
+    commands = []
+    words: list[str] = []
+    redirects: list[tuple[str, str | None]] = []
+
+    def end():
+        nonlocal words, redirects
+        if words or redirects:
+            commands.append((words, redirects))
+        words, redirects = [], []
+
+    index = 0
+    while index < len(tokens):
+        kind, text = tokens[index]
+        if kind == "word":
+            words.append(text)
+        elif text in _CONTROL_OPERATORS or text in ("<(", ">("):
+            end()
+        else:  # a redirection: its operand is the next word
+            operand = None
+            if index + 1 < len(tokens) and tokens[index + 1][0] == "word":
+                operand = tokens[index + 1][1]
+                index += 1
+            redirects.append((text, operand))
+        index += 1
+    end()
+    return commands
+
+
+def _command_index(words: list[str]) -> int | None:
+    """Index of the command word, past keywords, assignments and wrappers."""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in _LEADING_KEYWORDS or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word):
+            index += 1
+            continue
+        if _basename(word) in _COMMAND_PREFIXES:
+            index += 1
+            while index < len(words) and (
+                words[index].startswith("-")
+                or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[index])
+            ):
+                index += 1
+            continue
+        return index
+    return None
+
+
+def _shell_c_body(args: list[str]) -> str | None:
+    for position, arg in enumerate(args):
+        if arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]:
+            if position + 1 < len(args):
+                return args[position + 1]
+    return None
+
+
+def _parsed_commands(command: str, depth: int = 0):
+    """Simple commands of *command*, including those inside `sh -c '...'` and
+    `eval ...` bodies. Empty when the text cannot be lexed (callers keep their
+    coarser regex checks for that case)."""
+    try:
+        base = _simple_commands(command)
+    except ValueError:
+        return []
+    found = list(base)
+    if depth >= 4:
+        return found
+    for words, _redirects in base:
+        index = _command_index(words)
+        if index is None:
+            continue
+        name = _basename(words[index])
+        body = None
+        if name in _INTERACTIVE_SHELLS:
+            body = _shell_c_body(words[index + 1 :])
+        elif name == "eval":
+            body = " ".join(words[index + 1 :])
+        if body:
+            found.extend(_parsed_commands(body, depth + 1))
+    return found
+
+
+def _token_interpreter_stdin_hit(command: str) -> str | None:
+    """An interpreter (or `exec`) in a command whose standard input is
+    redirected from a credential path, judged on decoded words: compact
+    `python3<file`, quoted operands with spaces, redirects on compound
+    commands, and bodies of `sh -c`."""
+    commands = _parsed_commands(command)
+    credential = None
+    for _words, redirects in commands:
+        for operator, operand in redirects:
+            if operator in _REDIRECT_FROM_FILE and operand and is_credential_path(operand):
+                credential = operand
+    if credential is None:
+        return None
+    for words, _redirects in commands:
+        if any(_is_interpreter_word(word) for word in words):
+            return credential
+    return None
+
+
+def _token_sources_credential(command: str) -> bool:
+    """True when a decoded `source`/`.` command names a credential path,
+    allowing `--` and shell quoting inside the operand."""
+    for words, _redirects in _parsed_commands(command):
+        index = _command_index(words)
+        if index is None or words[index] not in ("source", "."):
+            continue
+        operands = words[index + 1 :]
+        if operands and operands[0] == "--":
+            operands = operands[1:]
+        if operands and is_credential_path(operands[0]):
+            return True
+    return False
+
+
+_SEARCH_NAMES = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "ack"})
+_RECURSIVE_BY_DEFAULT = frozenset({"rg", "ag", "ack"})
+_SEARCH_SHORT_WITH_ARG = {
+    "grep": set("ABCDdefm"),
+    "rg": set("ABCEMTefgjmrtd"),
+    "default": set("ABCGgm"),
+}
+_SEARCH_LONG_WITH_ARG = frozenset(
+    {
+        "--after-context", "--before-context", "--context", "--max-count", "--regexp",
+        "--file", "--include", "--exclude", "--exclude-dir", "--include-dir",
+        "--binary-files", "--devices", "--directories", "--label", "--encoding",
+        "--max-columns", "--type-not", "--glob", "--iglob", "--threads", "--replace",
+        "--type", "--max-depth", "--max-filesize", "--path-separator", "--pre",
+        "--pre-glob", "--sort", "--sortr", "--type-add", "--type-clear",
+        "--context-separator", "--colors", "--engine", "--ignore-file",
+    }
+)  # fmt: skip
+_FIND_EXEC_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+
+
+def _search_roots(name: str, args: list[str]):
+    """``(roots, recursive_flag)`` for a grep-family invocation. Roots are the
+    positional operands past the pattern; empty means the implicit root."""
+    family = "grep" if name in ("grep", "egrep", "fgrep") else (
+        "rg" if name == "rg" else "default"
+    )
+    short_with_arg = _SEARCH_SHORT_WITH_ARG[family]
+    positional: list[str] = []
+    pattern_given = False
+    recursive = name in _RECURSIVE_BY_DEFAULT
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            positional.extend(args[index + 1 :])
+            break
+        if arg.startswith("--"):
+            flag = arg.split("=", 1)[0]
+            if flag in ("--regexp", "--file"):
+                pattern_given = True
+            if flag in ("--recursive", "--dereference-recursive"):
+                recursive = True
+            if flag == "--directories" and arg.endswith("recurse"):
+                recursive = True
+            index += 2 if ("=" not in arg and flag in _SEARCH_LONG_WITH_ARG) else 1
+            if flag == "--directories" and index - 1 < len(args) and "=" not in arg:
+                if index - 1 < len(args) and args[index - 1] == "recurse":
+                    recursive = True
+        elif arg.startswith("-") and len(arg) > 1:
+            letters = arg[1:]
+            consumed_next = False
+            for offset, letter in enumerate(letters):
+                if family == "grep" and letter in "rR":
+                    recursive = True
+                if letter in short_with_arg:
+                    if letter in "ef":
+                        pattern_given = True
+                    consumed_next = offset == len(letters) - 1
+                    break
+            if family == "grep" and letters.startswith("d") and (
+                letters[1:] == "recurse"
+                or (len(letters) == 1 and index + 1 < len(args) and args[index + 1] == "recurse")
+            ):
+                recursive = True
+            index += 2 if consumed_next else 1
+        else:
+            positional.append(arg)
+            index += 1
+    roots = positional if pattern_given else positional[1:]
+    return roots, recursive
+
+
+def _find_roots_and_readers(args: list[str]):
+    """``(roots, runs_a_reader)`` for a `find` invocation."""
+    roots: list[str] = []
+    index = 0
+    while index < len(args) and args[index] in ("-H", "-L", "-P", "-x", "-X", "-E", "-s"):
+        index += 1
+    while index < len(args) and not (
+        args[index].startswith("-") or args[index] in ("!", "(", "\\(")
+    ):
+        roots.append(args[index])
+        index += 1
+    runs_reader = False
+    while index < len(args):
+        if args[index] in _FIND_EXEC_FLAGS:
+            clause: list[str] = []
+            index += 1
+            while index < len(args) and args[index] not in (";", "+", "\\;"):
+                clause.append(args[index])
+                index += 1
+            if _clause_is_reader(clause):
+                runs_reader = True
+        index += 1
+    return roots, runs_reader
+
+
+def _clause_is_reader(clause: list[str]) -> bool:
+    """Whether a `find -exec` argv can print file content: the same reader set
+    the direct-path checks use (dump commands, sed/awk, search tools,
+    interpreters and shells)."""
+    text = " ".join(clause)
+    return bool(
+        _CONTENT_DUMP_CMDS.search(text)
+        or _SED_AWK_RE.search(text)
+        or _GREP_RE.search(text)
+        or any(_is_interpreter_word(word) for word in clause)
+        or any(_basename(word) == "xargs" for word in clause)
+    )
+
+
+def _glob_prefix(path: str) -> str:
+    parts = path.split("/")
+    for position, part in enumerate(parts):
+        if any(ch in part for ch in "*?["):
+            return "/".join(parts[:position]) or "/"
+    return path
+
+
+def _root_in_territory(roots, possible_cwds):
+    for root in roots:
+        for base in possible_cwds:
+            if root is None:
+                if base is None:
+                    return "<unknown working directory>"
+                candidate = base
+            else:
+                expanded = _normalize_path(root)
+                if "$" in expanded or "`" in expanded:
+                    continue  # computed path: not analysed (documented limit)
+                if not os.path.isabs(expanded):
+                    if base is None:
+                        return "<unknown working directory>"
+                    expanded = os.path.join(base, expanded)
+                candidate = _glob_prefix(expanded)
+            if is_credential_territory(candidate):
+                return candidate
+    return None
+
+
+def _territory_search_hit(command: str, cwd: str | None = None) -> str | None:
+    """Refuse a recursive search that can print matched text, or a `find`
+    whose -exec runs a reader, when its root is credential territory.
+
+    Roots are decoded shell words, so `~`, `~/`, quoted forms and globs all
+    resolve alike. An omitted root is the working directory. A literal `cd`
+    earlier in the same command widens the set of directories a later
+    relative or omitted root may refer to (any directory entered so far, plus
+    the hook's own), and an unresolvable `cd` makes relative roots refuse.
+    """
+    possible: list[str | None] = []
+    for base in (cwd, os.getcwd()):
+        if base and base not in possible:
+            possible.append(base)
+    for words, _redirects in _parsed_commands(command):
+        index = _command_index(words)
+        if index is None:
+            continue
+        name = _basename(words[index])
+        args = words[index + 1 :]
+        if name in ("cd", "pushd", "popd"):
+            operands = [a for a in args if not a.startswith("-") or a == "-"]
+            if name == "popd" or (operands and operands[0] == "-"):
+                if None not in possible:
+                    possible.append(None)
+                continue
+            target = _normalize_path(operands[0] if operands else "~")
+            if "$" in target or "`" in target:
+                if None not in possible:
+                    possible.append(None)
+                continue
+            for base in list(possible):
+                new = target if os.path.isabs(target) else (
+                    os.path.join(base, target) if base else None
+                )
+                if new not in possible:
+                    possible.append(new)
+            continue
+        roots = None
+        if name in _SEARCH_NAMES:
+            rebuilt = " ".join(shlex.quote(w) for w in words[index:])
+            if _grep_is_safe_mode(rebuilt):
+                continue
+            roots, recursive = _search_roots(name, args)
+            if not recursive:
+                continue
+        elif name == "find":
+            roots, runs_reader = _find_roots_and_readers(args)
+            if not runs_reader:
+                continue
+        if roots is None:
+            continue
+        hit = _root_in_territory(roots or [None], possible)
+        if hit:
+            return hit
+    return None
+
+
+
 def _command_sources_credential(command: str) -> bool:
     """True if ANY segment in the whole command sources a credential path
     (used to gate a later bare env/printenv/set dump elsewhere in the same
     command string)."""
+    if _token_sources_credential(command):
+        return True
     for segment in _split_segments(command):
         m = _SOURCE_RE.search(segment)
         if m and is_credential_path(m.group(1).strip("'\"")):
@@ -1318,7 +1777,7 @@ def _redirected_stdin_loop_hit(command: str) -> str | None:
     return None
 
 
-def check_bash(command: str):
+def check_bash(command: str, cwd: str | None = None):
     if not command or not isinstance(command, str):
         return None
 
@@ -1338,6 +1797,14 @@ def check_bash(command: str):
         return hit
 
     hit = _interpreter_stdin_credential_hit(command)
+    if hit:
+        return hit
+
+    hit = _token_interpreter_stdin_hit(command)
+    if hit:
+        return hit
+
+    hit = _territory_search_hit(command, cwd)
     if hit:
         return hit
 
@@ -1478,7 +1945,10 @@ def main() -> int:
 
     if tool == "Bash":
         command = tool_input.get("command")
-        hit = check_bash(command)
+        hit = check_bash(
+            command,
+            cwd=payload.get("cwd") if isinstance(payload.get("cwd"), str) else None,
+        )
         if hit:
             log(f"blocking Bash read of credential content: {hit}")
             return deny(_safe_alternative(hit, tool="Bash"))

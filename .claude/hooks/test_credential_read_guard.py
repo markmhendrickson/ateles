@@ -1310,3 +1310,225 @@ def test_credential_directories_are_kept_in_step_with_the_path_globs():
     for directory, sample in guard.CREDENTIAL_DIRECTORIES.items():
         assert guard.is_credential_path(f"{directory}/{sample}"), directory
     assert guard.is_credential_path("~/.config/neotoma")
+
+
+# ---------------------------------------------------------------------------
+# Round-two coverage: compact and quoted redirections, shell-quoted source
+# operands, search roots that are not path-shaped, find readers beyond cat.
+# FAKE files only; HOME points at the fixture directory.
+# ---------------------------------------------------------------------------
+
+SPACED_DIR = FIXTURE_ROOT / "a b"
+SPACED_DIR.mkdir()
+SPACED_ENV_FILE = SPACED_DIR / "demo.env"
+SPACED_ENV_FILE.write_text("NEOTOMA_FAKE_SETTING=fake_test_token_not_real_0000\n")
+SPACED_ENV = str(SPACED_ENV_FILE)
+SPACED_ESCAPED = SPACED_ENV.replace(" ", "\\ ")
+
+
+def run_home_in(cmd, cwd):
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+    env = dict(os.environ)
+    env["HOME"] = str(FIXTURE_ROOT)
+    return subprocess.run(
+        [sys.executable, HOOK],
+        input=payload,
+        capture_output=True,
+        text=True,
+        cwd=str(cwd),
+        env=env,
+    ).returncode
+
+
+COMPACT_STDIN_BLOCK = [
+    ("redirect glued to the quoted program", f"python3 -c '{STDIN_PROGRAM}'<{ENV}"),
+    ("quoted operand containing a space", f"python3 -c '{STDIN_PROGRAM}' < '{SPACED_ENV}'"),
+    ("double-quoted operand containing a space", f'python3 -c "{STDIN_PROGRAM}" < "{SPACED_ENV}"'),
+    ("escaped space in the operand", f"python3 helper.py < {SPACED_ESCAPED}"),
+    ("interpreter glued to the redirect", f"python3<{ENV}"),
+    ("operand built from quoted pieces", f"python3 helper.py < {ENV[:-1]}'v'"),
+    ("escaped character in the operand", f"python3 helper.py < {ENV[:-3]}en\\v"),
+    ("inside a shell -c body", f"bash -c 'python3 helper.py < {ENV}'"),
+    ("redirect after a pipe stage", f"echo go | python3 helper.py <{ENV}"),
+]
+COMPACT_STDIN_ALLOW = [
+    ("compact redirect from an ordinary file", f"python3<{PLAIN}"),
+    ("quoted ordinary operand with a space", f"python3 helper.py < '{FIXTURE_ROOT}/a b/other.txt'"),
+    ("interpreter name inside a quoted word only", f"echo 'run python3 later' > {OTHER_DIR}/note.txt"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd", COMPACT_STDIN_BLOCK, ids=[x for x, _ in COMPACT_STDIN_BLOCK]
+)
+def test_compact_and_quoted_stdin_redirects_into_an_interpreter_are_refused(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,cmd", COMPACT_STDIN_ALLOW, ids=[x for x, _ in COMPACT_STDIN_ALLOW]
+)
+def test_compact_redirects_that_read_ordinary_files_stay_allowed(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 0, label
+
+
+def test_compact_stdin_redirect_really_prints_the_value_so_the_refusal_is_not_cosmetic():
+    probe = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"python3 -c '{STDIN_PROGRAM}'<{ENV}"],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin"},
+    )
+    assert FAKE_VALUE in probe.stdout
+
+
+SOURCE_FORMS = [
+    ("option terminator", f"source -- {ENV}"),
+    ("single-quoted operand with a space", f"source '{SPACED_ENV}'"),
+    ("double-quoted operand with a space", f'source "{SPACED_ENV}"'),
+    ("escaped space", f"source {SPACED_ESCAPED}"),
+    ("quoted piece inside the name", f"source {ENV[:-1]}'v'"),
+    ("escaped character inside the name", f"source {ENV[:-3]}en\\v"),
+    ("dot builtin with terminator", f". -- {ENV}"),
+    ("builtin prefix", f"builtin source {ENV}"),
+]
+
+
+@pytest.mark.parametrize("flag", ["set -x", "set -v", "set -o xtrace", "set -o verbose"])
+@pytest.mark.parametrize("label,source", SOURCE_FORMS, ids=[x for x, _ in SOURCE_FORMS])
+def test_tracing_then_a_shell_decoded_source_operand_is_refused(flag, label, source):
+    assert run_home("Bash", {"command": f"{flag}; {source}"}) == 2, label
+
+
+def test_shell_decoded_source_operand_inside_a_wrapper_is_refused():
+    assert run_bash(f"bash -x -c 'source {SPACED_ESCAPED}'") == 2
+    assert run_bash(f"bash -v -c \"source '{SPACED_ENV}'\"") == 2
+    assert run_bash(f"sh -x -c '. -- {ENV}'") == 2
+
+
+def test_untraced_or_untraced_off_source_of_the_same_forms_stays_allowed():
+    assert run_bash(f"source -- {ENV}") == 0
+    assert run_bash(f"set +x; source -- {ENV}") == 0
+    assert run_bash(f"set +v; source '{SPACED_ENV}'") == 0
+    assert run_bash(f"set -x; source -- {PLAIN}") == 0
+
+
+def test_traced_source_with_terminator_really_prints_the_value():
+    probe = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"set -x; source -- {ENV}"],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert FAKE_VALUE in probe.stderr
+
+
+ROOT_FORMS_BLOCK = [
+    ("bare tilde root", "rg --hidden X ~"),
+    ("tilde with slash", "rg --hidden X ~/"),
+    ("home variable root", "rg --hidden X $HOME"),
+    ("braced home variable root", "rg --hidden X ${HOME}"),
+    ("glob under home", "rg --hidden X ~/*"),
+    ("quoted tilde-less home", f"rg --hidden X '{FIXTURE_ROOT}'"),
+    ("recursive grep tilde", "grep -rn X ~"),
+    ("flag value before the root", "rg -g '*.py' X ~"),
+    ("ag at the home directory", "ag X ~"),
+    ("ack at the home directory", "ack X ~/"),
+    ("pattern flag then root", "rg -e X ~"),
+    ("find tilde root with cat", "find ~ -type f -exec cat {} +"),
+    ("find tilde-slash root with cat", "find ~/ -type f -exec cat {} +"),
+    ("find with sed", "find ~/ -type f -exec sed -n p {} +"),
+    ("find with awk", "find ~/ -type f -exec awk 1 {} +"),
+    ("find with grep", "find ~/ -type f -exec grep X {} +"),
+    ("find with an interpreter", "find ~/ -type f -exec python3 helper.py {} +"),
+    ("find execdir with sed", "find ~ -type f -execdir sed -n p {} +"),
+    ("find with escaped terminator", "find ~ -type f -exec sed -n p {} \\;"),
+    ("find in the credential directory with sed", f"find {NEOTOMA_DIR} -type f -exec sed -n p {{}} +"),
+    ("find in the credential directory with awk", f"find {NEOTOMA_DIR} -type f -exec awk 1 {{}} +"),
+]
+ROOT_FORMS_ALLOW = [
+    ("rg outside credential territory", f"rg X {OTHER_DIR}"),
+    ("names-only rg", "rg -l X ~"),
+    ("count grep", "grep -rc X ~"),
+    ("find with no reader", "find ~ -type f"),
+    ("find printing names", "find ~/ -type f -print"),
+    ("non-recursive grep of an ordinary file", f"grep X {PLAIN}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", ROOT_FORMS_BLOCK, ids=[x for x, _ in ROOT_FORMS_BLOCK])
+def test_search_roots_that_are_not_path_shaped_are_refused(label, cmd):
+    assert run_home_in(cmd, OTHER_DIR) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", ROOT_FORMS_ALLOW, ids=[x for x, _ in ROOT_FORMS_ALLOW])
+def test_searches_that_cannot_print_credential_text_stay_allowed_with_new_roots(label, cmd):
+    assert run_home_in(cmd, OTHER_DIR) == 0, label
+
+
+CWD_FORMS_BLOCK = [
+    ("omitted root from the home directory", "rg --hidden X", FIXTURE_ROOT),
+    ("dot root from the home directory", "rg --hidden X .", FIXTURE_ROOT),
+    ("omitted root after cd tilde", "cd ~; rg --hidden X", OTHER_DIR),
+    ("dot root after cd tilde", "cd ~; rg --hidden X .", OTHER_DIR),
+    ("omitted root after cd to the credential directory", f"cd {NEOTOMA_DIR} && rg X", OTHER_DIR),
+    ("relative root after cd", f"cd {FIXTURE_ROOT} && grep -r X .config", OTHER_DIR),
+    ("cd home variable", "cd $HOME && rg X", OTHER_DIR),
+    ("cd to an unresolvable directory then a relative root", "cd $UNSET_DIR_FOR_TEST && rg X .", OTHER_DIR),
+    ("cd inside a subshell then a search", "(cd ~); cd ~ && rg X", OTHER_DIR),
+    ("find with omitted root after cd", "cd ~ && find -type f -exec cat {} +", OTHER_DIR),
+]
+CWD_FORMS_ALLOW = [
+    ("omitted root in an ordinary directory", "rg X", OTHER_DIR),
+    ("dot root after cd to an ordinary directory", f"cd {OTHER_DIR} && rg X .", FIXTURE_ROOT / "links"),
+    ("names-only after cd tilde", "cd ~ && rg -l X", OTHER_DIR),
+]
+
+
+@pytest.mark.parametrize("label,cmd,cwd", CWD_FORMS_BLOCK, ids=[x[0] for x in CWD_FORMS_BLOCK])
+def test_implicit_roots_and_directory_changes_are_resolved_before_judging(label, cmd, cwd):
+    assert run_home_in(cmd, cwd) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd,cwd", CWD_FORMS_ALLOW, ids=[x[0] for x in CWD_FORMS_ALLOW])
+def test_implicit_roots_in_ordinary_directories_stay_allowed(label, cmd, cwd):
+    assert run_home_in(cmd, cwd) == 0, label
+
+
+def test_the_payload_working_directory_is_used_when_present():
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "rg --hidden X"},
+            "cwd": str(FIXTURE_ROOT),
+        }
+    )
+    env = dict(os.environ)
+    env["HOME"] = str(FIXTURE_ROOT)
+    result = subprocess.run(
+        [sys.executable, HOOK], input=payload, capture_output=True, text=True,
+        cwd=str(OTHER_DIR), env=env,
+    )
+    assert result.returncode == 2
+
+
+def test_find_with_a_sed_callback_really_prints_the_value():
+    probe = subprocess.run(
+        ["find", str(NEOTOMA_DIR), "-type", "f", "-name", ".env", "-exec", "sed", "-n", "p", "{}", "+"],
+        capture_output=True,
+        text=True,
+    )
+    assert FAKE_VALUE in probe.stdout
+
+
+DIRECT_SEARCH_BLOCK = [
+    ("ag on the credential directory", f"ag X {NEOTOMA_DIR}"),
+    ("ack on the credential directory", f"ack X {NEOTOMA_DIR}"),
+    ("ag on a credential file", f"ag X {ENV}"),
+    ("ack on a credential file", f"ack X {NEOTOMA_OTHER}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", DIRECT_SEARCH_BLOCK, ids=[x for x, _ in DIRECT_SEARCH_BLOCK])
+def test_ag_and_ack_are_search_readers_like_grep_and_rg(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 2, label
