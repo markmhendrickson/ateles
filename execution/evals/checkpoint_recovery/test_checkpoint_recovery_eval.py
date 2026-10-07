@@ -484,3 +484,85 @@ def test_one_tasks_checkpoints_are_all_read_across_pages(world, monkeypatch):
 
     assert found is not None
     assert len({e["entity_id"] for e in found}) == 231  # 230 + the scenario's one
+
+
+# ── --limit bounds the enumeration, not just what is examined ───────────────
+
+
+def _task_reads(world):
+    return [q for q in world.query_log if q["type"] == "task"]
+
+
+def _oversized(world, monkeypatch):
+    """A held backlog beyond the server's offset bound, at production page size."""
+    page = _production_page(monkeypatch)
+    bulk = world.add_held_tasks(gating.MAX_QUERY_OFFSET + 110)
+    assert len(bulk) + len(HELD) > gating.MAX_QUERY_OFFSET + page
+    return sorted(set(bulk) | set(HELD))
+
+
+def test_limit_one_on_an_oversized_backlog_dry_run_examines_the_first_task_only(
+    world, monkeypatch, capsys
+):
+    first = _oversized(world, monkeypatch)[0]
+
+    code, lines = run(monkeypatch, capsys, "--limit", "1")
+
+    assert code == 0, lines
+    assert outcomes(lines) == {first: "would_reissue"}
+    assert lines[-1]["examined"] == 1
+    assert len(_task_reads(world)) == 1, "nothing past the limit is read"
+    assert world.write_log == []
+
+
+def test_limit_one_on_an_oversized_backlog_apply_recovers_only_the_first_task(
+    world, monkeypatch, capsys
+):
+    ordered = _oversized(world, monkeypatch)
+    first = ordered[0]
+    others = {i: dict(world.entities[i]["fields"]) for i in ordered[1:]}
+
+    code, lines = run(monkeypatch, capsys, "--apply", "--limit", "1")
+
+    assert code == 0, lines
+    assert outcomes(lines) == {first: "reissued"}
+    assert lines[-1]["examined"] == 1
+    assert len(_task_reads(world)) == 1
+    assert len(world.pending_checkpoints(first)) == 1
+    assert resolvable(world, first) == world.pending_checkpoints(first)
+    assert world.entities[first]["fields"]["status"] == "awaiting_approval"
+    assert world.dispatches.calls == [], "recovery releases nothing"
+    # No other task was touched and none gained a checkpoint.
+    assert {i: world.entities[i]["fields"] for i in others} == others
+    assert all(
+        world.pending_checkpoints(i) == [] for i in others if i.startswith("ent_bulk")
+    )
+
+
+def test_a_limit_spanning_pages_reads_only_the_pages_it_needs(
+    world, monkeypatch, capsys
+):
+    page = _production_page(monkeypatch)
+    _oversized(world, monkeypatch)
+
+    code, lines = run(monkeypatch, capsys, "--limit", str(page + 50))
+
+    assert code == 0, lines[-2:]
+    assert lines[-1]["examined"] == page + 50
+    assert [q["offset"] for q in _task_reads(world)] == [0, page]
+
+
+def test_unlimited_run_on_an_oversized_backlog_is_a_failure_with_nothing_written(
+    world, monkeypatch, capsys
+):
+    """The whole list is read before any task is recovered, so an enumeration that
+    cannot complete changes nothing and is reported as a failure, not as work."""
+    _oversized(world, monkeypatch)
+
+    code, lines = run(monkeypatch, capsys, "--apply")
+
+    assert code == 1
+    assert any("enumeration" in line.get("detail", "") for line in lines)
+    assert lines[-1]["examined"] == 0, "no task was examined"
+    assert world.write_log == []
+    assert world.dispatches.calls == []

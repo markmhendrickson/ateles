@@ -61,11 +61,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # One meaning for --limit in both modes: the first N tasks, in order.
+    # One meaning for --limit in both modes: the first N tasks, in order.  The
+    # limit also bounds the enumeration itself, so a small batch never pages
+    # (or fails) on the whole backlog; without one the whole list is read first.
     task_ids = itertools.islice(
-        args.task if args.task else iter_held_task_ids(), args.limit
+        args.task if args.task else iter_held_task_ids(limit=args.limit), args.limit
     )
     counts: collections.Counter[str] = collections.Counter()
+    examined = 0
     enumeration_error: str | None = None
     iterator = iter(task_ids)
     while True:
@@ -105,12 +108,13 @@ def main() -> int:
                 "detail": f"{type(exc).__name__}: {exc}"[:200],
             }
         counts[record["outcome"]] += 1
+        examined += 1
         print(json.dumps(record, sort_keys=True))
     print(
         json.dumps(
             {
                 "summary": dict(counts),
-                "examined": sum(counts.values()),
+                "examined": examined,
                 "applied": args.apply,
             },
             sort_keys=True,

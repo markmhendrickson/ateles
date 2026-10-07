@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import importlib.machinery
 import importlib.util
 import json
 import sys
@@ -64,6 +65,10 @@ if _mcp_sdk_missing():
     _shapes["mcp.server.stdio"].stdio_server = None
     _shapes["mcp.types"].TextContent = _Shape
     _shapes["mcp.types"].Tool = _Shape
+    for _name, _module in _shapes.items():
+        # A stand-in with a spec, so a later find_spec("mcp") in the same run
+        # sees a module rather than raising on a missing spec.
+        _module.__spec__ = importlib.machinery.ModuleSpec(_name, None)
     sys.modules.update(_shapes)
 
 import apis  # noqa: E402
