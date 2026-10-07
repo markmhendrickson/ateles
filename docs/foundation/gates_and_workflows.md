@@ -1523,7 +1523,10 @@ only when all three of these hold:
    decrements; a take whose outcome is not yet known counts against the consent until it is confirmed
    failed, so an unresolved payment can never let the consent be exceeded.
 
-The other three take-time conditions apply unchanged. Anything else — a figure moved by the smallest unit,
+The other three take-time conditions apply unchanged, and the first of them keeps its own meaning: where a
+take under a standing consent writes no checkpoint, the take-time check that the parameters equal those the
+approval carried compares them against the consent's own figures, so the exact-match condition is never
+skipped for want of a checkpoint to compare with. Anything else — a figure moved by the smallest unit,
 an expired consent, an exhausted use count, a payee or destination the consent does not name — is an
 ordinary hold, and the occurrence waits on an ordinary checkpoint. A recurring obligation with no standing
 consent is paid exactly as before: each occurrence waits on its own checkpoint.
@@ -1550,7 +1553,7 @@ under it writes a checkpoint the consent resolves or writes none, are mechanism,
 Neither is the open half below.
 
 **Open (the other half of decision 127): whether a standing consent for one exact call is available to any
-class other than payment, and four questions about a payment's standing consent the ruling does not
+class other than payment, and five questions about a payment's standing consent the ruling does not
 answer.**
 
 *Other classes.* A `HIGH` class graduates once its action series reaches the policy's count
@@ -1575,7 +1578,7 @@ stated parameter constraint, with an expiry and a use count, read at the take. T
 Whether a standing consent may reach any other class the never-set holds — `operator_only`, or a reserved
 governance class — is part of this half too: the payment ruling neither extends to them nor rules them out.
 
-*A payment's standing consent.* Four questions, each with a recommended candidate, none ruled.
+*A payment's standing consent.* Five questions, each with a recommended candidate, none ruled.
 
 - **A change to the payee's destination.** The payee's profile is not a governance record, so its
   destination can change without a gated write, and under a standing consent no per-occurrence checkpoint
@@ -1595,13 +1598,20 @@ governance class — is part of this half too: the payment ruling neither extend
 - **Advance notice.** Recommended: the operator is told, ahead of time, that a consent is about to expire
   or reach its use count, so the first sign is not a held payment; how far ahead is a value on the
   consent or the policy, never a constant of the design. The alternative is no notice.
+- **Simultaneous takes under one consent.** Because the use count is a read over the takes made under the
+  consent, two takes that read it at the same moment could each see it one short and both proceed.
+  Recommended: the takes under one standing consent are serialized, so the count read and the take are one
+  step and the later take sees the earlier. The alternative is to leave it to the condition that no
+  confirmation exists for the action's dedup key, which keys each action and does not cover the series.
 
 **Recommendation, unruled.** For other classes, the second candidate. It applies the payment ruling's shape
 where a count is the only instrument the design offers, and it leaves graduation in place for the operator
 to retire class by class if the narrower instrument proves enough. For a payment's standing consent, the
-recommended candidate on each of the four questions above. If this half is not ruled, the payment ruling
-stands on its own, every other class keeps class graduation as its only unattended path, and a payment's
-standing consent lapses only by expiry, by use count, by a non-matching take, or by reserving the class.
+recommended candidate on each of the five questions above. If this half is not ruled, the payment ruling stands on its own,
+every other class keeps class graduation as its only unattended path, and a payment's standing consent
+lapses only by its expiry, by exhaustion of its use count, or by reservation of its class. A non-matching
+occurrence is held and leaves the consent standing; cancellation on a change of destination stays a
+recommended candidate, not a rule.
 
 ### Blast radius selects the gate; nothing yet selects the model a step runs at
 

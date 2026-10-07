@@ -1312,9 +1312,10 @@ answers part of this row and leaves the rest standing: the structural rule and t
 under any reading of it.
 
 **Recommendation, unruled.** The third candidate, with outbound traffic captured as session metadata at the
-profile — in plain terms, a shell's direct network calls get an enforcement point and a trace, and an agent
-that can move money or send never also holds an unmediated shell. It closes the gap between decisions 87 and 97 without making a proxy the enforcement point — the
-profile mediates reach that is not a write to the record, which decision 97 never covered — and it makes a
+profile — in plain terms, a shell's direct network calls get a mediator and a trace, and an agent that can
+move money or send never also holds an unmediated shell. It closes the gap between decisions 87 and 97
+while the record stays the enforcement point for the record, and no proxy becomes one — the profile
+mediates reach that is not a write to the record, which decision 97 never covered — and it makes a
 containment design the implementation of a rule rather than a convention. If unanswered, the question of
 what stops an agent with a shell keeps the answer the design already gives: nothing yet, by design.
 
