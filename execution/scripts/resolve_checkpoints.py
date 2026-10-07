@@ -82,7 +82,7 @@ AGENT_ENV_MARKERS = (
 _NO_RELEASE = re.compile(
     r"will\s+not\s+release|can\s+never\s+release|cannot\s+release", re.IGNORECASE
 )
-_TITLE = re.compile(r"^PLAN checkpoint:\s*(?P<title>.*?)\s*\[ent_[0-9a-f]+\]\s*$")
+_TITLE = re.compile(r"^PLAN checkpoint:\s*(?P<title>.*?)\s*\[ent_\w+\](?:\s*#[0-9a-f]+)?\s*$")
 
 
 class Fatal(Exception):
@@ -447,7 +447,13 @@ async def submit_batch(
         if problems:
             outcomes.append(Outcome(fresh, action, "skipped: " + "; ".join(problems)))
             continue
-        headers = sign(server, fresh, action)
+        try:
+            headers = sign(server, fresh, action)
+        except Fatal as exc:
+            # Nothing was written for this one; stop here and still report the
+            # earlier results rather than losing them to an exception.
+            outcomes.append(Outcome(fresh, action, f"stopped, not signed: {exc}"))
+            break
         reply = await server._resolve_checkpoint(
             fresh.checkpoint_id, action, resolver_aauth_headers=headers
         )
@@ -462,7 +468,7 @@ def print_outcomes(outcomes: list[Outcome]) -> None:
     for o in outcomes:
         print(
             f"{o.entry.checkpoint_id:<28} {o.action:<8} {o.checkpoint_status:<18} "
-            f"{o.task_status:<18} {'yes' if o.confirmed else 'NO':<3} {o.result[:90]}"
+            f"{o.task_status:<18} {'yes' if o.confirmed else 'NO':<3} {o.result[:120]}"
         )
     done = sum(1 for o in outcomes if o.confirmed)
     print(f"\n{done} of {len(outcomes)} confirmed by read-back.")
