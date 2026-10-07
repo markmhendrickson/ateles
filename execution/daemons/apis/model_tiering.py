@@ -125,6 +125,16 @@ ROUND_DEFINED_ACTION_CLASSES: frozenset[str] = frozenset(
 )
 
 
+# A code default for a class the live action_policy does not map. Deliberately
+# tiny and explicit: it is NOT a general "unmapped means cheap" rule (every other
+# class still fails up to `top`), and the live policy always wins over it. It
+# exists so the pre-gate producer score works on a deployment whose policy file
+# predates the class, rather than being inert until someone edits config.
+CLASS_DEFAULT_TIERS: dict[str, str] = {
+    "confidence_scoring": "mid",
+}
+
+
 def _tier_index(tier: str) -> int:
     try:
         return TIERS.index(tier)
@@ -319,7 +329,7 @@ class ResolvedTier:
     """The tier a dispatch should run at, and how that was decided."""
 
     tier: str
-    source: str  # "policy" | "unresolved_class" | "escalated"
+    source: str  # "policy" | "class_default" | "unresolved_class" | "escalated"
     action_class: str
     escalation_reasons: tuple[str, ...] = ()
 
@@ -345,8 +355,15 @@ def resolve_tier(
     active_policy = configured_action_policy() if policy is None else policy
     base_tier = active_policy.get(action_class)
     if base_tier is None:
-        base_tier = DEFAULT_TIER
-        source = "unresolved_class"
+        # A class the operator has not mapped. For the few classes that have a
+        # deliberate code default (CLASS_DEFAULT_TIERS) that default applies;
+        # for every other class this fails UP to the strongest tier.
+        base_tier = CLASS_DEFAULT_TIERS.get(action_class)
+        if base_tier is None:
+            base_tier = DEFAULT_TIER
+            source = "unresolved_class"
+        else:
+            source = "class_default"
     else:
         source = "policy"
     escalated_tier, reasons = escalate(base_tier, signals, action_class)
@@ -387,6 +404,7 @@ DEFAULT_ACTION_POLICY_HINT: dict[str, str] = {
     "regenerate_generated_files": "mechanical",
     "worktree_hygiene": "mechanical",
     "ci_log_triage": "mechanical",
+    "confidence_scoring": "mechanical",
 }
 
 
@@ -407,6 +425,12 @@ ACTION_REPAIR_DIAGNOSED = "repair_diagnosed"
 ACTION_CARRY_FORWARD_CHECK = "carry_forward_check"
 ACTION_CI_LOG_TRIAGE = "ci_log_triage"
 ACTION_ISSUE_TRIAGE = "issue_triage"  # Lanius new-issue protocol and entity backfill
+# The pre-gate producer score for an unscored low-blast task (ateles#1142,
+# producer_confidence.py). A model call whose entire output is one number: it
+# has a deliberate code default below, and the scorer additionally refuses to
+# run at `top`, so a config that maps it up or leaves it unmapped can only
+# ever switch it off, never make it expensive.
+ACTION_CONFIDENCE_SCORING = "confidence_scoring"
 # Not named by any ruling — unmapped on purpose, so they run at ``top``:
 ACTION_PANEL_AGGREGATION = "panel_aggregation"  # Vanellus verdict aggregation
 ACTION_TASK_DISPATCH_FALLBACK = "task_dispatch"  # queue task with no action_type

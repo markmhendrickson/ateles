@@ -51,6 +51,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -274,6 +275,11 @@ class GateDecision:
     # happens to be low. Callers must not let the two read the same: an
     # unscored task says so; a scored-low task keeps saying "low confidence".
     confidence_unscored: bool = False
+    # Who produced `confidence`, when a producer did: "" for a score the task
+    # already carried or a mechanical estimate, the producer's name for a score
+    # obtained ahead of the gate (apis producer_confidence, ateles#1142). Lets a
+    # producer score be told apart from an estimate on the record.
+    confidence_source: str = ""
 
     @property
     def may_auto_execute(self) -> bool:
@@ -920,6 +926,10 @@ def write_checkpoint_brief(
         ],
         "idempotency_key": f"checkpoint-{handler}-{task_entity_id}-plan",
     }
+    if decision.confidence_source:
+        # Only when a producer scored it: an estimate carries no source, and a
+        # field written as "" on every brief would be noise on the whole queue.
+        body["entities"][0]["confidence_source"] = decision.confidence_source
     normalized_action = str(action_type or "").strip().lower()
     authorization_expected = task_record is not None and policy is not None
     expected_authorization: dict | None = None
@@ -1002,6 +1012,151 @@ def write_checkpoint_brief(
         return entity_id
     except Exception as exc:  # noqa: BLE001
         log.warning(f"[gating] failed to persist checkpoint_brief: {exc}")
+        return None
+
+
+# ── Producer-score assessment record ──────────────────────────────────────────
+#
+# A confidence score obtained from a producer (apis producer_confidence) can
+# authorise an auto-execution. That judgment must be explainable from Neotoma
+# alone, so before the worker is dispatched the dispatcher writes it as a
+# `harness_event` (an existing, declared type) with the event type below, linked
+# REFERS_TO the task, then reads it back. If it cannot be written AND proven,
+# the caller must not auto-execute.
+#
+# The human-readable `output_summary` and `input_summary` are declared fields on
+# harness_event and are what the read-back proves; the dedicated fields beside
+# them (`confidence`, `confidence_source`, `confidence_threshold`, `action_type`,
+# `policy_entity_id`, `requested_tier`, `scorer_model`, `scorer_run_id`,
+# `rationale`, `gate_action`) are additive and are dropped server-side until the
+# harness_event schema declares them. Declaring them there is the one piece of
+# this that lives outside this repository.
+
+PRODUCER_ASSESSMENT_EVENT_TYPE = "producer_confidence_assessment"
+
+
+def producer_assessment_summary(
+    *,
+    value: float,
+    threshold: float,
+    source: str,
+    action_type: str,
+    policy_id: str,
+    tier: str,
+    model: str,
+    run_id: str,
+    capped_from: float | None = None,
+) -> str:
+    """The proven form of the assessment: exact (repr) values, one line.
+
+    ``capped_from`` is the scorer's own value when a rubric floor lowered it, so
+    the record shows both the number the scorer gave and the one that was used.
+    """
+    return (
+        f"producer_confidence={value!r} threshold={threshold!r} source={source} "
+        f"action_type={action_type} policy={policy_id or 'fallback'} "
+        f"tier={tier} model={model or 'unrecorded'} run={run_id}"
+        + (f" capped_from={capped_from!r}" if capped_from is not None else "")
+    )[:500]
+
+
+def write_producer_assessment(
+    *,
+    task_entity_id: str,
+    value: float,
+    threshold: float,
+    source: str,
+    action_type: str,
+    policy_id: str,
+    tier: str,
+    model: str,
+    run_id: str,
+    rationale: str,
+    gate_action: str,
+    handler: str,
+    capped_from: float | None = None,
+) -> str | None:
+    """Record a producer score durably and prove it by read-back.
+
+    Returns the harness_event entity id ONLY when the stored record reads back
+    with the exact summary written (which carries the unrounded value) and the
+    task link. Any other outcome returns None, and the caller must treat the
+    score as not recorded.
+    """
+    if not NEOTOMA_BEARER_TOKEN or not task_entity_id:
+        log.warning("[gating] producer assessment not persisted: no token or task id")
+        return None
+    event_at = datetime.now(timezone.utc).isoformat()
+    summary = producer_assessment_summary(
+        value=value, threshold=threshold, source=source, action_type=action_type,
+        policy_id=policy_id, tier=tier, model=model, run_id=run_id,
+        capped_from=capped_from,
+    )
+    input_summary = f"rationale: {rationale or 'none supplied'}"[:500]
+    entity = {
+        "entity_type": "harness_event",
+        "event_type": PRODUCER_ASSESSMENT_EVENT_TYPE,
+        "event_at": event_at,
+        "tool_name": f"{handler}:producer_confidence",
+        "agent_sub": f"{handler}@ateles-swarm",
+        "success": "true",
+        "task_entity_id": task_entity_id,
+        "input_summary": input_summary,
+        "output_summary": summary,
+        # Additive; dropped until the schema declares them.
+        "confidence": value,
+        "confidence_source": source,
+        "confidence_threshold": threshold,
+        "action_type": action_type,
+        "policy_entity_id": policy_id,
+        "requested_tier": tier,
+        "scorer_model": model,
+        "scorer_run_id": run_id,
+        "rationale": rationale,
+        "gate_action": gate_action,
+    }
+    body = {
+        "idempotency_key": f"producer-assessment-{task_entity_id}-{run_id}",
+        "observation_source": "workflow_state",
+        "entities": [entity],
+        "relationships": [
+            {
+                "relationship_type": "REFERS_TO",
+                "source_index": 0,
+                "target_entity_id": task_entity_id,
+            }
+        ],
+    }
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL.rstrip('/')}/store",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        ents = resp.json().get("entities") or []
+        event_id = ents[0].get("entity_id") if ents else None
+        if not event_id:
+            return None
+        readback = _fetch_entity(event_id)
+        snap = (readback or {}).get("snapshot") or {}
+        if isinstance(snap.get("snapshot"), dict):
+            snap = snap["snapshot"]
+        if (
+            snap.get("output_summary") != summary
+            or snap.get("input_summary") != input_summary
+            or snap.get("task_entity_id") != task_entity_id
+            or snap.get("event_type") != PRODUCER_ASSESSMENT_EVENT_TYPE
+        ):
+            log.warning(
+                "[gating] producer assessment %s did not read back as written",
+                event_id,
+            )
+            return None
+        return event_id
+    except Exception as exc:  # noqa: BLE001 — unproven means not recorded
+        log.warning(f"[gating] producer assessment not persisted: {exc}")
         return None
 
 

@@ -257,6 +257,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     mark_task_declined,
     read_authenticated_checkpoint_authorization,
     read_authenticated_checkpoint_resolution,
+    write_producer_assessment,
     read_checkpoint_resolution,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
@@ -521,6 +522,7 @@ from routing import (  # noqa: E402
 import github_gateway  # noqa: E402
 
 import model_tiering  # noqa: E402
+import producer_confidence  # noqa: E402
 from skill_runner import _redact_secrets, run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
@@ -782,6 +784,43 @@ async def _spawn_harness_skill(
         ),
     )
     return result
+
+
+def _shown_confidence(confidence: float, source: str) -> str:
+    """Confidence for humans. A producer score is truncated, never rounded, so
+    a figure shown beside a below-threshold decision cannot read as meeting it."""
+    if source:
+        return producer_confidence.display_confidence(confidence)
+    return f"{confidence:.2f}"
+
+
+def _scoring_summary(
+    source: str,
+    confidence: float,
+    rationale: str,
+    note: str,
+    capped_from: float | None = None,
+) -> str:
+    """What the operator is told about the score, appended to the checkpoint
+    summary and notification. A producer score carries its source and the
+    scorer's own explanation, or says plainly that none was given; a task the
+    scorer did not score says why when that is known."""
+    if source:
+        capped = (
+            f" The scorer reported {producer_confidence.display_confidence(capped_from)}; "
+            "the rubric's hard floor (a missing input or an unresolved conflict) "
+            "capped it."
+            if capped_from is not None
+            else ""
+        )
+        return (
+            f" Scored {_shown_confidence(confidence, source)} by {source}.{capped} "
+            "Scorer's assessment: "
+            f"{rationale or 'no explanation was supplied'}."
+        )
+    if note:
+        return f" Producer scoring was not applied: {note}."
+    return ""
 
 
 async def dispatch_task(
@@ -1089,11 +1128,58 @@ async def dispatch_task(
             action_type.strip().lower()
             in (policy.low_blast_action_types | policy.high_blast_action_types)
         )
+        has_owner = bool(assigned_to) or skill is not None
+        relationship_count = int(snapshot.get("relationship_count", 0) or 0)
+        # ateles#1142: a task nobody scored gets a real producer score on a
+        # cheap tier BEFORE the gate reads it, so the gate decides on a
+        # judgment instead of the mechanical estimate. Any failure leaves the
+        # snapshot as it was, which is the unscored path below, unchanged.
+        confidence_source = ""
+        confidence_rationale = ""
+        confidence_capped_from = None
+        scoring_note = ""
+        produced_score = None
+        gate_snapshot = snapshot
+        if not _confidence_is_explicit(snapshot):
+            attempt = await producer_confidence.score_unscored_task(
+                snapshot,
+                action_type=action_type,
+                policy=policy,
+                task_entity_id=entity_id,
+                mechanical_value=score_confidence(
+                    snapshot,
+                    has_owner=has_owner,
+                    action_type_recognized=action_type_recognized,
+                    relationship_count=relationship_count,
+                    successful_recurrences=_successful_recurrences(snapshot),
+                ).value,
+            )
+            scoring_note = attempt.note
+            produced = attempt.score
+            produced_score = produced
+            if produced is not None:
+                # The validated value, unrounded: it is what the gate compares.
+                gate_snapshot = {**snapshot, "confidence": produced.value}
+                confidence_source = produced.source
+                confidence_rationale = produced.rationale
+                confidence_capped_from = produced.capped_from
+                log.info(
+                    f"[{DAEMON_NAME}] confidence: task={entity_id} producer score "
+                    f"{produced.value!r} from {produced.source} "
+                    f"(tier={produced.tier}, provider={produced.provider or '?'}, "
+                    f"run={produced.run_id}"
+                    + (
+                        f", capped from {produced.capped_from!r}"
+                        if produced.capped_from is not None
+                        else ""
+                    )
+                    + f") rationale={produced.rationale!r}"
+                )
         confidence, confidence_unscored = _resolve_confidence(
-            snapshot,
-            has_owner=bool(assigned_to) or skill is not None,
+            gate_snapshot,
+            has_owner=has_owner,
             action_type_recognized=action_type_recognized,
-            relationship_count=int(snapshot.get("relationship_count", 0) or 0),
+            relationship_count=relationship_count,
         )
         decision = evaluate_gate(
             confidence=confidence,
@@ -1102,6 +1188,61 @@ async def dispatch_task(
             successful_recurrences=_successful_recurrences(snapshot),
             confidence_unscored=confidence_unscored,
         )
+        decision.confidence_source = confidence_source
+        if scoring_note and decision.action == GateAction.AUTO_EXECUTE:
+            # The scorer was asked and gave no usable score (or the task was too
+            # long to assess whole). A score that was missing or failed never
+            # lets a task run, so a pass that rested on the mechanical estimate
+            # alone is withheld. A recurrence-graduated pass does not depend on
+            # the confidence at all, so it is left as the policy decided it.
+            withheld = evaluate_gate(
+                confidence=0.0,
+                action_type=action_type,
+                policy=policy,
+                successful_recurrences=_successful_recurrences(snapshot),
+                confidence_unscored=True,
+            )
+            if withheld.action != GateAction.AUTO_EXECUTE:
+                decision = dataclasses.replace(withheld, confidence=confidence)
+        if decision.action == GateAction.AUTO_EXECUTE and produced_score is not None:
+            # A producer score is about to authorise a run. Record it durably
+            # and prove it by read-back BEFORE the worker is dispatched; if that
+            # cannot be proven, hold the task rather than run on a judgment
+            # Neotoma cannot explain.
+            assessment_id = await asyncio.to_thread(
+                write_producer_assessment,
+                task_entity_id=entity_id,
+                value=produced_score.value,
+                threshold=decision.threshold,
+                source=produced_score.source,
+                action_type=action_type or "",
+                policy_id=decision.policy_id,
+                tier=produced_score.tier,
+                model=produced_score.model,
+                run_id=produced_score.run_id,
+                rationale=produced_score.rationale,
+                gate_action=decision.action.value,
+                handler=DAEMON_NAME,
+                capped_from=produced_score.capped_from,
+            )
+            if assessment_id:
+                log.info(
+                    f"[{DAEMON_NAME}] confidence: task={entity_id} producer score "
+                    f"recorded as {assessment_id} before dispatch"
+                )
+            else:
+                log.error(
+                    f"[{DAEMON_NAME}] task {entity_id}: producer score could not be "
+                    "recorded and proven — holding instead of auto-executing"
+                )
+                decision = dataclasses.replace(
+                    decision,
+                    action=GateAction.CHECKPOINT,
+                    reason=(
+                        "producer score could not be recorded durably — held for "
+                        "operator approval rather than run on an unrecorded judgment"
+                    ),
+                )
         log.info(
             f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
             f"action={action_type} blast={decision.blast_radius.value} "
@@ -1140,6 +1281,13 @@ async def dispatch_task(
                     plan_summary=(
                         f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
                         f"Trigger: {trigger}. {decision.reason}."
+                        + _scoring_summary(
+                            decision.confidence_source,
+                            confidence,
+                            confidence_rationale,
+                            scoring_note,
+                            confidence_capped_from,
+                        )
                     ),
                     handler=DAEMON_NAME,
                     user_id=tenant_id,
@@ -1165,8 +1313,19 @@ async def dispatch_task(
             notifier.send(
                 f"PLAN checkpoint: {title[:70]}\n"
                 f"  agent={skill} blast={decision.blast_radius.value} "
-                f"conf={confidence:.2f} — {decision.reason}\n"
-                f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
+                f"conf={_shown_confidence(confidence, confidence_source)} — "
+                f"{decision.reason}\n"
+                + (
+                    _scoring_summary(
+                        confidence_source,
+                        confidence,
+                        confidence_rationale,
+                        scoring_note,
+                        confidence_capped_from,
+                    ).strip()
+                    + "\n"
+                ).lstrip("\n")
+                + f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
             )
