@@ -600,7 +600,7 @@ def cmd_resolve(args, triage) -> int:
             )
             if odd:
                 print(f"        note: triage recommended the opposite for {entry.bucket}")
-    print(f"\n{len(batch)} of {len(chosen)} would be {action}d.")
+    print(f"\n{len(batch)} of {len(chosen)} would be {"approved" if action == "approve" else "rejected"}.")
 
     if action == "approve":
         allowed, lines = pace_status()

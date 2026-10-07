@@ -486,3 +486,26 @@ def test_a_success_reply_that_did_not_happen_is_reported_as_unconfirmed(
     assert code == 1
     assert "0 of 1 confirmed by read-back" in out.getvalue()
     assert task_fields(ready, "ent_task_held_plain")["status"] == "awaiting_approval"
+
+
+def test_limit_also_caps_named_checkpoints(ready, capsys):
+    named = [ready.cp[t] for t in ("ent_task_held_plain", "ent_task_twin_a", "ent_task_twin_b")]
+    args = ["reject"]
+    for checkpoint_id in named:
+        args += ["--checkpoint", checkpoint_id]
+    assert cli(ready, *args, "--limit", "2") == 0
+    assert "2 of 2 would be rejected" in capsys.readouterr().out
+
+
+def test_a_rejection_that_did_not_decline_the_task_is_unconfirmed(ready, monkeypatch):
+    async def claims_success(checkpoint_id, action, resolver_aauth_headers=None):
+        return {"action_taken": "rejected — task marked declined"}
+
+    monkeypatch.setattr(server, "_resolve_checkpoint", claims_success)
+    out = at_terminal(monkeypatch, "reject 1 checkpoints\n")
+    code = cli(
+        ready, "reject", "--checkpoint", ready.cp["ent_task_reject"], "--execute"
+    )
+
+    assert code == 1
+    assert "0 of 1 confirmed by read-back" in out.getvalue()
