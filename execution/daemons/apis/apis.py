@@ -236,6 +236,7 @@ from lib.daemon_runtime import (  # noqa: E402
     send_run_email,
     update_run_session_status,
     write_assessment,
+    BlastRadius,
     GateAction,
     GateDecision,
     NeotomaEvent,
@@ -247,10 +248,12 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
     checkpoint_already_dispatched,
+    checkpoints_for_task,
     close_checkpoint_without_release,
     entity_record_digest,
     execution_policy_revision,
     fetch_checkpoint_record,
+    fetch_entity_observations_strict,
     fetch_entity_user_id,
     fetch_task_record,
     fetch_task_snapshot,
@@ -259,8 +262,10 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     read_authenticated_checkpoint_resolution,
     write_producer_assessment,
     read_checkpoint_resolution,
+    query_all_entities,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
+    supersede_checkpoint,
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     TaskStatus,
@@ -2129,14 +2134,8 @@ def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
         )
 
 
-def _file_fresh_checkpoint(
-    *,
-    prior_checkpoint_id: str,
-    task_id: str,
-    task_snapshot: dict,
-    notifier: Notifier,
-) -> str | None:
-    """Create a replacement checkpoint under the current live policy."""
+def _task_gate_context(task_snapshot: dict):
+    """The skill, action type, live policy and gate decision for a task as it is."""
     assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
     skill = assigned_to
     if not skill:
@@ -2157,6 +2156,42 @@ def _file_fresh_checkpoint(
         policy=policy,
         successful_recurrences=_successful_recurrences(task_snapshot),
     )
+    return skill, action_type, policy, decision
+
+
+def _approval_cannot_release(task_snapshot: dict) -> str | None:
+    """Why approving a checkpoint for this task could never release it, if so.
+
+    The release handler refuses an operator-only action and a never-tier blast
+    radius whatever the approval says.  Returns ``"operator_only"`` (the work is
+    reserved to the operator) or ``"unclassified"`` (the action type is not
+    classified by the policy, which fails closed to never-tier and needs a
+    classification repair), else ``None``.
+    """
+    _skill, action_type, _policy, decision = _task_gate_context(task_snapshot)
+    if action_type == "operator_only":
+        return "operator_only"
+    if decision.blast_radius == BlastRadius.NEVER:
+        return "unclassified"
+    return None
+
+
+def _file_fresh_checkpoint(
+    *,
+    prior_checkpoint_id: str,
+    task_id: str,
+    task_snapshot: dict,
+    notifier: Notifier | None,
+    plan_summary: str | None = None,
+    reason: str = "task authorization context changed; fresh approval required",
+    context_label: str = "fresh",
+) -> str | None:
+    """Create a replacement checkpoint under the current live policy.
+
+    ``notifier=None`` files it silently (the bulk re-issue path sends one
+    summary instead of one page per task).
+    """
+    skill, action_type, policy, decision = _task_gate_context(task_snapshot)
     if decision.action == GateAction.AUTO_EXECUTE:
         decision = GateDecision(
             action=GateAction.CHECKPOINT,
@@ -2164,7 +2199,7 @@ def _file_fresh_checkpoint(
             confidence=decision.confidence,
             threshold=decision.threshold,
             policy_id=decision.policy_id,
-            reason="task authorization context changed; fresh approval required",
+            reason=reason,
             confidence_unscored=decision.confidence_unscored,
         )
     task_record = fetch_task_record(task_id)
@@ -2185,18 +2220,19 @@ def _file_fresh_checkpoint(
         task_entity_id=task_id,
         decision=decision,
         title=str(task_snapshot.get("title") or "Re-approve changed task"),
-        plan_summary=(
+        plan_summary=plan_summary
+        or (
             "The task authorization context changed after the prior approval. "
             f"Current action: {action_type or 'unknown'}. {decision.reason}."
         ),
         handler=DAEMON_NAME,
         user_id=tenant_id,
         action_type=action_type,
-        idempotency_context=f"fresh-{context}",
+        idempotency_context=f"{context_label}-{context}",
         task_record=task_record,
         policy=policy,
     )
-    if brief_id:
+    if brief_id and notifier is not None:
         notifier.send(
             f"Fresh approval required for changed task {task_id}\n  brief={brief_id}",
             priority=Priority.BLOCKER,
@@ -2220,6 +2256,20 @@ def _require_fresh_release_authority(
         task_snapshot=task_snapshot,
         notifier=notifier,
     )
+    if replacement_id == checkpoint_id:
+        # Never retire the brief that is itself the replacement: that would
+        # leave the task with no resolvable checkpoint at all.
+        log.error(
+            f"[{DAEMON_NAME}] replacement for checkpoint {checkpoint_id} resolved "
+            "to the same entity — not retiring it"
+        )
+        notifier.send(
+            f"Fresh checkpoint for task {task_id} resolved to the checkpoint it "
+            "was meant to replace; it was not retired and no work was released",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+        return None
     if not replacement_id:
         notifier.send(
             f"Fresh checkpoint for changed task {task_id} could not be persisted; "
@@ -2296,6 +2346,370 @@ def migrate_checkpoint_authority(
         task_snapshot=task_snapshot,
         notifier=notifier,
         reason="legacy approval migrated to v2 authority; fresh approval required",
+    )
+
+
+@dataclasses.dataclass
+class ReissueResult:
+    task_id: str
+    outcome: str
+    detail: str = ""
+    checkpoint_id: str | None = None
+    superseded: list[str] = dataclasses.field(default_factory=list)
+    remaining: list[str] = dataclasses.field(default_factory=list)
+
+
+def _checkpoint_authority_state(checkpoint_id: str, task_record: dict) -> str:
+    """Classify a pending brief as ``current``, ``stale`` or ``unreadable``.
+
+    ``current`` means the brief would still be accepted for release as things
+    stand: its authenticated envelope binds the task as it is now AND the policy
+    and action context as they are now, judged the way release judges them.  A
+    task nobody touched can still hold an obsolete brief, because the policy it
+    was filed under has since changed.
+
+    ``stale`` is a positive finding: the brief was read and carries no authority
+    envelope, or its authenticated envelope does not bind the task and policy as
+    they are now.  ``unreadable`` means the checkpoint, its authorization
+    observations, or the current policy could not be read at all.  A failed read
+    is not evidence that authority is stale (docs/foundation/failure_posture.md),
+    so callers must never retire or replace a brief on that basis.
+    """
+    record = fetch_checkpoint_record(checkpoint_id)
+    if record is None:
+        return "unreadable"
+    snapshot = _record_snapshot(record) or {}
+    if not isinstance(snapshot.get("body"), str):
+        return "stale"  # a pre-signing brief: it has no envelope to read
+    observations = fetch_entity_observations_strict(checkpoint_id)
+    if observations is None:
+        return "unreadable"
+    authority = read_authenticated_checkpoint_authorization(
+        checkpoint_id, record, observations=observations
+    )
+    if not authority:
+        return "stale"
+    if authority.get("task_revision") != entity_record_digest(task_record):
+        return "stale"
+    # The task is as it was.  Whether the brief is still current now depends on
+    # the policy and action context release would judge it against.
+    _skill, action_type, policy, decision = _task_gate_context(
+        _record_snapshot(task_record) or {}
+    )
+    if not policy.loaded:
+        return "unreadable"
+    bound = (
+        authority.get("task_entity_id") == task_record.get("entity_id")
+        and authority.get("task_observation_count")
+        == task_record.get("observation_count")
+        and authority.get("task_last_observation_at")
+        == task_record.get("last_observation_at")
+        and str(authority.get("action_type") or "").strip().lower() == action_type
+        and authority.get("policy_entity_id") == policy.entity_id
+        and authority.get("policy_revision") == execution_policy_revision(policy)
+        and _decision_consistent_with_approval(
+            decision,
+            gate_action=str(authority.get("gate_action") or ""),
+            blast_radius=str(authority.get("blast_radius") or ""),
+        )
+    )
+    return "current" if bound else "stale"
+
+
+_BLOCKER_OUTCOMES = {
+    "operator_only": "needs_operator",
+    "unclassified": "needs_classification",
+}
+_OUTCOME_ON_THE_TASK = (
+    "set the task's status in Neotoma to done (or cancelled if you drop it); "
+    "no checkpoint action records that outcome. "
+    "Rejecting is not a way to close the work: rejecting declines the task."
+)
+_BLOCKER_SUMMARIES = {
+    "operator_only": (
+        "Operator action needed: this task is reserved to the operator, so "
+        "approving this checkpoint will NOT release it to an agent; approving "
+        "only closes the checkpoint and leaves the task as it is. Do the work "
+        "yourself, then " + _OUTCOME_ON_THE_TASK
+    ),
+    "unclassified": (
+        "Classification repair needed: this task's action type is not "
+        "classified by the execution policy, so it is treated as never "
+        "auto-executable and approving this checkpoint will NOT release it to "
+        "an agent; approving only closes the checkpoint and leaves the task as "
+        "it is. Add the classification (or correct the task's action type), "
+        "then re-run recovery, which replaces this checkpoint with one that "
+        "reflects the current policy. If you do the work yourself instead, "
+        + _OUTCOME_ON_THE_TASK
+    ),
+}
+
+
+def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
+    """Give one still-held task a fresh, signed, resolvable checkpoint.
+
+    The recovery for tasks that were left at ``awaiting_approval`` with no
+    checkpoint the operator can act on: either none was ever persisted (the
+    signed write was refused), or only a pre-signing one exists, which carries
+    no authority envelope so ``resolve_checkpoint`` can never resolve it.
+
+    Outcomes (the CLI exits non-zero for ``failed`` and ``incomplete``):
+      * ``skipped`` - confirmed nothing to do: the task is not held, or it
+        already has exactly one checkpoint that release would still accept (it
+        binds the task, policy and action as they are now) and no stale pending
+        one;
+      * ``would_reissue`` / ``would_retire`` - dry run, nothing written;
+      * ``reissued`` - a replacement persisted and proved, stale briefs retired;
+      * ``retired_stale`` - a resolvable checkpoint already existed; stale
+        pending briefs were retired (the retry that finishes a partial run);
+      * ``needs_operator`` / ``needs_classification`` - the task now has its
+        resolvable checkpoint, but approving it can never release the task
+        (an operator-only action, or an action type the policy does not
+        classify), so the checkpoint says so instead of inviting approval;
+      * ``incomplete`` - a replacement exists but a step after it did not
+        complete (a stale brief could not be retired, or the verification read
+        after the replacement failed); ``checkpoint_id`` is the replacement,
+        ``remaining`` the briefs still pending; rerun to finish;
+      * ``failed`` - a read or the replacement write failed: the task could not
+        be assessed or fixed.  A checkpoint or authorization read that fails is
+        reported here and never treated as proof a brief is stale.
+
+    Guarantees, each pinned by a test:
+      * only a task at ``awaiting_approval`` right now is touched, so a done,
+        declined, superseded, blocked, or running task is never re-issued;
+      * idempotent: one resolvable checkpoint per task and policy state; a rerun
+        reuses the proven replacement and only finishes retirement.  A policy
+        repair alone (task untouched) makes the earlier checkpoint obsolete, so
+        the rerun replaces it, retiring the old one only once the new one is
+        proven;
+      * fail closed: the replacement must persist and read back with its
+        authenticated envelope before anything old is retired, the replacement
+        is never retired, nothing is retired on an unreadable record, and
+        nothing here releases or dispatches the task;
+      * ``apply=False`` writes nothing.
+    """
+    record = fetch_task_record(task_id)
+    snapshot = _record_snapshot(record)
+    if record is None or snapshot is None:
+        return ReissueResult(task_id, "failed", "task could not be read")
+    status = normalize_status(snapshot.get("status"))
+    if status != TaskStatus.AWAITING_APPROVAL.value:
+        return ReissueResult(task_id, "skipped", f"not held (status={status or 'unset'})")
+
+    existing = checkpoints_for_task(task_id)
+    if existing is None:
+        return ReissueResult(task_id, "failed", "checkpoint list could not be read")
+    current_id: str | None = None
+    stale_pending: list[str] = []
+    for item in existing:
+        checkpoint_id = str(item.get("entity_id") or "")
+        item_snapshot = _record_snapshot(item) or {}
+        item_status = str(item_snapshot.get("status") or "").strip().lower()
+        if not checkpoint_id:
+            continue
+        if (
+            read_checkpoint_resolution(item_snapshot) == "approved"
+            and not checkpoint_already_dispatched(item_snapshot)
+        ):
+            return ReissueResult(
+                task_id,
+                "skipped",
+                f"approved checkpoint {checkpoint_id} is awaiting release",
+            )
+        if item_status != "awaiting_operator":
+            continue
+        state = _checkpoint_authority_state(checkpoint_id, record)
+        if state == "unreadable":
+            # Nothing is created or retired on an unreadable record.
+            return ReissueResult(
+                task_id,
+                "failed",
+                f"checkpoint {checkpoint_id} or its authorization could not be "
+                "read; nothing was replaced or retired",
+                remaining=[checkpoint_id],
+            )
+        if state == "current" and current_id is None:
+            current_id = checkpoint_id
+        else:
+            stale_pending.append(checkpoint_id)
+
+    blocker = _approval_cannot_release(snapshot)
+    blocker_outcome = _BLOCKER_OUTCOMES.get(blocker or "")
+
+    if current_id and not stale_pending:
+        if blocker_outcome:
+            return ReissueResult(
+                task_id,
+                blocker_outcome,
+                _BLOCKER_SUMMARIES[blocker],
+                checkpoint_id=current_id,
+            )
+        return ReissueResult(
+            task_id,
+            "skipped",
+            f"already has a resolvable checkpoint {current_id}",
+            checkpoint_id=current_id,
+        )
+
+    if not apply:
+        if current_id:
+            return ReissueResult(
+                task_id,
+                "would_retire",
+                f"resolvable checkpoint {current_id} exists; would retire "
+                f"{len(stale_pending)} stale pending",
+                checkpoint_id=current_id,
+                remaining=stale_pending,
+            )
+        return ReissueResult(
+            task_id,
+            "would_reissue",
+            "no resolvable checkpoint"
+            + (
+                f"; would retire {len(stale_pending)} obsolete pending"
+                if stale_pending
+                else ""
+            )
+            + (f"; {_BLOCKER_SUMMARIES[blocker]}" if blocker else ""),
+            remaining=stale_pending,
+        )
+
+    reissued = current_id is None
+    if reissued:
+        replacement_id = _file_fresh_checkpoint(
+            prior_checkpoint_id="reissue",
+            task_id=task_id,
+            task_snapshot=snapshot,
+            notifier=None,
+            plan_summary=(
+                _BLOCKER_SUMMARIES[blocker]
+                if blocker
+                else (
+                    "Re-issued: this task was held at the gate without a "
+                    "checkpoint the operator could resolve. Approval releases "
+                    "the task as it stands now; the original gate reason is "
+                    "repeated below. Rejecting this checkpoint declines the task."
+                )
+            ),
+            reason="re-issued checkpoint; operator approval required",
+            context_label="reissue",
+        )
+        if not replacement_id:
+            return ReissueResult(
+                task_id,
+                "failed",
+                "replacement checkpoint did not persist and prove",
+                remaining=stale_pending,
+            )
+        current_id = replacement_id
+        # The replacement is proven. Re-read the task to confirm it is still
+        # held. A failed read is not "the task moved on": report it as
+        # incomplete verification and leave the stale briefs pending, so a rerun
+        # (which reuses this replacement) finishes the job.
+        after_record = fetch_task_record(task_id)
+        after = _record_snapshot(after_record)
+        if after is None:
+            return ReissueResult(
+                task_id,
+                "incomplete",
+                "replacement persisted, but the task could not be re-read to "
+                "verify it is still held; retirement is pending, rerun to finish",
+                checkpoint_id=current_id,
+                remaining=stale_pending,
+            )
+        if normalize_status(after.get("status")) != TaskStatus.AWAITING_APPROVAL.value:
+            return ReissueResult(
+                task_id,
+                "skipped",
+                "task left awaiting_approval during re-issue",
+                checkpoint_id=current_id,
+            )
+    retired: list[str] = []
+    remaining: list[str] = []
+    for checkpoint_id in stale_pending:
+        # Never retire the checkpoint that is the task's resolvable authority,
+        # even if the record hands the same id back under another name.
+        if checkpoint_id == current_id:
+            continue
+        if supersede_checkpoint(
+            checkpoint_id,
+            handler=DAEMON_NAME,
+            reason=f"replaced by signed checkpoint {current_id}",
+        ):
+            retired.append(checkpoint_id)
+        else:
+            remaining.append(checkpoint_id)
+    if remaining:
+        return ReissueResult(
+            task_id,
+            "incomplete",
+            f"{len(remaining)} stale pending brief(s) could not be retired; rerun to finish",
+            checkpoint_id=current_id,
+            superseded=retired,
+            remaining=remaining,
+        )
+    if blocker_outcome:
+        return ReissueResult(
+            task_id,
+            blocker_outcome,
+            _BLOCKER_SUMMARIES[blocker],
+            checkpoint_id=current_id,
+            superseded=retired,
+        )
+    return ReissueResult(
+        task_id,
+        "reissued" if reissued else "retired_stale",
+        "",
+        checkpoint_id=current_id,
+        superseded=retired,
+    )
+
+
+def iter_held_task_ids(*, limit: int | None = None):
+    """Yield the id of every task at ``awaiting_approval``, paging to the end.
+
+    The whole list is read before the first id is yielded, so recovering one
+    task cannot shift the pages still to be read.  Raises ``RuntimeError`` on a
+    failed page: a truncated enumeration read as complete would report a partial
+    recovery as a whole one.
+    """
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be a positive integer")
+    held = query_all_entities(
+        "task",
+        snapshot_filters={
+            "status": {"op": "eq", "value": TaskStatus.AWAITING_APPROVAL.value}
+        },
+        limit=limit,
+    )
+    if held is None:
+        raise RuntimeError("could not read the held-task list from Neotoma")
+    for item in held:
+        task_id = str(item.get("entity_id") or "")
+        if task_id:
+            yield task_id
+
+
+def _decision_consistent_with_approval(
+    current_decision: GateDecision, *, gate_action: str, blast_radius: str
+) -> bool:
+    """Whether the gate's decision NOW is compatible with an approved checkpoint.
+
+    Blast radius must match exactly, and so must a checkpoint-requiring action.
+    One case also matches: the gate now permits automatic execution of an action
+    whose approval was requested.  That happens by construction when a
+    replacement checkpoint is filed for a task the gate would let through
+    (creation turns AUTO_EXECUTE into CHECKPOINT so the operator still decides),
+    and an explicit, authenticated approval of the exact task revision, policy
+    revision and action is stronger than the automatic permission, not weaker.
+    A decision that is stricter now (NEVER, or a different blast radius) never
+    matches, and every revision, tenant and approver check is unchanged.
+    """
+    if current_decision.blast_radius.value != blast_radius:
+        return False
+    return (
+        current_decision.action.value == gate_action
+        or current_decision.action == GateAction.AUTO_EXECUTE
     )
 
 
@@ -2542,8 +2956,9 @@ async def handle_checkpoint_brief(
         == execution_policy_revision(current_policy)
         and authorization.get("gate_action") == gate_action
         and authorization.get("blast_radius") == blast_radius
-        and current_decision.action.value == gate_action
-        and current_decision.blast_radius.value == blast_radius
+        and _decision_consistent_with_approval(
+            current_decision, gate_action=gate_action, blast_radius=blast_radius
+        )
     )
     if not exact_authority:
         _require_fresh_release_authority(
