@@ -16,7 +16,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import runner  # noqa: E402
+import credential_containment_runner as runner  # noqa: E402
 
 SCENARIOS = runner.load_scenarios()
 HOOK_SCENARIOS = SCENARIOS["hook"]

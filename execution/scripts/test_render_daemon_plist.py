@@ -390,7 +390,14 @@ def _symlinks_a_tracked_plist(script: Path) -> bool:
     ids=lambda p: p.parent.name,
 )
 def test_installers_that_write_launch_agents_call_the_renderer(script):
-    assert "render_daemon_plist.py" in script.read_text(encoding="utf-8")
+    text = script.read_text(encoding="utf-8")
+    # Either directly, or through the shared render-first install step, which
+    # is itself held to calling the renderer.
+    if "install_rendered_plist" in text:
+        shared = (script.parent.parent / "_install_plist.sh").read_text(encoding="utf-8")
+        assert "render_daemon_plist.py" in shared
+    else:
+        assert "render_daemon_plist.py" in text
 
 
 @pytest.mark.parametrize(
