@@ -117,48 +117,104 @@ def test_probe_is_green_with_the_scrub(tmp_path):
     assert "5 passed" in result.stdout
 
 
-def test_failure_output_with_the_scrub_never_contains_a_canary(tmp_path):
-    """Make the probe fail on purpose and read what pytest prints."""
+_FAILING_PROBE = """
+import json
+import os
+
+
+def test_print_environment():
+    # A failure message built here, not by pytest's assertion rewriting: the
+    # rewritten form truncates long reprs differently by pytest version, CI
+    # setting and environment size, so a check that depended on what pytest
+    # chose to print could not tell "scrub works" from "canary was elided".
+    seen = {k: v for k, v in os.environ.items() if k.startswith("ZZ_")}
+    raise AssertionError("SEEN=" + json.dumps(seen, sort_keys=True))
+"""
+
+
+def _deterministic_child_env(extra: dict, *, path_extra: str = "") -> dict:
+    """A child environment that does not depend on the caller's pytest setup."""
+    pythonpath = os.pathsep.join(p for p in (str(_REPO_ROOT), path_extra) if p)
+    child = {**os.environ, **extra, "PYTHONPATH": pythonpath}
+    for name in ("CI", "PYTEST_ADDOPTS", "PYTEST_PLUGINS", "COLUMNS", "LINES"):
+        child.pop(name, None)
+    child["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    child["COLUMNS"] = "400"
+    return child
+
+
+def _run_failing_probe(
+    tmp_path: Path, *, with_scrub: bool, plugin: str | None = None
+) -> str:
     probe = tmp_path / "test_probe_print.py"
-    probe.write_text(
-        "import os\n\ndef test_print_environment():\n"
-        "    assert os.environ == {}, os.environ\n",
-        encoding="utf-8",
-    )
-    env = {**os.environ, **_CANARY_ENV, "PYTHONPATH": str(_REPO_ROOT)}
+    probe.write_text(_FAILING_PROBE, encoding="utf-8")
+    command = [
+        sys.executable, "-m", "pytest", str(probe),
+        "-q", "-vv", "--tb=long", "-p", "no:cacheprovider", "-o", "addopts=",
+    ]  # fmt: skip
+    if with_scrub:
+        command += ["-p", "conftest"]
+    if plugin:
+        command += ["-p", plugin]
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            str(probe),
-            "-q",
-            "-p",
-            "no:cacheprovider",
-            "-p",
-            "conftest",
-        ],
+        command,
         cwd=tmp_path,
-        env=env,
+        env=_deterministic_child_env(
+            {**_CANARY_ENV, **_KEPT_ENV}, path_extra=str(tmp_path)
+        ),
         capture_output=True,
         text=True,
         timeout=120,
     )
     assert result.returncode != 0
-    combined = result.stdout + result.stderr
-    assert "canary-" not in combined
-    unscrubbed = subprocess.run(
-        [sys.executable, "-m", "pytest", str(probe), "-q", "-p", "no:cacheprovider"],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
+    return result.stdout + result.stderr
+
+
+def test_failure_output_with_the_scrub_never_contains_a_canary(tmp_path):
+    """Make the probe fail on purpose with a message we build, and read it."""
+    scrubbed = _run_failing_probe(tmp_path, with_scrub=True)
+    assert "SEEN=" in scrubbed  # the message was printed, so absence means something
+    assert "canary-" not in scrubbed
+    assert "ZZ_CANARY_PLAIN_SETTING" in scrubbed  # non-credential names survive
+    control = _run_failing_probe(tmp_path, with_scrub=False)
+    for value in _CANARY_ENV.values():
+        assert value in control, (
+            "without the scrub the failure message carries every canary, so the "
+            "check above is capable of failing"
+        )
+
+
+def test_the_scrubbed_mapping_never_renders_a_canary_whatever_prints_it():
+    """The same property with no pytest in the loop: build the message from the
+    mapping and look for the canaries, scrubbed and not."""
+    import json
+
+    def message(environ):
+        return json.dumps(dict(environ), sort_keys=True) + repr(environ)
+
+    leaking = {**_CANARY_ENV, **_KEPT_ENV}
+    assert all(value in message(leaking) for value in _CANARY_ENV.values())
+    scrubbed = dict(leaking)
+    root_conftest.scrub_credential_env(scrubbed)
+    rendered = message(scrubbed)
+    assert not any(value in rendered for value in _CANARY_ENV.values())
+    assert not any(name in rendered for name in _CANARY_ENV)
+
+
+def test_a_scrub_that_leaks_one_credential_turns_the_failure_check_red(tmp_path):
+    """Red control: with a scrub that spares one credential, the very condition
+    the main check asserts (no canary in the failure output) is violated."""
+    (tmp_path / "leaky_scrub_plugin.py").write_text(
+        "import os\n\n\ndef pytest_configure(config):\n"
+        "    for name in list(os.environ):\n"
+        "        if name.startswith('ZZ_CANARY_') and name != 'ZZ_CANARY_API_KEY':\n"
+        "            os.environ.pop(name)\n",
+        encoding="utf-8",
     )
-    assert "canary-" in unscrubbed.stdout + unscrubbed.stderr, (
-        "without the scrub the failing assertion prints the canaries, so the "
-        "check above is capable of failing"
-    )
+    output = _run_failing_probe(tmp_path, with_scrub=False, plugin="leaky_scrub_plugin")
+    assert "canary-" in output  # the main check's assertion would fail here
+    assert _CANARY_ENV["ZZ_CANARY_API_KEY"] in output
+    assert _CANARY_ENV["ZZ_CANARY_SERVICE_TOKEN"] not in output  # the others were removed
 
 
 def test_scrub_removes_only_credential_names_in_place():
