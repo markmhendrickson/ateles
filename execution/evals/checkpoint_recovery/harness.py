@@ -129,6 +129,9 @@ def world(monkeypatch, tmp_path):
     resolver = _signer(sub="ateles@ateles-swarm", kid="eval-resolver-key")
     fake = FakeNeotoma(SCENARIO, signer.thumbprint)
     monkeypatch.setattr(gating, "NEOTOMA_BASE_URL", "https://neotoma.test")
+    # A small page, so the scenario's population spans several; the tests that
+    # matter for production set the real size back.
+    monkeypatch.setattr(gating, "QUERY_PAGE_SIZE", SCENARIO["query_page_size"])
     monkeypatch.setattr(gating, "NEOTOMA_BEARER_TOKEN", "eval-token")
     # The resolver's key is pinned in every checkpoint's authority envelope.
     monkeypatch.setattr(gating, "CHECKPOINT_REQUIRED_APPROVER_JKT", resolver.thumbprint)

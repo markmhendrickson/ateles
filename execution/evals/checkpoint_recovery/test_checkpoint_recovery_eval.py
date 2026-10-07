@@ -384,3 +384,103 @@ def test_ordinary_held_task_summary_states_what_rejecting_does(
     checkpoint = world.pending_checkpoints("ent_task_held_plain")[0]
     summary = world.entities[checkpoint]["fields"]["plan_summary"]
     assert "Rejecting this checkpoint declines the task" in summary
+
+
+# ── Listing larger than a page, under the server's own query rules ──────────
+
+
+def _production_page(monkeypatch):
+    monkeypatch.setattr(gating, "QUERY_PAGE_SIZE", 100)
+    return 100
+
+
+def test_stand_in_refuses_what_the_server_refuses(world):
+    """Guards the guard: a cursor beside filters, an offset past the bound, and an
+    oversized snapshot page are each a 400, as in production."""
+    url = "https://neotoma.test/entities/query"
+    filters = {"status": {"op": "eq", "value": "awaiting_approval"}}
+
+    def post(**body):
+        return world.post(url, json={"entity_type": "task", **body})
+
+    combo = post(snapshot_filters=filters, cursor="ent_a")
+    assert combo.status_code == 400
+    assert combo.json()["details"]["code"] == "ERR_CURSOR_COMBINATION"
+    assert post(cursor="ent_a", offset=5).status_code == 400
+    assert post(offset=2001).status_code == 400
+    assert post(limit=501, include_snapshots=True).status_code == 400
+    assert post(snapshot_filters=filters, offset=2000, limit=500).status_code == 200
+    assert post(cursor="ent_a", limit=5).status_code == 200  # unfiltered keyset is fine
+
+
+def test_every_held_task_is_reached_across_production_sized_pages(
+    world, monkeypatch, capsys
+):
+    page = _production_page(monkeypatch)
+    bulk = world.add_held_tasks(2 * page + 37)
+    expected = set(HELD) | set(bulk)
+
+    code, lines = run(monkeypatch, capsys)
+
+    assert code == 0, lines[-3:]
+    assert set(outcomes(lines)) == expected, "every held task, none missed or repeated"
+    assert lines[-1]["examined"] == len(expected)
+    held_reads = [q for q in world.query_log if q["type"] == "task"]
+    assert [q["offset"] for q in held_reads] == [0, page, 2 * page]
+    assert all(q["filtered"] for q in held_reads)
+
+
+def test_a_held_list_that_ends_on_a_full_page_is_still_complete(
+    world, monkeypatch, capsys
+):
+    page = _production_page(monkeypatch)
+    bulk = world.add_held_tasks(2 * page - len(HELD))  # exactly two full pages
+
+    code, lines = run(monkeypatch, capsys)
+
+    assert code == 0, lines[-3:]
+    assert set(outcomes(lines)) == set(HELD) | set(bulk)
+
+
+def test_applying_to_a_multi_page_population_gives_each_task_one_checkpoint(
+    world, monkeypatch, capsys
+):
+    page = _production_page(monkeypatch)
+    bulk = world.add_held_tasks(page + 20)
+
+    code, lines = run(monkeypatch, capsys, "--apply")
+
+    assert code == 0, lines[-3:]
+    assert lines[-1]["examined"] == len(HELD) + len(bulk)
+    for task_id in bulk:
+        assert len(world.pending_checkpoints(task_id)) == 1, task_id
+
+
+def test_a_listing_deeper_than_the_server_allows_fails_loudly_not_short(
+    world, monkeypatch, capsys
+):
+    page = _production_page(monkeypatch)
+    world.add_held_tasks(gating.MAX_QUERY_OFFSET + page + 5)
+
+    code, lines = run(monkeypatch, capsys)
+
+    assert code == 1
+    assert any("enumeration" in line.get("detail", "") for line in lines), lines[-3:]
+    assert world.write_log == []
+
+
+def test_one_tasks_checkpoints_are_all_read_across_pages(world, monkeypatch):
+    _production_page(monkeypatch)
+    task = "ent_task_done"
+    for n in range(230):
+        world._put(
+            f"ent_many_{n:04d}",
+            CHECKPOINT,
+            {"task_entity_id": task, "status": "superseded"},
+            signed=False,
+        )
+
+    found = gating.checkpoints_for_task(task)
+
+    assert found is not None
+    assert len({e["entity_id"] for e in found}) == 231  # 230 + the scenario's one

@@ -1722,3 +1722,32 @@ def test_identical_replacement_content_is_still_a_distinct_checkpoint(monkeypatc
     # An exact retry of the replacement is the same entity.
     assert _hold(idempotency_context="fresh-replaces-prior") == replacement
     assert len(server.entities) == 2
+
+
+class _FakeHttpError(Exception):
+    def __init__(self, payload):
+        self.response = type("R", (), {"json": staticmethod(lambda: payload)})()
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"error_code": "ERR_X", "message": "root shape"}, " [server: ERR_X root shape]"),
+        ({"error": {"code": "ERR_Y", "message": "nested"}}, " [server: ERR_Y nested]"),
+        (
+            {"error": {"error_code": "ERR_Z", "message": "nested root-style"}},
+            " [server: ERR_Z nested root-style]",
+        ),
+        (
+            {"message": "", "details": {"code": "ERR_D", "message": "in details"}},
+            " [server: ERR_D in details]",
+        ),
+        ({"error": "plain string"}, " [server:  plain string]"),
+        ({"unrelated": 1}, ""),
+        ([], ""),
+    ],
+)
+def test_server_error_detail_reads_the_code_and_message_wherever_they_sit(
+    payload, expected
+):
+    assert gating_module._server_error_detail(_FakeHttpError(payload)) == expected

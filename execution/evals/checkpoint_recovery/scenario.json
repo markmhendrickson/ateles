@@ -2,7 +2,7 @@
   "id": "held_task_checkpoint_recovery",
   "description": "Tasks left at awaiting_approval with no resolvable checkpoint (the signed write was refused, or only a pre-signing brief exists) are recovered by the re-issue command; finished tasks are never touched.",
   "tenant": "tenant-a",
-  "page_size": 2,
+  "query_page_size": 2,
   "tasks": [
     {
       "id": "ent_task_held_plain",

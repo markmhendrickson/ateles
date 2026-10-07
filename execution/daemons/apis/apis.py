@@ -262,7 +262,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     read_authenticated_checkpoint_resolution,
     write_producer_assessment,
     read_checkpoint_resolution,
-    query_entities,
+    query_all_entities,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
     supersede_checkpoint,
@@ -2668,33 +2668,26 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
 def iter_held_task_ids(*, limit: int | None = None):
     """Yield the id of every task at ``awaiting_approval``, paging to the end.
 
-    Raises ``RuntimeError`` on a failed page: a truncated enumeration read as
-    complete would report a partial recovery as a whole one.
+    The whole list is read before the first id is yielded, so recovering one
+    task cannot shift the pages still to be read.  Raises ``RuntimeError`` on a
+    failed page: a truncated enumeration read as complete would report a partial
+    recovery as a whole one.
     """
     if limit is not None and limit < 1:
         raise ValueError("limit must be a positive integer")
-    cursor: str | None = None
-    yielded = 0
-    while True:
-        page = query_entities(
-            "task",
-            snapshot_filters={
-                "status": {"op": "eq", "value": TaskStatus.AWAITING_APPROVAL.value}
-            },
-            cursor=cursor,
-        )
-        if page is None:
-            raise RuntimeError("could not read the held-task list from Neotoma")
-        for item in page.get("entities") or []:
-            task_id = str(item.get("entity_id") or "")
-            if task_id:
-                yield task_id
-                yielded += 1
-                if limit is not None and yielded >= limit:
-                    return
-        cursor = page.get("next_cursor")
-        if not cursor:
-            return
+    held = query_all_entities(
+        "task",
+        snapshot_filters={
+            "status": {"op": "eq", "value": TaskStatus.AWAITING_APPROVAL.value}
+        },
+        limit=limit,
+    )
+    if held is None:
+        raise RuntimeError("could not read the held-task list from Neotoma")
+    for item in held:
+        task_id = str(item.get("entity_id") or "")
+        if task_id:
+            yield task_id
 
 
 def _decision_consistent_with_approval(

@@ -909,8 +909,23 @@ def _server_error_detail(exc: Exception) -> str:
         return ""
     if not isinstance(payload, dict):
         return ""
-    code = str(payload.get("error_code") or payload.get("code") or "")[:80]
-    message = str(payload.get("message") or "")[:300]
+    # The code and message sit at the root of the server's own envelope, but a
+    # proxy or a wrapped error can nest them under ``error`` or ``details``.
+    # Read the first place that names either one.
+    containers = [payload]
+    for key in ("error", "details"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    code = message = ""
+    for container in containers:
+        code = str(container.get("error_code") or container.get("code") or "")[:80]
+        message = str(container.get("message") or "")[:300]
+        if code or message:
+            break
+    else:
+        if isinstance(payload.get("error"), str):
+            message = payload["error"][:300]
     return f" [server: {code} {message}]" if code or message else ""
 
 
@@ -1547,29 +1562,45 @@ def supersede_checkpoint(
     )
 
 
+# Neotoma refuses a ``cursor`` beside ``snapshot_filters`` (ERR_CURSOR_COMBINATION,
+# HTTP 400) and an ``offset`` past 2000 (ERR_OFFSET_TOO_DEEP).  It still hands
+# back a ``next_cursor`` on a full filtered page, which the next request cannot
+# use, so a filtered listing is walked by ``offset`` and ``next_cursor`` is
+# ignored.  The order is by entity id, so the walk is stable.
+QUERY_PAGE_SIZE = 100
+MAX_QUERY_OFFSET = 2000
+
+
 def query_entities(
     entity_type: str,
     *,
     snapshot_filters: dict,
-    cursor: str | None = None,
-    limit: int = 100,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> dict | None:
-    """One page of ``POST /entities/query``; ``None`` when the read failed.
+    """One page of a filtered ``POST /entities/query``; ``None`` when it failed.
 
     A failed read must stay distinguishable from an empty page: callers that
     decide whether a task already has a checkpoint would otherwise read an
-    outage as "no checkpoint" and file a duplicate.
+    outage as "no checkpoint" and file a duplicate.  A page the server would
+    refuse as too deep is a failed read, never a silently short listing.
     """
     if not NEOTOMA_BEARER_TOKEN:
+        return None
+    if offset > MAX_QUERY_OFFSET:
+        log.warning(
+            f"[gating] entity query for {entity_type} needs offset {offset}, past "
+            f"the {MAX_QUERY_OFFSET} the server accepts — listing is incomplete"
+        )
         return None
     body: dict = {
         "entity_type": entity_type,
         "snapshot_filters": snapshot_filters,
-        "limit": limit,
+        "limit": limit or QUERY_PAGE_SIZE,
         "include_snapshots": True,
     }
-    if cursor:
-        body["cursor"] = cursor
+    if offset > 0:
+        body["offset"] = offset
     try:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL.rstrip('/')}/entities/query",
@@ -1581,26 +1612,48 @@ def query_entities(
         data = resp.json()
         return data if isinstance(data, dict) else None
     except Exception as exc:  # noqa: BLE001
-        log.warning(f"[gating] entity query for {entity_type} failed: {exc}")
+        log.warning(
+            f"[gating] entity query for {entity_type} failed: {exc}"
+            f"{_server_error_detail(exc)}"
+        )
         return None
+
+
+def query_all_entities(
+    entity_type: str, *, snapshot_filters: dict, limit: int | None = None
+) -> list[dict] | None:
+    """Every entity matching ``snapshot_filters``, or ``None`` if any page failed.
+
+    Pages by offset until a page comes back short; a partial list is never
+    returned for a failed page.  ``limit`` stops early once that many are held.
+    """
+    page_size = QUERY_PAGE_SIZE
+    found: list[dict] = []
+    offset = 0
+    while True:
+        page = query_entities(
+            entity_type,
+            snapshot_filters=snapshot_filters,
+            offset=offset,
+            limit=page_size,
+        )
+        if page is None:
+            return None
+        entities = [e for e in page.get("entities") or [] if isinstance(e, dict)]
+        found.extend(entities)
+        if limit is not None and len(found) >= limit:
+            return found[:limit]
+        if len(entities) < page_size:
+            return found
+        offset += len(entities)
 
 
 def checkpoints_for_task(task_entity_id: str) -> list[dict] | None:
     """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read."""
-    found: list[dict] = []
-    cursor: str | None = None
-    while True:
-        page = query_entities(
-            "checkpoint_brief",
-            snapshot_filters={"task_entity_id": {"op": "eq", "value": task_entity_id}},
-            cursor=cursor,
-        )
-        if page is None:
-            return None
-        found.extend(e for e in page.get("entities") or [] if isinstance(e, dict))
-        cursor = page.get("next_cursor")
-        if not cursor:
-            return found
+    return query_all_entities(
+        "checkpoint_brief",
+        snapshot_filters={"task_entity_id": {"op": "eq", "value": task_entity_id}},
+    )
 
 
 def close_checkpoint_without_release(

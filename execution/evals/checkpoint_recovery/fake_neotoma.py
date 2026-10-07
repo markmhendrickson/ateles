@@ -28,7 +28,7 @@ CHECKPOINT = "checkpoint_" + "brief"
 class FakeNeotoma:
     def __init__(self, scenario: dict, producer_jkt: str):
         self.tenant = scenario["tenant"]
-        self.page_size = scenario["page_size"]
+        self.query_log: list[dict] = []
         self.producer_jkt = producer_jkt
         self.entities: dict[str, dict[str, Any]] = {}
         self.by_key: dict[str, tuple[str, str]] = {}
@@ -69,6 +69,26 @@ class FakeNeotoma:
                     },
                     signed=False,
                 )
+
+    def add_held_tasks(self, count: int, *, prefix: str = "ent_bulk") -> list[str]:
+        """``count`` more tasks held at the gate, with ids that sort in order."""
+        ids = []
+        for n in range(count):
+            task_id = f"{prefix}_{n:05d}"
+            self._put(
+                task_id,
+                "task",
+                {
+                    "title": f"Bulk held task {n}",
+                    "status": "awaiting_approval",
+                    "assigned_to": "cicada",
+                    "action_type": "local_edit",
+                    "confidence": 0.3,
+                },
+                signed=False,
+            )
+            ids.append(task_id)
+        return ids
 
     # -- state ---------------------------------------------------------------
     def _put(self, entity_id, entity_type, fields, *, signed, attribution=None):
@@ -215,11 +235,52 @@ class FakeNeotoma:
             return self._store(body, signed, url)
         return self._response(404, {"error_code": "NOT_FOUND"}, url)
 
+    # Neotoma's query validation (src/shared/action_schemas.ts), reproduced so the
+    # stand-in cannot accept a request production refuses.
+    MAX_OFFSET = 2000
+    MAX_SNAPSHOT_PAGE = 500
+
+    def _reject(self, url, code, message):
+        return self._response(
+            400,
+            {
+                "error_code": "ERR_VALIDATION",
+                "message": message,
+                "details": {"code": code, "hint": message},
+            },
+            url,
+        )
+
     def _query(self, body, url):
         entity_type = body["entity_type"]
         if self.fail_query or entity_type in self.fail_query_types:
             return self._response(500, {"error_code": "DB_QUERY_FAILED"}, url)
         filters = body.get("snapshot_filters") or {}
+        cursor = body.get("cursor") or ""
+        offset = int(body.get("offset") or 0)
+        limit = int(body.get("limit", 100))
+        if cursor and offset > 0:
+            return self._reject(
+                url, "ERR_CURSOR_COMBINATION", "cursor and offset cannot be combined"
+            )
+        if cursor and filters:
+            return self._reject(
+                url,
+                "ERR_CURSOR_COMBINATION",
+                "cursor cannot be combined with published filters or snapshot_filters",
+            )
+        if offset > self.MAX_OFFSET:
+            return self._reject(
+                url,
+                "ERR_OFFSET_TOO_DEEP",
+                f"offset must not exceed {self.MAX_OFFSET}; use cursor for deep pagination",
+            )
+        if body.get("include_snapshots", True) and limit > self.MAX_SNAPSHOT_PAGE:
+            return self._reject(
+                url,
+                "ERR_SNAPSHOT_PAGE_TOO_LARGE",
+                f"limit must not exceed {self.MAX_SNAPSHOT_PAGE} when include_snapshots is true",
+            )
         matching = sorted(
             entity_id
             for entity_id, e in self.entities.items()
@@ -229,9 +290,12 @@ class FakeNeotoma:
                 for field, spec in filters.items()
             )
         )
-        start = int(body.get("cursor") or 0)
-        page = matching[start : start + self.page_size]
-        end = start + self.page_size
+        if cursor:
+            matching = [i for i in matching if i > cursor]
+        page = matching[offset : offset + limit]
+        self.query_log.append(
+            {"type": entity_type, "offset": offset, "limit": limit, "filtered": bool(filters)}
+        )
         return self._response(
             200,
             {
@@ -243,7 +307,9 @@ class FakeNeotoma:
                     }
                     for i in page
                 ],
-                "next_cursor": str(end) if end < len(matching) else None,
+                # As the server does: a full page always carries a cursor, even
+                # for a filtered listing where it can never be used.
+                "next_cursor": page[-1] if len(page) >= limit else None,
             },
             url,
         )

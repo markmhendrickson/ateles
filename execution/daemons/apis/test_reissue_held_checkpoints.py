@@ -312,24 +312,30 @@ def test_an_approved_unreleased_checkpoint_is_left_to_the_release_path(record):
 
 
 def test_enumeration_failure_is_an_error_not_an_empty_list(monkeypatch):
-    monkeypatch.setattr(apis, "query_entities", lambda *a, **k: None)
+    monkeypatch.setattr(gating, "query_entities", lambda *a, **k: None)
 
     with pytest.raises(RuntimeError):
         list(apis.iter_held_task_ids())
 
 
-def test_enumeration_pages_to_the_end(monkeypatch):
-    pages = {
-        None: {"entities": [{"entity_id": "ent_a"}], "next_cursor": "c1"},
-        "c1": {"entities": [{"entity_id": "ent_b"}], "next_cursor": None},
-    }
-    monkeypatch.setattr(
-        apis,
-        "query_entities",
-        lambda _t, *, snapshot_filters, cursor=None: pages[cursor],
-    )
+def test_enumeration_pages_by_offset_to_the_end_and_never_sends_a_cursor(monkeypatch):
+    monkeypatch.setattr(gating, "QUERY_PAGE_SIZE", 2)
+    ids = ["ent_a", "ent_b", "ent_c", "ent_d", "ent_e"]
+    seen: list[dict] = []
 
-    assert list(apis.iter_held_task_ids()) == ["ent_a", "ent_b"]
+    def page(_type, *, snapshot_filters, offset=0, limit=None):
+        seen.append({"offset": offset, "limit": limit})
+        chunk = ids[offset : offset + limit]
+        # The server offers a cursor on a full page; it must not be used.
+        return {
+            "entities": [{"entity_id": i} for i in chunk],
+            "next_cursor": "unusable" if len(chunk) == limit else None,
+        }
+
+    monkeypatch.setattr(gating, "query_entities", page)
+
+    assert list(apis.iter_held_task_ids()) == ids
+    assert [p["offset"] for p in seen] == [0, 2, 4]
 
 
 def _run_cli(monkeypatch, *argv):
@@ -386,7 +392,7 @@ def test_cli_partial_retirement_exits_nonzero_then_zero_after_rerun(
 def test_cli_enumeration_failure_is_reported_and_nonzero_not_an_empty_run(
     monkeypatch, capsys
 ):
-    monkeypatch.setattr(apis, "query_entities", lambda *a, **k: None)
+    monkeypatch.setattr(gating, "query_entities", lambda *a, **k: None)
 
     assert _run_cli(monkeypatch) == 1
     out = capsys.readouterr().out
@@ -395,7 +401,7 @@ def test_cli_enumeration_failure_is_reported_and_nonzero_not_an_empty_run(
 
 def test_cli_empty_successful_enumeration_is_distinguishable(monkeypatch, capsys):
     monkeypatch.setattr(
-        apis, "query_entities", lambda *a, **k: {"entities": [], "next_cursor": None}
+        gating, "query_entities", lambda *a, **k: {"entities": [], "next_cursor": None}
     )
 
     assert _run_cli(monkeypatch) == 0
@@ -519,7 +525,7 @@ def test_cli_limit_means_the_first_n_tasks_in_both_selection_modes(
     for task_id in ("ent_a", "ent_b", "ent_c"):
         record.add_task(task_id)
     monkeypatch.setattr(
-        apis,
+        gating,
         "query_entities",
         lambda *_a, **_k: {
             "entities": [{"entity_id": i} for i in ("ent_a", "ent_b", "ent_c")],
