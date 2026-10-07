@@ -79,7 +79,10 @@ _ISO_DATE_TIME = re.compile(
 )
 # resets in 2 hours / try again in 3 days 4 hours 12 minutes
 _RELATIVE = re.compile(rf"\b{_LEAD}\s+in\s+((?:\d+\s*(?:d|h|m|s|day|hour|hr|min|minute|sec|second)s?\b[\s,and]*)+)")
-_RELATIVE_PART = re.compile(r"(\d+)\s*(d|h|m|s|day|hour|hr|min|minute|sec|second)s?\b")
+# `(?<!\d)` starts a part only where a digit run begins. A start inside a run
+# sees the same text the run's own start already tried, so it cannot find a part
+# the first attempt missed; skipping it avoids rescanning a long run once per digit.
+_RELATIVE_PART = re.compile(r"(?<!\d)(\d+)\s*(d|h|m|s|day|hour|hr|min|minute|sec|second)s?\b")
 _UNIT_SECONDS = {"d": 86400, "day": 86400, "h": 3600, "hour": 3600, "hr": 3600,
                  "m": 60, "min": 60, "minute": 60, "s": 1, "sec": 1, "second": 1}
 

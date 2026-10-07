@@ -11729,6 +11729,13 @@ def test_parent_issue_numbers_empty_when_no_linkage():
     assert SwarmDispatcher._parent_issue_numbers("", "owner/repo") == []
 
 
+def test_parent_issue_numbers_skips_an_absurd_number_instead_of_raising():
+    """A body may carry a reference whose number is longer than any issue number."""
+    body = "Refs #" + "7" * 5000 + "\nCloses #12"
+    assert SwarmDispatcher._parent_issue_numbers(body, "owner/repo") == [12]
+    assert SwarmDispatcher._parent_issue_number(body, "owner/repo") == 12
+
+
 def test_parent_issue_number_singular_unchanged_for_routing():
     """The singular helper keeps first-match semantics for its routing callers."""
     body = "Closes #12\nCloses #13"

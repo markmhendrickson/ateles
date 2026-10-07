@@ -5841,9 +5841,12 @@ class TestModelTieringDispatch:
             for r in caplog.records
         )
         rows = [_json.loads(line) for line in ledger.read_text().splitlines()]
+        # One start row and, when the dispatch ends, one spend row tied to it.
+        assert [r["event"] for r in rows] == ["dispatch", "usage"]
+        assert rows[0]["dispatch_id"] and rows[0]["dispatch_id"] == rows[1]["dispatch_id"]
         assert [(r["tier"], r["source"], r["model"], r["action_class"]) for r in rows] == [
             ("mid", "policy", "claude-sonnet-5", "build")
-        ]
+        ] * 2
 
     @patch("skill_runner.AgentLoader")
     def test_real_dispatch_with_no_action_class_is_counted_untiered(
@@ -5876,8 +5879,9 @@ class TestModelTieringDispatch:
 
         assert result.ok
         rows = [_json.loads(line) for line in ledger.read_text().splitlines()]
-        assert [(r["tier"], r["source"]) for r in rows] == [
-            ("untiered", "no_action_class")
+        assert [(r["event"], r["tier"], r["source"]) for r in rows] == [
+            ("dispatch", "untiered", "no_action_class"),
+            ("usage", "untiered", "no_action_class"),
         ]
 
     @patch("skill_runner.AgentLoader")

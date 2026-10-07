@@ -1907,6 +1907,12 @@ def _delivery_failure_reason(*texts: str) -> str | None:
     return reasons[0] if reasons else None
 
 
+# The one adapter that can run with no tools at all (`--tools ""`), which is
+# what `inference_only` requires. Codex and Cursor have no equivalent control
+# here, so an inference-only run never reaches them.
+INFERENCE_ONLY_PROVIDER = "claude"
+
+
 def _provider_command(
     provider: str,
     binary: str,
@@ -2051,6 +2057,7 @@ def _subscription_only_env(
     *,
     local_review: bool = False,
     local_review_home: str | None = None,
+    inference_only: bool = False,
 ) -> dict[str, str]:
     """Build the child environment for a governed harness invocation.
 
@@ -2092,6 +2099,10 @@ def _subscription_only_env(
             "CODEX_HOME",
             "CLAUDE_CODE_OAUTH_TOKEN",
         }
+        if inference_only:
+            # A tool-free child has no use for another adapter's home, and an
+            # ambient one is configuration it must not inherit.
+            allowed = allowed - {"CODEX_HOME"}
         child = {key: value for key, value in merged.items() if key in allowed}
         isolated = Path(local_review_home)
         child.update(
@@ -2129,6 +2140,22 @@ def _subscription_only_env(
     return child
 
 
+def _dispatch_succeeded(
+    returncode: int | None,
+    delivery_denial: object,
+    postcondition_failure: object,
+) -> bool:
+    """Whether one finished dispatch counts as a success.
+
+    The exit code is necessary but not sufficient: an exit-0 run that could not
+    deliver, or that failed its post-condition check, is a failure. This is the
+    single definition behind both ``SkillResult.ok`` and the ledger's usage row.
+    """
+    return bool(
+        returncode == 0 and not delivery_denial and postcondition_failure is None
+    )
+
+
 # ── Single-provider runner ─────────────────────────────────────────────────────
 
 
@@ -2155,6 +2182,7 @@ async def _run_skill_once(
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     model: str | None = None,
     precomputed_tier: "model_tiering.ResolvedTier | None" = None,
+    inference_only: bool = False,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -2280,6 +2308,17 @@ async def _run_skill_once(
     """
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
+
+    if inference_only and not (provider == INFERENCE_ONLY_PROVIDER and local_review):
+        # The tool-free control exists for one adapter only. Any other provider
+        # would run with its own tool and MCP authority, so refuse before a
+        # child is built rather than fall back to it.
+        msg = (
+            f"inference_only is supported only on {INFERENCE_ONLY_PROVIDER!r} "
+            f"with local_review; refusing to launch {provider!r} with tools"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     if codex_outer_sandboxed:
         trusted_wrapper_profile_pair = bool(
@@ -2820,7 +2859,17 @@ async def _run_skill_once(
     # gate owner's session can no longer clear `gate_status` over the shared
     # bearer no matter what its allowlist otherwise grants.
     disallowed_list = list(GATE_OWNER_DENIED_TOOLS) if owns_pending_gate else []
-    if provider == "claude" and tools != ["*"]:
+    if provider == "claude" and inference_only:
+        # No tools at all: the child can only produce text. Together with the
+        # empty strict MCP configuration and isolated HOME of local_review this
+        # is the confinement, and it is a property of the command line, not of
+        # anything the prompt asks for.
+        cmd += ["--tools", "", "--disable-slash-commands"]
+        log.info(
+            f"[apis] Spawning via {provider}: "
+            f"<{_role}:{skill}.SKILL.md> tool-free inference timeout={timeout}s"
+        )
+    elif provider == "claude" and tools != ["*"]:
         # --allowed-tools is confirmed present in `claude --print --help`
         # (alias: --allowedTools). Accepts comma- or space-separated tool names.
         # MCP server tools use the "mcp__<servername>__*" wildcard form, where the
@@ -2895,11 +2944,15 @@ async def _run_skill_once(
     # the model actually requested. An un-tiered dispatch is logged as such
     # (`tiering=untiered(no_action_class)`), never omitted, so a call site that
     # forgot to name an action class shows up here instead of hiding.
+    # The id ties this start row to the spend row appended when the dispatch
+    # ends (`record_dispatch_usage`), so attribution survives a provider failover
+    # that records one start row per provider tried.
+    _ledger_dispatch_id = model_tiering.new_dispatch_id()
     log.info(
         f"[apis] {skill} via {provider}: "
         + model_tiering.record_dispatch(
             skill=skill, provider=provider, resolved=resolved_tier,
-            model=resolved_model,
+            model=resolved_model, dispatch_id=_ledger_dispatch_id,
         )
     )
 
@@ -2927,6 +2980,7 @@ async def _run_skill_once(
         env_extra,
         local_review=local_review,
         local_review_home=local_review_home or None,
+        inference_only=inference_only,
     )
     if local_cfg is not None:
         # Local inference: point the CLI at the loopback proxy and strip any
@@ -3061,6 +3115,20 @@ async def _run_skill_once(
             except Exception as exc:
                 log.debug(f"[apis] timeout harness_event write failed: {exc}")
 
+            # A timed-out dispatch still spent something; its spend row carries
+            # the provider and requested model with every count null.
+            model_tiering.record_dispatch_usage(
+                dispatch_id=_ledger_dispatch_id,
+                skill=skill,
+                provider=provider,
+                resolved=resolved_tier,
+                requested_model=_requested_model(provider, cmd),
+                usage=parse_dispatch_usage(
+                    provider, "", requested_model=_requested_model(provider, cmd)
+                ),
+                ok=False,
+            )
+
             # ateles#257 — a timed-out dispatch is the same silent failure class;
             # route it through the same rate-limited operator notification.
             notify_dispatch_failure(
@@ -3139,6 +3207,12 @@ async def _run_skill_once(
                 f"its post-condition check: {_postcondition_failure}"
             )
 
+        # The effective outcome, computed once: the ledger's usage row and the
+        # authoritative SkillResult below must never disagree about it.
+        _dispatch_ok = _dispatch_succeeded(
+            proc.returncode, _delivery_denial, _postcondition_failure
+        )
+
         # ── Per-dispatch usage attribution ───────────────────────────────────────
         # Parsed from what the harness already emitted; never estimated. Under
         # the swarm's text-mode invocations most harnesses report no token
@@ -3149,15 +3223,24 @@ async def _run_skill_once(
             provider,
             _stdout_text,
             requested_model=_requested_model(provider, cmd),
+            stderr=_stderr_text,
+        )
+        # The same attribution, appended to the tier ledger so spend is read
+        # per provider / model / tier / work class from one file.
+        await asyncio.to_thread(
+            model_tiering.record_dispatch_usage,
+            dispatch_id=_ledger_dispatch_id,
+            skill=skill,
+            provider=provider,
+            resolved=resolved_tier,
+            requested_model=_requested_model(provider, cmd),
+            usage=_usage,
+            ok=_dispatch_ok,
         )
 
         result = SkillResult(
             skill=skill,
-            ok=(
-                proc.returncode == 0
-                and not _delivery_denial
-                and _postcondition_failure is None
-            ),
+            ok=_dispatch_ok,
             returncode=proc.returncode,
             stdout=_stdout_text,
             stderr=_stderr_text,
@@ -3360,8 +3443,17 @@ async def run_skill(
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     model: str | None = None,
+    resolved_tier: "model_tiering.ResolvedTier | None" = None,
+    inference_only: bool = False,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    ``resolved_tier``: a tier the caller already resolved (and, for a caller
+    that enforces a ceiling, already checked). It is used as-is for every
+    attempt instead of resolving ``action_class`` again, so the tier a caller
+    validated is the tier that runs. ``inference_only``: run with no tools
+    (see ``INFERENCE_ONLY_PROVIDER``); requires ``local_review`` and a pinned
+    ``provider`` of that adapter.
 
     ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
     attempt — see that function's docstring. Unrelated to provider selection;
@@ -3447,8 +3539,8 @@ async def run_skill(
     if provider in (None, "claude"):
         await asyncio.to_thread(_refresh_usage_snapshot, _provider_binaries())
 
-    precomputed_tier: model_tiering.ResolvedTier | None = None
-    if model is None and action_class is not None:
+    precomputed_tier: model_tiering.ResolvedTier | None = resolved_tier
+    if precomputed_tier is None and model is None and action_class is not None:
         precomputed_tier = model_tiering.resolve_tier(
             action_class, signals=escalation_signals
         )
@@ -3476,6 +3568,7 @@ async def run_skill(
             escalation_signals=escalation_signals,
             model=fallback_model or model,
             precomputed_tier=precomputed_tier,
+            inference_only=inference_only,
         )
 
     local_first = (
@@ -4082,7 +4175,7 @@ async def run_review_prompt(
                 )
                 if result.ok:
                     verdicts = re.findall(
-                        r"(?im)^\s*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
+                        r"(?im)^[^\S\n]*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
                         out.replace("**", ""),
                     )
                     if len(verdicts) != 1:

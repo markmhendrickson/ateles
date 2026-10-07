@@ -1,0 +1,246 @@
+{
+  "paced_refusal": {
+    "meta": {
+      "id": "dispatch_budget.paced_refusal",
+      "description": "Codex is well past its weekly pace line: a refresh records the reading and the gate refuses new frontier dispatch, saying when capacity returns."
+    },
+    "events": [
+      {
+        "op": "refresh",
+        "at": 0,
+        "codex": {
+          "used_percent": 78,
+          "window_minutes": 10080
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "gate",
+        "at": 0,
+        "allowed": false,
+        "code": "paced",
+        "weekly_used_percent": 78.0,
+        "message_contains": "returns at"
+      }
+    ]
+  },
+  "under_budget_dispatch": {
+    "meta": {
+      "id": "dispatch_budget.under_budget_dispatch",
+      "description": "Codex is under its pace line: the gate allows dispatch and reports the weekly figure it used."
+    },
+    "events": [
+      {
+        "op": "refresh",
+        "at": 0,
+        "codex": {
+          "used_percent": 9,
+          "window_minutes": 10080
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "gate",
+        "at": 0,
+        "allowed": true,
+        "code": "ok",
+        "weekly_used_percent": 9.0
+      }
+    ]
+  },
+  "unknown_probe_recovery": {
+    "meta": {
+      "id": "dispatch_budget.unknown_probe_recovery",
+      "description": "With no weekly reading the gate says unknown and refuses (neither exhausted nor allowed); once a reading arrives it recovers."
+    },
+    "events": [
+      {
+        "op": "refresh",
+        "at": 0,
+        "codex": "unreadable",
+        "native": "ok"
+      },
+      {
+        "op": "refresh",
+        "at": 700,
+        "codex": {
+          "used_percent": 9,
+          "window_minutes": 10080
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "gate",
+        "at": 0,
+        "allowed": false,
+        "code": "unknown",
+        "message_contains": "weekly budget reading unavailable",
+        "after_event": 1
+      },
+      {
+        "type": "not_exhausted",
+        "at": 0,
+        "after_event": 1
+      },
+      {
+        "type": "gate",
+        "at": 700,
+        "allowed": true,
+        "code": "ok"
+      }
+    ]
+  },
+  "known_refusal_survives_a_failed_refresh": {
+    "meta": {
+      "id": "dispatch_budget.known_refusal_survives_a_failed_refresh",
+      "description": "Budget evidence recorded earlier keeps governing dispatch across a later refresh that obtains no weekly reading."
+    },
+    "events": [
+      {
+        "op": "refresh",
+        "at": 0,
+        "codex": {
+          "used_percent": 78,
+          "window_minutes": 10080
+        }
+      },
+      {
+        "op": "refresh",
+        "at": 601,
+        "codex": "unreadable",
+        "native": "ok"
+      }
+    ],
+    "assertions": [
+      {
+        "type": "gate",
+        "at": 601,
+        "allowed": false,
+        "code": "paced",
+        "weekly_used_percent": 78.0
+      }
+    ]
+  },
+  "spend_with_unreported_fields": {
+    "meta": {
+      "id": "dispatch_budget.spend_with_unreported_fields",
+      "description": "The spend report keeps unknown apart from zero for each field and says how many dispatches each total covers."
+    },
+    "events": [
+      {
+        "op": "usage_row",
+        "provider": "all_unknown"
+      },
+      {
+        "op": "usage_row",
+        "provider": "total_only",
+        "reported_total_tokens": 31255
+      },
+      {
+        "op": "usage_row",
+        "provider": "measured_zero",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    ],
+    "assertions": [
+      {
+        "type": "spend_field",
+        "by": "provider",
+        "group": "all_unknown",
+        "field": "total_tokens",
+        "sum": null,
+        "reported_rows": 0
+      },
+      {
+        "type": "spend_field",
+        "by": "provider",
+        "group": "total_only",
+        "field": "total_tokens",
+        "sum": 31255,
+        "reported_rows": 1
+      },
+      {
+        "type": "spend_field",
+        "by": "provider",
+        "group": "total_only",
+        "field": "input_tokens",
+        "sum": null,
+        "reported_rows": 0
+      },
+      {
+        "type": "spend_field",
+        "by": "provider",
+        "group": "measured_zero",
+        "field": "input_tokens",
+        "sum": 0,
+        "reported_rows": 1
+      }
+    ]
+  },
+  "spend_empty_ledger_is_no_spend": {
+    "meta": {
+      "id": "dispatch_budget.spend_empty_ledger_is_no_spend",
+      "description": "A ledger that is missing, or present and empty, reports as no spend: exit 0, zero rows, no error."
+    },
+    "events": [
+      {
+        "op": "ledger",
+        "state": "missing"
+      },
+      {
+        "op": "ledger",
+        "state": "empty"
+      }
+    ],
+    "assertions": [
+      {
+        "type": "spend_outcome",
+        "after_event": 1,
+        "exit": 0,
+        "rows": 0
+      },
+      {
+        "type": "spend_outcome",
+        "after_event": 2,
+        "exit": 0,
+        "rows": 0
+      }
+    ]
+  },
+  "spend_unreadable_ledger_is_an_error": {
+    "meta": {
+      "id": "dispatch_budget.spend_unreadable_ledger_is_an_error",
+      "description": "A ledger that exists but cannot be read is reported as an error naming the path and cause, with a nonzero exit and parseable JSON, never as an empty ledger."
+    },
+    "events": [
+      {
+        "op": "ledger",
+        "state": "directory"
+      },
+      {
+        "op": "ledger",
+        "state": "undecodable"
+      }
+    ],
+    "assertions": [
+      {
+        "type": "spend_outcome",
+        "after_event": 1,
+        "exit": 1,
+        "error_kind": "ledger_unreadable",
+        "cause_contains": "IsADirectoryError"
+      },
+      {
+        "type": "spend_outcome",
+        "after_event": 2,
+        "exit": 1,
+        "error_kind": "ledger_unreadable",
+        "cause_contains": "UnicodeDecodeError"
+      }
+    ]
+  }
+}

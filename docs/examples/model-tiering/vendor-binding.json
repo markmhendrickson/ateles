@@ -3,5 +3,10 @@
     "top": "opus",
     "mid": "sonnet",
     "mechanical": "haiku"
+  },
+  "codex": {
+    "top": "gpt-6-astra",
+    "mid": "gpt-6-sol",
+    "mechanical": "gpt-6-luna"
   }
 }
