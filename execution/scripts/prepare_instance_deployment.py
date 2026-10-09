@@ -15,6 +15,7 @@ from execution.lib.instance_profile_guard import (
     Refused,
     _deployment_argv,
     installed_config_projection,
+    input_changes,
     check_complete_projection,
     prepare,
     render_normalized_toml,
@@ -40,6 +41,13 @@ def run(args):
     )
     commit = command(["git", "rev-parse", "HEAD"], context).strip()
     require(commit == args.commit, "candidate commit drift")
+    raw_bytes = Path(args.saved_toml).read_bytes()
+    if manifest.get("version") == 2:
+        binding = manifest.get("input_toml", {})
+        require(
+            hashlib.sha256(raw_bytes).hexdigest() == binding.get("before_sha256"),
+            "raw input drift",
+        )
     result = prepare(
         evidence, manifest, args.manifest_sha256, args.image, commit, args.phase
     )
@@ -180,11 +188,22 @@ def run(args):
     for flag in argv[2:]:
         if flag.startswith("--"):
             require(flag.split("=", 1)[0] in help_text, "unsupported installed option")
-    rendered = render_normalized_toml(
-        Path(args.saved_toml).read_text(),
+    rendered, edits = render_normalized_toml(
+        raw_bytes.decode("utf-8"),
         evidence["saved"],
         result["normalized"],
-        manifest["idle_changes"],
+        input_changes(manifest),
+        with_edits=True,
+    )
+    if manifest["version"] == 2:
+        require(
+            hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+            == manifest["input_toml"]["after_sha256"],
+            "rendered raw input drift",
+        )
+    require(
+        Path(args.saved_toml).read_bytes() == raw_bytes,
+        "raw input changed during checks",
     )
     out = Path(args.output)
     out.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -208,6 +227,13 @@ def run(args):
         argv[argv.index("<owned-private-config>")] = str(config)
         result["argv"] = argv
         result["manifest_sha256"] = args.manifest_sha256
+        result["config_edits"] = edits
+        result["saved_toml_before_sha256"] = hashlib.sha256(
+            Path(args.saved_toml).read_bytes()
+        ).hexdigest()
+        result["saved_toml_after_sha256"] = hashlib.sha256(
+            config.read_bytes()
+        ).hexdigest()
         result["packaging_check"] = {
             "path": gate["path"],
             "sha256": gate["sha256"],

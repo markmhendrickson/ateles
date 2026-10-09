@@ -670,6 +670,132 @@ else: raise SystemExit(93)
                 current.update(old)
                 self.rebind_profiles()
 
+    def reconciliation(self):
+        import tomllib
+        from execution.lib.instance_profile_guard import normalized_input
+
+        self.raw.write_bytes(self.raw.read_bytes().replace(b"\n", b"\r\n"))
+        raw = self.raw.read_bytes().decode("utf-8")
+        raw = "# owned café; preserve UTF-8 and CRLF\r\n" + raw
+        raw = raw.replace(
+            "[[vm]]",
+            '[[http_service.checks]]\r\npath="/ready" # preserve\r\ninterval="30s"\r\ntimeout="30s"\r\ngrace_period="1m0s"\r\n[[vm]]',
+        )
+        raw = raw.replace('memory="512MB"', 'memory="2gb"').replace("cpus=1", "cpus=2")
+        self.raw.write_bytes(raw.encode("utf-8"))
+        self.evidence["saved"] = tomllib.loads(raw)
+        _, _, _, proposal = fixture_module.reconciliation_fixture()
+        self.manifest["version"] = 2
+        self.manifest.pop("idle_changes")
+        self.manifest["input_changes"] = proposal["input_changes"]
+        expected_raw = raw.replace('"off"', '"stop"').replace("running=1", "running=0")
+        expected_raw = expected_raw.replace('"2gb"', '"1gb"').replace(
+            "cpus=2", "cpus=1"
+        )
+        expected_raw = (
+            expected_raw.replace('"always"', '"on-failure"') + "retries = 10\r\n"
+        )
+        expected_raw = expected_raw.replace('"/ready"', '"/health"').replace(
+            '"30s"', '"15s"', 1
+        )
+        expected_raw = expected_raw.replace('timeout="30s"', 'timeout="10s"').replace(
+            '"1m0s"', '"30s"'
+        )
+        self.manifest["input_toml"] = {
+            "before_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            "after_sha256": hashlib.sha256(expected_raw.encode()).hexdigest(),
+        }
+
+        self.manifest["profile"]["saved_config_after_sha256"] = proposal["profile"][
+            "saved_config_after_sha256"
+        ]
+        # Bind this independently owned complete input, not the structural fixture.
+        after = copy.deepcopy(self.evidence["saved"])
+        for c in self.manifest["input_changes"]:
+            parent = after
+            for k in c["path"][:-1]:
+                parent = parent[k]
+            parent[c["path"][-1]] = c["after"]
+        self.manifest["profile"]["saved_config_before_sha256"] = digest(
+            self.evidence["saved"]
+        )
+        self.manifest["profile"]["saved_config_after_sha256"] = digest(after)
+        self.assertEqual(normalized_input(self.evidence["saved"], self.manifest), after)
+        source = self.evidence["inventory"][0]["config"]
+        source["guest"]["memory_mb"] = 1024
+        source["restart"] = {"policy": "on-failure", "max_retries": 10}
+        source["services"][0]["checks"] = [
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/health",
+                "interval": "15s",
+                "timeout": "10s",
+                "grace_period": "30s",
+            }
+        ]
+        # The selected saved check has no method: ToService supplies no method,
+        # so pin the matching native representation without guessing a default.
+        source["services"][0]["checks"][0].pop("method")
+        self.manifest["profile"]["source_static_config_sha256"] = digest(
+            stable_source(source)
+        )
+        return raw
+
+    def test_reconciliation_natural_cli_byte_receipt_and_full_projection(self):
+        raw = self.reconciliation()
+        result = self.execute()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((self.output / "prepared.json").read_text())
+        self.assertEqual(len(receipt["config_edits"]), 10)
+        self.assertEqual(receipt["packaging_check"]["tests_run"], 1)
+        self.assertEqual(
+            receipt["saved_toml_before_sha256"],
+            hashlib.sha256(raw.encode()).hexdigest(),
+        )
+        reproduced = raw.encode()
+        for edit in reversed(receipt["config_edits"]):
+            self.assertEqual(
+                reproduced[edit["start"] : edit["end"]], edit["before"].encode()
+            )
+            reproduced = (
+                reproduced[: edit["start"]]
+                + edit["after"].encode()
+                + reproduced[edit["end"] :]
+            )
+        self.assertEqual(reproduced, (self.output / "fly.toml").read_bytes())
+        calls = [json.loads(x) for x in (self.root / "calls").read_text().splitlines()]
+        self.assertFalse(
+            any(x and x[0] == "deploy" and x != ["deploy", "--help"] for x in calls)
+        )
+
+    def test_reconciliation_optimized_cli_same_positive(self):
+        self.reconciliation()
+        self.assertEqual(self.execute(optimized=True).returncode, 0)
+
+    def test_reconciliation_each_omission_refuses_before_gate(self):
+        self.reconciliation()
+        for index in range(10):
+            with self.subTest(omitted=index):
+                bad = copy.deepcopy(self.manifest)
+                bad["input_changes"].pop(index)
+                self.assertEqual(self.execute(manifest=bad).returncode, 2)
+                self.assertFalse((self.context / "gate-ran").exists())
+
+    def test_reconciliation_raw_and_rendered_hash_drift_refuse(self):
+        self.reconciliation()
+        self.raw.write_bytes(
+            self.raw.read_bytes() + b"# changed nonsemantic comment\r\n"
+        )
+        self.assertEqual(self.execute().returncode, 2)
+        self.assertFalse((self.context / "gate-ran").exists())
+        self.raw.write_bytes(
+            self.raw.read_bytes().replace(b"# changed nonsemantic comment\r\n", b"")
+        )
+        self.manifest["input_toml"]["after_sha256"] = "0" * 64
+        self.assertEqual(self.execute().returncode, 2)
+        self.assertFalse(self.output.exists())
+
     def test_installed_encoding_projection_is_narrow(self):
         source = {
             "http_service": {"auto_stop_machines": "stop", "min_machines_running": 0},

@@ -365,41 +365,43 @@ class CanonicalIdleState(unittest.TestCase):
 def reconciliation_fixture():
     import tomllib
 
-    raw = '\r\n'.join([
-        '# owned input; retain spacing and comments',
-        'app = "owned-fixture"',
-        '[env]',
-        'SCOPE = "development" # unchanged',
-        '[http_service]',
-        'auto_stop_machines = "off" # idle',
-        'min_machines_running = 1',
-        '[[http_service.checks]]',
-        'path = "/ready" # check',
-        'interval = "30s"',
-        'timeout = "30s"',
-        'grace_period = "1m0s"',
-        '[[vm]]',
-        'memory = "2gb" # budget',
-        'cpus = 2',
-        'cpu_kind = "shared"',
-        '[[restart]]',
-        'policy = "always" # keep comment',
-        '[deploy]',
-        'release_command = "owned required command"',
-        '',
-    ])
+    raw = "\r\n".join(
+        [
+            "# owned input; retain spacing and comments",
+            'app = "owned-fixture"',
+            "[env]",
+            'SCOPE = "development" # unchanged',
+            "[http_service]",
+            'auto_stop_machines = "off" # idle',
+            "min_machines_running = 1",
+            "[[http_service.checks]]",
+            'path = "/ready" # check',
+            'interval = "30s"',
+            'timeout = "30s"',
+            'grace_period = "1m0s"',
+            "[[vm]]",
+            'memory = "2gb" # budget',
+            "cpus = 2",
+            'cpu_kind = "shared"',
+            "[[restart]]",
+            'policy = "always" # keep comment',
+            "[deploy]",
+            'release_command = "owned required command"',
+            "",
+        ]
+    )
     saved = tomllib.loads(raw)
     selected = [
-        (['http_service', 'auto_stop_machines'], 'stop'),
-        (['http_service', 'min_machines_running'], 0),
-        (['vm', 0, 'memory'], '1gb'),
-        (['vm', 0, 'cpus'], 1),
-        (['restart', 0, 'policy'], 'on-failure'),
-        (['restart', 0, 'retries'], 10),
-        (['http_service', 'checks', 0, 'path'], '/health'),
-        (['http_service', 'checks', 0, 'interval'], '15s'),
-        (['http_service', 'checks', 0, 'timeout'], '10s'),
-        (['http_service', 'checks', 0, 'grace_period'], '30s'),
+        (["http_service", "auto_stop_machines"], "stop"),
+        (["http_service", "min_machines_running"], 0),
+        (["vm", 0, "memory"], "1gb"),
+        (["vm", 0, "cpus"], 1),
+        (["restart", 0, "policy"], "on-failure"),
+        (["restart", 0, "retries"], 10),
+        (["http_service", "checks", 0, "path"], "/health"),
+        (["http_service", "checks", 0, "interval"], "15s"),
+        (["http_service", "checks", 0, "timeout"], "10s"),
+        (["http_service", "checks", 0, "grace_period"], "30s"),
     ]
     after = copy.deepcopy(saved)
     changes = []
@@ -408,24 +410,32 @@ def reconciliation_fixture():
         for key in path[:-1]:
             before_parent, after_parent = before_parent[key], after_parent[key]
         present = path[-1] in before_parent
-        changes.append({
-            'path': path, 'before_present': present,
-            'before': before_parent.get(path[-1]),
-            'after_present': True, 'after': value,
-        })
+        changes.append(
+            {
+                "path": path,
+                "before_present": present,
+                "before": before_parent.get(path[-1]),
+                "after_present": True,
+                "after": value,
+            }
+        )
         after_parent[path[-1]] = value
-    manifest = {'version': 2, 'input_changes': changes,
-                'profile': {'saved_config_after_sha256': digest(after)}}
+    manifest = {
+        "version": 2,
+        "input_changes": changes,
+        "profile": {"saved_config_after_sha256": digest(after)},
+    }
     return raw, saved, after, manifest
 
 
 class Reconciliation(unittest.TestCase):
     def normalized(self, saved, manifest):
         from execution.lib.instance_profile_guard import normalized_input
+
         try:
             return normalized_input(saved, manifest)
         except (Refused, KeyError, TypeError) as exc:
-            self.fail(f'admitted closed reconciliation refused: {type(exc).__name__}')
+            self.fail(f"admitted closed reconciliation refused: {type(exc).__name__}")
 
     def test_ten_selected_changes_and_input_immutable(self):
         _, saved, after, manifest = reconciliation_fixture()
@@ -435,38 +445,56 @@ class Reconciliation(unittest.TestCase):
 
     def test_lossless_crlf_comments_and_exact_absent_insertion(self):
         from execution.lib.instance_profile_guard import render_normalized_toml
+
         raw, saved, after, manifest = reconciliation_fixture()
         normalized = self.normalized(saved, manifest)
-        rendered = render_normalized_toml(raw, saved, normalized, manifest['input_changes'])
-        expected = raw.replace('"off"', '"stop"').replace('running = 1', 'running = 0')
-        expected = expected.replace('"2gb"', '"1gb"').replace('cpus = 2', 'cpus = 1')
-        expected = expected.replace('"always"', '"on-failure"').replace('[deploy]', 'retries = 10\r\n[deploy]')
-        expected = expected.replace('"/ready"', '"/health"').replace('"30s"', '"15s"', 1)
-        expected = expected.replace('timeout = "30s"', 'timeout = "10s"').replace('"1m0s"', '"30s"')
+        rendered = render_normalized_toml(
+            raw, saved, normalized, manifest["input_changes"]
+        )
+        expected = raw.replace('"off"', '"stop"').replace("running = 1", "running = 0")
+        expected = expected.replace('"2gb"', '"1gb"').replace("cpus = 2", "cpus = 1")
+        expected = expected.replace('"always"', '"on-failure"').replace(
+            "[deploy]", "retries = 10\r\n[deploy]"
+        )
+        expected = expected.replace('"/ready"', '"/health"').replace(
+            '"30s"', '"15s"', 1
+        )
+        expected = expected.replace('timeout = "30s"', 'timeout = "10s"').replace(
+            '"1m0s"', '"30s"'
+        )
         self.assertEqual(rendered, expected)
-        self.assertEqual(__import__('tomllib').loads(rendered), after)
+        self.assertEqual(__import__("tomllib").loads(rendered), after)
 
     def test_each_omission_extra_path_presence_and_shape_refuses(self):
         from execution.lib.instance_profile_guard import normalized_input
+
         _, saved, _, manifest = reconciliation_fixture()
         self.normalized(saved, manifest)  # known positive before refusal controls
         for index in range(10):
             with self.subTest(omitted=index):
                 bad = copy.deepcopy(manifest)
-                bad['input_changes'].pop(index)
+                bad["input_changes"].pop(index)
                 with self.assertRaises(Refused):
                     normalized_input(saved, bad)
-        for path in (['env', 'SCOPE'], ['vm', 1, 'memory'], ['restart', 0, 'max_retries']):
+        for path in (
+            ["env", "SCOPE"],
+            ["vm", 1, "memory"],
+            ["restart", 0, "max_retries"],
+        ):
             bad = copy.deepcopy(manifest)
-            bad['input_changes'][0]['path'] = path
+            bad["input_changes"][0]["path"] = path
             with self.assertRaises(Refused):
                 normalized_input(saved, bad)
-        for key, value in (('before_present', True), ('after_present', False), ('before', 0)):
+        for key, value in (
+            ("before_present", True),
+            ("after_present", False),
+            ("before", 0),
+        ):
             bad = copy.deepcopy(manifest)
-            bad['input_changes'][5][key] = value
+            bad["input_changes"][5][key] = value
             with self.assertRaises(Refused):
                 normalized_input(saved, bad)
-        for section in ('vm', 'restart'):
+        for section in ("vm", "restart"):
             bad = copy.deepcopy(saved)
             bad[section].append(copy.deepcopy(bad[section][0]))
             with self.assertRaises(Refused):
@@ -474,8 +502,13 @@ class Reconciliation(unittest.TestCase):
 
     def test_web_zero_changes_byte_identity(self):
         from execution.lib.instance_profile_guard import render_normalized_toml
+
         raw, saved, _, _ = reconciliation_fixture()
-        manifest = {'version': 2, 'input_changes': [], 'profile': {'saved_config_after_sha256': digest(saved)}}
+        manifest = {
+            "version": 2,
+            "input_changes": [],
+            "profile": {"saved_config_after_sha256": digest(saved)},
+        }
         self.assertEqual(self.normalized(saved, manifest), saved)
         self.assertEqual(render_normalized_toml(raw, saved, saved, []), raw)
 
