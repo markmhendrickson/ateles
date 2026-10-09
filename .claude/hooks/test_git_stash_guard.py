@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 HOOK = str(Path(__file__).with_name("git_stash_guard.py"))
 S = "st" + "ash"  # avoid a literal `git stash` token in this file's own text
 GS = f"git {S}"
@@ -127,6 +129,49 @@ EXPORTED = [
 ]
 
 
+# ateles#1265 — heredoc-body stripping. These commands mirror the issue's
+# own repro (a Neotoma `agent_policy` string containing the literal phrase
+# "never git stash", quoted inside a heredoc), and must be judged against
+# the STRIPPED text so a phrase-as-data case is not misread as an invocation.
+HEREDOC_ALLOW = [
+    (
+        "agent_policy string in heredoc, no real stash",
+        f"python3 - <<'PY'\n"
+        f"agent_policy = \"never {GS} in this repo\"\n"
+        f"print(agent_policy)\n"
+        f"PY",
+    ),
+]
+
+HEREDOC_BLOCK = [
+    (
+        "heredoc payload plus a real stash outside it",
+        f"cat <<'EOF'\nsome unrelated payload\nEOF\n{GS} pop",
+    ),
+]
+
+# The single most important case in this file: an interpreter's ACTUAL
+# argument (not heredoc data) still contains a real mutating call. This must
+# stay refused — proving heredoc-body stripping did not reopen the
+# interpreter loophole gmail_send_gate.py already had to close once.
+INTERPRETER_ARGUMENT_BLOCK = [
+    (
+        "python3 -c with real stash as the interpreter's own argument",
+        f"python3 -c \"import subprocess; subprocess.run(['git','{S}'])\"",
+    ),
+]
+
+# A command whose ONLY occurrence of the substring "stash" is inside a
+# heredoc body — locks in that the `"stash" not in command` early-out in
+# main() is evaluated against the STRIPPED text, not the raw command.
+EARLY_OUT_ALLOW = [
+    (
+        "stash substring only inside heredoc body",
+        f"cat <<'EOF'\nthis body mentions {S} only here\nEOF\necho done",
+    ),
+]
+
+
 def run(command, tool="Bash", env=None):
     payload = json.dumps({"tool_name": tool, "tool_input": {"command": command}})
     child_env = None
@@ -214,3 +259,85 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---------------------------------------------------------------------------
+# pytest-collectible wrappers over the same fixture lists above. The
+# table-driven `main()` script runner predates pytest collection for this
+# file (it collected zero test items under `pytest .claude/hooks/ -q`) — these
+# wrappers make every BLOCK/ALLOW/EXPORTED case, plus the new ateles#1265
+# heredoc-stripping cases, individually visible to CI and to `pytest -k`.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("label,cmd", BLOCK, ids=[label for label, _ in BLOCK])
+def test_block_cases(label, cmd):
+    assert run(cmd) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", ALLOW, ids=[label for label, _ in ALLOW])
+def test_allow_cases(label, cmd):
+    assert run(cmd) == 0, label
+
+
+@pytest.mark.parametrize("label,cmd", EXPORTED, ids=[label for label, _ in EXPORTED])
+def test_exported_override_does_not_approve(label, cmd):
+    assert run(cmd, env={"ATELES_ALLOW_GIT_STASH": "1"}) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,cmd", HEREDOC_ALLOW, ids=[label for label, _ in HEREDOC_ALLOW]
+)
+def test_heredoc_agent_policy_string_allowed(label, cmd):
+    """Issue's second repro, verbatim scenario: storing a Neotoma
+    `agent_policy` string containing the literal phrase "never git stash"."""
+    assert run(cmd) == 0, label
+
+
+@pytest.mark.parametrize(
+    "label,cmd", HEREDOC_BLOCK, ids=[label for label, _ in HEREDOC_BLOCK]
+)
+def test_heredoc_with_real_stash_outside_still_refused(label, cmd):
+    """Mirrors the sibling-repo guard's loophole-reopening check: stripping
+    heredoc body content must not blind the guard to a real trailing
+    mutation in the same command."""
+    assert run(cmd) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,cmd",
+    INTERPRETER_ARGUMENT_BLOCK,
+    ids=[label for label, _ in INTERPRETER_ARGUMENT_BLOCK],
+)
+def test_interpreter_dash_c_with_real_stash_argument_still_refused(label, cmd):
+    """The single most important case in this plan: a `python3 -c` argument
+    containing a REAL mutating call (not heredoc data) must stay refused.
+    Red against any naive fix that widens TEXT_BEARING_LEADERS or exempts
+    interpreter leaders instead of stripping heredoc bodies."""
+    assert run(cmd) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,cmd", EARLY_OUT_ALLOW, ids=[label for label, _ in EARLY_OUT_ALLOW]
+)
+def test_early_out_uses_stripped_text(label, cmd):
+    """Characterization test: the `"stash" not in command` early-out in
+    main() must be evaluated against the STRIPPED text (strip once, use
+    everywhere), so a command whose only "stash" substring lives inside a
+    heredoc body still resolves to allowed rather than accidentally doing
+    (harmless but wasteful) extra work against the raw command."""
+    assert run(cmd) == 0, label
+
+
+def test_real_stash_bare_still_refused():
+    assert run(GS) == 2
+
+
+def test_real_stash_inside_bash_c_still_refused():
+    assert run(f'bash -c "{GS}"') == 2
+
+
+def test_real_stash_inside_command_substitution_still_refused():
+    assert run(f"$({GS} create)") == 2
+
+
+def test_real_stash_chained_after_and_still_refused():
+    assert run(f"true && {GS}") == 2
