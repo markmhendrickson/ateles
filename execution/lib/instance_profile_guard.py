@@ -394,6 +394,104 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
     }
 
 
+def check_projected_http_checks(saved, source_config):
+    """Compare the selected single HTTP-service check projection exactly.
+
+    Fly HTTPService.ToService/toMachineService adds type=http and retains
+    ServiceHTTPCheck JSON field names. This is not a full machine projection
+    or permission to normalize health policy; unselected service shapes refuse.
+    """
+    service = saved.get("http_service")
+    require(isinstance(service, dict), "missing HTTP service projection")
+    require(not saved.get("services"), "unselected additional service projection")
+    services = source_config.get("services")
+    require(
+        isinstance(services, list)
+        and len(services) == 1
+        and isinstance(services[0], dict),
+        "ambiguous HTTP service projection",
+    )
+    current = services[0]
+    if "internal_port" in service:
+        require(
+            current.get("internal_port") == service["internal_port"],
+            "HTTP service target drift",
+        )
+    selected = service.get("checks", [])
+    actual = current.get("checks", [])
+    require(
+        isinstance(selected, list) and isinstance(actual, list),
+        "unsupported HTTP checks",
+    )
+    fields = {
+        "interval",
+        "timeout",
+        "grace_period",
+        "method",
+        "path",
+        "protocol",
+        "tls_skip_verify",
+        "tls_server_name",
+        "headers",
+    }
+    expected = []
+    for check in selected:
+        require(
+            isinstance(check, dict)
+            and set(check) <= fields
+            and all(v is not None for v in check.values()),
+            "unsupported HTTP check input",
+        )
+        projected = dict(check)
+        projected["type"] = "http"
+        headers = projected.get("headers")
+        if headers is not None:
+            require(
+                isinstance(headers, dict)
+                and all(
+                    isinstance(k, str) and isinstance(v, str)
+                    for k, v in headers.items()
+                ),
+                "unsupported HTTP headers",
+            )
+            projected["headers"] = [
+                {"name": k, "values": [v]} for k, v in sorted(headers.items())
+            ]
+            if not projected["headers"]:
+                projected.pop("headers")
+        expected.append(projected)
+    actual = json.loads(json.dumps(actual, allow_nan=False))
+    for check in actual:
+        require(
+            isinstance(check, dict)
+            and set(check) <= fields | {"type"}
+            and check.get("type") == "http"
+            and all(v is not None for v in check.values()),
+            "unsupported machine HTTP checks",
+        )
+        if "headers" in check:
+            headers = check["headers"]
+            require(
+                isinstance(headers, list)
+                and all(
+                    isinstance(h, dict)
+                    and set(h) == {"name", "values"}
+                    and isinstance(h["name"], str)
+                    and isinstance(h["values"], list)
+                    and len(h["values"]) == 1
+                    and isinstance(h["values"][0], str)
+                    for h in headers
+                )
+                and len({h["name"] for h in headers}) == len(headers),
+                "unsupported machine HTTP headers",
+            )
+            check["headers"] = sorted(headers, key=lambda h: h["name"])
+            if not headers:
+                check.pop("headers")
+    require(actual == expected, "saved checks differ from admitted machine")
+    return True
+
+
 def _deployment_argv(manifest, image):
     """Internal serialization; the preparation CLI owns all preceding gates."""
     command = manifest["command"]

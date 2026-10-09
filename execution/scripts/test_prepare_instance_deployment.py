@@ -79,6 +79,7 @@ a=sys.argv[1:]
 if a==['version']: print('owned-tool')
 elif a==['deploy','--help']: print('--app --config --image --primary-region --ha --strategy --only-machines --update-only --no-public-ips --deploy-retries --exclude-machines --skip-release-command')
 elif a[:3]==['config','show','--local']:
+ if os.environ.get('OWNED_MUTATE'): Path(os.environ['OWNED_MUTATE']).write_text('changed during parser')
  c=tomllib.loads(Path(a[-1]).read_text());v=c['http_service']['auto_stop_machines']
  if v in ('off','stop'): c['http_service']['auto_stop_machines']=v=='stop'
  print(json.dumps(c))
@@ -136,6 +137,13 @@ else: raise SystemExit(93)
         self.assertEqual(result.returncode, 0, result.stderr)
         prepared = json.loads((self.output / "prepared.json").read_text())
         self.assertEqual(prepared["commit"], self.commit)
+        self.assertEqual(prepared["manifest_sha256"], digest(self.manifest))
+        self.assertEqual(
+            prepared["packaging_check"]["inputs"],
+            self.manifest["packaging_gate"]["inputs"],
+        )
+        self.assertEqual(prepared["packaging_check"]["tests_run"], 1)
+        self.assertEqual(prepared["packaging_check"]["skips"], 0)
         self.assertTrue((self.context / "gate-ran").exists())
         self.assertEqual(self.output.stat().st_mode & 0o777, 0o700)
         self.assertEqual((self.output / "fly.toml").stat().st_mode & 0o777, 0o600)
@@ -180,6 +188,118 @@ else: raise SystemExit(93)
         (self.context / "untracked").write_text("unexpected")
         self.assertEqual(self.execute().returncode, 2)
         self.assertFalse(self.output.exists())
+
+    def replace_gate(self, body):
+        self.gate.write_text(body)
+        self.manifest["packaging_gate"]["sha256"] = hashlib.sha256(
+            self.gate.read_bytes()
+        ).hexdigest()
+        subprocess.run(
+            ["git", "add", "."], cwd=self.context, check=True, capture_output=True
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Owned Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-qm",
+                "owned check",
+            ],
+            cwd=self.context,
+            check=True,
+            capture_output=True,
+        )
+        self.commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.context, text=True
+        ).strip()
+
+    def test_skip_only_packaging_refuses_command(self):
+        self.replace_gate(
+            "import unittest\nclass Gate(unittest.TestCase):\n"
+            ' @unittest.skip("owned unavailable dependency")\n'
+            " def test_input(self): pass\n"
+        )
+        result = self.execute()
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.output.exists())
+        self.assertFalse((self.root / "calls").exists())
+
+    def test_packaging_mutation_refuses_command(self):
+        self.replace_gate(
+            "from pathlib import Path\nimport unittest\n"
+            "class Gate(unittest.TestCase):\n def test_input(self):\n"
+            '  self.assertEqual(Path("Dockerfile").read_text(),'
+            '"owned safe build")\n'
+            '  Path("Dockerfile").write_text("changed after check")\n'
+        )
+        result = self.execute()
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.output.exists())
+        self.assertFalse((self.root / "calls").exists())
+
+    def test_parser_mutation_refuses_final_emission(self):
+        self.env["OWNED_MUTATE"] = str(self.context / "Dockerfile")
+        result = self.execute()
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.output.exists())
+
+    def test_mixed_skipped_and_executed_gate_refuses(self):
+        self.replace_gate(
+            "import unittest\nclass Gate(unittest.TestCase):\n"
+            " def test_positive(self): self.assertTrue(True)\n"
+            ' @unittest.skip("owned unavailable dependency")\n'
+            " def test_input(self): pass\n"
+        )
+        result = self.execute()
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.output.exists())
+
+    def bind_service_checks(self, path):
+        from execution.lib.instance_profile_guard import stable_source
+
+        self.evidence["saved"]["http_service"]["checks"] = [
+            {"path": path, "interval": "30s", "timeout": "30s", "grace_period": "1m"}
+        ]
+        self.evidence["inventory"][0]["config"]["services"][0]["checks"] = [
+            {
+                "path": "/health",
+                "interval": "30s",
+                "timeout": "30s",
+                "grace_period": "1m",
+                "type": "http",
+            }
+        ]
+        normalized = copy.deepcopy(self.evidence["saved"])
+        normalized["http_service"]["auto_stop_machines"] = "stop"
+        normalized["http_service"]["min_machines_running"] = 0
+        profile = self.manifest["profile"]
+        profile["saved_config_before_sha256"] = digest(self.evidence["saved"])
+        profile["saved_config_after_sha256"] = digest(normalized)
+        profile["source_static_config_sha256"] = digest(
+            stable_source(self.evidence["inventory"][0]["config"])
+        )
+        self.raw.write_text(
+            self.raw.read_text() + "[[http_service.checks]]\n"
+            'path="' + path + '"\ninterval="30s"\n'
+            'timeout="30s"\ngrace_period="1m"\n'
+        )
+
+    def test_saved_and_machine_check_drift_refuses_command(self):
+        self.bind_service_checks("/ready")
+        result = self.execute()
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.output.exists())
+        self.assertFalse((self.context / "gate-ran").exists())
+
+    def test_matching_saved_and_machine_checks_runs_real_gate(self):
+        self.bind_service_checks("/health")
+        result = self.execute()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.context / "gate-ran").exists())
+        self.assertTrue((self.output / "prepared.json").exists())
 
     def test_installed_encoding_projection_is_narrow(self):
         source = {

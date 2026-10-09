@@ -15,6 +15,7 @@ from execution.lib.instance_profile_guard import (
     Refused,
     _deployment_argv,
     installed_config_projection,
+    check_projected_http_checks,
     prepare,
     render_normalized_toml,
     require,
@@ -42,6 +43,10 @@ def run(args):
     result = prepare(
         evidence, manifest, args.manifest_sha256, args.image, commit, args.phase
     )
+    source = next(
+        m for m in evidence["inventory"] if m["id"] == manifest["profile"]["source_id"]
+    )
+    check_projected_http_checks(result["normalized"], source["config"])
     gate = manifest["packaging_gate"]
     require(
         isinstance(gate, dict) and set(gate) == {"path", "sha256", "inputs"},
@@ -59,15 +64,37 @@ def run(args):
     require(
         isinstance(gate["inputs"], dict) and gate["inputs"], "missing packaging inputs"
     )
-    for name, expected in gate["inputs"].items():
-        item = (context / name).resolve(strict=True)
+
+    def validate_candidate():
         require(
-            item.is_relative_to(context) and item.is_file(), "invalid packaging input"
+            command(["git", "status", "--porcelain", "--untracked-files=all"], context)
+            == "",
+            "candidate changed during preparation",
         )
         require(
-            hashlib.sha256(item.read_bytes()).hexdigest() == expected,
-            "packaging input changed",
+            command(["git", "rev-parse", "HEAD"], context).strip() == commit,
+            "candidate commit changed during preparation",
         )
+        current_script = (context / gate["path"]).resolve(strict=True)
+        require(
+            current_script == script
+            and current_script.is_file()
+            and hashlib.sha256(current_script.read_bytes()).hexdigest()
+            == gate["sha256"],
+            "packaging gate changed",
+        )
+        for name, expected in gate["inputs"].items():
+            item = (context / name).resolve(strict=True)
+            require(
+                item.is_relative_to(context) and item.is_file(),
+                "invalid packaging input",
+            )
+            require(
+                hashlib.sha256(item.read_bytes()).hexdigest() == expected,
+                "packaging input changed",
+            )
+
+    validate_candidate()
     gate_run = subprocess.run(
         [
             sys.executable,
@@ -88,9 +115,16 @@ def run(args):
     )
     require(
         gate_run.returncode == 0
-        and re.search(r"Ran [1-9][0-9]* tests? in", gate_run.stderr),
+        and re.search(r"Ran [1-9][0-9]* tests? in", gate_run.stderr)
+        and not re.search(
+            r"\b(?:skipped|expected failures|unexpected successes)\b",
+            gate_run.stderr,
+            re.IGNORECASE,
+        ),
         "packaging gate failed or ran no tests",
     )
+    # The executed gate cannot invalidate the clean candidate or its inputs.
+    validate_candidate()
     # The pinned tool must still support every emitted option. No fallback.
     version = command(["fly", "version"]).strip()
     require(version == manifest["tool_version"], "installed tool drift")
@@ -122,8 +156,29 @@ def run(args):
             parsed == installed_config_projection(result["normalized"]),
             "installed config parser changed input",
         )
+        # Tool parsing is still preparation; rebind immediately before emission.
+        validate_candidate()
         argv[argv.index("<owned-private-config>")] = str(config)
         result["argv"] = argv
+        result["manifest_sha256"] = args.manifest_sha256
+        result["packaging_check"] = {
+            "path": gate["path"],
+            "sha256": gate["sha256"],
+            "inputs": dict(gate["inputs"]),
+            "argv": gate_run.args,
+            "returncode": gate_run.returncode,
+            "tests_run": int(
+                re.search(r"Ran ([1-9][0-9]*) tests? in", gate_run.stderr).group(1)
+            ),
+            "skips": 0,
+            "result_sha256": hashlib.sha256(gate_run.stderr.encode()).hexdigest(),
+        }
+        result["tool_version"] = version
+        result["phase"] = args.phase
+        result["scope"] = (
+            "PREPARATION ONLY; pinned candidate/packaging/tool/profile checks "
+            "completed; no deployment or application/readiness clearance"
+        )
         result.pop("normalized")
         fd = os.open(out / "prepared.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
