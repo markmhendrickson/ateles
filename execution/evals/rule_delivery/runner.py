@@ -645,6 +645,16 @@ def score_run(
         outcome = checks.check_pr_closure_ownership(
             ws, calls, final_text, scenario, pull_requests
         )
+    elif scenario["id"] == "delegate_completion":
+        outcome = checks.check_delegate_completion(
+            ws,
+            calls,
+            final_text,
+            scenario,
+            completed_task_id=scenario["completed_task_id"],
+            plan_id=scenario["plan_id"],
+            next_task_id=scenario["next_task_id"],
+        )
     else:
         raise ValueError(scenario["id"])
 
