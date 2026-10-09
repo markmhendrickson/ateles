@@ -102,25 +102,69 @@ TRUSTED_MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 
 
+def _owned_descendant_pids(pid: int) -> list[int]:
+    """Snapshot only descendants of the still-owned invocation wrapper."""
+    try:
+        table = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="], capture_output=True, text=True,
+            check=True, timeout=1,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        log.warning("[apis] could not inspect owned dispatch descendants")
+        return []
+    children: dict[int, list[int]] = {}
+    for line in table.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and all(field.isdigit() for field in fields):
+            child, parent = map(int, fields)
+            children.setdefault(parent, []).append(child)
+    owned, pending = [], list(children.get(pid, []))
+    while pending:
+        child = pending.pop()
+        if child == pid or child in owned:
+            continue
+        owned.append(child)
+        pending.extend(children.get(child, []))
+    return list(reversed(owned))
+
+
 async def _kill_spawned_process_group(proc: asyncio.subprocess.Process) -> None:
-    """Kill and drain exactly the process group created for one provider run.
+    """Kill one invocation's group and proven descendants; bound pipe drain.
 
     Provider CLIs commonly launch a native child. Killing only the immediate
     wrapper can orphan that child with the stdout/stderr pipes still open,
     which makes the timeout path's follow-up ``communicate()`` hang forever.
-    Every caller launches with ``start_new_session=True``, so the wrapper PID
-    is also the exact process-group ID; no process-name or broad PID matching
-    is involved.
+    Every caller launches with ``start_new_session=True``. A child may start
+    another session, so capture its ancestry before killing the wrapper. No
+    process-name matching or unrelated process signaling is involved.
     """
     pid = getattr(proc, "pid", None)
     if isinstance(pid, int) and hasattr(os, "killpg"):
+        # Snapshot ancestry BEFORE killing the wrapper: a CLI child can start
+        # its own session, then become unprovable after reparenting to PID 1.
+        descendants = (await asyncio.to_thread(_owned_descendant_pids, pid)
+                       if proc.returncode is None else [])
+        for child in descendants:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         try:
             os.killpg(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
     else:
         proc.kill()
-    await proc.communicate()
+    try:
+        await asyncio.wait_for(proc.communicate(), timeout=2)
+    except asyncio.TimeoutError:
+        # Never wait forever on an inherited pipe whose writer we cannot
+        # prove is ours. Closing this invocation's transport does not signal
+        # any unrelated process and timeout output remains discarded.
+        log.warning("[apis] dispatch output pipes did not drain after cleanup")
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            transport.close()
 
 
 ATELES_REPO = Path(
@@ -3367,6 +3411,9 @@ async def _run_skill_once(
 
         return result
 
+    except asyncio.CancelledError:
+        await _kill_spawned_process_group(proc)
+        raise
     finally:
         # Clean up the MCP config temp file (always, even on timeout/exception).
         if _mcp_tmp_path is not None:
@@ -4197,6 +4244,10 @@ async def run_review_prompt(
                     error=f"review timed out after {timeout}s",
                     provider=provider,
                 )
+            except asyncio.CancelledError:
+                if process is not None:
+                    await _kill_spawned_process_group(process)
+                raise
             except OSError as exc:
                 result = SkillResult(
                     role,
