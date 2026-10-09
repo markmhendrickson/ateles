@@ -162,8 +162,130 @@ def check_profiles(inventory, saved_config, baseline, image, phase="before"):
     return True
 
 
+RECONCILIATION_PATHS = frozenset(
+    {
+        ("http_service", "auto_stop_machines"),
+        ("http_service", "min_machines_running"),
+        ("vm", 0, "memory"),
+        ("vm", 0, "cpus"),
+        ("restart", 0, "policy"),
+        ("restart", 0, "retries"),
+        ("http_service", "checks", 0, "path"),
+        ("http_service", "checks", 0, "interval"),
+        ("http_service", "checks", 0, "timeout"),
+        ("http_service", "checks", 0, "grace_period"),
+    }
+)
+
+
+def input_changes(manifest):
+    return (
+        manifest["input_changes"]
+        if manifest.get("version") == 2
+        else manifest["idle_changes"]
+    )
+
+
+def _reconciled_input(saved, manifest):
+    import copy
+
+    changes = manifest["input_changes"]
+    require(isinstance(changes, list), "invalid input corrections")
+    paths = []
+    for c in changes:
+        require(
+            isinstance(c, dict)
+            and set(c)
+            == {"path", "before_present", "before", "after_present", "after"},
+            "invalid correction binding",
+        )
+        require(
+            isinstance(c["path"], list)
+            and all(type(k) in (str, int) for k in c["path"]),
+            "invalid correction path",
+        )
+        paths.append(tuple(c["path"]))
+    require(
+        not changes or (len(paths) == 10 and set(paths) == RECONCILIATION_PATHS),
+        "unsupported normalization",
+    )
+    result = copy.deepcopy(saved)
+    if changes:
+        for key in ("vm", "restart"):
+            require(
+                isinstance(result.get(key), list)
+                and len(result[key]) == 1
+                and isinstance(result[key][0], dict),
+                "unselected input array",
+            )
+        service = result.get("http_service")
+        require(
+            isinstance(service, dict)
+            and isinstance(service.get("checks"), list)
+            and len(service["checks"]) == 1
+            and isinstance(service["checks"][0], dict),
+            "unselected HTTP check array",
+        )
+    for c in changes:
+        parent = result
+        for key in c["path"][:-1]:
+            require(
+                (type(key) is str and isinstance(parent, dict) and key in parent)
+                or (
+                    type(key) is int
+                    and isinstance(parent, list)
+                    and 0 <= key < len(parent)
+                ),
+                "correction parent absent",
+            )
+            parent = parent[key]
+        key = c["path"][-1]
+        require(isinstance(parent, dict), "correction scalar parent invalid")
+        present = key in parent
+        require(
+            type(c["before_present"]) is bool
+            and c["before_present"] == present
+            and (present or c["before"] is None)
+            and (
+                not present
+                or (
+                    type(parent[key]) is type(c["before"])
+                    and parent[key] == c["before"]
+                )
+            )
+            and c["after_present"] is True,
+            "correction presence/value drift",
+        )
+        require(
+            present or tuple(c["path"]) == ("restart", 0, "retries"),
+            "unselected absent insertion",
+        )
+        value = c["after"]
+        if key in ("min_machines_running", "cpus", "retries"):
+            require(
+                type(value) is int and value >= (1 if key == "cpus" else 0),
+                "invalid correction integer",
+            )
+        elif key == "auto_stop_machines":
+            require(
+                type(value) is bool
+                or (type(value) is str and value in ("off", "stop")),
+                "unknown idle encoding",
+            )
+        else:
+            require(type(value) is str and bool(value), "invalid correction scalar")
+        parent[key] = value
+    require(
+        digest(result) == manifest["profile"]["saved_config_after_sha256"],
+        "normalized configuration drift",
+    )
+    return result
+
+
 def normalized_input(saved, manifest):
-    """Apply only the separately pinned idle correction, never learn a policy."""
+    """Apply the selected closed correction version, never learn a policy."""
+    if manifest.get("version") == 2:
+        return _reconciled_input(saved, manifest)
     import copy
 
     changes = manifest["idle_changes"]
@@ -235,22 +357,25 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
     require(digest(manifest) == manifest_sha256, "manifest binding changed")
     require(
         set(manifest)
-        == {
-            "version",
-            "deployment_configuration",
-            "canonical_sha256",
-            "app",
-            "environment",
-            "profile",
-            "idle_changes",
-            "secrets_sha256",
-            "volumes_sha256",
-            "tool_version",
-            "command",
-            "packaging_gate",
-        }
+        == (
+            {
+                "version",
+                "deployment_configuration",
+                "canonical_sha256",
+                "app",
+                "environment",
+                "profile",
+                ("input_changes" if manifest.get("version") == 2 else "idle_changes"),
+                "secrets_sha256",
+                "volumes_sha256",
+                "tool_version",
+                "command",
+                "packaging_gate",
+            }
+            | ({"input_toml"} if manifest.get("version") == 2 else set())
+        )
         and type(manifest["version"]) is int
-        and manifest["version"] == 1,
+        and manifest["version"] in (1, 2),
         "unsupported manifest",
     )
     require(
@@ -345,7 +470,7 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
     )
     # Pin both representations to the independently admitted running policy.
     # Only single-service idle corrections are supported; never guess a group.
-    if manifest["idle_changes"]:
+    if input_changes(manifest):
         source = next(
             m
             for m in evidence["inventory"]
@@ -366,6 +491,17 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
             and services[0].get("min_machines_running")
             == policy["min_machines_running"],
             "normalization differs from admitted machine",
+        )
+    if manifest["version"] == 2:
+        raw_binding = manifest["input_toml"]
+        require(
+            isinstance(raw_binding, dict)
+            and set(raw_binding) == {"before_sha256", "after_sha256"}
+            and all(
+                isinstance(v, str) and re.fullmatch(r"[0-9a-f]{64}", v)
+                for v in raw_binding.values()
+            ),
+            "invalid raw input binding",
         )
     command = manifest["command"]
     require(
@@ -889,30 +1025,118 @@ def _deployment_argv(manifest, image):
     return argv
 
 
-def render_normalized_toml(raw_text, saved, normalized, changes):
-    """Preserve every input byte except the two pinned scalar values."""
+def render_normalized_toml(raw_text, saved, normalized, changes, *, with_edits=False):
+    """Replace only selected scalar spans; retain comments/newlines and all else.
+
+    The closed shape admits one absent retry key insertion at the end of its
+    selected restart table. Every rendered byte span is returned to the private
+    receipt when requested; reparsing must match the independently pinned result.
+    """
     import tomllib
 
-    require(tomllib.loads(raw_text) == saved, "saved TOML does not match evidence")
-    lines = raw_text.splitlines(keepends=True)
-    active = False
+    try:
+        parsed = tomllib.loads(raw_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise Refused("invalid saved TOML") from exc
+    require(parsed == saved, "saved TOML does not match evidence")
+    wanted = {tuple(c["path"]): c for c in changes}
+    require(len(wanted) == len(changes), "duplicate correction path")
+    section = ()
+    offsets = 0
+    edits = []
     hits = set()
-    by_key = {c["path"][1]: c for c in changes}
-    for index, line in enumerate(lines):
-        if line.strip().startswith("["):
-            active = line.strip() == "[http_service]"
-        if active:
-            match = re.fullmatch(r"(\s*)([A-Za-z_]+)(\s*=\s*)([^\r\n]*)(\r?\n)?", line)
-            if match and match[2] in by_key:
-                key = match[2]
-                require(key not in hits, "duplicate idle key")
-                hits.add(key)
-                value = json.dumps(by_key[key]["after"], ensure_ascii=True)
-                lines[index] = match[1] + key + match[3] + value + (match[5] or "")
-    require(hits == set(by_key), "idle key not rendered")
-    rendered = "".join(lines)
+    table_ends = {}
+    table_indents = {}
+    seen_tables = set()
+    scalar = re.compile(
+        r"([ \t]*)([A-Za-z_][A-Za-z0-9_-]*)([ \t]*=[ \t]*)(\"(?:[^\"\\]|\\.)*\"|'[^']*'|true|false|[-+]?[0-9]+)([ \t]*(?:#[^\r\n]*)?)(\r?\n)?$"
+    )
+    for line in raw_text.splitlines(keepends=True):
+        header = re.fullmatch(
+            r"[ \t]*(\[\[?)([A-Za-z_][A-Za-z0-9_.]*)(\]\]?)[ \t]*(?:#[^\r\n]*)?(?:\r?\n)?",
+            line,
+        )
+        if header:
+            table_ends[section] = offsets
+            names = tuple(header[2].split("."))
+            if header[1] == "[[" and header[3] == "]]":
+                require(names not in seen_tables, "unselected repeated array table")
+                seen_tables.add(names)
+                section = names + (0,)
+            else:
+                require(header[1] == "[" and header[3] == "]", "invalid table encoding")
+                section = names
+        else:
+            match = scalar.fullmatch(line)
+            if match:
+                table_indents[section] = match[1]
+                path = section + (match[2],)
+                if path in wanted:
+                    c = wanted[path]
+                    require(
+                        c.get("before_present", True) is True and path not in hits,
+                        "scalar presence drift",
+                    )
+                    hits.add(path)
+                    edits.append(
+                        {
+                            "path": list(path),
+                            "start": offsets + match.start(4),
+                            "end": offsets + match.end(4),
+                            "before": match[4],
+                            "after": json.dumps(c["after"], ensure_ascii=True),
+                        }
+                    )
+        offsets += len(line)
+    table_ends[section] = offsets
+    for path, c in wanted.items():
+        if path not in hits:
+            require(
+                path == ("restart", 0, "retries") and c.get("before_present") is False,
+                "selected scalar not rendered",
+            )
+            require(path[:-1] in table_ends, "missing insertion table")
+            position = table_ends[path[:-1]]
+            require(
+                position == 0 or raw_text[position - 1] == "\n",
+                "missing insertion newline",
+            )
+            newline = "\r\n" if "\r\n" in raw_text else "\n"
+            edits.append(
+                {
+                    "path": list(path),
+                    "start": position,
+                    "end": position,
+                    "before": "",
+                    "after": table_indents.get(path[:-1], "")
+                    + "retries = "
+                    + json.dumps(c["after"])
+                    + newline,
+                }
+            )
+            hits.add(path)
+    require(hits == set(wanted), "correction not rendered")
+    edits.sort(key=lambda e: (e["start"], e["end"]))
+    require(
+        all(a["end"] <= b["start"] for a, b in zip(edits, edits[1:])),
+        "overlapping correction spans",
+    )
+    rendered = raw_text
+    for edit in reversed(edits):
+        require(
+            raw_text[edit["start"] : edit["end"]] == edit["before"], "raw span changed"
+        )
+        rendered = rendered[: edit["start"]] + edit["after"] + rendered[edit["end"] :]
     require(tomllib.loads(rendered) == normalized, "TOML correction altered profile")
-    return rendered
+    byte_edits = [
+        {
+            **edit,
+            "start": len(raw_text[: edit["start"]].encode("utf-8")),
+            "end": len(raw_text[: edit["end"]].encode("utf-8")),
+        }
+        for edit in edits
+    ]
+    return (rendered, byte_edits) if with_edits else rendered
 
 
 def installed_config_projection(config):
