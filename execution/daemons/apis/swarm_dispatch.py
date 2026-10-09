@@ -7006,6 +7006,7 @@ class SwarmDispatcher:
                 "",
                 "",
                 reason="PR head could not be verified before review",
+                head=None,
             )
             return
 
@@ -7323,6 +7324,7 @@ class SwarmDispatcher:
                 ),
                 completed_lenses=tuple(lens for lens, _ in reviews),
                 failed_lenses=tuple(failed_lenses),
+                head=review_head,
             )
             return
 
@@ -7343,6 +7345,7 @@ class SwarmDispatcher:
                 "",
                 "",
                 reason="durable exact-head review read-back failed",
+                head=review_head,
             )
             return
 
@@ -7425,6 +7428,7 @@ class SwarmDispatcher:
             await self._handle_panel_session_limit(
                 trigger, parent, "panel", "", "",
                 reason="PR head changed during review or could not be verified",
+                head=aggregation_head or review_head,
             )
             return
         vanellus_result = await run_skill(
@@ -7456,6 +7460,7 @@ class SwarmDispatcher:
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus",
                 vanellus_result.stdout, vanellus_result.stderr,
+                head=aggregation_head,
             )
             return
         # 4a. Credential-expiry guard: if the aggregation's claude call failed
@@ -7477,6 +7482,7 @@ class SwarmDispatcher:
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", vanellus_result.error,
                 reason=reason,
+                head=aggregation_head,
             )
             return
 
@@ -7508,6 +7514,7 @@ class SwarmDispatcher:
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", "",
                 reason="no verified current-head verdict",
+                head=aggregation_head,
             )
             return
         if used_comment_fallback:
@@ -7618,6 +7625,7 @@ class SwarmDispatcher:
                     "PR head changed after binding review or could not be "
                     "verified before merge readiness"
                 ),
+                head=readiness_head,
             )
             return
 
@@ -14380,6 +14388,7 @@ class SwarmDispatcher:
         reason: str = "usage limit",
         completed_lenses: tuple[str, ...] = (),
         failed_lenses: tuple[tuple[str, str], ...] = (),
+        head: str | None = None,
     ) -> None:
         """Surface an incomplete review without fabricating a verdict.
 
@@ -14388,7 +14397,15 @@ class SwarmDispatcher:
         failures require attention and must not borrow that self-clearing copy.
         Successful and failed lens names remain visible on partial panels.
         Best-effort; never raises.
+
+        ``head`` is the caller's already-resolved current head (whichever of
+        ``review_head``/``aggregation_head``/``readiness_head`` is in scope at
+        the call site); it falls back to ``t.head_sha`` when the caller has
+        none (e.g. the "head could not be verified" site). Used only by the
+        non-auto-resume branch's dedupe key — the auto-resume branch keeps its
+        own self-clearing GitHub marker untouched (ateles#1250).
         """
+        resolved_head = head or t.head_sha
         auto_resume = reason in {"usage limit", "provider capacity exhausted"}
         iso = ""
         if auto_resume:
@@ -14417,6 +14434,36 @@ class SwarmDispatcher:
             if failed_lenses
             else ""
         )
+        # panel-incomplete dedupe key (ateles#1250): scoped per-PR, per-head,
+        # and per exact missing-lens-set (each lens paired with its OWN
+        # failure reason, not a bare count) — so a suppressed repeat only
+        # ever hides a byte-identical report of the same still-open
+        # condition. Collapsing any one of those three axes back to a
+        # coarser key (e.g. dropping the head, or keying on lens count
+        # alone) reproduces the ateles#1216 class of bug: a materially
+        # different report silently swallowed by a stale key. Auto-resume
+        # (usage limit / provider exhaustion) is untouched — it keeps its
+        # own self-clearing GitHub marker, not this key.
+        dedupe_key = None
+        if not auto_resume:
+            pair_strings = sorted(
+                f"{lens}:{failure}" for lens, failure in failed_lenses
+            )
+            dedupe_key = (
+                f"panel-incomplete:{t.repository}#{t.number}:{resolved_head}:"
+                + ",".join(pair_strings)
+            )
+
+        # Decide suppression BEFORE calling send(): send()'s own return value
+        # conflates "suppressed as a duplicate" with "attempted delivery and
+        # the transport failed" (Telegram/email/Apprise down still returns
+        # False for a BLOCKER that was NOT a duplicate). Gating the GitHub
+        # comment on that conflated value would silently drop the comment on
+        # every transport failure too — worse than the 23x-repost bug this
+        # fixes, since the operator would then get nothing on any channel and
+        # the key would still be marked notified. Checking the journal
+        # directly keeps the two failure modes distinct.
+        is_duplicate = bool(dedupe_key and self.notifier._is_duplicate(dedupe_key))
         try:
             if auto_resume:
                 message = (
@@ -14434,9 +14481,18 @@ class SwarmDispatcher:
                 message + completed_note + failed_note,
                 priority=priority,
                 handler=DAEMON_NAME,
+                dedupe_key=dedupe_key,
             )
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] review-incomplete notice failed: {exc}", exc_info=True)
+
+        # Both effects are gated by the SAME dedupe decision, computed once
+        # above — a duplicate condition suppresses the GitHub comment too, so
+        # the two never split state (ateles#1250). The auto-resume branch
+        # never sets dedupe_key, so `is_duplicate` stays False there and its
+        # own marker-based dedupe (below) is unaffected.
+        if is_duplicate:
+            return
 
         repo_token = _token_for_repo(t.repository)
         if not repo_token:
