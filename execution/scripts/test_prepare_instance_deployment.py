@@ -782,6 +782,30 @@ else: raise SystemExit(93)
                 self.assertEqual(self.execute(manifest=bad).returncode, 2)
                 self.assertFalse((self.context / "gate-ran").exists())
 
+    def test_version_two_web_zero_changes_keeps_exact_raw_bytes(self):
+        self.manifest["version"] = 2
+        self.manifest.pop("idle_changes")
+        self.manifest["input_changes"] = []
+        self.manifest["input_toml"] = {
+            "before_sha256": hashlib.sha256(self.raw.read_bytes()).hexdigest(),
+            "after_sha256": hashlib.sha256(self.raw.read_bytes()).hexdigest(),
+        }
+        self.evidence["inventory"][0]["config"]["services"][0].update(
+            {"autostop": False, "min_machines_running": 1}
+        )
+        self.manifest["profile"]["source_static_config_sha256"] = digest(
+            stable_source(self.evidence["inventory"][0]["config"])
+        )
+        self.manifest["profile"]["saved_config_after_sha256"] = digest(
+            self.evidence["saved"]
+        )
+        result = self.execute()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.output / "fly.toml").read_bytes(), self.raw.read_bytes())
+        self.assertEqual(
+            json.loads((self.output / "prepared.json").read_text())["config_edits"], []
+        )
+
     def test_reconciliation_raw_and_rendered_hash_drift_refuse(self):
         self.reconciliation()
         self.raw.write_bytes(
