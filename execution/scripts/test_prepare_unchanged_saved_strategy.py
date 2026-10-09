@@ -151,6 +151,26 @@ class UnchangedSavedStrategyCLI(unittest.TestCase):
         self.evidence["provider_saved_json"]["env"]["SCOPE"] = "unselected"
         self.refused(phase="after")
 
+    def test_selected_descriptor_cannot_be_relaxed(self):
+        self.select()
+        self.manifest["saved_command_metadata"]["path"] = "/unselected"
+        self.refused()
+
+    def test_selected_saved_digests_cannot_diverge(self):
+        self.select()
+        self.manifest["profile"]["saved_config_after_sha256"] = "0" * 64
+        self.refused()
+
+    def test_version_three_present_before_is_not_reinterpreted(self):
+        self.select()
+        self.manifest["version"] = 3
+        self.manifest["saved_command_metadata"].update(
+            {"before_present": False, "before": None}
+        )
+        self.refused()
+        self.after_phase()
+        self.refused(phase="after")
+
     def test_unsupported_present_shapes_never_select_another_version(self):
         self.select()
         for value in (
