@@ -36,7 +36,9 @@ WHAT IS REFUSED (would put file content into context):
     credential path. Also `env`,
     `printenv`, a bare `set` dump, or `declare -p`/`export -p`/`typeset -p`
     AFTER sourcing one (a source alone does not print anything; the dump
-    does). Also base64/xxd/od/hexdump/strings against a credential path —
+    does). `env` counts as a dump only when no program operand follows its
+    options and assignments: `env -u NAME <command>` runs the command and
+    prints nothing. Also base64/xxd/od/hexdump/strings against a credential path —
     encoding the bytes is still exfiltrating them into context. Also an
     interpreter's inline program (`python3 -c`, `perl -e`, `ruby -e`,
     `node -e`) whose source text NAMES a credential path — this hook cannot
@@ -99,6 +101,7 @@ crashes the harness is worse than either.
 
 import json
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -441,8 +444,244 @@ _PROC_ENVIRON_RE = re.compile(r"/proc/[^\s'\"]*?/environ\b")
 _COMMAND_START = r"(?<![A-Za-z0-9_./-])"
 _COMMAND_END = r"(?![A-Za-z0-9_./-])"
 _BIN_PATH = r"(?:/(?:usr/)?bin/)?"
-_PRINTENV_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}printenv{_COMMAND_END}")
-_ENV_RE = re.compile(rf"{_COMMAND_START}{_BIN_PATH}env{_COMMAND_END}")
+# `env` and `printenv` are matched under ANY directory prefix, not only the
+# two canonical bin directories: `//usr/bin/env`, `/usr/bin/../bin/env`,
+# `./printenv` and a Homebrew or Nix path all run the same dump, and the
+# narrower `_BIN_PATH` let them through after a credential source once the
+# post-source check stopped using the loose word match (security review of
+# ateles#1346, finding ent_a447f6f9062e19f3454278de). The prefix stops at
+# shell syntax, quotes, `$` and `=`, and a `:` may neither precede nor
+# appear in it, so a URL such as `https://host/env` is not read as a path.
+_PATHED_COMMAND_START = r"(?<![A-Za-z0-9_./:-])"
+_ANY_PATH = r"(?:[^\s;&|<>()`'\"$:=]*/)?"
+_PRINTENV_RE = re.compile(rf"{_PATHED_COMMAND_START}{_ANY_PATH}printenv{_COMMAND_END}")
+_ENV_RE = re.compile(rf"{_PATHED_COMMAND_START}{_ANY_PATH}env{_COMMAND_END}")
+# The bare name and the two canonical bin paths count wherever they appear,
+# exactly as on main. Any OTHER path counts only in command position: the
+# any-prefix match above otherwise read an ordinary path ARGUMENT such as
+# `ls config/env` or `git diff -- src/env` as an `env` invocation and refused
+# it as an ambient dump with no credential source at all (ux and arch review
+# of ateles#1346, round 2).
+_CANONICAL_ENV_WORD_RE = re.compile(r"(?:/(?:usr/)?bin/)?(?:env|printenv)")
+_ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+# Programs known to take a path operand only as data: they never run it,
+# and a path argument such as `ls config/env` is not an invocation. This is
+# an ALLOWLIST on purpose. A first version listed the runners instead, and a
+# runner list can never be complete (`mise exec`, `gosu`, `bundle exec`,
+# `$R` holding `sudo`); every program not listed here, including one named
+# through a variable or substitution, puts the path in command position and
+# refuses (self-review of this change). Programs that print their operands
+# (`ls`, `realpath`) are safe here because handing their output to anything
+# but a pure consumer is refused separately (`_pathed_env_output_may_run`).
+# `git` and `python3` are admitted only in their argument-only forms (`_git_is_argument_only`, `python3 -m venv`),
+# and `rg` only without `--pre`/`--hostname-bin`. Programs with an option
+# that runs a separate-word operand (`tar --use-compress-program`, `zip
+# -TT`, `git grep -O`, `vim '+!cmd'`) are left out, and so are `cp`, `mv`
+# and `ln`, which can put the binary under a name this match cannot see and
+# run it later in the same command (third and fourth self-review of this
+# change).
+_ARGUMENT_ONLY_PROGRAMS = frozenset(
+    {
+        "ls", "cd", "pushd", "rm", "rmdir", "mkdir", "touch", "cat", "head",
+        "tail", "wc", "stat", "file", "du", "tree", "chmod", "chown", "chgrp",
+        "realpath", "readlink", "grep", "egrep", "fgrep", "diff", "cmp",
+        "unzip", "trash",
+    }
+)  # fmt: skip
+_GIT_ARGUMENT_ONLY_SUBCOMMANDS = frozenset(
+    {
+        "add", "rm", "mv", "diff", "log", "show", "status", "restore",
+        "checkout", "switch", "ls-files", "blame", "commit", "reset",
+    }
+)  # fmt: skip
+_GIT_OPTIONS_WITH_ARGUMENT = frozenset({"-C", "-c", "--git-dir", "--work-tree"})
+
+
+def _git_is_argument_only(words: list) -> bool:
+    """True when `git <words>` is a subcommand that takes paths as data.
+    `git bisect run ./env`, `git rebase -x ./env` and `git submodule foreach`
+    run an operand, so any subcommand not listed refuses."""
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        index += 2 if words[index] in _GIT_OPTIONS_WITH_ARGUMENT else 1
+    return index < len(words) and words[index] in _GIT_ARGUMENT_ONLY_SUBCOMMANDS
+
+
+_COMMAND_BOUNDARY_CHARS = frozenset(";&|(){}`\n")
+
+
+def _last_command_boundary(text: str) -> int:
+    """Index of the last command boundary in `text` that is not inside
+    quotes, or -1. Splitting on `;`/`(`/`|` inside a quoted argument let a
+    quoted operand hide the runner before it: `sudo -u "a(b" /x/env` read
+    as a path argument (self-review of this change). A `$(` or backtick
+    starts a command even inside double quotes."""
+    last = -1
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+        elif quote == '"':
+            if char == '"':
+                quote = ""
+            elif char == "`" or (char == "(" and text[index - 1 : index] == "$"):
+                last = index
+        elif char in "'\"":
+            quote = char
+        elif char in _COMMAND_BOUNDARY_CHARS:
+            last = index
+        index += 1
+    return last
+
+
+def _shlex_prefix_words(text: str):
+    """Split the text before a match into words, or None when it cannot be
+    parsed. The one unbalanced shape accepted is a quote that opens the
+    matched word itself (`ls "`, `sh -c "`), which becomes an empty last
+    word. Any other unbalanced quote means the segment began inside a quoted
+    string (the segment splitter cuts on `;` even there), so the words are
+    not trustworthy and the caller fails closed."""
+    try:
+        return shlex.split(text)
+    except ValueError:
+        pass
+    if text and text[-1] in "'\"":
+        try:
+            return shlex.split(text[:-1]) + [""]
+        except ValueError:
+            return None
+    return None
+
+
+def _in_command_position(segment: str, start: int) -> bool:
+    """True when the word starting at `start` is run as a command rather
+    than passed to one as an argument. Uncertain shapes return True, which
+    refuses: this only decides whether a non-canonical `env`/`printenv` path
+    is an invocation."""
+    pre = segment[:start]
+    # A completed expansion is a word, not a command boundary: `ls
+    # $(pwd)/env` and `ls ${D}/env` pass a path argument to `ls`.
+    pre = re.sub(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`", "X", pre)
+    boundary = _last_command_boundary(pre)
+    # Inside an open `$(`, backtick or process substitution the output may
+    # itself be run (`$(ls ./env)`, `sh <(echo ./env)`), so refuse there.
+    if boundary >= 0 and (
+        pre[boundary] == "`"
+        or (pre[boundary] == "(" and pre[boundary - 1 : boundary] in ("$", "<", ">"))
+    ):
+        return True
+    text = pre[boundary + 1 :]
+    words = _shlex_prefix_words(text)
+    if words is None:
+        return True
+    # When the match is not preceded by whitespace, the last word is the
+    # start of the matched word itself (`"$D"/env`, `X/env`), not a program.
+    # A value attached with `=` (`git -c core.pager=./env`, `--opt=./env`)
+    # may be a program another tool runs, so that refuses.
+    if words and text and not text[-1].isspace():
+        if "=" in words[-1]:
+            return True
+        words = words[:-1]
+    while True:
+        while words and _ASSIGNMENT_WORD_RE.fullmatch(words[0]):
+            words = words[1:]
+        if not words:
+            return True
+        command_word = words[0]
+        name = command_word.rsplit("/", 1)[-1]
+        if name == "env":
+            program = _env_program(shlex.join(words[1:]))
+            if program is None:
+                # env's program operand has not started before the match,
+                # so the match is that operand (or an option's argument).
+                return True
+            words = program
+            continue
+        # Only an exact bare command earns the argument-only exemption. An
+        # arbitrary executable such as `./ls` can have entirely different
+        # behaviour despite sharing an allowlisted basename.
+        if command_word == name and name in _ARGUMENT_ONLY_PROGRAMS:
+            return False
+        if command_word == name and name == "git":
+            return not _git_is_argument_only(words[1:])
+        if command_word == name and name == "rg":
+            return any(
+                word.split("=", 1)[0] in ("--pre", "--hostname-bin")
+                for word in words[1:]
+            )
+        if command_word == name and re.fullmatch(r"python[0-9.]*", name):
+            return words[1:3] != ["-m", "venv"]
+        return True
+
+
+def _env_word_matches(pattern: re.Pattern, segment: str):
+    """Yield the matches of `_ENV_RE`/`_PRINTENV_RE` that are invocations:
+    every bare or canonical match, and a non-canonical path only when it is
+    in command position."""
+    for match in pattern.finditer(segment):
+        if _CANONICAL_ENV_WORD_RE.fullmatch(match.group(0)) or _in_command_position(
+            segment, match.start()
+        ):
+            yield match
+
+
+def _printenv_invoked(segment: str, *, strict: bool = False) -> bool:
+    """True when `segment` invokes printenv.
+
+    Before a credential source, command-position filtering avoids treating a
+    harmless path argument as an invocation. After a source, argument position
+    is not a safety boundary: a function, later segment, or renamed runner can
+    execute it, so every match fails closed.
+    """
+    matches = (
+        _PRINTENV_RE.finditer(segment)
+        if strict
+        else _env_word_matches(_PRINTENV_RE, segment)
+    )
+    return next(matches, None) is not None
+
+
+# A later pipeline stage, or a file written and then run, can execute a
+# path an earlier stage only printed: `ls ./env | xargs -I{} {}`, `ls ./env
+# |& sh`, `ls ./env > x; sh x`. Each segment is judged alone, so this is
+# checked across the whole command. Like the argument allowlist, it lists
+# what is SAFE: every stage after a pipe must start with a pure consumer
+# (a runner list missed `| nice sh`, `| { sh; }` and `| awk
+# '{system($0)}'`, third self-review of this change).
+_PIPE_CONSUMERS = frozenset(
+    {"wc", "head", "tail", "grep", "egrep", "fgrep", "sort", "uniq", "cut", "tr"}
+)
+_PIPE_STAGE_RE = re.compile(r"(?<!\|)\|&?(?!\|)\s*([^|;&\n)]*)")
+_STDOUT_TO_FILE_RE = re.compile(r">>?\s*(?!&|/dev/null(?![^\s;&|)]))\S")
+
+
+def _pathed_env_output_may_run(command: str) -> bool:
+    """True when `command` names a non-canonical `env`/`printenv` path and
+    also pipes into a stage that is not a pure consumer, or writes stdout to
+    a file."""
+    if not any(
+        not _CANONICAL_ENV_WORD_RE.fullmatch(match.group(0))
+        for pattern in (_ENV_RE, _PRINTENV_RE)
+        for match in pattern.finditer(command)
+    ):
+        return False
+    if _STDOUT_TO_FILE_RE.search(command):
+        return True
+    for stage in _PIPE_STAGE_RE.finditer(command):
+        words = _shlex_prefix_words(stage.group(1)) or [""]
+        while len(words) > 1 and _ASSIGNMENT_WORD_RE.fullmatch(words[0]):
+            words = words[1:]
+        if words[0].rsplit("/", 1)[-1] not in _PIPE_CONSUMERS:
+            return True
+    return False
+
+
 _SERVICE_ENV_RE = re.compile(
     rf"{_COMMAND_START}{_BIN_PATH}launchctl\s+(?:print|getenv){_COMMAND_END}"
     rf"|{_COMMAND_START}{_BIN_PATH}systemctl\s+"
@@ -525,51 +764,292 @@ def _pgrep_reads_full_command(segment: str) -> bool:
 
 
 def _env_dumps_ambient(segment: str) -> bool:
-    """True when `env` has no program operand and therefore prints values."""
-    match = _ENV_RE.search(segment)
-    if not match:
-        return False
-    tail = segment[match.end() :].lstrip()
-    if not tail:
+    """True when ANY `env` invocation in `segment` has no program operand
+    and therefore prints values.
+
+    `env -u NAME <command>`, `env -i <command>`, and `env VAR=1 <command>`
+    run the command and print nothing themselves, so they are not dumps
+    (the swarm's standard `env -u GITHUB_TOKEN -u GH_TOKEN gh ...` form).
+    Every occurrence is checked, not only the first: `env -u X env` runs a
+    second, bare `env` as its program, and that one dumps."""
+    return any(
+        _env_program(segment[match.end() :]) is None
+        for match in _env_word_matches(_ENV_RE, segment)
+    )
+
+
+# Programs that can print the environment they inherit when `env` hands it
+# to them: a second `env`/`printenv`, awk (its program is positional and can
+# walk ENVIRON), or a shell/interpreter given an inline program. After a
+# credential source, `env -u X <one of these>` is refused even though env
+# itself prints nothing; before the ent_32394756032dd7a59e9311b6 fix every
+# post-source `env` was refused, and the common dumping shapes should not
+# become reachable through the narrowing (self-review finding, `env -u X
+# bash -c set`). This is a denylist, so it is not complete: a wrapper such as
+# `env -u X nice bash -c set` still passes, exactly as the unwrapped
+# `nice bash -c set` does after a source on main. Judging every post-source
+# program by capability, with or without `env`, is follow-up task
+# ent_4c0f949eeafbca174819e22f.
+_ENV_DUMPING_PROGRAMS = frozenset({"env", "printenv", "awk", "gawk", "mawk", "nawk"})
+_INLINE_PROGRAM_INTERPRETERS = re.compile(
+    r"^(?:sh|bash|zsh|dash|ksh|python[0-9.]*|perl|ruby|node|nodejs)$"
+)
+_INLINE_PROGRAM_LONG_FLAGS = frozenset({"--command", "--eval", "--print"})
+# The short-flag letters that take an inline program, per interpreter, and
+# the flags whose attached argument must not be read as more letters
+# (`perl -Mstrict`, `python3 -Wignore`). Checking `c`/`e`/`E`/`p` for every
+# interpreter refused `python3 -E script.py` (which IGNORES the environment),
+# `bash -p script.sh` and `perl -Mstrict x.pl` (ux and qa review of
+# ateles#1346, round 2).
+_INLINE_PROGRAM_LETTERS = (
+    (re.compile(r"(?:sh|bash|zsh|dash|ksh)$"), "c", ""),
+    (re.compile(r"python[0-9.]*$"), "c", "WXQ"),
+    (re.compile(r"perl$"), "eE", "MImx"),
+    (re.compile(r"ruby$"), "e", "Ir"),
+    (re.compile(r"(?:node|nodejs)$"), "ep", "r"),
+)
+
+
+def _is_inline_program_flag(interpreter: str, word: str) -> bool:
+    """True for a flag that hands `interpreter` an inline program: the
+    separate `-c`/`-e` forms, combined short flags (`bash -lc`, `sh -xc`,
+    `perl -pe`, `perl -E`, `node -p`), and the long `--eval`/`--print`/
+    `--command` forms. Matching exact words only let the combined forms
+    through (qa and security review of ateles#1346, round 1)."""
+    if word.split("=", 1)[0] in _INLINE_PROGRAM_LONG_FLAGS:
         return True
+    if not word.startswith("-") or word.startswith("--") or len(word) < 2:
+        return False
+    for pattern, letters, attached_argument in _INLINE_PROGRAM_LETTERS:
+        if pattern.match(interpreter):
+            if word[1] in attached_argument:
+                return False
+            return bool(set(word[1:]) & set(letters))
+    return False
+
+
+def _env_dumps_after_source(segment: str) -> bool:
+    """Stricter than `_env_dumps_ambient`, for a segment that follows a
+    credential source: also refuse an `env` whose program can itself print
+    the inherited environment (see `_ENV_DUMPING_PROGRAMS`). Argument-position
+    exemptions are deliberately unavailable here: after sourcing, indirect
+    execution makes an apparent data operand unsafe."""
+    for match in _ENV_RE.finditer(segment):
+        program = _env_program(segment[match.end() :])
+        if program is None:
+            return True
+        name = program[0].rsplit("/", 1)[-1]
+        if name in _ENV_DUMPING_PROGRAMS:
+            return True
+        if _INLINE_PROGRAM_INTERPRETERS.match(name) and any(
+            _is_inline_program_flag(name, word) for word in program[1:]
+        ):
+            return True
+    return False
+
+
+def _shlex_words(tail: str):
+    """Split an `env` invocation's tail into words, or None if it cannot be
+    parsed. The tail is tried as-is first: stripping quotes up front turned
+    `env -u X gh pr view -q '.a, .b'` into an unbalanced string, and an
+    unparseable tail fails closed, so a harmless command was refused. Only
+    when the raw tail does not parse is a trailing quote dropped, which is
+    the closing quote of a wrapper such as `sh -c "env -u X cmd"`."""
+    for candidate in (tail, tail.rstrip("'\"")):
+        try:
+            return shlex.split(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+# A shell redirection word: `2>/dev/null`, `>&2`, `>>log`, `<in`, or a bare
+# operator (`>`, `2>`, `>>`) whose target is the NEXT word. Neither is a
+# program operand: `env -u X 2>/dev/null` runs nothing and prints the
+# environment (self-review finding on this change).
+_REDIRECTION_RE = re.compile(r"^[0-9]*(?:>>?|<<?|>&|<&)(.*)$")
+
+
+def _env_program(tail: str):
+    """Return the words of the program `env` runs (the program first), or
+    None when this `env` invocation runs no program and so prints the
+    environment. Unparseable input returns None: this is a fail-closed
+    decision about whether values reach context."""
+    tail = tail.lstrip()
+    if not tail:
+        return None
     # A closing shell delimiter ends the nested invocation; anything after
     # it belongs to the outer command, not to `env` as a program operand.
     # This is the distinction missed by parsing `echo "$(env)" trailing` as
     # though `trailing` were the program run by env.
     if tail[0] in ")]}'\"`":
-        return True
-    tail = tail.strip().strip("'\"")
-    try:
-        words = shlex.split(tail)
-    except ValueError:
-        return True
+        return None
+    words = _shlex_words(tail.strip())
+    if words is None:
+        return None
+    # A `)` or backtick closes the command substitution `env` runs inside,
+    # so words after it are the OUTER command's, never env's program:
+    # `echo "$(env -u X) trailing"` dumps, whatever `trailing` is.
+    for position, word in enumerate(words):
+        cut = min((word.find(c) for c in ")`" if c in word), default=-1)
+        if cut >= 0:
+            words = words[:position] + ([word[:cut]] if word[:cut] else [])
+            break
+    operands = []
     index = 0
+    while index < len(words):
+        redirection = _REDIRECTION_RE.match(words[index])
+        if redirection:
+            # A bare operator's target is the following word.
+            index += 1 if redirection.group(1) else 2
+            continue
+        operands.append(words[index])
+        index += 1
+    index = 0
+    options_ended = False
     no_argument_options = {"-i", "--ignore-environment", "-0", "--null"}
     argument_options = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
-    while index < len(words):
-        word = words[index]
-        if word == "--":
-            return index + 1 >= len(words)
-        if word in no_argument_options:
-            index += 1
-            continue
-        if word in argument_options:
-            index += 2
-            if index > len(words):
-                return True
-            continue
+    while index < len(operands):
+        word = operands[index]
+        # `env -- A=1` still reads A=1 as an assignment and runs nothing, so
+        # `--` ends option parsing only, never assignment parsing.
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
             index += 1
             continue
-        if word.startswith("-"):
-            return True
+        if not options_ended:
+            if word == "--":
+                options_ended = True
+                index += 1
+                continue
+            if word in no_argument_options:
+                index += 1
+                continue
+            if word in argument_options:
+                index += 2
+                if index > len(operands):
+                    return None
+                continue
+            if word.startswith("-"):
+                return None
+        return operands[index:]
+    return None
+
+
+def _lexically_resolves_to_git(command_word: str) -> bool | None:
+    """Classify a command word without consulting the filesystem.
+
+    Git may be installed below any prefix, and redundant separators or
+    parent traversal do not change the executable's final path component.
+    Dynamic command words cannot be classified safely at hook time.
+    """
+    if command_word == "git":
+        return True
+    if any(marker in command_word for marker in ("$", "`", "*", "?", "[")):
+        return None
+    if "/" not in command_word:
         return False
-    return True
+    normalized = posixpath.normpath(command_word)
+    return posixpath.basename(normalized) == "git"
+
+
+def _has_executable_git_config(words: list[str]) -> bool:
+    """Return whether words carry a Git config key that names a command."""
+    for index, word in enumerate(words):
+        if word == "-c" and index + 1 < len(words):
+            config = words[index + 1]
+        elif word.startswith("-c") and len(word) > 2:
+            config = word[2:]
+        else:
+            continue
+        key, separator, _value = config.partition("=")
+        if separator and (
+            key.lower().startswith("alias.") or key.lower() == "core.pager"
+        ):
+            return True
+    return False
+
+
+def _git_config_post_source(segment: str) -> tuple[bool, str]:
+    """Inspect Git configuration values that Git executes after a source.
+
+    `alias.*` values beginning with `!` are shell commands and `core.pager`
+    values are pager commands. Return whether either command dumps the
+    environment, plus a copy of the Git invocation with every parsed `-c`
+    operand masked so the generic strict matcher judges only the remaining
+    shell command. This is intentionally structural: arbitrary config values
+    containing the word `env` are data, not executable commands.
+    """
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        # A malformed Git command carrying an executable config value is an
+        # uninspectable safety field. The generic matcher cannot distinguish
+        # the config value from Git's later operands, so deny rather than let
+        # the parse error erase the executable sink.
+        if re.search(r"(?:^|\s)(?:[^\s;|&]*/)?git(?:/+)?\s", segment) and re.search(
+            r"(?:^|\s)-c(?:\s+)?(?:alias\.[^=\s]+|core\.pager)=",
+            segment,
+            re.IGNORECASE,
+        ):
+            return True, segment
+        return False, segment
+    while words and _ASSIGNMENT_WORD_RE.fullmatch(words[0]):
+        words = words[1:]
+    if not words:
+        return False, segment
+    git_command = _lexically_resolves_to_git(words[0])
+    if git_command is None:
+        return (_has_executable_git_config(words[1:]), segment)
+    if not git_command:
+        return False, segment
+
+    masked = list(words)
+    index = 1
+    while index < len(words):
+        config_index = None
+        config = None
+        if words[index] == "-c":
+            if index + 1 >= len(words):
+                return False, segment
+            config_index = index + 1
+            config = words[config_index]
+            index += 2
+        elif words[index].startswith("-c") and len(words[index]) > 2:
+            config_index = index
+            config = words[index][2:]
+            index += 1
+        else:
+            index += 1
+            continue
+
+        key, separator, value = config.partition("=")
+        if not separator:
+            continue
+        key = key.lower()
+        executable = None
+        if key.startswith("alias.") and value.lstrip().startswith("!"):
+            executable = value.lstrip()[1:].lstrip()
+        elif key == "core.pager":
+            executable = value.lstrip()
+        if executable and (
+            _env_dumps_after_source(executable)
+            or _printenv_invoked(executable, strict=True)
+        ):
+            return True, segment
+
+        prefix = (
+            "-c"
+            if config_index == index - 1 and words[config_index].startswith("-c")
+            else ""
+        )
+        masked[config_index] = f"{prefix}{key}=CONFIG_VALUE"
+
+    return False, shlex.join(masked)
 
 
 def _ambient_process_or_service_hit(segment: str) -> str | None:
     """Return the ambient-output entrance that could expose credentials."""
-    if _PRINTENV_RE.search(segment) or _env_dumps_ambient(segment):
+    if _printenv_invoked(segment) or _env_dumps_ambient(segment):
         return "ambient environment dump"
     if _SERVICE_ENV_RE.search(segment):
         return "service environment dump"
@@ -1073,6 +1553,9 @@ def check_bash(command: str):
         if hit:
             return hit
 
+    if _pathed_env_output_may_run(joined):
+        return "ambient environment dump"
+
     for segment in _split_segments(command):
         normalized = " ".join(segment.split())
         if not normalized:
@@ -1080,7 +1563,12 @@ def check_bash(command: str):
         if _is_text_bearing(normalized):
             continue
 
-        hit = _ambient_process_or_service_hit(normalized)
+        git_config_dump = False
+        post_source_segment = normalized
+        if sourced_a_credential:
+            git_config_dump, post_source_segment = _git_config_post_source(normalized)
+
+        hit = _ambient_process_or_service_hit(post_source_segment)
         if hit:
             return hit
 
@@ -1097,8 +1585,17 @@ def check_bash(command: str):
         # the sanctioned idiom) does not match `_VAR_PRINT_RE` at all, since
         # that pattern requires echo/printf/cat<<< specifically — a plain
         # program invocation with no such leader is unaffected.
+        #
+        # `env` is judged by its program operand, not a bare word match:
+        # `env -u NAME <command>` runs a command and prints nothing, and the
+        # word match refused it after every credential source (the swarm's
+        # standard `export GITHUB_TOKEN=$(env -u GITHUB_TOKEN -u GH_TOKEN gh
+        # auth token)` form, 2026-09-29). `_env_dumps_after_source` still
+        # refuses an env whose program can itself print the environment.
         if sourced_a_credential and (
-            _ENV_DUMP_RE.search(normalized)
+            git_config_dump
+            or _printenv_invoked(post_source_segment, strict=True)
+            or _env_dumps_after_source(post_source_segment)
             or _BARE_SET_DUMP_RE.search(normalized)
             or _DECLARE_DUMP_RE.search(normalized)
             or _VAR_PRINT_RE.search(normalized)
