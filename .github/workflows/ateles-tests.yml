@@ -39,6 +39,8 @@ on:
       - "lib/github_app_token.py"
       - "lib/test_github_app_token.py"
       - "execution/scripts/**"
+      # The scripts fixture imports the complete-profile preparation core.
+      - "execution/lib/instance_profile_guard.py"
       # Rule-delivery evals: the offline harness tests import the real
       # policy_skill_renderer (already covered by lib/daemon_runtime/**), so a
       # renderer change that alters what a channel delivers re-runs them.
