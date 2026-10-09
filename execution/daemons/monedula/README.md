@@ -182,6 +182,21 @@ gate fails closed on every uncertain case:
 | `TELEGRAM_ALLOWED_USER_ID` unset | `channel_error` + escalation, no reply accepted |
 | `TELEGRAM_ALLOWED_USER_ID` non-numeric | `channel_error` + escalation |
 | Message with no sender id (channel post) | ignored |
+| `TELEGRAM_CHAT_ID` unset or non-numeric | `channel_error` + escalation |
+
+**Both pollers enforce this, not just the payment path.** The rule above is
+applied by `telegram_poll_approval` *and* by the legacy
+`telegram_long_poll_once`, through the same `_resolve_operator_principal`.
+The legacy poller kept the original `if allowed_user_id and ...` form after the
+first fix landed, which left the identical bypass standing one caller away — a
+guard binds to the call site it is written at, not to the vulnerability, so
+fixing the path that was audited does not fix the one that was not.
+
+`TELEGRAM_CHAT_ID` is resolved the same way. It previously went through a bare
+`int()`, so a malformed value raised an uncaught `ValueError` out of the poll
+loop — killing the run *before* it could escalate, which meant the one
+mechanism built to make a broken gate loud was skipped by exactly the
+misconfiguration that should have triggered it.
 
 Absence of a configured principal is the **absence of authority, never a
 wildcard**. Before this was enforced, an unset value skipped the identity check
