@@ -13,13 +13,16 @@ credential or operator record is read.
 from __future__ import annotations
 
 import http.server
+import importlib.util
 import json
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -95,6 +98,343 @@ def _run(command: str, event: dict, *, env: dict[str, str] | None = None):
 
 
 class TestCodexRuleDeliveryEffect(unittest.TestCase):
+    def test_lifecycle_receipts_are_bounded_pruned_and_fail_open(self) -> None:
+        module_path = REPO_ROOT / ".claude" / "hooks" / "rule_index_state.py"
+        spec = importlib.util.spec_from_file_location("rule_index_state", module_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        state = {
+            module.LIFECYCLE_RECEIPTS_KEY: {
+                "malformed": {"recorded_at": "not-a-timestamp"}
+            },
+            "rule_index_lifecycle_receipt": {
+                "revision": "legacy",
+                "content_hash": "payload",
+                "recorded_at": 1_000,
+            },
+        }
+        legacy_event = {
+            "hook_event_name": "SessionStart",
+            "turn_id": "legacy",
+        }
+        self.assertFalse(
+            module.lifecycle_delivery_is_duplicate(
+                state, legacy_event, "payload", now=1_000
+            )
+        )
+
+        events = []
+        for index in range(module._MAX_LIFECYCLE_RECEIPTS + 5):
+            event = {
+                "hook_event_name": "SessionStart",
+                "turn_id": f"turn-{index}",
+            }
+            events.append(event)
+            module.record_lifecycle_delivery(state, event, "payload", now=1_000 + index)
+
+        receipts = state[module.LIFECYCLE_RECEIPTS_KEY]
+        self.assertEqual(len(receipts), module._MAX_LIFECYCLE_RECEIPTS)
+        self.assertFalse(
+            module.lifecycle_delivery_is_duplicate(
+                state, events[0], "payload", now=1_040
+            )
+        )
+        self.assertTrue(
+            module.lifecycle_delivery_is_duplicate(
+                state, events[-1], "payload", now=1_040
+            )
+        )
+        self.assertFalse(
+            module.lifecycle_delivery_is_duplicate(
+                state,
+                events[-1],
+                "payload",
+                now=1_000 + len(events) + module._DUPLICATE_WINDOW_SECONDS,
+            )
+        )
+        self.assertEqual(state[module.LIFECYCLE_RECEIPTS_KEY], {})
+
+    def test_session_state_lock_imports_without_fcntl_on_windows(self) -> None:
+        """Native Windows has no ``fcntl`` module.  Exercise the Windows
+        backend in an isolated interpreter so an unconditional POSIX import
+        fails before any Codex hook can deliver its rules."""
+        probe = r"""
+import importlib.abc
+import json
+import os
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+class BlockFcntl(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "fcntl":
+            raise ModuleNotFoundError("fcntl is unavailable on native Windows")
+        return None
+
+calls = []
+msvcrt = types.ModuleType("msvcrt")
+msvcrt.LK_LOCK = 1
+msvcrt.LK_UNLCK = 2
+msvcrt.locking = lambda fd, mode, size: calls.append((mode, size))
+sys.modules["msvcrt"] = msvcrt
+sys.modules.pop("fcntl", None)
+sys.meta_path.insert(0, BlockFcntl())
+sys.path.insert(0, os.fspath(Path(sys.argv[1]) / ".claude" / "hooks"))
+
+import _session_integrity
+
+with tempfile.TemporaryDirectory() as state_dir:
+    os.environ["ATELES_SESSION_STATE_DIR"] = state_dir
+    with _session_integrity.state_lock("windows-lock-probe"):
+        pass
+
+print(json.dumps(calls))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", probe, os.fspath(REPO_ROOT)],
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [[1, 1], [2, 1]])
+
+    def test_project_and_user_hooks_deliver_each_lifecycle_revision_once(self) -> None:
+        """Codex composes project and user hook files and launches matching
+        commands concurrently.  The two intentional carriers must produce one
+        developer-context payload for one lifecycle event, while a later
+        lifecycle revision still gets a fresh payload."""
+        with _FakeNeotoma() as fake, tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex-home"
+            installed_file = codex_home / "hooks.json"
+            installed = subprocess.run(
+                [
+                    os.fspath(Path(os.sys.executable)),
+                    os.fspath(INSTALLER),
+                    "--out",
+                    os.fspath(installed_file),
+                ],
+                text=True,
+                capture_output=True,
+                cwd=REPO_ROOT,
+                timeout=20,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            installed_hooks = json.loads(installed_file.read_text(encoding="utf-8"))
+            installed_commands = {
+                event: next(
+                    hook["command"]
+                    for group in installed_hooks["hooks"][event]
+                    for hook in group.get("hooks", [])
+                    if "session_rule_index.py" in hook["command"]
+                )
+                for event in ("SessionStart", "SubagentStart")
+            }
+            installed_prompt = next(
+                hook["command"]
+                for group in installed_hooks["hooks"]["UserPromptSubmit"]
+                for hook in group.get("hooks", [])
+                if "session_rule_delivery.py" in hook["command"]
+            )
+            project_commands = {
+                event: next(
+                    command
+                    for command in _hook_commands(event)
+                    if "session_rule_index.py" in command
+                )
+                for event in ("SessionStart", "SubagentStart")
+            }
+            project_prompt = next(
+                command
+                for command in _hook_commands("UserPromptSubmit")
+                if "session_rule_delivery.py" in command
+            )
+
+            fake.handler.rows = [
+                {
+                    "entity_id": "ent_codex_dedupe_canary",
+                    "snapshot": {
+                        "title": "CODEX_DEDUPE_CANARY_72B1",
+                        "rule": "CODEX_DEDUPE_CANARY_72B1 reaches context once.",
+                        "applies_when": "always",
+                        "scope": "global",
+                        "status": "active",
+                        "rule_kind": "mandatory",
+                    },
+                }
+            ]
+            transcript = Path(tmp) / "rollout.jsonl"
+            transcript.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+            env = {
+                "NEOTOMA_BASE_URL": fake.base_url,
+                "CODEX_HOME": os.fspath(codex_home),
+            }
+
+            cases = (
+                (
+                    "SessionStart",
+                    {
+                        "session_id": "codex-root-dedupe-session",
+                        "hook_event_name": "SessionStart",
+                        "source": "startup",
+                        "transcript_path": os.fspath(transcript),
+                        "model": "test-model",
+                        "cwd": os.fspath(REPO_ROOT),
+                    },
+                ),
+                (
+                    "SubagentStart",
+                    {
+                        "session_id": "codex-child-dedupe-session",
+                        "turn_id": "turn-3",
+                        "agent_id": "agent-1",
+                        "agent_type": "worker",
+                        "hook_event_name": "SubagentStart",
+                        "transcript_path": os.fspath(transcript),
+                        "model": "test-model",
+                        "cwd": os.fspath(REPO_ROOT),
+                    },
+                ),
+            )
+            for event_name, event in cases:
+                with self.subTest(event=event_name):
+                    commands = (
+                        project_commands[event_name],
+                        installed_commands[event_name],
+                    )
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        results = list(
+                            pool.map(
+                                lambda command: _run(command, event, env=env), commands
+                            )
+                        )
+                    self.assertTrue(
+                        all(result.returncode == 0 for result in results),
+                        [result.stderr for result in results],
+                    )
+                    deliveries = [
+                        result.stdout
+                        for result in results
+                        if "CODEX_DEDUPE_CANARY_72B1" in result.stdout
+                    ]
+                    self.assertEqual(
+                        len(deliveries),
+                        1,
+                        "the same project+user hook event was delivered more than once",
+                    )
+
+            interleaved_session = "codex-interleaved-dedupe-session"
+            event_a = {
+                **cases[0][1],
+                "session_id": interleaved_session,
+                "turn_id": "turn-a",
+            }
+            event_b = {
+                **cases[0][1],
+                "session_id": interleaved_session,
+                "turn_id": "turn-b",
+            }
+            interleaved_results = (
+                _run(project_commands["SessionStart"], event_a, env=env),
+                _run(project_commands["SessionStart"], event_b, env=env),
+                _run(installed_commands["SessionStart"], event_a, env=env),
+                _run(installed_commands["SessionStart"], event_b, env=env),
+            )
+            self.assertTrue(
+                all(result.returncode == 0 for result in interleaved_results),
+                [result.stderr for result in interleaved_results],
+            )
+            self.assertTrue(
+                all(
+                    "CODEX_DEDUPE_CANARY_72B1" in result.stdout
+                    for result in interleaved_results[:2]
+                ),
+                [result.stdout for result in interleaved_results],
+            )
+            self.assertTrue(
+                all(
+                    "CODEX_DEDUPE_CANARY_72B1" not in result.stdout
+                    for result in interleaved_results[2:]
+                ),
+                [result.stdout for result in interleaved_results],
+            )
+
+            transcript.write_text(
+                '{"type":"session_meta"}\n{"type":"turn_context"}\n',
+                encoding="utf-8",
+            )
+            later = _run(
+                project_commands["SessionStart"],
+                {
+                    **cases[0][1],
+                    "source": "compact",
+                },
+                env=env,
+            )
+            self.assertEqual(later.returncode, 0, later.stderr)
+            self.assertIn("CODEX_DEDUPE_CANARY_72B1", later.stdout)
+
+            prompt_session = "codex-prompt-dedupe-session"
+            baseline = _run(
+                project_commands["SessionStart"],
+                {
+                    **cases[0][1],
+                    "session_id": prompt_session,
+                },
+                env=env,
+            )
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            fake.handler.rows.append(
+                {
+                    "entity_id": "ent_codex_delta_dedupe_canary",
+                    "snapshot": {
+                        "title": "CODEX_DELTA_DEDUPE_CANARY_91C4",
+                        "rule": "CODEX_DELTA_DEDUPE_CANARY_91C4 reaches context once.",
+                        "applies_when": "always",
+                        "scope": "global",
+                        "status": "active",
+                        "rule_kind": "mandatory",
+                    },
+                }
+            )
+            prompt_event = {
+                "session_id": prompt_session,
+                "turn_id": "turn-4",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Continue.",
+                "transcript_path": os.fspath(transcript),
+                "model": "test-model",
+                "cwd": os.fspath(REPO_ROOT),
+            }
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                prompt_results = list(
+                    pool.map(
+                        lambda command: _run(command, prompt_event, env=env),
+                        (project_prompt, installed_prompt),
+                    )
+                )
+            self.assertTrue(
+                all(result.returncode == 0 for result in prompt_results),
+                [result.stderr for result in prompt_results],
+            )
+            delta_deliveries = [
+                result.stdout
+                for result in prompt_results
+                if "CODEX_DELTA_DEDUPE_CANARY_91C4" in result.stdout
+            ]
+            self.assertEqual(
+                len(delta_deliveries),
+                1,
+                "the same project+user prompt delta was delivered more than once",
+            )
+
     def test_installed_user_hooks_render_live_policy_outside_repo(self) -> None:
         with _FakeNeotoma() as fake, tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "codex-home" / "hooks.json"
@@ -162,15 +502,13 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CODEX_INSTALLED_CANARY_E31A", result.stdout)
 
-    def test_installed_hook_keys_state_on_checkout_not_cwd_without_claude_project_dir(
+    def test_installed_hook_keys_codex_state_on_shared_home_not_cwd(
         self,
     ) -> None:
         """Codex never sets CLAUDE_PROJECT_DIR. Without it, session state must
-        still land under the installed checkout's own .claude/.session_state/
-        (resolved from the hook script's file location) — never under
-        whatever directory the hook happened to be invoked from, which would
-        make the delta-delivery dedup this test guards silently unstable
-        across invocations from different cwds."""
+        land in the shared Codex home — never under the invoking cwd or one
+        installed checkout — so project- and user-level hook copies see the
+        same delivery receipts."""
         with _FakeNeotoma() as fake, tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "codex-home" / "hooks.json"
             installed = subprocess.run(
@@ -216,6 +554,7 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                         "session_id": "no-project-dir-session",
                         "hook_event_name": "SessionStart",
                         "source": "startup",
+                        "model": "test-model",
                         "cwd": os.fspath(outside),
                     }
                 ),
@@ -225,34 +564,26 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                 env={
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
                     "NEOTOMA_BASE_URL": fake.base_url,
+                    "CODEX_HOME": os.fspath(out.parent),
                     # Deliberately no CLAUDE_PROJECT_DIR — the real Codex shape.
                 },
                 timeout=20,
             )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("CODEX_NO_PROJECT_DIR_CANARY_5F2C", result.stdout)
-        state_file = (
-            REPO_ROOT
-            / ".claude"
-            / ".session_state"
-            / "no-project-dir-session.json"
-        )
-        try:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("CODEX_NO_PROJECT_DIR_CANARY_5F2C", result.stdout)
+            state_file = (
+                out.parent / ".ateles" / "session_state" / "no-project-dir-session.json"
+            )
             self.assertTrue(
                 state_file.exists(),
-                f"expected session state at {state_file}, keyed on the "
-                "installed checkout, not on the outside-repo cwd the hook "
-                "was invoked from",
+                f"expected shared Codex session state at {state_file}",
             )
             self.assertFalse(
                 (outside / ".claude" / ".session_state").exists(),
                 "session state must not be keyed on cwd when "
                 "CLAUDE_PROJECT_DIR is unset",
             )
-        finally:
-            if state_file.exists():
-                state_file.unlink()
 
     def test_configured_session_start_command_renders_live_policy(self) -> None:
         commands = _hook_commands("SessionStart")
@@ -407,9 +738,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         self,
     ) -> None:
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = [
@@ -470,9 +799,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         injected nothing) — this is the reproduction of Falco's non-blocking
         finding, now closed."""
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = [
@@ -521,9 +848,7 @@ class TestCodexPointOfUseRuleInjection(unittest.TestCase):
         path must not match — same "affirmative shape, not blanket
         apply_patch coverage" posture as sibling_repo_worktree_guard.py."""
         command = next(
-            c
-            for c in _hook_commands("PreToolUse")
-            if "rule_injection_gate.py" in c
+            c for c in _hook_commands("PreToolUse") if "rule_injection_gate.py" in c
         )
         with _FakeNeotoma() as fake:
             fake.handler.rows = []
