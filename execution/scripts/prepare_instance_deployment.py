@@ -15,7 +15,7 @@ from execution.lib.instance_profile_guard import (
     Refused,
     _deployment_argv,
     installed_config_projection,
-    check_projected_http_checks,
+    check_complete_projection,
     prepare,
     render_normalized_toml,
     require,
@@ -46,7 +46,9 @@ def run(args):
     source = next(
         m for m in evidence["inventory"] if m["id"] == manifest["profile"]["source_id"]
     )
-    check_projected_http_checks(result["normalized"], source["config"])
+    projection = check_complete_projection(
+        result["normalized"], source["config"], manifest["tool_version"]
+    )
     gate = manifest["packaging_gate"]
     require(
         isinstance(gate, dict) and set(gate) == {"path", "sha256", "inputs"},
@@ -173,6 +175,7 @@ def run(args):
             "skips": 0,
             "result_sha256": hashlib.sha256(gate_run.stderr.encode()).hexdigest(),
         }
+        result["machine_projection"] = projection
         result["tool_version"] = version
         result["phase"] = args.phase
         result["scope"] = (

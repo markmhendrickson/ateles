@@ -492,6 +492,304 @@ def check_projected_http_checks(saved, source_config):
     return True
 
 
+# Source: flyctl v0.4.112 ca63052e, Config.Flatten/updateMachineConfig and
+# launchInputForUpdate. This intentionally supports a closed ordinary app shape.
+# Unselected advanced inputs refuse; a separately pinned pair is not equality.
+FLY_PROJECTION_COMMIT = "ca63052e2526df073e9a1a4ad57bcbe5892f0543"
+
+
+def check_complete_projection(saved, source_config, tool_version):
+    """Require the supported installed Fly update to preserve ALL static fields.
+
+    Input normalization happens elsewhere. This function neither corrects a
+    mismatching input nor learns authority from it. Native image/release changes
+    are the only fields omitted by stable_source; everything else is compared.
+    """
+    import copy
+
+    require(
+        isinstance(tool_version, str)
+        and re.fullmatch(
+            r"fly v0\.4\.112 [^ ]+ Commit: "
+            + FLY_PROJECTION_COMMIT
+            + r" BuildDate: [^ ]+",
+            tool_version,
+        ),
+        "unsupported installed projection",
+    )
+    require(
+        isinstance(saved, dict)
+        and set(saved)
+        <= {
+            "app",
+            "primary_region",
+            "env",
+            "http_service",
+            "vm",
+            "restart",
+            "mounts",
+            "deploy",
+        },
+        "unsupported saved machine input",
+    )
+    require(isinstance(source_config, dict), "invalid machine projection")
+    # Fields the installed update explicitly preserves are copied below. Unknown
+    # native fields/containers/standbys refuse rather than guessing their effects.
+    require(
+        set(source_config)
+        <= {
+            "image",
+            "env",
+            "init",
+            "guest",
+            "metadata",
+            "mounts",
+            "services",
+            "metrics",
+            "checks",
+            "statics",
+            "files",
+            "restart",
+            "stop_config",
+            "schedule",
+            "auto_destroy",
+            "dns",
+            "processes",
+            "rootfs",
+            "cache_drive",
+            "spot",
+            "size",
+            "disable_machine_autostart",
+        },
+        "unsupported native machine shape",
+    )
+    deploy = saved.get("deploy", {})
+    require(
+        isinstance(deploy, dict)
+        and set(deploy) <= {"release_command"}
+        and all(isinstance(v, str) for v in deploy.values()),
+        "unsupported deploy input",
+    )
+    expected = copy.deepcopy(source_config)
+    env = saved.get("env", {})
+    require(
+        isinstance(env, dict)
+        and all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()),
+        "unsupported environment input",
+    )
+    region = saved.get("primary_region", "")
+    require(isinstance(region, str), "unsupported primary region")
+    expected["env"] = {**env, "FLY_PROCESS_GROUP": "app"}
+    if region:
+        expected["env"]["PRIMARY_REGION"] = region
+    metadata = expected.get("metadata", {})
+    require(isinstance(metadata, dict), "unsupported native metadata")
+    expected["metadata"] = {
+        **metadata,
+        "fly_flyctl_version": "0.4.112",
+        "fly_platform_version": "v2",
+        "fly_process_group": "app",
+    }
+    init = expected.get("init", {})
+    require(
+        isinstance(init, dict)
+        and set(init)
+        <= {
+            "cmd",
+            "entrypoint",
+            "exec",
+            "swap_size_mb",
+            "tty",
+            "kernel_args",
+        },
+        "unsupported native init",
+    )
+    for field in ("cmd", "entrypoint", "exec", "swap_size_mb"):
+        init.pop(field, None)
+    expected["init"] = init
+    # updateMachineConfig clears these when no selected saved input supplies them.
+    for field in ("metrics", "checks", "statics", "files", "stop_config"):
+        expected.pop(field, None)
+    service = saved.get("http_service")
+    require(
+        isinstance(service, dict)
+        and set(service)
+        <= {
+            "internal_port",
+            "force_https",
+            "auto_stop_machines",
+            "auto_start_machines",
+            "min_machines_running",
+            "processes",
+            "concurrency",
+            "checks",
+        },
+        "unsupported HTTP service input",
+    )
+    require(
+        service.get("processes", ["app"]) in ([], ["app"]),
+        "unsupported process selection",
+    )
+    require(
+        type(service.get("internal_port")) is int
+        and 0 < service["internal_port"] <= 65535,
+        "unsupported service port",
+    )
+    force = service.get("force_https", False)
+    require(type(force) is bool, "unsupported HTTPS flag")
+    projected = {
+        "protocol": "tcp",
+        "internal_port": service["internal_port"],
+        "ports": [
+            {"port": 80, "handlers": ["http"]},
+            {"port": 443, "handlers": ["http", "tls"]},
+        ],
+        "force_instance_key": None,
+    }
+    if force:
+        projected["ports"][0]["force_https"] = True
+    for inp, native in (
+        ("auto_stop_machines", "autostop"),
+        ("auto_start_machines", "autostart"),
+        ("min_machines_running", "min_machines_running"),
+    ):
+        if inp in service:
+            value = service[inp]
+            if inp == "auto_stop_machines":
+                require(
+                    type(value) is bool or value in ("off", "stop", "suspend"),
+                    "unknown idle projection",
+                )
+                value = (value == "stop") if value in ("off", "stop") else value
+            elif inp == "auto_start_machines":
+                require(type(value) is bool, "invalid start projection")
+            else:
+                require(type(value) is int and value >= 0, "invalid minimum projection")
+            projected[native] = value
+    if "concurrency" in service:
+        concurrency = service["concurrency"]
+        require(
+            isinstance(concurrency, dict)
+            and set(concurrency) <= {"type", "hard_limit", "soft_limit"}
+            and concurrency.get("type", "") in ("", "connections", "requests")
+            and all(
+                type(v) is int and v >= 0 for k, v in concurrency.items() if k != "type"
+            ),
+            "unsupported concurrency",
+        )
+        projected["concurrency"] = {k: v for k, v in concurrency.items() if v}
+    check_projected_http_checks(saved, source_config)
+    checks = copy.deepcopy(service.get("checks", []))
+    for check in checks:
+        check["type"] = "http"
+        if "headers" in check:
+            headers = check.pop("headers")
+            if headers:
+                check["headers"] = [
+                    {"name": k, "values": [v]} for k, v in sorted(headers.items())
+                ]
+    if checks:
+        projected["checks"] = checks
+    expected["services"] = [projected]
+    # Go map iteration changes header ordering but not header identity/value.
+    actual = copy.deepcopy(source_config)
+    for native in actual.get("services", []):
+        for check in native.get("checks", []):
+            if "headers" in check:
+                check["headers"] = sorted(check["headers"], key=lambda h: h["name"])
+    vm = saved.get("vm", [])
+    require(isinstance(vm, list) and len(vm) <= 1, "unsupported compute selection")
+    if vm:
+        guest = vm[0]
+        require(
+            isinstance(guest, dict)
+            and set(guest) <= {"memory", "memory_mb", "cpu_kind", "cpus", "processes"}
+            and guest.get("processes", ["app"]) in ([], ["app"]),
+            "unsupported compute input",
+        )
+        require(
+            not ("memory" in guest and "memory_mb" in guest), "ambiguous compute memory"
+        )
+        memory = 256  # native DefaultVMSize=shared-cpu-1x
+        if "memory" in guest:
+            require(isinstance(guest["memory"], str), "unsupported memory encoding")
+            match = re.fullmatch(r"([1-9][0-9]*)(MB|GB)", guest["memory"], re.I)
+            require(match is not None, "unsupported memory encoding")
+            memory = int(match[1]) * (1024 if match[2].upper() == "GB" else 1)
+        if "memory_mb" in guest:
+            require(
+                type(guest["memory_mb"]) is int and guest["memory_mb"] > 0,
+                "invalid compute memory",
+            )
+            memory = guest["memory_mb"]
+        cpus, kind = guest.get("cpus", 1), guest.get("cpu_kind", "shared")
+        require(
+            type(cpus) is int and cpus > 0 and kind in ("shared", "performance"),
+            "unsupported compute CPU",
+        )
+        expected["guest"] = {"cpu_kind": kind, "cpus": cpus, "memory_mb": memory}
+    restart = saved.get("restart", [])
+    require(
+        isinstance(restart, list) and len(restart) <= 1, "unsupported restart selection"
+    )
+    expected.pop("restart", None)
+    if restart:
+        rule = restart[0]
+        require(
+            isinstance(rule, dict)
+            and set(rule) <= {"policy", "retries", "processes"}
+            and rule.get("processes", ["app"]) in ([], ["app"])
+            and rule.get("policy") in ("always", "on-failure", "never"),
+            "unsupported restart input",
+        )
+        expected["restart"] = {
+            "policy": "no" if rule["policy"] == "never" else rule["policy"]
+        }
+        if "retries" in rule:
+            require(
+                type(rule["retries"]) is int and rule["retries"] >= 0,
+                "invalid restart retries",
+            )
+            if rule["retries"]:
+                expected["restart"]["max_retries"] = rule["retries"]
+    mounts = saved.get("mounts", [])
+    old = source_config.get("mounts", [])
+    require(
+        isinstance(mounts, list)
+        and isinstance(old, list)
+        and len(mounts) == len(old)
+        and len(mounts) <= 1,
+        "mount replacement unsupported",
+    )
+    expected.pop("mounts", None)
+    if mounts:
+        mount = mounts[0]
+        require(
+            isinstance(mount, dict)
+            and set(mount) == {"source", "destination"}
+            and all(isinstance(v, str) and v for v in mount.values())
+            and isinstance(old[0], dict)
+            and old[0].get("name")
+            and old[0]["name"] == mount["source"]
+            and old[0].get("path") == mount["destination"]
+            and isinstance(old[0].get("volume"), str)
+            and old[0]["volume"],
+            "unproved mount identity/path",
+        )
+        expected["mounts"] = copy.deepcopy(old)
+        for field in ("extend_threshold_percent", "add_size_gb", "size_gb_limit"):
+            expected["mounts"][0].pop(field, None)
+    require(
+        digest(stable_source(expected)) == digest(stable_source(actual)),
+        "saved input changes complete admitted machine profile",
+    )
+    return {
+        "source_commit": FLY_PROJECTION_COMMIT,
+        "complete_static_match": True,
+        "supported_shape": "single-app-http-image-only",
+    }
+
+
 def _deployment_argv(manifest, image):
     """Internal serialization; the preparation CLI owns all preceding gates."""
     command = manifest["command"]

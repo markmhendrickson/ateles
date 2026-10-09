@@ -13,7 +13,11 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from execution.lib.instance_profile_guard import digest, installed_config_projection  # noqa: E402
+from execution.lib.instance_profile_guard import (  # noqa: E402
+    digest,
+    installed_config_projection,
+    stable_source,
+)
 
 spec = importlib.util.spec_from_file_location(
     "owned_fixtures", ROOT / "execution/scripts/test_instance_profile_guard.py"
@@ -63,6 +67,58 @@ class LocalCLI(unittest.TestCase):
                 (self.context / "Dockerfile").read_bytes()
             ).hexdigest()
         }
+        # A real Fly JSON shape; the executable below only supplies local parsing.
+        self.evidence["saved"].update(
+            {
+                "primary_region": "fixture-region",
+                "env": {"SCOPE": "development"},
+                "vm": [{"cpu_kind": "shared", "cpus": 1, "memory": "512MB"}],
+                "restart": [{"policy": "always"}],
+            }
+        )
+        self.evidence["saved"]["http_service"].update(
+            {
+                "internal_port": 8080,
+                "force_https": True,
+                "auto_start_machines": True,
+            }
+        )
+        current = self.evidence["inventory"][0]["config"]
+        current.update(
+            {
+                "init": {},
+                "guest": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 512},
+                "restart": {"policy": "always"},
+                "env": {
+                    "SCOPE": "development",
+                    "FLY_PROCESS_GROUP": "app",
+                    "PRIMARY_REGION": "fixture-region",
+                },
+            }
+        )
+        current["metadata"].update(
+            {"fly_flyctl_version": "0.4.112", "fly_platform_version": "v2"}
+        )
+        current["services"][0].update(
+            {
+                "protocol": "tcp",
+                "internal_port": 8080,
+                "force_instance_key": None,
+                "ports": [
+                    {"port": 80, "handlers": ["http"], "force_https": True},
+                    {"port": 443, "handlers": ["http", "tls"]},
+                ],
+            }
+        )
+        self.tool_version = (
+            "fly v0.4.112 owned/fixture Commit: "
+            "ca63052e2526df073e9a1a4ad57bcbe5892f0543 "
+            "BuildDate: 2026-10-05T16:49:57Z"
+        )
+        self.manifest["tool_version"] = self.evidence["tool_version"] = (
+            self.tool_version
+        )
+        self.rebind_profiles()
         self.bin = self.root / "bin"
         self.bin.mkdir()
         fly = self.bin / "fly"
@@ -76,7 +132,7 @@ class LocalCLI(unittest.TestCase):
 from pathlib import Path
 with open(os.environ['OWNED_CALLS'],'a') as log: log.write(json.dumps(sys.argv[1:])+'\\n')
 a=sys.argv[1:]
-if a==['version']: print('owned-tool')
+if a==['version']: print(os.environ['OWNED_TOOL_VERSION'])
 elif a==['deploy','--help']: print('--app --config --image --primary-region --ha --strategy --only-machines --update-only --no-public-ips --deploy-retries --exclude-machines --skip-release-command')
 elif a[:3]==['config','show','--local']:
  if os.environ.get('OWNED_MUTATE'): Path(os.environ['OWNED_MUTATE']).write_text('changed during parser')
@@ -89,14 +145,31 @@ else: raise SystemExit(93)
         fly.chmod(0o700)
         self.raw = self.root / "raw.toml"
         self.raw.write_text(
-            'app="owned-fixture"\n[http_service]\nauto_stop_machines="off"\nmin_machines_running=1\n'
+            'app="owned-fixture"\nprimary_region="fixture-region"\n'
+            '[env]\nSCOPE="development"\n'
+            "[http_service]\ninternal_port=8080\nforce_https=true\n"
+            'auto_start_machines=true\nauto_stop_machines="off"\nmin_machines_running=1\n'
+            '[[vm]]\nmemory="512MB"\ncpu_kind="shared"\ncpus=1\n'
+            '[[restart]]\npolicy="always"\n'
         )
         self.env = {
             **os.environ,
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "OWNED_CALLS": str(self.root / "calls"),
+            "OWNED_TOOL_VERSION": self.tool_version,
         }
         self.output = self.root / "prepared"
+
+    def rebind_profiles(self):
+        profile = self.manifest["profile"]
+        profile["source_static_config_sha256"] = digest(
+            stable_source(self.evidence["inventory"][0]["config"])
+        )
+        profile["saved_config_before_sha256"] = digest(self.evidence["saved"])
+        normalized = copy.deepcopy(self.evidence["saved"])
+        normalized["http_service"]["auto_stop_machines"] = "stop"
+        normalized["http_service"]["min_machines_running"] = 0
+        profile["saved_config_after_sha256"] = digest(normalized)
 
     def execute(self, manifest=None, evidence=None, optimized=False):
         manifest = manifest or self.manifest
@@ -300,6 +373,159 @@ else: raise SystemExit(93)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.context / "gate-ran").exists())
         self.assertTrue((self.output / "prepared.json").exists())
+
+    def test_complete_supported_mount_headers_restart_and_preserved_fields(self):
+        from execution.lib.instance_profile_guard import check_complete_projection
+
+        saved = copy.deepcopy(self.evidence["saved"])
+        saved["http_service"]["auto_stop_machines"] = "stop"
+        saved["http_service"]["min_machines_running"] = 0
+        current = copy.deepcopy(self.evidence["inventory"][0]["config"])
+        saved["restart"] = [{"policy": "on-failure", "retries": 10}]
+        current["restart"] = {"policy": "on-failure", "max_retries": 10}
+        saved["mounts"] = [{"source": "owned", "destination": "/data"}]
+        current["mounts"] = [
+            {
+                "name": "owned",
+                "path": "/data",
+                "volume": "owned-id",
+                "encrypted": True,
+                "size_gb": 3,
+            }
+        ]
+        saved["http_service"]["concurrency"] = {"type": "requests", "soft_limit": 20}
+        current["services"][0]["concurrency"] = {"type": "requests", "soft_limit": 20}
+        saved["http_service"]["checks"] = [
+            {"path": "/health", "headers": {"Z-Owned": "last", "A-Owned": "first"}}
+        ]
+        current["services"][0]["checks"] = [
+            {
+                "path": "/health",
+                "type": "http",
+                "headers": [
+                    {"name": "Z-Owned", "values": ["last"]},
+                    {"name": "A-Owned", "values": ["first"]},
+                ],
+            }
+        ]
+        current.update(
+            {
+                "dns": {"skip_registration": True},
+                "rootfs": {"size_gb": 1},
+                "processes": [{"cmd": ["owned"]}],
+                "auto_destroy": False,
+            }
+        )
+        before = copy.deepcopy([saved, current])
+        self.assertTrue(check_complete_projection(saved, current, self.tool_version))
+        self.assertEqual([saved, current], before)
+        for mutation in ("path", "identity", "extensions", "retries", "headers"):
+            bad = copy.deepcopy(saved)
+            changed = copy.deepcopy(current)
+            if mutation == "path":
+                bad["mounts"][0]["destination"] = "/other"
+            if mutation == "identity":
+                bad["mounts"][0]["source"] = "other"
+            if mutation == "extensions":
+                changed["mounts"][0]["add_size_gb"] = 1
+            if mutation == "retries":
+                bad["restart"][0]["retries"] = 5
+            if mutation == "headers":
+                bad["http_service"]["checks"][0]["headers"]["A-Owned"] = "changed"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                check_complete_projection(bad, changed, self.tool_version)
+        bad = copy.deepcopy(saved)
+        bad["restart"][0]["max_retries"] = bad["restart"][0].pop("retries")
+        with self.assertRaises(ValueError):
+            check_complete_projection(bad, current, self.tool_version)
+
+    def test_separately_pinned_environment_and_vm_drift_refuse(self):
+        for field in ("environment", "guest"):
+            with self.subTest(field=field):
+                saved = copy.deepcopy(self.evidence["saved"])
+                raw = self.raw.read_text()
+                if field == "environment":
+                    self.evidence["saved"]["env"]["SCOPE"] = "production"
+                    self.raw.write_text(
+                        raw.replace('SCOPE="development"', 'SCOPE="production"')
+                    )
+                else:
+                    self.evidence["saved"]["vm"][0]["memory"] = "8GB"
+                    self.raw.write_text(raw.replace('memory="512MB"', 'memory="8GB"'))
+                self.rebind_profiles()
+                result = self.execute()
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.output.exists())
+                self.assertFalse((self.context / "gate-ran").exists())
+                self.evidence["saved"] = saved
+                self.raw.write_text(raw)
+                self.rebind_profiles()
+
+    def test_each_unselected_mutating_input_refuses_before_gate(self):
+        for field, value in {
+            "processes": {"app": "different"},
+            "experimental": {"exec": ["different"]},
+            "checks": {"new": {"type": "http"}},
+            "metrics": {"port": 9090},
+            "statics": [{"guest_path": "/app", "url_prefix": "/"}],
+            "files": [{"guest_path": "/app", "raw_value": "different"}],
+            "kill_signal": "SIGKILL",
+            "swap_size_mb": 100,
+            "machine_config": "{}",
+            "container": [],
+            "build": {"compose": "x"},
+            "compute": [{"size": "performance-1x"}],
+            "services": [],
+        }.items():
+            with self.subTest(field=field):
+                self.evidence["saved"][field] = value
+                self.rebind_profiles()
+                self.assertEqual(self.execute().returncode, 2)
+                self.assertFalse(self.output.exists())
+                self.assertFalse((self.context / "gate-ran").exists())
+                del self.evidence["saved"][field]
+                self.rebind_profiles()
+
+    def test_full_service_restart_init_and_mount_projection_refusals(self):
+        current = self.evidence["inventory"][0]["config"]
+        mutations = [
+            ("restart", {"policy": "on-failure", "max_retries": 10}),
+            ("init", {"exec": ["different"]}),
+            ("mounts", [{"name": "owned", "path": "/data", "volume": "owned"}]),
+            ("metrics", {"port": 9090}),
+            ("checks", {"new": {"port": 8080}}),
+            ("files", [{"guest_path": "/app", "raw_value": "different"}]),
+            ("statics", [{"guest_path": "/app", "url_prefix": "/"}]),
+            ("stop_config", {"signal": "SIGKILL"}),
+            ("standbys", ["other"]),
+            ("containers", []),
+        ]
+        for field, value in mutations:
+            with self.subTest(field=field):
+                old = copy.deepcopy(current)
+                current[field] = value
+                self.rebind_profiles()
+                self.assertEqual(self.execute().returncode, 2)
+                self.assertFalse((self.context / "gate-ran").exists())
+                current.clear()
+                current.update(old)
+                self.rebind_profiles()
+        for field, value in {
+            "protocol": "udp",
+            "internal_port": 9090,
+            "ports": [{"port": 80, "handlers": ["http"]}],
+            "concurrency": {"type": "requests", "hard_limit": 100},
+            "force_instance_key": "different",
+        }.items():
+            with self.subTest(field=field):
+                old = copy.deepcopy(current)
+                current["services"][0][field] = value
+                self.rebind_profiles()
+                self.assertEqual(self.execute().returncode, 2)
+                self.assertFalse((self.context / "gate-ran").exists())
+                current.clear()
+                current.update(old)
+                self.rebind_profiles()
 
     def test_installed_encoding_projection_is_narrow(self):
         source = {
