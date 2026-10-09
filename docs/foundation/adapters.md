@@ -421,64 +421,167 @@ stale into a confident-looking value at exactly the moment the adapter stops rea
 
 ### What a reader of adapter-sourced state in the record may rely on
 
-**This question is open.** The rule above states what every observation carries; it does not state what a
-reader who is not a step may conclude from finding an artifact in the record. The operator asks whether the
-record should hold a stronger position for external state — whether state read from the record can be
-relied on to have incorporated everything the external system holds, so that no reader needs a
-supplementary read of its own. Four candidates, none ruled.
+**Ruled (decision 104, 2026-09-29, the operator's): a reader may rely on the record for what was read,
+when, and with what coverage, and on nothing more; every surface that presents adapter-sourced state
+carries that state's coverage and sourced time with it; and adapter-sourced material becomes typed
+entities and edges through a declared workflow step, never through the adapter.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Of the four candidates the question was opened
+with, the ruling takes the third and the fourth on top of the first — the scoped claim, made explicit — and
+rejects the second, a completeness guarantee. The three rules it settles are stated first; the question,
+the candidates, and the argument that decided among them follow as the record of the ruling.
+
+**The rules in this section.**
+
+- [The record holds the entries read, and coverage says which](#the-record-holds-the-entries-read-and-coverage-says-which).
+- [Coverage and sourced time travel with adapter-sourced state to every surface that presents it](#coverage-and-sourced-time-travel-with-adapter-sourced-state-to-every-surface-that-presents-it).
+- [Adapter-sourced material is incorporated by a declared step, bounded by what it names](#adapter-sourced-material-is-incorporated-by-a-declared-step-bounded-by-what-it-names).
+
+#### The record holds the entries read, and coverage says which
+
+**The record never holds every entry an external system holds; it holds the ones read, and coverage says
+which.** This is the one home of that sentence; `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of`
+applies it and points here. What a reader may conclude from finding an adapter-sourced artifact or
+observation in the record is exactly what the sourcing rule above makes every observation carry: that the
+external system held it, as the adapter read it, at the sourced time, within the coverage of the read that
+produced it. What a reader may conclude from **not** finding one is narrower still: that no read within the
+coverage the record shows returned it — never that the external system holds no such entry. A reader who
+needs more than that is making a claim about the external system's present state, and the design's answer
+to that reader is unchanged: a step declares the freshness it requires and hydration enforces the
+declaration (`gates_and_workflows.md#declaration-batch-projection`), and a reader outside a step derives
+what it needs from coverage or asks for the read through a step. Nothing in the record states completeness
+for an artifact kind, as a field, a flag, or a reading of an absence, because nothing establishes it
+(principle 5) and an entry outside the coverage read is unknown, never a conclusion that it is absent
+(principle 7); a stored form of it would be the maintained state principle 11 forbids.
+
+#### Coverage and sourced time travel with adapter-sourced state to every surface that presents it
+
+**Any surface presenting adapter-sourced state carries that state's coverage and sourced time with it, so
+a reader is told what was read rather than having to know to ask.** A surface here is any read of the
+record rendered for a reader who is not a step: the operator's view of work, a rendered page, a query result
+handed to a person, a channel message that carries adapter-sourced state. The coverage and sourced time it
+carries are derived at the read from the observations' provenance, as freshness is derived above, and
+never a field the surface keeps: a surface that stored them would be the second copy decision 37 refuses,
+stale in the direction that matters. A surface that persists once composed — a channel message sent, a page
+rendered — makes its read at composition: it carries coverage and sourced time as of that moment and states
+when it was composed, so a reader sees how old the picture is rather than taking a sent copy for a live
+read.
+
+**Where the requirement binds first.** The rule's home is this section; it binds first on the operator's view of work
+(`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`,
+decision 37): that view is a read of the record rendered for a principal, and this rule states what such a
+read owes the reader when what it renders came through an adapter. The console that realises the
+operator's view is specified against it, and so is any other read surface; the design does not state a
+second requirement per surface, because each is the same read.
+
+**What fails when a surface omits it** (principle 1). A surface that renders adapter-sourced state without
+its coverage and sourced time is **non-conforming**, and the failure is observable where the suite can see
+it: the surface's read of an adapter-sourced value, through the record proxy, with no read of the
+provenance that yields its coverage and sourced time (`conformance_suite.md`, AD-44). What the omission
+costs is the gap the sourcing rule exists to close, reopened at the last step before a person: a truncated
+page, a rate-limited partial answer, and a system with nothing to report all render as the same picture, and
+a reader reads "no reply arrived" where the record holds only "no read since the sourced time".
+
+#### Adapter-sourced material is incorporated by a declared step, bounded by what it names
+
+**Adapter-sourced material becomes typed entities and edges — the `contact` and `company` it names, and the
+edges between them and the artifact — through a declared workflow step, never through the adapter, bounded
+by what the material names, excluding Art. 9 special categories for third parties, and riding the
+interpretation provenance chain.** Four bounds, each one the corpus already states for a neighbouring case:
+
+- **Who performs it.** A step in a declared workflow, with a step owner and a verdict, and never the
+  adapter's mapping. `workflows.md#meeting-processing` is the model: its `extract` step turns a transcript
+  into participants as `contact` entities under the people-data rule, and the transcript's source reached the
+  record without any adapter creating a person. So `calendar.md#what-this-adapter-refuses` stands and is not
+  overruled: the calendar adapter still records an attendee as a reference where the record already holds a
+  `contact` and as an address otherwise, and creates a `contact` for nobody it merely observes. The adapter
+  translates; incorporation is a judgement, and a judgement belongs to a step whose verdict can be reviewed,
+  found wrong, and corrected (`#when-an-adapter-is-wrong` states why an adapter's error is the harder kind
+  to find).
+- **What it extends to.** What the material **names** — a sender, a recipient, a party named in the body, the
+  organisation a signature names — and nothing selected on relevance alone. What the material names is the
+  **ceiling**; the **obligation** is what the declared step's purpose selects within it, and within that
+  selection the step must incorporate — a step that signs having extracted nothing its purpose selects has
+  not done its work. So the purpose test `calendar.md#what-this-adapter-refuses` states in its first refusal,
+  that a person appearing once on someone else's invitation is not one of the operator's actual
+  relationships, stays compatible: a
+  calendar incorporation step's purpose may exclude that person although the material names them. This is decision 39's rule for
+  `link` (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`) applied to extraction: a
+  relevance-judged pull has no stopping rule and is purpose-blind, and a bound of "what might later matter"
+  would reopen that ruling rather than compose with it.
+- **What it never extends to.** Art. 9 special categories for a third party: the generous purpose under
+  which capture is ruled (`data_model.md#record-conventions`) does not reach them, and correspondence is
+  precisely where third-party material arrives. The step summarizes or omits such a disclosure, as
+  `meeting_processing`'s `extract` already does. And a person's recorded objection to further processing,
+  read at intake, binds every later step about that person, this one included (`workflows.md#intake`).
+- **How it is attributed.** Each extracted entity and edge links to the interpretation that produced it from
+  its source (`#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`), so a wrong
+  extraction is findable by provenance and corrected by a new interpretation rather than deleted. That is
+  about correcting an error; it does not limit a person's request to erase what is held about them, which
+  the record's own conventions govern.
+
+The rule makes **no completeness claim**: it states what the material read becomes, not whether the source
+was read in full, so the first rule's scope is untouched by it.
+
+#### The question, the candidates, and how the ruling decided among them
+
+**The question as opened (2026-09-09).** The sourcing rule above states what every observation carries; it
+did not state what a reader who is not a step may conclude from finding an artifact in the record. The
+operator asked whether the record should hold a stronger position for external state — whether state read
+from the record can be relied on to have incorporated everything the external system holds, so that no
+reader needs a supplementary read of its own. Four candidates were registered.
 
 The first three answer by settling what the record **claims** about what it holds. The fourth answers by
 changing what is **there to read** — leaving the claim exactly as it is and obliging that adapter-sourced
 material be incorporated into the graph as typed entities and edges, so that a reader who would not know to
-go looking finds the thing anyway. They are not alternatives in the same register, and an answer may well
-take one of the first three together with the fourth; the row states them side by side because each is a
-distinct answer to what a reader may rely on, and the fourth is the one that does not depend on the reader
+go looking finds the thing anyway. They are not alternatives in the same register, and the ruling takes the
+first with the third and the fourth together; the fourth is the one that does not depend on the reader
 knowing the question arises.
 
-**1. The scoped claim, made explicit.** What the design does today: the record states what was read and
-when, coverage bounds it, and a step declares the freshness it requires with hydration enforcing that
-declaration (`gates_and_workflows.md#declaration-batch-projection`). A reader needing a guarantee reads
-coverage and derives it. For: the record claims only what a mechanism establishes, and the guarantee
-composes with the declaration that already exists. Against: the guarantee exists per step and nowhere
-else. A reader outside a step — a person reading an entity, a query written for some other purpose — gets
-whatever the record happens to hold, and must know to read coverage and know how to interpret it. Nothing
-tells such a reader that the question arises.
+**1. The scoped claim, made explicit — taken, as the base.** What the design already did: the record states
+what was read and when, coverage bounds it, and a step declares the freshness it requires with hydration
+enforcing that declaration (`gates_and_workflows.md#declaration-batch-projection`). A reader needing a
+guarantee reads coverage and derives it. For: the record claims only what a mechanism establishes, and the
+guarantee composes with the declaration that already exists. Against, and the reason it was not enough on
+its own: the guarantee exists per step and nowhere else. A reader outside a step — a person reading an
+entity, a query written for some other purpose — gets whatever the record happens to hold, and must know to
+read coverage and know how to interpret it. Nothing told such a reader that the question arises. The third
+candidate is what closes that.
 
-**2. A completeness guarantee.** Adapter-sourced state in the record is complete for its artifact kind, so
-that no reader supplements it. Against, and this is the difficulty any argument for it must answer:
-completeness cannot be known without asking the external system, and asking is the read the guarantee
-exists to remove, so the record would state something no mechanism establishes — the shape principle 5
-refuses, and the shape `authority_model.md#grants` refuses again in the rule that a degraded read never
-synthesizes a value more permissive than success would have returned. It also has no stopping rule for an
-unbounded source: a mailbox and a recurring series both hold entries without end, which
+**2. A completeness guarantee — rejected.** Adapter-sourced state in the record would be complete for its
+artifact kind, so that no reader supplements it. Rejected on principles 5 and 11. Completeness cannot be
+known without asking the external system, and asking is the read the guarantee exists to remove, so the
+record would state something no mechanism establishes — the shape principle 5 refuses, and the shape
+`authority_model.md#grants` refuses again in the rule that a degraded read never synthesizes a value more
+permissive than success would have returned. It also has no stopping rule for an unbounded source: a
+mailbox and a recurring series both hold entries without end, which
 `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` already treats as the
 ordinary condition of every artifact kind rather than a defect to repair. And a stored flag carrying the
 guarantee is the maintained state principle 11 forbids, for the reason the freshness rule above gives.
 
-**3. Coverage surfaced at read.** Any surface presenting adapter-sourced state carries that state's
-coverage and sourced time with it, so a reader is told what was read rather than having to know to ask.
-For: a requirement on presentation rather than a new claim about the world, which closes the gap candidate
-1 leaves without asserting what nothing establishes; it is the same response
-`telegram.md#delivery-webhooks-long-polling-and-what-the-dedup-rule-keys-on` already gives to an
-irrecoverable coverage gap, making it legible rather than pretending it is absent. Against: the design
-states its requirements on writes, and this one binds read surfaces, so it must say what fails when a
-surface omits it (principle 1) and where that requirement lives.
+**3. Coverage surfaced at read — taken.** For: a requirement on presentation rather than a new claim about
+the world, which closes the gap candidate 1 leaves without asserting what nothing establishes; it is the same
+response `telegram.md#delivery-webhooks-long-polling-and-what-the-dedup-rule-keys-on` already gives to an
+irrecoverable coverage gap, making it legible rather than pretending it is absent. The objection registered
+against it was that the design states its requirements on writes, and this one binds read surfaces, so it
+had to say what fails when a surface omits it (principle 1) and where the requirement lives. The ruling
+answers both in the rule above: it binds first on the operator's view of work under decision 37, and a surface
+that omits it is non-conforming, with the omission observable as a read of the value without the read of its
+provenance.
 
-**4. Incorporation: adapter-sourced material becomes typed entities and edges, not only artifacts.** The
-record's claim is left as candidate 1 leaves it, and the obligation moves to what an adapter's material
-becomes once it is in the record. Capture without incorporation, on this reading, does not deliver what
-capture is for: a message held as an artifact with a body is captured, and the company and the people that
-message names are not queryable until something extracts them into typed entities with edges.
+**4. Incorporation — taken.** The record's claim is left as candidate 1 leaves it, and the obligation moves
+to what an adapter's material becomes once it is in the record. Capture without incorporation does not
+deliver what capture is for: a message held as an artifact with a body is captured, and the company and the
+people that message names are not queryable until something extracts them into typed entities with edges.
 
 The case that shows it is an archive of correspondence digested in full. It produces the message
-artifacts, and it also produces the `contact` and `company` entities the correspondence refers to — and those surface in
-contexts where correspondence is not the question at all: a step drafting a proposal, one checking who a
-payment is for, one judging whether a task concerns a party who has objected to being processed. None of
-those would think to read a mailbox, because none of them is doing mail work. That is the difference this
-candidate turns on. The first three all assume a reader who would go and read, reading more or well or
-badly; this one names work that is **structurally unavailable on demand**, because what is needed cannot be
-asked for by a reader who does not know it exists. The need is invisible from where the reader stands, so
-no occasion to read ever arises.
+artifacts, and it also produces the `contact` and `company` entities the correspondence refers to — and those
+surface in contexts where correspondence is not the question at all: a step drafting a proposal, one
+checking who a payment is for, one judging whether a task concerns a party who has objected to being
+processed. None of those would think to read a mailbox, because none of them is doing mail work. That is
+the difference this candidate turns on. The first three all assume a reader who would go and read, reading
+more or well or badly; this one names work that is **structurally unavailable on demand**, because what is
+needed cannot be asked for by a reader who does not know it exists. The need is invisible from where the
+reader stands, so no occasion to read ever arises.
 
 The supporting argument is invariant 1's. A retrieval that depends on someone remembering to make it
 mostly will not be made, and when it is, the result lands in that step's own context rather than in the
@@ -488,67 +591,75 @@ at the call site, and it applies to a retrieval no one is prompted to make with 
 
 **What it composes with.** `data_model.md#record-conventions` already rules capture generous by design,
 on the stated purpose under which a piece of context with no use today is the input to work not yet
-conceived. This candidate extends that from capture to incorporation, and it does so with **no completeness
+conceived. The ruling extends that from capture to incorporation, and it does so with **no completeness
 claim at all** — nothing is asserted about whether the archive was read in full, only about what the
 material read becomes — so principle 5 and the coverage rule are untouched by it. It is a claim about form
-rather than about extent, and it is independently testable in the way the other three are not: whether a
-digested archive produced typed entities with edges is a question a reader can ask of the record itself.
-The provenance machinery it would need is also already there, since `#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`
-binds an observation to the **interpretation** that produced it wherever a value was extracted rather than
-transcribed, which is exactly the chain an extracted entity would ride on.
+rather than about extent, and it is independently testable in the way the other candidates were not:
+whether a digested archive produced typed entities with edges is a question a reader can ask of the record
+itself. The provenance machinery it needs is already there, since
+`#what-the-record-supplies-and-what-an-adapter-therefore-never-builds` binds an observation to the
+**interpretation** that produced it wherever a value was extracted rather than transcribed, which is
+exactly the chain an extracted entity rides on.
 
-**What it costs, and what it owes.** Extraction is a judgement, judgements are wrong, and a wrongly
+**What it cost, and how the ruling paid it.** Extraction is a judgement, judgements are wrong, and a wrongly
 extracted entity is a durable false fact that later work reads as true — where a missing entity is only
-absent. So the obligation cannot be "extract everything", and naming its bound is part of what this
-candidate would have to settle rather than something to work out afterwards. Three things in the corpus
-already bound it and each is an objection this candidate must answer rather than a detail it inherits.
-`data_model.md#record-conventions` states that the generous purpose does **not** reach Art. 9 for a third
-party, and correspondence is precisely where third-party material arrives. `calendar.md#what-this-adapter-refuses`
-refuses the nearby shape outright for its own adapter, which records an attendee as a reference where the
-record already holds a `contact` and as an address otherwise, and creates a `contact` for nobody it merely
-observes — so this candidate either scopes its obligation to a step rather than to the adapter, as
-`workflows.md#meeting-processing` already does for a transcript, or it overrules that refusal and says so.
-And decision 39 ruled that `link` attaches what a task **names** and nothing on relevance alone
-(`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`), on the ground that a relevance-judged
-pull has no stopping rule and is purpose-blind; an incorporation obligation bounded by what the material
-names is consistent with that ruling, and one bounded by what might later matter reopens it.
+absent. So the obligation could not be "extract everything", and naming its bound was part of what the
+question had to settle. Three things in the corpus already bounded it, and each was an objection the
+candidate had to answer. `data_model.md#record-conventions` states that the generous purpose does **not**
+reach Art. 9 for a third party; the ruling excludes those categories. `calendar.md#what-this-adapter-refuses`
+refuses the nearby shape outright for its own adapter; the candidate could either scope its obligation to a
+step, as `workflows.md#meeting-processing` already does for a transcript, or overrule that refusal and say
+so — the ruling scopes it to a step, and the refusal stands. And decision 39 ruled that `link` attaches what
+a task **names** and nothing on relevance alone; an incorporation obligation bounded by what the material
+names is consistent with that ruling, and the ruling bounds it so.
 
-**A statement already made in passing, and its home.** The posture candidate 1 describes is asserted once
+**The one-home defect, settled.** Before the ruling, the posture candidate 1 describes was asserted once
 in the corpus, as an aside answering a different objection:
-`calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` states that the record
+`calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` stated that the record
 never holds every entry an external system holds, that it holds the ones read, and that coverage says
-which — and cites this section as where that rule lives. This section does not carry it: the rule above
-defines what an observation carries and stops there. So the claim is stated where it is not argued and
-cited to a home that does not hold it, which is the one-home defect principle 9 names. Whichever candidate
-is ruled, the sentence belongs in one place with an anchor a reader can be pointed at, and that placement
-is part of what this question settles rather than a tidy-up to do beside it.
+which — and cited as its home a section that carried only the definition of coverage, which is the one-home
+defect principle 9 names. The sentence now has one anchored home,
+`#the-record-holds-the-entries-read-and-coverage-says-which`, and `calendar.md` points at it.
 
-**What the question turns on, and what it is not.** Whether the record is the swarm's system of record for
-external state at all may be the crux rather than a framing of it. This corpus's position is that the
+**What the question turned on, and what it was not.** Whether the record is the swarm's system of record
+for external state at all was the crux rather than a framing of it. This corpus's position is that the
 record holds what the swarm decided and on what evidence, and is deliberately not a copy of a system it
 does not own — the source it keeps is not a second copy of what the external system currently holds, but
 the record of one read, at one time, with the coverage that read had (*What the record supplies*, below).
-Candidate 2 makes it the second thing, which is a different object with different obligations, and an
-argument for it has to take that on rather than treat it as a stronger version of what exists. Candidate 4
-does not touch that crux at all — it leaves the record the first thing and asks what the material read
-becomes once it is there — which is why it can be ruled alongside any of the first three. What this
-question is **not** is the cadence question
+Candidate 2 would have made it the second thing, which is a different object with different obligations;
+the ruling keeps it the first. Candidate 4 does not touch that crux at all — it leaves the record the first
+thing and asks what the material read becomes once it is there — which is why it could be ruled alongside
+the others. What this question is **not** is the cadence question
 (`#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`), which asks how
 external state reaches the record and is answered; nor the step's question, which
 `gates_and_workflows.md#declaration-batch-projection` answers by declaration and hydration. This one is
 about readers other than steps.
 
-**One asymmetry any answer must account for, stated here as an inference the corpus has not written
-down.** Reads and attributions are not equally recoverable. A read that fell outside a channel's retention
-is a coverage gap that a later read can sometimes close, and the design records it as a gap when it
-cannot. An inbound approval lost the same way is not recoverable at all by reading the system again: an
-approval is attributed to a principal and authorized against the required approvers
-(`telegram.md#what-this-document-refuses-and-why`), and a later read finding a changed state carries no
-such attribution. So a completeness claim over adapter-sourced state would be stronger for the artifacts a
-re-read can establish than for the decisions it cannot, and a candidate that does not distinguish them
-claims most where it is least supported. Whether that composition is a rule of this design or only an
-observation about two of its rules is itself unsettled, and is registered with the question rather than
-assumed by it.
+**One asymmetry, kept as an observation.** Reads and attributions are not equally recoverable. A read that
+fell outside a channel's retention is a coverage gap that a later read can sometimes close, and the design
+records it as a gap when it cannot. An inbound approval lost the same way is not recoverable at all by
+reading the system again: an approval is attributed to a principal and authorized against the required
+approvers (`telegram.md#what-this-document-refuses-and-why`), and a later read finding a changed state
+carries no such attribution. So a completeness claim over adapter-sourced state would be stronger for the
+artifacts a re-read can establish than for the decisions it cannot, and a candidate that did not distinguish
+them would claim most where it is least supported. The ruling makes no completeness claim, so the asymmetry
+does not bite on it. Whether the asymmetry is a rule of this design or only an observation about two of its
+rules is left unsettled, and stays registered with decision 104 as an observation rather than assumed by
+any rule.
+
+**Cost accepted.** A surface that presents adapter-sourced state carries more than the value — its coverage
+and sourced time beside it — so every read surface is denser than one that showed the value alone, and the
+console is specified against a requirement it cannot drop for brevity. And incorporation adds judgements to
+the record that can be wrong; the bounds above keep them to what the material names, and provenance keeps
+each one findable and correctable, but a wrongly extracted entity is still a false fact until a correction
+lands. **What this does not settle.** Which declared workflow carries the incorporation step for a given kind
+of material — correspondence, calendar events, a code host's comments — is that workflow's declaration, and
+this ruling states the rule such a step obeys rather than declaring one; the console's own specification is
+not written here; and the asymmetry above stays an observation. **What would reopen it.** A mechanism that
+establishes completeness for an artifact kind without the read the guarantee exists to remove — which would
+reopen candidate 2 on principle 5's own terms; or a class of material whose incorporation cannot be bounded
+by what it names without losing what capture is for, which would be a case for revisiting decision 39's
+rule as applied here.
 
 ### An artifact exists only once its external system's entry does, and the interval before that belongs to the action
 

@@ -1332,6 +1332,7 @@ An adapter records sourcing through provenance and never through bookkeeping of 
 distinguishable from a complete one.
 Without it a cut-short page and a system with nothing to report produce the same record.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event),
+[`adapters.md#the-record-holds-the-entries-read-and-coverage-says-which`](adapters.md#the-record-holds-the-entries-read-and-coverage-says-which),
 [`data_model.md#record-conventions`](data_model.md#record-conventions).
 **Never:** —
 **Not for:** coverage for test coverage; coverage as a completeness flag (it states the window asked and

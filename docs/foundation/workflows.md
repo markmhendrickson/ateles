@@ -712,7 +712,10 @@ to fails `classify` (`CLAUDE.md`, people-data processing).
 <!-- /rendered -->
 
 `extract` carries the people-data rule as its closing condition because the extraction is where a
-transcript's incidental disclosures would otherwise become durable profile fields. `deliver` is optional
+transcript's incidental disclosures would otherwise become durable profile fields. It is also the model
+decision 104 names for incorporating any adapter-sourced material into typed entities and edges: a declared
+step, never the adapter, bounded by what the material names and excluding Art. 9 categories for third
+parties (`adapters.md#adapter-sourced-material-is-incorporated-by-a-declared-step-bounded-by-what-it-names`). `deliver` is optional
 and creates tasks rather than sending, so that no recap reaches a participant without passing the
 outreach workflow's review and consent.
 
