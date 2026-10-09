@@ -54,7 +54,18 @@
         ]
       },
       {
-        "matcher": "^(Bash|apply_patch|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store)$",
+        "matcher": "^(Bash|exec_command|Read|Grep|Glob)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/credential_read_guard.py\"",
+            "timeout": 30,
+            "statusMessage": "Protecting credential content"
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|exec_command|apply_patch|mcp__neotoma__(correct|store|store_structured|publish_rendered_page)|mcp__mcpsrv_neotoma__(correct|store|store_structured|publish_rendered_page))$",
         "hooks": [
           {
             "type": "command",

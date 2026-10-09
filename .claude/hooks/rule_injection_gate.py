@@ -85,6 +85,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input  # noqa: E402
+from action_capabilities import classify_tool_call  # noqa: E402
 
 _HOOK_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _HOOK_DIR.parent.parent
@@ -98,6 +99,7 @@ _CATEGORY_RULE_IDS: dict[str, tuple[str, ...]] = {
     "policy_write": ("ent_1c0cbb99d2c8011358ff1dc3", "ent_82b64b6c4104843e43853666"),
     "harness_config": ("ent_c4d33237ff2d12b4aaec71af", "ent_663888501a290e9aaf60270c"),
     "advisory": ("ent_e774dddc392478472c3a84c6",),
+    "publication": ("ent_f67e021874c1e1595dbbe768",),
 }
 
 _HARNESS_CONFIG_PATH_RE = re.compile(
@@ -379,46 +381,13 @@ def matched_categories(tool_name: str, tool_input: dict) -> list[str]:
     both an `agent_grant` and an `agent_policy` row in the same request) —
     every matching category's rules are injected, not just the first.
     """
-    cats: list[str] = []
-    touched = _neotoma_entity_types_touched(tool_name, tool_input)
-    if touched & _GRANT_ENTITY_TYPES:
-        cats.append("grant_write")
-    if touched & _POLICY_ENTITY_TYPES:
-        cats.append("policy_write")
-
-    path = _file_path_from(tool_input)
-    if path and _HARNESS_CONFIG_PATH_RE.search(path):
-        cats.append("harness_config")
-
-    if tool_name == "Bash":
-        command = _bash_command(tool_input)
-        if command:
-            if _bash_touches_harness_config(command):
-                cats.append("harness_config")
-            if _bash_touches_advisory(command):
-                cats.append("advisory")
-
-    if tool_name == "apply_patch":
-        # Codex's native file-edit tool carries its payload as one string
-        # under `command` (patch-text shape, not `file_path`) — a SEPARATE
-        # branch from the Edit/Write/NotebookEdit `_file_path_from` check
-        # above, not a fallback into it, since the two payloads have nothing
-        # in common. Every path the patch touches (Add/Update/Delete File,
-        # Move to) is checked, so a multi-file patch that touches a
-        # harness-config path alongside unrelated files still matches (Falco,
-        # PR #1320 round 2: this was the exact audited failure — a subagent
-        # rewriting harness config via a file edit with no governing rule
-        # reaching it — now reachable identically through apply_patch).
-        for touched_path in _apply_patch_paths(_bash_command(tool_input)):
-            if _HARNESS_CONFIG_PATH_RE.search(touched_path):
-                cats.append("harness_config")
-                break
-
-    # De-duplicate, preserving first-seen order.
-    seen: dict[str, None] = {}
-    for c in cats:
-        seen.setdefault(c, None)
-    return list(seen)
+    capabilities = classify_tool_call(tool_name, tool_input)
+    injection_categories = _CATEGORY_RULE_IDS.keys()
+    return [
+        action_class
+        for action_class in capabilities.action_classes
+        if action_class in injection_categories
+    ]
 
 
 def _fetch_rows_by_id(ids: set[str]) -> dict[str, dict]:

@@ -212,6 +212,18 @@ def _run(event: dict, base_url: str | None = None):
 
 
 class TestMatchedCategories:
+    def test_current_neotoma_store_alias_matches_grant_write(self):
+        assert gate.matched_categories(
+            "mcp__neotoma__store",
+            {"entities": [{"entity_type": "agent_grant"}]},
+        ) == ["grant_write"]
+
+    def test_rendered_page_publish_matches_publication(self):
+        assert gate.matched_categories(
+            "mcp__neotoma__publish_rendered_page",
+            {"entity_id": "ent_synthetic_page"},
+        ) == ["publication"]
+
     def test_correct_targeting_agent_grant_matches_grant_write(self):
         cats = gate.matched_categories(
             "mcp__mcpsrv_neotoma__correct",

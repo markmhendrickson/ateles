@@ -41,7 +41,7 @@
         ]
       },
       {
-        "matcher": "Edit|Write|NotebookEdit|Bash|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store",
+        "matcher": "Edit|Write|NotebookEdit|Bash|mcp__neotoma__(correct|store|store_structured|publish_rendered_page)|mcp__mcpsrv_neotoma__(correct|store|store_structured|publish_rendered_page)",
         "hooks": [
           {
             "type": "command",
