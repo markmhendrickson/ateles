@@ -43,7 +43,7 @@ def run(args):
     commit = command(["git", "rev-parse", "HEAD"], context).strip()
     require(commit == args.commit, "candidate commit drift")
     raw_bytes = Path(args.saved_toml).read_bytes()
-    if manifest.get("version") in (2, 3):
+    if manifest.get("version") in (2, 3, 4):
         binding = manifest.get("input_toml", {})
         require(
             hashlib.sha256(raw_bytes).hexdigest()
@@ -57,9 +57,19 @@ def run(args):
         m for m in evidence["inventory"] if m["id"] == manifest["profile"]["source_id"]
     )
     projection = check_complete_projection(
-        result["normalized"], source["config"], manifest["tool_version"]
+        result["normalized"],
+        source["config"],
+        manifest["tool_version"],
+        **(
+            {
+                "saved_command_metadata": result["saved_command_metadata"],
+                "saved_command_metadata_version": 4,
+            }
+            if manifest["version"] == 4
+            else {}
+        ),
     )
-    if manifest["version"] == 3:
+    if manifest["version"] in (3, 4):
         import tomllib
 
         require(
@@ -72,6 +82,7 @@ def run(args):
             source["config"],
             manifest["tool_version"],
             saved_command_metadata=result["saved_command_metadata"],
+            saved_command_metadata_version=manifest["version"],
         )
         require(provider_projection == projection, "physical projections differ")
     gate = manifest["packaging_gate"]
@@ -205,7 +216,7 @@ def run(args):
     for flag in argv[2:]:
         if flag.startswith("--"):
             require(flag.split("=", 1)[0] in help_text, "unsupported installed option")
-    if args.phase == "before" and manifest["version"] != 3:
+    if args.phase == "before" and manifest["version"] not in (3, 4):
         rendered, edits = render_normalized_toml(
             raw_bytes.decode("utf-8"),
             evidence["saved"],
@@ -217,7 +228,7 @@ def run(args):
         # After evidence already contains the pinned final configuration. Keep
         # its bytes intact; an absent-before insertion must never run twice.
         rendered, edits = raw_bytes.decode("utf-8"), []
-    if manifest["version"] in (2, 3):
+    if manifest["version"] in (2, 3, 4):
         require(
             hashlib.sha256(rendered.encode("utf-8")).hexdigest()
             == manifest["input_toml"]["after_sha256"],
@@ -244,7 +255,7 @@ def run(args):
             (
                 digest(parsed)
                 == digest(installed_config_projection(result["normalized"]))
-                if manifest["version"] == 3
+                if manifest["version"] in (3, 4)
                 else parsed == installed_config_projection(result["normalized"])
             ),
             "installed config parser changed input",
@@ -304,7 +315,7 @@ def run(args):
                 ).hexdigest(),
             }
         result["machine_projection"] = projection
-        if manifest["version"] == 3:
+        if manifest["version"] in (3, 4):
             result["provider_machine_projection"] = provider_projection
         result["tool_version"] = version
         result["phase"] = args.phase
@@ -312,7 +323,7 @@ def run(args):
             "PREPARATION ONLY; pinned candidate/packaging/tool/profile checks "
             "completed; no deployment or application/readiness clearance"
         )
-        if manifest["version"] != 3:
+        if manifest["version"] not in (3, 4):
             result.pop("normalized")
         fd = os.open(out / "prepared.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
