@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -171,7 +172,7 @@ else: raise SystemExit(93)
         normalized["http_service"]["min_machines_running"] = 0
         profile["saved_config_after_sha256"] = digest(normalized)
 
-    def execute(self, manifest=None, evidence=None, optimized=False):
+    def execute(self, manifest=None, evidence=None, optimized=False, phase="before"):
         manifest = manifest or self.manifest
         evidence = evidence or self.evidence
         mp = self.root / "manifest.json"
@@ -199,6 +200,8 @@ else: raise SystemExit(93)
                 str(self.raw),
                 "--output",
                 str(self.output),
+                "--phase",
+                phase,
             ]
         )
         return subprocess.run(
@@ -773,6 +776,75 @@ else: raise SystemExit(93)
         self.reconciliation()
         self.assertEqual(self.execute(optimized=True).returncode, 0)
 
+    def reconciliation_after(self):
+        import tomllib
+
+        before_raw = self.reconciliation().encode()
+        before = self.execute()
+        self.assertEqual(before.returncode, 0, before.stderr)
+        after_raw = (self.output / "fly.toml").read_bytes()
+        self.assertEqual(
+            len(
+                json.loads((self.output / "prepared.json").read_text())["config_edits"]
+            ),
+            10,
+        )
+        shutil.rmtree(self.output)
+        (self.context / "gate-ran").unlink()
+        (self.root / "calls").unlink()
+        self.raw.write_bytes(after_raw)
+        self.evidence["saved"] = tomllib.loads(after_raw.decode())
+        source = self.evidence["inventory"][0]
+        source["config"]["image"] = self.image
+        source["image_ref"] = {"digest": self.image.split("@", 1)[1]}
+        return before_raw, after_raw
+
+    def test_reconciliation_after_checks_final_bytes_without_repeating_edits(self):
+        _, after_raw = self.reconciliation_after()
+        result = self.execute(phase="after")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((self.output / "prepared.json").read_text())
+        self.assertEqual(receipt["phase"], "after")
+        self.assertEqual(receipt["config_edits"], [])
+        self.assertEqual(receipt["saved_toml_input_phase"], "after")
+        for field in ("saved_toml_before_sha256", "saved_toml_after_sha256"):
+            self.assertEqual(receipt[field], hashlib.sha256(after_raw).hexdigest())
+        self.assertEqual((self.output / "fly.toml").read_bytes(), after_raw)
+        self.assertEqual(receipt["packaging_check"]["tests_run"], 1)
+        self.assertTrue((self.context / "gate-ran").exists())
+
+    def test_reconciliation_after_optimized_same_binding(self):
+        _, after_raw = self.reconciliation_after()
+        result = self.execute(phase="after", optimized=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.output / "fly.toml").read_bytes(), after_raw)
+
+    def test_reconciliation_after_stale_raw_parsed_image_and_profile_refuse(self):
+        before_raw, after_raw = self.reconciliation_after()
+        self.raw.write_bytes(before_raw)
+        self.assertEqual(self.execute(phase="after").returncode, 2)
+        self.raw.write_bytes(after_raw + b"# unselected comment\r\n")
+        self.assertEqual(self.execute(phase="after").returncode, 2)
+        self.raw.write_bytes(after_raw)
+        mutations = []
+        bad = copy.deepcopy(self.evidence)
+        bad["saved"]["vm"][0]["memory"] = "2gb"
+        mutations.append(bad)
+        bad = copy.deepcopy(self.evidence)
+        bad["inventory"][0]["image_ref"]["digest"] = "sha256:" + "0" * 64
+        mutations.append(bad)
+        bad = copy.deepcopy(self.evidence)
+        bad["inventory"][0]["config"]["env"]["SCOPE"] = "production"
+        mutations.append(bad)
+        for bad in mutations:
+            with self.subTest(evidence=bad):
+                self.assertEqual(
+                    self.execute(evidence=bad, phase="after").returncode, 2
+                )
+        self.assertFalse((self.context / "gate-ran").exists())
+        self.assertFalse((self.root / "calls").exists())
+        self.assertFalse(self.output.exists())
+
     def test_reconciliation_each_omission_refuses_before_gate(self):
         self.reconciliation()
         for index in range(10):
@@ -805,6 +877,21 @@ else: raise SystemExit(93)
         self.assertEqual(
             json.loads((self.output / "prepared.json").read_text())["config_edits"], []
         )
+        # Zero-change consumers still validate an actual after image without
+        # inventing edits or changing the selected raw input.
+        original = self.raw.read_bytes()
+        shutil.rmtree(self.output)
+        (self.context / "gate-ran").unlink()
+        self.evidence["inventory"][0]["config"]["image"] = self.image
+        self.evidence["inventory"][0]["image_ref"] = {
+            "digest": self.image.split("@", 1)[1]
+        }
+        after = self.execute(phase="after")
+        self.assertEqual(after.returncode, 0, after.stderr)
+        self.assertEqual((self.output / "fly.toml").read_bytes(), original)
+        receipt = json.loads((self.output / "prepared.json").read_text())
+        self.assertEqual(receipt["config_edits"], [])
+        self.assertEqual(receipt["saved_toml_input_phase"], "after")
 
     def test_reconciliation_raw_and_rendered_hash_drift_refuse(self):
         self.reconciliation()

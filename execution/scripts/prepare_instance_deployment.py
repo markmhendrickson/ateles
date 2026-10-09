@@ -45,7 +45,8 @@ def run(args):
     if manifest.get("version") == 2:
         binding = manifest.get("input_toml", {})
         require(
-            hashlib.sha256(raw_bytes).hexdigest() == binding.get("before_sha256"),
+            hashlib.sha256(raw_bytes).hexdigest()
+            == binding.get(f"{args.phase}_sha256"),
             "raw input drift",
         )
     result = prepare(
@@ -188,13 +189,18 @@ def run(args):
     for flag in argv[2:]:
         if flag.startswith("--"):
             require(flag.split("=", 1)[0] in help_text, "unsupported installed option")
-    rendered, edits = render_normalized_toml(
-        raw_bytes.decode("utf-8"),
-        evidence["saved"],
-        result["normalized"],
-        input_changes(manifest),
-        with_edits=True,
-    )
+    if args.phase == "before":
+        rendered, edits = render_normalized_toml(
+            raw_bytes.decode("utf-8"),
+            evidence["saved"],
+            result["normalized"],
+            input_changes(manifest),
+            with_edits=True,
+        )
+    else:
+        # After evidence already contains the pinned final configuration. Keep
+        # its bytes intact; an absent-before insertion must never run twice.
+        rendered, edits = raw_bytes.decode("utf-8"), []
     if manifest["version"] == 2:
         require(
             hashlib.sha256(rendered.encode("utf-8")).hexdigest()
@@ -228,6 +234,7 @@ def run(args):
         result["argv"] = argv
         result["manifest_sha256"] = args.manifest_sha256
         result["config_edits"] = edits
+        result["saved_toml_input_phase"] = args.phase
         result["saved_toml_before_sha256"] = hashlib.sha256(
             Path(args.saved_toml).read_bytes()
         ).hexdigest()
