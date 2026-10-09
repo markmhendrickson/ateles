@@ -21,7 +21,10 @@ stored, the projections that are stored and reconciled, and, for each, what is d
 The concepts of the work model, the gate model, the failure posture, and the authority model. Neotoma is
 the record (principle 9): every type here is a Neotoma entity type or relationship type, and a concept
 with no row here is a concept the design does not persist. Field names are the design's; a checkout may
-carry older names, and the gap is `status.md`.
+carry older names, and the gap is `status.md`. What an execution environment holds instead, and what it may
+never hold, is proposed and unruled at
+`#what-a-step-holds-outside-the-record-is-scratch-state-and-scratch-state-is-never-read-as-truth`
+(decision 126).
 
 ## Concepts
 
@@ -580,6 +583,82 @@ runs through a second type, which stays true whether the per-type check is decla
   again, which silently drops every edge whose producer is gone, and edge loss after a merge is invisible
   because the survivor still looks well-formed. The bounded retrieval below is what keeps most merges from
   being necessary at all.
+
+### What a step holds outside the record is scratch state, and scratch state is never read as truth
+
+**Open (decision 126, 2026-10-06): a proposed answer, unruled.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Hosted agent runtimes give an agent working storage —
+files, a small database, a notes area — that often persists between its runs. This design keeps one record
+for anything durable: a concept with no row here is a concept the design does not persist (`#scope`). The
+proposal names what an execution environment holds instead, and draws the line between the two; nothing below
+is ruled until the operator rules it.
+
+**The rules in this section.**
+
+- What a harness, a sandbox, or a runner holds while a step executes is scratch state: disposable, and never read as truth.
+- If losing it would lose work or knowledge another agent, a later session, or the operator needs, it is not scratch state.
+- Progress, dedup state, and configuration are never scratch state.
+- Scratch state that outlives its step is held for the one principal whose step made it, and is never shared across principals.
+- Credential material held under custody, and diagnostic capture, are neither scratch state nor record content, and the loss test does not send either to the record.
+
+**What a harness, a sandbox, or a runner holds while a step executes is scratch state: disposable, and never
+read as truth.** A working copy, files written in a sandbox, an intermediate result, a cache: the step that
+made them reads them while it executes, and no other reader treats them as the state of anything. Scratch
+state may outlive the step only where losing it would cost time and nothing else — a dependency cache is the
+case — and a reader that would take something from it as a fact is reading a second record. The corpus
+already treats it so in one place: a conclusion parked in "the runner's own scratch state" is diagnostic
+capture that "asserts nothing about the record" (`failure_posture.md`, rule 4).
+
+**If losing it would lose work or knowledge another agent, a later session, or the operator needs, it is not
+scratch state.** That is the test, and it is applied to the content, not to where it happens to sit. Whatever
+passes it is written to the record before the step closes — an entity, an observation, a verdict naming what
+the step produced (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`),
+or an artifact through the adapter of the system that holds it — and a step whose close depended on
+something only scratch state held has not closed on the record. Working storage that persists between an
+agent's runs for the next run to read fails the test by construction, because the next run reads it as true —
+credential material aside, which custody governs (below);
+an agent's memory across runs is the record, reached through its definition's context types
+(`#what-each-actor-reads-and-writes`).
+
+**Progress, dedup state, and configuration are never scratch state.** Each fails the test whatever its size.
+Progress — which steps are done and what remains — is the batch's verdicts and the step state read from them
+(`#concepts`). Dedup state is the record's effect dedup: the `dedup_key` on the action
+(`work_model.md#at-least-once-implies-effect-dedup`), and a note in working storage that something was
+already sent is the second ledger principle 11 forbids, lost exactly when a re-claim on another runner needs
+it. Configuration — what an agent is, its rules, its grant, its bindings — is a governance or context entity,
+and configuration held in working storage is a change to the swarm that no gate saw.
+
+**Scratch state that outlives its step is held for the one principal whose step made it, and is never shared
+across principals.** A cache that survives its step is still read as an input by the next step that finds it:
+a dependency cache is code that step will run. Shared across principals, it is an integrity channel — a
+principal with narrow authority writes into it, and a principal with wider authority later runs what was
+written, acting on content no grant of its own admitted. So a surviving cache is scoped to the principal that
+filled it, exactly as a credential is resolved for one principal (`authority_model.md#grants`), and a step of
+another principal starts without it. Losing it still costs only time, which is why it may exist at all.
+
+**Credential material held under custody, and diagnostic capture, are neither scratch state nor record
+content, and the loss test does not send either to the record.** Each is governed by a rule of its own, and
+the test above is not that rule. Credential material — a token, a key, a login session the host keeps so an
+adapter's later runs are authenticated (`adapters.md#a-login-wall-is-an-operator_only-action-and-the-session-it-leaves-is-a-credential-the-host-holds`)
+— persists between runs and the next run relies on it, so by the test alone it would be written to the
+record; but it must never enter the record, and the custody rule (`authority_model.md#grants`) governs where
+it is held, for how long, and how it is withdrawn. Its loss is recovered the way custody provides, by
+re-provisioning or, for a session, by the checkpoint that asks the operator to sign in again. Diagnostic
+capture is forensic output written to local disk while the record is unreachable, and `failure_posture.md`
+rule 1 already governs it: it asserts nothing about the record and no step closes on it. A third category
+is not a third home for the work: neither holds anything a step reads as the state of the work.
+
+The name is chosen against a collision: `adapters.md` uses "the swarm's own working state" for the leases,
+checkpoints, and verdicts by which the swarm runs itself — record state — so this proposal uses scratch state,
+added to `vocabulary.md#scratch-state` as a proposed entry, and never working state, for what an execution
+environment holds.
+
+**What ruling this would oblige.** No row in `#concepts`, since scratch state is exactly what has none; the
+suite gains a row in which a step whose dedup note lived only in a disposable environment repeats no effect
+on re-claim, because the key it relies on was the record's, and one in which a step of a second principal
+does not find a cache a first principal's step left. **What would reopen it:** a class of content
+that passes the test above and that the record cannot hold — a volume or a rate it cannot take — which would
+be evidence for a record-side home, never for working storage read as truth.
 
 ## What each actor reads and writes
 

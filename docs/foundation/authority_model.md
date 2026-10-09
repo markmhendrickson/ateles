@@ -1118,6 +1118,104 @@ argue for the stricter reading it declines. So would evidence in the other direc
 every principal's grant names every surface wildcard on its first day, which would make the enumeration
 ceremony rather than authorization and argue that the rule buys nothing the parity test did not.
 
+#### A sandbox whose reach is declared makes the shell boundable, and the grant names that reach
+
+**Open (decision 123, 2026-10-06): a proposed answer, unruled.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Hosted agent runtimes commonly run an agent's shell
+inside a sandbox, which is the condition decision 87's reopening clause names. This is the answer that would
+follow from it; nothing below is ruled until the operator rules it.
+
+**The rules in this section.**
+
+- A sandbox is a harness whose reach is declared before it starts and enumerable at check time: its mounts, its network egress, and the credentials it holds.
+- A sandbox holds no credential for any destination it can reach: none in its mounts and none in its environment.
+- Where a sandbox is the harness, the shell surface's `param_constraints` name that declared reach, and the sandbox is their enforcement point, checked against the reach read back from the sandbox itself.
+- An effect that needs authority leaves a sandbox only as a record write through admission and the gate, or as an action through an adapter; what a destination accepts without authority is recorded and unenforced.
+- A sandbox's filesystem is disposable and is never a second record.
+- The stricter reading applies only where a grant names a sandbox's reach; the concession decision 87 made for an unbounded harness is not withdrawn.
+
+**A sandbox is a harness whose reach is declared before it starts and enumerable at check time: its mounts,
+its network egress, and the credentials it holds.** The commands a shell can run stay unenumerable, as
+decision 86 found. What a sandbox makes enumerable is what any of those commands can reach. Decision 87's
+reopening clause asks for "filesystem and process reach" enumerable at check time, and this section reads
+that as exactly three things a check can list. **Mounts**: each path the sandbox mounts, read-only or
+read-write, together with any socket or device a mount exposes, since a socket mounted in is a door to the
+process behind it. **Egress**: each network destination the sandbox may connect to, counting the services the
+host itself listens on and name resolution, since a resolver is a destination and a query carries data out.
+**Held credentials**: every credential present inside the sandbox, in a file within its mounts or in the
+environment it inherits. Filesystem reach is the mounts; process reach is all three, because a process
+reaches what it can open, what it can connect to, and what it can authenticate as. Each of the three is
+empty unless declared, and everything else is unreachable by the sandbox's construction rather than by the
+model's compliance. Decision 86 already located filesystem reach in where a process runs and not in a name it
+is called by
+(`#a-capability-names-a-tool-as-toolsurfaceoperation-and-that-is-what-a-harness-allowlist-is-compared-against`);
+a sandbox makes where it runs a declared value a check can read. What the isolation boundary itself is worth
+is not a value the declaration states, and is part of the harness the grant names, not of the reach.
+
+**A sandbox holds no credential for any destination it can reach: none in its mounts and none in its
+environment.** The declared held-credential set is empty for every destination the egress admits. An egress
+allowlist bounds destinations, not what is done there: a sandbox that can reach a package index and holds a
+credential for it can publish to it, and nothing in the allowlist fails when it does. The custody rule
+already supplies the missing half — a credential is returned as a value to the process that uses it and never
+written into an environment a child process inherits (`#grants`) — and a sandbox is such a child. So
+credentials stay with the host, which presents them outside the sandbox for the record writes and adapter
+actions the sandbox's outputs become. A login session decision 122 creates is such a credential: the host
+holds it, never a sandbox, which is also why it is not lost each time a disposable sandbox ends. A sandbox
+whose read-back finds any credential inside it fails the check exactly as a mount wider than the grant does.
+
+**Where a sandbox is the harness, the shell surface's `param_constraints` name that declared reach, and the
+sandbox is their enforcement point, checked against the reach read back from the sandbox itself.** No
+grammar is added: decision 86 placed an argument bound on a tool capability in `param_constraints`,
+"recorded and unenforced where none does" mediate the call, and the sandbox is the mediator that was missing
+for the shell. A grant names `tool:shell:*` with the mounts, the egress allowlist, and the empty
+held-credential set as its constraints; the sandbox's own configuration is a copy derived from or held equal
+to that grant, the shape decision 42 already rules for any harness allowlist. Decision 42's parity test then
+compares the grant with the reach **read back from the sandbox itself** — what is mounted, what it can
+connect to, and what credentials are present, as observed in the sandbox — and never with its configuration
+alone, built or declared, because comparing a grant with a configuration compares two statements and not a
+statement with a fact. A divergence in either direction fails. A sandbox whose reach cannot be read back at
+check time is `Indeterminate`, which denies (principle 7).
+
+**An effect that needs authority leaves a sandbox only as a record write through admission and the gate, or
+as an action through an adapter; what a destination accepts without authority is recorded and
+unenforced.** A write to the record is admitted against the principal's grant, and is an action at the gate
+where its type or its blast makes it one
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`); an effect on
+an external system is an action an adapter takes
+(`gates_and_workflows.md#external-systems-are-reached-only-through-adapters`). The held-credential condition
+is what makes this enforceable for any effect a destination authenticates: the sandbox has nothing to
+authenticate with. It does not make admitted egress read-only, and this section claims no such thing. A
+destination that accepts an unauthenticated write is reach to an effect, so admitting it names an effect,
+and a grant that admits one names it as such rather than as reading. Data carried out in the parameters of
+a request to an admitted destination is beyond what a destination allowlist can see. Both of those residues
+are **recorded and unenforced**, in the sense decision 86 gives an argument bound nothing mediates, and a
+reviewer reading a grant that admits egress reads them as the grant's stated cost.
+
+**A sandbox's filesystem is disposable and is never a second record.** What a step leaves there is scratch
+state (`data_model.md#what-a-step-holds-outside-the-record-is-scratch-state-and-scratch-state-is-never-read-as-truth`):
+read by nothing as the state of the work, and lost without loss when the sandbox ends, because whatever had to
+survive was written out by one of the two paths above before the step closed.
+
+**The stricter reading applies only where a grant names a sandbox's reach; the concession decision 87 made
+for an unbounded harness is not withdrawn.** For a principal whose grant bounds its shell to a declared
+reach, a harness that cannot enforce that declaration does not carry the principal's work: routing it there
+is `capability_denied`, by the same rule that governs a provider that does not enforce
+(`#routing-to-a-provider-that-does-not-enforce-widens-reach-and-the-router-is-not-where-it-is-refused`). A
+grant naming an unbounded `tool:shell:*` keeps the standing decision 87 gave it, and nothing already granted
+changes. **This is narrower than the reopening clause above**, which says a fully bounding harness "would
+remove the concession": the existence of one bounding harness does not bound the others, and withdrawing the
+concession instance-wide would move every harness without a sandbox outside the record, the relocation
+decision 87 refused. The wider reading — every shell bounded, no unbounded wildcard admitted — is the
+alternative the operator may rule instead.
+
+**What ruling this would oblige.** The tool-grant grammar document states the three constraint keys a
+sandbox reads; the suite's row for a sandbox holding a credential for a destination it can reach
+(`conformance_suite.md`, AU-29) moves from pending to mechanical, and the suite gains a row in which a
+sandbox wider than its grant fails the parity test, and one in which a bounded grant routed to an unbounding
+harness is denied. **What would reopen it:** a sandbox whose mounts, egress, or held credentials cannot be
+read back from the sandbox itself, only from its configuration, which would make the check a comparison of
+two statements rather than of a statement and a fact.
+
 ### Where a harness reaches the record, and what admits the request
 
 **Ruled (decision 97, 2026-09-08): the enforcement point for an agent's read and write to the record is

@@ -5,7 +5,7 @@
 
 Every rule `authority_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`authority_model.md`](../authority_model.md) and are not repeated here (decision 66).
 
-28 rules.
+29 rules.
 
 ## [The tuple](../authority_model.md#the-tuple)
 
@@ -64,3 +64,7 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 - **AU-25** — the same table, row 4: `Indeterminate` (binding source unreadable/partial) — the relationship store is unreachable, timed out, or the read is incomplete; the enforcement point treats it as `Deny` and the third value is kept in diagnostics rather than coerced to a plain `Deny` in the recorded decision *[M (same red-by-design status as AU-22)]*
 - **AU-26** — the same table, row 5: `Deny` (ambiguous/conflicting) — two or more live matching edges target different principals; fail closed, never pick the first edge *[M (same red-by-design status as AU-22)]*
 - **AU-27** — the same table, row 6: `Deny` (malformed presentation) — the presented credential is missing a required key part (`credential_kind` / `credential_value` / issuer when the kind requires one), or the kind is unrecognized *[M (same red-by-design status as AU-22)]*
+
+## [A sandbox whose reach is declared makes the shell boundable, and the grant names that reach](../authority_model.md#a-sandbox-whose-reach-is-declared-makes-the-shell-boundable-and-the-grant-names-that-reach)
+
+- **AU-29** — (decision 123, open): a sandbox holds no credential for any destination it can reach — none in a file within its mounts, none in the environment it inherits — and its reach is checked as read back from the sandbox itself *[P (decision 123, open; designed under the proposed reading and held until it is ruled — under it the row is M, its mutant a sandbox build that copies the host's credential file into a mount or its value into the environment)]*
