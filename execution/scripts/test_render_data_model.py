@@ -71,7 +71,7 @@ class RenderDataModelCheck(unittest.TestCase):
         stripped = "\n".join(
             line
             for line in self.data_model.splitlines()
-            if not line.startswith("| agent behavioural rule | `agent_policy` |")
+            if not line.startswith("| agent behavioural rule |")
             and not line.startswith("| roster | `swarm_roster` |")
         )
         proc = _run(self._tree(stripped, self.suite))
@@ -89,7 +89,7 @@ class RenderDataModelCheck(unittest.TestCase):
         stripped = "\n".join(
             line
             for line in self.data_model.splitlines()
-            if not line.startswith("| agent behavioural rule | `agent_policy` |")
+            if not line.startswith("| agent behavioural rule |")
         )
         self.assertIn("`agent_policy`", stripped)  # still mentioned in prose
         proc = _run(self._tree(stripped, self.suite))
