@@ -1326,6 +1326,38 @@ resolved to something *other* than a principal in the record, or one whose grant
 else — and AAuth is neither. What the checkout does differently from this design is `status.md`'s to
 report, not this document's.
 
+#### Whether an agent may provision an external service itself
+
+**Open (decision 138, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Some external systems let an agent sign up for an
+account, acquire its own credential, and top up a prepaid balance with no person involved. The design gives
+the minting of a credential a provider issues to the operator (decision 118,
+`#a-per-agent-credential-is-an-obligation-where-the-system-issues-one`) and says nothing of creating the
+account that credential belongs to. Three parts, each with its own candidates.
+
+- **Sign-up.** Creating an account on an external system is an outbound action through an admitted adapter
+  (`#outbound-steps-produce-actions-adapters-take-them`). Candidates: the operator's only, as minting is; or a
+  governance class the operator may grant per system, held at the gate like any other governance write
+  (decision 18).
+- **Acquiring a credential.** Candidates: decision 118 as ruled, the operator minting; or a carve-out, which
+  would reopen 118 in part, for a credential whose issuer expires it on its own and whose reach is bounded by
+  the account it was issued under — the class 118 already treats as closer to the swarm's self-issued case.
+- **Topping up.** Which kind of thing a top-up is has not been ruled. Candidates: a payment over a payment
+  rail, in which case decision 127 applies — it never graduates by count, and a recurring one is taken
+  unattended only under a standing consent for its exact figure; the service's own action, where the
+  balance is bought on the service's own system, which `payments.md#scope` puts outside `payment` and
+  `transfer` and gives to that system's action class; or the funding payment of decision 137's
+  metered-resource candidate.
+
+Any answer keeps three things. The credential is held under custody (`authority_model.md#grants`) and never
+written into a process environment; it binds to the agent as one more credential of one identity
+(`#aauth-is-the-internal-credential-not-a-second-identity-system`); and a root secret stays the operator's
+outright.
+
+**Recommendation, unruled.** Keep minting the operator's (decision 118), admit sign-up as a governance class
+the operator grants system by system, and leave the top-up's classification to be ruled with decision 137. If unanswered, an agent that
+needs an account it lacks raises `capability_denied` and waits, as the obligation above already says.
+
 ### When an adapter is wrong
 
 An adapter that mis-resolves identity could turn a stranger's comment into a verdict. That is the worst

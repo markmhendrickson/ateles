@@ -132,4 +132,19 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 117 | whether a grant may say what a principal may do to an … | yes | yes | unknown | decision 41, whose tuple and default-deny shape this widens rather than replaces; decision 43, … |
 | 118 | whether credential rotation is one authority or several, split by who issues … | yes | yes | unknown | decision 105, open, on where a credential's value comes from and how it reaches … |
 | 119 | how an authorized principal commissions an entire plan or project for autonomous … | yes | yes | unknown | decisions 14, 18, 30, 41, 46, 47, 53, 56, 57, and 92; the existing … |
+| 127 | whether one approval may stand for one exact, repeated call instead of … | yes | yes | unknown | decisions 27 and 28, which bind consent to the verified figures at zero tolerance; … |
+| 128 | whether a held lease is a condition of everything done under it … | no | no | unknown | decision 44, which this would extend from the verdict to the take; gap G27 … |
+| 129 | what contains the effects of a granted shell or network reach — … | no | no | unknown | decision 87, whose reopening condition names a sandbox whose reach is enumerable at check … |
+| 130 | whether what a principal has read narrows what it may then do … | no | no | unknown | decision 103, on what a step's declared reads bind; decision 87; the adapters' degrees … |
+| 131 | whether consumption spent outside any action — inference, a subscription's quota window, … | no | no | unknown | decision 53, which this reopens in part on its own stated condition, its half … |
+| 132 | whose interest an agent acts in when an instance has several operators … | no | no | unknown | decisions 107, 108, and 109, on what the acts-as edge carries, which this complements … |
+| 133 | what starts a runner, how many may run for one role at … | no | no | unknown | decision 92, the live partition; decision 42, the `vendor_binding` that would carry the maximum; … |
+| 134 | how a swarm's declarations move between instances — agents, roster, workflows, intake … | no | no | unknown | decisions 43, 55, and 65; decisions 18 and 100, which an import would pass … |
+| 135 | whether decision 100's proving obligation covers a change to an agent's or … | no | no | unknown | decision 100, which this would extend; decision 42 |
+| 136 | what a harness binding declares and demonstrates before work is routed to … | no | no | unknown | decision 87's unchosen mechanism; decisions 42, 60, 63, and 64; decisions 129 and 131, … |
+| 137 | whether paying a service per call, at the moment of the call, … | no | no | unknown | decision 127; decision 53 and decision 131, which would meter it as a resource; … |
+| 138 | whether an agent may provision an external service itself — sign up … | no | no | unknown | decision 118; decision 127, which governs a top-up only if it is a payment … |
+| 139 | what the operator's view must be able to show — decision 37 … | no | no | unknown | decision 37, which this would add content to and not reopen; decisions 53, 92, … |
+| 140 | whether a step's writes to subjects other than the one it holds … | no | no | unknown | decision 103, for which it is either the ground of a revisit or the … |
+| 141 | whether every retrieval of a credential value is an observation on the … | no | no | unknown | decision 105, which it holds under whichever way 105 is answered; the custody rules … |
 

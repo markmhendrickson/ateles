@@ -828,6 +828,31 @@ rules it matched on the grant as `match_tenant`, and nothing is derived from a c
 reach a tenant. And the identifier's form on the `operator` entity is decision 79, ruled to a human slug
 with an immutable UUID behind it; a binding names whatever that identifier is, and does not restate it.
 
+### Whether every retrieval of a credential value is an observation on the record
+
+**Open (decision 141, 2026-10-06), from a competitive review; a candidate raised against decision 105,
+registered as a row of its own.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+Decision 105 asks where a credential's value comes from and what holds when that source cannot be read
+(`#where-a-credential-comes-from-and-what-happens-when-that-source-cannot-be-read`), and custody says how a
+credential is held once it is resolved (`#grants`). Neither says whether resolving one leaves a trace. The
+record can say which principal acted and under which grant; it cannot say which credential values were read
+to let it act, or whether a value was read that no action explains. Three candidates.
+
+- **No record of a retrieval.** Nothing new is built; custody and the grant remain the whole bound.
+- **Every retrieval an observation.** Each resolution of a credential value writes an observation — which
+  principal, for which action or step, under which grant, from which source — and never the value, on the
+  reference-never-value rule (`data_model.md#record-conventions`). Custody becomes auditable, a read is tied
+  to the action that needed it, and a read no action explains is visible.
+- **Retrieval recorded only for a credential that may never be resident.** Narrower: only the class custody
+  by revocability keeps out of every process environment is observed.
+
+**Why a row of its own, and not an amendment to decision 105.** The candidate records the act of resolving a
+value, not where the value is kept, so it holds under any answer decision 105 is given, including one that
+names the store on the deployment.
+
+**Recommendation, unruled.** The second. If unanswered, a credential read the custody rules permit leaves no
+trace a reviewer could check against the actions it served.
+
 ### A capability names a tool as `tool:<surface>:<operation>`, and that is what a harness allowlist is compared against
 
 **Ruled (2026-09-08, decision 86).** A capability names a tool the way it names everything else: as one
@@ -1241,12 +1266,91 @@ requires the proxy to hold a credential.
 since that would make pass-through unimplementable rather than merely costly, and a rule nothing can satisfy
 relocates the reach rather than bounding it.
 
+### What contains the effects of a granted shell or network reach, and whether that reach's outbound traffic is observed
+
+**Open (decision 129, 2026-10-06), from a competitive review; the operator's priority is to rule it first,
+together with decision 131.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+
+Decision 87 holds that `tool:shell:*` and its kin are granted and never inherited, and states the cost
+plainly: the bound on such a capability stays unenforced until something mediates the shell
+(`#a-harness-whose-reach-cannot-be-bounded-may-carry-granted-work-and-its-use-is-a-capability`). Decision 97
+puts the enforcement point for a read or write of the record at the record
+(`#where-a-harness-reaches-the-record-and-what-admits-the-request`), and the action gate binds what an
+adapter takes (`gates_and_workflows.md#external-systems-are-reached-only-through-adapters`). An effect a
+shell produces directly on a system outside the record — a network call, a command-line client using a
+token it finds on disk, a file read — passes through neither, so nothing the design names binds it.
+Decision 87's own reopening condition is "a sandbox whose filesystem and process reach are enumerable at
+check time"; this row asks what mediates such a reach where that condition can be met, and what holds where
+it is not. Three candidates.
+
+- **The recorded bound, unenforced.** As decision 87 left it. Nothing new is built, and the gap stays the
+  one the design already names.
+- **A containment profile.** The harness's `vendor_binding` names a profile — a sandboxed filesystem, an
+  egress allowlist, no credential resident, no inherited environment — and the profile is the enforcement
+  point for a shell capability's `param_constraints` in decision 86's grammar, with an unmediated shell a
+  separately named capability. A profile is then declared per harness binding, and the host a runner runs
+  on has to supply the sandbox.
+- **A containment profile and a structural rule.** As the second, and a principal whose grant includes a
+  consent-gated or never-set action class may not also hold an unmediated shell: a separation of duties
+  between being able to move money or send and having a raw shell, on the counting reasoning of decision
+  48. Its cost is that some roles split in two.
+
+**Whether the reach's outbound traffic is observed.** A second question from the same review. Where a
+containment profile mediates egress, is what passes through it captured into the record — each request's
+destination and time, and the principal and step it ran under — so that an effect a shell produced is
+attributable afterwards even where the allowlist permitted it? Candidates: no capture, the allowlist being
+the whole bound; capture as metadata on the runner's session (`vocabulary.md#agent_session`) — the
+destination, the time, and the principal and step, never a request's content, since decision 40 keeps
+content off a session — carrying coverage like any other adapter-sourced read
+(`adapters.md#what-the-adapter-does-with-every-event`); and capture of refused egress only. No candidate makes the mediator an enforcement point for the record, which decision 97
+keeps at the record, and none stores a request's content where the minimization rules of
+`data_model.md#record-conventions` would refuse it.
+
+**Where a sandbox's own declared reach is ruled separately.** A declared sandbox is one form the second
+candidate's profile can take, so a ruling on what decision 87's reopening condition implies for a sandbox
+answers part of this row and leaves the rest standing: the structural rule and the capture question hold
+under any reading of it.
+
+**Recommendation, unruled.** The third candidate, with outbound traffic captured as session metadata at the
+profile — in plain terms, a shell's direct network calls get a mediator and a trace, and an agent that can
+move money or send never also holds an unmediated shell. It closes the gap between decisions 87 and 97
+while the record stays the enforcement point for the record, and no proxy becomes one — the profile
+mediates reach that is not a write to the record, which decision 97 never covered — and it makes a
+containment design the implementation of a rule rather than a convention. If unanswered, the question of
+what stops an agent with a shell keeps the answer the design already gives: nothing yet, by design.
+
 ## Attribution
 
 Every write carries the agent that made it (a per-agent signature) and the principal it acted for; a shared
 bearer that never identifies its caller is not attribution. Input attribution (what was read, at which
 version, from how trusted a source) is part of the record. Output attribution is the precondition for
 credit (below); a credit model on attribution that does not hold credits the wrong principal.
+
+### Whether what a principal has read narrows what it may then do
+
+**Open (decision 130, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Inbound content becomes one of four outcomes at the
+adapter, so no external event instructs a workflow (`adapters.md#what-the-adapter-does-with-every-event`;
+`telegram.md#a-chat-message-is-not-an-instruction`). That rule governs the adapter. It does not govern what
+a principal reasoning under a model does after it reads hostile content — a mail body, an issue, a diff on
+a pull request — which it reads with its whole grant in force. Input attribution, "from how trusted a
+source", is part of the record (above), and nothing reads it to narrow authority. Three candidates.
+
+- **No: the grant and the gate are the bound.** Nothing new is built. A principal misled by what it read is
+  bounded only by what it was granted and by the gate on what it takes.
+- **Input trust as a grant condition.** A step whose declared reads include adapter-sourced content below a
+  stated degree of trust runs under a narrowed set of capabilities — no governance writes, no task created
+  outside its own chain, every action held at a checkpoint whatever its confidence or graduation — and the
+  tasks it creates inherit the narrowing. It ties the narrowing to the step's declared reads (decision 103)
+  and to the degrees of trust adapters already distinguish
+  (`adapters.md#degrees-of-trust-the-design-distinguishes-and-grants-already-express-it`).
+- **A reader and an actor.** The principal that reads untrusted content writes only typed extractions, and a
+  different principal acts on them. Structural; it costs a step and a role in every flow that reads
+  external content.
+
+**Recommendation, unruled.** The second, with the third for never-set and high-blast classes. If unanswered,
+the four-outcomes rule keeps a message from instructing the workflow, and nothing narrows the principal that
+reads the message.
 
 ## Delegation
 
@@ -1259,6 +1363,34 @@ section forbids. The `authority_chain` is a derived read model over delegation e
 checkpoints, tenant-filtered per hop, never stored. The acceptance test for any design here is the
 hardest-problem chain: A delegates to X, X assigns a task that Y claims, Y's action needs B's approval,
 using C's state under D's policy, and every hop is reconstructible.
+
+### Whose interest an agent acts in when an instance has several operators
+
+**Open (decision 132, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. An agent's acts-as `principal_binding` is per agent
+and static (`#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal`),
+a task's beneficiary is informational (`multi_tenant.md#5-for-whom--beneficiary-model`), and decision 82
+rules that any instance may have one operator or many
+(`multi_tenant.md#every-instance-may-have-one-operator-or-many-and-hosting-does-not-decide-it`). So one agent
+serving two operators' tasks is recorded as acting for whichever operator its one edge names, and this
+section's own test — A acting for B recorded as A-for-B — cannot be met for the other. Three candidates.
+
+- **The per-agent binding only.** One agent per operator on a shared instance. Nothing new is built, and the
+  agents multiply with the operators.
+- **A responsible principal resolved per claim.** Resolved from the task's origin — the principal of its
+  intake source, else its parent task's, else the seat that owns its subject
+  (`#what-owning-confers-the-required-seat`) — and recorded with the lease as A-for-B; where none resolves,
+  the claim is refused and a checkpoint raised, on the same fail-closed reading the approval rule gives a
+  checkpoint whose approvers resolve to nobody (`#approval`).
+- **Delegation only.** Every task on an instance with several operators reaches an agent through an
+  explicit `delegation_edge`, so the chain names the principal.
+
+This row complements decisions 107, 108, and 109, on what the acts-as edge carries and who may hold one, and
+reopens none of them: they ask what the edge is, and this asks which principal one claim serves when the
+edge cannot say.
+
+**Recommendation, unruled.** The second. It is needed before a shared instance runs agents for several
+operators, and not before. If unanswered, attribution on a shared instance names the wrong person.
 
 ## Approval
 
@@ -1612,7 +1744,48 @@ confirmed actions to answer it.
 
 **What would reopen it.** A resource whose consumption cannot be read from confirmed actions —
 one spent outside any action — which would be a resource the design cannot bound, and the question would be
-why it is spent off the record.
+why it is spent off the record. A competitive review (2026-10-06) found that condition met by inference and
+by the compute a run consumes, and that half is carried open as decision 131
+(`#whether-consumption-spent-outside-any-action-is-a-resource-a-budget-meters-and-whether-a-runners-model-may-be-chosen-by-budget`);
+the half that meters confirmed actions stands.
+
+### Whether consumption spent outside any action is a resource a budget meters, and whether a runner's model may be chosen by budget
+
+**Open (decision 131, 2026-10-06), from a competitive review; it reopens decision 53 in part, on 53's own
+stated condition, and the operator's priority is to rule it first, together with decision 129.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. Decision 53 reads consumption against a budget only
+from confirmed actions, and names what would reopen it: a resource whose consumption cannot be read from
+confirmed actions, one spent outside any action (`#budget-is-a-scope-term-that-attenuates`). Inference is
+such a resource. The model calls a runner makes while it works a step are not actions
+(`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`), and neither is a subscription's quota
+window or the compute a run consumes, so the largest cost of operating agents is one the design can neither
+bound nor attribute. The half of decision 53 that meters confirmed actions is untouched; what is reopened is
+which resources a budget may meter. Three candidates.
+
+- **Model use stays outside the design.** Bounded operationally, per provider, by whatever the provider
+  itself enforces. The main cost stays unattributed in the record.
+- **Usage as session metadata per runner.** Each runner records what its harness reports it consumed as
+  metadata on its session (`vocabulary.md#agent_session`) — usage figures, never content, since decision 40
+  keeps content off a session — carrying the billing basis — a metered price, or units of a subscription's
+  quota window, and never a subscription priced at nothing — and `metered_resources[]` may name it.
+  Consumption is a derived read over that metadata, attenuating down a delegation as decision 53 rules. Every harness binding then has to report usage (decision 136).
+- **Metering at the harness binding's scope only.** Cheaper. It loses attenuation, since a delegate could
+  spend the whole of its delegator's allowance.
+
+**Per-agent inference budgets, and a model chosen by budget.** Two narrower questions are held in this row.
+Whether an inference budget is written per agent, per role, or per delegation is the attenuation question
+above, answered by whichever candidate is ruled. Whether the model a runner works under may be chosen by
+what remains of its budget — a cheaper tier as a budget runs down — is already bounded from below: a class's
+`min_tier` (decision 59,
+`gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at`)
+disqualifies a runner below it whatever its budget, so a budget can choose only among tiers at or above the
+floor; and a budget exhausted mid-step is a runner losing its model mid-step, which decision 60 rules an
+unknown that holds the step and never a silent re-claim below the floor
+(`failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`). Whether a binding may declare a budget-driven choice at all, and where, is open with this row.
+
+**Recommendation, unruled.** The second candidate, with a budget-driven choice of model admitted only at or
+above `min_tier`. If unanswered, cost stays in a log beside the record, the second source principle 9
+forbids.
 
 ### Credit is a read model over attribution
 

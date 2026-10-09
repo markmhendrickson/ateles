@@ -366,6 +366,27 @@ passes through as the principal's own; nothing in the path holds one of its own
 (`authority_model.md#a-proxy-passes-through-the-agents-own-credential-and-holds-none-of-its-own`). Sources:
 plan decision `agent_identity_is_carried_per_transport_not_by_one_mechanism`, ruled 2026-09-18.
 
+### What a harness binding declares and demonstrates before work is routed to it
+
+**Open (decision 136, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. An external system's adapter is admitted under a full
+contract (`adapters.md#the-admission-contract`), and a harness has no counterpart. Decision 87 requires a
+provider to declare whether it enforces a grant's bounds and leaves the mechanism unchosen
+(`authority_model.md#routing-to-a-provider-that-does-not-enforce-widens-reach-and-the-router-is-not-where-it-is-refused`).
+Nothing states a check run before work is first routed to a harness, how a provider's quota windows are read,
+or whether a runner that re-claims a step may resume the previous runner's harness session, which holds state
+the record does not. Two candidates.
+
+- **No contract.** Each harness is configured as found, and its first routed step is its first test.
+- **A harness admission contract, parallel to the adapter one.** Capability slots on the harness's
+  `vendor_binding` for whether it enforces a grant's bounds, its containment profile (decision 129), and its
+  usage reporting (decision 131); a preflight run before the first routing and read back; quota windows
+  recorded as observations; and resuming a previous runner's session on a re-claim refused unless that
+  session is itself on the record (decisions 63 and 64).
+
+**Recommendation, unruled.** The second. Most of it is where decisions 129 and 131 are declared, so it follows
+cheaply from ruling them.
+
 ## Measured Constraints and Open Questions
 
 Each entry is updated in place when it changes, never appended to. Each carries the date it was last
