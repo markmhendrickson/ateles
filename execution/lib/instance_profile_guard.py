@@ -181,7 +181,7 @@ RECONCILIATION_PATHS = frozenset(
 def input_changes(manifest):
     return (
         manifest["input_changes"]
-        if manifest.get("version") == 2
+        if manifest.get("version") in (2, 3)
         else manifest["idle_changes"]
     )
 
@@ -346,6 +346,57 @@ def normalized_input(saved, manifest):
     return result
 
 
+def _selected_saved_command_metadata(descriptor):
+    selected = {
+        "path": "/deploy",
+        "before_present": False,
+        "before": None,
+        "after_present": True,
+        "after": {"strategy": "rolling"},
+    }
+    require(
+        isinstance(descriptor, dict) and digest(descriptor) == digest(selected),
+        "unsupported saved command metadata",
+    )
+    return selected
+
+
+def _saved_command_input(saved, manifest, phase):
+    """Bind the one admitted absent-to-rolling saved metadata transition.
+
+    Expected after derives from the pinned before, never from observed drift.
+    This version has no deployment-input edits and admits no other deploy shape.
+    """
+    import copy
+
+    selected = _selected_saved_command_metadata(manifest["saved_command_metadata"])
+    require(manifest["input_changes"] == [], "saved metadata cannot edit input")
+    require(
+        manifest["input_toml"]["before_sha256"]
+        == manifest["input_toml"]["after_sha256"],
+        "saved metadata raw input differs",
+    )
+    before = copy.deepcopy(saved)
+    if phase == "after":
+        require(
+            "deploy" in before
+            and digest(before["deploy"]) == digest(selected["after"]),
+            "saved deployment metadata drift",
+        )
+        del before["deploy"]
+    require("deploy" not in before, "saved deploy was not absent")
+    require(
+        digest(before) == manifest["profile"]["saved_config_before_sha256"],
+        "saved before cannot be recovered",
+    )
+    after = {**copy.deepcopy(before), "deploy": copy.deepcopy(selected["after"])}
+    require(
+        digest(after) == manifest["profile"]["saved_config_after_sha256"],
+        "command-derived saved after differs",
+    )
+    return before
+
+
 def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
     """Validate private pinned evidence; emit argv, never execute deployment.
 
@@ -365,23 +416,35 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
                 "app",
                 "environment",
                 "profile",
-                ("input_changes" if manifest.get("version") == 2 else "idle_changes"),
+                (
+                    "input_changes"
+                    if manifest.get("version") in (2, 3)
+                    else "idle_changes"
+                ),
                 "secrets_sha256",
                 "volumes_sha256",
                 "tool_version",
                 "command",
                 "packaging_gate",
             }
-            | ({"input_toml"} if manifest.get("version") == 2 else set())
+            | ({"input_toml"} if manifest.get("version") in (2, 3) else set())
+            | ({"saved_command_metadata"} if manifest.get("version") == 3 else set())
         )
         and type(manifest["version"]) is int
-        and manifest["version"] in (1, 2),
+        and manifest["version"] in (1, 2, 3),
         "unsupported manifest",
     )
     require(
         isinstance(evidence, dict)
         and set(evidence)
-        == {"canonical", "inventory", "saved", "secrets", "volumes", "tool_version"},
+        == (
+            {"canonical", "inventory", "saved", "secrets", "volumes", "tool_version"}
+            | (
+                {"provider_saved_json", "provider_saved_toml"}
+                if manifest["version"] == 3
+                else set()
+            )
+        ),
         "incomplete evidence",
     )
     canonical = evidence["canonical"]
@@ -463,11 +526,33 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
     check_profiles(
         evidence["inventory"], evidence["saved"], manifest["profile"], image, phase
     )
-    normalized = (
-        normalized_input(evidence["saved"], manifest)
-        if phase == "before"
-        else evidence["saved"]
-    )
+    if manifest["version"] == 3:
+        normalized = _saved_command_input(evidence["saved"], manifest, phase)
+        import tomllib
+
+        require(
+            isinstance(evidence["provider_saved_toml"], str),
+            "invalid provider saved TOML type",
+        )
+        try:
+            provider_parsed = tomllib.loads(evidence["provider_saved_toml"])
+        except (TypeError, tomllib.TOMLDecodeError):
+            raise Refused("invalid provider saved TOML") from None
+        require(
+            digest(provider_parsed) == digest(evidence["saved"]),
+            "provider TOML differs",
+        )
+        require(
+            digest(evidence["provider_saved_json"])
+            == digest(installed_config_projection(evidence["saved"])),
+            "provider JSON projection differs",
+        )
+    else:
+        normalized = (
+            normalized_input(evidence["saved"], manifest)
+            if phase == "before"
+            else evidence["saved"]
+        )
     # Pin both representations to the independently admitted running policy.
     # Only single-service idle corrections are supported; never guess a group.
     if input_changes(manifest):
@@ -492,7 +577,7 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
             == policy["min_machines_running"],
             "normalization differs from admitted machine",
         )
-    if manifest["version"] == 2:
+    if manifest["version"] in (2, 3):
         raw_binding = manifest["input_toml"]
         require(
             isinstance(raw_binding, dict)
@@ -516,7 +601,9 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
         command["build_arguments"] == [],
         "unselected build arguments in immutable-image method",
     )
-    check_release_contract(normalized, command)
+    check_release_contract(
+        evidence["saved"] if manifest["version"] == 3 else normalized, command
+    )
     # The reviewed immutable-image method cannot smuggle flags via an app or ID.
     for value in (
         manifest["app"],
@@ -528,11 +615,29 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
             isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", value),
             "invalid command target",
         )
-    return {
+    result = {
         "normalized": normalized,
         "commit": commit,
         "scope": "PROFILE CHECK ONLY; packaging/tool/candidate gates precede command emission",
     }
+    if manifest["version"] == 3:
+        result.update(
+            {
+                "provider_saved": evidence["saved"],
+                "saved_command_metadata": manifest["saved_command_metadata"],
+                "saved_config_before_sha256": manifest["profile"][
+                    "saved_config_before_sha256"
+                ],
+                "saved_config_after_sha256": manifest["profile"][
+                    "saved_config_after_sha256"
+                ],
+                "provider_saved_toml_sha256": hashlib.sha256(
+                    evidence["provider_saved_toml"].encode("utf-8")
+                ).hexdigest(),
+                "provider_saved_json_sha256": digest(evidence["provider_saved_json"]),
+            }
+        )
+    return result
 
 
 def check_projected_http_checks(saved, source_config):
@@ -697,7 +802,9 @@ def check_release_contract(saved, command):
 FLY_PROJECTION_COMMIT = "ca63052e2526df073e9a1a4ad57bcbe5892f0543"
 
 
-def check_complete_projection(saved, source_config, tool_version):
+def check_complete_projection(
+    saved, source_config, tool_version, *, saved_command_metadata=None
+):
     """Require the supported installed Fly update to preserve ALL static fields.
 
     Input normalization happens elsewhere. This function neither corrects a
@@ -763,9 +870,16 @@ def check_complete_projection(saved, source_config, tool_version):
         "unsupported native machine shape",
     )
     deploy = saved.get("deploy", {})
+    if saved_command_metadata is not None:
+        _selected_saved_command_metadata(saved_command_metadata)
     require(
         isinstance(deploy, dict)
-        and set(deploy) <= {"release_command"}
+        and set(deploy)
+        <= ({"strategy"} if saved_command_metadata is not None else {"release_command"})
+        and (
+            "strategy" not in deploy
+            or (saved_command_metadata is not None and deploy["strategy"] == "rolling")
+        )
         and all(isinstance(v, str) for v in deploy.values()),
         "unsupported deploy input",
     )

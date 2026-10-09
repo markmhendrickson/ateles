@@ -17,6 +17,7 @@ from execution.lib.instance_profile_guard import (
     installed_config_projection,
     input_changes,
     check_complete_projection,
+    digest,
     prepare,
     render_normalized_toml,
     require,
@@ -42,7 +43,7 @@ def run(args):
     commit = command(["git", "rev-parse", "HEAD"], context).strip()
     require(commit == args.commit, "candidate commit drift")
     raw_bytes = Path(args.saved_toml).read_bytes()
-    if manifest.get("version") == 2:
+    if manifest.get("version") in (2, 3):
         binding = manifest.get("input_toml", {})
         require(
             hashlib.sha256(raw_bytes).hexdigest()
@@ -58,6 +59,21 @@ def run(args):
     projection = check_complete_projection(
         result["normalized"], source["config"], manifest["tool_version"]
     )
+    if manifest["version"] == 3:
+        import tomllib
+
+        require(
+            digest(tomllib.loads(raw_bytes.decode("utf-8")))
+            == digest(result["normalized"]),
+            "sealed input differs from normalized profile",
+        )
+        provider_projection = check_complete_projection(
+            result["provider_saved"],
+            source["config"],
+            manifest["tool_version"],
+            saved_command_metadata=result["saved_command_metadata"],
+        )
+        require(provider_projection == projection, "physical projections differ")
     gate = manifest["packaging_gate"]
     release = manifest["command"]["release"]
     selected = [("packaging", gate)]
@@ -189,7 +205,7 @@ def run(args):
     for flag in argv[2:]:
         if flag.startswith("--"):
             require(flag.split("=", 1)[0] in help_text, "unsupported installed option")
-    if args.phase == "before":
+    if args.phase == "before" and manifest["version"] != 3:
         rendered, edits = render_normalized_toml(
             raw_bytes.decode("utf-8"),
             evidence["saved"],
@@ -201,7 +217,7 @@ def run(args):
         # After evidence already contains the pinned final configuration. Keep
         # its bytes intact; an absent-before insertion must never run twice.
         rendered, edits = raw_bytes.decode("utf-8"), []
-    if manifest["version"] == 2:
+    if manifest["version"] in (2, 3):
         require(
             hashlib.sha256(rendered.encode("utf-8")).hexdigest()
             == manifest["input_toml"]["after_sha256"],
@@ -225,22 +241,30 @@ def run(args):
             command(["fly", "config", "show", "--local", "--config", str(config)])
         )
         require(
-            parsed == installed_config_projection(result["normalized"]),
+            (
+                digest(parsed)
+                == digest(installed_config_projection(result["normalized"]))
+                if manifest["version"] == 3
+                else parsed == installed_config_projection(result["normalized"])
+            ),
             "installed config parser changed input",
         )
         # Tool parsing is still preparation; rebind immediately before emission.
         validate_candidate()
+        sealed_after = Path(args.saved_toml).read_bytes()
+        emitted_after = config.read_bytes()
+        require(sealed_after == raw_bytes, "raw input changed during parser")
+        require(
+            emitted_after == rendered.encode("utf-8"),
+            "emitted input changed during parser",
+        )
         argv[argv.index("<owned-private-config>")] = str(config)
         result["argv"] = argv
         result["manifest_sha256"] = args.manifest_sha256
         result["config_edits"] = edits
         result["saved_toml_input_phase"] = args.phase
-        result["saved_toml_before_sha256"] = hashlib.sha256(
-            Path(args.saved_toml).read_bytes()
-        ).hexdigest()
-        result["saved_toml_after_sha256"] = hashlib.sha256(
-            config.read_bytes()
-        ).hexdigest()
+        result["saved_toml_before_sha256"] = hashlib.sha256(sealed_after).hexdigest()
+        result["saved_toml_after_sha256"] = hashlib.sha256(emitted_after).hexdigest()
         result["packaging_check"] = {
             "path": gate["path"],
             "sha256": gate["sha256"],
@@ -280,13 +304,16 @@ def run(args):
                 ).hexdigest(),
             }
         result["machine_projection"] = projection
+        if manifest["version"] == 3:
+            result["provider_machine_projection"] = provider_projection
         result["tool_version"] = version
         result["phase"] = args.phase
         result["scope"] = (
             "PREPARATION ONLY; pinned candidate/packaging/tool/profile checks "
             "completed; no deployment or application/readiness clearance"
         )
-        result.pop("normalized")
+        if manifest["version"] != 3:
+            result.pop("normalized")
         fd = os.open(out / "prepared.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
             json.dump(result, handle, indent=2)
