@@ -24,7 +24,11 @@ cloudflared tunnel route dns --overwrite-dns "$TUNNEL_NAME" "$HOSTNAME"
 
 # 2. Install launchd agent
 echo "==> Installing launchd agent to $PLIST_DST"
-cp "$PLIST_SRC" "$PLIST_DST"
+# Render through the shared renderer rather than copying: it leaves
+# credential-named variables out of the installed plist (daemons load them
+# from the secrets store at start) and refuses a template it cannot render
+# safely.
+python3 "$DAEMON_DIR/../../scripts/render_daemon_plist.py" "$PLIST_SRC" "$PLIST_DST"
 
 # 3. Load (or reload if already loaded)
 echo "==> Loading launchd agent"

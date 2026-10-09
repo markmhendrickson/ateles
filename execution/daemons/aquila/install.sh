@@ -10,14 +10,12 @@ DEST="$LAUNCH_AGENTS/$PLIST"
 
 mkdir -p "$LAUNCH_AGENTS"
 
-# Unload aquila if already installed.
-if launchctl list 2>/dev/null | grep -q "com.ateles.aquila"; then
-  echo "Unloading existing aquila agent..."
-  launchctl unload "$DEST" 2>/dev/null || true
-fi
-
-cp "$SCRIPT_DIR/$PLIST" "$DEST"
-launchctl load "$DEST"
+# Render and validate first, then swap: the shared step renders through the
+# credential-free renderer into a scratch file, and only a clean render
+# unloads the running agent, replaces the plist and loads it again. A refused
+# template leaves the running agent and the installed plist untouched.
+source "$SCRIPT_DIR/../_install_plist.sh"
+install_rendered_plist "aquila" "com.ateles.aquila" "$SCRIPT_DIR/$PLIST" "$DEST"
 
 echo "✓ aquila installed."
 echo "  Schedule: monthly on the 1st at 06:00 Madrid"

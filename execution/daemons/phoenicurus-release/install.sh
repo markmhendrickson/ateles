@@ -122,19 +122,19 @@ fi
 if [ "${1:-}" = "--load-prepare" ]; then
   PLIST="com.ateles.phoenicurus-prepare.plist"
   DEST="$HOME/Library/LaunchAgents/$PLIST"
-  # The live .plist is gitignored (repo convention); render it from the tracked
-  # .tmpl if it isn't already present locally.
-  if [ ! -f "$SCRIPT_DIR/$PLIST" ] && [ -f "$SCRIPT_DIR/$PLIST.tmpl" ]; then
-    cp "$SCRIPT_DIR/$PLIST.tmpl" "$SCRIPT_DIR/$PLIST"
-    echo "Rendered $PLIST from template."
+  # The live .plist is gitignored (repo convention); render from the tracked
+  # .tmpl if there is no local copy to render from.
+  SRC="$SCRIPT_DIR/$PLIST"
+  if [ ! -f "$SRC" ] && [ -f "$SCRIPT_DIR/$PLIST.tmpl" ]; then
+    SRC="$SCRIPT_DIR/$PLIST.tmpl"
   fi
   mkdir -p "$HOME/Library/LaunchAgents"
-  if launchctl list 2>/dev/null | grep -q "com.ateles.phoenicurus-prepare"; then
-    echo "Unloading existing phoenicurus-prepare agent..."
-    launchctl unload "$DEST" 2>/dev/null || true
-  fi
-  cp "$SCRIPT_DIR/$PLIST" "$DEST"
-  launchctl load "$DEST"
+  # Render and validate first, then swap: the shared step renders through the
+  # credential-free renderer into a scratch file, and only a clean render
+  # unloads the running agent, replaces the plist and loads it again. A refused
+  # template leaves the running agent and the installed plist untouched.
+  source "$SCRIPT_DIR/../_install_plist.sh"
+  install_rendered_plist "phoenicurus-prepare" "com.ateles.phoenicurus-prepare" "$SRC" "$DEST"
   echo "✓ phoenicurus-prepare scheduled (Mon-Thu 07:00 local)."
 else
   echo
