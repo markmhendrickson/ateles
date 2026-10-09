@@ -55,8 +55,18 @@ def main(argv: list[str]) -> int:
             continue
         try:
             values = sl.sops_decrypt_dotenv(src)
+        except sl.SecretsToolError as exc:
+            # Value-free by construction — safe to print in full.
+            print(f"[{name}] decrypt FAILED — {exc}")
+            rc = 1
+            continue
         except Exception as exc:  # noqa: BLE001
-            print(f"[{name}] decrypt FAILED ({exc})")
+            # Any other exception may quote sops output (which can carry
+            # recovered plaintext); report the TYPE only.
+            print(
+                f"[{name}] decrypt FAILED ({type(exc).__name__}; "
+                f"detail withheld — it can carry secret values)"
+            )
             rc = 1
             continue
         changed = sl.merge_into_env_file(env_file, values)

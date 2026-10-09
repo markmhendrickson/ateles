@@ -85,7 +85,12 @@ def _list_all_grants() -> list:
         entities = resp.json().get("entities", [])
         return [GrantChecker._parse(e) for e in entities]
     except Exception as exc:
-        sys.exit(f"ERROR: {exc}")
+        # Catch-all over a Bearer-authenticated request. httpx puts the URL in
+        # its message and not the headers, so the token does not normally reach
+        # here — but this is the same "format the exception the obvious way"
+        # shape that disclosed a value from secrets_lib (ateles#682), and the
+        # exception type is enough to act on. Report the type only.
+        sys.exit(f"ERROR: {type(exc).__name__} listing grants from {base}")
 
 
 def cmd_suspend(args: argparse.Namespace) -> None:
