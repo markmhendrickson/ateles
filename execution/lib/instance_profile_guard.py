@@ -181,7 +181,7 @@ RECONCILIATION_PATHS = frozenset(
 def input_changes(manifest):
     return (
         manifest["input_changes"]
-        if manifest.get("version") in (2, 3)
+        if manifest.get("version") in (2, 3, 4)
         else manifest["idle_changes"]
     )
 
@@ -346,11 +346,12 @@ def normalized_input(saved, manifest):
     return result
 
 
-def _selected_saved_command_metadata(descriptor):
+def _selected_saved_command_metadata(descriptor, version=3):
+    require(type(version) is int and version in (3, 4), "unselected metadata version")
     selected = {
         "path": "/deploy",
-        "before_present": False,
-        "before": None,
+        "before_present": version == 4,
+        "before": {"strategy": "rolling"} if version == 4 else None,
         "after_present": True,
         "after": {"strategy": "rolling"},
     }
@@ -397,6 +398,33 @@ def _saved_command_input(saved, manifest, phase):
     return before
 
 
+def _unchanged_saved_command_input(saved, manifest):
+    """Version4 preserves a separately selected whole present rolling input."""
+    import copy
+
+    selected = _selected_saved_command_metadata(manifest["saved_command_metadata"], 4)
+    require(manifest["input_changes"] == [], "unchanged metadata cannot edit input")
+    require(
+        manifest["input_toml"]["before_sha256"]
+        == manifest["input_toml"]["after_sha256"],
+        "unchanged metadata raw input differs",
+    )
+    require(
+        manifest["profile"]["saved_config_before_sha256"]
+        == manifest["profile"]["saved_config_after_sha256"],
+        "unchanged metadata saved digests differ",
+    )
+    require(
+        "deploy" in saved and digest(saved["deploy"]) == digest(selected["before"]),
+        "unchanged saved deployment metadata drift",
+    )
+    require(
+        digest(saved) == manifest["profile"]["saved_config_before_sha256"],
+        "unchanged saved configuration drift",
+    )
+    return copy.deepcopy(saved)
+
+
 def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
     """Validate private pinned evidence; emit argv, never execute deployment.
 
@@ -418,7 +446,7 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
                 "profile",
                 (
                     "input_changes"
-                    if manifest.get("version") in (2, 3)
+                    if manifest.get("version") in (2, 3, 4)
                     else "idle_changes"
                 ),
                 "secrets_sha256",
@@ -427,11 +455,15 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
                 "command",
                 "packaging_gate",
             }
-            | ({"input_toml"} if manifest.get("version") in (2, 3) else set())
-            | ({"saved_command_metadata"} if manifest.get("version") == 3 else set())
+            | ({"input_toml"} if manifest.get("version") in (2, 3, 4) else set())
+            | (
+                {"saved_command_metadata"}
+                if manifest.get("version") in (3, 4)
+                else set()
+            )
         )
         and type(manifest["version"]) is int
-        and manifest["version"] in (1, 2, 3),
+        and manifest["version"] in (1, 2, 3, 4),
         "unsupported manifest",
     )
     require(
@@ -441,7 +473,7 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
             {"canonical", "inventory", "saved", "secrets", "volumes", "tool_version"}
             | (
                 {"provider_saved_json", "provider_saved_toml"}
-                if manifest["version"] == 3
+                if manifest["version"] in (3, 4)
                 else set()
             )
         ),
@@ -526,8 +558,12 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
     check_profiles(
         evidence["inventory"], evidence["saved"], manifest["profile"], image, phase
     )
-    if manifest["version"] == 3:
-        normalized = _saved_command_input(evidence["saved"], manifest, phase)
+    if manifest["version"] in (3, 4):
+        normalized = (
+            _saved_command_input(evidence["saved"], manifest, phase)
+            if manifest["version"] == 3
+            else _unchanged_saved_command_input(evidence["saved"], manifest)
+        )
         import tomllib
 
         require(
@@ -577,7 +613,7 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
             == policy["min_machines_running"],
             "normalization differs from admitted machine",
         )
-    if manifest["version"] in (2, 3):
+    if manifest["version"] in (2, 3, 4):
         raw_binding = manifest["input_toml"]
         require(
             isinstance(raw_binding, dict)
@@ -602,7 +638,7 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
         "unselected build arguments in immutable-image method",
     )
     check_release_contract(
-        evidence["saved"] if manifest["version"] == 3 else normalized, command
+        evidence["saved"] if manifest["version"] in (3, 4) else normalized, command
     )
     # The reviewed immutable-image method cannot smuggle flags via an app or ID.
     for value in (
@@ -620,7 +656,7 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
         "commit": commit,
         "scope": "PROFILE CHECK ONLY; packaging/tool/candidate gates precede command emission",
     }
-    if manifest["version"] == 3:
+    if manifest["version"] in (3, 4):
         result.update(
             {
                 "provider_saved": evidence["saved"],
@@ -637,6 +673,8 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
                 "provider_saved_json_sha256": digest(evidence["provider_saved_json"]),
             }
         )
+        if manifest["version"] == 4:
+            result["saved_config_actual_sha256"] = digest(evidence["saved"])
     return result
 
 
@@ -803,7 +841,12 @@ FLY_PROJECTION_COMMIT = "ca63052e2526df073e9a1a4ad57bcbe5892f0543"
 
 
 def check_complete_projection(
-    saved, source_config, tool_version, *, saved_command_metadata=None
+    saved,
+    source_config,
+    tool_version,
+    *,
+    saved_command_metadata=None,
+    saved_command_metadata_version=3,
 ):
     """Require the supported installed Fly update to preserve ALL static fields.
 
@@ -871,7 +914,9 @@ def check_complete_projection(
     )
     deploy = saved.get("deploy", {})
     if saved_command_metadata is not None:
-        _selected_saved_command_metadata(saved_command_metadata)
+        _selected_saved_command_metadata(
+            saved_command_metadata, saved_command_metadata_version
+        )
     require(
         isinstance(deploy, dict)
         and set(deploy)
