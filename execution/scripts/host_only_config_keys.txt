@@ -1,0 +1,44 @@
+# Host-only deployed configuration -- env var NAMES ONLY, never values.
+#
+# These are deployed on the running client instance but are NOT in the
+# ateles-private SOPS store, so they are unrecoverable once that machine is
+# torn down or moved to another region. Established 2026-09-02 by differencing
+# the live `flyctl secrets list` names (14) against the manifest's block for
+# that app (4 of its 5 vars are deployed to the app; CLIENT_INSTANCE_FLY_TOKEN
+# is a GitHub repo secret, not an app secret).
+#
+# Already covered by the SOPS snapshot, deliberately NOT listed here:
+#   NEOTOMA_BEARER_TOKEN, NEOTOMA_GOOGLE_CLIENT_ID,
+#   NEOTOMA_GOOGLE_CLIENT_SECRET, OPENAI_API_KEY
+#
+# Feed this to secrets_extract_host.py --keys-from. Adding a line here only
+# widens what gets captured; it can never cause a value to be printed.
+
+# --- Auth / access control -------------------------------------------------
+# Membership list gating who may sign in. `flyctl secrets set` REPLACES rather
+# than appends, so a set rebuilt from a guess silently revokes every omitted
+# address -- this is the value whose absence already blocked an access request.
+NEOTOMA_APPROVED_EMAILS
+# Whether authentication is enforced at all.
+NEOTOMA_REQUIRE_AUTH
+# Whether an API key is additionally required on the OAuth path.
+NEOTOMA_REQUIRE_KEY_FOR_OAUTH
+# Issuing authority for agent-auth tokens.
+NEOTOMA_AAUTH_AUTHORITY
+
+# --- Graph identity --------------------------------------------------------
+# The user id every shared-graph read and write scopes to. A wrong value here
+# returns well-formed responses over an almost-empty account.
+NEOTOMA_SHARED_GRAPH_USER_ID
+
+# --- Runtime / addressing --------------------------------------------------
+# Public base URL the instance believes it is served at.
+NEOTOMA_HOST_URL
+# On-disk data directory backing the mounted volume.
+NEOTOMA_DATA_DIR
+# Deployment environment selector.
+NEOTOMA_ENV
+# Database driver selection (libsql vs the synchronous default).
+NEOTOMA_DB_BACKEND
+# Lifetime of minted guest access tokens.
+NEOTOMA_GUEST_TOKEN_TTL_SECONDS
