@@ -29,6 +29,8 @@ def runtime_digest():
         "execution/lib/instance_auth_profile_preflight.py",
         "execution/lib/instance_profile_guard.py",
         "execution/scripts/check_instance_auth_preparation.py",
+        "execution/scripts/prepare_instance_auth_deployment.py",
+        "execution/scripts/prepare_instance_deployment.py",
         "lib/capabilities/neotoma_http.py",
         "lib/capabilities/credentials.py",
     )

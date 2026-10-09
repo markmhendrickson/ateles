@@ -307,8 +307,7 @@ def _secret_rows(rows):
             and set(row) in ({"name", "status"}, {"name", "status", "version"})
             and isinstance(row["name"], str)
             and row["name"]
-            and isinstance(row["status"], str)
-            and row["status"]
+            and row["status"] in ("Deployed", "Staged")
             and (
                 "version" not in row
                 or isinstance(row["version"], str)

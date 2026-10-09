@@ -224,6 +224,20 @@ class AuthPhaseProfiles(unittest.TestCase):
         self.after = expected_auth_config(self.before, self.binding)
         self.secrets = [{"name": "THEODORE_PASSWORD", "status": "Deployed"}]
 
+    def test_unknown_secret_status_refuses_even_when_before_and_current_match(self):
+        for status in (None, "", "UNKNOWN", "Partial", True, 1):
+            rows = [{"name": "THEODORE_PASSWORD", "status": status}]
+            with self.subTest(status=status), self.assertRaises(Refused):
+                check_auth_phase(
+                    self.before,
+                    self.after,
+                    self.before,
+                    rows,
+                    rows,
+                    self.binding,
+                    "auth_stage_before",
+                )
+
     def phase_secrets(self, phase):
         if phase == "auth_stage_before":
             return copy.deepcopy(self.secrets)

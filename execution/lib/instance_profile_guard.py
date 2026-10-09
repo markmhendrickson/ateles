@@ -1025,7 +1025,9 @@ def _deployment_argv(manifest, image):
     return argv
 
 
-def render_normalized_toml(raw_text, saved, normalized, changes, *, with_edits=False):
+def render_normalized_toml(
+    raw_text, saved, normalized, changes, *, with_edits=False, auth_insertions=()
+):
     """Replace only selected scalar spans; retain comments/newlines and all else.
 
     The closed shape admits one absent retry key insertion at the end of its
@@ -1039,6 +1041,20 @@ def render_normalized_toml(raw_text, saved, normalized, changes, *, with_edits=F
     except tomllib.TOMLDecodeError as exc:
         raise Refused("invalid saved TOML") from exc
     require(parsed == saved, "saved TOML does not match evidence")
+    allowed_auth = frozenset(
+        ("env", name)
+        for name in (
+            "THEODORE_AUTH_MODE",
+            "THEODORE_OIDC_ORIGIN",
+            "THEODORE_OIDC_ENVIRONMENT",
+            "THEODORE_OIDC_MACHINE_ID",
+        )
+    )
+    require(
+        isinstance(auth_insertions, (tuple, frozenset))
+        and set(auth_insertions) <= allowed_auth,
+        "unselected auth insertion path",
+    )
     wanted = {tuple(c["path"]): c for c in changes}
     require(len(wanted) == len(changes), "duplicate correction path")
     section = ()
@@ -1092,7 +1108,8 @@ def render_normalized_toml(raw_text, saved, normalized, changes, *, with_edits=F
     for path, c in wanted.items():
         if path not in hits:
             require(
-                path == ("restart", 0, "retries") and c.get("before_present") is False,
+                (path == ("restart", 0, "retries") or path in auth_insertions)
+                and c.get("before_present") is False,
                 "selected scalar not rendered",
             )
             require(path[:-1] in table_ends, "missing insertion table")
@@ -1109,8 +1126,9 @@ def render_normalized_toml(raw_text, saved, normalized, changes, *, with_edits=F
                     "end": position,
                     "before": "",
                     "after": table_indents.get(path[:-1], "")
-                    + "retries = "
-                    + json.dumps(c["after"])
+                    + path[-1]
+                    + " = "
+                    + json.dumps(c["after"], ensure_ascii=True)
                     + newline,
                 }
             )

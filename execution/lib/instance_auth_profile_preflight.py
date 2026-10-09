@@ -13,15 +13,19 @@ from execution.lib.instance_auth_profile_guard import (
     check_auth_phase,
     expected_auth_config,
 )
-from execution.lib.instance_profile_guard import digest, require, stable_source
+from execution.lib.instance_profile_guard import (
+    digest,
+    require,
+    stable_source,
+    render_normalized_toml,
+)
 
 
 def check_phase_evidence(packet, current, manifest, phase):
-    _closed(
-        packet,
-        {"before", "after", "phase_sha256", "before_protected_fields"},
-        "invalid full auth profile packet",
-    )
+    fields = {"before", "after", "phase_sha256", "before_protected_fields"}
+    if isinstance(packet, dict) and "deployment" in packet:
+        fields.add("deployment")
+    _closed(packet, fields, "invalid full auth profile packet")
     _closed(packet["phase_sha256"], AUTH_PHASES, "incomplete phase evidence pins")
     require(phase in AUTH_PHASES, "unknown auth phase")
     require(
@@ -127,3 +131,39 @@ def check_phase_evidence(packet, current, manifest, phase):
         "whole_machine_profile_matches": True,
         "volume_inventory_matches": True,
     }
+
+
+def render_auth_toml(raw_text, saved, binding):
+    """Reuse scalar spans; insert only four named public fields in [env].
+
+    All other bytes, comments and values remain unchanged. A missing or
+    unsupported env table representation refuses rather than serializing the
+    whole configuration or inventing a broad mutable-environment exemption.
+    """
+    after = expected_auth_config(saved, binding)
+    changes = []
+    for name in (
+        "THEODORE_AUTH_MODE",
+        "THEODORE_OIDC_ORIGIN",
+        "THEODORE_OIDC_ENVIRONMENT",
+        "THEODORE_OIDC_MACHINE_ID",
+    ):
+        present = name in saved["env"]
+        if present and saved["env"][name] == after["env"][name]:
+            continue
+        changes.append(
+            {
+                "path": ["env", name],
+                "before_present": present,
+                "before": saved["env"].get(name),
+                "after": after["env"][name],
+            }
+        )
+    return render_normalized_toml(
+        raw_text,
+        saved,
+        after,
+        changes,
+        with_edits=True,
+        auth_insertions=tuple(tuple(c["path"]) for c in changes),
+    )
