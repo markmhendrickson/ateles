@@ -70,7 +70,7 @@ be fully populated and deliver nothing. Each store therefore carries a
 
 What `--check` compares, and what it only reports
 --------------------------------------------------
-The merge gate compares the committed file against a fresh measurement, so
+`--check` compares the committed file against a fresh measurement, so
 everything in the compared text must be a function of the rule estate itself
 -- a value that moves while no rule changed makes the gate unsatisfiable. Two
 kinds of value do move that way, and both are rendered inside blocks marked
@@ -113,7 +113,7 @@ are all functions of the rule text.
 
 Canonical repository instruction roots -- the definition
 --------------------------------------------------------
-The canonical measurement runner supplies, in
+The canonical measurement host supplies, in
 `RULE_INVENTORY_CANONICAL_REPOSITORY_ROOTS` (os.pathsep-separated), the other
 repository clones whose root instruction files (`CLAUDE.md`, `AGENTS.md`,
 `.cursorrules`) belong to the rule estate. The set is: **every primary git
@@ -131,7 +131,8 @@ enforces the shape of the rule -- directly under `~/repos`, not one of the
 three excluded names, not a symlink, a primary clone -- and any violation
 makes the whole store UNREAD (exit 3), never a silently different count.
 
-Read-only. Neotoma PROD, never the dev instance. Writes one repo file.
+Read-only. Neotoma PROD, never the dev instance. Writes one repo file, or
+with `--output` one private file outside the repository.
 
 Usage:
     python3 execution/scripts/render_rule_inventory.py            # write
@@ -139,6 +140,14 @@ Usage:
     python3 execution/scripts/render_rule_inventory.py --json OUT # public dump
     python3 execution/scripts/render_rule_inventory.py --check \
         --private-diagnostics /tmp/rule-inventory-locators.json
+    python3 execution/scripts/render_rule_inventory.py \
+        --require-complete-measurement --output PRIVATE_DIR/rule_inventory.md
+
+Since ateles#1333 no pull request runs this: the complete measurement is a
+private, milestone-driven audit run locally on the operator's host, and the
+committed `docs/foundation/rule_inventory.md` is the historical Stage-0
+snapshot. `--output` keeps a milestone's render private instead of writing
+over that snapshot. Procedure: `docs/runbooks/rule_inventory_audit.md`.
 """
 
 from __future__ import annotations
@@ -1623,13 +1632,30 @@ def private_diagnostics_payload(clusters: list[Cluster]) -> dict:
 
 def write_private_diagnostics(path: str | Path, clusters: list[Cluster]) -> None:
     """Write mode-0600 private locators, refusing every in-repository path."""
+    payload = json.dumps(private_diagnostics_payload(clusters), indent=2) + "\n"
+    _write_private_file(path, payload, "private diagnostics")
+
+
+def write_private_output(path: str | Path, text: str) -> None:
+    """Write a milestone audit's rendered inventory, mode 0600, outside the repo.
+
+    ateles#1333: the complete measurement is a private milestone audit, so its
+    render is kept by the operator rather than committed over the public
+    Stage-0 snapshot. The render itself is public-safe (values withheld, store
+    topology projected), but it is evidence for a private decision and is
+    written where only the operator can read it.
+    """
+    _write_private_file(path, text, "private output")
+
+
+def _write_private_file(path: str | Path, payload: str, label: str) -> None:
+    """Write ``payload`` mode 0600 at ``path``, refusing every in-repository path."""
     target = Path(path).expanduser().resolve()
     if target == REPO_ROOT or REPO_ROOT in target.parents:
         raise ValueError(
-            "private diagnostics path must be outside the repository; "
+            f"{label} path must be outside the repository; "
             "use a temporary or other non-versioned directory"
         )
-    payload = json.dumps(private_diagnostics_payload(clusters), indent=2) + "\n"
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.fchmod(fd, 0o600)
@@ -3062,11 +3088,20 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--output",
+        metavar="PATH",
+        help=(
+            "write the render to PATH (mode 0600, refused inside the repository) "
+            "instead of the committed Stage-0 snapshot; the private milestone "
+            "audit's evidence (docs/runbooks/rule_inventory_audit.md)"
+        ),
+    )
+    ap.add_argument(
         "--require-complete-measurement",
         action="store_true",
         help=(
             "fail before comparison when any canonical store kind is missing or "
-            "unread; required by the merge-gating workflow"
+            "unread; required by the private milestone audit"
         ),
     )
     ap.add_argument(
@@ -3208,6 +3243,18 @@ def main() -> int:
             file=sys.stderr,
         )
 
+    if args.output:
+        try:
+            write_private_output(args.output, out)
+        except (OSError, ValueError) as exc:
+            print(f"PRIVATE OUTPUT WRITE FAILED: {exc}", file=sys.stderr)
+            return 2
+        print(
+            "wrote private rule inventory render outside the repository: "
+            f"{Path(args.output).expanduser()}",
+            file=sys.stderr,
+        )
+
     if args.check:
         if not expected_output.exists():
             print("candidate rule inventory is absent", file=sys.stderr)
@@ -3237,12 +3284,16 @@ def main() -> int:
         print("rule inventory matches the measured system")
         return 0
 
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(out)
+    if args.output:
+        written = "the private render"
+    else:
+        OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+        OUTPUT.write_text(out)
+        written = str(OUTPUT.relative_to(REPO_ROOT))
     unread = [s.name for s in stores if not s.read_ok]
     clustered = sum(len(c.statements) for c in clusters)
     print(
-        f"wrote {OUTPUT.relative_to(REPO_ROOT)}: "
+        f"wrote {written}: "
         f"{len(clusters)} rules, {clustered} statements of them "
         f"({len(statements)} scanned), "
         f"{clustered / max(len(clusters), 1):.1f}x duplication, "
