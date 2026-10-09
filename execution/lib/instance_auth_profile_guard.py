@@ -42,7 +42,7 @@ def check_action_manifest(manifest, selected, registration):
     ``selected`` must come from the separately admitted private action record,
     not the supplied template or provider evidence. This pure function cannot
     establish that record's authority, retrieve credentials, or execute it.
-    The trusted CLI/private adapter remains a separate, unimplemented boundary.
+    The trusted CLI/private adapter establishes those references separately.
     """
     _closed(
         selected,
@@ -241,7 +241,7 @@ def check_action_manifest(manifest, selected, registration):
     for locator in protected.values():
         require(
             isinstance(locator, str)
-            and re.fullmatch(r"op://[^/\s]+/[^/\s]+/[^/\s]+", locator),
+            and re.fullmatch(r"op://[^/\s]+/[a-z2-7]{26}/[^/\s]+", locator),
             "missing immutable protected field locator",
         )
     require(len(set(protected.values())) == 3, "reused protected field locator")
@@ -304,11 +304,16 @@ def _secret_rows(rows):
         isinstance(rows, list)
         and all(
             isinstance(row, dict)
-            and set(row) == {"name", "status"}
+            and set(row) in ({"name", "status"}, {"name", "status", "version"})
             and isinstance(row["name"], str)
             and row["name"]
             and isinstance(row["status"], str)
             and row["status"]
+            and (
+                "version" not in row
+                or isinstance(row["version"], str)
+                and bool(row["version"])
+            )
             for row in rows
         ),
         "invalid secret-name metadata",
@@ -326,12 +331,14 @@ def check_auth_phase(
     current_secrets,
     binding,
     phase,
+    *,
+    verified_continuity_names=(),
 ):
     """Compare phase effects only; the caller still must validate action authority.
 
-    This initial slice supports three genuinely new secret names. A profile
-    containing earlier OIDC names needs the separately pinned value/version
-    continuity adapter; it is refused rather than treated as replacement permission.
+    Earlier OIDC names require the exact membership returned by the protected
+    value-continuity consumer. Exposed versions remain unchanged; absent
+    versions are disclosed by the preparation receipt rather than invented.
     """
     require(phase in AUTH_PHASES, "unknown auth phase")
     expected = expected_auth_config(before_config, binding)
@@ -344,15 +351,19 @@ def check_auth_phase(
     before = _secret_rows(before_secrets)
     current = _secret_rows(current_secrets)
     require(
-        not (set(before) & AUTH_SECRET_NAMES),
-        "existing OIDC continuity adapter required",
+        set(verified_continuity_names) == set(before) & AUTH_SECRET_NAMES,
+        "existing OIDC continuity membership differs",
     )
     expected_secrets = copy.deepcopy(before)
     if phase != "auth_stage_before":
         status = "Deployed" if phase == "auth_deploy_after" else "Staged"
-        expected_secrets.update(
-            {name: {"name": name, "status": status} for name in AUTH_SECRET_NAMES}
+        require(
+            set(current) == set(before) | AUTH_SECRET_NAMES, "auth secret names differ"
         )
+        for name in AUTH_SECRET_NAMES:
+            row = dict(before[name]) if name in before else dict(current[name])
+            row["status"] = status
+            expected_secrets[name] = row
     require(current == expected_secrets, "auth secret phase differs")
     return {
         "phase": phase,

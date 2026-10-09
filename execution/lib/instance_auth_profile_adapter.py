@@ -59,14 +59,19 @@ def resolve_action(record_path, record_sha256, manifest, *, canonical_get=None):
     """
     record = private_json(record_path)
     require(digest(record) == record_sha256, "selected action record drift")
-    _closed(
-        record,
-        {"version", "selected", "canonical", "registration"},
-        "invalid selected action record",
+    fields = {"version", "selected", "canonical", "registration"}
+    if record.get("version") == 2:
+        fields.add("profiles")
+    _closed(record, fields, "invalid selected action record")
+    require(
+        type(record["version"]) is int and record["version"] in (1, 2),
+        "unknown selected action record",
     )
     require(
-        type(record["version"]) is int and record["version"] == 1,
-        "unknown selected action record",
+        isinstance(manifest, dict)
+        and isinstance(manifest.get("binding"), dict)
+        and isinstance(manifest.get("references"), dict),
+        "incomplete action manifest",
     )
     canonical = record["canonical"]
     _closed(
@@ -81,7 +86,7 @@ def resolve_action(record_path, record_sha256, manifest, *, canonical_get=None):
     require(
         isinstance(mapping["canonical"], str)
         and mapping["canonical"]
-        and mapping["runtime"] == manifest["binding"]["environment"],
+        and mapping["runtime"] == manifest["binding"].get("environment"),
         "established environment mapping differs",
     )
     _closed(
@@ -103,7 +108,7 @@ def resolve_action(record_path, record_sha256, manifest, *, canonical_get=None):
     )
     require(
         canonical["snapshot_sha256"] == record["selected"]["canonical_sha256"]
-        and manifest["references"]["canonical_ref"] == canonical["entity_id"],
+        and manifest["references"].get("canonical_ref") == canonical["entity_id"],
         "selected canonical reference differs",
     )
     registration_ref = record["registration"]
@@ -139,11 +144,18 @@ def resolve_action(record_path, record_sha256, manifest, *, canonical_get=None):
         == manifest["binding"]["origin"].split("//", 1)[1],
         "canonical auth host or environment differs",
     )
-    return {
+    resolved = {
         "selected": record["selected"],
         "canonical": current,
         "registration": registration,
     }
+    if record["version"] == 2:
+        ref = record["profiles"]
+        _closed(ref, {"path", "sha256"}, "invalid full profile reference")
+        profiles = private_json(ref["path"])
+        require(digest(profiles) == ref["sha256"], "full profile artifact drift")
+        resolved["profiles"] = profiles
+    return resolved
 
 
 def op_field(locator):
@@ -182,6 +194,12 @@ def verify_protected_fields(refs, registration, *, reader=None, before_refs=None
         isinstance(before_refs, dict) and set(before_refs) <= AUTH_SECRET_NAMES,
         "invalid protected continuity membership",
     )
+    for locator in [*refs.values(), *before_refs.values()]:
+        require(
+            isinstance(locator, str)
+            and re.fullmatch(r"op://[^/\s]+/[a-z2-7]{26}/[^/\s]+", locator),
+            "nonimmutable protected locator",
+        )
     read = reader or op_field
     try:
         values = {name: read(refs[name]) for name in sorted(AUTH_SECRET_NAMES)}

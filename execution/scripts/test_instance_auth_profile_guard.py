@@ -69,7 +69,8 @@ class ActionManifestBindings(unittest.TestCase):
             },
             "registration": self.registration,
             "protected_fields": {
-                name: "op://Private/owned-item/" + name for name in AUTH_SECRET_NAMES
+                name: "op://Private/" + "a" * 26 + "/" + name
+                for name in AUTH_SECRET_NAMES
             },
         }
         self.selected = {
