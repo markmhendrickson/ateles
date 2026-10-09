@@ -5,6 +5,12 @@ entity_id: ent_38829f93d37f6e99b84a4ca7
 entity_type: agent_definition
 name: ops
 description: Website + host operations agent (DRAFT, planned). Owns website deploy/verify pipelines and host-machine maintenance. Chartered 2026-07-07 to fill the website-ops/host-ops gap from the skill owner audit (analysis ent_9c57e1028b9f5ae68168daf6). Genus TBD by operator.
+observation_ids:
+  name: 7926ac86-828e-505a-a3c0-1ee72255ca92
+  description: 7926ac86-828e-505a-a3c0-1ee72255ca92
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 7926ac86-828e-505a-a3c0-1ee72255ca92
 ---
 
 <!-- Claude Code adapter for agent `ops`. Canonical file: docs/agents/ops.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

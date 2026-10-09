@@ -43,18 +43,24 @@ Usage:
 
 Env: NEOTOMA_BASE_URL, NEOTOMA_BEARER_TOKEN (falls back to
 ~/.config/neotoma/.env).
+
+Each rendered file's frontmatter carries an `observation_ids:` block (see
+neotoma_mirror_lib.observation_ids_block) stamping the exact observation that
+produced each field's current value, alongside the entity id. Previously only
+the entity id was stamped, so a mirror could go stale against a corrected
+field with no way for the file itself to say so — only re-running --check
+revealed it. The observation ids make staleness visible in the artifact.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-import time
-import urllib.request
-import urllib.error
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from neotoma_mirror_lib import load_env, request, unwrap_snapshot, observation_ids_block  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENTS_DOC_DIR = REPO_ROOT / "docs" / "agents"
@@ -66,64 +72,29 @@ SKILL_HEADER = (
     "Inspector. This file is regenerated on every relevant write. -->\n"
 )
 
-
-def _load_env() -> tuple[str, str]:
-    base_url = os.environ.get("NEOTOMA_BASE_URL", "")
-    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-    env_path = Path.home() / ".config" / "neotoma" / ".env"
-    if (not base_url or not token) and env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            value = value.strip().strip('"').strip("'")
-            if key == "NEOTOMA_BASE_URL" and not base_url:
-                base_url = value
-            elif key == "NEOTOMA_BEARER_TOKEN" and not token:
-                token = value
-    if not base_url:
-        sys.exit("NEOTOMA_BASE_URL not set (env or ~/.config/neotoma/.env)")
-    return base_url.rstrip("/"), token
-
-
-def _request(url: str, token: str, payload: dict | None = None, retries: int = 5) -> dict:
-    last = None
-    for attempt in range(retries):
-        try:
-            req = urllib.request.Request(url)
-            req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
-            if token:
-                req.add_header("Authorization", f"Bearer {token}")
-            if payload is not None:
-                req.add_header("Content-Type", "application/json")
-                req.data = json.dumps(payload).encode()
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode())
-        except (urllib.error.URLError, ConnectionError) as exc:
-            last = exc
-            time.sleep(2)
-    raise SystemExit(f"Neotoma unreachable after {retries} tries: {last}")
-
-
-def _unwrap(entity: dict) -> dict:
-    s = entity.get("snapshot", entity)
-    if isinstance(s.get("snapshot"), dict):
-        s = s["snapshot"]
-    return s
+# Fields whose observation id is stamped in frontmatter — the structured
+# fields that actually surface there (see _canonical_frontmatter/skill_md),
+# not every field on the entity.
+STAMPED_FIELDS = (
+    "name", "description", "tier", "genus", "status", "aauth_sub",
+    "agent_grant", "observation_source_default", "harness_preferences",
+    "triggers", "tool_allowlist", "context_entity_types",
+    "operational_entity_types", "user_invocable", "prompt_markdown",
+)
 
 
 def fetch_agents(base_url: str, token: str) -> list[dict]:
-    data = _request(f"{base_url}/entities/query", token, {"entity_type": "agent_definition", "limit": 200})
+    data = request(f"{base_url}/entities/query", token, {"entity_type": "agent_definition", "limit": 200})
     ents = data.get("entities") or data.get("results") or []
     real = []
     for e in ents:
-        s = _unwrap(e)
+        s, provenance = unwrap_snapshot(e)
         if not s.get("name"):
             continue
         if not (s.get("tier") or s.get("genus") or s.get("aauth_sub")):
             continue  # excludes skills miscategorized as agent_definition
         s["_entity_id"] = e.get("entity_id") or s.get("entity_id", "")
+        s["_provenance"] = provenance
         real.append(s)
     real.sort(key=lambda s: s["name"])
     return real
@@ -177,13 +148,14 @@ def _as_list(v) -> list[str]:
 
 
 def _yaml_scalar(v) -> str:
-    """Quote a YAML scalar when it contains characters that would break parsing."""
-    sv = str(v)
-    if sv == "":
-        return '""'
-    if any(c in sv for c in ':#') or sv[0] in "!&*?{}[]|>@`\"'%,-" or sv != sv.strip():
-        return '"' + sv.replace('\\', '\\\\').replace('"', '\\"') + '"'
-    return sv
+    """Quote a YAML scalar when it contains characters that would break parsing.
+
+    Thin wrapper over neotoma_mirror_lib.yaml_scalar, kept under this name so
+    the rest of this file's call sites are unchanged.
+    """
+    from neotoma_mirror_lib import yaml_scalar
+
+    return yaml_scalar(v)
 
 
 # Context entity types an agent prompt may resolve at runtime (the
@@ -234,6 +206,7 @@ def _canonical_frontmatter(s: dict) -> list[str]:
     if ctx_refs:
         fm.append("canonical_context_entities:")
         fm += [f"  - {v}" for v in ctx_refs]
+    fm += observation_ids_block(s.get("_provenance") or {}, STAMPED_FIELDS)
     fm.append("---")
     return fm
 
@@ -303,6 +276,10 @@ def skill_md(s: dict) -> str:
         fm += [f"  - {_yaml_scalar(t)}" for t in triggers]
     if s.get("user_invocable") is not None:
         fm.append(f"user_invocable: {str(bool(s['user_invocable'])).lower()}")
+    fm += observation_ids_block(
+        s.get("_provenance") or {},
+        ("name", "description", "triggers", "user_invocable", "prompt_markdown"),
+    )
     fm.append("---")
     body = (s.get("prompt_markdown") or "").rstrip()
     pointer = (
@@ -431,7 +408,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="verify disk matches Neotoma")
     args = parser.parse_args()
-    base_url, token = _load_env()
+    base_url, token = load_env()
     agents = fetch_agents(base_url, token)
     return check(agents) if args.check else render(agents)
 

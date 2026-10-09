@@ -13,6 +13,12 @@ triggers:
   - review fixed costs
   - how are my finances trending
 user_invocable: true
+observation_ids:
+  name: 957bfe66-8876-b5b1-8bdd-93dde525210e
+  description: 957bfe66-8876-b5b1-8bdd-93dde525210e
+  triggers: a9b7fbb6-aa63-6a6f-2775-f5d9dc8f7221
+  user_invocable: 4c99a4bf-814e-63a6-4d81-f54c5b48afee
+  prompt_markdown: e6f4b3fb-0870-91c6-27a6-f825a5d37d3a
 ---
 
 <!-- Claude Code adapter for agent `fringilla`. Canonical file: docs/agents/fringilla.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

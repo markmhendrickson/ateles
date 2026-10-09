@@ -5,6 +5,12 @@ entity_id: ent_7df43f2bd35df575abfaa920
 entity_type: agent_definition
 name: struthio
 description: Autonomous release agent. Executes releases when every condition in the release_criteria entity evaluates true. Triggered by Lanius when all workflow gates are complete.
+observation_ids:
+  name: f28ad480-d297-1eaa-41a1-00ea169f1178
+  description: 57ae5bf1-ef1c-de41-4ba4-25f449946c2d
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: b54effb3-bcdd-ddf0-b399-078fe0d9edc4
 ---
 
 <!-- Claude Code adapter for agent `struthio`. Canonical file: docs/agents/struthio.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

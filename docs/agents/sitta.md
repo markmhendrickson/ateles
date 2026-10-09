@@ -27,6 +27,22 @@ operational_entity_types:
   - escalation
 canonical_context_entities:
   - constitution
+observation_ids:
+  name: 90034223-46e1-d679-4646-97f381bff293
+  description: 7b0436b6-116e-10da-4c19-a907d6e7ade7
+  tier: 90034223-46e1-d679-4646-97f381bff293
+  genus: 90034223-46e1-d679-4646-97f381bff293
+  status: 4c8dc4eb-e818-011b-ce35-d7bf1b13b4ce
+  aauth_sub: 90034223-46e1-d679-4646-97f381bff293
+  agent_grant: 90034223-46e1-d679-4646-97f381bff293
+  observation_source_default: ac8d1f47-25c9-bedd-2d80-041b2e12196e
+  harness_preferences: 46d1ceef-a0c0-a296-529a-6b8a8f4c922c
+  triggers: unknown
+  tool_allowlist: b66975e9-e926-607a-6c0a-a6604da7e60a
+  context_entity_types: fa9e244d-bef9-ba3f-c114-eb9b6a7cc2f7
+  operational_entity_types: a3a74bc7-3442-d41e-dac5-351d1fd59ba4
+  user_invocable: unknown
+  prompt_markdown: 42ae3bd1-e449-fd38-dd6f-1a4579fb7d61
 ---
 
 # sitta

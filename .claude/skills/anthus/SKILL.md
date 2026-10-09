@@ -5,6 +5,12 @@ entity_id: ent_887e8fd74d79eb63344df63e
 entity_type: agent_definition
 name: anthus
 description: Silence-detection watchdog and swarm coordinator (Tier 3 daemon). Maintains a cadence registry for every active roster role derived from agent_strategy entities, tracks last-heard-from per role, and fires escalation to the operator-interface agent on missed cadence even with zero late deliverables. Prior event-relay duties (escalation routing, content-workflow task-state relay) retained as secondary transport.
+observation_ids:
+  name: 29829eeb-82ce-bc83-5e21-9e272c585b35
+  description: 959573cf-acec-e063-293f-e31c73c870e7
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: d9410fab-550d-9f9c-c2af-6c822c1f7a63
 ---
 
 <!-- Claude Code adapter for agent `anthus`. Canonical file: docs/agents/anthus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

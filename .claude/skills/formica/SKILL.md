@@ -5,6 +5,12 @@ entity_id: ent_d62f1df8784b7f4fcadc7d74
 entity_type: agent_definition
 name: formica
 description: GitHub issue/PR automation daemon for the ateles repo. SSE subscriber to ateles GitHub events; dispatches issues and PRs to T4 invocable workers (Cicada for implementation, Vanellus for PR review). Symmetric to neotoma-agent (which handles the neotoma repo). Currently JS; Phase 5 Python rewrite using lib/daemon_runtime/.
+observation_ids:
+  name: 1d893a38-a713-8720-87d5-abc61890f0f0
+  description: dbe0a852-aece-68a6-6693-22bd90d5e1d9
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 2710bcee-9d9a-7bf3-5fbf-192ccf796f56
 ---
 
 <!-- Claude Code adapter for agent `formica`. Canonical file: docs/agents/formica.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
