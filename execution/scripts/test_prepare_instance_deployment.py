@@ -374,6 +374,149 @@ else: raise SystemExit(93)
         self.assertTrue((self.context / "gate-ran").exists())
         self.assertTrue((self.output / "prepared.json").exists())
 
+    def test_unadmitted_saved_release_command_refuses_emission(self):
+        self.evidence["saved"]["deploy"] = {
+            "release_command": "node dist/owned_unselected_release.js"
+        }
+        self.rebind_profiles()
+        self.raw.write_text(
+            self.raw.read_text()
+            + '[deploy]\nrelease_command="node dist/owned_unselected_release.js"\n'
+        )
+        result = self.execute()
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.output.exists())
+        self.assertFalse((self.context / "gate-ran").exists())
+
+    def bind_required_release(self):
+        value = "node dist/owned_release.js"
+        self.evidence["saved"]["deploy"] = {"release_command": value}
+        self.rebind_profiles()
+        self.raw.write_text(
+            self.raw.read_text() + '[deploy]\nrelease_command="' + value + '"\n'
+        )
+        release_file = self.context / "test_release_gate.py"
+        release_file.write_text(
+            "import unittest,os,hashlib\nfrom pathlib import Path\n"
+            "class Release(unittest.TestCase):\n"
+            " def test_existing_source(self):\n"
+            '  self.assertEqual(os.environ["INSTANCE_RELEASE_COMMAND_SHA256"],'
+            'hashlib.sha256(b"node dist/owned_release.js").hexdigest())\n'
+            '  self.assertEqual(Path("release-source.txt").read_text(),"owned release source")\n'
+            '  self.assertEqual(len(os.environ["INSTANCE_CANDIDATE_COMMIT"]),40)\n'
+            '  Path("release-gate-ran").write_text("actual gate")\n'
+        )
+        (self.context / "release-source.txt").write_text("owned release source")
+        with (self.context / ".gitignore").open("a") as f:
+            f.write("release-gate-ran\n")
+        # Existing helper commits/pins the candidate without altering this gate.
+        self.replace_gate(self.gate.read_text())
+        self.manifest["command"]["release"] = {
+            "present": True,
+            "command": value,
+            "disposition": "required",
+            "gate": {
+                "path": release_file.name,
+                "sha256": hashlib.sha256(release_file.read_bytes()).hexdigest(),
+                "inputs": {
+                    "release-source.txt": hashlib.sha256(
+                        (self.context / "release-source.txt").read_bytes()
+                    ).hexdigest()
+                },
+                "command_sha256": hashlib.sha256(value.encode()).hexdigest(),
+            },
+        }
+
+    def test_required_release_gate_executes_and_records_source_candidate(self):
+        self.bind_required_release()
+        result = self.execute()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.context / "release-gate-ran").exists())
+        prepared = json.loads((self.output / "prepared.json").read_text())
+        self.assertNotIn("--skip-release-command", prepared["argv"])
+        release = prepared["release_check"]
+        self.assertEqual(release["disposition"], "required")
+        self.assertEqual(release["gate"]["candidate_commit"], self.commit)
+        self.assertEqual(release["gate"]["tests_run"], 1)
+        self.assertEqual(release["gate"]["skips"], 0)
+        self.assertEqual(
+            release["gate"]["inputs"],
+            self.manifest["command"]["release"]["gate"]["inputs"],
+        )
+
+    def test_required_release_cannot_be_skipped_removed_or_boolean_attested(self):
+        self.bind_required_release()
+        bads = []
+        for field, value in (("skip_release_command", True),):
+            bad = copy.deepcopy(self.manifest)
+            bad["command"][field] = value
+            bads.append(bad)
+        for field, value in (
+            ("gate", True),
+            ("gate", None),
+            ("command", "node dist/other.js"),
+            ("present", False),
+            ("disposition", "unknown"),
+        ):
+            bad = copy.deepcopy(self.manifest)
+            bad["command"]["release"][field] = value
+            bads.append(bad)
+        bad = copy.deepcopy(self.manifest)
+        bad["command"]["release"]["gate"]["command_sha256"] = "0" * 64
+        bads.append(bad)
+        for i, bad in enumerate(bads):
+            with self.subTest(case=i):
+                self.assertEqual(self.execute(manifest=bad).returncode, 2)
+                self.assertFalse(self.output.exists())
+                self.assertFalse((self.context / "gate-ran").exists())
+        self.evidence["saved"].pop("deploy")
+        self.rebind_profiles()
+        self.assertEqual(self.execute().returncode, 2)
+        self.assertFalse(self.output.exists())
+
+    def test_skipped_or_mutating_release_gate_refuses_final_emission(self):
+        self.bind_required_release()
+        release_file = (
+            self.context / self.manifest["command"]["release"]["gate"]["path"]
+        )
+        for name, body in (
+            (
+                "skip",
+                "import unittest\nclass Release(unittest.TestCase):\n"
+                ' @unittest.skip("owned unavailable")\n def test_release(self):pass\n',
+            ),
+            (
+                "mutation",
+                "import unittest\nfrom pathlib import Path\n"
+                "class Release(unittest.TestCase):\n def test_release(self):\n"
+                '  self.assertTrue(True)\n  Path("release-source.txt").write_text("changed")\n',
+            ),
+        ):
+            with self.subTest(mode=name):
+                release_file.write_text(body)
+                self.manifest["command"]["release"]["gate"]["sha256"] = hashlib.sha256(
+                    release_file.read_bytes()
+                ).hexdigest()
+                self.replace_gate(self.gate.read_text())
+                self.assertEqual(self.execute().returncode, 2)
+                self.assertFalse(self.output.exists())
+
+    def test_unselected_build_arguments_and_missing_absence_contract_refuse(self):
+        for mutation in ("build", "contract", "skip", "presence"):
+            bad = copy.deepcopy(self.manifest)
+            if mutation == "build":
+                bad["command"]["build_arguments"] = ["--build-arg", "UNSELECTED=value"]
+            elif mutation == "contract":
+                bad["command"].pop("release")
+            elif mutation == "skip":
+                bad["command"]["skip_release_command"] = True
+            else:
+                bad["command"]["release"]["present"] = True
+            with self.subTest(mutation=mutation):
+                self.assertEqual(self.execute(manifest=bad).returncode, 2)
+                self.assertFalse(self.output.exists())
+                self.assertFalse((self.context / "gate-ran").exists())
+
     def test_complete_supported_mount_headers_restart_and_preserved_fields(self):
         from execution.lib.instance_profile_guard import check_complete_projection
 

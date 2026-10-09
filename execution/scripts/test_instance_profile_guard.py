@@ -161,7 +161,16 @@ def preparation_fixture():
         "secrets_sha256": digest(secrets),
         "volumes_sha256": digest(volumes),
         "tool_version": "owned-tool",
-        "command": {"skip_release_command": False, "build_arguments": []},
+        "command": {
+            "skip_release_command": False,
+            "build_arguments": [],
+            "release": {
+                "present": False,
+                "command": None,
+                "disposition": "absent",
+                "gate": None,
+            },
+        },
         "packaging_gate": {
             "path": "owned_gate.py",
             "sha256": "b" * 64,
@@ -295,6 +304,19 @@ class Preparation(unittest.TestCase):
             "config_sha256": digest(clone["config"]),
         }
         manifest["command"]["skip_release_command"] = True
+        evidence["saved"]["deploy"] = {"release_command": "node dist/owned_schema.js"}
+        manifest["command"]["release"] = {
+            "present": True,
+            "command": "node dist/owned_schema.js",
+            "disposition": "existing_skip",
+            "gate": None,
+        }
+        manifest["profile"]["saved_config_before_sha256"] = digest(evidence["saved"])
+        normalized = copy.deepcopy(evidence["saved"])
+        normalized["http_service"].update(
+            auto_stop_machines="stop", min_machines_running=0
+        )
+        manifest["profile"]["saved_config_after_sha256"] = digest(normalized)
         prepare(evidence, manifest, digest(manifest), image, "c" * 40)
         self.assertIn("--skip-release-command", _deployment_argv(manifest, image))
         self.assertEqual(

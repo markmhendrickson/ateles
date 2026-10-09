@@ -370,12 +370,17 @@ def prepare(evidence, manifest, manifest_sha256, image, commit, phase="before"):
     command = manifest["command"]
     require(
         isinstance(command, dict)
-        and set(command) == {"skip_release_command", "build_arguments"}
+        and set(command) == {"skip_release_command", "build_arguments", "release"}
         and type(command["skip_release_command"]) is bool
         and isinstance(command["build_arguments"], list)
         and all(isinstance(x, str) and x for x in command["build_arguments"]),
         "invalid command binding",
     )
+    require(
+        command["build_arguments"] == [],
+        "unselected build arguments in immutable-image method",
+    )
+    check_release_contract(normalized, command)
     # The reviewed immutable-image method cannot smuggle flags via an app or ID.
     for value in (
         manifest["app"],
@@ -490,6 +495,64 @@ def check_projected_http_checks(saved, source_config):
                 check.pop("headers")
     require(actual == expected, "saved checks differ from admitted machine")
     return True
+
+
+def check_release_contract(saved, command):
+    """Bind saved presence/value and the independently admitted disposition.
+
+    A required command needs a real pinned candidate gate, executed by the CLI.
+    The separately reviewed manifest is authority; no pass/approval Boolean is
+    accepted as a gate. Existing skip must be explicitly selected, never inferred.
+    """
+    release = command["release"]
+    require(
+        isinstance(release, dict)
+        and set(release) == {"present", "command", "disposition", "gate"}
+        and type(release["present"]) is bool,
+        "missing release contract",
+    )
+    deploy = saved.get("deploy", {})
+    require(isinstance(deploy, dict), "malformed saved deploy input")
+    present = "release_command" in deploy
+    value = deploy.get("release_command")
+    require(
+        present == release["present"]
+        and value == release["command"]
+        and (value is None if not present else isinstance(value, str)),
+        "saved release presence/value differs",
+    )
+    disposition = release["disposition"]
+    if disposition == "absent":
+        require(
+            value in (None, "")
+            and release["gate"] is None
+            and command["skip_release_command"] is False,
+            "release absence/skip differs",
+        )
+    elif disposition == "existing_skip":
+        require(
+            present
+            and isinstance(value, str)
+            and value.strip()
+            and command["skip_release_command"] is True
+            and release["gate"] is None,
+            "unbound existing release skip",
+        )
+    elif disposition == "required":
+        gate = release["gate"]
+        require(
+            present
+            and isinstance(value, str)
+            and value.strip()
+            and command["skip_release_command"] is False
+            and isinstance(gate, dict)
+            and set(gate) == {"path", "sha256", "inputs", "command_sha256"}
+            and gate["command_sha256"] == hashlib.sha256(value.encode()).hexdigest(),
+            "required release gate missing or mismatched",
+        )
+    else:
+        raise Refused("unknown release disposition")
+    return release
 
 
 # Source: flyctl v0.4.112 ca63052e, Config.Flatten/updateMachineConfig and

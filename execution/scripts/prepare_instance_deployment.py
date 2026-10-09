@@ -50,22 +50,51 @@ def run(args):
         result["normalized"], source["config"], manifest["tool_version"]
     )
     gate = manifest["packaging_gate"]
-    require(
-        isinstance(gate, dict) and set(gate) == {"path", "sha256", "inputs"},
-        "missing packaging gate",
-    )
-    script = (context / gate["path"]).resolve(strict=True)
-    require(
-        script.is_relative_to(context) and script.suffix == ".py",
-        "invalid packaging gate path",
-    )
-    require(
-        hashlib.sha256(script.read_bytes()).hexdigest() == gate["sha256"],
-        "packaging gate changed",
-    )
-    require(
-        isinstance(gate["inputs"], dict) and gate["inputs"], "missing packaging inputs"
-    )
+    release = manifest["command"]["release"]
+    selected = [("packaging", gate)]
+    if release["disposition"] == "required":
+        selected.append(
+            (
+                "release",
+                {k: v for k, v in release["gate"].items() if k != "command_sha256"},
+            )
+        )
+    scripts = {}
+    for name, descriptor in selected:
+        require(
+            isinstance(descriptor, dict)
+            and set(descriptor) == {"path", "sha256", "inputs"},
+            "missing executed candidate gate",
+        )
+        require(
+            isinstance(descriptor["path"], str)
+            and descriptor["path"]
+            and isinstance(descriptor["sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", descriptor["sha256"]),
+            "malformed gate identity",
+        )
+        script = (context / descriptor["path"]).resolve(strict=True)
+        require(
+            script.is_relative_to(context)
+            and script.suffix == ".py"
+            and script.is_file(),
+            "invalid candidate gate path",
+        )
+        require(
+            isinstance(descriptor["inputs"], dict) and descriptor["inputs"],
+            "missing candidate gate inputs",
+        )
+        require(
+            all(
+                isinstance(k, str)
+                and k
+                and isinstance(v, str)
+                and re.fullmatch(r"[0-9a-f]{64}", v)
+                for k, v in descriptor["inputs"].items()
+            ),
+            "malformed gate input identity",
+        )
+        scripts[name] = script
 
     def validate_candidate():
         require(
@@ -77,56 +106,72 @@ def run(args):
             command(["git", "rev-parse", "HEAD"], context).strip() == commit,
             "candidate commit changed during preparation",
         )
-        current_script = (context / gate["path"]).resolve(strict=True)
-        require(
-            current_script == script
-            and current_script.is_file()
-            and hashlib.sha256(current_script.read_bytes()).hexdigest()
-            == gate["sha256"],
-            "packaging gate changed",
+        for name, descriptor in selected:
+            current_script = (context / descriptor["path"]).resolve(strict=True)
+            require(
+                current_script == scripts[name]
+                and current_script.is_file()
+                and hashlib.sha256(current_script.read_bytes()).hexdigest()
+                == descriptor["sha256"],
+                "candidate gate changed",
+            )
+            for relative, expected in descriptor["inputs"].items():
+                item = (context / relative).resolve(strict=True)
+                require(
+                    item.is_relative_to(context) and item.is_file(),
+                    "invalid candidate gate input",
+                )
+                require(
+                    hashlib.sha256(item.read_bytes()).hexdigest() == expected,
+                    "candidate gate input changed",
+                )
+
+    def execute_gate(name):
+        script = scripts[name]
+        # These are nonsecret immutable context identities, not approval flags.
+        gate_env = {
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "INSTANCE_CANDIDATE_COMMIT": commit,
+        }
+        if name == "release":
+            gate_env["INSTANCE_RELEASE_COMMAND_SHA256"] = release["gate"][
+                "command_sha256"
+            ]
+        ran = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                str(script.parent),
+                "-p",
+                script.name,
+                "-v",
+            ],
+            cwd=context,
+            env=gate_env,
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
-        for name, expected in gate["inputs"].items():
-            item = (context / name).resolve(strict=True)
-            require(
-                item.is_relative_to(context) and item.is_file(),
-                "invalid packaging input",
-            )
-            require(
-                hashlib.sha256(item.read_bytes()).hexdigest() == expected,
-                "packaging input changed",
-            )
+        require(
+            ran.returncode == 0
+            and re.search(r"Ran [1-9][0-9]* tests? in", ran.stderr)
+            and not re.search(
+                r"\b(?:skipped|expected failures|unexpected successes)\b",
+                ran.stderr,
+                re.IGNORECASE,
+            ),
+            "candidate gate failed or ran no tests",
+        )
+        validate_candidate()
+        return ran
 
     validate_candidate()
-    gate_run = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            str(script.parent),
-            "-p",
-            script.name,
-            "-v",
-        ],
-        cwd=context,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    require(
-        gate_run.returncode == 0
-        and re.search(r"Ran [1-9][0-9]* tests? in", gate_run.stderr)
-        and not re.search(
-            r"\b(?:skipped|expected failures|unexpected successes)\b",
-            gate_run.stderr,
-            re.IGNORECASE,
-        ),
-        "packaging gate failed or ran no tests",
-    )
-    # The executed gate cannot invalidate the clean candidate or its inputs.
-    validate_candidate()
+    gate_run = execute_gate("packaging")
+    release_run = execute_gate("release") if "release" in scripts else None
     # The pinned tool must still support every emitted option. No fallback.
     version = command(["fly", "version"]).strip()
     require(version == manifest["tool_version"], "installed tool drift")
@@ -175,6 +220,32 @@ def run(args):
             "skips": 0,
             "result_sha256": hashlib.sha256(gate_run.stderr.encode()).hexdigest(),
         }
+        result["release_check"] = {
+            "disposition": release["disposition"],
+            "saved_present": release["present"],
+            "command_sha256": (
+                hashlib.sha256(release["command"].encode()).hexdigest()
+                if release["command"] is not None
+                else None
+            ),
+            "gate": None,
+        }
+        if release_run is not None:
+            result["release_check"]["gate"] = {
+                **release["gate"],
+                "candidate_commit": commit,
+                "argv": release_run.args,
+                "returncode": release_run.returncode,
+                "tests_run": int(
+                    re.search(r"Ran ([1-9][0-9]*) tests? in", release_run.stderr).group(
+                        1
+                    )
+                ),
+                "skips": 0,
+                "result_sha256": hashlib.sha256(
+                    release_run.stderr.encode()
+                ).hexdigest(),
+            }
         result["machine_projection"] = projection
         result["tool_version"] = version
         result["phase"] = args.phase
@@ -213,7 +284,14 @@ def main():
     parser.add_argument("--phase", choices=("before", "after"), default="before")
     try:
         print(json.dumps(run(parser.parse_args())))
-    except (Refused, ValueError, OSError, subprocess.SubprocessError):
+    except (
+        Refused,
+        ValueError,
+        TypeError,
+        KeyError,
+        OSError,
+        subprocess.SubprocessError,
+    ):
         print("Preparation refused; private input/check did not bind", file=sys.stderr)
         return 2
     return 0
