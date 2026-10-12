@@ -73,6 +73,10 @@ CHECKPOINT_TYPE = "checkpoint_" + "brief"
 REAL_READ_AUTHENTICATED_RESOLUTION = (
     gating_module.read_authenticated_checkpoint_resolution
 )
+REAL_READ_AUTHORIZATION = gating_module.read_authenticated_checkpoint_authorization
+REAL_RESOLVER_AUTHORITY = server._checkpoint_resolver_authority
+REAL_AUTHENTICATE_RESOLVER = server._authenticate_checkpoint_resolver
+REAL_CORRECT = server._correct
 
 
 class _Notifier:
@@ -338,7 +342,7 @@ async def test_unattributed_approval_never_reaches_gate_override(
             "user_id": "tenant-a",
             "provenance": {
                 "agent_sub": "ateles@ateles-swarm",
-                    "agent_thumbprint": TEST_RESOLVER_JKT,
+                "agent_thumbprint": TEST_RESOLVER_JKT,
                 "attribution_tier": "software",
             },
         }
@@ -392,7 +396,7 @@ async def test_unattributed_rejection_never_declines_task(
             "user_id": "tenant-a",
             "provenance": {
                 "agent_sub": "ateles@ateles-swarm",
-                    "agent_thumbprint": TEST_RESOLVER_JKT,
+                "agent_thumbprint": TEST_RESOLVER_JKT,
                 "attribution_tier": "software",
             },
         }
@@ -427,9 +431,7 @@ async def test_unattributed_rejection_never_declines_task(
 
 
 @pytest.mark.asyncio
-async def test_authenticated_rejection_declines_task(
-    monkeypatch, release_store
-):
+async def test_authenticated_rejection_declines_task(monkeypatch, release_store):
     records, brief_id, task_id = release_store
     brief = records[brief_id]["snapshot"]
     brief["status"] = "rejected"
@@ -441,7 +443,7 @@ async def test_authenticated_rejection_declines_task(
             "user_id": "tenant-a",
             "provenance": {
                 "agent_sub": "ateles@ateles-swarm",
-                    "agent_thumbprint": TEST_RESOLVER_JKT,
+                "agent_thumbprint": TEST_RESOLVER_JKT,
                 "attribution_tier": "software",
             },
         }
@@ -615,6 +617,192 @@ async def test_approve_releases_task_and_marks_brief_consumed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "outer",
+        "snapshot_only",
+        "conflict",
+        "cross_tenant",
+        "missing",
+        "malformed",
+        "wrong_key",
+        "wrong_body",
+        "wrong_producer",
+    ],
+)
+async def test_authoritative_owner_signed_resolution_releases_exactly_once(
+    monkeypatch, release_store, mode
+):
+    """Real authority/signature readers + consumer; hermetic persistence adapter.
+
+    The adapter models Neotoma's immutable attributed observations, not a live
+    transport or deployed Neotoma signature verifier. No production keys exist.
+    """
+    from test_server import _resolver_proof
+
+    records, brief_id, task_id = release_store
+    owner = "11111111-1111-4111-8111-111111111111"
+    headers, resolver_jkt = _resolver_proof(checkpoint_id=brief_id)
+    producer_jkt = "P" * 43
+    monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", producer_jkt)
+    for record in records.values():
+        record["user_id"] = owner
+        record["snapshot"]["user_id"] = owner
+    # The producer does not author a snapshot user_id; only the row owns it.
+    records[brief_id]["snapshot"].pop("user_id")
+    policy = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        high_blast_action_types=frozenset(),
+        loaded=True,
+    )
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    fields = records[brief_id]["snapshot"]
+    fields["handler"] = "apis"
+    fields["body"] = build_checkpoint_authorization_envelope(
+        task_record=records[task_id],
+        policy=policy,
+        decision=decision,
+        action_type="local_edit",
+        user_id=owner,
+        required_approver_jkt=resolver_jkt,
+        producer_jkt=producer_jkt,
+    )
+    protected = (
+        "body",
+        "task_entity_id",
+        "policy_entity_id",
+        "blast_radius",
+        "gate_action",
+        "handler",
+    )
+    records[brief_id]["provenance"] = {field: "obs-create" for field in protected}
+    observations = [
+        {
+            "id": "obs-create",
+            "fields": dict(fields),
+            "user_id": owner,
+            "provenance": {
+                "agent_sub": "apis@ateles-swarm",
+                "agent_thumbprint": producer_jkt,
+                "attribution_tier": "software",
+            },
+        }
+    ]
+    monkeypatch.setattr(
+        gating_module, "_fetch_entity_observations", lambda entity_id: observations
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "read_authenticated_checkpoint_authorization",
+        REAL_READ_AUTHORIZATION,
+    )
+    monkeypatch.setattr(
+        apis, "read_authenticated_checkpoint_authorization", REAL_READ_AUTHORIZATION
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "read_authenticated_checkpoint_resolution",
+        REAL_READ_AUTHENTICATED_RESOLUTION,
+    )
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_resolution",
+        REAL_READ_AUTHENTICATED_RESOLUTION,
+    )
+    monkeypatch.setattr(
+        server, "_checkpoint_resolver_authority", REAL_RESOLVER_AUTHORITY
+    )
+    monkeypatch.setattr(
+        server, "_authenticate_checkpoint_resolver", REAL_AUTHENTICATE_RESOLVER
+    )
+    monkeypatch.setattr(server, "_correct", REAL_CORRECT)
+    monkeypatch.setattr(
+        apis, "fetch_entity_user_id", lambda entity_id: records[entity_id]["user_id"]
+    )
+    writes = []
+
+    def persisted_correction(path, body, *, extra_headers, encoded_body):
+        assert path == "/correct"
+        assert encoded_body == server._canonical_body_bytes(body)
+        claims = REAL_AUTHENTICATE_RESOLVER(
+            extra_headers,
+            body=encoded_body,
+            required_principal_sub="ateles@ateles-swarm",
+            required_principal_jkt=resolver_jkt,
+        )
+        assert claims is not None
+        writes.append(body)
+        fields["status"] = body["value"]
+        records[brief_id]["provenance"]["status"] = "obs-resolution"
+        observations.append(
+            {
+                "id": "obs-resolution",
+                "fields": {"status": body["value"]},
+                "user_id": owner,
+                "provenance": {
+                    "agent_sub": claims["sub"],
+                    "agent_thumbprint": resolver_jkt,
+                    "attribution_tier": "software",
+                },
+            }
+        )
+        return {"success": True}
+
+    monkeypatch.setattr(server, "_post", persisted_correction)
+    dispatches = []
+    original_dispatch = apis.dispatch_task
+
+    async def counted_dispatch(*args, **kwargs):
+        dispatches.append(args)
+        await original_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(apis, "dispatch_task", counted_dispatch)
+    if mode == "snapshot_only":
+        records[brief_id].pop("user_id")
+        fields["user_id"] = owner
+    elif mode == "conflict":
+        fields["user_id"] = None
+    elif mode == "cross_tenant":
+        records[brief_id]["user_id"] = "22222222-2222-4222-8222-222222222222"
+    elif mode == "missing":
+        records[brief_id].pop("user_id")
+    elif mode == "malformed":
+        records[brief_id]["user_id"] = " " + owner
+    elif mode == "wrong_key":
+        headers, _ = _resolver_proof(checkpoint_id=brief_id)
+    elif mode == "wrong_body":
+        headers, _ = _resolver_proof(checkpoint_id=brief_id, action="reject")
+    elif mode == "wrong_producer":
+        observations[0]["provenance"]["agent_thumbprint"] = "Q" * 43
+    result = await _resolve(brief_id, "approve", headers)
+    if mode != "outer":
+        assert "error" in result
+        assert writes == dispatches == []
+        assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+        assert fields["resolved_dispatched"] is False
+        return
+    assert "error" not in result
+    assert len(writes) == len(dispatches) == 1
+    assert records[task_id]["snapshot"]["status"] == "routed"
+    assert fields["resolved_dispatched"] is True
+    assert (
+        REAL_READ_AUTHENTICATED_RESOLUTION(
+            brief_id,
+            records[brief_id],
+            required_approver_sub="ateles@ateles-swarm",
+            required_approver_jkt=resolver_jkt,
+            expected_user_id=owner,
+        )["observation_id"]
+        == "obs-resolution"
+    )
+    assert "error" in await _resolve(brief_id, "approve", headers)
+    await apis.handle_checkpoint_brief(brief_id, fields, _Notifier())
+    assert len(writes) == len(dispatches) == 1
+
+
+@pytest.mark.asyncio
 async def test_stale_sse_snapshot_cannot_dispatch_after_inline_consumer(
     monkeypatch, release_store
 ):
@@ -697,7 +885,6 @@ def _cicada_delivers_a_pr(monkeypatch, records):
     monkeypatch.setattr(task_lifecycle, "NEOTOMA_BEARER_TOKEN", "test-token")
     monkeypatch.setattr(task_lifecycle.httpx, "post", post)
     return _Success
-
 
 
 @pytest.mark.asyncio

@@ -393,6 +393,38 @@ class TestRouteTask(unittest.TestCase):
         self.assertEqual(result["matched_agent"], "vanellus")
 
 
+class TestCheckpointOwnerAuthority(unittest.TestCase):
+    OWNER = "11111111-1111-4111-8111-111111111111"
+    OTHER = "22222222-2222-4222-8222-222222222222"
+
+    def authority(self, record):
+        with patch(
+            "lib.daemon_runtime.gating.read_authenticated_checkpoint_authorization",
+            return_value={
+                "required_approver_sub": "resolver@example.test",
+                "required_approver_jkt": _TEST_RESOLVER_JKT,
+                "user_id": self.OWNER,
+            },
+        ):
+            return srv._checkpoint_resolver_authority("ent_checkpoint", record)
+
+    def test_authoritative_outer_owner_is_required(self):
+        self.assertIsNotNone(self.authority({"user_id": self.OWNER, "snapshot": {}}))
+        self.assertIsNone(self.authority({"snapshot": {"user_id": self.OWNER}}))
+
+    def test_missing_malformed_cross_tenant_outer_owner_fails_closed(self):
+        for owner in (None, "", False, [], {}, "tenant", " " + self.OWNER, self.OTHER):
+            with self.subTest(owner=owner):
+                self.assertIsNone(self.authority({"user_id": owner, "snapshot": {}}))
+
+    def test_present_nested_owner_must_match_even_when_falsey(self):
+        for nested in (None, "", False, [], {}, self.OTHER):
+            for snapshot in ({"user_id": nested}, {"snapshot": {"user_id": nested}}):
+                with self.subTest(snapshot=snapshot):
+                    self.assertIsNone(self.authority({"user_id": self.OWNER, "snapshot": snapshot}))
+        self.assertIsNotNone(self.authority({"user_id": self.OWNER, "snapshot": {"user_id": self.OWNER}}))
+
+
 class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):

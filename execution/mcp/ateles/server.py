@@ -538,16 +538,29 @@ def _checkpoint_resolver_authority(
         return None
     required_sub = str(authority.get("required_approver_sub") or "").strip()
     required_jkt = str(authority.get("required_approver_jkt") or "").strip()
-    tenant_id = str(authority.get("user_id") or "").strip()
-    snapshot_tenant = str(_snapshot_of(checkpoint_record).get("user_id") or "").strip()
+    tenant_id = authority.get("user_id")
+    # Ownership is server-owned envelope metadata, never reducer content.
+    # Do not coerce or strip safety-bearing values: malformed input denies.
+    owner = checkpoint_record.get("user_id")
+    uuid_pattern = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
     if (
         not required_sub
         or "@" not in required_sub
         or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
-        or not tenant_id
-        or snapshot_tenant != tenant_id
+        or not isinstance(tenant_id, str)
+        or not re.fullmatch(uuid_pattern, tenant_id)
+        or not isinstance(owner, str)
+        or not re.fullmatch(uuid_pattern, owner)
+        or owner != tenant_id
     ):
         return None
+    # Both supported snapshot envelopes may contain user-authored fields.
+    # An explicitly present falsey/malformed/conflicting owner is not absence.
+    snapshot = checkpoint_record.get("snapshot")
+    while isinstance(snapshot, dict):
+        if "user_id" in snapshot and snapshot["user_id"] != owner:
+            return None
+        snapshot = snapshot.get("snapshot")
     return required_sub, required_jkt, tenant_id
 
 
