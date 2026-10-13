@@ -521,6 +521,30 @@ rule rather than as a posture.
 
 ---
 
+## 8. Whether a swarm's declarations can move between instances, and in what form
+
+**Open (decision 134, 2026-10-06), from a competitive review.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. A swarm's declarations — its agents, its roster, its
+workflows, its intake rules, the shape of its action policies without their values, and its skills — live in
+the record, not in the repository (`conformance.md#direction-of-truth-per-class-of-record`). Forking the
+repository therefore carries none of them, which is the gap between this document's goal, a third party
+forking public ateles, and what a fork receives. Peering is not the path either: a governance-type
+observation synced from a peer is recorded and never takes effect (decisions 55 and 65,
+`gates_and_workflows.md#a-synced-observation-on-a-governance-type-is-recorded-and-never-takes-effect`). A new
+operator or a second instance starts from the bootstrap set (decision 43) and declares the rest again. Three
+candidates.
+
+- **Declared again by hand.** Nothing new is built; every fork rebuilds by hand what the first instance
+  learned.
+- **A declaration package.** An export of governance records with the operator's values stripped, imported
+  as governance writes held at the gate (decision 18) and proven where decision 100's tier requires, with the
+  source package and its version on the provenance of every imported observation.
+- **The repository's rendered mirrors as the package.** Treats a render target as a source, which the
+  direction-of-truth table forbids.
+
+**Recommendation, unruled.** The second. It is the forkable unit decision 82's fork case needs, gated and
+provenanced on import. If unanswered, a fork carries the code and none of the swarm.
+
 ---
 
 ## Related

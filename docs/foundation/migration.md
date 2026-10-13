@@ -1196,7 +1196,8 @@ waited on this ruling; the pending mark on MG-2 and the MG-12 pointer row in `co
 **Ruled (decision 42, 2026-09-06): split by what each mechanic is — the tools a principal may invoke are a
 dimension of its grant; the harness a role prefers and its model tier are a `vendor_binding` for the harness
 as a vendor; hook wiring and environment stay outside the record, as harness plumbing.** Registered as ruled
-in `conformance.md#the-register-of-open-design-decisions`. No new context type is introduced.
+in part in `conformance.md#the-register-of-open-design-decisions`, its open half stated below. No new context
+type is introduced.
 
 **The question, and the three answers it had.** After the skills section's three moves — what is read and written to the declaration, which system and operation
 to the adapter document, how the record is called to the record's own interface — a skill still carries what binds
@@ -1244,6 +1245,19 @@ and a governance write per grant that names tools. A harness that cannot enforce
 the bound reporting-only for that harness, and principle 1 names it as such rather than hiding it. The format-gap
 section had framed the residue as the operator's; it is ruled here because two ruled decisions and the tuple's own
 definition of `scope` answer it, and no operator lean was recorded to contradict.
+
+**The half left open, and the candidate a competitive review adds.** The ruling makes a harness's allowlist a
+copy — derived from the grant at load, or held equal to it by a parity test — and does not choose between the
+two; decision 87 binds under either
+(`authority_model.md#a-harness-provides-only-what-a-grant-names-and-a-provider-that-does-not-enforce-is-a-capability-the-grant-names`),
+and the register carries the choice as this decision's open half. **Derived at load:** each time a runner
+starts, the harness's tool configuration is built strictly from the grant and from nothing else, so a tool the
+grant does not name is absent rather than present and refused, and the copy cannot drift because it is never
+kept. **Held equal:** the harness keeps its own list, and a parity test detects when the two diverge; cheaper,
+and the drift class remains, detected after the fact. A competitive review (2026-10-06) found the first in use
+as a strict configuration built per run, and recommends it, since it removes the drift class decision 87 names
+rather than detecting it; its cost is that a harness which cannot be configured per run from the grant cannot
+carry granted work under this reading until it can. **Recommendation, unruled:** derived at load.
 
 **What would reopen it.** A harness mechanic that is none of the three — neither a bound on what an agent may do,
 nor a binding to a vendor's instance, nor plumbing — would need a home this ruling does not give it; and a

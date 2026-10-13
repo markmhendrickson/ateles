@@ -112,7 +112,12 @@ each already in the design, and their composition is what a payment gets:
 an action a policy can never demote, a checkpoint a named approver must resolve, and a verification by a
 second principal that must have happened first. The recurrence path that lets a `HIGH`-blast class graduate
 into being taken without a checkpoint is unavailable to it, which is the specific property that matters —
-a payment that has been made correctly a hundred times is gated exactly as the hundred-and-first.
+a payment that has been made correctly a hundred times is gated exactly as the hundred-and-first. A
+recurring obligation is not an exception: it is taken unattended only under a standing consent the operator
+approved once, for its exact figures at zero tolerance — the class's `consent_tolerance` does not apply to a
+standing consent — with an expiry and a use count; that is a principal's decision, never a count, and without
+one each occurrence waits on an ordinary checkpoint (decision 127,
+`gates_and_workflows.md#a-recurring-payment-runs-only-under-a-standing-consent-and-whether-other-classes-may-hold-one-is-open`).
 
 **What a second gate would cost, stated because the temptation is real.** The instinct at this boundary is
 to add something: a second approver, a cooling-off period, a value ceiling above which a different path
@@ -791,6 +796,40 @@ to make, and the drift table below records that the built path does both.
 closed it at once. **What would reopen it:** a rail class for which irreversible has no state the rail itself
 names — a settlement layer with only probabilistic finality and no depth convention — which would need its
 own criterion stated here, per the freshness note's list of what a new rail class must answer.
+
+## Whether paying a service per call is a payment or a metered resource
+
+**Open (decision 137, 2026-10-06), from a competitive review; the question is posed here and deliberately
+not answered.** Registered in `conformance.md#the-register-of-open-design-decisions`. Some services charge an
+agent per call, at the moment of the call: the service answers a request with a demand for payment, the agent
+pays a small amount, and the call proceeds. The review asked whether an agent may pay such charges unattended
+below a threshold set per role, with an approval above it. Decision 127 bears on it directly — a payment never
+graduates by count, and a recurring obligation is taken unattended only under a standing consent for an exact
+figure — so the
+answer turns on which kind of thing a per-call charge is. Already out of scope, by this document's scope, is a
+purchase made on a merchant's own system, which is that system's action class (`#scope`). Three candidates.
+
+- **A payment.** Each charge is a `payment` action through the gate: in the never-set, never graduated, and
+  payable unattended only under a standing consent, whose exact-figure condition a per-call price meets only
+  where the price is fixed. The safest reading; unattended per-call payment becomes impractical wherever
+  prices vary.
+- **A budget-metered resource.** Access to the service is a capability whose consumption is metered under
+  decision 53's scope term — or under decision 131, where a charge is not itself an action — drawn from an
+  account or balance the operator funds by an ordinary payment. The per-role threshold is a budget term that
+  attenuates down a delegation, and a charge above it is a hold. Practical; money leaves without a decision
+  per charge, bounded by the budget the operator funded.
+- **A class of its own.** A distinct action class for per-call charges, with a ceiling per call as a
+  parameter constraint. What decides whether such a class sits in the never-set is that it moves money, not
+  what the class is named (principle 5): naming a money-moving charge something other than `payment` never
+  takes it out of the never-set by itself. So this candidate stands only if the ruling on this row says, for
+  this class and on its own ground, that per-call charges below a ceiling may be taken outside the
+  never-set; it is never a precedent for any other class that moves money, and no count graduates it.
+
+What no candidate may do: clear a charge on a rail by a count, which decision 127 forbids; or pay from a
+credential the agent holds as its own value, which custody forbids (`authority_model.md#grants`).
+
+**No recommendation is made.** Whether paying for service access is a payment class or a budget-metered
+resource sets how far money moves without a decision per charge, and that is the operator's to rule.
 
 ## Freshness
 
