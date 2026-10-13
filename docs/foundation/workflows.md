@@ -41,7 +41,11 @@ to a principal at claim time: the declaration's `owner_role` holds the role, the
 an agent per declaration scope (`swarm_roster`, by role), and the binding is read when the step is claimed, so a
 renamed or replaced agent leaves no stale name here or in the declaration (`vocabulary.md#step-owner`).
 The step-owner column of every table below is therefore a role, and a role that resolves to no principal
-raises a checkpoint (reason `unspawnable_assignee`) rather than falling through to any available agent. No section names an operator, a payee, a contact, or a channel; those are context entities the step
+raises a checkpoint (reason `unspawnable_assignee`) rather than falling through to any available agent.
+The role names in those columns are **example slot names**: the design fixes no role set, each implementation
+defines its own and fills each slot it uses, and an implementation may rename, merge, or split the examples
+so long as the constraints of `#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`
+hold. No section names an operator, a payee, a contact, or a channel; those are context entities the step
 owner retrieves at runtime.
 
 ## How to read a workflow section
@@ -53,7 +57,7 @@ from the declarations (below).
 - **Entry condition**: what makes a task eligible to enter this workflow. For every workflow but intake,
   the entry condition includes that an intake batch closed naming this workflow as successor
   (`work_model.md#intake-is-every-tasks-first-workflow`).
-- **Steps**: the ordered list, each with its step owner by role, whether it is required, and its parallel group
+- **Steps**: the ordered list, each with its step owner by role (an example slot name, `#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`), whether it is required, and its parallel group
   and join where it has one. A workflow's last step is always a single step, never a parallel group; its
   verdict is the batch's closing verdict and names the successor
   (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). A step's state within a batch
@@ -108,22 +112,69 @@ PR that edits a table by hand fails the check. A section whose workflow has no d
 hand-authored table with the same marker, which becomes the check's expected content the day the entity
 is declared.
 
-## Roles named in this document
+## Roles are slots, and the design fixes only the constraints on filling them
 
-| Role | Claims |
-|---|---|
-| `pm` step owner | the `pm` step of every code workflow and every step of intake |
-| `ux`, `arch`, `pr_review`, `qa`, `legal` step owners | the review step of the same name (`vocabulary.md#review-step`) |
-| implementer | the `impl` step |
-| steward | the `merge` step, whose work is the merge action (`vocabulary.md#steward`) |
-| release steward | every step of the release workflow |
-| copywriter | the `copy` step |
-| content author | the drafting and posting steps of social content and outreach |
-| lint runner | a deterministic step whose work is a script and whose verdict is the script's result |
-| operator-facing agent | every step that carries a checkpoint or a task to the operator (`vocabulary.md#operator-facing-agent`) |
-| payer, verifier | the two disjoint roles of the payment workflow |
-| researcher, analyst | the working steps of research and of meeting processing |
-| planner | every step of the planning workflow, declared per declaration scope and once for the levels above a project (`#planning`) |
+**The rules in this section.**
+
+- [A role is a slot an implementation fills](#a-role-is-a-slot-an-implementation-fills).
+- [Five constraints hold for any role set](#five-constraints-hold-for-any-role-set).
+
+### A role is a slot an implementation fills
+
+No role is foundational: no implementation needs a particular one, and this document defines no fixed list
+of them (operator ruling, 2026-10-13, register decision 142). A step declaration's `owner_role` names a role
+and is a **slot**: each implementation defines its own role set, declares which roles it uses, and fills each
+slot with a principal through its roster (`swarm_roster`, per declaration scope). The role names that appear in
+the step tables of the sections below (`pm`, `ux`, `arch`, `pr_review`, `qa`, `legal`, implementer,
+steward, copywriter, content author, lint runner, operator-facing agent, payer, verifier, researcher,
+analyst, planner, and the like) are **example role names** chosen so the reference workflows read
+concretely. An implementation may rename them, merge two into one, or split one into several, and a section
+here binds no implementation to any of them. What binds is the set of constraints below, which every role
+set must satisfy. Where an implementation keeps a mapping from its own role set to the examples, that mapping
+is implementation state and lives outside this directory (`migration.md` states the same boundary for
+names the checkout uses).
+
+### Five constraints hold for any role set
+
+Each is stated here without naming a role and is argued where it is cited.
+
+1. **Separation of duties.** Where the design requires two duties to be held by distinct principals, the roles
+   an implementation defines for them must resolve to distinct principals, an agent counting as the principal
+   it is bound to (decision 48). The design requires it in two places: in the payment workflow, whoever
+   verifies and reconciles a payment is not whoever prepares and takes it (`#payment`,
+   `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`); and on every checkpoint, whoever raised it does
+   not resolve it, except the operator resolving a checkpoint the operator raised, which is marked
+   (`gates_and_workflows.md#the-checkpoint`, decision 47). Any further pair is policy data, the
+   `disjoint_roles[]` of an action class on the `action_policy`, and an absent value is the fail-closed one
+   (`authority_model.md#structural-checks-quorum-and-separation-of-duties`, decision 50).
+2. **A review step is signed by its own step owner.** The verdict that closes a review step is written by the
+   principal that fills the slot the step declares. An automated credential's approval, a CI result, or the
+   fact that a remedy was routed to and carried out by another slot never stands in for it: routing a remedy
+   never transfers the conclusion (`adapters.md#no-external-event-advances-a-step-by-itself`;
+   `github.md#reviews-review-comments-and-threads`; `gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
+3. **An `operator_only` action is taken by the operator, and its step closes on the confirmation.** No agent
+   takes such an action: it resolves to `NEVER` ahead of any policy. The task or step that carries it is carried
+   to the operator by whichever slot the implementation designates for that, holds for the confirmation, and
+   closes on it, never on the checkpoint's resolution alone (`#operator-only`,
+   `work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`,
+   `gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`).
+   Every implementation therefore needs some slot that carries work to the operator.
+4. **A deterministic step needs no model.** A step whose work is a script and whose verdict is the script's
+   result, such as the lint steps of `#social-content` and `#outreach`, is filled by a runner that invokes no
+   model, and an implementation need not give it an agent. A blocking conclusion may rest on such a result
+   provided the verdict names the mechanism and what it read
+   (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
+5. **Every slot resolves, and an unresolved one holds.** Each role a declaration names resolves to exactly one
+   principal for the declaration scope, with a credential, at declaration and again at claim. A role that
+   resolves to no principal raises a checkpoint (`unresolvable_assignee` at declaration,
+   `unspawnable_assignee` at claim) and never falls through to any available agent
+   (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`, `data_model.md#concepts`'s `swarm_roster` row).
+
+**What this removes and what it keeps.** The previous list of named roles and what each claims is gone from this
+directory. `owner_role` and the roster stay, redefined as above; the examples stay in the reference workflows;
+the five constraints are the load the list was carrying, each of them already stated in the document cited.
+The list itself is kept outside this directory, as the reference implementation's role set, because it is
+implementation state.
 
 ## intake
 

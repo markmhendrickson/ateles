@@ -1612,7 +1612,7 @@ is.
 
 **Scenario (j).** "a batch record opens for it, and the product its step owner claims each step in turn"
 was the residue of two renames over "the product lens claims each step in turn" (revision 19 retired
-`lens`; the intake steps are the `pm` step owner's, `workflows.md#roles-named-in-this-document`). It now
+`lens`; the intake steps are the `pm` step owner's, `workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`). It now
 reads "the `pm` step owner claims each step in turn — a lease on the step, and a sign-off to close it".
 
 **A named agent in generic definitions.** `vocabulary.md#operator-facing-agent` and
