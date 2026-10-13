@@ -379,9 +379,12 @@ that word for the socket a delivery lands on.
 rule, or "template" (the rule authors the created task's text; classification is intake's).
 
 ### operator-facing agent
-**Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role) — bound per
-[declaration scope](#declaration-scope) in `swarm_roster`, never named in the design — which [claims](#claim) operator-only [tasks](#task),
-carries them and their [checkpoints](#checkpoint) to the [operator](#operator), and records the outcome.
+**Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role), bound per
+[declaration scope](#declaration-scope) in `swarm_roster` and never named in the design. The name is an example slot
+name: an implementation may call the slot something else but must fill one that carries work to the operator
+(`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`, constraint 3). The agent
+[claims](#claim) operator-only [tasks](#task), carries them and their [checkpoints](#checkpoint) to the
+[operator](#operator), and records the outcome.
 **See:** [`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`](work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 **Never:** —
 **Not for:** the operator for the agent; concierge for the agent, unqualified.
@@ -509,8 +512,8 @@ step owner's
 [verdict](#verdict).
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`,
 `verify_deployed`, and any a [workflow](#workflow) declares), and no name carries an entry of its own: each is
-declared on one workflow, its [step owner](#step-owner)'s [role](#role) is tabled at
-`workflows.md#roles-named-in-this-document`, and the reason the [workflow](#workflow) separates it from its
+declared on one workflow, its [step owner](#step-owner)'s [role](#role) is an example slot name in
+`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`, and the reason the [workflow](#workflow) separates it from its
 neighbours is argued in that workflow's own section — three homes a per-name entry would duplicate
 (principle 9). Where a name's separation is the point, the section says so: `verify_deployed` is a step
 apart from `release` because released and landed are different claims (`principles.md`, invariant 10), and
@@ -574,7 +577,10 @@ principal may also be a role the roster resolves, carried in `needed_input` beca
 [edge](#edge)'s target is a principal and never a role (`authority_model.md#approval`); a role that
 resolves to no principal raises a [checkpoint](#checkpoint) (reason `unspawnable_assignee`) rather than
 falling through to any available agent. A role is declared once and reused; it is not created per [batch](#batch) or
-per checkpoint.
+per checkpoint. A role is a **slot**: the design fixes no set of roles, each implementation defines its own and
+fills each slot it uses, and the role names the reference [workflows](#workflow) carry are examples an implementation may
+rename, merge, or split, subject to the five constraints stated at
+[`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
 [`authority_model.md#approval`](authority_model.md#approval).
 **Never:** —
@@ -1007,7 +1013,7 @@ either way, name the entity — the checkpoint's subject, or the subject of a st
 checkpoint's subject; two subjects on one checkpoint; the subject held as free text.
 
 ### steward
-**Definition:** the [engine](#engine) [role](#role) that merges a pull request once every required [step](#step) is signed off and
+**Definition:** an example [engine](#engine) [role](#role) name for the slot that merges a pull request once every required [step](#step) is signed off and
 the [action gate](#action-gate) permits the `merge_pr` [action](#action).
 **See:** [`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent).
 **Never:** "merger".
@@ -1015,8 +1021,8 @@ the [action gate](#action-gate) permits the `merge_pr` [action](#action).
 
 ### review step
 **Definition:** a [step](#step) whose work is a judgement of the [batch](#batch)'s change rather than a
-change to it, closed by its [step owner](#step-owner)'s [verdict](#verdict) like any other step. `pm`,
-`ux`, `arch`, `pr_review`, `qa`, and `legal` are review steps; nothing distinguishes one from a working
+change to it, closed by its [step owner](#step-owner)'s [verdict](#verdict) like any other step. In the reference [workflows](#workflow) `pm`,
+`ux`, `arch`, `pr_review`, `qa`, and `legal` are review steps (example names, not a fixed list); nothing distinguishes one from a working
 step but what its owner does, and no separate review concept exists in the design.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
 [`workflows.md`](workflows.md).
@@ -1451,7 +1457,7 @@ resolution of a checkpoint for a planning decision (a resolution is a principal'
 or task); a register decision of this directory for a planning decision.
 
 ### planner
-**Definition:** the [role](#role) that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
+**Definition:** an example [role](#role) name for the slot that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
 [declaration scope](#declaration-scope), and once for the levels above a [project](#project).
 **See:** [`workflows.md#planning`](workflows.md#planning),
 [`planning_model.md#maintenance-is-work-the-planning-workflow`](planning_model.md#maintenance-is-work-the-planning-workflow).

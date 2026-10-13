@@ -11,9 +11,9 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 - **WF-1** — a failing conclusion does not advance; `on_fail` reopens; the cap escalates *[M]*
 
-## [Roles named in this document](../workflows.md#roles-named-in-this-document)
+## [Roles are slots, and the design fixes only the constraints on filling them](../workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them)
 
-- **WF-2** — every role resolves against the roster per project *[M]*
+- **WF-2** — the design fixes no role set; every role a declaration names resolves against the roster per declaration scope, and one that resolves to nobody holds with a checkpoint *[M]*
 
 ## [intake](../workflows.md#intake)
 
@@ -67,7 +67,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [operator-only](../workflows.md#operator-only)
 
-- **WF-20** — only the operator-facing agent claims; `present` through `vendor_binding`; `await` bounded to `rounds_exhausted`; `record` read back; the redirect is by this batch's close, not a new intake *[M]*
+- **WF-20** — only the slot designated for operator-only work (example name: operator-facing agent) claims; `present` through `vendor_binding`; `await` bounded to `rounds_exhausted`; `record` read back; the redirect is by this batch's close, not a new intake *[M]*
 
 ## [session digestion](../workflows.md#session-digestion)
 
