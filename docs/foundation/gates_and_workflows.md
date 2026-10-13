@@ -36,6 +36,7 @@ and the adapters that reach them: `adapters.md`.
 - [What a step leaves at close: what it produced, and a reference to what it read](#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read).
 - [Findings, conclusions, and what a blocking finding obliges](#findings-conclusions-and-what-a-blocking-finding-obliges).
 - [Whether the conclusion is a stored field or a read over the findings and the author](#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author).
+- [The builder of a change never signs its review](#the-builder-of-a-change-never-signs-its-review).
 - [A finding is one-off or standing, and a standing one obliges a change to what produced it](#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
 - [Work is reviewed on the record, and a channel carries only what awaits the operator or cannot wait](#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait).
 - [Closed work is reviewed on the record and redone through intake, never reopened](#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened).
@@ -723,6 +724,83 @@ reconciler a process rather than a moment, and the field the stored state princi
 no such write, and admitting one would reopen more than this decision.
 
 **Matrix.** GW-19, GW-20, and GW-21 stand as mechanical rows; GW-51 closes (`conformance_suite.md`).
+
+### The builder of a change never signs its review
+
+**Ruled (decision 143, 2026-10-13, the operator's): the principal that built an artifact never signs a
+required review step on it.** Registered in `conformance.md#the-register-of-open-design-decisions`. The role
+that builds a change is never the role that reviews it. The rule is one more pair of the separation of duties
+the design already requires of a payment's payer and verifier, of a checkpoint's raiser and resolver, and of a
+declaration's approver and proposer (`workflows.md#five-constraints-hold-for-any-role-set`), and it is
+the pair every build-and-review workflow contains.
+
+**It binds slots and principals, and the check is on principals.** The rule is stated on roles because a
+declaration and a roster are read for roles: the slot that builds and the slot that reviews are distinct. It is
+checked on principals because a slot is only a name. The check reads the principal each role resolves to, an
+agent counting as the principal it is bound to (decision 48,
+`authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal`). One agent seated in both
+slots is one principal, and two agents bound to one operator are one interest, so neither escapes it; two slots
+resolving to two principals satisfy it however the roles are named. A roster that seats one principal in both
+slots is a roster in which the review step cannot close: the verdict is refused, a refused write is an error and
+never swallowed (above), and the step holds.
+
+**Authorship is read from the record, never stored** (principle 11). The authors of an artifact are the
+principals the record attributes its making to: the principal the action that left it is attributed to (the
+artifact is `PRODUCES` from the batch that took the action, `data_model.md#concepts`; every write carries the
+agent that made it and the principal it acted for, `authority_model.md#attribution`), and the principal each
+later head-advancing observation of it resolves to through the credential binding
+(`github.md#pull-requests`, the `pull_request.synchronize` row;
+`adapters.md#no-external-event-advances-a-step-by-itself`). The step during which the action was taken is the
+building step. A remedy routed to an implementer after a blocking finding advances the head, so its implementer
+becomes an author and cannot then sign the step that re-judges it, which is routing the remedy never
+transferring the conclusion (above) restated for the signer. An artifact the batch `PRODUCES` whose
+building is attributed to no principal has unreadable authorship, which is `unknown`, and unknown holds
+(`#an-unreadable-workflow-is-unknown-and-unknown-holds`). An actor the credential binding resolves to no
+principal is no author this check can name, and a signer is always a resolved principal.
+
+**It is refused at the verdict write, beside the lease check.** A verdict that closes a required review step
+as `signed` or as a blocking conclusion is refused when its signer, counted under 48, is an author of an artifact
+in its `artifact_refs[]`, unless the step is the one that built the artifact. `artifact_refs[]` names what the
+step judged on (above), so a step that pins an artifact has judged on it. The check is the same moment and
+the same kind of refusal as the lapsed lease and the contradicting conclusion
+(`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`); it adds
+no entity and no held state, only a read over edges the verdict and the batch already carry.
+
+**A deterministic step is exempt, because it reviews nothing.** A step whose work is a script and whose
+verdict is the script's result (`workflows.md#five-constraints-hold-for-any-role-set`, constraint 4) is
+judged by the mechanism, and the verdict names the mechanism and what it read. It is not a review step for this
+rule, so the slot that runs a lint over an artifact may be filled by a principal that built it. The exemption
+is by the step's class and never by the principal: a step that adds a judgement of its own to the script's
+result is a review step.
+
+**The operator's `waived` verdict is not refused.** A `waived` verdict is the operator principal closing an
+unsigned required step, attributed and carrying its reason; it is not a signature and not a review, and this rule
+does not touch it. Where the operator is also an author, directly or through an agent bound to the operator, the
+waiver closes the review of the operator's own work. That is the single-interest case decision 47 makes
+readable rather than pretended: it is not hidden and not refused, and it is a read over edges the record
+already holds, a `waived` verdict signed by the operator principal whose `artifact_refs[]` name an artifact the
+operator authored. No new mark is added.
+
+**Why.** Principle 5 chooses the restrictive branch. A review signed by the principal that built the work is
+one interest looking at its own work and a verdict saying a second looked; the pair is the smallest structural
+check for the same reason the raiser and resolver are, and the prior art is the same, GitHub's
+prevent-self-review and NIST dynamic separation of duty
+(`authority_model.md#prior-art`). The fixed pair is not an `action_policy` value: unlike the pairs
+`disjoint_roles[]` carries, it does not vary by action class, and an absent value cannot weaken it
+(`authority_model.md#the-thresholds-home-is-the-action_policy-per-class`).
+
+**What this does not decide.** Record entities a step writes, such as a digest, an analysis, or a plan
+amendment, are not artifacts: the rule reads authorship of artifacts, which an external system holds
+(`data_model.md#concepts`). Whether the principal that wrote such an entity may verify it, as the same role
+does in `workflows.md#session-digestion` and `workflows.md#planning`, is not decided here and is not changed.
+
+**Cost accepted.** A swarm whose agents are all bound to one operator interest cannot close a review of work
+that interest built, which is decision 48's cost stated for this pair. One agent seated in both slots cannot
+close the review step, and the step holds rather than passing.
+
+**What would reopen it.** A review whose judgement needs knowledge only the builder has, so that excluding the
+builder makes the review worse than the self-review: no case has been found in the corpus, and admitting one
+would first have to say what the verdict is evidence of.
 
 ### A finding is one-off or standing, and a standing one obliges a change to what produced it
 

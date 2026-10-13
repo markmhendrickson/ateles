@@ -147,6 +147,7 @@ Companion report (not a foundation design document; not in the review reading li
 - [**Who it's for (ICP)**](icp.md) — the ideal operator this is built for, and the explicit anti-profile.
 - [**Architecture**](architecture.md) — the entity model, four agent tiers, and Neotoma integration.
 - [**Agent taxonomy**](taxonomy.md) — the full roster of agents by tier and status ([per-agent docs](agents/)).
+- [**Swarm role set**](swarm_role_set.md) — the reference implementation's role names and what each claims; implementation state, not foundation (the foundation fixes only the constraints on filling a role).
 - [**Phases**](phases.md) — the implementation roadmap.
 
 ## P1 · Understand the system

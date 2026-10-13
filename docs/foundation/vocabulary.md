@@ -380,7 +380,7 @@ rule, or "template" (the rule authors the created task's text; classification is
 
 ### operator-facing agent
 **Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role), bound per
-[declaration scope](#declaration-scope) in `swarm_roster` and never named in the design. The name is an example slot
+[declaration scope](#declaration-scope) in `swarm_roster` and never named in the design. The name is an example [slot](#slot)
 name: an implementation may call the slot something else but must fill one that carries work to the operator
 (`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`, constraint 3). The agent
 [claims](#claim) operator-only [tasks](#task), carries them and their [checkpoints](#checkpoint) to the
@@ -512,7 +512,7 @@ step owner's
 [verdict](#verdict).
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`,
 `verify_deployed`, and any a [workflow](#workflow) declares), and no name carries an entry of its own: each is
-declared on one workflow, its [step owner](#step-owner)'s [role](#role) is an example slot name in
+declared on one workflow, its [step owner](#step-owner)'s [role](#role) is an example [slot](#slot) name in
 `workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`, and the reason the [workflow](#workflow) separates it from its
 neighbours is argued in that workflow's own section — three homes a per-name entry would duplicate
 (principle 9). Where a name's separation is the point, the section says so: `verify_deployed` is a step
@@ -578,7 +578,7 @@ principal may also be a role the roster resolves, carried in `needed_input` beca
 resolves to no principal raises a [checkpoint](#checkpoint) (reason `unspawnable_assignee`) rather than
 falling through to any available agent. A role is declared once and reused; it is not created per [batch](#batch) or
 per checkpoint. A role is a **slot**: the design fixes no set of roles, each implementation defines its own and
-fills each slot it uses, and the role names the reference [workflows](#workflow) carry are examples an implementation may
+fills each [slot](#slot) it uses, and the role names the reference [workflows](#workflow) carry are examples an implementation may
 rename, merge, or split, subject to the five constraints stated at
 [`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
@@ -592,6 +592,15 @@ and the two are checked separately —
 states this for proposal rights: "standing to propose is a capability and not a role"); the required seat an
 [ownership](#ownership) [edge](#edge) names for a role (ownership resolves straight to the principal the
 `ownership_grant` points at; nothing is looked up by name).
+
+### slot
+**Definition:** a [role](#role) read as a position the design requires to be filled and does not fill: the name a [step](#step) declaration's
+`owner_role` carries, which each implementation resolves to a [principal](#principal) through its roster. It is not a second
+concept beside [role](#role) but the same name seen from the implementation, which defines its own role set, seats a principal in each slot it uses, and is
+bound only by the constraints on filling the slots.
+**See:** [`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
+**Never:** —
+**Not for:** a fixed list of roles the design defines; an [agent](#agent) for a slot (the roster seats an agent in it).
 
 ### verdict
 **Definition:** the record a [step owner](#step-owner) writes to close a [step](#step) on a
@@ -1013,7 +1022,7 @@ either way, name the entity — the checkpoint's subject, or the subject of a st
 checkpoint's subject; two subjects on one checkpoint; the subject held as free text.
 
 ### steward
-**Definition:** an example [engine](#engine) [role](#role) name for the slot that merges a pull request once every required [step](#step) is signed off and
+**Definition:** an example [engine](#engine) [role](#role) name for the [slot](#slot) that merges a pull request once every required [step](#step) is signed off and
 the [action gate](#action-gate) permits the `merge_pr` [action](#action).
 **See:** [`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent).
 **Never:** "merger".
@@ -1457,7 +1466,7 @@ resolution of a checkpoint for a planning decision (a resolution is a principal'
 or task); a register decision of this directory for a planning decision.
 
 ### planner
-**Definition:** an example [role](#role) name for the slot that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
+**Definition:** an example [role](#role) name for the [slot](#slot) that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
 [declaration scope](#declaration-scope), and once for the levels above a [project](#project).
 **See:** [`workflows.md#planning`](workflows.md#planning),
 [`planning_model.md#maintenance-is-work-the-planning-workflow`](planning_model.md#maintenance-is-work-the-planning-workflow).
@@ -1670,11 +1679,14 @@ principal where none is set (decision 50).
 
 ### separation of duties
 **Definition:** a structural check requiring disjointness between the [roles](#role) on one [checkpoint](#checkpoint), such as
-raiser and resolver or proposer and approver.
+raiser and resolver or proposer and approver, or between the role that builds an [artifact](#artifact) and the role of a required
+[review step](#review-step) on it.
 Read as disjointness over the checkpoint's principal [edges](#edge), an [agent](#agent) counting as its bound
 [principal](#principal) (decisions 48 and 49); the pairs a class requires are its `disjoint_roles[]` on the
-`action_policy` (decision 50).
-**See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties).
+`action_policy` (decision 50). The builder and review pair is fixed by the design and read at the [verdict](#verdict)
+write instead (decision 143).
+**See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties),
+[`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review).
 **Never:** —
 **Not for:** "four eyes" for the check, unqualified; verdict for the check.
 
@@ -2014,7 +2026,7 @@ Besides those two: 22 adapter table headers read `| Event | Status | Outcome in 
 inventing a fifth outcome.
 
 **`resolution` and `type` also failed.** `resolution` carries three bound senses across 220 uses, and
-[`disposition`](#disposition) already occupies the noun slot downstream of *resolve*. `type` failed earlier on
+[`disposition`](#disposition) already occupies the noun [slot](#slot) downstream of *resolve*. `type` failed earlier on
 volume: bare `type` appears ~858 times meaning *what kind of thing this is*, which is not what the field
 means.
 

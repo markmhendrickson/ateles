@@ -1427,6 +1427,13 @@ need a process to keep its count true where the edges need none (principle 11).
 **What would reopen it.** A structural check whose inputs are not on the checkpoint — one over principals
 who never resolved and were never awaited — which would first have to say what object it was a check on.
 
+**A further pair, read over the verdict (decision 143, 2026-10-13).** The principal that built an artifact never
+signs a required review step on it. Its inputs are not on a checkpoint, and it does not reopen this ruling for
+the reason the line above gives: it says what object it is a check on, the verdict, and it reads the verdict's
+`SIGNED_BY` edge, its `artifact_refs[]`, and the artifact's attributed building, under the same counting rule.
+It adds no entity and no held state, so it is not the second decision-carrying type this ruling refuses. The pair
+is fixed by the design and is not an `action_policy` value (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`).
+
 ### The threshold's home is the `action_policy`, per class
 
 **Ruled (decision 50, the brief's Q3, 2026-09-06): the thresholds a structural check reads live on the
@@ -1651,7 +1658,8 @@ as `Permit`. Cedar's rule (zero permits is deny; forbid wins) is the fix. Attenu
 (macaroons) is the invariant delegation carries. RFC 8693's nested `act` claim is the shape of
 `authority_chain`. Clark-Wilson's caveat, that separation of duties fails under collusion, is why an
 operator and the agents they built may count as one interest (Q1). GitHub's prevent-self-review and NIST
-dynamic separation of duty are the smallest structural check. Sources: `ent_08460968e6f49dac21510f4a`.
+dynamic separation of duty are the smallest structural check, and prevent-self-review applies literally to the
+builder and review pair (decision 143). Sources: `ent_08460968e6f49dac21510f4a`.
 
 ## Beyond the sources
 

@@ -40,11 +40,13 @@ is `swarm_roster` on the record, never this file; the agent definitions are in [
 ## How this set meets the foundation's constraints
 
 - **Separation of duties:** `payer` and `verifier` are distinct roles that must resolve to distinct principals;
-  every checkpoint's raiser and resolver are distinct, save the operator's marked self-resolution.
+  every checkpoint's raiser and resolver are distinct, save the operator's marked self-resolution; a declaration's approver is never its proposer; and the implementer
+  never signs a review step (`pm`, `ux`, `arch`, `pr_review`, `qa`, `legal`) on an artifact it built, whether the roster seats them as one
+  agent or two, though the lint runner is exempt because it reviews nothing.
 - **A review step is signed by its own step owner, or waived by the operator:** the `ux`, `arch`, `pr_review`, `qa`, and `legal` step owners
   sign their own steps; an approval from a credential not bound to the step owner is an observation, never a verdict.
 - **`operator_only`:** the operator-facing agent carries such work, and every checkpoint awaiting the operator, to the operator; the operator takes the action.
-- **Deterministic steps:** the lint runner's runner invokes no model, and the lint runner is still an agent that resolves through `swarm_roster` like any other role; a blocking conclusion on its result names the mechanism and what it read.
+- **Deterministic steps:** the lint runner is filled by a principal whose work is a script and invokes no model, and it is still an agent that resolves through `swarm_roster` like any other role; a blocking conclusion on its result names the mechanism and what it read.
 - **Every slot resolves:** each role above must resolve through `swarm_roster` to an agent that can be run,
   or a declaration naming it raises an `unspawnable_assignee` checkpoint; the `pm` step owner (intake's step
   owners) and the operator-facing agent must exist.

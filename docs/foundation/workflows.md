@@ -140,14 +140,17 @@ Each is stated here without naming a role and is argued where it is cited.
 
 1. **Separation of duties.** Where the design requires two duties to be held by distinct principals, the roles
    an implementation defines for them must resolve to distinct principals, an agent counting as the principal
-   it is bound to (decision 48). The design requires it in at least three places: in the payment workflow,
+   it is bound to (decision 48). The design requires it in at least four places: in the payment workflow,
    whoever verifies and reconciles a payment is not whoever prepares and takes it (`#payment`,
    `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`); on every checkpoint, whoever raised it
    does not resolve it, except the operator resolving a checkpoint the operator raised, which is marked
-   (`gates_and_workflows.md#the-checkpoint`, decision 47); and on every new or amended declaration, the
-   principal that approves it is not the one that proposed it
-   (`#who-approves-a-new-or-amended-declaration`). Any further pair is policy data, the
-   `disjoint_roles[]` of an action class on the `action_policy`, and an absent value is the fail-closed one
+   (`gates_and_workflows.md#the-checkpoint`, decision 47); on every new or amended declaration, the swarm's
+   approval is never the proposer's (`#who-approves-a-new-or-amended-declaration`); and on every artifact,
+   the role that builds a change is never the role that reviews it: the principal that built an artifact never
+   signs a required review step on it, whether the slots are one or two, and a deterministic step reviews nothing
+   and is exempt (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`, decision 143). Any
+   further pair is policy data, the `disjoint_roles[]` of an action class on the `action_policy`, and an absent
+   value is the fail-closed one
    (`authority_model.md#structural-checks-quorum-and-separation-of-duties`, decision 50).
 2. **A review step is signed by its own step owner, or waived by the operator.** The verdict that closes a
    required step is written by the principal that fills the slot the step declares; the one other way it closes
@@ -185,8 +188,8 @@ Each is stated here without naming a role and is argued where it is cited.
 directory. `owner_role` and the roster stay, redefined as above; the examples stay in the reference workflows;
 the five constraints are the load the list was carrying, each collected from the documents cited, which state
 the rule it rests on.
-The list itself is kept outside this directory, as the reference implementation's role set, because it is
-implementation state.
+The list itself is kept outside this directory, as the reference implementation's role set
+([`docs/swarm_role_set.md`](../swarm_role_set.md)), because it is implementation state.
 
 ## intake
 
