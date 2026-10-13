@@ -28,7 +28,8 @@ is `swarm_roster` on the record, never this file; the agent definitions are in [
 | `ux`, `arch`, `pr_review`, `qa`, `legal` step owners | the review step of the same name (`foundation/vocabulary.md#review-step`) |
 | implementer | the `impl` step |
 | steward | the `merge` step, whose work is the merge action (`foundation/vocabulary.md#steward`) |
-| release steward | every step of the release workflow |
+| release steward | the `criteria` and `release` steps of the release workflow |
+| deployment verifier | the `verify_deployed` step of the release workflow, a slot distinct from the release steward's |
 | copywriter | the `copy` step |
 | content author | the drafting and posting steps of social content and outreach |
 | lint runner | a deterministic step whose work is a script and whose verdict is the script's result |
@@ -39,12 +40,19 @@ is `swarm_roster` on the record, never this file; the agent definitions are in [
 
 ## How this set meets the foundation's constraints
 
-- **Separation of duties:** `payer` and `verifier` are distinct roles that must resolve to distinct principals;
-  every checkpoint's raiser and resolver are distinct, save the operator's marked self-resolution.
+- **Separation of duties:**
+  - `payer` and `verifier` are distinct roles that must resolve to distinct principals.
+  - Every checkpoint's raiser and resolver are distinct, save the operator's marked self-resolution.
+  - The swarm's approval of a declaration is never its proposer's.
+  - An agent never signs a review step on an artifact it built, whether the roster seats it in one slot or two.
+    The review steps include `ux`, `arch`, `pr_review`, `qa`, `legal`, and the release workflow's `verify_deployed`;
+    the `pm` step, the implementer, the steward, the lint runner's steps, and digestion's `verify` are not review steps
+    ([`foundation/gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](foundation/gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review)).
+    The check is on the agent itself, so two agents acting for the one operator may review each other's work.
 - **A review step is signed by its own step owner, or waived by the operator:** the `ux`, `arch`, `pr_review`, `qa`, and `legal` step owners
-  sign their own steps; an approval from a credential not bound to the step owner is an observation, never a verdict.
+  sign their own steps, and the deployment verifier signs `verify_deployed`; an approval from a credential not bound to the step owner is an observation, never a verdict.
 - **`operator_only`:** the operator-facing agent carries such work, and every checkpoint awaiting the operator, to the operator; the operator takes the action.
-- **Deterministic steps:** the lint runner's runner invokes no model, and the lint runner is still an agent that resolves through `swarm_roster` like any other role; a blocking conclusion on its result names the mechanism and what it read.
+- **Deterministic steps:** the lint runner is filled by a principal whose work is a script, and it is still an agent that resolves through `swarm_roster` like any other role; a blocking conclusion on its result names the mechanism and what it read.
 - **Every slot resolves:** each role above must resolve through `swarm_roster` to an agent that can be run,
   or a declaration naming it raises an `unspawnable_assignee` checkpoint; the `pm` step owner (intake's step
   owners) and the operator-facing agent must exist.

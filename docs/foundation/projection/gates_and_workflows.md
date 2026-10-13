@@ -5,7 +5,7 @@
 
 Every rule `gates_and_workflows.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`gates_and_workflows.md`](../gates_and_workflows.md) and are not repeated here (decision 66).
 
-58 rules.
+59 rules.
 
 ## [Declaration, batch, projection](../gates_and_workflows.md#declaration-batch-projection)
 
@@ -118,3 +118,7 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 ## [Closed work is reviewed on the record and redone through intake, never reopened](../gates_and_workflows.md#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened)
 
 - **GW-54** — (ruling 38): a closed batch is never reopened; the input is a finding on it; the redo is a new task through intake referring to the closed batch's artifacts, with provenance to the finding *[M]*
+
+## [The builder of a change never signs its review](../gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review)
+
+- **GW-55** — (decision 143): an agent that built an artifact never signs a step declared `review` on it; `work`, `deterministic`, and `waived` are not refused *[M]*

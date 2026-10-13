@@ -68,7 +68,10 @@ from the declarations (below).
   Two intervals are declared on every step and shown in no table: `unclaimed_after`, after which an
   unclaimed step raises `unclaimed_step`, and `hold_bound`, the most a claimed step may hold on a condition
   before its declared alternative close or `rounds_exhausted`
-  (`gates_and_workflows.md#declaration-batch-projection`). Where a section's prose names a declared interval
+  (`gates_and_workflows.md#declaration-batch-projection`). A third thing is declared on every step and shown
+  in no table: its `class` (`review`, `work`, or `deterministic`), which the builder-never-reviews refusal reads and
+  the section that states it lists for the reference workflows
+  (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). Where a section's prose names a declared interval
   — a follow-up interval, the bound on an `await` — it is that step's `hold_bound`; a step whose close
   condition names an arrival from outside the swarm is a planned wait, held under decision 13 and ended by
   that bound. Either interval may be declared as the task's `due_date` where the bound is a date fixed
@@ -122,8 +125,8 @@ is declared.
 ### A role is a slot an implementation fills
 
 No role is foundational: no implementation needs a particular one, and this document defines no fixed list
-of them (operator ruling, 2026-10-13, register decision 142). A step declaration's `owner_role` names a role
-and is a **slot**: each implementation defines its own role set, declares which roles it uses, and fills each
+of them (operator ruling, 2026-10-13, register decision 142). A step declaration's `owner_role` names a role,
+which stands for a **slot**: each implementation defines its own role set, declares which roles it uses, and fills each
 slot with a principal through its roster (`swarm_roster`, per declaration scope). The role names that appear in
 the step tables of the sections below (`pm`, `ux`, `arch`, `pr_review`, `qa`, `legal`, implementer,
 steward, copywriter, content author, lint runner, operator-facing agent, payer, verifier, researcher,
@@ -140,15 +143,20 @@ Each is stated here without naming a role and is argued where it is cited.
 
 1. **Separation of duties.** Where the design requires two duties to be held by distinct principals, the roles
    an implementation defines for them must resolve to distinct principals, an agent counting as the principal
-   it is bound to (decision 48). The design requires it in at least three places: in the payment workflow,
-   whoever verifies and reconciles a payment is not whoever prepares and takes it (`#payment`,
-   `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`); on every checkpoint, whoever raised it
-   does not resolve it, except the operator resolving a checkpoint the operator raised, which is marked
-   (`gates_and_workflows.md#the-checkpoint`, decision 47); and on every new or amended declaration, the
-   principal that approves it is not the one that proposed it
-   (`#who-approves-a-new-or-amended-declaration`). Any further pair is policy data, the
-   `disjoint_roles[]` of an action class on the `action_policy`, and an absent value is the fail-closed one
-   (`authority_model.md#structural-checks-quorum-and-separation-of-duties`, decision 50).
+   it is bound to (decision 48), except in the fourth place below, which is checked on the agent itself
+   (decision 143). The design requires it in at least four places:
+   - in the payment workflow, whoever verifies and reconciles a payment is not whoever prepares and takes it
+     (`#payment`, `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`);
+   - on every checkpoint, whoever raised it does not resolve it, except the operator resolving a checkpoint the
+     operator raised, which is marked (`gates_and_workflows.md#the-checkpoint`, decision 47);
+   - on every new or amended declaration, the swarm's approval is never the proposer's
+     (`#who-approves-a-new-or-amended-declaration`);
+   - on every artifact, the agent that built it never signs a review step on it
+     (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`).
+
+   Any further pair is policy data, the `disjoint_roles[]` of an action class on the `action_policy`, and an
+   absent value is the fail-closed one (`authority_model.md#structural-checks-quorum-and-separation-of-duties`,
+   decision 50).
 2. **A review step is signed by its own step owner, or waived by the operator.** The verdict that closes a
    required step is written by the principal that fills the slot the step declares; the one other way it closes
    is the operator's `waived` verdict, which is itself a verdict attributed to the operator principal
@@ -167,8 +175,9 @@ Each is stated here without naming a role and is argued where it is cited.
    Every implementation therefore needs some slot that carries work to the operator, and the same slot carries
    every checkpoint awaiting the operator, not only `operator_only` work (`vocabulary.md#operator-facing-agent`).
 4. **A deterministic step is still filled by a principal.** A step whose work is a script and whose verdict is
-   the script's result, such as the lint steps of `#social-content` and `#outreach`, is filled by a principal
-   whose runner invokes no model. That principal is still an `agent` in the design's sense
+   the script's result, such as the lint steps of `#social-content` and `#outreach`, is declared `deterministic`
+   (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`) and is filled by a principal all the
+   same. That principal is an `agent` in the design's sense
    (`vocabulary.md#agent`) and resolves through the roster like any slot (constraint 5). A blocking conclusion
    may rest on the script's result provided the verdict names the mechanism and what it read
    (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
@@ -181,12 +190,12 @@ Each is stated here without naming a role and is argued where it is cited.
    must the slot constraint 3 requires, because intake is the one core workflow and no task enters without it
    (`#scope`).
 
-**What this removes and what it keeps.** The previous list of named roles and what each claims is gone from this
-directory. `owner_role` and the roster stay, redefined as above; the examples stay in the reference workflows;
-the five constraints are the load the list was carrying, each collected from the documents cited, which state
-the rule it rests on.
-The list itself is kept outside this directory, as the reference implementation's role set, because it is
-implementation state.
+**What this removes and what it keeps.** The previous list of named roles and what each claims stood in this
+directory until revision 133 (2026-10-13). `owner_role` and the roster stay, redefined as above; the examples
+stay in the reference workflows; the five constraints gather the rules the list rested on, each from the
+documents cited, which state the rule it rests on.
+The list itself is kept outside this directory, as the reference implementation's role set
+([`docs/swarm_role_set.md`](../swarm_role_set.md)), because it is implementation state.
 
 ## intake
 
@@ -582,7 +591,7 @@ workflow together, as one batch (`work_model.md#what-goes-through-a-workflow-is-
 |---|---|---|---|---|---|
 | 1 | `criteria` | release steward | yes | | every criterion in the `release_criteria` entity, retrieved by type, is read and holds; a criterion that cannot be read is `unknown`, and unknown holds the batch (`principles.md`, invariant 7) |
 | 2 | `release` | release steward | yes | on fail: `criteria` | the `release` action taken through the action gate; the tag, package, or deployment is read back at its terminal status (`principles.md`, invariant 2) |
-| 3 | `verify_deployed` | release steward | yes | on fail: `release` | the deployed checkout reports the released version; the verdict closes the batch |
+| 3 | `verify_deployed` | deployment verifier | yes | on fail: `release` | the deployed checkout reports the released version; the verdict closes the batch |
 
 <!-- /rendered -->
 
@@ -590,7 +599,9 @@ workflow together, as one batch (`work_model.md#what-goes-through-a-workflow-is-
 (`principles.md`, invariant 10), and a batch that closed on the release action's success would record
 the first as the second. `criteria` is separate from `release` so that the read of the criteria and the
 taking of the release are two verdicts, and a release taken against criteria nobody read is visible as a
-batch missing one.
+batch missing one. `verify_deployed` is declared `review` and has its own slot, distinct from `release`'s, so
+that an agent other than the one that took the release confirms the deployment
+(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`); `criteria` and `release` are `work`.
 
 **Stages:** readiness (`criteria`); shipping (`release`, `verify_deployed`).
 
@@ -871,7 +882,10 @@ is the case the workflow exists for, and waiting for a session to "finish" would
 
 `verify` is required and separate from `digest` because a session's own account of itself is a claim and
 not evidence: the digest states what the session said it did, and only the system that would hold the
-effect can say whether it happened (principle 2). `file` creates tasks and completes none — digestion
+effect can say whether it happened (principle 2). `verify` is declared `work`: it reads a record and the
+systems that would hold the effects, and the batch produces no artifact for the builder-never-reviews rule to
+read (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). Whether a digest must be
+verified by an agent other than its author is a separate question that rule does not decide. `file` creates tasks and completes none — digestion
 recovers work by making it claimable again, which is the guarantee the lease gives the other three
 mechanisms, and it never marks the recovered work done on the strength of the session having attempted it
 (principle 10).
