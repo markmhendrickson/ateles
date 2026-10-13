@@ -484,12 +484,20 @@ def fetch_entity_observations_strict(entity_id: str, *, limit: int = 100) -> lis
 
 
 def fetch_entity_user_id(entity_id: str) -> str | None:
-    """Resolve tenant provenance from immutable observation ownership."""
-    user_ids = {
-        str(item.get("user_id")).strip()
-        for item in _fetch_entity_observations(entity_id)
-        if item.get("user_id")
-    }
+    """Resolve exact tenant provenance from immutable observation ownership.
+
+    Missing or malformed ownership on any returned observation is ambiguous;
+    callers must not silently choose a different row's tenant.
+    """
+    observations = _fetch_entity_observations(entity_id)
+    if not observations or any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("user_id"), str)
+        or not item["user_id"]
+        for item in observations
+    ):
+        return None
+    user_ids = {item["user_id"] for item in observations}
     return next(iter(user_ids)) if len(user_ids) == 1 else None
 
 

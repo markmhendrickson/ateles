@@ -74,6 +74,7 @@ REAL_READ_AUTHENTICATED_RESOLUTION = (
     gating_module.read_authenticated_checkpoint_resolution
 )
 REAL_READ_AUTHORIZATION = gating_module.read_authenticated_checkpoint_authorization
+REAL_FETCH_ENTITY_USER_ID = gating_module.fetch_entity_user_id
 REAL_RESOLVER_AUTHORITY = server._checkpoint_resolver_authority
 REAL_AUTHENTICATE_RESOLVER = server._authenticate_checkpoint_resolver
 REAL_CORRECT = server._correct
@@ -226,6 +227,13 @@ def release_store(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         apis,
+        "fetch_entity_user_id",
+        lambda entity_id: (records.get(entity_id, {}).get("snapshot") or {}).get(
+            "user_id"
+        ),
+    )
+    monkeypatch.setattr(
+        gating_module,
         "fetch_entity_user_id",
         lambda entity_id: (records.get(entity_id, {}).get("snapshot") or {}).get(
             "user_id"
@@ -620,7 +628,7 @@ async def test_approve_releases_task_and_marks_brief_consumed(
 @pytest.mark.parametrize(
     "mode",
     [
-        "outer",
+        "neotoma_shape",
         "snapshot_only",
         "conflict",
         "cross_tenant",
@@ -646,10 +654,9 @@ async def test_authoritative_owner_signed_resolution_releases_exactly_once(
     headers, resolver_jkt = _resolver_proof(checkpoint_id=brief_id)
     producer_jkt = "P" * 43
     monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", producer_jkt)
-    for record in records.values():
-        record["user_id"] = owner
-        record["snapshot"]["user_id"] = owner
-    # The producer does not author a snapshot user_id; only the row owns it.
+    # Neotoma GET /entities/:id does not return a root user_id. Ownership is
+    # available through the server-owned observation rows instead.
+    records[task_id]["snapshot"]["user_id"] = owner
     records[brief_id]["snapshot"].pop("user_id")
     policy = ExecutionPolicy(
         entity_id="default",
@@ -691,7 +698,11 @@ async def test_authoritative_owner_signed_resolution_releases_exactly_once(
         }
     ]
     monkeypatch.setattr(
-        gating_module, "_fetch_entity_observations", lambda entity_id: observations
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: (
+            observations if entity_id == brief_id else [{"user_id": owner}]
+        ),
     )
     monkeypatch.setattr(
         gating_module,
@@ -719,7 +730,10 @@ async def test_authoritative_owner_signed_resolution_releases_exactly_once(
     )
     monkeypatch.setattr(server, "_correct", REAL_CORRECT)
     monkeypatch.setattr(
-        apis, "fetch_entity_user_id", lambda entity_id: records[entity_id]["user_id"]
+        gating_module, "fetch_entity_user_id", REAL_FETCH_ENTITY_USER_ID
+    )
+    monkeypatch.setattr(
+        apis, "fetch_entity_user_id", gating_module.fetch_entity_user_id
     )
     writes = []
 
@@ -760,16 +774,16 @@ async def test_authoritative_owner_signed_resolution_releases_exactly_once(
 
     monkeypatch.setattr(apis, "dispatch_task", counted_dispatch)
     if mode == "snapshot_only":
-        records[brief_id].pop("user_id")
+        observations[0].pop("user_id")
         fields["user_id"] = owner
     elif mode == "conflict":
         fields["user_id"] = None
     elif mode == "cross_tenant":
-        records[brief_id]["user_id"] = "22222222-2222-4222-8222-222222222222"
+        observations[0]["user_id"] = "22222222-2222-4222-8222-222222222222"
     elif mode == "missing":
-        records[brief_id].pop("user_id")
+        observations[0].pop("user_id")
     elif mode == "malformed":
-        records[brief_id]["user_id"] = " " + owner
+        observations[0]["user_id"] = " " + owner
     elif mode == "wrong_key":
         headers, _ = _resolver_proof(checkpoint_id=brief_id)
     elif mode == "wrong_body":
@@ -777,7 +791,7 @@ async def test_authoritative_owner_signed_resolution_releases_exactly_once(
     elif mode == "wrong_producer":
         observations[0]["provenance"]["agent_thumbprint"] = "Q" * 43
     result = await _resolve(brief_id, "approve", headers)
-    if mode != "outer":
+    if mode != "neotoma_shape":
         assert "error" in result
         assert writes == dispatches == []
         assert records[task_id]["snapshot"]["status"] == "awaiting_approval"

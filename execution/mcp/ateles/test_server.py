@@ -33,6 +33,7 @@ import server as srv  # noqa: E402
 
 
 _TEST_RESOLVER_JKT = "A" * 43
+_DEFAULT_OBSERVATION_OWNER = object()
 _DUMMY_RESOLVER_HEADERS = {
     "signature-key": "caller-proof",
     "signature-input": "caller-proof",
@@ -394,10 +395,12 @@ class TestRouteTask(unittest.TestCase):
 
 
 class TestCheckpointOwnerAuthority(unittest.TestCase):
-    OWNER = "11111111-1111-4111-8111-111111111111"
+    OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     OTHER = "22222222-2222-4222-8222-222222222222"
 
-    def authority(self, record):
+    def authority(self, record, observation_owner=_DEFAULT_OBSERVATION_OWNER):
+        if observation_owner is _DEFAULT_OBSERVATION_OWNER:
+            observation_owner = self.OWNER
         with patch(
             "lib.daemon_runtime.gating.read_authenticated_checkpoint_authorization",
             return_value={
@@ -405,24 +408,30 @@ class TestCheckpointOwnerAuthority(unittest.TestCase):
                 "required_approver_jkt": _TEST_RESOLVER_JKT,
                 "user_id": self.OWNER,
             },
+        ), patch(
+            "lib.daemon_runtime.gating.fetch_entity_user_id",
+            return_value=observation_owner,
         ):
             return srv._checkpoint_resolver_authority("ent_checkpoint", record)
 
-    def test_authoritative_outer_owner_is_required(self):
-        self.assertIsNotNone(self.authority({"user_id": self.OWNER, "snapshot": {}}))
-        self.assertIsNone(self.authority({"snapshot": {"user_id": self.OWNER}}))
+    def test_neotoma_response_without_root_owner_uses_observation_owner(self):
+        self.assertIsNotNone(self.authority({"snapshot": {}}))
+        self.assertIsNotNone(self.authority({"snapshot": {"snapshot": {}}}))
+        self.assertIsNone(
+            self.authority({"user_id": self.OWNER, "snapshot": {}}, observation_owner="")
+        )
 
-    def test_missing_malformed_cross_tenant_outer_owner_fails_closed(self):
-        for owner in (None, "", False, [], {}, "tenant", " " + self.OWNER, self.OTHER):
+    def test_missing_malformed_cross_tenant_observation_owner_fails_closed(self):
+        for owner in (None, "", False, [], {}, "tenant", " " + self.OWNER, self.OTHER, self.OWNER.upper()):
             with self.subTest(owner=owner):
-                self.assertIsNone(self.authority({"user_id": owner, "snapshot": {}}))
+                self.assertIsNone(self.authority({"snapshot": {}}, observation_owner=owner))
 
     def test_present_nested_owner_must_match_even_when_falsey(self):
         for nested in (None, "", False, [], {}, self.OTHER):
             for snapshot in ({"user_id": nested}, {"snapshot": {"user_id": nested}}):
                 with self.subTest(snapshot=snapshot):
-                    self.assertIsNone(self.authority({"user_id": self.OWNER, "snapshot": snapshot}))
-        self.assertIsNotNone(self.authority({"user_id": self.OWNER, "snapshot": {"user_id": self.OWNER}}))
+                    self.assertIsNone(self.authority({"snapshot": snapshot}))
+        self.assertIsNotNone(self.authority({"snapshot": {"user_id": self.OWNER}}))
 
 
 class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
@@ -440,12 +449,18 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
             "lib.daemon_runtime.gating.read_authenticated_checkpoint_resolution",
             return_value={"principal_sub": "ateles@ateles-swarm"},
         )
+        owner = patch(
+            "lib.daemon_runtime.gating.fetch_entity_user_id",
+            return_value="tenant-a",
+        )
         authority.start()
         authenticated.start()
         readback.start()
+        owner.start()
         self.addCleanup(authority.stop)
         self.addCleanup(authenticated.stop)
         self.addCleanup(readback.stop)
+        self.addCleanup(owner.stop)
 
     @patch("server._get")
     async def test_missing_authenticated_resolver_context_cannot_resolve(

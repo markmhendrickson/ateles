@@ -529,7 +529,10 @@ def _checkpoint_resolver_authority(
     checkpoint_id: str, checkpoint_record: dict
 ) -> tuple[str, str, str] | None:
     """Return the authenticated resolver subject, key pin, and tenant."""
-    from lib.daemon_runtime.gating import read_authenticated_checkpoint_authorization
+    from lib.daemon_runtime.gating import (
+        fetch_entity_user_id,
+        read_authenticated_checkpoint_authorization,
+    )
 
     authority = read_authenticated_checkpoint_authorization(
         checkpoint_id, checkpoint_record
@@ -539,9 +542,10 @@ def _checkpoint_resolver_authority(
     required_sub = str(authority.get("required_approver_sub") or "").strip()
     required_jkt = str(authority.get("required_approver_jkt") or "").strip()
     tenant_id = authority.get("user_id")
-    # Ownership is server-owned envelope metadata, never reducer content.
+    # GET /entities/:id omits the row's user_id. Read server-owned observation
+    # ownership instead; reducer-built snapshots are only consistency checks.
     # Do not coerce or strip safety-bearing values: malformed input denies.
-    owner = checkpoint_record.get("user_id")
+    owner = fetch_entity_user_id(checkpoint_id)
     uuid_pattern = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
     if (
         not required_sub
@@ -1292,8 +1296,10 @@ async def _resolve_checkpoint(
         )
         task_data = _get(f"/entities/{task_id}") if task_id else None
         task_snap = _snapshot_of(task_data or {})
-        brief_user_id = resolved_snap.get("user_id")
-        task_user_id = task_snap.get("user_id")
+        from lib.daemon_runtime.gating import fetch_entity_user_id
+
+        brief_user_id = fetch_entity_user_id(checkpoint_id)
+        task_user_id = fetch_entity_user_id(task_id) if task_id else None
         same_tenant = bool(
             brief_user_id
             and task_user_id

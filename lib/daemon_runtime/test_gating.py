@@ -60,6 +60,22 @@ def _default() -> ExecutionPolicy:
     return ExecutionPolicy(entity_id="default", loaded=False)
 
 
+def test_fetch_entity_user_id_requires_exact_consistent_observation_ownership(
+    monkeypatch,
+):
+    owner = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    observations = [{"user_id": owner}, {"user_id": owner}]
+    monkeypatch.setattr(
+        gating_module, "_fetch_entity_observations", lambda _entity_id: observations
+    )
+    assert gating_module.fetch_entity_user_id("ent_checkpoint") == owner
+    for invalid in (None, "", " " + owner, owner.upper(), 42):
+        observations[1] = {"user_id": invalid}
+        assert gating_module.fetch_entity_user_id("ent_checkpoint") is None
+    observations[1] = {}
+    assert gating_module.fetch_entity_user_id("ent_checkpoint") is None
+
+
 def test_high_conf_low_blast_auto_executes():
     d = evaluate_gate(confidence=0.9, action_type="local_edit", policy=_default())
     assert d.action == GateAction.AUTO_EXECUTE
