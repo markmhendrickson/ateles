@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Copy the rule-inventory candidate corpus into a bounded data-only tree.
 
-The canonical measurement workflow runs this script from the trusted default
-branch on a hosted runner. It never executes a file from the candidate checkout:
-the candidate contributes only the fixed repository inputs enumerated here.
-The privileged runner validates the resulting manifest before the trusted
-renderer reads the tree as data.
+It never executes a file from the candidate checkout: the candidate
+contributes only the fixed repository inputs enumerated here, and the trusted
+gate (`run_canonical_rule_inventory_gate.py`) validates the resulting manifest
+before the trusted renderer reads the tree as data.
+
+No workflow runs this since ateles#1333 removed the pull_request_target
+measurement workflow and its self-hosted job: complete measurement is now a
+private milestone audit run locally (`docs/runbooks/rule_inventory_audit.md`).
+The packager and gate are kept as the rollback path and for auditing a
+candidate tree as data.
 
 Last-modified dates are recorded here, as data
 ----------------------------------------------
