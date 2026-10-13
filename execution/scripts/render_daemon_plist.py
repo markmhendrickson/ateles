@@ -17,12 +17,24 @@ install in the shape this module allows:
 * Credential-named ``EnvironmentVariables`` keys (see
   ``lib/credential_env_names.py``) are DROPPED, whatever their value, and
   reported by name only. The daemon fills them from the secrets store.
+* Git configuration carried in the environment (the ``GIT_CONFIG_COUNT`` /
+  ``GIT_CONFIG_KEY_<n>`` / ``GIT_CONFIG_VALUE_<n>`` group and
+  ``GIT_CONFIG_PARAMETERS``) is judged as a unit by the same mapping-level
+  scrub the test suite uses (``plan_env_scrub``). If that scrub would drop or
+  renumber any of it, the entry can carry authentication and the render is a
+  hard error: git configuration is never silently half-rewritten in a job
+  definition.
 * Any other ``EnvironmentVariables`` value that looks like key material (long,
-  opaque, not a path or URL) is a hard error: the render fails and writes
-  nothing, rather than guessing which half of the file is safe.
+  opaque, not a path or URL) or carries authentication material (an
+  authorization header, credentials inside a URL, a credential word in a
+  non-path value; judged by ``text_looks_credential_bearing``) is a hard
+  error: the render fails and writes nothing, rather than guessing which half
+  of the file is safe.
 * A ``ProgramArguments`` flag whose name is credential-shaped and carries a
   value (``--bearer-token <value>`` / ``--api-key=<value>``) is a hard error
-  for the same reason.
+  for the same reason, as is an argument that carries authentication material
+  itself (a sensitive git ``-c`` entry, an authorization header, credentials
+  inside a URL).
 
 The renderer never reads the process environment, so ambient secrets cannot
 reach the output. It prints names, never values. The output file is written
@@ -49,7 +61,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from lib.credential_env_names import is_credential_env_name  # noqa: E402
+from lib.credential_env_names import (  # noqa: E402
+    GIT_CONFIG_PARAMETERS_NAME,
+    git_config_entry_is_sensitive,
+    is_credential_env_name,
+    is_git_config_group_name,
+    plan_env_scrub,
+    text_looks_credential_bearing,
+)
 
 HOME_PLACEHOLDER = "<HOME>"
 
@@ -85,6 +104,64 @@ def _looks_like_opaque_secret(value: str) -> bool:
     if _HOSTNAME_RE.match(value) or _EMAIL_RE.match(value):
         return False
     return bool(_OPAQUE_RE.match(value))
+
+
+def _is_plain_path(value: str) -> bool:
+    """A file-system location (or a ``:``-joined list of them) with nothing
+    else in it. Paths may legitimately contain credential words
+    (``.../token-cache``), so they are judged by ``_looks_like_opaque_secret``
+    alone."""
+    return (
+        value.startswith(("/", "~"))
+        and "://" not in value
+        and not any(character.isspace() for character in value)
+    )
+
+
+def _value_carries_authentication(value: str) -> bool:
+    """True when *value* could carry key material that the opaque-value check
+    exempts (it contains a space, a colon or a URL): an authorization header,
+    credentials inside a URL, a credential word. One classifier, shared with
+    the environment scrub, decides."""
+    if not value or _PLACEHOLDER_RE.match(value) or _is_plain_path(value):
+        return False
+    return text_looks_credential_bearing(value)
+
+
+def _git_environment_refusal(environment: dict) -> list[str]:
+    """Git-configuration names the shared mapping-level scrub would drop or
+    rewrite. Each is a name whose value can carry authentication, so the
+    render refuses instead of writing it (or a renumbered copy of it)."""
+    as_text = {
+        key: value if isinstance(value, str) else str(value)
+        for key, value in environment.items()
+    }
+    remove, updates = plan_env_scrub(as_text)
+    touched = set(remove) | set(updates)
+    return sorted(
+        name
+        for name in touched
+        if is_git_config_group_name(name) or name == GIT_CONFIG_PARAMETERS_NAME
+    )
+
+
+def _argument_carries_authentication(arguments: list) -> int | None:
+    """Index of the first argument that itself carries authentication material:
+    a sensitive git configuration entry (``-c http.extraHeader=...``) or a
+    value the shared classifier reads as credential-bearing. Bare flags and
+    plain paths are judged by the flag check and the opaque check instead."""
+    for index, argument in enumerate(arguments):
+        if not isinstance(argument, str) or not argument:
+            continue
+        if argument.startswith("-") and "=" not in argument:
+            continue  # a flag name; `_credential_flag_with_value` judges it
+        key, equals, value = argument.lstrip("-").partition("=")
+        if equals and "." in key and git_config_entry_is_sensitive(key, value):
+            return index
+        judged = value if equals and key and re.fullmatch(r"[A-Za-z0-9_.-]+", key) else argument
+        if _value_carries_authentication(judged):
+            return index
+    return None
 
 
 def _credential_flag_with_value(arguments: list) -> str | None:
@@ -143,6 +220,12 @@ def render(template_text: str, *, home: str) -> RenderResult:
     if environment is not None:
         if not isinstance(environment, dict):
             raise PlistRenderError("EnvironmentVariables is not a dictionary")
+        git_names = _git_environment_refusal(environment)
+        if git_names:
+            raise PlistRenderError(
+                "EnvironmentVariables carries git configuration that can hold "
+                f"authentication ({', '.join(git_names)}); refusing to write it"
+            )
         for key in list(environment):
             if is_credential_env_name(key):
                 dropped.append(key)
@@ -154,6 +237,11 @@ def render(template_text: str, *, home: str) -> RenderResult:
                     f"EnvironmentVariables[{key!r}] holds an opaque value that looks "
                     "like key material; refusing to write it"
                 )
+            if isinstance(value, str) and _value_carries_authentication(value):
+                raise PlistRenderError(
+                    f"EnvironmentVariables[{key!r}] holds a value that can carry "
+                    "authentication material; refusing to write it"
+                )
 
     arguments = data.get("ProgramArguments")
     if isinstance(arguments, list):
@@ -162,6 +250,12 @@ def render(template_text: str, *, home: str) -> RenderResult:
             raise PlistRenderError(
                 f"ProgramArguments passes a value to {flag}; refusing to write a "
                 "credential into the job definition"
+            )
+        position = _argument_carries_authentication(arguments)
+        if position is not None:
+            raise PlistRenderError(
+                f"ProgramArguments[{position}] carries authentication material; "
+                "refusing to write a credential into the job definition"
             )
 
     return RenderResult(

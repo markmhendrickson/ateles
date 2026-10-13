@@ -413,3 +413,125 @@ def test_symlinking_installers_point_at_a_tracked_plist(script):
         f"{script.parent.name} links {plist_name}, which is not a tracked plist, "
         "so nothing holds its content to the no-credentials rule"
     )
+
+
+# ── Git configuration and authentication-bearing values ---------------------------
+#
+# The name classifier deliberately leaves the grouped git configuration to a
+# mapping-level judgement, and the opaque-value check exempts anything with a
+# space or a colon. Both gaps let authentication reach a rendered job
+# definition, so the renderer judges the whole environment mapping with the
+# shared scrub and the shared value classifier. Synthetic markers only.
+
+_AUTH_MARKER = "synthetic-auth-marker"
+
+
+def _render_environment(variables: dict[str, str]):
+    template = plistlib.dumps(
+        {
+            "Label": "com.example.daemon",
+            "ProgramArguments": ["/bin/daemon"],
+            "EnvironmentVariables": variables,
+        }
+    ).decode("utf-8")
+    return rdp.render(template, home="/h")
+
+
+@pytest.mark.parametrize(
+    "variables",
+    [
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {_AUTH_MARKER}",
+        },
+        {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "core.autocrlf",
+            "GIT_CONFIG_VALUE_0": "false",
+            "GIT_CONFIG_KEY_1": "http.extraHeader",
+            "GIT_CONFIG_VALUE_1": f"X-Custom: {_AUTH_MARKER}",
+        },
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "url.https://user:pass@example.test/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://example.test/",
+        },
+        {
+            "GIT_CONFIG_PARAMETERS": (
+                f"'http.extraHeader'='Authorization: Basic {_AUTH_MARKER}'"
+            )
+        },
+        # A member with no usable count: the scrub drops the group, so the
+        # renderer refuses it rather than writing an unjudged entry.
+        {
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {_AUTH_MARKER}",
+        },
+    ],
+    ids=["extra-header", "mixed-group", "url-userinfo-key", "parameters", "no-count"],
+)
+def test_git_configuration_that_can_carry_authentication_is_refused(variables):
+    with pytest.raises(rdp.PlistRenderError) as excinfo:
+        _render_environment(variables)
+    assert _AUTH_MARKER not in str(excinfo.value)
+    assert "GIT_CONFIG" in str(excinfo.value)
+
+
+def test_git_configuration_without_authentication_is_kept():
+    variables = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.autocrlf",
+        "GIT_CONFIG_VALUE_0": "false",
+    }
+    parsed = plistlib.loads(_render_environment(variables).content)
+    assert parsed["EnvironmentVariables"] == variables
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"Authorization: Basic {_AUTH_MARKER}",
+        f"Bearer {_AUTH_MARKER}",
+        f"https://user:{_AUTH_MARKER}@example.test/repo.git",
+        f"https://example.test/hook?token={_AUTH_MARKER}",
+    ],
+)
+def test_authentication_bearing_value_under_an_innocent_name_is_refused(tmp_path, value):
+    with pytest.raises(rdp.PlistRenderError) as excinfo:
+        _render_environment({"EXTRA_HTTP_HEADER": value})
+    assert _AUTH_MARKER not in str(excinfo.value)
+    # The CLI writes nothing and prints names, never the value.
+    template = tmp_path / "t.plist"
+    template.write_text(_template({"EXTRA_HTTP_HEADER": value}), encoding="utf-8")
+    out = tmp_path / "out.plist"
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "render_daemon_plist.py"), str(template), str(out)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert not out.exists()
+    assert _AUTH_MARKER not in result.stdout + result.stderr
+
+
+def test_paths_that_mention_credential_words_are_not_refused():
+    variables = {"CACHE_DIR_LIST": "/Users/example/token-cache:/Users/example/secrets-index"}
+    parsed = plistlib.loads(_render_environment(variables).content)
+    assert parsed["EnvironmentVariables"] == variables
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["/usr/bin/git", "-c", f"http.extraHeader=Authorization: Basic {_AUTH_MARKER}", "fetch"],
+        ["/usr/bin/git", "-c", f"http.extraHeader=X-Custom: {_AUTH_MARKER}", "fetch"],
+        ["/bin/daemon", f"--remote=https://user:{_AUTH_MARKER}@example.test/x.git"],
+        ["/bin/daemon", "--header", f"Authorization: Bearer {_AUTH_MARKER}"],
+    ],
+)
+def test_program_argument_carrying_authentication_is_refused(arguments):
+    template = plistlib.dumps({"Label": "x", "ProgramArguments": arguments}).decode("utf-8")
+    with pytest.raises(rdp.PlistRenderError) as excinfo:
+        rdp.render(template, home="/h")
+    assert _AUTH_MARKER not in str(excinfo.value)
