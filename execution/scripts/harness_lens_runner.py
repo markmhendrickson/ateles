@@ -61,7 +61,11 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
     ``file-read*`` on the credential-file globs named in this task
     (Neotoma auth, GitHub CLI hosts, git credential stores, SSH private keys,
     ``~/.claude.json``, ``~/.netrc``, and SOPS age keys; dotenv files
-    anywhere; the whole Neotoma config directory; launchd job plists), denies
+    anywhere; the whole Neotoma config directory; launchd job plists), then
+    re-allows placeholder templates (``.env.example`` and siblings, by the one
+    rule in ``lib/credential_templates.py`` that the read hook and the launch
+    check also use; the resolved path is matched, so a template-named link to
+    a credential stays denied), denies
     execution of ordinary keychain/credential helpers and of the launchd
     inspection tools, blocks the keychain service lookup,
     and
@@ -268,6 +272,10 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
 
 # noqa: E402 — path bootstrap above must run first
 import dispatch_role  # noqa: E402
+from lib.credential_templates import (  # noqa: E402
+    is_placeholder_template,
+    placeholder_template_sandbox_regexes,
+)
 import harness_router  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
@@ -1056,6 +1064,13 @@ def build_sandbox_exec_profile(
     verdict_path = verdict_path or (profile_path.parent / "verdict.md")
     runtime_root = str(runtime_write_root.resolve()).replace('"', '\\"')
     verdict = str(verdict_path.resolve()).replace('"', '\\"')
+    # Placeholder templates are re-allowed AFTER the credential read denies
+    # (Seatbelt applies the last matching rule), from the same single source
+    # the read hook and the launch check use. Seatbelt matches the resolved
+    # path, so a template-named link to a credential stays denied.
+    template_allows = "\n".join(
+        f'  (regex #"{p}")' for p in placeholder_template_sandbox_regexes()
+    )
     profile = (
         "(version 1)\n"
         "(allow default)\n"
@@ -1068,6 +1083,9 @@ def build_sandbox_exec_profile(
         ")\n"
         "(deny file-read*\n"
         f"{read_denies}\n"
+        ")\n"
+        "(allow file-read*\n"
+        f"{template_allows}\n"
         ")\n"
         "(deny file-write*\n"
         f"{write_denies}\n"
@@ -1860,15 +1878,13 @@ class HarnessSandbox:
         )
 
 
-_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
-
-
 def _is_dotenv_name(name: str) -> bool:
     """True for ``.env``, ``.env.*``, ``.envrc`` and ``<name>.env`` file names,
-    except placeholder templates (``.env.example`` and its siblings), which
-    are tracked on purpose and hold no values."""
+    except placeholder templates (``.env.example`` and its siblings, defined
+    once in ``lib/credential_templates.py``), which are tracked on purpose and
+    hold no values."""
     lowered = name.lower()
-    if lowered.endswith(_TEMPLATE_SUFFIXES):
+    if is_placeholder_template(name):
         return False
     return lowered.startswith(".env") or lowered.endswith(".env")
 

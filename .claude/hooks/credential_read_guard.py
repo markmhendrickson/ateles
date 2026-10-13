@@ -142,6 +142,10 @@ CREDENTIAL_PATH_GLOBS = [
     "*/.config/neotoma/.env",
     "*.env",
     "*.env.*",
+    # direnv's file holds exported values like a dotenv file; the review
+    # sandbox and the launch check already treat it as one.
+    "*/.envrc",
+    ".envrc",
     "*/.claude.json",
     "*/.config/sops/age/*",
     "*/repos/ateles-private/keys/*",
@@ -176,7 +180,28 @@ CREDENTIAL_DIRECTORIES = {
 # credential glob they'd otherwise match — a `.env.example` living right
 # next to `.env` must stay readable, or agents lose the one safe way to see
 # what a file's shape is without touching the real values.
-SAFE_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+def _load_placeholder_template_suffixes() -> tuple[str, ...]:
+    """The placeholder-template suffixes from their single source,
+    ``lib/credential_templates.py`` (shared with the review launch check and
+    the review sandbox). Loaded by file path so no package import can shadow
+    it. If it cannot be loaded, NO name is treated as a template: the
+    restrictive branch, never a local copy of the list."""
+    try:
+        import importlib.util
+
+        source = Path(__file__).resolve().parents[2] / "lib" / "credential_templates.py"
+        spec = importlib.util.spec_from_file_location("_ateles_credential_templates", source)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        suffixes = tuple(module.PLACEHOLDER_TEMPLATE_SUFFIXES)
+        if all(isinstance(s, str) and s.startswith(".") for s in suffixes):
+            return suffixes
+    except Exception:  # noqa: BLE001 — fail closed, never crash the hook
+        pass
+    return ()
+
+
+SAFE_TEMPLATE_SUFFIXES = _load_placeholder_template_suffixes()
 
 # Directories reads through: 1Password's own "export" nomenclature can also
 # appear in perfectly ordinary paths (e.g. a doc titled "1password-export-

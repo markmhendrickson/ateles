@@ -4302,3 +4302,147 @@ def test_dry_run_reports_a_dotenv_refusal(
     assert report["ok"] is False
     assert "prod.env" in report["would_refuse"]
     assert report["reason"] == report["would_refuse"]
+
+
+# ── One placeholder-template rule for the hook, the launch check and the sandbox ──
+#
+# A placeholder template (`.env.example` and siblings) is readable; the same
+# dotenv name without the suffix is not. The read hook, the review launch check
+# and the review sandbox profile must all derive that from
+# `lib/credential_templates.py` and agree name by name.
+
+import importlib.util as _importlib_util  # noqa: E402
+
+from lib import credential_templates as _templates  # noqa: E402
+
+_HOOK_PATH = _REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
+_hook_spec = _importlib_util.spec_from_file_location("_template_rule_hook", _HOOK_PATH)
+_hook = _importlib_util.module_from_spec(_hook_spec)
+_hook_spec.loader.exec_module(_hook)
+
+_DOTENV_BASES = (".env", ".env.local", ".env.development", "prod.env", ".envrc")
+_TEMPLATE_NAMES = tuple(
+    base + suffix
+    for base in _DOTENV_BASES
+    for suffix in (*_templates.PLACEHOLDER_TEMPLATE_SUFFIXES, ".EXAMPLE", ".Sample")
+)
+
+
+def _profile_read_rules() -> list[tuple[str, str]]:
+    """``(action, regex)`` read rules of the profile the runner actually
+    generates, in profile order."""
+    with tempfile.TemporaryDirectory() as scratch:
+        profile = Path(scratch) / "profile.sb"
+        hlr.build_sandbox_exec_profile(profile)
+        text = profile.read_text(encoding="utf-8")
+    rules = []
+    for block in re.finditer(r"\((allow|deny) file-read\*\n(.*?)\n\)", text, re.S):
+        for regex in re.findall(r'\(regex #"(.*)"\)', block.group(2)):
+            rules.append((block.group(1), regex))
+    return rules
+
+
+_PROFILE_READ_RULES = _profile_read_rules()
+
+
+def _sandbox_denies_read(path: str) -> bool:
+    """The generated profile's read decision for *path*, with Seatbelt's
+    last-matching-rule-wins semantics (verified for real by the sandbox test
+    below)."""
+    decision = "allow"
+    for action, regex in _PROFILE_READ_RULES:
+        if re.search(regex, path):
+            decision = action
+    return decision == "deny"
+
+
+@pytest.mark.parametrize("name", (*_DOTENV_BASES, *_TEMPLATE_NAMES))
+def test_hook_launch_check_and_sandbox_agree_on_placeholder_templates(name):
+    path = f"/synthetic/project/{name}"
+    hook_refuses = _hook.is_credential_path(path)
+    launch_refuses = hlr._is_dotenv_name(name)
+    sandbox_refuses = _sandbox_denies_read(path)
+    expected = not _templates.is_placeholder_template(name)
+    assert (hook_refuses, launch_refuses, sandbox_refuses) == (expected,) * 3, name
+
+
+def test_the_template_rule_has_exactly_one_definition():
+    assert _hook.SAFE_TEMPLATE_SUFFIXES == _templates.PLACEHOLDER_TEMPLATE_SUFFIXES
+    assert not hasattr(hlr, "_TEMPLATE_SUFFIXES")
+    literal = re.compile(r"""["']\.example["']\s*,\s*["']\.sample["']""")
+    tracked = subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), "ls-files", "*.py"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()  # fmt: skip
+    copies = [
+        path
+        for path in tracked
+        if path != "lib/credential_templates.py"
+        and not Path(path).name.startswith("test_")
+        and literal.search((_REPO_ROOT / path).read_text(encoding="utf-8", errors="replace"))
+    ]
+    assert copies == [], f"a second copy of the template suffix list: {copies}"
+
+
+def test_the_sandbox_profile_re_allows_templates_after_its_read_denies(tmp_path):
+    profile = tmp_path / "profile.sb"
+    hlr.build_sandbox_exec_profile(profile)
+    text = profile.read_text(encoding="utf-8")
+    deny_at = text.index("(deny file-read*")
+    allow_at = text.index("(allow file-read*")
+    assert deny_at < allow_at
+    for pattern in _templates.placeholder_template_sandbox_regexes():
+        assert f'(regex #"{pattern}")' in text[allow_at:]
+
+
+def test_the_hook_fails_closed_when_the_template_source_is_missing(tmp_path):
+    hooks = tmp_path / "repo" / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    for name in ("credential_read_guard.py", "_session_integrity.py"):
+        (hooks / name).write_text(
+            (_HOOK_PATH.parent / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    spec = _importlib_util.spec_from_file_location("_hook_no_source", hooks / "credential_read_guard.py")
+    module = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.SAFE_TEMPLATE_SUFFIXES == ()
+    assert module.is_credential_path("/synthetic/project/.env.example")
+
+
+@pytest.mark.skipif(
+    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
+    reason="sandbox-exec is macOS-only",
+)
+def test_the_real_sandbox_reads_templates_and_still_denies_credentials(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    dotenv = project / ".env"
+    dotenv.write_text("SYNTHETIC_NOT_A_REAL_VALUE=1\n", encoding="utf-8")
+    templates = []
+    for suffix in _templates.PLACEHOLDER_TEMPLATE_SUFFIXES:
+        template = project / f".env{suffix}"
+        template.write_text("SYNTHETIC_NOT_A_REAL_VALUE=\n", encoding="utf-8")
+        templates.append(template)
+    disguised = project / "copy.env.example"
+    disguised.symlink_to(dotenv)
+    profile = tmp_path / "profile.sb"
+    hlr.build_sandbox_exec_profile(profile)
+
+    def read(path):
+        return subprocess.run(
+            ["/usr/bin/sandbox-exec", "-f", str(profile), "cat", str(path)],
+            capture_output=True, text=True,
+        )  # fmt: skip
+
+    for template in templates:
+        result = read(template)
+        assert result.returncode == 0 and "SYNTHETIC" in result.stdout, template.name
+    assert read(dotenv).returncode != 0
+    assert read(disguised).returncode != 0
+    # The launch check and the hook allow the same templates.
+    assert hlr.refuse_if_credential_files_in_worktree(project) is not None  # the real .env
+    dotenv.unlink()
+    disguised.unlink()
+    assert hlr.refuse_if_credential_files_in_worktree(project) is None
+    for template in templates:
+        assert not _hook.is_credential_path(str(template))
