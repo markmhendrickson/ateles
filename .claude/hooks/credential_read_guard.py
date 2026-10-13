@@ -2,6 +2,11 @@
 """PreToolUse hook — stop an agent from putting a credential file's CONTENT
 into model context, across Bash, Read, Grep, and Glob.
 
+SCOPE: this is a tripwire for ACCIDENTAL credential reads, not a boundary
+against an agent that is trying to read one; shell parsing cannot be made
+complete, and the real boundary is the OS sandbox plus credential broker
+tracked in ateles#1340.
+
 The hazard (Neotoma task ent_cbf9bdbdf475eda8900d6b49): three agents read
 ~/.config/neotoma/.env whole rather than reading the one variable they
 needed. On 2026-09-07 a subagent grepped the file broadly and printed every
@@ -111,6 +116,23 @@ gmail_send_gate.py's adversarial pass covered them for its own domain: by
 refusing to special-case any leader that can itself execute a further
 command (see `TEXT_BEARING_LEADERS`'s docstring in that file for why
 interpreters must never be exempted).
+
+KNOWN LIMITS — recorded here rather than patched, because closing them is
+not possible by parsing shell text. The guard does not handle these CLASSES:
+  - Targets that are computed or only resolvable at run time: a path assembled
+    from variables or command output, or a relative name used after changing
+    directory, so the credential path never appears in the command text.
+  - Exotic shell encodings: quoting, expansion, and encoding forms that make
+    the command text differ from what the shell eventually executes.
+  - Reads performed by something the guard does not inspect: a program,
+    script, or tool that opens the file on its own, and any tool or MCP server
+    outside Bash, Read, Grep, and Glob.
+  - A credential reaching context from a source that is not a listed path
+    (an environment, a process listing, a log).
+Treat a pass from this hook as "nothing obviously wrong", never as proof that
+no credential was read. Hardening belongs to the sandbox and broker
+(ateles#1340); additions here should be limited to accidents that actually
+occurred.
 
 Fail-open: any error, missing field, or unparseable input -> exit 0. This
 hook must never itself become the reason a session breaks; the credential
