@@ -216,6 +216,41 @@ def log(msg: str) -> None:
         pass
 
 
+_MAX_NAMED_LENGTH = 256
+# Descriptions the checks return instead of a path; always safe to show.
+_FIXED_DESCRIPTIONS = frozenset(
+    {
+        "a credential path named in the command",
+        "ambient environment dump",
+        "environment dump after sourcing a credential file",
+        "environment dump sent to a remote shell",
+        "full process command-line inspection",
+        "process command-line or environment inspection",
+        "process tree inspection",
+        "service environment dump",
+        "shell tracing in a command that sources a credential file",
+    }
+)
+
+
+def _describe_hit(hit: str) -> str:
+    """What a refusal or log line may name: a path or a fixed description,
+    never anything that could be file content or a matched value. A hit
+    that is not a single path-shaped word (whitespace, control characters,
+    quotes, an expansion, or unusually long) is replaced by a fixed phrase."""
+    if (
+        not isinstance(hit, str)
+        or not hit
+        or len(hit) > _MAX_NAMED_LENGTH
+        or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in hit)
+        or any(ch in hit for ch in "'\"`$=")
+    ):
+        if hit in _FIXED_DESCRIPTIONS:
+            return hit
+        return "a credential path named in the command"
+    return hit
+
+
 def deny(reason: str) -> int:
     print(
         json.dumps(
@@ -948,6 +983,12 @@ def _grep_is_safe_mode(segment: str) -> bool:
             }
         )
 
+    # Context options print lines AROUND each match; with `-o` some greps
+    # print those surrounding lines in full, which is file content the
+    # names-only pattern never selected. No safe mode admits them.
+    context_options = {"A", "B", "C"}
+    context_long_options = {"--after-context", "--before-context", "--context"}
+
     output_modes = set()
     patterns = []
     pattern_is_unknown = False
@@ -979,6 +1020,8 @@ def _grep_is_safe_mode(segment: str) -> bool:
                 output_modes.add("only_matching")
                 index += 1
                 continue
+            if option in context_long_options:
+                return False
             if option in long_options_with_value:
                 if separator:
                     operand = attached_value
@@ -1017,6 +1060,8 @@ def _grep_is_safe_mode(segment: str) -> bool:
                     output_modes.add("only_matching")
                     flag_index += 1
                     continue
+                if flag in context_options:
+                    return False
                 if flag in short_options_with_value:
                     operand = flags[flag_index + 1 :]
                     if not operand:
@@ -2244,22 +2289,25 @@ def main() -> int:
         command = tool_input.get("command")
         hit = check_bash(command, cwd=cwd)
         if hit:
-            log(f"blocking Bash read of credential content: {hit}")
-            return deny(_safe_alternative(hit, tool="Bash"))
+            shown = _describe_hit(hit)
+            log(f"blocking Bash read of credential content: {shown}")
+            return deny(_safe_alternative(shown, tool="Bash"))
         return 0
 
     if tool == "Read":
         hit = check_read(tool_input, cwd=cwd)
         if hit:
-            log(f"blocking Read of credential file: {hit}")
-            return deny(_safe_alternative(hit, tool="Read"))
+            shown = _describe_hit(hit)
+            log(f"blocking Read of credential file: {shown}")
+            return deny(_safe_alternative(shown, tool="Read"))
         return 0
 
     if tool == "Grep":
         hit = check_grep(tool_input, cwd=cwd)
         if hit:
-            log(f"blocking Grep content-mode read of credential file: {hit}")
-            return deny(_safe_alternative(hit, tool="Grep"))
+            shown = _describe_hit(hit)
+            log(f"blocking Grep content-mode read of credential file: {shown}")
+            return deny(_safe_alternative(shown, tool="Grep"))
         return 0
 
     if tool == "Glob":
@@ -2273,5 +2321,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:  # noqa: BLE001 — fail open, never break a session
-        log(f"internal error, failing open: {exc}")
+        log(f"internal error, failing open: {type(exc).__name__}")
         sys.exit(0)

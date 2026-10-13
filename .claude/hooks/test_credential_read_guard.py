@@ -1798,3 +1798,95 @@ def test_a_split_quoted_operand_really_reads_the_protected_file():
     spelling = _operand_spellings(NEOTOMA_OTHER, "neotoma")["single-quoted piece"]
     probe = subprocess.run(["bash", "-c", f"cat {spelling}"], capture_output=True, text=True)
     assert "not-a-real-value" in probe.stdout
+
+
+# ---------------------------------------------------------------------------
+# The guard's own output never carries file content or matched values.
+#
+# Two sides: (1) a mode the guard lets through as names/count-only must not
+# be able to print surrounding lines, so grep context options are never a safe
+# mode; (2) the refusal and the log line name a path or a fixed description,
+# never text that could be content or a value.
+# ---------------------------------------------------------------------------
+
+_FIXTURE_CONTENT_MARKERS = (
+    "fake_test_token_not_real_0000",
+    "synthetic_attached_pattern_canary_not_real",
+    "zzz_fake_value",
+    "not-a-real-value",
+    "synthetic-not-real",
+)
+
+CONTEXT_MODE_BLOCK = [
+    ("names-only with after-context", f"grep -o -A 1 '^[A-Z_]*=' {ENV}"),
+    ("names-only with attached before-context", f"grep -o -B1 '^[A-Z_]*=' {ENV}"),
+    ("names-only with context", f"grep -o -C 2 '^[A-Z_]*=' {ENV}"),
+    ("names-only with long context", f"grep -o --context=1 '^[A-Z_]*=' {ENV}"),
+    ("names-only with long after-context", f"grep -o --after-context 1 '^[A-Z_]*=' {ENV}"),
+    ("count with context", f"grep -c -A1 X {ENV}"),
+    ("files with context", f"grep -l -B 2 X {ENV}"),
+    ("ripgrep names-only with context", f"rg -o -C1 '^[A-Za-z_][A-Za-z0-9_]*=' {ENV}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", CONTEXT_MODE_BLOCK, ids=[c[0] for c in CONTEXT_MODE_BLOCK])
+def test_context_options_are_never_a_safe_grep_mode(label, cmd):
+    assert run_bash(cmd) == 2, label
+
+
+def test_context_with_names_only_can_print_values_on_this_platform():
+    probe = subprocess.run(
+        ["grep", "-o", "-A", "1", "^[A-Z_]*=", ENV], capture_output=True, text=True
+    )
+    if FAKE_VALUE not in probe.stdout and "client_secret" not in probe.stdout:
+        pytest.skip("this grep does not print context lines in -o mode")
+    assert run_bash(f"grep -o -A 1 '^[A-Z_]*=' {ENV}") == 2
+
+
+_OUTPUT_PROBES = [
+    *[("Bash", {"command": cmd}) for _, cmd in BASH_BLOCK],
+    *[("Bash", {"command": cmd}) for _, cmd in CONTEXT_MODE_BLOCK],
+    ("Read", {"file_path": ENV}),
+    ("Read", {"file_path": NEOTOMA_OTHER}),
+    ("Read", {"file_path": PLIST}),
+    ("Grep", {"pattern": "X", "path": ENV, "output_mode": "content"}),
+]
+
+
+@pytest.mark.parametrize(
+    "tool,tool_input", _OUTPUT_PROBES, ids=[f"{t}-{i}" for i, (t, _) in enumerate(_OUTPUT_PROBES)]
+)
+def test_a_refusal_never_contains_file_content(tool, tool_input):
+    result = run_result(tool, tool_input)
+    assert result.returncode == 2
+    output = result.stdout + result.stderr
+    for marker in _FIXTURE_CONTENT_MARKERS:
+        assert marker not in output, marker
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        f'cat "{NEOTOMA_DIR}/x synthetic_value_marker_77"',
+        f"cat '{NEOTOMA_DIR}/a=synthetic_value_marker_77'",
+        f'cat "{NEOTOMA_DIR}/$(printf synthetic_value_marker_77)"',
+    ],
+    ids=["space", "assignment", "expansion"],
+)
+def test_a_refusal_names_only_a_path_or_a_fixed_description(cmd):
+    result = run_result("Bash", {"command": cmd})
+    assert result.returncode == 2
+    assert "synthetic_value_marker_77" not in result.stdout + result.stderr
+
+
+def test_safe_modes_the_guard_allows_print_no_content_when_run():
+    for argv in (
+        ["grep", "-c", "^NEOTOMA_BEARER_TOKEN=", ENV],
+        ["grep", "-o", "^[A-Z_]*=", ENV],
+        ["grep", "-l", "TOKEN", ENV],
+    ):
+        cmd = " ".join(argv[:-1]) .replace("^", "'^").replace("=", "='") + f" {ENV}"
+        assert run_bash(cmd) == 0, cmd
+        printed = subprocess.run(argv, capture_output=True, text=True).stdout
+        for marker in _FIXTURE_CONTENT_MARKERS:
+            assert marker not in printed, (argv, marker)
