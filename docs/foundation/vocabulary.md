@@ -577,8 +577,8 @@ principal may also be a role the roster resolves, carried in `needed_input` beca
 [edge](#edge)'s target is a principal and never a role (`authority_model.md#approval`); a role that
 resolves to no principal raises a [checkpoint](#checkpoint) (reason `unspawnable_assignee`) rather than
 falling through to any available agent. A role is declared once and reused; it is not created per [batch](#batch) or
-per checkpoint. A role is a **slot**: the design fixes no set of roles, each implementation defines its own and
-fills each [slot](#slot) it uses, and the role names the reference [workflows](#workflow) carry are examples an implementation may
+per checkpoint. A role is a [**slot**](#slot): the design fixes no set of roles, each implementation defines its own and
+fills each slot it uses, and the role names the reference [workflows](#workflow) carry are examples an implementation may
 rename, merge, or split, subject to the five constraints stated at
 [`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
@@ -594,13 +594,17 @@ states this for proposal rights: "standing to propose is a capability and not a 
 `ownership_grant` points at; nothing is looked up by name).
 
 ### slot
-**Definition:** a [role](#role) read as a position the design requires to be filled and does not fill: the name a [step](#step) declaration's
-`owner_role` carries, which each implementation resolves to a [principal](#principal) through its roster. It is not a second
-concept beside [role](#role) but the same name seen from the implementation, which defines its own role set, seats a principal in each slot it uses, and is
-bound only by the constraints on filling the slots.
+**Definition:** the position a [role](#role) names in a [step](#step) declaration's `owner_role`, filled when the
+roster seats one [principal](#principal) in it; the design requires the position to be filled and never fills it. The design
+fixes no set of slots: each implementation defines its own and is bound only by the constraints on filling them.
+**Swap test:** against [role](#role), "fills each role" reads as filling a name, "fills each slot" as filling a position, and the
+rule that turns on it is the second: a name is resolved, a position is seated and can be left unfilled (constraint 5 of the
+roles section holds a slot that resolves to nobody). Against [step owner](#step-owner), a step owner is the principal that
+fills the slot a step declares, so "the step owner is unseated" is false where "the slot is unseated" is true. Against
+[agent](#agent), an agent fills a slot and is not one.
 **See:** [`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
 **Never:** —
-**Not for:** a fixed list of roles the design defines; an [agent](#agent) for a slot (the roster seats an agent in it).
+**Not for:** a fixed list of roles the design defines; an [agent](#agent) for a slot (the roster seats a principal in it, and the slot outlives whichever principal is seated).
 
 ### verdict
 **Definition:** the record a [step owner](#step-owner) writes to close a [step](#step) on a
@@ -1029,11 +1033,13 @@ the [action gate](#action-gate) permits the `merge_pr` [action](#action).
 **Not for:** "bot" for the steward.
 
 ### review step
-**Definition:** a [step](#step) whose work is a judgement of the [batch](#batch)'s change rather than a
-change to it, closed by its [step owner](#step-owner)'s [verdict](#verdict) like any other step. In the reference [workflows](#workflow) `pm`,
-`ux`, `arch`, `pr_review`, `qa`, and `legal` are review steps (example names, not a fixed list); nothing distinguishes one from a working
-step but what its owner does, and no separate review concept exists in the design.
+**Definition:** a [step](#step) whose declared class is `review`: its work is a judgement of the [batch](#batch)'s change
+rather than a change to it, closed by its [step owner](#step-owner)'s [verdict](#verdict) like any other step. The class is a
+field of the step's declaration (`review`, `work`, or `deterministic`; absent reads as `review`), not a second concept beside the
+step. In the reference [workflows](#workflow) `ux`, `arch`, `pr_review`, `qa`, and `legal` are review steps (example names, not a
+fixed list); a step declared `work` or `deterministic` is not one.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
+[`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review),
 [`workflows.md`](workflows.md).
 **Never:** "lens", "review panel", "panel".
 **Not for:** "reviewer" for a review step's owner, unqualified; CI for a review step.
@@ -1678,13 +1684,12 @@ principal where none is set (decision 50).
 **Not for:** "required reviewers" for a quorum (1-of-n is not a quorum); verdict for a quorum.
 
 ### separation of duties
-**Definition:** a structural check requiring disjointness between the [roles](#role) on one [checkpoint](#checkpoint), such as
-raiser and resolver or proposer and approver, or between the role that builds an [artifact](#artifact) and the role of a required
-[review step](#review-step) on it.
-Read as disjointness over the checkpoint's principal [edges](#edge), an [agent](#agent) counting as its bound
-[principal](#principal) (decisions 48 and 49); the pairs a class requires are its `disjoint_roles[]` on the
-`action_policy` (decision 50). The builder and review pair is fixed by the design and read at the [verdict](#verdict)
-write instead (decision 143).
+**Definition:** a structural check requiring disjointness between two duties. For the pairs a class requires, such as a
+[checkpoint](#checkpoint)'s raiser and resolver, it is read over the checkpoint's principal [edges](#edge), an
+[agent](#agent) counting as its bound [principal](#principal) (decisions 48 and 49), and the pairs a class requires are its
+`disjoint_roles[]` on the `action_policy` (decision 50). For the builder and review pair, which the design fixes, it is read over
+a [verdict](#verdict)'s signer and the [batch](#batch)'s [artifacts](#artifact) at the verdict write, on the agent's own
+identity and not its bound principal (decision 143, extending decision 49).
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties),
 [`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review).
 **Never:** —
@@ -2026,7 +2031,7 @@ Besides those two: 22 adapter table headers read `| Event | Status | Outcome in 
 inventing a fifth outcome.
 
 **`resolution` and `type` also failed.** `resolution` carries three bound senses across 220 uses, and
-[`disposition`](#disposition) already occupies the noun [slot](#slot) downstream of *resolve*. `type` failed earlier on
+[`disposition`](#disposition) already occupies the noun position downstream of *resolve*. `type` failed earlier on
 volume: bare `type` appears ~858 times meaning *what kind of thing this is*, which is not what the field
 means.
 

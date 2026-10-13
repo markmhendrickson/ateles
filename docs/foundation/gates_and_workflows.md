@@ -59,7 +59,7 @@ and the adapters that reach them: `adapters.md`.
 ### Declaration, batch, projection
 
 `workflow` declares one entity per (declaration scope, workflow type): ordered `steps[]` (`step_name`,
-`owner_role`, `parallel_group`, `join_step`, `required`, `applies_when` — the condition that decides
+`owner_role`, `class` (`review`, `work`, or `deterministic`; absent reads as `review` — `#the-builder-of-a-change-never-signs-its-review`), `parallel_group`, `join_step`, `required`, `applies_when` — the condition that decides
 whether an optional step opens at all, below — and `on_fail` — the earlier step a failing verdict
 opens again, with `rounds_cap`, the rounds that loop may take, below — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below, and
 `unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`, with
@@ -727,80 +727,153 @@ no such write, and admitting one would reopen more than this decision.
 
 ### The builder of a change never signs its review
 
-**Ruled (decision 143, 2026-10-13, the operator's): the principal that built an artifact never signs a
-required review step on it.** Registered in `conformance.md#the-register-of-open-design-decisions`. The role
-that builds a change is never the role that reviews it. The rule is one more pair of the separation of duties
-the design already requires of a payment's payer and verifier, of a checkpoint's raiser and resolver, and of a
-declaration's approver and proposer (`workflows.md#five-constraints-hold-for-any-role-set`), and it is
-the pair every build-and-review workflow contains.
+**Ruled (decision 143, 2026-10-13, the operator's): the role that builds a change is never the role that
+reviews it.** Registered in `conformance.md#the-register-of-open-design-decisions`. It is one more pair of the
+separation of duties the design already requires of a payment's payer and verifier, of a checkpoint's raiser
+and resolver, and of a declaration's proposer and the swarm's approval of it
+(`workflows.md#five-constraints-hold-for-any-role-set`), and it is the pair every build-and-review workflow
+contains.
 
-**It binds slots and principals, and the check is on principals.** The rule is stated on roles because a
-declaration and a roster are read for roles: the slot that builds and the slot that reviews are distinct. It is
-checked on principals because a slot is only a name. The check reads the principal each role resolves to, an
-agent counting as the principal it is bound to (decision 48,
-`authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal`). One agent seated in both
-slots is one principal, and two agents bound to one operator are one interest, so neither escapes it; two slots
-resolving to two principals satisfy it however the roles are named. A roster that seats one principal in both
-slots is a roster in which the review step cannot close: the verdict is refused, a refused write is an error and
-never swallowed (above), and the step holds.
+**Ruled the same day (decision 143, 2026-10-13, the operator's): distinctness is checked on the agent's own
+identity, which is its own credential and principal binding, and not on whose interest the agent serves.** Two
+different agent identities acting for the same operator may build and review each other's work. One agent
+identity may never review what it built, whichever slots it fills. The operator reviewing work the operator
+built needs a different reviewer, or the operator's waiver.
+
+**The interest-level reading is not adopted.** Decision 48's counting rule, under which an agent counts as the
+principal its acts-as binding names, is not applied to this pair: the check reads the agent's own binding,
+the one that ends at the agent, and not the acts-as binding that ends at the operator
+(`authority_model.md#the-counting-rule-an-agent-counts-as-its-bound-principal`). Two grounds, which are the
+corpus's and not words of the ruling. First, in the reference deployment every agent acts for the operator, so
+the counting rule would make every agent one interest with the operator and refuse every agent-signed review of
+agent-built work; the operator's `waived` would close every review step of every batch, one verdict per step,
+which is the return `principles.md#the-autonomy-the-design-is-for-the-operator-is-involved-wherever-involvement-is-needed-and-nowhere-it-is-not`
+calls a defect. Second, the failure the pair exists to prevent is one identity judging its own work, and the
+identity-level check closes exactly that. What it leaves is a cost, stated under *Cost accepted*.
+
+**Defaults applied by consistency (2026-10-13), each following from the ruling it names.** The operator ruled the two paragraphs above and nothing else here; the rest of the section is how the
+design carries them out, and each choice follows from something already ruled or stated:
+
+- a step carries a declared class, and an absent class reads as `review`: principle 5, and the rule that an
+  amendment weakening a review step is the operator's (`workflows.md#who-approves-a-new-or-amended-declaration`);
+- the check is a refusal at the verdict write, beside the lease check: the lapsed-lease and contradicting-conclusion
+  refusals;
+- authorship is read from the record and not stored, and the adapter records the actor: principle 11, and the
+  identity rule of `adapters.md#the-admission-contract` (obligation 2);
+- the artifacts are read from the batch's `PRODUCES` edges, an omitted artifact is refused, and an unreadable set
+  holds: invariant 7, and principle 5's rule that the field carrying the safety meaning is never one the checked
+  party writes;
+- a step declared `deterministic` is exempt: `workflows.md#five-constraints-hold-for-any-role-set`, constraint 4;
+- `waived` is not refused: the waiver rule below;
+- it is a fixed pair and not an `action_policy` value: decision 50 puts a pair in policy only where it varies by
+  class, and this one does not;
+- it extends decision 49 to the verdict and adds no entity or held state: decision 49's own ground;
+- record entities are outside it: the rule reads artifacts, which an external system holds (`data_model.md#concepts`);
+- a remedy the builder carries out makes it an author: routing a remedy never transfers the conclusion;
+- release `verify_deployed` has its own slot, and the reference steps are classified below: the rule applied to
+  the reference workflows.
+
+**It binds slots and identities.** The rule is stated on roles because a declaration and a roster are read for
+roles: the slot that builds and the slot that reviews are distinct. It is checked on identities because a slot
+is only a name. The check reads the identity each signer resolves to, an agent's being the agent and the
+operator's being the operator principal, so one agent seated in both slots is one identity and does not escape
+by being seated twice. A roster that seats one identity in a building slot and a review slot is a roster in
+which the review step cannot close. For an implementer, the instruction is: seat two different agents in the
+slot that builds and the slot that reviews, or the engine refuses the review's verdict.
+
+**A step's class is declared, and the refusal reads it from the declaration.** Each step of a `workflow`
+declaration carries a `class`, one of three: `review`, a step whose work is a judgement of artifacts it did not
+leave; `work`, a step whose work changes something or takes an action, such as building, drafting, merging,
+releasing or recording; and `deterministic`, a step whose work is a script and whose verdict is the script's
+result, its owner using no model to produce it (`workflows.md#five-constraints-hold-for-any-role-set`,
+constraint 4). An absent class reads as `review`, the fail-closed branch (principle 5), so a declaration that
+leaves out a building step's class finds its first close refused rather than silently exempt. The class is
+never read from the signer's verdict: a verdict that cites a CI run or a lint result is still the verdict of the
+class its step declares, and a step is exempt only because its declaration says `deterministic`. Moving a step
+away from `review` is an amendment that weakens a review step and is the operator's to approve. The trigger is a
+step declared `review` that has opened, required or not; an optional step recorded inapplicable never opens
+and needs no check.
 
 **Authorship is read from the record, never stored** (principle 11). The authors of an artifact are the
-principals the record attributes its making to: the principal the action that left it is attributed to (the
-artifact is `PRODUCES` from the batch that took the action, `data_model.md#concepts`; every write carries the
-agent that made it and the principal it acted for, `authority_model.md#attribution`), and the principal each
-later head-advancing observation of it resolves to through the credential binding
-(`github.md#pull-requests`, the `pull_request.synchronize` row;
-`adapters.md#no-external-event-advances-a-step-by-itself`). The step during which the action was taken is the
-building step. A remedy routed to an implementer after a blocking finding advances the head, so its implementer
-becomes an author and cannot then sign the step that re-judges it, which is routing the remedy never
-transferring the conclusion (above) restated for the signer. An artifact the batch `PRODUCES` whose
-building is attributed to no principal has unreadable authorship, which is `unknown`, and unknown holds
-(`#an-unreadable-workflow-is-unknown-and-unknown-holds`). An actor the credential binding resolves to no
-principal is no author this check can name, and a signer is always a resolved principal.
+identities the record names as having made it: the identity behind the action that left it, and the identity
+behind every observation that moved its `head`. Each is written when it happens. The adapter records, on every
+observation that creates an artifact's record or creates or moves its `head`, an action confirmation included,
+the actor's credential resolved through the binding at that delivery, as an agent identity, as `external` where
+the credential binds to no principal, or as `unresolved` (`adapters.md#the-admission-contract`,
+obligation 2; `github.md#pull-requests`). The binding is read as of the delivery and never again at the verdict
+write, so a credential rotated or a binding expired after the advance drops no author.
 
-**It is refused at the verdict write, beside the lease check.** A verdict that closes a required review step
-as `signed` or as a blocking conclusion is refused when its signer, counted under 48, is an author of an artifact
-in its `artifact_refs[]`, unless the step is the one that built the artifact. `artifact_refs[]` names what the
-step judged on (above), so a step that pins an artifact has judged on it. The check is the same moment and
-the same kind of refusal as the lapsed lease and the contradicting conclusion
-(`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`); it adds
-no entity and no held state, only a read over edges the verdict and the batch already carry.
+**What authorship then means.** A remedy routed to an implementer after a blocking finding moves the head, so
+that implementer becomes an author and cannot sign the step that re-judges it, which is routing the remedy
+never transferring the conclusion (`#findings-conclusions-and-what-a-blocking-finding-obliges`) restated for the
+signer. An actor recorded `unresolved`, or no actor recorded at all, is unknown authorship, and unknown holds
+(`principles.md`, invariant 7). An actor recorded `external` is no author, and neither is an actor that an
+adapter's document declares host automation that authors nothing; a pull request whose every author is one of
+these is outside this rule. Authors are the actors of head advances: a co-author named in a commit trailer is not read, a reviewer
+who uses the host's update-branch control becomes an author and is then barred from that step, and a rebase or
+force-update by another identity adds that identity.
 
-**A deterministic step is exempt, because it reviews nothing.** A step whose work is a script and whose
-verdict is the script's result (`workflows.md#five-constraints-hold-for-any-role-set`, constraint 4) is
-judged by the mechanism, and the verdict names the mechanism and what it read. It is not a review step for this
-rule, so the slot that runs a lint over an artifact may be filled by a principal that built it. The exemption
-is by the step's class and never by the principal: a step that adds a judgement of its own to the script's
-result is a review step.
+**It is refused at the verdict write, beside the lease check.** A verdict that closes a step declared `review`
+as `signed` or as a blocking conclusion is refused when its signer's identity is an author of an artifact the
+batch `PRODUCES` or of one the verdict pins. A blocking conclusion is refused alike because it would be the
+builder's own judgement of its work and would route the remedy back to the builder. The artifacts are read from
+the batch's `PRODUCES` edges, which the engine and the adapter write, and never from the verdict's
+`artifact_refs[]`, which its signer writes: a pin can only add an artifact to the set checked, never remove one.
+A review verdict whose `artifact_refs[]` omits an artifact the batch `PRODUCES` is refused too, and a set that
+cannot be read is unknown and holds. This is the same moment and the same kind of refusal as the lapsed lease
+and the contradicting conclusion (`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`),
+and the lease check runs first, so the authorship refusal applies to the lease holder. It adds no entity and no
+held state, only a read over edges the verdict and the batch already carry.
 
-**The operator's `waived` verdict is not refused.** A `waived` verdict is the operator principal closing an
-unsigned required step, attributed and carrying its reason; it is not a signature and not a review, and this rule
-does not touch it. Where the operator is also an author, directly or through an agent bound to the operator, the
-waiver closes the review of the operator's own work. That is the single-interest case decision 47 makes
-readable rather than pretended: it is not hidden and not refused, and it is a read over edges the record
-already holds, a `waived` verdict signed by the operator principal whose `artifact_refs[]` name an artifact the
-operator authored. No new mark is added.
+**What fires, and what the signer sees.** The refusal fires on one thing: a verdict on a `review` step, written
+by an identity that made one of the batch's artifacts. The signer receives it as an error on its write, which
+names this rule, and the step stays unsigned. It closes when a different identity signs it, or when the operator
+writes `waived` (below); where the declaration sets `unclaimed_after`, a step nobody can sign raises
+`unclaimed_step` (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`).
 
-**Why.** Principle 5 chooses the restrictive branch. A review signed by the principal that built the work is
-one interest looking at its own work and a verdict saying a second looked; the pair is the smallest structural
-check for the same reason the raiser and resolver are, and the prior art is the same, GitHub's
-prevent-self-review and NIST dynamic separation of duty
-(`authority_model.md#prior-art`). The fixed pair is not an `action_policy` value: unlike the pairs
-`disjoint_roles[]` carries, it does not vary by action class, and an absent value cannot weaken it
-(`authority_model.md#the-thresholds-home-is-the-action_policy-per-class`).
+**The operator's `waived` verdict is not refused, and it is how a held review step is released.** A `waived`
+verdict is the operator principal closing an unsigned required step, attributed and carrying its reason; it is
+not a signature and not a review, and this rule does not touch it. Only the operator principal may waive: the
+right is not delegable, and an agent never writes `waived` on its own initiative (`#declaration-batch-projection`, on who may
+waive; `data_model.md#concepts`, the operator-facing agent row), so an agent bound to the operator does not hold
+the right by being bound to it, and an agent author cannot waive its own review. Where the operator is also an
+author, because it advanced the head under its own credential, the waiver closes the review of the operator's own work:
+that is not refused, and it is readable as a `waived` verdict signed by the operator principal that `CLOSES` a
+batch which `PRODUCES` an artifact the operator authored. No new mark is added.
 
-**What this does not decide.** Record entities a step writes, such as a digest, an analysis, or a plan
-amendment, are not artifacts: the rule reads authorship of artifacts, which an external system holds
-(`data_model.md#concepts`). Whether the principal that wrote such an entity may verify it, as the same role
-does in `workflows.md#session-digestion` and `workflows.md#planning`, is not decided here and is not changed.
+**Which reference steps are which class.** The class is declared, not inferred, and the reference workflows
+declare it as follows.
 
-**Cost accepted.** A swarm whose agents are all bound to one operator interest cannot close a review of work
-that interest built, which is decision 48's cost stated for this pair. One agent seated in both slots cannot
-close the review step, and the step holds rather than passing.
+- `review`: `ux`, `arch`, `pr_review`, `qa` and `legal` where they appear; outreach `review`; postmortem
+  `pr_review`; payment `verify` and `reconcile`; release `verify_deployed`, which confirms what `release` left and
+  so has its own slot, distinct from `release`'s; and session digestion `verify`, which judges the pull
+  requests, messages and deployments the digested session built, so an identity that built them does not verify
+  them and a self-report digest is verified by another.
+- `deterministic`: `draft_lint` of social content and `disclosure_lint` of outreach.
+- `work`: every other step. That includes `pm`, which states the scope and may open the issue that carries it;
+  `impl`, `copy`, `draft`, `post`, `send`, `follow_up`, `prepare`, `pay`, `consent` and the operator-only steps;
+  release `criteria` and `release`; intake's five steps; the research and meeting steps; and digestion `digest`,
+  `reconcile` and `file`. `merge` is `work`: it takes the merge action, which the action gate governs and
+  ordinarily checkpoints for the operator, so merging reviewed work is not reviewing it. Planning's `judge` is
+  `work`: it judges record entities, and the planning workflow lists no artifacts for the rule to read.
+
+**Why.** Principle 5 chooses the restrictive branch. A review signed by the identity that built the work is one
+party looking at its own work and a verdict saying a second looked; the pair is the smallest structural check
+for the same reason the raiser and resolver are, and the prior art is the same, GitHub's prevent-self-review
+and NIST dynamic separation of duty (`authority_model.md#prior-art`). Review of a record entity, such as an
+outreach draft, a postmortem finding or a digest, is outside the rule because the rule reads artifacts, which
+an external system holds.
+
+**Cost accepted.** The rule excludes one identity, not one interest, so two agents of one operator can build and
+review each other's work; that is the ruling's cost, and the interest-level reading above is what would close
+it. A deployment that seats one agent identity in both a building slot and a review slot cannot close that
+review: the step holds until a different identity signs it or the operator writes `waived`. Every `review` step
+of the reference workflows therefore needs an agent identity other than the one that built the work.
 
 **What would reopen it.** A review whose judgement needs knowledge only the builder has, so that excluding the
 builder makes the review worse than the self-review: no case has been found in the corpus, and admitting one
-would first have to say what the verdict is evidence of.
+would first have to say what the verdict is evidence of. The interest-level reading would be reopened by a
+separate ruling, once agents of one deployment are bound to distinct interests.
 
 ### A finding is one-off or standing, and a standing one obliges a change to what produced it
 

@@ -121,4 +121,4 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 
 ## [The builder of a change never signs its review](../gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review)
 
-- **GW-55** — (decision 143): the principal that built an artifact never signs a required review step on it, an agent counting as its bound principal; a deterministic step and the building step are not refused; `waived` is not refused *[M for the refusals; R for whether a step is a review step (the step's class is read from its declaration and verdict, `workflows.md#five-constraints-hold-for-any-role-set` constraint 4)]*
+- **GW-55** — (decision 143): an agent identity that built an artifact never signs a step declared `review` on it; `work`, `deterministic`, and `waived` are not refused *[M]*
