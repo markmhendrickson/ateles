@@ -265,6 +265,7 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
 # noqa: E402 — path bootstrap above must run first
 import dispatch_role  # noqa: E402
 import harness_router  # noqa: E402
+import skill_runner  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
@@ -498,7 +499,7 @@ class LensTarget:
     pr: int
     head: str
     lens: str  # short label, e.g. "pm"
-    agent: str  # docs/agents/<agent>.md name, e.g. "pavo"
+    agent: str  # Ateles agent_definition name, e.g. "pavo"
     focus_notes: str = ""
     # Neotoma task entity this dispatch is PART_OF, if any. Optional — a
     # one-off comparison run need not have one — but when present it is the
@@ -513,11 +514,9 @@ def render_lens_task(target: LensTarget, brief_path: Path) -> str:
     task string, exactly as the bootstrap-mode operator-run subagent brief
     describes doing it by hand (see the brief's step 2).
 
-    The agent's own ``docs/agents/<agent>.md`` prompt is read from the LOCAL
-    worktree the caller is about to dispatch into (passed in via
-    ``agent_prompt_source``-equivalent callers use ``read_agent_prompt``
-    below) — not fetched again here — so the two reads are guaranteed to be
-    against the SAME head the lens will actually review.
+    The agent's own prompt is NOT read here: ``read_agent_prompt`` resolves
+    it from the Ateles side (see that function), never from the checkout
+    under review.
     """
     if not brief_path.is_file():
         raise FileNotFoundError(
@@ -538,16 +537,57 @@ def render_lens_task(target: LensTarget, brief_path: Path) -> str:
     return f"{launch}\n---\n\n{brief}"
 
 
-def read_agent_prompt(worktree: Path, agent: str) -> str:
-    """Read docs/agents/<agent>.md from the worktree (i.e. from TARGET HEAD's
-    own tree state at fetch time — the worktree is created from origin, and
-    docs/agents is generated from Neotoma on origin/main, per the lens brief's
-    own instruction to read it from ``origin/main`` rather than the PR branch).
+class LensRoleUnavailable(RuntimeError):
+    """The lens's canonical Ateles role definition could not be loaded.
+
+    Raised before any worktree is created or any model is called. There is
+    deliberately no fallback: not to the target checkout's prompt files, and
+    not to the loader's stub (empty prompt, wildcard tools).
     """
-    path = worktree / "docs" / "agents" / f"{agent}.md"
-    if not path.is_file():
-        raise FileNotFoundError(f"{path} does not exist — unknown lens agent {agent!r}")
-    return path.read_text(encoding="utf-8")
+
+
+def read_agent_prompt(agent: str) -> str:
+    """Return the lens's prompt from its canonical Ateles agent_definition.
+
+    Resolved through ``skill_runner._load_agent_def`` — the same cached
+    resolver ``dispatch_role.dispatch`` uses for the child's identity and
+    system prompt — so the task text and the dispatch agree on one
+    definition, and a definition this check accepts is the one dispatch
+    then runs on.
+
+    Never read from the repository under review (ateles#1337). The target
+    checkout is untrusted input: an Ateles PR could edit
+    ``docs/agents/<agent>.md`` and so rewrite its own reviewer, and a
+    sibling repository (Neotoma) carries no Ateles prompt tree at all, which
+    made every sibling review refuse with "unknown lens agent".
+
+    Fails closed with ``LensRoleUnavailable`` on a stub (a failed load: empty
+    prompt, wildcard tools), a definition with no entity id, a definition
+    whose name is not the requested agent, or an empty prompt.
+    """
+    try:
+        definition = skill_runner._load_agent_def(agent)
+    except Exception as exc:  # noqa: BLE001 — any load failure refuses the run
+        raise LensRoleUnavailable(
+            f"canonical lens role {agent!r} could not be loaded "
+            f"({type(exc).__name__}: {exc}) — refusing before any model call"
+        ) from exc
+    problem = ""
+    if definition.is_stub:
+        problem = f"load failed ({definition.load_error or 'no reason recorded'})"
+    elif not definition.entity_id:
+        problem = "definition carries no entity id"
+    elif (definition.name or "").strip().lower() != agent.strip().lower():
+        problem = f"loaded definition is named {definition.name!r}"
+    elif not (definition.prompt_markdown or "").strip():
+        problem = "definition has an empty prompt"
+    if problem:
+        raise LensRoleUnavailable(
+            f"canonical lens role {agent!r} is unusable: {problem} — "
+            "refusing before any model call; the target checkout is never "
+            "consulted for a lens prompt"
+        )
+    return definition.prompt_markdown
 
 
 def final_child_instruction(verdict_path: Path) -> str:
@@ -2422,6 +2462,9 @@ async def run_one(
     gate named in the task.
     """
     check_headroom(provider)
+    # Resolved before any worktree exists: the prompt is Ateles-side identity,
+    # not something the target head can supply (ateles#1337).
+    agent_prompt = read_agent_prompt(target.agent)
 
     worktree_path = (
         scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
@@ -2430,10 +2473,10 @@ async def run_one(
     verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
 
     if dry_run:
-        # A dry run still creates nothing model-facing, but it DOES need the
-        # real agent prompt to report an accurate prompt_chars figure, and
-        # that prompt lives in a worktree at TARGET HEAD. Building the
-        # worktree is a `git worktree add` (explicitly allowed by every
+        # A dry run still creates nothing model-facing, but it DOES build the
+        # real sandbox against a real worktree at TARGET HEAD, so the report
+        # is what an operator would see about to run this for real. Building
+        # the worktree is a `git worktree add` (explicitly allowed by every
         # relevant guard) and is removed again before returning. The refusal
         # (if any) is reported alongside the rest rather than short-circuited,
         # so --dry-run is exactly what an operator would see about to run
@@ -2447,7 +2490,6 @@ async def run_one(
                 review_worktree=worktree.path,
                 verdict_path=verdict_path,
             )
-            agent_prompt = read_agent_prompt(worktree.path, target.agent)
             task_text = (
                 render_lens_task(target, brief_path)
                 + "\n\n---\n\n"
@@ -2477,7 +2519,6 @@ async def run_one(
         refusal = refuse_if_guard_required(sandbox)
         if refusal:
             return {"ok": False, "provider": provider, "reason": refusal}
-        agent_prompt = read_agent_prompt(worktree.path, target.agent)
         task_text = (
             render_lens_task(target, brief_path)
             + "\n\n---\n\n"
@@ -2764,7 +2805,9 @@ def main(argv: list[str] | None = None) -> int:
         "--agent",
         default=None,
         help=(
-            "docs/agents/<agent>.md name. Optional when --lens names a lens "
+            "Ateles agent_definition name; its prompt is always loaded from "
+            "Neotoma, never from the repository under review. Optional when "
+            "--lens names a lens "
             "in review_panel.LENSES (the same registry select_panel/"
             "approve_pr_as_app.py derive a PR's required-lens panel from): "
             "the agent is then resolved via review_panel.lens_by_name so a "
@@ -2897,7 +2940,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
         except HeadroomExhausted as exc:
             report = {"ok": False, "reason": str(exc)}
-        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        except (
+            FileNotFoundError,
+            subprocess.CalledProcessError,
+            LensRoleUnavailable,
+        ) as exc:
             report = {"ok": False, "reason": str(exc)}
 
     if args.json:
