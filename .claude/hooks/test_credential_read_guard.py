@@ -1532,3 +1532,134 @@ DIRECT_SEARCH_BLOCK = [
 @pytest.mark.parametrize("label,cmd", DIRECT_SEARCH_BLOCK, ids=[x for x, _ in DIRECT_SEARCH_BLOCK])
 def test_ag_and_ack_are_search_readers_like_grep_and_rg(label, cmd):
     assert run_home("Bash", {"command": cmd}) == 2, label
+
+
+# ---------------------------------------------------------------------------
+# Relative operands are judged against the directory they are read from.
+#
+# Every direct reader, source, redirect and link check resolves a relative
+# operand against the payload's working directory, the hook process's own,
+# and every literal `cd`/`pushd` target in the command, with `~`, `..` and
+# symbolic links resolved, so a protected file is refused whether it is named
+# absolutely or relative to wherever the shell will be. The hook process runs
+# in an ordinary directory in every case below, so the payload directory or
+# the `cd` is the only way it can know where the operand points.
+# ---------------------------------------------------------------------------
+
+DIR_LINK = FIXTURE_ROOT / "relative-links" / "settings-dir"
+DIR_LINK.parent.mkdir()
+DIR_LINK.symlink_to(NEOTOMA_DIR, target_is_directory=True)
+
+
+def run_in(tool_name, tool_input, process_cwd, payload_cwd=None):
+    payload = {"tool_name": tool_name, "tool_input": tool_input}
+    if payload_cwd is not None:
+        payload["cwd"] = str(payload_cwd)
+    env = dict(os.environ)
+    env["HOME"] = str(FIXTURE_ROOT)
+    return subprocess.run(
+        [sys.executable, HOOK],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        cwd=str(process_cwd),
+        env=env,
+    ).returncode
+
+
+RELATIVE_BASH_BLOCK = [
+    ("cd then a reader", f"cd {NEOTOMA_DIR}; cat config.json"),
+    ("cd and-chain then a reader", f"cd {NEOTOMA_DIR} && head -1 config.json"),
+    ("cd then an interpreter on stdin", f"cd {NEOTOMA_DIR}; python3 < config.json"),
+    ("cd then a compact stdin redirect", f"cd {NEOTOMA_DIR}; python3<config.json"),
+    ("cd then a plist reader", f"cd {LAUNCH_AGENTS_DIR}; plutil -p com.example.agent.plist"),
+    ("cd tilde then a nested relative reader", "cd ~ && cat .config/neotoma/config.json"),
+    ("cd tilde subdirectory then a reader", "cd ~/.config/neotoma && cat config.json"),
+    ("cd through dot-dot then a reader", f"cd {OTHER_DIR}/../.config/neotoma && cat config.json"),
+    ("dot-dot operand after cd", f"cd {OTHER_DIR} && cat ../.config/neotoma/config.json"),
+    ("cd then a bare file name", f"cd {NEOTOMA_DIR}; cat settings"),
+    ("pushd then a reader", f"pushd {NEOTOMA_DIR} >/dev/null; cat config.json"),
+    ("cd through a directory link then a reader", f"cd {DIR_LINK}; cat config.json"),
+    ("cd then source then dump", f"cd {NEOTOMA_DIR}; set -a; source settings; set +a; env"),
+    ("cd then an inline program naming the file", f"cd {NEOTOMA_DIR}; python3 -c \"print(open('config.json').read())\""),
+    ("cd then a piped reader", f"cd {NEOTOMA_DIR}; echo config.json | xargs cat"),
+    ("cd then a read loop", f"cd {NEOTOMA_DIR}; while read l; do echo $l; done < config.json"),
+    ("cd then a link", f"cd {NEOTOMA_DIR}; ln -s config.json {OTHER_DIR}/innocent"),
+    ("cd in a subshell then a reader", f"(cd {NEOTOMA_DIR} && cat config.json)"),
+    ("cd inside sh -c then a reader", f"sh -c 'cd {NEOTOMA_DIR} && cat config.json'"),
+]
+RELATIVE_BASH_ALLOW = [
+    ("cd to an ordinary directory then a reader", f"cd {OTHER_DIR}; cat readme.txt"),
+    ("cd then a template reader", f"cd {NEOTOMA_DIR}; cat .env.example"),
+    ("cd then a names-only listing", f"cd {NEOTOMA_DIR} && ls"),
+    ("cd then a count-only grep", f"cd {NEOTOMA_DIR} && grep -c X config.json"),
+    ("cd to the agents directory then a listing", f"cd {LAUNCH_AGENTS_DIR} && ls -la"),
+    ("dot-dot to an ordinary file", f"cd {OTHER_DIR} && cat ../notes.txt"),
+    ("relative reader with no cd in an ordinary directory", "cat readme.txt"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", RELATIVE_BASH_BLOCK, ids=[x for x, _ in RELATIVE_BASH_BLOCK])
+def test_relative_operands_after_a_directory_change_are_refused(label, cmd):
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", RELATIVE_BASH_ALLOW, ids=[x for x, _ in RELATIVE_BASH_ALLOW])
+def test_relative_operands_that_do_not_reach_a_credential_stay_allowed(label, cmd):
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 0, label
+
+
+PAYLOAD_CWD_BLOCK = [
+    ("Bash", {"command": "cat config.json"}, NEOTOMA_DIR),
+    ("Bash", {"command": "python3 < config.json"}, NEOTOMA_DIR),
+    ("Bash", {"command": "plutil -p com.example.agent.plist"}, LAUNCH_AGENTS_DIR),
+    ("Bash", {"command": "cat ../.config/neotoma/config.json"}, OTHER_DIR),
+    ("Bash", {"command": "cat config.json"}, DIR_LINK),
+    ("Read", {"file_path": "config.json"}, NEOTOMA_DIR),
+    ("Read", {"file_path": "../.config/neotoma/config.json"}, OTHER_DIR),
+    ("Grep", {"pattern": "X", "path": ".", "output_mode": "content"}, NEOTOMA_DIR),
+    ("Grep", {"pattern": "X", "path": "config.json", "output_mode": "content"}, NEOTOMA_DIR),
+]
+PAYLOAD_CWD_ALLOW = [
+    ("Bash", {"command": "cat readme.txt"}, OTHER_DIR),
+    ("Bash", {"command": "cat .env.example"}, NEOTOMA_DIR),
+    ("Read", {"file_path": "readme.txt"}, OTHER_DIR),
+    ("Grep", {"pattern": "X", "path": "config.json", "output_mode": "count"}, NEOTOMA_DIR),
+]
+
+
+@pytest.mark.parametrize(
+    "tool,tool_input,payload_cwd",
+    PAYLOAD_CWD_BLOCK,
+    ids=[f"{t}-{i}" for i, (t, _, _) in enumerate(PAYLOAD_CWD_BLOCK)],
+)
+def test_relative_operands_are_judged_from_the_payload_directory(tool, tool_input, payload_cwd):
+    # The hook process runs in an ordinary directory, as a project hook does.
+    assert run_in(tool, tool_input, OTHER_DIR, payload_cwd) == 2
+
+
+@pytest.mark.parametrize(
+    "tool,tool_input,payload_cwd",
+    PAYLOAD_CWD_ALLOW,
+    ids=[f"{t}-{i}" for i, (t, _, _) in enumerate(PAYLOAD_CWD_ALLOW)],
+)
+def test_relative_ordinary_operands_from_the_payload_directory_stay_allowed(
+    tool, tool_input, payload_cwd
+):
+    assert run_in(tool, tool_input, OTHER_DIR, payload_cwd) == 0
+
+
+def test_absolute_and_relative_forms_of_the_same_read_get_the_same_decision():
+    absolute = run_in("Bash", {"command": f"cat {NEOTOMA_OTHER}"}, OTHER_DIR)
+    relative = run_in("Bash", {"command": f"cd {NEOTOMA_DIR}; cat config.json"}, OTHER_DIR)
+    assert absolute == relative == 2
+
+
+def test_relative_read_after_cd_really_prints_the_file_so_the_refusal_is_not_cosmetic():
+    probe = subprocess.run(
+        ["sh", "-c", f"cd {NEOTOMA_DIR}; cat config.json"],
+        capture_output=True,
+        text=True,
+        cwd=str(OTHER_DIR),
+    )
+    assert "not-a-real-value" in probe.stdout

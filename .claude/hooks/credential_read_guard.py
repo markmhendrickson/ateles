@@ -276,6 +276,55 @@ def _resolve_links(norm: str) -> str:
         return norm
 
 
+# Directories a RELATIVE operand may be relative to while one tool call is
+# being judged: the payload's working directory, the hook process's own, and
+# every literal `cd`/`pushd` target in the command (see
+# `_possible_directories`). Set by `check_bash` / `check_read` / `check_grep`
+# for the duration of one judgement and empty otherwise, so a relative
+# operand is matched against what the shell would actually open, not only
+# against the directory this hook process happens to run in.
+_BASE_DIRECTORIES: tuple[str, ...] = ()
+
+
+class _judging_from:
+    """Context manager: judge relative operands against *bases*."""
+
+    def __init__(self, bases):
+        self._bases = tuple(dict.fromkeys(b for b in bases if b))
+        self._saved: tuple[str, ...] = ()
+
+    def __enter__(self):
+        global _BASE_DIRECTORIES
+        self._saved = _BASE_DIRECTORIES
+        _BASE_DIRECTORIES = self._bases
+        return self
+
+    def __exit__(self, *exc):
+        global _BASE_DIRECTORIES
+        _BASE_DIRECTORIES = self._saved
+        return False
+
+
+def _path_forms(raw: str) -> list[str]:
+    """Every form of *raw* that names what a reader would open: as written,
+    lexically normalized (`..` collapsed), with links followed, and, for a
+    relative operand, the same three forms against each directory in
+    `_BASE_DIRECTORIES`."""
+    norm = _normalize_path(raw)
+    forms = [norm]
+    if norm.startswith("/"):
+        forms.append(os.path.normpath(norm).replace("\\", "/"))
+    forms.append(_resolve_links(norm))
+    if not norm.startswith("/"):
+        for base in _BASE_DIRECTORIES:
+            joined = os.path.normpath(
+                os.path.join(_normalize_path(base), norm)
+            ).replace("\\", "/")
+            forms.append(joined)
+            forms.append(_resolve_links(joined))
+    return list(dict.fromkeys(forms))
+
+
 def _fnmatch_any(path: str, globs) -> bool:
     from fnmatch import fnmatch
 
@@ -295,11 +344,12 @@ def is_credential_path(raw: str) -> bool:
     and it is not a safe template/placeholder variant."""
     if not raw or not isinstance(raw, str):
         return False
-    norm = _normalize_path(raw)
-    # Judged twice, as written and with links followed, and refused if either
-    # form is a credential: a template-looking link name must not launder a
-    # credential target, and an innocuous link name must not hide one.
-    for form in dict.fromkeys((norm, _resolve_links(norm))):
+    # Judged in every form (as written, normalized, links followed, and
+    # against each working directory a relative operand may be read from),
+    # and refused if any form is a credential: a template-looking link name
+    # must not launder a credential target, an innocuous link name must not
+    # hide one, and a relative operand must not hide its directory.
+    for form in _path_forms(raw):
         if form.lower().endswith(SAFE_TEMPLATE_SUFFIXES):
             continue
         # A path ending in one of the safe suffixes with an extra dotted
@@ -320,8 +370,7 @@ def is_credential_territory(raw: str) -> bool:
         return False
     if is_credential_path(raw):
         return True
-    norm = _normalize_path(raw)
-    for form in dict.fromkeys((norm, _resolve_links(norm))):
+    for form in _path_forms(raw):
         form = form.rstrip("/") or "/"
         for directory in CREDENTIAL_DIRECTORIES:
             for known in {
@@ -1036,7 +1085,7 @@ def _extract_paths(segment: str):
     (defense in depth, not a hermetic seal, exactly like
     sibling_repo_worktree_guard.py's own stated limitation)."""
     out = []
-    for tok in segment.split():
+    for position, tok in enumerate(segment.split()):
         cand = _strip_wrapper_punctuation(tok)
         if not cand or cand.startswith("-"):
             continue
@@ -1052,7 +1101,12 @@ def _extract_paths(segment: str):
             after = cand[eq_idx + 1 :]
             if "/" in after or "." in after:
                 cand = after
-        if "/" in cand or "." in cand or _is_existing_link(cand):
+        if (
+            "/" in cand
+            or "." in cand
+            or _is_existing_link(cand)
+            or (position > 0 and _bare_word_names_credential(cand))
+        ):
             out.append(cand)
     return out
 
@@ -1061,10 +1115,24 @@ def _is_existing_link(candidate: str) -> bool:
     """A bare word (no slash, no dot) that names a symbolic link in the
     working directory: it has the shape of a command word but may point at a
     credential, so it is a path candidate too."""
-    try:
-        return os.path.islink(os.path.expanduser(candidate))
-    except Exception:  # noqa: BLE001
-        return False
+    bases = ("",) + _BASE_DIRECTORIES
+    for base in bases:
+        try:
+            if os.path.islink(os.path.join(base, os.path.expanduser(candidate))):
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def _bare_word_names_credential(candidate: str) -> bool:
+    """A bare word (no slash, no dot) that, read from one of the working
+    directories in play, is a credential path: any file name inside a
+    credential directory after a `cd` into it. The command word itself is
+    excluded by the caller."""
+    return any(
+        is_credential_path(os.path.join(base, candidate)) for base in _BASE_DIRECTORIES
+    )
 
 
 # Path-shaped substrings ANYWHERE in a string, not just whitespace-delimited
@@ -1640,6 +1708,62 @@ def _root_in_territory(roots, possible_cwds):
     return None
 
 
+def _initial_directories(cwd: str | None) -> list[str | None]:
+    possible: list[str | None] = []
+    for base in (cwd, os.getcwd()):
+        if base and base not in possible:
+            possible.append(base)
+    return possible
+
+
+def _track_directory_change(name: str, args: list[str], possible: list) -> bool:
+    """When *name* changes directory, widen *possible* with every directory
+    it may enter (``None`` for one that cannot be resolved from the text) and
+    return True; otherwise leave it alone and return False."""
+    if name not in ("cd", "pushd", "popd"):
+        return False
+    operands = [a for a in args if not a.startswith("-") or a == "-"]
+    if name == "popd" or (operands and operands[0] == "-"):
+        if None not in possible:
+            possible.append(None)
+        return True
+    target = _normalize_path(operands[0] if operands else "~")
+    if "$" in target or "`" in target:
+        if None not in possible:
+            possible.append(None)
+        return True
+    for base in list(possible):
+        new = target if os.path.isabs(target) else (
+            os.path.normpath(os.path.join(base, target)) if base else None
+        )
+        if new not in possible:
+            possible.append(new)
+    return True
+
+
+_CD_FALLBACK_RE = re.compile(r"(?:^|[;&|(\n{]|\bthen|\bdo)\s*(?:cd|pushd)\s+([^\s;&|)]+)")
+
+
+def _possible_directories(command: str, cwd: str | None) -> list[str]:
+    """Every directory a relative operand in *command* may be read from: the
+    payload directory, the hook's own, and every literal `cd`/`pushd` target
+    anywhere in the command (a deliberate over-approximation: order is not
+    tracked, so a later `cd` widens the set for earlier commands too). A
+    directory that cannot be resolved from the text (`cd "$X"`) adds
+    nothing; that case stays a documented limit for direct readers."""
+    possible = _initial_directories(cwd)
+    parsed = _parsed_commands(command)
+    if parsed:
+        for words, _redirects in parsed:
+            index = _command_index(words)
+            if index is not None:
+                _track_directory_change(_basename(words[index]), words[index + 1 :], possible)
+    else:  # the text does not lex: fall back to a coarse scan
+        for match in _CD_FALLBACK_RE.finditer(command):
+            _track_directory_change("cd", [match.group(1).strip("'\"")], possible)
+    return [p for p in possible if p]
+
+
 def _territory_search_hit(command: str, cwd: str | None = None) -> str | None:
     """Refuse a recursive search that can print matched text, or a `find`
     whose -exec runs a reader, when its root is credential territory.
@@ -1650,33 +1774,14 @@ def _territory_search_hit(command: str, cwd: str | None = None) -> str | None:
     relative or omitted root may refer to (any directory entered so far, plus
     the hook's own), and an unresolvable `cd` makes relative roots refuse.
     """
-    possible: list[str | None] = []
-    for base in (cwd, os.getcwd()):
-        if base and base not in possible:
-            possible.append(base)
+    possible = _initial_directories(cwd)
     for words, _redirects in _parsed_commands(command):
         index = _command_index(words)
         if index is None:
             continue
         name = _basename(words[index])
         args = words[index + 1 :]
-        if name in ("cd", "pushd", "popd"):
-            operands = [a for a in args if not a.startswith("-") or a == "-"]
-            if name == "popd" or (operands and operands[0] == "-"):
-                if None not in possible:
-                    possible.append(None)
-                continue
-            target = _normalize_path(operands[0] if operands else "~")
-            if "$" in target or "`" in target:
-                if None not in possible:
-                    possible.append(None)
-                continue
-            for base in list(possible):
-                new = target if os.path.isabs(target) else (
-                    os.path.join(base, target) if base else None
-                )
-                if new not in possible:
-                    possible.append(new)
+        if _track_directory_change(name, args, possible):
             continue
         roots = None
         if name in _SEARCH_NAMES:
@@ -1780,6 +1885,15 @@ def _redirected_stdin_loop_hit(command: str) -> str | None:
 def check_bash(command: str, cwd: str | None = None):
     if not command or not isinstance(command, str):
         return None
+    # Every operand check below resolves a relative path against the payload
+    # directory, the hook's own, and each literal `cd` target in the command,
+    # so a reader cannot reach a credential by naming it relative to a
+    # directory this process does not run in.
+    with _judging_from(_possible_directories(command, cwd)):
+        return _check_bash(command, cwd)
+
+
+def _check_bash(command: str, cwd: str | None):
 
     # Checked FIRST and against the WHOLE command text: a remote-exec
     # wrapper's carried command is almost always one quoted string
@@ -1880,10 +1994,13 @@ def check_bash(command: str, cwd: str | None = None):
 # ---------------------------------------------------------------------------
 
 
-def check_read(tool_input: dict):
+def check_read(tool_input: dict, cwd: str | None = None):
     path = tool_input.get("file_path") or tool_input.get("path")
-    if isinstance(path, str) and is_credential_path(path):
-        return path
+    if not isinstance(path, str):
+        return None
+    with _judging_from(_initial_directories(cwd)):
+        if is_credential_path(path):
+            return path
     return None
 
 
@@ -1903,7 +2020,12 @@ def _glob_alternatives(glob: str):
         yield from _glob_alternatives(glob[: match.start()] + option + glob[match.end() :])
 
 
-def check_grep(tool_input: dict):
+def check_grep(tool_input: dict, cwd: str | None = None):
+    with _judging_from(_initial_directories(cwd)):
+        return _check_grep(tool_input, cwd)
+
+
+def _check_grep(tool_input: dict, cwd: str | None):
     path = tool_input.get("path")
     glob = tool_input.get("glob")
     output_mode = tool_input.get("output_mode") or "files_with_matches"
@@ -1913,12 +2035,17 @@ def check_grep(tool_input: dict):
     # Content mode from here on (and any unexpected mode, refused
     # conservatively rather than guessed at). -A/-B/-C context or multiline
     # widen the printed span but the base case is already unsafe.
+    root = path if isinstance(path, str) and path else (cwd or os.getcwd())
     if isinstance(glob, str):
         for alternative in _glob_alternatives(glob):
             if is_credential_path(alternative):
                 return glob
+            # A glob is relative to the search root, so judge it there too.
+            if not alternative.startswith(("/", "~")) and is_credential_path(
+                os.path.join(_normalize_path(root), alternative)
+            ):
+                return glob
     # No path means the search starts at the working directory.
-    root = path if isinstance(path, str) and path else os.getcwd()
     if is_credential_territory(root):
         return root
     return None
@@ -1943,26 +2070,25 @@ def main() -> int:
     if not isinstance(tool_input, dict):
         return 0
 
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+
     if tool == "Bash":
         command = tool_input.get("command")
-        hit = check_bash(
-            command,
-            cwd=payload.get("cwd") if isinstance(payload.get("cwd"), str) else None,
-        )
+        hit = check_bash(command, cwd=cwd)
         if hit:
             log(f"blocking Bash read of credential content: {hit}")
             return deny(_safe_alternative(hit, tool="Bash"))
         return 0
 
     if tool == "Read":
-        hit = check_read(tool_input)
+        hit = check_read(tool_input, cwd=cwd)
         if hit:
             log(f"blocking Read of credential file: {hit}")
             return deny(_safe_alternative(hit, tool="Read"))
         return 0
 
     if tool == "Grep":
-        hit = check_grep(tool_input)
+        hit = check_grep(tool_input, cwd=cwd)
         if hit:
             log(f"blocking Grep content-mode read of credential file: {hit}")
             return deny(_safe_alternative(hit, tool="Grep"))
