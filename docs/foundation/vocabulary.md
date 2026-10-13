@@ -504,7 +504,7 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [verdict]
 
 ### step
 **Definition:** one declared position in a [workflow](#workflow)'s ordered list, carrying a name, a [step owner](#step-owner), a
-`required` flag, an `on_fail` target with its `rounds_cap`, its [read dependencies](#read-dependency), two intervals
+[`class`](#step-class), a `required` flag, an `on_fail` target with its `rounds_cap`, its [read dependencies](#read-dependency), two intervals
 (`unclaimed_after`, `hold_bound`, each an interval or the [task](#task)'s `due_date` —
 `gates_and_workflows.md#declaration-batch-projection`), and
 parallel-group and join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that
@@ -597,6 +597,8 @@ states this for proposal rights: "standing to propose is a capability and not a 
 **Definition:** the position a [role](#role) names in a [step](#step) declaration's `owner_role`, filled when the
 roster seats one [principal](#principal) in it; the design requires the position to be filled and never fills it. The design
 fixes no set of slots: each implementation defines its own and is bound only by the constraints on filling them.
+The headings of the roles section in `workflows.md` ("Roles are slots", "A role is a slot an implementation fills")
+use "is a slot" as shorthand for "names a slot"; in a sentence, a role names a slot and is not one.
 **Swap test:** against [role](#role), "fills each role" reads as filling a name and "fills each slot" as filling a
 position, and the rule that turns on it is the second: a name is resolved, a position is seated and can be left unfilled
 (constraint 5 of the roles section holds a slot that resolves to nobody). Against [step owner](#step-owner), the step owner
@@ -845,7 +847,7 @@ count at which [`repeated_lapse`](#repeated_lapse) is raised, undeclared raising
 minimum model tier a class's [action](#action) may be taken at, evaluated at the same take as
 [blast radius](#blast-radius) and set by the [operator](#operator) only for irreversible classes),
 `confidence_threshold` (the policy floor a scored [confidence](#confidence) is compared with — not a second
-term beside `confidence`), `recoveries`, `metered_resources[]`, `quorum`, and `disjoint_roles[]` are the
+term beside `confidence`), `recoveries`, `metered_resources[]`, `payee_caps[]`, `quorum`, and `disjoint_roles[]` are the
 policy's data. A reader meets each on the policy's row; naming one here would be a second home for a value
 that already has one (principle 9).
 **See:** [`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken),
@@ -958,7 +960,8 @@ another is load-bearing — the same calendar write being `external_api_write` o
 **Definition:** the tier an [action_type](#action_type) resolves to under an [action_policy](#action_policy), one of `LOW`, `HIGH`, or
 `NEVER`.
 `LOW` is taken at or above the [confidence](#confidence) threshold or once an [action series](#action-series) graduates; `HIGH` is
-[checkpointed](#checkpoint) until an action series graduates; `NEVER` is cleared by no confidence and no recurrence.
+[checkpointed](#checkpoint) until an action series graduates; `NEVER` is cleared by no confidence and no recurrence; the one other clearing is a payment's, by its own
+parameters (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** "risk level" (unbounded).
 **Not for:** "severity" for a tier.
@@ -1043,6 +1046,24 @@ fixed list); a step declared `work` or `deterministic` is not one.
 [`workflows.md`](workflows.md).
 **Never:** "lens", "review panel", "panel".
 **Not for:** "reviewer" for a review step's owner, unqualified; CI for a review step.
+
+### step class
+**Definition:** the field a [step](#step) declaration carries stating what kind of work the step does: `review` for a
+judgement of [artifacts](#artifact) the step did not leave, `work` for a step that changes something or takes an [action](#action), and
+`deterministic` for a step whose work is a script and whose [verdict](#verdict) is the script's result. An absent class
+reads as `review`.
+**Swap test:** against [action_type](#action_type), a step's class says what the step is and an action's class says which
+[blast radius](#blast-radius) the [action gate](#action-gate) resolves, so "a `deterministic` action" and "a
+`send_external_comms` step" both read wrongly, and the rule that turns on the step class, that the builder of an artifact
+never signs a review step on it, would become a rule about whether an effect is taken. Against [review step](#review-step),
+the review step is a step whose class is `review`, so "a review step" is true where "a review class" is not: the class is the
+field and the review step is what that value makes of a step. Against [reason class](#reason-class), which sorts a
+[checkpoint](#checkpoint) by why it was raised, a step class sorts a declared step by its work and is read at the verdict write
+and never at a checkpoint.
+**See:** [`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review),
+[`workflows.md#five-constraints-hold-for-any-role-set`](workflows.md#five-constraints-hold-for-any-role-set).
+**Never:** —
+**Not for:** the class of the action a step takes; a class read from the signer's verdict or inferred from the step's name.
 
 ### effect dedup
 **Definition:** the rule that every [outbound](#outbound) effect is idempotent or deduplicated on its own

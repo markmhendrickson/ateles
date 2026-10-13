@@ -12,15 +12,17 @@ This file covers the reference implementation's role names and what each claims.
 
 This is the implementation's role set: the slot names the Ateles swarm uses in its workflow declarations, and
 what each slot claims. It is **not** foundation. The foundation defines no fixed list of roles (operator ruling,
-2026-10-13, register decision 142): a step declaration's `owner_role` is a slot each implementation fills from its
+2026-10-13, register decision 142): a step declaration's `owner_role` names a slot each implementation fills from its
 own role set, and the only things the foundation fixes are the constraints on filling the slots
 ([`foundation/workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](foundation/workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them)).
 A fork may rename, merge, or split any of these roles, so long as those constraints hold.
 
-The table below is the table that stood in `docs/foundation/workflows.md` under "Roles named in this document"
-before that ruling, moved here unchanged in content. This file is a hand-kept reference copy and is descriptive: the `swarm_roster` and `workflow` declaration entities on the record
-govern, and where this file differs from them, they are right and this file is stale. Which agent fills each role for a given declaration scope
-is `swarm_roster` on the record, never this file; the agent definitions are in [`agents/`](agents/README.md).
+The table below is the table that stood in `docs/foundation/workflows.md` under "Roles named in this document" before
+that ruling, moved here, with the release steward's row split in two by decision 143. This file is a hand-kept
+reference copy and is descriptive: the `swarm_roster` and `workflow` declaration entities on the record govern, and
+where this file differs from them, they are right and this file is stale. Which agent fills each role for a given
+declaration scope is `swarm_roster` on the record, never this file; the agent definitions are in
+[`agents/`](agents/README.md).
 
 | Role | Claims |
 |---|---|

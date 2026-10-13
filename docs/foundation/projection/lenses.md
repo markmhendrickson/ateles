@@ -5,7 +5,7 @@
 
 Which rules a lens reviewing for one kind of failure should select, by the conformance class the matrix assigns each row (`conformance_suite.md#how-the-suite-judges-and-what-a-row-is`). This is an index of row ids and the file each is projected into — the statements themselves are in those files and are not repeated here, so there is one copy of every rule in this directory.
 
-## Class M — 376 rules
+## Class M — 386 rules
 
 - [`adapters.md`](adapters.md) — AD-1, AD-2, AD-3, AD-4, AD-5, AD-6, AD-7, AD-8, AD-8a, AD-9, AD-10, AD-11, AD-12, AD-13, AD-14, AD-15, AD-16, AD-17, AD-18, AD-19, AD-20, AD-21, AD-22, AD-23, AD-24, AD-25, AD-26, AD-27, AD-28, AD-29, AD-30, AD-31, AD-32, AD-33, AD-34, AD-36, AD-37, AD-38, AD-39, AD-40, AD-41, AD-42
 
@@ -27,7 +27,7 @@ Which rules a lens reviewing for one kind of failure should select, by the confo
 
 - [`migration.md`](migration.md) — MG-1, MG-2, MG-3, MG-4, MG-5, MG-6, MG-7, MG-8, MG-9, MG-10, MG-13
 
-- [`payments.md`](payments.md) — PY-1, PY-2, PY-3, PY-3a, PY-4, PY-5, PY-5a, PY-6, PY-7, PY-8, PY-9, PY-10, PY-11, PY-12, PY-13, PY-14, PY-15
+- [`payments.md`](payments.md) — PY-1, PY-2, PY-3, PY-3a, PY-4, PY-5, PY-5a, PY-6, PY-7, PY-8, PY-9, PY-10, PY-11, PY-12, PY-13, PY-14, PY-15, PY-16, PY-16a, PY-16b, PY-16c, PY-16d, PY-17, PY-18, PY-19, PY-20, PY-21
 
 - [`planning_model.md`](planning_model.md) — PM-1, PM-2, PM-3, PM-4, PM-5, PM-6, PM-7, PM-8, PM-9, PM-10, PM-11, PM-13, PM-14, PM-15, PM-16, PM-17
 

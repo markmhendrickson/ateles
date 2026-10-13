@@ -1261,7 +1261,7 @@ Graduation changes exactly one thing, and it
 is at the gate: whether the next action of that class is held at a checkpoint. It never changes whether
 the task recurs, which workflow its instance enters, or which steps that workflow has — `workflows.md#payment`
 states this for the case where it matters most, a recurring payment's `consent` step existing whether or
-not its action class has graduated. The converse also holds: the recurrence of a *task* is never an
+not the gate holds its action at a checkpoint. The converse also holds: the recurrence of a *task* is never an
 input to graduation, because a series is made of taken actions and an instance that completed without
 taking one added nothing to any series. Nothing about this pair is open; the documents already implied
 it, and this paragraph states it once.
