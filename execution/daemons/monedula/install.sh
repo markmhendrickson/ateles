@@ -17,7 +17,7 @@ mkdir -p "$LAUNCH_AGENTS"
 source "$SCRIPT_DIR/../_install_plist.sh"
 install_rendered_plist "monedula" "com.markmhendrickson.monedula" "$SCRIPT_DIR/$PLIST" "$DEST"
 
-echo "✓ monedula installed."
+ateles_install_summary "monedula"
 echo "  Schedule: daily at 07:00 UTC (09:00 Madrid summer / 08:00 winter)"
 echo "  Logs: $HOME/Library/Logs/ateles/monedula.log"
 echo ""

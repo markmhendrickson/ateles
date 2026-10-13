@@ -13,6 +13,7 @@ DEST="$HOME/Library/LaunchAgents/$PLIST"
 # template leaves the running agent and the installed plist untouched.
 source "$SCRIPT_DIR/../_install_plist.sh"
 install_rendered_plist "morning-brief" "com.ateles.morning-brief" "$SCRIPT_DIR/$PLIST" "$DEST"
-echo "Morning Brief installed and loaded. Next run: 05:30 tomorrow."
+ateles_install_summary "morning-brief"
+echo "Schedule: daily at 05:30."
 echo "To test immediately: launchctl start com.ateles.morning-brief"
 echo "Logs: ~/Library/Logs/ateles/morning-brief.log"

@@ -16,7 +16,7 @@ mkdir -p "$LAUNCH_AGENTS"
 source "$SCRIPT_DIR/../_install_plist.sh"
 install_rendered_plist "strix" "com.ateles.strix" "$SCRIPT_DIR/$PLIST" "$DEST"
 
-echo "✓ strix installed and started."
+ateles_install_summary "strix"
 echo "  Menu bar icon: 🔴 recording  ⚫ idle"
 echo "  Logs: /tmp/com.ateles.strix.{log,err}"
 echo ""

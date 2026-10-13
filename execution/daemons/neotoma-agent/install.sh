@@ -16,7 +16,7 @@ mkdir -p "$LAUNCH_AGENTS"
 source "$SCRIPT_DIR/../_install_plist.sh"
 install_rendered_plist "neotoma-agent" "com.ateles.neotoma-agent" "$SCRIPT_DIR/$PLIST" "$DEST"
 
-echo "✓ neotoma-agent installed and started."
+ateles_install_summary "neotoma-agent"
 echo "  Logs: /tmp/com.ateles.neotoma-agent.{log,err}"
 echo ""
 echo "To uninstall:"

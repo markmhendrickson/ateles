@@ -17,7 +17,7 @@ mkdir -p "$LAUNCH_AGENTS"
 source "$SCRIPT_DIR/../_install_plist.sh"
 install_rendered_plist "aquila" "com.ateles.aquila" "$SCRIPT_DIR/$PLIST" "$DEST"
 
-echo "✓ aquila installed."
+ateles_install_summary "aquila"
 echo "  Schedule: monthly on the 1st at 06:00 Madrid"
 echo "  Logs: $HOME/Library/Logs/ateles/aquila.log"
 echo ""

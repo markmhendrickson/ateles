@@ -13,10 +13,12 @@
 # operation it describes, never inferred from an exit status. The states are:
 #
 #   running (pid N)  - registered and a process is alive
-#   registered       - registered with launchd and idle; a scheduled job
-#                      waits here until its next trigger
+#   registered       - registered with launchd and no process running (the
+#                      listing alone says nothing about when it will run)
 #   not registered   - launchd does not list the job
-#   unknown          - launchd could not be queried; nothing is claimed
+#   unknown          - launchd could not be queried; nothing is claimed, and
+#                      an unknown state after an operation is a FAILURE: the
+#                      installer never advances or reports success on it
 #
 # Outcomes:
 #   * Render refused: nothing is unloaded and the installed plist is not
@@ -27,8 +29,14 @@
 #   * Load failed after the swap: the previous plist is put back and loaded
 #     again; the message gives the configuration outcome and the OBSERVED job
 #     state separately, with the next action for that state. Exit status 1.
-#   * Success: the observed state is reported; a scheduled job is described as
-#     registered, never as running.
+#   * Unload or load succeeded but launchd could not be queried afterwards:
+#     treated as a failure (exit 1). After an unload the plist is not
+#     replaced; after a load the new plist stays installed, the previous one
+#     is kept beside it, and the message says the job state is unknown.
+#   * Success: only when the job is read back as running or registered. The
+#     observed state is reported and left in ATELES_INSTALLED_JOB_STATE for
+#     the caller's summary (`ateles_install_summary`); a registered job is
+#     never described as running or started.
 #
 # Requires the caller to set SCRIPT_DIR (the installer's own directory). The
 # renderer path can be overridden with ATELES_PLIST_RENDERER (tests only).
@@ -58,7 +66,7 @@ _ateles_job_state() {
 # Wording for a state, for messages that describe what was observed.
 _ateles_describe_state() {
   case "$1" in
-    registered) printf 'registered (scheduled; runs at its next trigger)' ;;
+    registered) printf 'registered with launchd, no process running' ;;
     unknown) printf 'unknown (launchd could not be queried)' ;;
     *) printf '%s' "$1" ;;
   esac
@@ -77,9 +85,21 @@ _ateles_next_action() {
   esac
 }
 
+# One line for the caller's closing summary, from the state read back after
+# the load (never inferred): running, or registered with no process.
+ateles_install_summary() {
+  local name="$1"
+  case "${ATELES_INSTALLED_JOB_STATE:-}" in
+    "running (pid "*) printf '%s installed; job %s.\n' "$name" "$ATELES_INSTALLED_JOB_STATE" ;;
+    registered) printf '%s installed; job registered with launchd, no process running yet.\n' "$name" ;;
+    *) printf '%s installed; job state was not verified.\n' "$name" ;;
+  esac
+}
+
 install_rendered_plist() {
   local name="$1" label="$2" template="$3" dest="$4"
   local dir rendered backup="" before after unload_status
+  ATELES_INSTALLED_JOB_STATE=""
 
   dir="$(dirname "$dest")"
   mkdir -p "$dir"
@@ -115,7 +135,16 @@ install_rendered_plist() {
     unload_status=0
     launchctl unload "$dest" >/dev/null 2>&1 || unload_status=$?
     after="$(_ateles_job_state "$label")"
-    if [ "$unload_status" -ne 0 ] || { [ "$after" != "not registered" ] && [ "$after" != "unknown" ]; }; then
+    if [ "$unload_status" -eq 0 ] && [ "$after" = "unknown" ]; then
+      rm -f "$rendered"
+      if [ -n "$backup" ]; then rm -f "$backup"; fi
+      echo "ERROR: $name was not updated: launchd could not be queried after the unload, so whether the old job stopped is unknown." >&2
+      echo "       Configuration: the installed plist was NOT replaced; it is unchanged." >&2
+      echo "       Job state now observed: unknown (launchd could not be queried)." >&2
+      echo "       $(_ateles_next_action "$name" "unknown" "$dest")" >&2
+      return 1
+    fi
+    if [ "$unload_status" -ne 0 ] || [ "$after" != "not registered" ]; then
       rm -f "$rendered"
       if [ -n "$backup" ]; then rm -f "$backup"; fi
       echo "ERROR: $name was not updated: launchctl could not unload the existing job (exit $unload_status)." >&2
@@ -131,6 +160,12 @@ install_rendered_plist() {
   if launchctl load "$dest" >/dev/null 2>&1; then
     after="$(_ateles_job_state "$label")"
     case "$after" in
+      "running (pid "*|registered)
+        if [ -n "$backup" ]; then rm -f "$backup"; fi
+        ATELES_INSTALLED_JOB_STATE="$after"
+        echo "$name job: $(_ateles_describe_state "$after")."
+        return 0
+        ;;
       "not registered")
         echo "ERROR: launchctl reported success but $name is not listed by launchd." >&2
         echo "       Configuration: the new plist is installed at $dest." >&2
@@ -140,9 +175,14 @@ install_rendered_plist() {
         return 1
         ;;
       *)
-        if [ -n "$backup" ]; then rm -f "$backup"; fi
-        echo "$name job: $(_ateles_describe_state "$after")."
-        return 0
+        echo "ERROR: $name is not verified: launchctl load exited 0 but launchd could not be queried afterwards." >&2
+        echo "       Configuration: the new plist is installed at $dest." >&2
+        if [ -n "$backup" ]; then
+          echo "       The previous plist is kept at $backup." >&2
+        fi
+        echo "       Job state now observed: unknown (launchd could not be queried)." >&2
+        echo "       $(_ateles_next_action "$name" "unknown" "$dest")" >&2
+        return 1
         ;;
     esac
   fi

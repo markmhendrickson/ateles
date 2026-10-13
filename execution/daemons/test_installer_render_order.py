@@ -42,6 +42,7 @@ SIMPLE_INSTALLERS = {
         [],
     ),
     "strix": ("com.ateles.strix.plist", "com.ateles.strix", []),
+    "cotinga": ("com.ateles.cotinga.plist", "com.ateles.cotinga", []),
 }
 ALL_INSTALLERS = [*SIMPLE_INSTALLERS, "phoenicurus-release"]
 
@@ -71,6 +72,8 @@ STUB_LAUNCHCTL = """#!/usr/bin/env bash
 #   refuse_all     every load exits 1
 #   run_at_load    a successful load leaves a running process (pid 4242)
 #   list_fails     `list` exits 1
+#   list_fails_after_unload / list_fails_after_load
+#                  the operation succeeds, then every later `list` exits 1
 echo "$*" >> "$STUB_DIR/calls.log"
 case "$1" in
   list)
@@ -79,7 +82,9 @@ case "$1" in
   unload)
     if [ -f "$STUB_DIR/refuse_unload" ]; then exit 1; fi
     if [ -f "$STUB_DIR/unload_noop" ]; then exit 0; fi
-    : > "$STUB_DIR/loaded"; exit 0 ;;
+    : > "$STUB_DIR/loaded"
+    if [ -f "$STUB_DIR/list_fails_after_unload" ]; then : > "$STUB_DIR/list_fails"; fi
+    exit 0 ;;
   load)
     if [ -f "$STUB_DIR/refuse_new" ] && grep -q NEWMARK "$2"; then exit 1; fi
     if [ -f "$STUB_DIR/refuse_all" ]; then exit 1; fi
@@ -88,6 +93,7 @@ case "$1" in
     else
       printf -- '-\t0\t%s\n' "$LABEL" > "$STUB_DIR/loaded"
     fi
+    if [ -f "$STUB_DIR/list_fails_after_load" ]; then : > "$STUB_DIR/list_fails"; fi
     exit 0 ;;
 esac
 exit 0
@@ -199,7 +205,7 @@ def test_clean_render_of_a_scheduled_template_is_reported_as_registered_not_runn
     assert _verbs(stub) == ["unload", "load"]
     assert "NEWMARK" in installed.read_text()
     assert _job(stub) == "-"  # registered, idle: no process claimed
-    assert "registered (scheduled; runs at its next trigger)" in result.stdout
+    assert "registered with launchd, no process running" in result.stdout
     assert f"{name} job: running" not in result.stdout  # no process is claimed after the load
     assert stat.S_IMODE(installed.stat().st_mode) == 0o600
     assert _leftovers(installed.parent) == []
@@ -265,7 +271,7 @@ def test_load_failure_after_unload_restores_the_previous_plist_and_reports_the_o
     assert installed.read_text() == OLD_PLIST  # previous configuration back in place
     assert _job(stub) == "-"  # and registered again, as observed
     assert "previous plist was put back" in result.stderr
-    assert "registered (scheduled; runs at its next trigger)" in result.stderr
+    assert "registered with launchd, no process running" in result.stderr
     assert "running as before" not in result.stderr + result.stdout
     assert "NOT running" not in result.stderr
     assert _leftovers(installed.parent) == []
@@ -357,3 +363,69 @@ def test_phoenicurus_release_prepare_step_refuses_before_unloading(tmp_path):
     assert _verbs(stub) == []
     assert _job(stub) == "123"
     assert installed.read_text() == OLD_PLIST
+
+
+# ── An unknown state after an operation is a failure, never success ──────────
+
+_STARTUP_CLAIMS = ("started", "installed and loaded", "is live")
+
+
+def test_unknown_state_after_unload_stops_before_replacing_the_plist(installer):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+    (stub / "list_fails_after_unload").write_text("")
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode != 0
+    assert _verbs(stub) == ["unload"], "nothing may be loaded after an unverified unload"
+    assert installed.read_text() == OLD_PLIST
+    assert "whether the old job stopped is unknown" in result.stderr
+    assert "Job state now observed: unknown" in result.stderr
+    assert f"{name} installed" not in result.stdout
+    assert _leftovers(installed.parent) == []
+
+
+def test_unknown_state_after_load_is_a_failure_and_keeps_the_previous_plist(installer):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+    (stub / "list_fails_after_load").write_text("")
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode != 0
+    assert "NEWMARK" in installed.read_text()  # the new configuration is in place
+    kept = [p for p in installed.parent.iterdir() if p.name.startswith(f".{name}-previous.")]
+    assert len(kept) == 1 and kept[0].read_text() == OLD_PLIST  # recovery copy kept
+    assert "not verified" in result.stderr
+    assert "Job state now observed: unknown" in result.stderr
+    assert str(kept[0]) in result.stderr
+    output = result.stdout + result.stderr
+    assert f"{name} installed" not in result.stdout
+    for claim in _STARTUP_CLAIMS:
+        assert claim not in output, claim
+
+
+def test_whole_output_claims_no_process_for_a_registered_job(installer):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    assert "no process running" in result.stdout
+    assert "job running" not in output and "job: running" not in output
+    for claim in _STARTUP_CLAIMS:
+        assert claim not in output, claim
+
+
+def test_whole_output_reports_the_observed_process_for_a_running_job(installer):
+    name, plist, label, args, daemon_dir, home, installed, stub = installer
+    (daemon_dir / plist).write_text(GOOD_TEMPLATE.format(label=label))
+    (stub / "run_at_load").write_text("")
+
+    result = _run(daemon_dir, home, stub, label, args)
+
+    assert result.returncode == 0, result.stderr
+    assert f"{name} installed; job running (pid 4242)." in result.stdout

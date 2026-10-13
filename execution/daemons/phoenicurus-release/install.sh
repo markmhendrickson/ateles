@@ -135,7 +135,8 @@ if [ "${1:-}" = "--load-prepare" ]; then
   # template leaves the running agent and the installed plist untouched.
   source "$SCRIPT_DIR/../_install_plist.sh"
   install_rendered_plist "phoenicurus-prepare" "com.ateles.phoenicurus-prepare" "$SRC" "$DEST"
-  echo "✓ phoenicurus-prepare scheduled (Mon-Thu 07:00 local)."
+  ateles_install_summary "phoenicurus-prepare"
+  echo "  Schedule: Mon-Thu 07:00 local."
 else
   echo
   echo "To schedule the Mon-Thu prepare run:  bash install.sh --load-prepare"
