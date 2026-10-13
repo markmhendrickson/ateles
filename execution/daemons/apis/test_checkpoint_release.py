@@ -1851,6 +1851,44 @@ async def test_release_requires_matching_present_tenant_provenance(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("brief_owner", "should_dispatch"),
+    [
+        ("absent", False),
+        ("", False),
+        (None, False),
+        ("tenant-b", False),
+        ("tenant-a", True),
+    ],
+)
+async def test_direct_consumer_delivery_requires_matching_owner(
+    brief_owner, should_dispatch, monkeypatch, release_store
+):
+    """An approved brief delivered straight to the consumer (SSE, no MCP
+    resolve) must still bind to the brief's ownership, not bypass it."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    if brief_owner == "absent":
+        brief.pop("user_id")
+    else:
+        brief["user_id"] = brief_owner
+    dispatches: list[tuple] = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    await apis.handle_checkpoint_brief(brief_id, dict(brief), _Notifier())
+
+    assert bool(dispatches) is should_dispatch
+    if not should_dispatch:
+        assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
+        assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
 async def test_non_releasable_approval_cannot_be_reclassified_and_replayed(
     monkeypatch, release_store
 ):
