@@ -1085,10 +1085,17 @@ def _extract_paths(segment: str):
     (defense in depth, not a hermetic seal, exactly like
     sibling_repo_worktree_guard.py's own stated limitation)."""
     out = []
+    try:
+        decoded = [text for kind, text in _lex(segment) if kind == "word"]
+        lexed = True
+    except ValueError:
+        decoded, lexed = [], False
     for position, tok in enumerate(segment.split()):
         cand = _strip_wrapper_punctuation(tok)
         if not cand or cand.startswith("-"):
             continue
+        if lexed and any(ch in cand for ch in "'\"\\"):
+            continue  # judged below in the form the shell actually opens
         # A `key=value` token (`dd if=<path>`, `--file=<path>`) carries the
         # path after the `=`, not as the whole token — strip a leading
         # `bareword=`/`--flag=` prefix so `if=/x/.env` yields `/x/.env`
@@ -1108,7 +1115,76 @@ def _extract_paths(segment: str):
             or (position > 0 and _bare_word_names_credential(cand))
         ):
             out.append(cand)
-    return out
+    # The same text as the shell decodes it: quoting, escapes, ANSI-C and
+    # locale quoting removed and quoted pieces joined, then every operand
+    # shape a reader accepts (attached flag values, `--opt=path`, `key=path`,
+    # `@path`, path lists, brace alternatives, globs).
+    for position, word in enumerate(decoded):
+        for cand in _operand_candidates(word):
+            if (
+                "/" in cand
+                or "." in cand
+                or _is_existing_link(cand)
+                or (position > 0 and _bare_word_names_credential(cand))
+            ):
+                out.append(cand)
+    return list(dict.fromkeys(out))
+
+
+_GLOB_CHARS = "*?["
+_MAX_GLOB_MATCHES = 256
+
+
+def _operand_candidates(word: str):
+    """Every path a decoded shell *word* may hand a reader: the word itself;
+    the value of an attached short flag (`-f<path>`), a long flag
+    (`--opt=<path>`) or an assignment (`if=<path>`); an `@<path>` file
+    reference; each member of a `:` or `,` list; each brace alternative; and
+    what a glob expands to on disk."""
+    forms = [word]
+    if word.startswith("@"):
+        forms.append(word[1:])
+    if word.startswith("--") and "=" in word:
+        forms.append(word.split("=", 1)[1])
+    elif word.startswith("-") and not word.startswith("--") and len(word) > 2:
+        forms.extend(word[cut:] for cut in range(2, len(word)))
+    if "=" in word:
+        forms.append(word.split("=", 1)[1])
+        forms.append(word.rsplit("=", 1)[1])
+    for separator in (":", ","):
+        for form in list(forms):
+            if separator in form and "://" not in form:
+                forms.extend(part for part in form.split(separator) if part)
+    expanded: list[str] = []
+    for form in forms:
+        expanded.extend(_glob_alternatives(form) if "{" in form else [form])
+    out: list[str] = []
+    for form in expanded:
+        out.append(form)
+        if any(ch in form for ch in _GLOB_CHARS):
+            out.extend(_glob_matches(form))
+    return list(dict.fromkeys(f for f in out if f))
+
+
+def _glob_matches(pattern: str) -> list[str]:
+    import glob as _glob
+
+    norm = _normalize_path(pattern)
+    bases = [""] if norm.startswith("/") else list(_BASE_DIRECTORIES) or [os.getcwd()]
+    found: list[str] = []
+    for base in bases:
+        try:
+            try:
+                matches = _glob.iglob(os.path.join(base, norm), include_hidden=True)
+            except TypeError:  # Python < 3.11
+                matches = _glob.iglob(os.path.join(base, norm))
+            for match in matches:
+                found.append(match)
+                if len(found) >= _MAX_GLOB_MATCHES:
+                    return found
+        except Exception:  # noqa: BLE001
+            continue
+    return found
 
 
 def _is_existing_link(candidate: str) -> bool:
@@ -1333,6 +1409,32 @@ _OPERATORS = (
 )  # fmt: skip
 
 
+_ANSI_C_SIMPLE = {
+    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+    "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
+}  # fmt: skip
+
+
+def _decode_ansi_c_escape(text: str, index: int) -> tuple[str, int]:
+    """Decode the escape starting at *index* (just past the backslash) inside
+    ``$'...'``; return the character(s) and the index after the escape."""
+    char = text[index]
+    if char in _ANSI_C_SIMPLE:
+        return _ANSI_C_SIMPLE[char], index + 1
+    for prefix, base, width in (("x", 16, 2), ("u", 16, 4), ("U", 16, 8)):
+        if char == prefix:
+            match = re.match(r"[0-9A-Fa-f]{1,%d}" % width, text[index + 1 :])
+            if match:
+                return chr(int(match.group(0), base)), index + 1 + len(match.group(0))
+            return "\\" + char, index + 1
+    if char in "01234567":
+        match = re.match(r"[0-7]{1,3}", text[index:])
+        return chr(int(match.group(0), 8) & 0xFF), index + len(match.group(0))
+    if char == "c" and index + 1 < len(text):
+        return chr(ord(text[index + 1]) & 0x1F), index + 2
+    return "\\" + char, index + 1
+
+
 def _lex(command: str):
     """Split *command* into ``(kind, text)`` tokens, kind ``"word"`` or ``"op"``.
 
@@ -1394,6 +1496,27 @@ def _lex(command: str):
         elif ch == "#" and not in_word:
             while i < n and command[i] != "\n":
                 i += 1
+        elif ch == "$" and command.startswith("$'", i):
+            # ANSI-C quoting: backslash escapes are decoded by the shell.
+            j, decoded = i + 2, []
+            while True:
+                if j >= n:
+                    raise ValueError("unterminated ANSI-C quote")
+                c = command[j]
+                if c == "'":
+                    break
+                if c == "\\" and j + 1 < n:
+                    escape, j = _decode_ansi_c_escape(command, j + 1)
+                    decoded.append(escape)
+                    continue
+                decoded.append(c)
+                j += 1
+            word.append("".join(decoded))
+            in_word = True
+            i = j + 1
+        elif ch == "$" and command.startswith('$"', i):
+            i += 1  # locale quoting reads like double quoting
+            in_word = True
         elif ch == "$" and command.startswith("$(", i):
             depth, j = 0, i + 1
             while j < n:
@@ -1874,6 +1997,10 @@ def _redirected_stdin_loop_hit(command: str) -> str | None:
     follow-up), same shape as the earlier `xargs` pipe-chain fix."""
     if not _STDIN_LOOP_RE.search(command):
         return None
+    for _words, redirects in _parsed_commands(command):
+        for operator, operand in redirects:
+            if operator in _REDIRECT_FROM_FILE and operand and is_credential_path(operand):
+                return operand
     for cand in _extract_paths(command):
         if not is_credential_path(cand):
             continue
@@ -1931,6 +2058,22 @@ def _check_bash(command: str, cwd: str | None):
     joined = _join_line_continuations(command)
     for chain in (c for c in (s.strip() for s in _CHAIN_SPLIT.split(joined)) if c):
         hit = _chain_touches_credential_via_pipe(chain)
+        if hit:
+            return hit
+
+    # Each simple command as the shell decodes it (including bodies of
+    # `sh -c` and `eval`), so quoting and escaping inside a command word or an
+    # operand cannot hide a reader or a credential path from the checks below.
+    for words, redirects in _parsed_commands(command):
+        if not words:
+            continue
+        rebuilt = " ".join(
+            [shlex.quote(w) for w in words]
+            + [f"{op} {shlex.quote(operand)}" for op, operand in redirects if operand]
+        )
+        if _is_text_bearing(rebuilt):
+            continue
+        hit = _segment_touches_credential(rebuilt)
         if hit:
             return hit
 

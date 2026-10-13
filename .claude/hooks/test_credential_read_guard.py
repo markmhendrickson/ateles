@@ -1663,3 +1663,138 @@ def test_relative_read_after_cd_really_prints_the_file_so_the_refusal_is_not_cos
         cwd=str(OTHER_DIR),
     )
     assert "not-a-real-value" in probe.stdout
+
+
+# ---------------------------------------------------------------------------
+# Operand shapes: every spelling a shell decodes to the same path is judged as
+# that path.
+#
+# For each protected target (a dotenv file, a non-dotenv file in the
+# credential directory, a launchd plist) the same read is written in every
+# operand shape: quoting and escaping inside a path component, concatenated
+# and empty quotes, ANSI-C and locale quoting, option terminators, attached
+# and `=`-joined option values, assignments, redirects, brace alternatives,
+# globs, variables and `~`, pipeline operands, and a quoted command word.
+# Each spelling is first decoded by a real shell (`printf`) to prove it names
+# the protected file, so a refusal is not a guess about shell semantics.
+# ---------------------------------------------------------------------------
+
+
+def _mangle(component: str) -> dict[str, str]:
+    """Shell spellings of *component* that all decode to it."""
+    head, mid, tail = component[:2], component[2:-1], component[-1]
+    ansi = "".join(f"\\x{ord(c):02x}" for c in mid)
+    return {
+        "single-quoted piece": f"{head}'{mid}'{tail}",
+        "double-quoted piece": f'{head}"{mid}"{tail}',
+        "backslash escape": f"{head}\\{mid}{tail}",
+        "empty quotes": f"{head}''{mid}\"\"{tail}",
+        "ansi-c escapes": f"{head}$'{ansi}'{tail}",
+        "locale quoting": f'{head}$"{mid}"{tail}',
+    }
+
+
+_OPERAND_TARGETS = {
+    "dotenv": (ENV, ".env"),
+    "credential-directory file": (NEOTOMA_OTHER, "neotoma"),
+    "launchd plist": (PLIST, "LaunchAgents"),
+}
+
+
+def _operand_spellings(path: str, component: str) -> dict[str, str]:
+    spellings = {
+        name: path.replace(component, mangled, 1) if component != ".env" else path[: -len(component)] + mangled
+        for name, mangled in _mangle(component).items()
+    }
+    spellings["whole word single-quoted"] = f"'{path}'"
+    spellings["whole word ansi-c"] = f"$'{path}'"
+    return spellings
+
+
+def _shell_decodes_to(spelling: str, path: str) -> bool:
+    probe = subprocess.run(
+        ["bash", "-c", f"printf '%s' {spelling}"], capture_output=True, text=True
+    )
+    return probe.stdout == path
+
+
+_SHAPE_TEMPLATES = {
+    "plain reader": "cat {p}",
+    "option terminator": "cat -- {p}",
+    "reader with options": "head -n 1 {p}",
+    "stdin redirect to a reader": "cat < {p}",
+    "nonrecursive search": "grep X {p}",
+    "attached option value": "grep -f{p} /dev/null",
+    "long option value": "grep --file={p} /dev/null",
+    "assignment operand": "dd if={p}",
+    "pipeline operand": "printf '%s\\n' {p} | xargs cat",
+    "quoted command word": "c'a't {p}",
+    "escaped command word": "\\cat {p}",
+    "plist reader": "plutil -p {p}",
+    "read loop": "while read l; do echo $l; done < {p}",
+    "interpreter on stdin": "python3 < {p}",
+    "inside sh -c": "sh -c \"cat {p}\"",
+}
+
+_SHAPE_CASES = [
+    (f"{target} / {spelling_name} / {shape}", template.format(p=spelling), path, spelling)
+    for target, (path, component) in _OPERAND_TARGETS.items()
+    for spelling_name, spelling in _operand_spellings(path, component).items()
+    for shape, template in _SHAPE_TEMPLATES.items()
+    # A double quote inside the double-quoted `sh -c` body would end it early,
+    # so that pairing would not name the target at all.
+    if not (shape == "inside sh -c" and '"' in spelling)
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd,path,spelling", _SHAPE_CASES, ids=[c[0] for c in _SHAPE_CASES]
+)
+def test_every_shell_spelling_of_a_protected_operand_is_refused(label, cmd, path, spelling):
+    assert _shell_decodes_to(spelling, path), f"fixture spelling is wrong: {spelling}"
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 2, label
+
+
+_EXPANSION_CASES = [
+    ("brace alternatives", "cat {root}/.config/{{neotoma,unused}}/config.json"),
+    ("glob in a directory", "cat {root}/.config/neot?ma/config.json"),
+    ("glob in a file name", "cat {root}/.config/neotoma/conf*.json"),
+    ("glob over plists", "cat {root}/Library/LaunchAgents/*.plist"),
+    ("glob over a dotenv", "cat {root}/.config/neotoma/.e[n]v"),
+    ("home variable", "cat $HOME/.config/neotoma/config.json"),
+    ("braced home variable", "cat ${{HOME}}/.config/neotoma/config.json"),
+    ("tilde", "cat ~/.config/neotoma/config.json"),
+    ("at-file reference", "grep X @{root}/.config/neotoma/config.json"),
+    ("path list", "cat x:{root}/.config/neotoma/config.json"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,template", _EXPANSION_CASES, ids=[c[0] for c in _EXPANSION_CASES]
+)
+def test_expanded_operand_forms_are_refused(label, template):
+    cmd = template.format(root=FIXTURE_ROOT)
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 2, label
+
+
+_SHAPE_ALLOW = [
+    ("quoted ordinary file", f"cat {PLAIN[:-3]}'{PLAIN[-3:]}'"),
+    ("ansi-c ordinary file", f"cat $'{PLAIN}'"),
+    ("quoted template", f"cat {ENV_EXAMPLE[:-4]}'{ENV_EXAMPLE[-4:]}'"),
+    ("count-only search of a quoted credential", f"grep -c X {ENV[:-2]}'{ENV[-2:]}'"),
+    ("names-only listing of a quoted credential directory", f"ls {str(NEOTOMA_DIR)[:-3]}'{str(NEOTOMA_DIR)[-3:]}'"),
+    ("glob over ordinary files", f"cat {OTHER_DIR}/*.txt"),
+    ("brace over ordinary files", f"cat {FIXTURE_ROOT}/{{notes.txt,somewhere-else/readme.txt}}"),
+    ("option value that is not a path", "grep --color=auto X readme.txt"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", _SHAPE_ALLOW, ids=[c[0] for c in _SHAPE_ALLOW])
+def test_shell_spellings_of_ordinary_operands_stay_allowed(label, cmd):
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 0, label
+
+
+def test_a_split_quoted_operand_really_reads_the_protected_file():
+    spelling = _operand_spellings(NEOTOMA_OTHER, "neotoma")["single-quoted piece"]
+    probe = subprocess.run(["bash", "-c", f"cat {spelling}"], capture_output=True, text=True)
+    assert "not-a-real-value" in probe.stdout
