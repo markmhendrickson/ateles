@@ -35,7 +35,8 @@
  *   GET  /api/entity?id=…     ONE entity of any type, plus its relationships —
  *                             what the in-app detail views read
  *   GET  /api/console?section=…  one section of the Console overview (charter,
- *                             missions, strategies, retired, projects); cached
+ *                             missions, strategies, retired, allstrategies,
+ *                             projects); cached
  *                             briefly and read two at a time — see consoleSpine.ts
  *   GET  /api/scan-freshness  how far the committed static code scan has fallen
  *                             behind the repo's HEAD — the one thing about that
@@ -2128,7 +2129,7 @@ export function registerApiRoutes(server: MiddlewareHost) {
       });
 
       /**
-       * GET /api/console?section=<charter|missions|strategies|retired|projects>
+       * GET /api/console?section=<charter|missions|strategies|retired|allstrategies|projects>
        *
        * ONE SECTION PER REQUEST, so a slow type does not hold the others back
        * and a failed one names itself. The section is checked against a fixed

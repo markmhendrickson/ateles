@@ -1,7 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
   EXPECTED_AREA_COUNT,
+  SECTION_FAILURE,
+  type Loadable,
   areaHasFields,
+  formatAsOf,
+  interpretSectionResponse,
+  missionOpening,
+  otherStrategyCount,
+  projectLookup,
+  staleness,
   NO_ALTITUDE,
   decisionsWaiting,
   groupByAltitude,
@@ -198,6 +206,16 @@ describe("mission helpers", () => {
     expect(missionStatement(null)).toBeNull();
   });
 
+  it("falls back to the first paragraph that is not only headings", () => {
+    expect(missionOpening("# MISSION\n\n## THE PURPOSE\nHelp people reclaim time.\nSecond line.\n\nMore later.")).toBe(
+      "Help people reclaim time.\nSecond line.",
+    );
+    expect(missionOpening("No headings, one paragraph.")).toBe("No headings, one paragraph.");
+    expect(missionOpening("# Only a heading\n\n## Another")).toBeNull();
+    expect(missionOpening("")).toBeNull();
+    expect(missionOpening(null)).toBeNull();
+  });
+
   it("flags more than one active mission and does not for one", () => {
     expect(hasDuplicateMissions([MISSION_A, MISSION_B])).toBe(true);
     expect(hasDuplicateMissions([MISSION_A])).toBe(false);
@@ -224,5 +242,132 @@ describe("decisionsWaiting", () => {
       kind: "exact",
       value: 0,
     });
+  });
+});
+
+// ── the loader's rules ──────────────────────────────────────────────────────
+
+const GOOD = { ok: true, fetchedAt: "2026-10-13T10:00:00.000Z", records: [], total: 0 };
+const NOW = () => "2026-10-13T12:00:00.000Z";
+const loading: Loadable<typeof GOOD> = { state: "loading" };
+const have: Loadable<typeof GOOD> = { state: "ready", data: GOOD, fetchedAt: GOOD.fetchedAt };
+
+describe("interpretSectionResponse", () => {
+  it("reads a good answer as ready data stamped with the server's fetch time", () => {
+    const next = interpretSectionResponse({ status: 200, ok: true, body: GOOD }, loading, NOW);
+    expect(next).toEqual({ state: "ready", data: GOOD, fetchedAt: GOOD.fetchedAt });
+  });
+
+  it("stamps its own time when the body carries none", () => {
+    const next = interpretSectionResponse({ status: 200, ok: true, body: { statuses: {} } }, loading, NOW);
+    expect(next).toMatchObject({ state: "ready", fetchedAt: NOW() });
+  });
+
+  it("is an error, not data, when the HTTP status is not ok, whatever the body holds", () => {
+    const next = interpretSectionResponse({ status: 502, ok: false, body: GOOD }, loading, NOW);
+    expect(next).toEqual({ state: "error", error: SECTION_FAILURE.failed });
+  });
+
+  it("is an error when the body says ok:false on a 200", () => {
+    const next = interpretSectionResponse({ status: 200, ok: true, body: { ok: false, error: "x" } }, loading, NOW);
+    expect(next.state).toBe("error");
+    const noError = interpretSectionResponse({ status: 200, ok: true, body: { ok: false } }, loading, NOW);
+    expect(noError.state).toBe("error");
+  });
+
+  it("is an error when the body carries an error key on a 200", () => {
+    const next = interpretSectionResponse({ status: 200, ok: true, body: { error: "x", records: [] } }, loading, NOW);
+    expect(next.state).toBe("error");
+  });
+
+  it("shows only the fixed failure texts, never what the server or the parser said", () => {
+    const server = interpretSectionResponse(
+      { status: 502, ok: false, body: { ok: false, error: "ECONNRESET internal.host:8443" } },
+      loading,
+      NOW,
+    );
+    expect(server).toEqual({ state: "error", error: SECTION_FAILURE.failed });
+    const html = interpretSectionResponse({ status: 502, ok: false, body: undefined }, loading, NOW);
+    expect(html).toEqual({ state: "error", error: SECTION_FAILURE.unreadable });
+    const down = interpretSectionResponse(null, loading, NOW);
+    expect(down).toEqual({ state: "error", error: SECTION_FAILURE.unreachable });
+    const texts = new Set(Object.values(SECTION_FAILURE));
+    expect(texts.size).toBe(3);
+  });
+
+  it("keeps good data across a failed refresh, marked as such, for every kind of failure", () => {
+    const failures = [
+      null,
+      { status: 502, ok: false, body: undefined },
+      { status: 502, ok: false, body: { ok: false, error: "x" } },
+      { status: 200, ok: true, body: { ok: false } },
+    ];
+    for (const f of failures) {
+      const next = interpretSectionResponse(f, have, NOW);
+      expect(next).toEqual({ ...have, refreshFailed: true });
+    }
+  });
+
+  it("clears the stale mark when a later refresh succeeds", () => {
+    const stale = interpretSectionResponse(null, have, NOW);
+    const next = interpretSectionResponse({ status: 200, ok: true, body: { ...GOOD, fetchedAt: "2026-10-13T11:00:00.000Z" } }, stale, NOW);
+    expect(next).toMatchObject({ state: "ready", fetchedAt: "2026-10-13T11:00:00.000Z" });
+    expect(next).not.toHaveProperty("refreshFailed");
+  });
+});
+
+describe("staleness", () => {
+  it("is null when nothing is stale, loading or errored", () => {
+    expect(staleness([have, loading, { state: "error", error: "x" }])).toBeNull();
+  });
+
+  it("reports the oldest data among the stale sections", () => {
+    const old: Loadable<unknown> = { ...have, fetchedAt: "2026-10-13T09:00:00.000Z", refreshFailed: true };
+    const newer: Loadable<unknown> = { ...have, fetchedAt: "2026-10-13T11:00:00.000Z", refreshFailed: true };
+    expect(staleness([newer, old])).toEqual({ asOf: formatAsOf("2026-10-13T09:00:00.000Z") });
+  });
+
+  it("reports an unknown age when a stale section has no usable time", () => {
+    const noTime: Loadable<unknown> = { state: "ready", data: {}, refreshFailed: true };
+    expect(staleness([noTime])).toEqual({ asOf: null });
+  });
+
+  it("formats a time as HH:MM and refuses a non-date", () => {
+    expect(formatAsOf("2026-10-13T09:05:00.000Z")).toMatch(/^\d\d:\d\d$/);
+    expect(formatAsOf("not a date")).toBeNull();
+    expect(formatAsOf(undefined)).toBeNull();
+  });
+});
+
+describe("projectLookup", () => {
+  const ready = (records: number, total: number | null): Loadable<{ records: unknown[]; total: number | null }> => ({
+    state: "ready",
+    data: { records: Array.from({ length: records }, () => ({})), total },
+  });
+
+  it("distinguishes loading, failed, partial and complete", () => {
+    expect(projectLookup({ state: "loading" })).toBe("loading");
+    expect(projectLookup({ state: "error", error: "x" })).toBe("failed");
+    expect(projectLookup(ready(2, 2))).toBe("complete");
+    expect(projectLookup(ready(0, 0))).toBe("complete");
+  });
+
+  it("is partial when more records exist than were read, or the total is unknown", () => {
+    expect(projectLookup(ready(200, 201))).toBe("partial");
+    expect(projectLookup(ready(2, null))).toBe("partial");
+  });
+});
+
+describe("otherStrategyCount", () => {
+  it("is all minus active minus retired", () => {
+    expect(otherStrategyCount(10, 6, 3)).toBe(1);
+    expect(otherStrategyCount(9, 6, 3)).toBe(0);
+  });
+
+  it("is null, never a guess, when a count is unknown or the counts disagree", () => {
+    expect(otherStrategyCount(null, 6, 3)).toBeNull();
+    expect(otherStrategyCount(10, null, 3)).toBeNull();
+    expect(otherStrategyCount(10, 6, null)).toBeNull();
+    expect(otherStrategyCount(8, 6, 3)).toBeNull();
   });
 });

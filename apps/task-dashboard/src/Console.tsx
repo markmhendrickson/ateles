@@ -21,6 +21,7 @@
 import { useEffect, useState } from "react";
 import type { CountSection, RecordsSection, SpineRecord } from "../server/consoleSpine";
 import {
+  type FetchOutcome,
   type Loadable,
   type ParsedArea,
   EXPECTED_AREA_COUNT,
@@ -28,16 +29,20 @@ import {
   decisionsWaiting,
   groupByAltitude,
   hasDuplicateMissions,
+  interpretSectionResponse,
+  missionOpening,
   missionStatement,
+  otherStrategyCount,
   parseCharter,
+  projectLookup,
   resolveProjectRefs,
+  staleness,
 } from "./consoleData";
 import { type FacetsResponse } from "./facets";
 import { countText } from "./taskCount";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { AlertTriangle, Info } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 
 const REFRESH_MS = 60_000;
 
@@ -47,46 +52,32 @@ export interface ConsoleModel {
   missions: Loadable<RecordsSection>;
   strategies: Loadable<RecordsSection>;
   retired: Loadable<CountSection>;
+  /** Every strategy whatever its status, so the ones in other statuses can be counted. */
+  allStrategies: Loadable<CountSection>;
   projects: Loadable<RecordsSection>;
-  /** `null` = the facets read failed or has not landed. */
-  facets: FacetsResponse | null;
+  facets: Loadable<FacetsResponse>;
 }
 
 type Open = (entityId: string) => void;
 
 // ── small shared pieces ─────────────────────────────────────────────────────
 
-function Hint({ children }: { children: React.ReactNode }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex text-muted-foreground hover:text-foreground"
-          aria-label="More about this section"
-        >
-          <Info className="h-[13px] w-[13px]" aria-hidden />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent>{children}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-function SectionTitle({
-  children,
-  hint,
-  aside,
-}: {
-  children: React.ReactNode;
-  hint?: React.ReactNode;
-  aside?: React.ReactNode;
-}) {
+function SectionTitle({ children, aside }: { children: React.ReactNode; aside?: React.ReactNode }) {
   return (
     <div className="mb-[8px] mt-5 flex items-center gap-[8px]">
       <h2 className="text-[14px] font-[650] tracking-[-0.01em]">{children}</h2>
-      {hint && <Hint>{hint}</Hint>}
       {aside && <span className="ml-auto text-[12px] text-muted-foreground">{aside}</span>}
+    </div>
+  );
+}
+
+/** Shown when a refresh failed and the section is still drawing its last good data. */
+function StaleNote({ sources }: { sources: Loadable<unknown>[] }) {
+  const stale = staleness(sources);
+  if (!stale) return null;
+  return (
+    <div role="status" data-testid="stale" className="mb-[6px] text-[12px] text-[hsl(var(--warn))]">
+      Showing data as of {stale.asOf ?? "an unknown time"}. The latest refresh failed.
     </div>
   );
 }
@@ -138,22 +129,23 @@ const recordLabel = (r: SpineRecord) => r.title ?? r.name ?? r.id;
 
 // ── decisions waiting ───────────────────────────────────────────────────────
 
-function DecisionsWaiting({ facets }: { facets: FacetsResponse | null }) {
-  const count = decisionsWaiting(facets);
+function DecisionsWaiting({ facets }: { facets: Loadable<FacetsResponse> }) {
+  const count = facets.state === "ready" ? decisionsWaiting(facets.data) : ({ kind: "unmeasured" } as const);
+  const text = facets.state === "loading" ? "loading" : countText(count);
+  const stale = staleness([facets]);
   return (
     <div className="flex items-center gap-[8px] rounded-lg border bg-card px-3 py-[8px] text-[12.5px]">
       <Badge variant={count.kind === "exact" && count.value > 0 ? "warn" : "muted"} caps>
         decisions waiting
       </Badge>
       <span className="text-[15px] font-[650] tabular-nums" data-testid="decisions-waiting">
-        {countText(count)}
+        {text}
       </span>
-      <Hint>
-        Tasks in <code className="font-mono text-[11px]">awaiting_approval</code> or{" "}
-        <code className="font-mono text-[11px]">awaiting_input</code>, counted across every open
-        task. This is the global figure; per-area counts need the planning ascent and are not
-        attributed yet.
-      </Hint>
+      {stale && (
+        <span role="status" data-testid="stale" className="text-[12px] text-[hsl(var(--warn))]">
+          as of {stale.asOf ?? "an unknown time"}, refresh failed
+        </span>
+      )}
     </div>
   );
 }
@@ -162,6 +154,9 @@ function DecisionsWaiting({ facets }: { facets: FacetsResponse | null }) {
 
 function MissionRecord({ mission, onOpen }: { mission: SpineRecord; onOpen: Open }) {
   const statement = missionStatement(mission.content);
+  // No THE MISSION heading: show the record's own first paragraph, and say it is
+  // that, rather than "no readable statement" over a record that holds text.
+  const opening = statement === null ? missionOpening(mission.content) : null;
   return (
     <div className="min-w-0">
       <div className="text-[14px] font-[650]">
@@ -169,10 +164,13 @@ function MissionRecord({ mission, onOpen }: { mission: SpineRecord; onOpen: Open
           {recordLabel(mission)}
         </RecordButton>
       </div>
+      {opening !== null && (
+        <div className="mt-[5px] text-[11px] text-muted-foreground">Opening of the record text</div>
+      )}
       <p className="mt-[5px] whitespace-pre-line text-[13px] leading-[1.5]">
-        {statement ?? mission.description ?? "This record has no readable statement."}
+        {statement ?? opening ?? mission.description ?? "This record has no readable statement."}
       </p>
-      {mission.content && statement && (
+      {mission.content && (
         <details className="mt-[6px] text-[12px] text-muted-foreground">
           <summary className="cursor-pointer">Full record text</summary>
           <p className="mt-[6px] whitespace-pre-line leading-[1.5]">{mission.content}</p>
@@ -187,6 +185,7 @@ function Mission({ missions, onOpen }: { missions: Loadable<RecordsSection>; onO
   return (
     <>
       <SectionTitle>Mission</SectionTitle>
+      <StaleNote sources={[missions]} />
       {missions.state === "loading" ? (
         <SectionSkeleton />
       ) : missions.state === "error" ? (
@@ -205,8 +204,8 @@ function Mission({ missions, onOpen }: { missions: Loadable<RecordsSection>; onO
               <AlertTriangle className="mt-[2px] h-[14px] w-[14px] flex-none text-[hsl(var(--warn))]" aria-hidden />
               <span>
                 <strong>{missions.data.records.length} active mission records.</strong> The
-                console does not choose between them; both are shown in full. One record should
-                be retired or merged.
+                console does not choose between them; all {missions.data.records.length} are shown
+                in full. Only one should be active.
               </span>
             </div>
           )}
@@ -226,17 +225,18 @@ function Mission({ missions, onOpen }: { missions: Loadable<RecordsSection>; onO
 function Strategies({
   strategies,
   retired,
+  allStrategies,
   onOpen,
 }: {
   strategies: Loadable<RecordsSection>;
   retired: Loadable<CountSection>;
+  allStrategies: Loadable<CountSection>;
   onOpen: Open;
 }) {
   const groups = strategies.state === "ready" ? groupByAltitude(strategies.data.records) : [];
   return (
     <>
       <SectionTitle
-        hint="Grouped by the altitude field on each strategy. The graph has no strategy-to-mission edge, so this order comes from that field alone."
         aside={
           strategies.state === "ready"
             ? `${strategies.data.records.length} active${
@@ -249,6 +249,7 @@ function Strategies({
       >
         Strategies
       </SectionTitle>
+      <StaleNote sources={[strategies, retired, allStrategies]} />
       {strategies.state === "loading" ? (
         <SectionSkeleton lines={5} />
       ) : strategies.state === "error" ? (
@@ -293,15 +294,32 @@ function Strategies({
           ))}
         </div>
       )}
-      <div className="mt-2 text-[12px] text-muted-foreground">
-        {retired.state === "ready"
-          ? `${retired.data.total.toLocaleString()} retired or reference strategies not shown.`
-          : retired.state === "error"
-            ? "Retired strategy count could not be read."
-            : "Counting retired strategies…"}
+      <div className="mt-2 text-[12px] text-muted-foreground" data-testid="strategy-footer">
+        Not shown: {retiredText(retired)}, {otherText(strategies, retired, allStrategies)}.
       </div>
     </>
   );
+}
+
+function retiredText(retired: Loadable<CountSection>): string {
+  if (retired.state === "ready") return `${retired.data.total.toLocaleString()} retired or reference`;
+  return retired.state === "error" ? "retired count could not be read" : "retired count loading";
+}
+
+/** Strategies in a status other than active or retired. Never a guess: loading, failed, or a number. */
+function otherText(
+  strategies: Loadable<RecordsSection>,
+  retired: Loadable<CountSection>,
+  all: Loadable<CountSection>,
+): string {
+  if (strategies.state === "error" || retired.state === "error" || all.state === "error") {
+    return "other count could not be read";
+  }
+  if (strategies.state !== "ready" || retired.state !== "ready" || all.state !== "ready") {
+    return "other count loading";
+  }
+  const other = otherStrategyCount(all.data.total, strategies.data.total, retired.data.total);
+  return other === null ? "other count could not be worked out" : `${other.toLocaleString()} other`;
 }
 
 // ── areas ───────────────────────────────────────────────────────────────────
@@ -370,7 +388,22 @@ function ProjectChips({
     area.projectNames,
     projects.state === "ready" ? projects.data.records : [],
   );
-  const projectsKnown = projects.state === "ready";
+  const lookup = projectLookup(projects);
+  const chipNote = {
+    loading: "loading",
+    failed: "not looked up",
+    partial: "not checked",
+    complete: "no record",
+  }[lookup];
+  const chipTitle = {
+    loading: "Project records are still loading.",
+    failed: "Project records could not be read, so this name was not looked up.",
+    partial:
+      projects.state === "ready"
+        ? `Only ${projects.data.records.length} of ${projects.data.total ?? "an unknown number of"} project records were read, so this name was not checked.`
+        : "",
+    complete: "No project record has this title or name.",
+  }[lookup];
   return (
     <div className="text-[12.5px]">
       <span className="mr-[6px] font-[600] text-muted-foreground">Projects</span>
@@ -389,13 +422,9 @@ function ProjectChips({
             <span
               key={r.name}
               className="rounded-full border border-dashed px-[8px] py-[1px] font-mono text-[11px] text-muted-foreground"
-              title={
-                projectsKnown
-                  ? "No project record has this title or name."
-                  : "Project records could not be read, so this name was not looked up."
-              }
+              title={chipTitle}
             >
-              {r.name}: {projectsKnown ? "no record" : "not looked up"}
+              {r.name}: {chipNote}
             </span>
           ),
         )}
@@ -517,11 +546,11 @@ function Areas({
   return (
     <>
       <SectionTitle
-        hint="Parsed from the responsibility charter's prose. Open work and decisions per area are not attributed yet: that needs the planning ascent from each area's projects."
         aside={record ? <RecordButton record={record} onOpen={onOpen}>The charter</RecordButton> : undefined}
       >
         What the swarm owns
       </SectionTitle>
+      <StaleNote sources={[charter, projects]} />
       {charter.state === "loading" ? (
         <SectionSkeleton lines={6} />
       ) : charter.state === "error" ? (
@@ -584,36 +613,49 @@ export function ConsoleView({ model, onOpenEntity }: { model: ConsoleModel; onOp
         </div>
       </div>
       <Mission missions={model.missions} onOpen={onOpenEntity} />
-      <Strategies strategies={model.strategies} retired={model.retired} onOpen={onOpenEntity} />
+      <Strategies
+        strategies={model.strategies}
+        retired={model.retired}
+        allStrategies={model.allStrategies}
+        onOpen={onOpenEntity}
+      />
       <Areas charter={model.charter} projects={model.projects} onOpen={onOpenEntity} />
     </div>
   );
 }
 
 /**
- * Read one console section. A failure and a slow read are different states: the
- * previous good data is kept on screen across a refresh that fails, and the
- * error shows only when there is nothing better to show.
+ * Fetch one JSON endpoint and reduce what came back to a `FetchOutcome`. A
+ * network failure is `null`; a body that is not JSON is `body: undefined`.
  */
-function useSection<T>(section: string): Loadable<T> {
+async function fetchOutcome(url: string): Promise<FetchOutcome | null> {
+  try {
+    const res = await fetch(url);
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = undefined;
+    }
+    return { status: res.status, ok: res.ok, body };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one endpoint on load and every minute. A failure and a slow read are
+ * different states: `interpretSectionResponse` keeps the previous good data on
+ * screen across a refresh that fails (marked stale), and shows the error only
+ * when there is nothing better to show.
+ */
+function useEndpoint<T>(url: string): Loadable<T> {
   const [value, setValue] = useState<Loadable<T>>({ state: "loading" });
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      try {
-        const res = await fetch(`/api/console?section=${section}`);
-        const body = await res.json();
-        if (!res.ok || body.error || body.ok === false) {
-          throw new Error(body.error ?? `HTTP ${res.status}`);
-        }
-        if (alive) setValue({ state: "ready", data: body as T });
-      } catch (err) {
-        if (alive) {
-          setValue((prev) =>
-            prev.state === "ready" ? prev : { state: "error", error: (err as Error).message },
-          );
-        }
-      }
+      const outcome = await fetchOutcome(url);
+      if (alive) setValue((prev) => interpretSectionResponse<T>(outcome, prev));
     };
     void load();
     const id = setInterval(() => void load(), REFRESH_MS);
@@ -621,41 +663,22 @@ function useSection<T>(section: string): Loadable<T> {
       alive = false;
       clearInterval(id);
     };
-  }, [section]);
+  }, [url]);
   return value;
 }
 
 export function Console({ onOpenEntity }: { onOpenEntity: Open }) {
-  const charter = useSection<RecordsSection>("charter");
-  const missions = useSection<RecordsSection>("missions");
-  const strategies = useSection<RecordsSection>("strategies");
-  const retired = useSection<CountSection>("retired");
-  const projects = useSection<RecordsSection>("projects");
-
-  const [facets, setFacets] = useState<FacetsResponse | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const res = await fetch("/api/facets");
-        const body = await res.json();
-        if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
-        if (alive) setFacets(body);
-      } catch {
-        // Leave the last good figure; with none, the badge reads "not measured".
-      }
-    };
-    void load();
-    const id = setInterval(() => void load(), REFRESH_MS);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, []);
+  const charter = useEndpoint<RecordsSection>("/api/console?section=charter");
+  const missions = useEndpoint<RecordsSection>("/api/console?section=missions");
+  const strategies = useEndpoint<RecordsSection>("/api/console?section=strategies");
+  const retired = useEndpoint<CountSection>("/api/console?section=retired");
+  const allStrategies = useEndpoint<CountSection>("/api/console?section=allstrategies");
+  const projects = useEndpoint<RecordsSection>("/api/console?section=projects");
+  const facets = useEndpoint<FacetsResponse>("/api/facets");
 
   return (
     <ConsoleView
-      model={{ charter, missions, strategies, retired, projects, facets }}
+      model={{ charter, missions, strategies, retired, allStrategies, projects, facets }}
       onOpenEntity={onOpenEntity}
     />
   );

@@ -316,7 +316,7 @@ export function groupByAltitude(strategies: SpineRecord[]): AltitudeGroup[] {
 
 /**
  * The part of a mission's prose headed THE MISSION, or null when no such
- * heading exists (the view then shows the opening of the record instead).
+ * heading exists (the view then falls back to `missionOpening`).
  */
 export function missionStatement(content: string | null): string | null {
   if (!content) return null;
@@ -330,6 +330,22 @@ export function missionStatement(content: string | null): string | null {
 }
 
 /**
+ * The first paragraph of a mission's prose that is not only headings, or null
+ * when there is none. Used when no THE MISSION heading exists, so a reworded
+ * record still shows its own words rather than "no readable statement".
+ */
+export function missionOpening(content: string | null): string | null {
+  if (!content) return null;
+  const blocks = content.split(/\r?\n\s*\r?\n/).map((b) => b.trim()).filter(Boolean);
+  for (const block of blocks) {
+    const lines = block.split(/\r?\n/).filter((l) => l.trim());
+    const body = lines.filter((l) => !/^#{1,6}\s/.test(l)).join("\n").trim();
+    if (body) return body;
+  }
+  return null;
+}
+
+/**
  * Do the active mission records disagree about being the mission? More than one
  * active record is a data defect the view shows in full; it does not choose.
  */
@@ -337,11 +353,128 @@ export function hasDuplicateMissions(missions: SpineRecord[]): boolean {
   return missions.length > 1;
 }
 
-/** One section of the page as the browser holds it: never conflates "not yet" with "none". */
+/**
+ * One section of the page as the browser holds it: never conflates "not yet" with "none".
+ *
+ * A `ready` section whose latest refresh failed keeps its last good data and is
+ * marked `refreshFailed`, with `fetchedAt` saying how old that data is, so the
+ * page can say so rather than pass old data off as current.
+ */
 export type Loadable<T> =
   | { state: "loading" }
   | { state: "error"; error: string }
-  | { state: "ready"; data: T };
+  | { state: "ready"; data: T; fetchedAt?: string; refreshFailed?: boolean };
+
+/**
+ * The only failure texts the page shows for a section or the figure. Whatever
+ * the server or the browser says is mapped onto one of these; the detail stays
+ * in the server log.
+ */
+export const SECTION_FAILURE = {
+  /** The request itself failed: no answer from the dashboard server. */
+  unreachable: "The dashboard server did not answer.",
+  /** An answer came back that is not JSON (for example a proxy's error page). */
+  unreadable: "The dashboard server sent a reply the page could not read.",
+  /** The server answered and said the read failed. */
+  failed: "The read failed.",
+} as const;
+
+/** What a fetch produced, reduced to what the loader needs. `body` is undefined when it was not JSON. */
+export interface FetchOutcome {
+  status: number;
+  ok: boolean;
+  body: unknown;
+}
+
+/**
+ * Turn one fetch outcome into the next state of a section. Pure, so the rules
+ * that keep a failure from reading as data are testable without a browser:
+ *
+ *   - `outcome` null = the request itself failed (network);
+ *   - a non-2xx status, a body that is not JSON, `ok: false` or an `error` key
+ *     is a failure whatever else the body holds;
+ *   - a failure never replaces good data: it keeps it, marked `refreshFailed`;
+ *   - with no good data to keep, the failure becomes the section's error state.
+ */
+export function interpretSectionResponse<T>(
+  outcome: FetchOutcome | null,
+  prev: Loadable<T>,
+  now: () => string = () => new Date().toISOString(),
+): Loadable<T> {
+  const fail = (message: string): Loadable<T> =>
+    prev.state === "ready" ? { ...prev, refreshFailed: true } : { state: "error", error: message };
+
+  if (outcome === null) return fail(SECTION_FAILURE.unreachable);
+  const body = outcome.body;
+  if (typeof body !== "object" || body === null) return fail(SECTION_FAILURE.unreadable);
+  const b = body as Record<string, unknown>;
+  if (!outcome.ok || b.ok === false || "error" in b) return fail(SECTION_FAILURE.failed);
+  return {
+    state: "ready",
+    data: body as T,
+    fetchedAt: typeof b.fetchedAt === "string" ? b.fetchedAt : now(),
+  };
+}
+
+/** "14:05" in the viewer's own time, or null when the timestamp is not a date. */
+export function formatAsOf(fetchedAt: string | undefined): string | null {
+  if (!fetchedAt) return null;
+  const d = new Date(fetchedAt);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+/**
+ * The oldest data among the sections that are showing old data after a failed
+ * refresh, as `{ asOf }` (asOf null = age unknown), or null when none is stale.
+ */
+export function staleness(sources: Loadable<unknown>[]): { asOf: string | null } | null {
+  const stale = sources.filter(
+    (s): s is Extract<Loadable<unknown>, { state: "ready" }> => s.state === "ready" && s.refreshFailed === true,
+  );
+  if (stale.length === 0) return null;
+  const dated = stale
+    .map((s) => s.fetchedAt)
+    .filter((f): f is string => typeof f === "string" && !Number.isNaN(new Date(f).getTime()))
+    .sort();
+  // Any stale source with an unknown age makes the age unknown.
+  if (dated.length < stale.length) return { asOf: null };
+  return { asOf: formatAsOf(dated[0]) };
+}
+
+/** What is known about the project records the charter's names are matched against. */
+export type ProjectLookup =
+  /** Still reading. Say "loading", not that the names were not found. */
+  | "loading"
+  /** The read failed: the names were not looked up. */
+  | "failed"
+  /** Fewer records were read than exist (or the total is unknown): a missing name proves nothing. */
+  | "partial"
+  /** Every project record was read: a name with no match has no record. */
+  | "complete";
+
+export function projectLookup(projects: Loadable<{ records: unknown[]; total: number | null }>): ProjectLookup {
+  if (projects.state === "loading") return "loading";
+  if (projects.state === "error") return "failed";
+  const { records, total } = projects.data;
+  return total !== null && total <= records.length ? "complete" : "partial";
+}
+
+/**
+ * Strategies in a status other than active or retired: all of them, minus the
+ * active ones, minus the retired ones. Null when any of the three is unknown or
+ * the arithmetic goes negative (the three counts disagree), because a guessed
+ * figure would read as a measurement.
+ */
+export function otherStrategyCount(
+  all: number | null,
+  active: number | null,
+  retired: number | null,
+): number | null {
+  if (all === null || active === null || retired === null) return null;
+  const other = all - active - retired;
+  return other >= 0 ? other : null;
+}
 
 /**
  * Tasks waiting on the operator: `awaiting_approval` plus `awaiting_input`,

@@ -28,7 +28,14 @@
  * without a network.
  */
 
-export const SPINE_SECTIONS = ["charter", "missions", "strategies", "retired", "projects"] as const;
+export const SPINE_SECTIONS = [
+  "charter",
+  "missions",
+  "strategies",
+  "retired",
+  "allstrategies",
+  "projects",
+] as const;
 export type SpineSection = (typeof SPINE_SECTIONS)[number];
 
 export function isSpineSection(value: string): value is SpineSection {
@@ -46,7 +53,12 @@ export const SPINE_READ_TIMEOUT_MS = 90_000;
 export const RETIRED_STRATEGY_STATUSES = ["demoted_to_plan", "superseded", "reference_artifact"];
 
 /** Cap on prose carried to the browser, so one runaway record cannot bloat a response. */
-const MAX_CONTENT_CHARS = 60_000;
+export const MAX_CONTENT_CHARS = 60_000;
+/** Cap on the short text fields (title, name, description) of one record. */
+export const MAX_FIELD_CHARS = 2_000;
+
+/** What the client is told when a read fails. The real error stays in the server log. */
+export const READ_FAILED_MESSAGE = "Read failed.";
 
 /** The `/entities/query` response, as far as the spine reads it. */
 export interface QueryResponse {
@@ -62,6 +74,8 @@ export interface SpineDeps {
   query(body: Record<string, unknown>): Promise<unknown>;
   now?(): number;
   ttlMs?: number;
+  /** Where the real error of a failed read goes. Defaults to `console.error`. */
+  log?(...args: unknown[]): void;
 }
 
 export type SectionResult<T> = ({ ok: true; fetchedAt: string } & T) | { ok: false; error: string };
@@ -98,15 +112,16 @@ function shape(entity: NonNullable<QueryResponse["entities"]>[number], withConte
   if (typeof entity.entity_id !== "string") return null;
   const s = entity.snapshot ?? {};
   const content = withContent ? text(s.content) : null;
+  const short = (value: unknown) => text(value)?.slice(0, MAX_FIELD_CHARS) ?? null;
   return {
     id: entity.entity_id,
-    name: text(entity.canonical_name),
-    title: text(s.title),
+    name: short(entity.canonical_name),
+    title: short(s.title),
     status: text(s.status),
     altitude: text(s.altitude),
     domain: text(s.domain),
     role: text(s.role),
-    description: text(s.description),
+    description: short(s.description),
     content: content ? content.slice(0, MAX_CONTENT_CHARS) : null,
   };
 }
@@ -153,6 +168,11 @@ export function queryFor(section: SpineSection): Record<string, unknown> {
         include_snapshots: false,
         limit: 1,
       };
+    case "allstrategies":
+      // Every strategy whatever its status, counted: with the active and retired
+      // counts it yields the strategies in any other status. No filter, so
+      // upstream runs a real aggregate rather than a clamped one.
+      return { entity_type: "strategy", include_snapshots: false, limit: 1 };
     case "projects":
       return { entity_type: "project", include_snapshots: true, limit: 200 };
   }
@@ -164,10 +184,10 @@ export function shapeSection(
   raw: unknown,
 ): RecordsSection | CountSection {
   const body = (raw ?? {}) as QueryResponse;
-  if (section === "retired") {
+  if (section === "retired" || section === "allstrategies") {
     const total = totalOf(body);
     // No total means we do not know. That is a failure of the read, not zero.
-    if (total === null) throw new Error("Neotoma did not report a total for retired strategies.");
+    if (total === null) throw new Error(`Neotoma did not report a total for ${section}.`);
     return { total };
   }
   if (!Array.isArray(body.entities)) {
@@ -218,9 +238,10 @@ export function createSpine(deps: SpineDeps) {
       cache.set(section, { at: now(), value });
       return value;
     } catch (err) {
-      // Never cached: the next request retries. The message is the proxy's own
-      // generic text, which never echoes the upstream body or the token.
-      return { ok: false, error: (err as Error).message || "Read failed." };
+      // Never cached: the next request retries. The client gets a fixed short
+      // message; the real error (which can name hosts or paths) stays in the log.
+      (deps.log ?? console.error)(`console section "${section}" read failed:`, err);
+      return { ok: false, error: READ_FAILED_MESSAGE };
     }
   }
 
