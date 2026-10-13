@@ -53,7 +53,7 @@ TEMPLATE_WITH_CANARIES = """<?xml version="1.0" encoding="UTF-8"?>
     <dict>
         <key>HOME</key>
         <string><HOME></string>
-        <key>EXAMPLE_BASE_URL</key>
+        <key>NEOTOMA_BASE_URL</key>
         <string>https://neotoma.example.test</string>
         <key>ATELES_PRIVATE_KEYS_DIR</key>
         <string><HOME>/private/keys</string>
@@ -85,7 +85,7 @@ def test_canary_values_in_the_template_never_reach_the_output():
     assert set(result.dropped_credential_keys) == set(CANARIES)
     parsed = plistlib.loads(result.content)
     assert parsed["EnvironmentVariables"]["HOME"] == "/Users/example"
-    assert parsed["EnvironmentVariables"]["EXAMPLE_BASE_URL"] == (
+    assert parsed["EnvironmentVariables"]["NEOTOMA_BASE_URL"] == (
         "https://neotoma.example.test"
     )
     assert parsed["EnvironmentVariables"]["ATELES_PRIVATE_KEYS_DIR"] == (
@@ -161,9 +161,11 @@ def test_stdout_mode_emits_the_clean_plist(tmp_path):
 @pytest.mark.parametrize(
     "name,value",
     [
+        ("APIS_HARNESS_PROVIDERS", "AbCdEf0123456789AbCdEf0123456789"),
+        ("APIS_OPERATOR_LOGIN", "eyJhbGciOiJIUzI1NiJ9.payload.signature"),
+        ("NEOTOMA_SANDBOX_URL", "0123456789abcdef0123456789abcdef0123"),
+        # Not declared at all: refused by the allowlist before any value check.
         ("SERVICE_ENDPOINT_ID", "AbCdEf0123456789AbCdEf0123456789"),
-        ("SOME_SETTING", "eyJhbGciOiJIUzI1NiJ9.payload.signature"),
-        ("WEBHOOK_TARGET", "0123456789abcdef0123456789abcdef0123"),
     ],
 )
 def test_opaque_value_under_an_innocent_name_is_refused(tmp_path, name, value):
@@ -200,9 +202,10 @@ def test_opaque_value_under_an_innocent_name_is_refused(tmp_path, name, value):
     ],
 )
 def test_ordinary_values_are_not_mistaken_for_secrets(value):
-    result = rdp.render(_template({"SOME_SETTING": value}), home="/h")
+    result = rdp.render(_template({"APIS_HARNESS_PROVIDERS": value}), home="/h")
     assert (
-        plistlib.loads(result.content)["EnvironmentVariables"]["SOME_SETTING"] == value
+        plistlib.loads(result.content)["EnvironmentVariables"]["APIS_HARNESS_PROVIDERS"]
+        == value
     )
 
 
@@ -526,22 +529,17 @@ def test_every_git_configuration_mechanism_is_refused_when_it_can_carry_authenti
         {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
         {"GIT_ASKPASS": "/usr/bin/false", "SSH_ASKPASS": "/usr/bin/false"},
         {"GIT_CONFIG_PARAMETERS": "'core.quotepath'='false'"},
+        {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.autocrlf", "GIT_CONFIG_VALUE_0": "false"},
     ],
-    ids=["null-pointers", "inert-programs", "benign-parameters"],
+    ids=["null-pointers", "inert-programs", "benign-parameters", "benign-group"],
 )
-def test_inert_git_configuration_is_kept(variables):
-    parsed = plistlib.loads(_render_environment(variables).content)
-    assert parsed["EnvironmentVariables"] == variables
-
-
-def test_git_configuration_without_authentication_is_kept():
-    variables = {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "core.autocrlf",
-        "GIT_CONFIG_VALUE_0": "false",
-    }
-    parsed = plistlib.loads(_render_environment(variables).content)
-    assert parsed["EnvironmentVariables"] == variables
+def test_even_inert_git_configuration_is_refused_because_it_is_not_declared(variables):
+    with pytest.raises(rdp.PlistRenderError) as excinfo:
+        _render_environment(variables)
+    for name in variables:
+        # A credential-named member (``..._KEY_0``) is dropped first; every
+        # other member is refused by name.
+        assert name in str(excinfo.value) or rdp.is_credential_env_name(name)
 
 
 @pytest.mark.parametrize(
@@ -572,7 +570,7 @@ def test_authentication_bearing_value_under_an_innocent_name_is_refused(tmp_path
 
 
 def test_paths_that_mention_credential_words_are_not_refused():
-    variables = {"CACHE_DIR_LIST": "/Users/example/token-cache:/Users/example/secrets-index"}
+    variables = {"PYTHONPATH": "/Users/example/token-cache:/Users/example/secrets-index"}
     parsed = plistlib.loads(_render_environment(variables).content)
     assert parsed["EnvironmentVariables"] == variables
 
@@ -591,3 +589,61 @@ def test_program_argument_carrying_authentication_is_refused(arguments):
     with pytest.raises(rdp.PlistRenderError) as excinfo:
         rdp.render(template, home="/h")
     assert _AUTH_MARKER not in str(excinfo.value)
+
+
+# ── The environment is an allowlist ──────────────────────────────────────────
+#
+# Only names declared in lib/environment_allowlist.py pass. Carriers of
+# authentication that no classifier was written for are refused simply because
+# they are not declared; the refusal names the key and never the value.
+
+_CARRIERS = {
+    "http_proxy": f"http://user:{_AUTH_MARKER}@proxy.example.test",
+    "https_proxy": f"http://user:{_AUTH_MARKER}@proxy.example.test",
+    "HTTPS_PROXY": f"http://user:{_AUTH_MARKER}@proxy.example.test",
+    "ALL_PROXY": f"socks5://user:{_AUTH_MARKER}@proxy.example.test",
+    "all_proxy": f"socks5://user:{_AUTH_MARKER}@proxy.example.test",
+    "GCM_HTTP_PROXY": f"http://user:{_AUTH_MARKER}@proxy.example.test",
+    "SSH_AUTH_SOCK": f"/synthetic/{_AUTH_MARKER}.sock",
+    "XDG_CONFIG_HOME": f"/synthetic/{_AUTH_MARKER}",
+    "KRB5CCNAME": f"FILE:/synthetic/{_AUTH_MARKER}",
+    "GIT_SSL_CERT": f"/synthetic/{_AUTH_MARKER}.pem",
+    "GIT_EXEC_PATH": f"/synthetic/{_AUTH_MARKER}",
+    "GIT_DIR": f"/synthetic/{_AUTH_MARKER}",
+    "BASH_ENV": f"/synthetic/{_AUTH_MARKER}",
+    "ENV": f"/synthetic/{_AUTH_MARKER}",
+    "ZDOTDIR": f"/synthetic/{_AUTH_MARKER}",
+    "NODE_OPTIONS": f"--require /synthetic/{_AUTH_MARKER}.js",
+    "ZZ_NEVER_DECLARED": _AUTH_MARKER,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_CARRIERS))
+def test_an_undeclared_name_is_refused_with_the_key_named_and_the_value_hidden(name, tmp_path):
+    with pytest.raises(rdp.PlistRenderError) as excinfo:
+        _render_environment({name: _CARRIERS[name]})
+    assert name in str(excinfo.value)
+    assert _AUTH_MARKER not in str(excinfo.value)
+    template = tmp_path / "t.plist"
+    template.write_text(
+        plistlib.dumps(
+            {"Label": "x", "EnvironmentVariables": {name: _CARRIERS[name]}}
+        ).decode("utf-8"),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.plist"
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "render_daemon_plist.py"), str(template), str(out)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert not out.exists()
+    assert name in result.stderr
+    assert _AUTH_MARKER not in result.stdout + result.stderr
+
+
+def test_credential_named_variables_are_still_dropped_not_refused():
+    result = _render_environment({"HOME": "/h", "EXAMPLE_SERVICE_TOKEN": _AUTH_MARKER})
+    assert result.dropped_credential_keys == ("EXAMPLE_SERVICE_TOKEN",)
+    assert _AUTH_MARKER.encode() not in result.content

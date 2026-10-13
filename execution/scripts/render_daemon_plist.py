@@ -17,14 +17,13 @@ install in the shape this module allows:
 * Credential-named ``EnvironmentVariables`` keys (see
   ``lib/credential_env_names.py``) are DROPPED, whatever their value, and
   reported by name only. The daemon fills them from the secrets store.
-* Every way git takes configuration or authentication from the environment
-  (the indexed ``GIT_CONFIG_*`` group, ``GIT_CONFIG_PARAMETERS``, configuration
-  file pointers, and the programs git runs for credentials; see
-  ``lib/credential_env_names.py``) is judged by the same mapping-level scrub
-  the test suite uses (``plan_env_scrub``). If that scrub would drop or
-  rewrite any of it, the render is a hard error: git configuration is never
-  silently half-rewritten in a job definition.
-* Any other ``EnvironmentVariables`` value that looks like key material (long,
+* Every other ``EnvironmentVariables`` name must be on the shared allowlist
+  (``lib/environment_allowlist.py``, the same list the test scrub uses). An
+  undeclared name is a hard error that names the key and never shows its
+  value. Git configuration, proxy settings and any other way of carrying
+  authentication through the environment are not declared there, so they are
+  refused without having to be recognised.
+* As a second layer, an allowed ``EnvironmentVariables`` value that looks like key material (long,
   opaque, not a path or URL) or carries authentication material (an
   authorization header, credentials inside a URL, a credential word in a
   non-path value; judged by ``text_looks_credential_bearing``) is a hard
@@ -64,10 +63,9 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.credential_env_names import (  # noqa: E402
     git_config_entry_is_sensitive,
     is_credential_env_name,
-    is_git_environment_name,
-    plan_env_scrub,
     text_looks_credential_bearing,
 )
+from lib.environment_allowlist import is_allowed_environment_name  # noqa: E402
 
 HOME_PLACEHOLDER = "<HOME>"
 
@@ -125,19 +123,6 @@ def _value_carries_authentication(value: str) -> bool:
     if not value or _PLACEHOLDER_RE.match(value) or _is_plain_path(value):
         return False
     return text_looks_credential_bearing(value)
-
-
-def _git_environment_refusal(environment: dict) -> list[str]:
-    """Git-configuration names the shared mapping-level scrub would drop or
-    rewrite. Each is a name whose value can carry authentication, so the
-    render refuses instead of writing it (or a renumbered copy of it)."""
-    as_text = {
-        key: value if isinstance(value, str) else str(value)
-        for key, value in environment.items()
-    }
-    remove, updates = plan_env_scrub(as_text)
-    touched = set(remove) | set(updates)
-    return sorted(name for name in touched if is_git_environment_name(name))
 
 
 def _argument_carries_authentication(arguments: list) -> int | None:
@@ -215,17 +200,20 @@ def render(template_text: str, *, home: str) -> RenderResult:
     if environment is not None:
         if not isinstance(environment, dict):
             raise PlistRenderError("EnvironmentVariables is not a dictionary")
-        git_names = _git_environment_refusal(environment)
-        if git_names:
-            raise PlistRenderError(
-                "EnvironmentVariables carries git configuration that can hold "
-                f"authentication ({', '.join(git_names)}); refusing to write it"
-            )
         for key in list(environment):
-            if is_credential_env_name(key):
+            if is_credential_env_name(str(key)):
                 dropped.append(key)
                 del environment[key]
-                continue
+        undeclared = sorted(
+            str(key) for key in environment if not is_allowed_environment_name(str(key))
+        )
+        if undeclared:
+            raise PlistRenderError(
+                "EnvironmentVariables names a variable that is not on the shared "
+                f"allowlist in lib/environment_allowlist.py ({', '.join(undeclared)}); "
+                "refusing to write it. Declare the name there if the daemon needs it."
+            )
+        for key in list(environment):
             value = environment[key]
             if isinstance(value, str) and _looks_like_opaque_secret(value):
                 raise PlistRenderError(
