@@ -18,7 +18,8 @@ own role set, and the only things the foundation fixes are the constraints on fi
 A fork may rename, merge, or split any of these roles, so long as those constraints hold.
 
 The table below is the table that stood in `docs/foundation/workflows.md` under "Roles named in this document"
-before that ruling, moved here unchanged in content. Which agent fills each role for a given declaration scope
+before that ruling, moved here unchanged in content. This file is a hand-kept reference copy and is descriptive: the `swarm_roster` and `workflow` declaration entities on the record
+govern, and where this file differs from them, they are right and this file is stale. Which agent fills each role for a given declaration scope
 is `swarm_roster` on the record, never this file; the agent definitions are in [`agents/`](agents/README.md).
 
 | Role | Claims |
@@ -40,9 +41,10 @@ is `swarm_roster` on the record, never this file; the agent definitions are in [
 
 - **Separation of duties:** `payer` and `verifier` are distinct roles that must resolve to distinct principals;
   every checkpoint's raiser and resolver are distinct, save the operator's marked self-resolution.
-- **A review step is signed by its own step owner:** the `ux`, `arch`, `pr_review`, `qa`, and `legal` step owners
-  sign their own steps; an automated account's approval is an observation, never a verdict.
-- **`operator_only`:** the operator-facing agent carries such work to the operator; the operator takes the action.
-- **Deterministic steps:** the lint runner runs a script and no model.
-- **Every slot resolves:** each role above must resolve through `swarm_roster` to an agent with a credential
-  before a declaration naming it is made.
+- **A review step is signed by its own step owner, or waived by the operator:** the `ux`, `arch`, `pr_review`, `qa`, and `legal` step owners
+  sign their own steps; an approval from a credential not bound to the step owner is an observation, never a verdict.
+- **`operator_only`:** the operator-facing agent carries such work, and every checkpoint awaiting the operator, to the operator; the operator takes the action.
+- **Deterministic steps:** the lint runner's runner invokes no model, and the lint runner is still an agent that resolves through `swarm_roster` like any other role; a blocking conclusion on its result names the mechanism and what it read.
+- **Every slot resolves:** each role above must resolve through `swarm_roster` to an agent that can be run,
+  or a declaration naming it raises an `unspawnable_assignee` checkpoint; the `pm` step owner (intake's step
+  owners) and the operator-facing agent must exist.

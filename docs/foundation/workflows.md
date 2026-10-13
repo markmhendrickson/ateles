@@ -140,17 +140,23 @@ Each is stated here without naming a role and is argued where it is cited.
 
 1. **Separation of duties.** Where the design requires two duties to be held by distinct principals, the roles
    an implementation defines for them must resolve to distinct principals, an agent counting as the principal
-   it is bound to (decision 48). The design requires it in two places: in the payment workflow, whoever
-   verifies and reconciles a payment is not whoever prepares and takes it (`#payment`,
-   `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`); and on every checkpoint, whoever raised it does
-   not resolve it, except the operator resolving a checkpoint the operator raised, which is marked
-   (`gates_and_workflows.md#the-checkpoint`, decision 47). Any further pair is policy data, the
+   it is bound to (decision 48). The design requires it in at least three places: in the payment workflow,
+   whoever verifies and reconciles a payment is not whoever prepares and takes it (`#payment`,
+   `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`); on every checkpoint, whoever raised it
+   does not resolve it, except the operator resolving a checkpoint the operator raised, which is marked
+   (`gates_and_workflows.md#the-checkpoint`, decision 47); and on every new or amended declaration, the
+   principal that approves it is not the one that proposed it
+   (`#who-approves-a-new-or-amended-declaration`). Any further pair is policy data, the
    `disjoint_roles[]` of an action class on the `action_policy`, and an absent value is the fail-closed one
    (`authority_model.md#structural-checks-quorum-and-separation-of-duties`, decision 50).
-2. **A review step is signed by its own step owner.** The verdict that closes a review step is written by the
-   principal that fills the slot the step declares. An automated credential's approval, a CI result, or the
-   fact that a remedy was routed to and carried out by another slot never stands in for it: routing a remedy
-   never transfers the conclusion (`adapters.md#no-external-event-advances-a-step-by-itself`;
+2. **A review step is signed by its own step owner, or waived by the operator.** The verdict that closes a
+   required step is written by the principal that fills the slot the step declares; the one other way it closes
+   is the operator's `waived` verdict, which is itself a verdict attributed to the operator principal
+   (`gates_and_workflows.md#declaration-batch-projection`, "A required step is closed only by a verdict, and no principal signs for another").
+   A CI result, an approval from a credential bound to no principal or to one other than the step owner, or the
+   fact that a remedy was routed to and carried out by another slot never stands in for it: the rule is about
+   identity, so a credential bound to the step owner does sign, and routing a remedy never transfers the
+   conclusion (`adapters.md#no-external-event-advances-a-step-by-itself`;
    `github.md#reviews-review-comments-and-threads`; `gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
 3. **An `operator_only` action is taken by the operator, and its step closes on the confirmation.** No agent
    takes such an action: it resolves to `NEVER` ahead of any policy. The task or step that carries it is carried
@@ -158,21 +164,27 @@ Each is stated here without naming a role and is argued where it is cited.
    closes on it, never on the checkpoint's resolution alone (`#operator-only`,
    `work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`,
    `gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`).
-   Every implementation therefore needs some slot that carries work to the operator.
-4. **A deterministic step needs no model.** A step whose work is a script and whose verdict is the script's
-   result, such as the lint steps of `#social-content` and `#outreach`, is filled by a runner that invokes no
-   model, and an implementation need not give it an agent. A blocking conclusion may rest on such a result
-   provided the verdict names the mechanism and what it read
+   Every implementation therefore needs some slot that carries work to the operator, and the same slot carries
+   every checkpoint awaiting the operator, not only `operator_only` work (`vocabulary.md#operator-facing-agent`).
+4. **A deterministic step is still filled by a principal.** A step whose work is a script and whose verdict is
+   the script's result, such as the lint steps of `#social-content` and `#outreach`, is filled by a principal
+   whose runner invokes no model. That principal is still an `agent` in the design's sense
+   (`vocabulary.md#agent`) and resolves through the roster like any slot (constraint 5). A blocking conclusion
+   may rest on the script's result provided the verdict names the mechanism and what it read
    (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
 5. **Every slot resolves, and an unresolved one holds.** Each role a declaration names resolves to exactly one
-   principal for the declaration scope, with a credential, at declaration and again at claim. A role that
-   resolves to no principal raises a checkpoint (`unresolvable_assignee` at declaration,
-   `unspawnable_assignee` at claim) and never falls through to any available agent
-   (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`, `data_model.md#concepts`'s `swarm_roster` row).
+   principal for the declaration scope, an agent that can be run, at declaration and again at claim. A role that
+   resolves to no principal, or to an agent with no runner, raises a checkpoint with reason
+   `unspawnable_assignee`, at declaration and again at claim, and never falls through to any available agent
+   (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; the declaration-time check is also the
+   `swarm_roster` row of `data_model.md#concepts`). The slot that fills intake's step owners must exist, as
+   must the slot constraint 3 requires, because intake is the one core workflow and no task enters without it
+   (`#scope`).
 
 **What this removes and what it keeps.** The previous list of named roles and what each claims is gone from this
 directory. `owner_role` and the roster stay, redefined as above; the examples stay in the reference workflows;
-the five constraints are the load the list was carrying, each of them already stated in the document cited.
+the five constraints are the load the list was carrying, each collected from the documents cited, which state
+the rule it rests on.
 The list itself is kept outside this directory, as the reference implementation's role set, because it is
 implementation state.
 
@@ -788,7 +800,8 @@ operator decides or acts, and record the outcome, so that operator-only work is 
 visible rather than a notification nobody owns.
 
 **Entry condition:** intake closed naming `operator-only`, or the task's declared action classes include
-`operator_only`. The operator-facing agent is the only principal eligible to claim it
+`operator_only`. Only the slot the implementation designates for operator-only work (example name:
+operator-facing agent) is eligible to claim it
 (`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`). The task is an ordinary
 task, not a checkpoint: it raises one only when an action inside it reaches the action gate, which holds
 an `operator_only` action with reason `gate_hold`; the checkpoint is what this workflow carries
