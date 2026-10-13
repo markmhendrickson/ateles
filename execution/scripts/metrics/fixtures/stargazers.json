@@ -1,0 +1,5 @@
+[{"starred_at":"2026-09-30T10:00:00Z","user":{"login":"a"}},
+ {"starred_at":"2026-10-01T10:00:00Z","user":{"login":"b"}},
+ {"starred_at":"2026-10-06T23:59:59Z","user":{"login":"c"}},
+ {"starred_at":"2026-10-12T00:00:00Z","user":{"login":"d"}},
+ {"user":{"login":"no-timestamp"}}]
