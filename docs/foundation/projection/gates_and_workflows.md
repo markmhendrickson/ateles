@@ -121,4 +121,4 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 
 ## [The builder of a change never signs its review](../gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review)
 
-- **GW-55** — (decision 143): an agent identity that built an artifact never signs a step declared `review` on it; `work`, `deterministic`, and `waived` are not refused *[M]*
+- **GW-55** — (decision 143): an agent that built an artifact never signs a step declared `review` on it; `work`, `deterministic`, and `waived` are not refused *[M]*

@@ -577,7 +577,7 @@ principal may also be a role the roster resolves, carried in `needed_input` beca
 [edge](#edge)'s target is a principal and never a role (`authority_model.md#approval`); a role that
 resolves to no principal raises a [checkpoint](#checkpoint) (reason `unspawnable_assignee`) rather than
 falling through to any available agent. A role is declared once and reused; it is not created per [batch](#batch) or
-per checkpoint. A role is a [**slot**](#slot): the design fixes no set of roles, each implementation defines its own and
+per checkpoint. A role names a [**slot**](#slot): the design fixes no set of roles, each implementation defines its own and
 fills each slot it uses, and the role names the reference [workflows](#workflow) carry are examples an implementation may
 rename, merge, or split, subject to the five constraints stated at
 [`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
@@ -597,11 +597,11 @@ states this for proposal rights: "standing to propose is a capability and not a 
 **Definition:** the position a [role](#role) names in a [step](#step) declaration's `owner_role`, filled when the
 roster seats one [principal](#principal) in it; the design requires the position to be filled and never fills it. The design
 fixes no set of slots: each implementation defines its own and is bound only by the constraints on filling them.
-**Swap test:** against [role](#role), "fills each role" reads as filling a name, "fills each slot" as filling a position, and the
-rule that turns on it is the second: a name is resolved, a position is seated and can be left unfilled (constraint 5 of the
-roles section holds a slot that resolves to nobody). Against [step owner](#step-owner), a step owner is the principal that
-fills the slot a step declares, so "the step owner is unseated" is false where "the slot is unseated" is true. Against
-[agent](#agent), an agent fills a slot and is not one.
+**Swap test:** against [role](#role), "fills each role" reads as filling a name and "fills each slot" as filling a
+position, and the rule that turns on it is the second: a name is resolved, a position is seated and can be left unfilled
+(constraint 5 of the roles section holds a slot that resolves to nobody). Against [step owner](#step-owner), the step owner
+is the role a step declares and the slot is the position that role stands for, so "the slot is unseated" is true where "the
+step owner is unseated" reads as the name being unseated. Against [agent](#agent), an agent fills a slot and is not one.
 **See:** [`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
 **Never:** —
 **Not for:** a fixed list of roles the design defines; an [agent](#agent) for a slot (the roster seats a principal in it, and the slot outlives whichever principal is seated).
@@ -1688,8 +1688,8 @@ principal where none is set (decision 50).
 [checkpoint](#checkpoint)'s raiser and resolver, it is read over the checkpoint's principal [edges](#edge), an
 [agent](#agent) counting as its bound [principal](#principal) (decisions 48 and 49), and the pairs a class requires are its
 `disjoint_roles[]` on the `action_policy` (decision 50). For the builder and review pair, which the design fixes, it is read over
-a [verdict](#verdict)'s signer and the [batch](#batch)'s [artifacts](#artifact) at the verdict write, on the agent's own
-identity and not its bound principal (decision 143, extending decision 49).
+a [verdict](#verdict)'s signer and the [batch](#batch)'s [artifacts](#artifact) at the verdict write, on the agent itself
+and not its bound principal (decision 143, extending decision 49).
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties),
 [`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review).
 **Never:** —

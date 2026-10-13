@@ -44,11 +44,11 @@ is `swarm_roster` on the record, never this file; the agent definitions are in [
   - `payer` and `verifier` are distinct roles that must resolve to distinct principals.
   - Every checkpoint's raiser and resolver are distinct, save the operator's marked self-resolution.
   - The swarm's approval of a declaration is never its proposer's.
-  - An agent identity never signs a review step on an artifact it built, whether the roster seats it in one slot or two.
-    The review steps include `ux`, `arch`, `pr_review`, `qa`, `legal`, the release workflow's `verify_deployed`, and
-    digestion's `verify`; the implementer, the steward, and the lint runner's steps are not review steps
+  - An agent never signs a review step on an artifact it built, whether the roster seats it in one slot or two.
+    The review steps include `ux`, `arch`, `pr_review`, `qa`, `legal`, and the release workflow's `verify_deployed`;
+    the `pm` step, the implementer, the steward, the lint runner's steps, and digestion's `verify` are not review steps
     ([`foundation/gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](foundation/gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review)).
-    The check is on the agent's own identity, so two agents acting for the one operator may review each other's work.
+    The check is on the agent itself, so two agents acting for the one operator may review each other's work.
 - **A review step is signed by its own step owner, or waived by the operator:** the `ux`, `arch`, `pr_review`, `qa`, and `legal` step owners
   sign their own steps, and the deployment verifier signs `verify_deployed`; an approval from a credential not bound to the step owner is an observation, never a verdict.
 - **`operator_only`:** the operator-facing agent carries such work, and every checkpoint awaiting the operator, to the operator; the operator takes the action.

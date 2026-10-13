@@ -125,8 +125,8 @@ is declared.
 ### A role is a slot an implementation fills
 
 No role is foundational: no implementation needs a particular one, and this document defines no fixed list
-of them (operator ruling, 2026-10-13, register decision 142). A step declaration's `owner_role` names a role
-and is a **slot**: each implementation defines its own role set, declares which roles it uses, and fills each
+of them (operator ruling, 2026-10-13, register decision 142). A step declaration's `owner_role` names a role,
+which stands for a **slot**: each implementation defines its own role set, declares which roles it uses, and fills each
 slot with a principal through its roster (`swarm_roster`, per declaration scope). The role names that appear in
 the step tables of the sections below (`pm`, `ux`, `arch`, `pr_review`, `qa`, `legal`, implementer,
 steward, copywriter, content author, lint runner, operator-facing agent, payer, verifier, researcher,
@@ -143,15 +143,15 @@ Each is stated here without naming a role and is argued where it is cited.
 
 1. **Separation of duties.** Where the design requires two duties to be held by distinct principals, the roles
    an implementation defines for them must resolve to distinct principals, an agent counting as the principal
-   it is bound to (decision 48), except in the fourth place below, which is checked on the agent's own
-   identity (decision 143). The design requires it in at least four places:
+   it is bound to (decision 48), except in the fourth place below, which is checked on the agent itself
+   (decision 143). The design requires it in at least four places:
    - in the payment workflow, whoever verifies and reconciles a payment is not whoever prepares and takes it
      (`#payment`, `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`);
    - on every checkpoint, whoever raised it does not resolve it, except the operator resolving a checkpoint the
      operator raised, which is marked (`gates_and_workflows.md#the-checkpoint`, decision 47);
    - on every new or amended declaration, the swarm's approval is never the proposer's
      (`#who-approves-a-new-or-amended-declaration`);
-   - on every artifact, the identity that built it never signs a review step on it
+   - on every artifact, the agent that built it never signs a review step on it
      (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`).
 
    Any further pair is policy data, the `disjoint_roles[]` of an action class on the `action_policy`, and an
@@ -600,7 +600,7 @@ workflow together, as one batch (`work_model.md#what-goes-through-a-workflow-is-
 the first as the second. `criteria` is separate from `release` so that the read of the criteria and the
 taking of the release are two verdicts, and a release taken against criteria nobody read is visible as a
 batch missing one. `verify_deployed` is declared `review` and has its own slot, distinct from `release`'s, so
-that an agent identity other than the one that took the release confirms the deployment
+that an agent other than the one that took the release confirms the deployment
 (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`); `criteria` and `release` are `work`.
 
 **Stages:** readiness (`criteria`); shipping (`release`, `verify_deployed`).
@@ -882,10 +882,10 @@ is the case the workflow exists for, and waiting for a session to "finish" would
 
 `verify` is required and separate from `digest` because a session's own account of itself is a claim and
 not evidence: the digest states what the session said it did, and only the system that would hold the
-effect can say whether it happened (principle 2). `verify` is declared `review`, because it judges the pull
-requests, messages and deployments the digested session built: where the analyst identity is the one that built
-them, its verdict is refused, so a self-report digest is verified by another identity
-(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). `file` creates tasks and completes none — digestion
+effect can say whether it happened (principle 2). `verify` is declared `work`: it reads a record and the
+systems that would hold the effects, and the batch produces no artifact for the builder-never-reviews rule to
+read (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). Whether a digest must be
+verified by an agent other than its author is a separate question that rule does not decide. `file` creates tasks and completes none — digestion
 recovers work by making it claimable again, which is the guarantee the lease gives the other three
 mechanisms, and it never marks the recovered work done on the strength of the session having attempted it
 (principle 10).

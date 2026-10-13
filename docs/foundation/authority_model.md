@@ -1429,16 +1429,17 @@ need a process to keep its count true where the edges need none (principle 11).
 **What would reopen it.** A structural check whose inputs are not on the checkpoint — one over principals
 who never resolved and were never awaited — which would first have to say what object it was a check on.
 
-**Extended by decision 143 (2026-10-13), to a pair read over the verdict.** The identity that built an artifact
+**Extended by decision 143 (2026-10-13), to a pair read over the verdict.** The agent that built an artifact
 never signs a review step on it (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). Its
 inputs are not on a checkpoint: they are the verdict's `SIGNED_BY` edge, the batch's `PRODUCES` edges, and the
 actors recorded on the artifact's observations. That is the condition the reopening clause above names, and
-decision 143 meets it once, deliberately, at the operator's ruling: it extends decision 49 from the checkpoint's
-principal edges to the verdict's signer and the batch's artifacts, naming the verdict as the object it checks.
-What survives of decision 49 is the ground it gives for refusing a second mechanism: the extension adds no vote
+decision 143 meets it once, deliberately, as a default applied by consistency
+(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`), not as a word of the operator's
+ruling: it extends decision 49 from the checkpoint's principal edges to the verdict's signer and the batch's
+artifacts, naming the verdict as the object it checks. What survives of decision 49 is the ground it gives for refusing a second mechanism: the extension adds no vote
 entity, no tally and no held state, and needs no process to keep it true (principle 11). It also departs from
 decision 48 for this pair alone: it reads the agent's own binding, the one that ends at the agent, and not the
-acts-as binding that ends at the operator, so two agents bound to one operator are two identities here
+acts-as binding that ends at the operator, so two agents bound to one operator are two distinct signers here
 (`#the-counting-rule-an-agent-counts-as-its-bound-principal`, decision 143). The pair is fixed by the design
 and is not an `action_policy` value.
 
