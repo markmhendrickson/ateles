@@ -31,6 +31,11 @@ at its reported reset without a hand edit of the headroom file.
     # ...and why dispatches ran above their policy tier (escalation signals):
     harness_usage.py tiers --since-hours 24 --reasons
 
+    # What dispatches spent, per provider / model / tier / work class, from the
+    # same ledger (tokens and cost only where the provider reported them; every
+    # sum says how many dispatches it covers and how many reported nothing):
+    harness_usage.py spend --since-hours 24 --by model   # alias: cost; also --by skill
+
 ``show`` also reports, per gated provider, the reading's age, the weekly
 ceiling, the pace line (ceiling x elapsed fraction of the week + burst), and
 whether frontier dispatch is allowed right now.  A reading older than
@@ -195,7 +200,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("show", help="print the headroom selection would use now")
     sub.add_parser(
         "refresh",
-        help="refresh Claude's usage reading from the CLI's own rate-limit report",
+        help=(
+            "refresh every configured provider's usage reading now (Claude from "
+            "its rate_limit_event, Codex from its app-server plan windows)"
+        ),
     )
 
     tiers = sub.add_parser(
@@ -218,7 +226,41 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    spend = sub.add_parser(
+        "spend",
+        aliases=["cost"],
+        help=(
+            "print what dispatches spent (tokens, cost) from the tier ledger's "
+            "usage rows; a field no provider reported stays null, never estimated"
+        ),
+    )
+    spend.add_argument(
+        "--since-hours", type=float, default=None,
+        help="only count dispatches from the last N hours (default: all)",
+    )
+    spend.add_argument(
+        "--by", choices=model_tiering.USAGE_GROUPS, default="provider",
+        help="group the totals by this ledger field (default: provider)",
+    )
+
     args = parser.parse_args(argv)
+    if args.command in ("spend", "cost"):
+        try:
+            report = model_tiering.usage_totals(
+                group_by=args.by, since_hours=args.since_hours
+            )
+        except model_tiering.LedgerReadError as exc:
+            # A ledger that cannot be read is not an empty ledger: say so on
+            # both streams (JSON stays parseable) and exit nonzero.
+            print(json.dumps(
+                {"error": {"kind": "ledger_unreadable", "path": str(exc.path),
+                           "cause": exc.cause}},
+                indent=2, sort_keys=True,
+            ))
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
     if args.command == "tiers":
         print(json.dumps(
             model_tiering.tier_counts(

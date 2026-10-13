@@ -51,6 +51,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -274,6 +275,11 @@ class GateDecision:
     # happens to be low. Callers must not let the two read the same: an
     # unscored task says so; a scored-low task keeps saying "low confidence".
     confidence_unscored: bool = False
+    # Who produced `confidence`, when a producer did: "" for a score the task
+    # already carried or a mechanical estimate, the producer's name for a score
+    # obtained ahead of the gate (apis producer_confidence, ateles#1142). Lets a
+    # producer score be told apart from an estimate on the record.
+    confidence_source: str = ""
 
     @property
     def may_auto_execute(self) -> bool:
@@ -450,6 +456,31 @@ def _fetch_entity_observations(entity_id: str, *, limit: int = 100) -> list[dict
     except Exception as exc:  # noqa: BLE001
         log.warning("[gating] could not fetch observations for %s: %s", entity_id, exc)
         return []
+
+
+def fetch_entity_observations_strict(entity_id: str, *, limit: int = 100) -> list[dict] | None:
+    """Observations of an entity, or ``None`` when the read FAILED.
+
+    ``_fetch_entity_observations`` folds a failed read into an empty list, which
+    callers that decide "is this authority valid" cannot tell from "there are no
+    observations".  A recovery decision must not treat an outage as evidence.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        return None
+    try:
+        resp = httpx.get(
+            f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            params={"limit": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        observations = data.get("observations") if isinstance(data, dict) else None
+        return observations if isinstance(observations, list) else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[gating] could not read observations for %s: %s", entity_id, exc)
+        return None
 
 
 def fetch_entity_user_id(entity_id: str) -> str | None:
@@ -714,7 +745,10 @@ def build_checkpoint_authorization_envelope(
 
 
 def read_authenticated_checkpoint_authorization(
-    checkpoint_id: str, checkpoint_record: dict
+    checkpoint_id: str,
+    checkpoint_record: dict,
+    *,
+    observations: list[dict] | None = None,
 ) -> dict | None:
     """Read an authorization envelope only from its AAuth-backed observation.
 
@@ -743,7 +777,11 @@ def read_authenticated_checkpoint_authorization(
     observation = next(
         (
             item
-            for item in _fetch_entity_observations(checkpoint_id)
+            for item in (
+                observations
+                if observations is not None
+                else _fetch_entity_observations(checkpoint_id)
+            )
             if item.get("id") == observation_id
         ),
         None,
@@ -855,6 +893,42 @@ def read_authenticated_checkpoint_resolution(
     }
 
 
+def _server_error_detail(exc: Exception) -> str:
+    """The server's own error code and message, when it sent one.
+
+    ``httpx`` renders an HTTP failure as status line plus URL only, which is why
+    643 failed checkpoint writes read identically in the log for a week.  Only
+    the two named fields are surfaced, never the body wholesale.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    # The code and message sit at the root of the server's own envelope, but a
+    # proxy or a wrapped error can nest them under ``error`` or ``details``.
+    # Read the first place that names either one.
+    containers = [payload]
+    for key in ("error", "details"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    code = message = ""
+    for container in containers:
+        code = str(container.get("error_code") or container.get("code") or "")[:80]
+        message = str(container.get("message") or "")[:300]
+        if code or message:
+            break
+    else:
+        if isinstance(payload.get("error"), str):
+            message = payload["error"][:300]
+    return f" [server: {code} {message}]" if code or message else ""
+
+
 def write_checkpoint_brief(
     *,
     task_entity_id: str,
@@ -897,7 +971,7 @@ def write_checkpoint_brief(
                 "checkpoint_name": "PLAN",
                 "blocking": True,
                 "task_entity_id": task_entity_id,
-                "title": f"PLAN checkpoint: {title}",
+                "title": f"PLAN checkpoint: {title} [{task_entity_id}]",
                 "plan_summary": plan_summary,
                 "confidence": decision.confidence,
                 "confidence_threshold": decision.threshold,
@@ -911,14 +985,16 @@ def write_checkpoint_brief(
                 "handler": handler,
             }
         ],
-        "relationships": [
-            {
-                "relationship_type": "REFERS_TO",
-                "source_index": 0,
-                "target_entity_id": task_entity_id,
-            }
-        ],
         "idempotency_key": f"checkpoint-{handler}-{task_entity_id}-plan",
+    }
+    if decision.confidence_source:
+        # Only when a producer scored it: an estimate carries no source, and a
+        # field written as "" on every brief would be noise on the whole queue.
+        body["entities"][0]["confidence_source"] = decision.confidence_source
+    task_edge = {
+        "relationship_type": "REFERS_TO",
+        "source_index": 0,
+        "target_entity_id": task_entity_id,
     }
     normalized_action = str(action_type or "").strip().lower()
     authorization_expected = task_record is not None and policy is not None
@@ -949,8 +1025,50 @@ def write_checkpoint_brief(
         )
         body["entities"][0]["body"] = encoded_authorization
         expected_authorization = json.loads(encoded_authorization)
+    if not authorization_expected:
+        # Legacy bearer-only write: nothing capability-gates it, so the edge
+        # rides in the same request as before.
+        body["relationships"] = [task_edge]
+    # A signed write is judged against the producer's AAuth grant, which covers
+    # entity types and no edges, and the server refuses the whole store when a
+    # relationship in it is outside the grant (every signed checkpoint failed
+    # this way from 2026-09-28).  The signed write therefore carries no
+    # relationship, and none is written by any other path: the checkpoint binds
+    # its task through the signed ``task_entity_id`` field and the envelope, and
+    # the relationship write stays within the producer's grant per security
+    # review.  Only the legacy bearer-only path below still carries its edge, as
+    # before.
     if idempotency_context:
         body["idempotency_key"] += f"-{idempotency_context}"
+    # Neotoma resolves a checkpoint_brief's identity from its title.  A title
+    # unique per task is not enough: a changed hold of the same task would
+    # resolve to the SAME entity, so a replacement would be the checkpoint it is
+    # meant to replace.  A digest of the hold's content makes the identity
+    # per-hold: an exact retry keeps it (same entity), a changed hold gets a
+    # new one (a distinct checkpoint), and earlier holds are preserved.
+    _entity = body["entities"][0]
+    # The replacement context (which brief a fresh checkpoint replaces) is part
+    # of the identity: a replacement whose content is otherwise identical to the
+    # brief it replaces must still be a different entity, or retiring the prior
+    # brief would retire the replacement.
+    _hold_identity = hashlib.sha256(
+        _canonical_json(
+            {
+                "entity": {k: v for k, v in _entity.items() if k != "title"},
+                "context": idempotency_context or "",
+            }
+        ).encode()
+    ).hexdigest()[:12]
+    _entity["title"] = f"{_entity['title']} #{_hold_identity}"
+    # Neotoma refuses an idempotency key reused with different content (HTTP
+    # 400 ERR_IDEMPOTENCY_MISMATCH).  A task held a second time carries a new
+    # revision and reason, so a content-blind key made every re-hold a 400
+    # (97 of them in the 2026-09 log, each on a task that had already been
+    # checkpointed once).  Binding the key to the content keeps an exact retry
+    # an idempotent replay while a changed hold becomes a new checkpoint.
+    body["idempotency_key"] += "-" + hashlib.sha256(
+        _canonical_json(body["entities"]).encode()
+    ).hexdigest()[:16]
     try:
         headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
         encoded_request_body: bytes | None = None
@@ -1001,7 +1119,155 @@ def write_checkpoint_brief(
                 return None
         return entity_id
     except Exception as exc:  # noqa: BLE001
-        log.warning(f"[gating] failed to persist checkpoint_brief: {exc}")
+        log.warning(
+            f"[gating] failed to persist checkpoint_brief: {exc}"
+            f"{_server_error_detail(exc)}"
+        )
+        return None
+
+
+# ── Producer-score assessment record ──────────────────────────────────────────
+#
+# A confidence score obtained from a producer (apis producer_confidence) can
+# authorise an auto-execution. That judgment must be explainable from Neotoma
+# alone, so before the worker is dispatched the dispatcher writes it as a
+# `harness_event` (an existing, declared type) with the event type below, linked
+# REFERS_TO the task, then reads it back. If it cannot be written AND proven,
+# the caller must not auto-execute.
+#
+# The human-readable `output_summary` and `input_summary` are declared fields on
+# harness_event and are what the read-back proves; the dedicated fields beside
+# them (`confidence`, `confidence_source`, `confidence_threshold`, `action_type`,
+# `policy_entity_id`, `requested_tier`, `scorer_model`, `scorer_run_id`,
+# `rationale`, `gate_action`) are additive and are dropped server-side until the
+# harness_event schema declares them. Declaring them there is the one piece of
+# this that lives outside this repository.
+
+PRODUCER_ASSESSMENT_EVENT_TYPE = "producer_confidence_assessment"
+
+
+def producer_assessment_summary(
+    *,
+    value: float,
+    threshold: float,
+    source: str,
+    action_type: str,
+    policy_id: str,
+    tier: str,
+    model: str,
+    run_id: str,
+    capped_from: float | None = None,
+) -> str:
+    """The proven form of the assessment: exact (repr) values, one line.
+
+    ``capped_from`` is the scorer's own value when a rubric floor lowered it, so
+    the record shows both the number the scorer gave and the one that was used.
+    """
+    return (
+        f"producer_confidence={value!r} threshold={threshold!r} source={source} "
+        f"action_type={action_type} policy={policy_id or 'fallback'} "
+        f"tier={tier} model={model or 'unrecorded'} run={run_id}"
+        + (f" capped_from={capped_from!r}" if capped_from is not None else "")
+    )[:500]
+
+
+def write_producer_assessment(
+    *,
+    task_entity_id: str,
+    value: float,
+    threshold: float,
+    source: str,
+    action_type: str,
+    policy_id: str,
+    tier: str,
+    model: str,
+    run_id: str,
+    rationale: str,
+    gate_action: str,
+    handler: str,
+    capped_from: float | None = None,
+) -> str | None:
+    """Record a producer score durably and prove it by read-back.
+
+    Returns the harness_event entity id ONLY when the stored record reads back
+    with the exact summary written (which carries the unrounded value) and the
+    task link. Any other outcome returns None, and the caller must treat the
+    score as not recorded.
+    """
+    if not NEOTOMA_BEARER_TOKEN or not task_entity_id:
+        log.warning("[gating] producer assessment not persisted: no token or task id")
+        return None
+    event_at = datetime.now(timezone.utc).isoformat()
+    summary = producer_assessment_summary(
+        value=value, threshold=threshold, source=source, action_type=action_type,
+        policy_id=policy_id, tier=tier, model=model, run_id=run_id,
+        capped_from=capped_from,
+    )
+    input_summary = f"rationale: {rationale or 'none supplied'}"[:500]
+    entity = {
+        "entity_type": "harness_event",
+        "event_type": PRODUCER_ASSESSMENT_EVENT_TYPE,
+        "event_at": event_at,
+        "tool_name": f"{handler}:producer_confidence",
+        "agent_sub": f"{handler}@ateles-swarm",
+        "success": "true",
+        "task_entity_id": task_entity_id,
+        "input_summary": input_summary,
+        "output_summary": summary,
+        # Additive; dropped until the schema declares them.
+        "confidence": value,
+        "confidence_source": source,
+        "confidence_threshold": threshold,
+        "action_type": action_type,
+        "policy_entity_id": policy_id,
+        "requested_tier": tier,
+        "scorer_model": model,
+        "scorer_run_id": run_id,
+        "rationale": rationale,
+        "gate_action": gate_action,
+    }
+    body = {
+        "idempotency_key": f"producer-assessment-{task_entity_id}-{run_id}",
+        "observation_source": "workflow_state",
+        "entities": [entity],
+        "relationships": [
+            {
+                "relationship_type": "REFERS_TO",
+                "source_index": 0,
+                "target_entity_id": task_entity_id,
+            }
+        ],
+    }
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL.rstrip('/')}/store",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        ents = resp.json().get("entities") or []
+        event_id = ents[0].get("entity_id") if ents else None
+        if not event_id:
+            return None
+        readback = _fetch_entity(event_id)
+        snap = (readback or {}).get("snapshot") or {}
+        if isinstance(snap.get("snapshot"), dict):
+            snap = snap["snapshot"]
+        if (
+            snap.get("output_summary") != summary
+            or snap.get("input_summary") != input_summary
+            or snap.get("task_entity_id") != task_entity_id
+            or snap.get("event_type") != PRODUCER_ASSESSMENT_EVENT_TYPE
+        ):
+            log.warning(
+                "[gating] producer assessment %s did not read back as written",
+                event_id,
+            )
+            return None
+        return event_id
+    except Exception as exc:  # noqa: BLE001 — unproven means not recorded
+        log.warning(f"[gating] producer assessment not persisted: {exc}")
         return None
 
 
@@ -1274,6 +1540,120 @@ def _transition_checkpoint_status(
             exc,
         )
         return False
+
+
+CHECKPOINT_SUPERSEDED = "superseded"
+
+
+def supersede_checkpoint(
+    checkpoint_entity_id: str, *, handler: str, reason: str
+) -> bool:
+    """Retire a pending checkpoint that a proven replacement has taken over.
+
+    ``superseded`` is neither an approved nor a rejected state, so it releases
+    nothing and drops the brief out of the ``awaiting_operator`` queue.
+    """
+    return _transition_checkpoint_status(
+        checkpoint_entity_id,
+        handler=handler,
+        reason=reason,
+        status=CHECKPOINT_SUPERSEDED,
+        idempotency_label="superseded",
+    )
+
+
+# Neotoma refuses a ``cursor`` beside ``snapshot_filters`` (ERR_CURSOR_COMBINATION,
+# HTTP 400) and an ``offset`` past 2000 (ERR_OFFSET_TOO_DEEP).  It still hands
+# back a ``next_cursor`` on a full filtered page, which the next request cannot
+# use, so a filtered listing is walked by ``offset`` and ``next_cursor`` is
+# ignored.  The order is by entity id, so the walk is stable.
+QUERY_PAGE_SIZE = 100
+MAX_QUERY_OFFSET = 2000
+
+
+def query_entities(
+    entity_type: str,
+    *,
+    snapshot_filters: dict,
+    offset: int = 0,
+    limit: int | None = None,
+) -> dict | None:
+    """One page of a filtered ``POST /entities/query``; ``None`` when it failed.
+
+    A failed read must stay distinguishable from an empty page: callers that
+    decide whether a task already has a checkpoint would otherwise read an
+    outage as "no checkpoint" and file a duplicate.  A page the server would
+    refuse as too deep is a failed read, never a silently short listing.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        return None
+    if offset > MAX_QUERY_OFFSET:
+        log.warning(
+            f"[gating] entity query for {entity_type} needs offset {offset}, past "
+            f"the {MAX_QUERY_OFFSET} the server accepts — listing is incomplete"
+        )
+        return None
+    body: dict = {
+        "entity_type": entity_type,
+        "snapshot_filters": snapshot_filters,
+        "limit": limit or QUERY_PAGE_SIZE,
+        "include_snapshots": True,
+    }
+    if offset > 0:
+        body["offset"] = offset
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL.rstrip('/')}/entities/query",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            f"[gating] entity query for {entity_type} failed: {exc}"
+            f"{_server_error_detail(exc)}"
+        )
+        return None
+
+
+def query_all_entities(
+    entity_type: str, *, snapshot_filters: dict, limit: int | None = None
+) -> list[dict] | None:
+    """Every entity matching ``snapshot_filters``, or ``None`` if any page failed.
+
+    Pages by offset until a page comes back short; a partial list is never
+    returned for a failed page.  ``limit`` stops early once that many are held.
+    """
+    page_size = QUERY_PAGE_SIZE
+    found: list[dict] = []
+    offset = 0
+    while True:
+        page = query_entities(
+            entity_type,
+            snapshot_filters=snapshot_filters,
+            offset=offset,
+            limit=page_size,
+        )
+        if page is None:
+            return None
+        entities = [e for e in page.get("entities") or [] if isinstance(e, dict)]
+        found.extend(entities)
+        if limit is not None and len(found) >= limit:
+            return found[:limit]
+        if len(entities) < page_size:
+            return found
+        offset += len(entities)
+
+
+def checkpoints_for_task(task_entity_id: str) -> list[dict] | None:
+    """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read."""
+    return query_all_entities(
+        "checkpoint_brief",
+        snapshot_filters={"task_entity_id": {"op": "eq", "value": task_entity_id}},
+    )
 
 
 def close_checkpoint_without_release(
