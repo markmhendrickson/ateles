@@ -478,6 +478,62 @@ def test_git_configuration_that_can_carry_authentication_is_refused(variables):
     assert "GIT_CONFIG" in str(excinfo.value)
 
 
+_GIT_MECHANISM_CASES = {
+    "parameters-custom-header": {
+        "GIT_CONFIG_PARAMETERS": f"'http.extraHeader'='X-Custom: {_AUTH_MARKER[:9]}'"
+    },
+    "parameters-old-quoting": {
+        "GIT_CONFIG_PARAMETERS": f"'http.extraHeader=X-Custom: {_AUTH_MARKER[:9]}'"
+    },
+    "parameters-include": {"GIT_CONFIG_PARAMETERS": "'include.path'='/synthetic/cfg'"},
+    "parameters-credential-helper": {
+        "GIT_CONFIG_PARAMETERS": "'credential.helper'='/synthetic/helper'"
+    },
+    "parameters-unparseable": {"GIT_CONFIG_PARAMETERS": "http.extraHeader=x"},
+    "group-ssh-command": {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.sshCommand",
+        "GIT_CONFIG_VALUE_0": "ssh -i /synthetic/key",
+    },
+    "group-include-if": {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "includeIf.gitdir:/synthetic/.path",
+        "GIT_CONFIG_VALUE_0": "/synthetic/cfg",
+    },
+    "global-pointer": {"GIT_CONFIG_GLOBAL": "/synthetic/gitconfig"},
+    "system-pointer": {"GIT_CONFIG_SYSTEM": "/synthetic/gitconfig"},
+    "legacy-pointer": {"GIT_CONFIG": "/synthetic/gitconfig"},
+    "askpass-program": {"GIT_ASKPASS": "/synthetic/askpass"},
+    "ssh-command": {"GIT_SSH_COMMAND": "ssh -i /synthetic/key"},
+    "proxy-command": {"GIT_PROXY_COMMAND": "/synthetic/proxy"},
+}
+
+
+@pytest.mark.parametrize(
+    "variables", list(_GIT_MECHANISM_CASES.values()), ids=list(_GIT_MECHANISM_CASES)
+)
+def test_every_git_configuration_mechanism_is_refused_when_it_can_carry_authentication(
+    variables,
+):
+    with pytest.raises(rdp.PlistRenderError) as excinfo:
+        _render_environment(variables)
+    assert _AUTH_MARKER[:9] not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "variables",
+    [
+        {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
+        {"GIT_ASKPASS": "/usr/bin/false", "SSH_ASKPASS": "/usr/bin/false"},
+        {"GIT_CONFIG_PARAMETERS": "'core.quotepath'='false'"},
+    ],
+    ids=["null-pointers", "inert-programs", "benign-parameters"],
+)
+def test_inert_git_configuration_is_kept(variables):
+    parsed = plistlib.loads(_render_environment(variables).content)
+    assert parsed["EnvironmentVariables"] == variables
+
+
 def test_git_configuration_without_authentication_is_kept():
     variables = {
         "GIT_CONFIG_COUNT": "1",

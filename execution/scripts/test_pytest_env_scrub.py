@@ -442,3 +442,134 @@ def test_collection_that_runs_git_survives_injected_git_config():
         cwd=str(_REPO_ROOT),
     )
     assert result.returncode == 0, result.stdout[-400:] + result.stderr[-400:]
+
+
+# ── Every mechanism git takes configuration through is judged the same way -------
+#
+# Git reads configuration and authentication from the environment through four
+# mechanisms: the indexed group, GIT_CONFIG_PARAMETERS, configuration-file
+# pointers, and the programs it runs for credentials. Each sensitive entry kind
+# below is tried through each mechanism that can carry it. Synthetic values only.
+
+from lib import credential_env_names as cen  # noqa: E402
+
+_CLASS_ENTRIES = [
+    *_SENSITIVE_ENTRIES,
+    ("http.extraHeader", f"X-Custom: {_GIT_CANARY[:12]}"),
+    ("http.https://example.test/.extraHeader", f"X-Custom: {_GIT_CANARY[:12]}"),
+    ("include.path", "/synthetic/included-config"),
+    ("includeIf.gitdir:/synthetic/.path", "/synthetic/included-config"),
+    ("core.sshCommand", f"ssh -o SendEnv={_GIT_CANARY[:12]}"),
+    ("core.askPass", "/synthetic/askpass-helper"),
+    ("core.gitProxy", "/synthetic/proxy-helper"),
+    ("credential.username", "synthetic-user"),
+    ("credential.https://example.test.helper", "/synthetic/helper"),
+    ("http.cookieFile", "/synthetic/cookies"),
+    ("http.sslCert", "/synthetic/client.pem"),
+    ("sendemail.smtpPass", _GIT_CANARY[:12]),
+    ("http.proxy", f"http://user:{_GIT_CANARY[:12]}@proxy.example.test:8080"),
+]
+
+
+def _new_form(entries) -> str:
+    return " ".join(
+        "'" + k.replace("'", "'\\''") + "'='" + v.replace("'", "'\\''") + "'" for k, v in entries
+    )
+
+
+def _old_form(entries) -> str:
+    return " ".join("'" + f"{k}={v}".replace("'", "'\\''") + "'" for k, v in entries)
+
+
+@pytest.mark.parametrize("form", [_new_form, _old_form], ids=["new-quoting", "old-quoting"])
+@pytest.mark.parametrize("entry", _CLASS_ENTRIES, ids=lambda e: e[0][:30])
+def test_sensitive_entries_in_git_config_parameters_are_removed_and_git_keeps_working(
+    entry, form
+):
+    safe = ("core.quotePath", "false")
+    environ = _git_env({"GIT_CONFIG_PARAMETERS": form([safe, entry])})
+    assert _git(["config", "--get", entry[0]], environ).returncode == 0  # git reads it
+    root_conftest.scrub_credential_env(environ)
+    assert entry[1] not in environ.get("GIT_CONFIG_PARAMETERS", "")
+    assert _git(["config", "--get", entry[0]], environ).returncode == 1
+    got = _git(["config", "--get", safe[0]], environ)
+    assert got.returncode == 0 and got.stdout.strip() == safe[1]
+
+
+@pytest.mark.parametrize("entry", _CLASS_ENTRIES, ids=lambda e: e[0][:30])
+def test_sensitive_entries_in_the_indexed_group_are_removed(entry):
+    environ = _git_env(_git_group([_SAFE_ENTRIES[0], entry]))
+    root_conftest.scrub_credential_env(environ)
+    assert entry[1] not in " ".join(environ.values())
+    assert environ["GIT_CONFIG_COUNT"] == "1"
+    assert _git(["rev-parse", "--is-inside-work-tree"], environ).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["'unterminated", "core.quotepath=false", "'a.b'x'c'", "'a.b'='c'trailing"],
+)
+def test_git_config_parameters_that_do_not_parse_are_removed(text):
+    environ = {"GIT_CONFIG_PARAMETERS": text}
+    root_conftest.scrub_credential_env(environ)
+    assert "GIT_CONFIG_PARAMETERS" not in environ
+
+
+def test_benign_git_config_parameters_in_both_forms_are_kept_unchanged():
+    for text in ("'core.quotepath'='false'", "'core.quotepath=false'", "'c.d'= 'e.f'"):
+        environ = {"GIT_CONFIG_PARAMETERS": text}
+        root_conftest.scrub_credential_env(environ)
+        assert environ["GIT_CONFIG_PARAMETERS"] == text
+
+
+def test_parameters_as_git_itself_exports_them_are_parsed():
+    environ = _git_env({})
+    probe = subprocess.run(
+        [
+            "git", "-c", "core.quotePath=false", "-c", "http.extraHeader=X-Custom: v",
+            "-c", "alias.p=!printf %s \"$GIT_CONFIG_PARAMETERS\"", "p",
+        ],
+        capture_output=True, text=True, env=environ, cwd=str(_REPO_ROOT),
+    )  # fmt: skip
+    entries = cen.parse_git_config_parameters(probe.stdout)
+    assert entries is not None
+    assert ("http.extraheader", "X-Custom: v") in [(k.lower(), v) for k, v in entries]
+    remove, updates = cen.plan_env_scrub({"GIT_CONFIG_PARAMETERS": probe.stdout})
+    assert "X-Custom" not in updates.get("GIT_CONFIG_PARAMETERS", "")
+
+
+_GIT_POINTER_AND_PROGRAM_NAMES = [
+    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("name", _GIT_POINTER_AND_PROGRAM_NAMES)
+@pytest.mark.parametrize(
+    "value,removed",
+    [
+        ("/synthetic/somewhere", True),
+        ("ssh -i /synthetic/key -o User=x", True),
+        ("", False),
+        ("/dev/null", False),
+        ("/usr/bin/false", False),
+    ],
+)
+def test_configuration_pointers_and_credential_programs_are_removed_unless_inert(
+    name, value, removed
+):
+    environ = {name: value}
+    root_conftest.scrub_credential_env(environ)
+    assert (name not in environ) is removed
+
+
+def test_the_enumerated_git_mechanisms_are_the_ones_the_scrub_judges():
+    expected = {
+        "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+        "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+    }  # fmt: skip
+    for name in expected:
+        assert cen.is_git_environment_name(name), name
+    for name in ("GIT_CONFIG_NOSYSTEM", "GIT_DIR", "GIT_AUTHOR_NAME"):
+        assert not cen.is_git_environment_name(name), name

@@ -17,13 +17,13 @@ install in the shape this module allows:
 * Credential-named ``EnvironmentVariables`` keys (see
   ``lib/credential_env_names.py``) are DROPPED, whatever their value, and
   reported by name only. The daemon fills them from the secrets store.
-* Git configuration carried in the environment (the ``GIT_CONFIG_COUNT`` /
-  ``GIT_CONFIG_KEY_<n>`` / ``GIT_CONFIG_VALUE_<n>`` group and
-  ``GIT_CONFIG_PARAMETERS``) is judged as a unit by the same mapping-level
-  scrub the test suite uses (``plan_env_scrub``). If that scrub would drop or
-  renumber any of it, the entry can carry authentication and the render is a
-  hard error: git configuration is never silently half-rewritten in a job
-  definition.
+* Every way git takes configuration or authentication from the environment
+  (the indexed ``GIT_CONFIG_*`` group, ``GIT_CONFIG_PARAMETERS``, configuration
+  file pointers, and the programs git runs for credentials; see
+  ``lib/credential_env_names.py``) is judged by the same mapping-level scrub
+  the test suite uses (``plan_env_scrub``). If that scrub would drop or
+  rewrite any of it, the render is a hard error: git configuration is never
+  silently half-rewritten in a job definition.
 * Any other ``EnvironmentVariables`` value that looks like key material (long,
   opaque, not a path or URL) or carries authentication material (an
   authorization header, credentials inside a URL, a credential word in a
@@ -62,10 +62,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.credential_env_names import (  # noqa: E402
-    GIT_CONFIG_PARAMETERS_NAME,
     git_config_entry_is_sensitive,
     is_credential_env_name,
-    is_git_config_group_name,
+    is_git_environment_name,
     plan_env_scrub,
     text_looks_credential_bearing,
 )
@@ -138,11 +137,7 @@ def _git_environment_refusal(environment: dict) -> list[str]:
     }
     remove, updates = plan_env_scrub(as_text)
     touched = set(remove) | set(updates)
-    return sorted(
-        name
-        for name in touched
-        if is_git_config_group_name(name) or name == GIT_CONFIG_PARAMETERS_NAME
-    )
+    return sorted(name for name in touched if is_git_environment_name(name))
 
 
 def _argument_carries_authentication(arguments: list) -> int | None:
