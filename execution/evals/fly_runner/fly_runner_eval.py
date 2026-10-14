@@ -59,12 +59,14 @@ def load_scenarios() -> list[dict]:
 
 
 class FakeFly:
-    def __init__(self, wait_mode: str):
+    def __init__(self, wait_mode: str, *, start_lost: bool = False):
         self.wait_mode = wait_mode
+        self.start_lost = start_lost
         self.requests: list[httpx.Request] = []
         self.machines: dict[str, dict] = {}
         self.created: list[str] = []
         self.deleted: list[str] = []
+        self.sticky: set[str] = set()  # delete acknowledged, machine keeps running
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -79,6 +81,9 @@ class FakeFly:
         parts = rest.split("/")
         mid = parts[2]
         if request.method == "GET" and parts[3:] == ["wait"]:
+            if self.machines.get(mid, {}).get("login"):
+                state = self.machines[mid]["state"]
+                return httpx.Response(200 if state == "stopped" else 408, json={"state": state})
             if self.wait_mode == "disconnect":
                 raise httpx.ConnectError("eval: connection dropped while waiting")
             if self.wait_mode == "timeout":
@@ -89,13 +94,25 @@ class FakeFly:
             if mid in self.machines:
                 return httpx.Response(200, json=self.machines[mid])
             return httpx.Response(404, json={"error": "not found"})
+        if request.method == "POST" and len(parts) == 3:  # update a login machine
+            body = json.loads(request.content)
+            self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})[
+                "config"
+            ] = body["config"]
+            return httpx.Response(200, json={"id": mid, "instance_id": f"i-{mid}"})
+        if request.method == "POST" and parts[3:] == ["start"]:
+            self.machines[mid]["state"] = "started"
+            if self.start_lost:
+                return httpx.Response(500, json={"error": "eval: start response lost"})
+            return httpx.Response(200, json={"ok": True})
         if request.method == "POST" and parts[3:] == ["stop"]:
             if mid in self.machines:
                 self.machines[mid]["state"] = "stopped"
             return httpx.Response(200, json={"ok": True})
         if request.method == "DELETE":
             self.deleted.append(mid)
-            self.machines.pop(mid, None)
+            if mid not in self.sticky:
+                self.machines.pop(mid, None)
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(500, json={"error": "eval: unhandled"})
 
@@ -124,6 +141,11 @@ class Trace:
     minted: list[str]
     revoked: list[str]
     in_flight_after: int
+    spend_usd: float = 0.0
+    seeded_cost_usd: float = 0.0
+    seed_entries_left: list[str] = field(default_factory=list)
+    login_state: str = ""
+    login_lock_held: bool = False
     everything_sent: str = field(repr=False, default="")
 
 
@@ -179,8 +201,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         "GITHUB_TOKEN": SHARED_PAT,
         "CLAUDE_CODE_OAUTH_TOKEN": CLAUDE_OAUTH,
         "EVAL_LOCAL_SCOPED_GH": LOCAL_SCOPED_GH,
+        "APIS_FLY_CODEX_MACHINE_ID": "m-codex-login",
         **scenario.get("settings", {}),
     }
+    if scenario.get("provider") == "codex":
+        settings["APIS_HARNESS_PROVIDERS"] = "claude,codex"
     for name, value in settings.items():
         monkeypatch.setenv(name, value)
     if scenario["identity"] == "key":
@@ -203,6 +228,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     monkeypatch.setattr(dispatch_role, "ATELES_REPO", tmp_path)
     monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
     monkeypatch.setattr(skill_runner, "CLAUDE_BIN", cli)
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", cli)
     monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: agent_def)
     monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: agent_def)
     monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
@@ -211,7 +237,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     harness_router.reset_state()
 
     # ── The Fly edge ─────────────────────────────────────────────────────────
-    fake = FakeFly(scenario["fly"]["wait"])
+    fake = FakeFly(scenario["fly"]["wait"], start_lost=scenario["fly"].get("start") == "lost")
+    fake.machines["m-codex-login"] = {"id": "m-codex-login", "state": "stopped", "login": True,
+                                      "config": {"mounts": []}}  # fmt: skip
     config = fly_runner.FlyConfig.from_env()
     minted: list[str] = []
     revoked: list[str] = []
@@ -242,7 +270,23 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         read_result=read_result,
         clock=clock,
     )
-    executor._last_reap = float("inf")
+    # A dispatcher restart: reservations left by a collector that is gone.
+    seeded_cost = 0.0
+    seed_keys: list[str] = []
+    for seed in scenario.get("seed", []):
+        mid = seed["machine"]
+        started = clock.now - seed["age"]
+        executor.ledger.reserve(config, run_id=f"seed-{mid}", max_run_seconds=seed["window"],
+                                now=started)  # fmt: skip
+        executor.ledger.bind(f"seed-{mid}", mid, login=False)
+        seeded_cost += min(seed["age"], seed["window"]) * config.rate_per_second_usd
+        seed_keys.append(mid)
+        if seed["state"] in ("listed", "sticky"):
+            fake.machines[mid] = {"id": mid, "state": "started"}
+        if seed["state"] == "sticky":
+            fake.sticky.add(mid)
+    # The reaper runs on a launch only when one is due; seeded scenarios are.
+    executor._last_reap = float("-inf") if seed_keys else float("inf")
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     fly_runner._LOGIN_LOCKS.clear()
 
@@ -251,7 +295,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         exit_code = dispatch_role.main(
             ["--role", ROLE, "--task", "Check the PR's gate inheritance.", "--provider",
-             "claude", "--json", *scenario["args"]]
+             scenario.get("provider", "claude"), "--json", *scenario["args"]]
         )  # fmt: skip
     stdout_text = out.getvalue()
     try:
@@ -267,10 +311,15 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         local_cli_ran=marker.exists(),
         fly_requests=len(fake.requests),
         machines_created=len(fake.created),
-        machines_remaining=sorted(fake.machines),
+        machines_remaining=sorted(m for m, d in fake.machines.items() if not d.get("login")),
         minted=minted,
         revoked=revoked,
-        in_flight_after=len(executor.ledger.snapshot()["in_flight"]),
+        in_flight_after=len(executor.ledger.snapshot(clock.now)["in_flight"]),
+        spend_usd=float(executor.ledger.snapshot(clock.now)["spend_usd"]),
+        seeded_cost_usd=seeded_cost,
+        seed_entries_left=[k for k in seed_keys if executor.ledger.entry(k) is not None],
+        login_state=str(fake.machines.get("m-codex-login", {}).get("state", "")),
+        login_lock_held=fly_runner._login_lock("codex").locked(),
         everything_sent=sent,
     )
 
@@ -308,6 +357,28 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append(f"{trace.in_flight_after} ledger slots still held")
     if e.get("cooled_until") and not env.get("cooled_until"):
         problems.append("no cooled_until on a deferred dispatch")
+    if "output_truncated" in e:
+        flagged = bool(env.get("output_truncated"))
+        marked = str(env.get("stdout", "")).startswith("[fly runner: output truncated")
+        if flagged != e["output_truncated"] or marked != e["output_truncated"]:
+            problems.append(f"output_truncated flag={flagged} marker={marked}, "
+                            f"expected {e['output_truncated']}")  # fmt: skip
+    if "in_flight_at_least" in e and trace.in_flight_after < e["in_flight_at_least"]:
+        problems.append(f"{trace.in_flight_after} ledger slots held, expected a kept slot")
+    if e.get("seed_settled") is True:
+        if trace.seed_entries_left:
+            problems.append(f"seeded reservations not settled: {trace.seed_entries_left}")
+        if trace.spend_usd + 1e-12 < trace.seeded_cost_usd:
+            problems.append(f"spend ${trace.spend_usd:.6f} < incurred ${trace.seeded_cost_usd:.6f}")
+    if e.get("seed_settled") is False:
+        if not trace.seed_entries_left:
+            problems.append("an unconfirmed seeded machine's reservation was released")
+        if trace.spend_usd > 0:
+            problems.append("an unconfirmed seeded machine was charged as if settled")
+    if "login_state" in e and trace.login_state != e["login_state"]:
+        problems.append(f"login machine is {trace.login_state}, expected {e['login_state']}")
+    if e.get("login_lock_free") and trace.login_lock_held:
+        problems.append("the login lock is still held")
     # Always: no shared credential ever reaches Fly or the caller's output.
     for label, value in (("shared PAT", SHARED_PAT), ("shared bearer", SHARED_BEARER),
                          ("deploy token", FLY_TOKEN)):  # fmt: skip

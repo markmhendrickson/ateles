@@ -1064,6 +1064,7 @@ def main(argv: list[str] | None = None) -> int:
             "stdout": result.stdout,
             "stderr": result.stderr,
             **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
+            **({"output_truncated": True} if getattr(result, "output_truncated", False) else {}),
         }
     )
     if not args.json and result.stdout:

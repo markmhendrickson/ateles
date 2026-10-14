@@ -48,6 +48,10 @@ class FakeFly:
         self.create_status = 201
         self.listed: list[dict] = []
         self.next_id = 0
+        self.start_lost = False  # the start takes effect, the response is a 500
+        self.create_lost = False  # the create takes effect, the response is a 500
+        self.stop_effective = True  # a stop request actually stops the machine
+        self.sticky_delete = False  # a delete is acknowledged but nothing happens
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -61,16 +65,22 @@ class FakeFly:
             self.next_id += 1
             mid = f"m{self.next_id}"
             self.machines[mid] = {"id": mid, "state": "started", **json.loads(request.content)}
+            if self.create_lost:
+                return httpx.Response(500, json={"error": "response lost"})
             return httpx.Response(201, json={"id": mid, "instance_id": f"i{self.next_id}"})
         if method == "GET" and rest == "/machines":
-            return httpx.Response(200, json=self.listed)
+            return httpx.Response(200, json=self.listed or list(self.machines.values()))
         parts = rest.split("/")  # ['', 'machines', id, ...]
         mid = parts[2]
         if method == "GET" and len(parts) == 4 and parts[3] == "wait":
+            if not self.stop_effective and self.machines.get(mid, {}).get("state") == "started":
+                return httpx.Response(408, json={"error": "still running"})  # never stops
             if self.wait_status != 200:
                 return httpx.Response(self.wait_status, json={"error": "timeout"})
             if mid in self.machines and not self.machines[mid].get("login"):
                 del self.machines[mid]  # auto_destroy
+            elif mid in self.machines:
+                self.machines[mid]["state"] = "stopped"  # run_job exited
             return httpx.Response(200, json={"ok": True})
         if method == "GET" and len(parts) == 3:
             if mid not in self.machines:
@@ -80,10 +90,19 @@ class FakeFly:
             body = json.loads(request.content)
             self.machines.setdefault(mid, {"id": mid, "login": True})["config"] = body["config"]
             return httpx.Response(200, json={"id": mid, "instance_id": "i-login"})
-        if method == "POST" and parts[3:] in (["start"], ["stop"]):
+        if method == "POST" and parts[3:] == ["start"]:
+            if mid in self.machines:
+                self.machines[mid]["state"] = "started"
+            if self.start_lost:
+                return httpx.Response(500, json={"error": "response lost"})
+            return httpx.Response(200, json={"ok": True})
+        if method == "POST" and parts[3:] == ["stop"]:
+            if mid in self.machines and self.stop_effective:
+                self.machines[mid]["state"] = "stopped"
             return httpx.Response(200, json={"ok": True})
         if method == "DELETE":
-            self.machines.pop(mid, None)
+            if not self.sticky_delete:
+                self.machines.pop(mid, None)
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(500, json={"error": f"unhandled {method} {rest}"})
 
@@ -219,11 +238,7 @@ def test_per_job_machine_config_and_credential_set(fly_env, caplog):
     )
     job = _job()
 
-    async def go():
-        handle = await executor.launch(job)
-        return handle, await executor.collect(handle)
-
-    handle, (rc, out, err) = asyncio.run(go())
+    rc, out, err = asyncio.run(executor.run(job))
     assert (rc, out) == (0, b"GATE_INHERITANCE: clear\n")
 
     (create,) = fake.calls("POST", "/machines")
@@ -294,14 +309,19 @@ def test_the_job_token_is_revoked_on_every_exit_path(fly_env, outcome):
     executor, _, revoked = make_executor(fake, record=record, clock=clock)
     job = _job()
 
+    real_wait = executor.client.wait
+
+    async def advancing_wait(machine_id, **k):
+        if k.get("instance_id") is None and k.get("timeout_s") == 30:
+            return await real_wait(machine_id, **k)  # the stop confirmation
+        clock.now += 120
+        return "timeout"
+
+    if outcome == "timeout":
+        executor.client.wait = advancing_wait
+
     async def go():
-        handle = await executor.launch(job)
-        if outcome == "timeout":
-            async def advancing_wait(*a, **k):
-                clock.now += 120
-                return "timeout"
-            executor.client.wait = advancing_wait
-        return await executor.collect(handle)
+        return await executor.run(job)
 
     if outcome == "timeout":
         with pytest.raises(asyncio.TimeoutError):
@@ -325,7 +345,7 @@ def test_launch_failure_revokes_and_leaves_nothing_in_flight(fly_env):
     fake.create_status = 503
     executor, _, revoked = make_executor(fake, record=None)
     with pytest.raises(fly_runner.FlyLaunchError):
-        asyncio.run(executor.launch(_job()))
+        asyncio.run(executor.run(_job()))
     assert revoked == [MINTED]
     assert executor.ledger.snapshot()["in_flight"] == {}
 
@@ -338,7 +358,7 @@ def test_mint_failure_refuses_fly_and_creates_nothing(fly_env):
 
     executor, _, revoked = make_executor(fake, mint=_fail)
     with pytest.raises(fly_runner.FlyIneligible, match="GitHub App"):
-        asyncio.run(executor.launch(_job()))
+        asyncio.run(executor.run(_job()))
     assert fake.requests == []
     assert revoked == []
 
@@ -425,7 +445,7 @@ def test_claude_without_setup_token_is_ineligible(fly_env, monkeypatch):
 def test_budget_refusal_carries_cooled_until_next_month(fly_env):
     executor, _, revoked = make_executor(FakeFly(), budget_usd=0.0001)
     with pytest.raises(fly_runner.FlyRefusal) as exc:
-        asyncio.run(executor.launch(_job()))
+        asyncio.run(executor.run(_job()))
     assert "budget" in str(exc.value)
     assert exc.value.cooled_until
     assert revoked == [MINTED]
@@ -480,13 +500,14 @@ def test_reaper_destroys_strays_but_not_login_or_in_flight(fly_env):
     executor.ledger.reserve(executor.config, run_id="live", max_run_seconds=600, now=clock.now)
     executor.ledger.bind("live", "m-live", login=False)
     iso = "2027-01-15T08:00:00Z"
-    fake.listed = [
+    for machine in (
         {"id": "m-stray", "state": "started", "created_at": iso},
-        {"id": "m-login", "state": "stopped", "created_at": iso},
+        {"id": "m-login", "state": "stopped", "created_at": iso, "login": True},
         {"id": "m-live", "state": "started", "created_at": iso},
         {"id": "m-unbound", "state": "started", "created_at": iso,
          "config": {"metadata": {"ateles_run_id": "pending-run"}}},
-    ]  # fmt: skip
+    ):  # fmt: skip
+        fake.machines[machine["id"]] = machine
     executor.ledger.reserve(executor.config, run_id="pending-run", max_run_seconds=600,
                             now=clock.now)  # fmt: skip
     clock.now = fly_runner._parse_ts(iso) + 10
@@ -515,12 +536,15 @@ def test_codex_login_machine_is_updated_started_and_scrubbed(fly_env, monkeypatc
     for name in ("OPENAI_API_KEY", "CODEX_API_KEY"):
         assert name not in job.secrets
 
-    async def go():
-        handle = await executor.launch(job)
-        assert fly_runner._login_lock("codex").locked()
-        return await executor.collect(handle)
+    held = []
 
-    assert asyncio.run(go())[0] == 0
+    async def read_and_check(run_id):
+        held.append(fly_runner._login_lock("codex").locked())
+        return {"run_id": run_id, "exit_code": 0, "stdout": "done"}
+
+    executor._read_result = read_and_check
+    assert asyncio.run(executor.run(job))[0] == 0
+    assert held == [True]  # one job at a time while it ran
     assert not fake.calls("POST", "/machines")  # no new machine
     updates = [json.loads(r.content) for r in fake.requests
                if r.method == "POST" and r.url.path.endswith("/machines/m-codex")]  # fmt: skip
@@ -549,7 +573,7 @@ def test_login_queue_wait_limit_returns_cooled_until(fly_env, monkeypatch):
 
     async def go():
         await fly_runner._login_lock("cursor").acquire()
-        await executor.launch(job)
+        await executor.run(job)
 
     with pytest.raises(fly_runner.FlyRefusal) as exc:
         asyncio.run(go())
@@ -678,7 +702,7 @@ def test_seam_launch_failure_falls_back_or_fails(fly_env, seam, monkeypatch):
                       github_token="t-local", include_github_contract=True)  # fmt: skip
         forced = _once(runner="fly", repository="owner/repo", include_github_contract=True)
     assert opted.ok and len(spawned) == 1  # logged, counted local fallback
-    assert not forced.ok and forced.error.startswith("claude launch failed: fly:")
+    assert not forced.ok and forced.error.startswith("fly runner refused: Fly launch failed")
 
 
 # ── dispatch_role --runner ────────────────────────────────────────────────────
@@ -713,26 +737,43 @@ def test_dispatch_role_runner_flag_reaches_run_skill(monkeypatch, tmp_path):
     assert rc != 0
 
 
-# ── Review round 1: lifecycle ownership on every exit path ───────────────────
+# ── Lifecycle ownership on every exit path (review rounds 1 and 2) ───────────
 
 
 def _disconnect(*a, **k):
     raise httpx.ConnectError("injected disconnect")
 
 
+def _async(fn):
+    async def wrapper(*a, **k):
+        return fn(*a, **k)
+
+    return wrapper
+
+
+def _codex_job():
+    return fly_runner.build_job(
+        provider="codex", role="lanius", cmd=["/x/codex", "exec", "-"], stdin=b"t",
+        timeout=60, repository="owner/repo", github_requested=True, mcp_config_path=None,
+    )  # fmt: skip
+
+
+def _codex_fake(monkeypatch) -> FakeFly:
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    fake = FakeFly()
+    fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
+                                "config": {"mounts": []}}  # fmt: skip
+    return fake
+
+
 def test_wait_disconnect_destroys_per_job_machine_before_release(fly_env):
     fake = FakeFly()
     executor, _, revoked = make_executor(fake, record={"exit_code": 0, "stdout": "x"})
-
-    async def go():
-        handle = await executor.launch(_job())
-        assert executor.ledger.entry(handle.machine_id) is not None
-        executor.client.wait = _async(_disconnect)
-        return await executor.collect(handle)
-
-    rc, out, err = asyncio.run(go())
+    executor.client.wait = _async(_disconnect)
+    rc, out, err = asyncio.run(executor.run(_job()))
     assert rc == 1 and b"error while waiting" in err  # a failed result, not a raise
     assert fake.calls("POST", "/stop") and fake.calls("DELETE")
+    assert fake.machines == {}
     # Released only because destruction was confirmed (GET -> 404).
     assert executor.ledger.snapshot()["in_flight"] == {}
     assert revoked == [MINTED]
@@ -740,35 +781,30 @@ def test_wait_disconnect_destroys_per_job_machine_before_release(fly_env):
 
 def test_unconfirmed_termination_keeps_the_slot_for_the_reaper(fly_env):
     fake = FakeFly()
-    executor, _, revoked = make_executor(fake, record=None)
+    clock = Clock()
+    executor, _, revoked = make_executor(fake, record=None, clock=clock)
     real_destroy = executor.client.destroy
 
     async def failing_destroy(mid):
         raise fly_runner.FlyApiError(500, "injected destroy failure")
 
-    async def go():
-        handle = await executor.launch(_job())
-        executor.client.wait = _async(_disconnect)
-        executor.client.destroy = failing_destroy
-        try:
-            await executor.collect(handle)
-        except httpx.ConnectError:
-            pass
-        return handle
-
-    handle = asyncio.run(go())
-    entry = executor.ledger.entry(handle.machine_id)
+    executor.client.wait = _async(_disconnect)
+    executor.client.destroy = failing_destroy
+    asyncio.run(executor.run(_job()))
+    (mid,) = fake.machines
+    entry = executor.ledger.entry(mid)
     assert entry is not None and entry["unconfirmed"] is True
     assert revoked == [MINTED]  # the token is revoked regardless
-    # The slot still counts against concurrency and the budget.
-    snap = executor.ledger.snapshot()
-    assert handle.machine_id in snap["in_flight"]
+    assert executor.ledger.snapshot(clock.now)["spend_usd"] == 0.0  # not settled yet
 
-    # The reaper, once the API answers, destroys it, confirms, and releases.
+    # The reaper, once the API answers, destroys it, confirms, charges, releases.
     executor.client.destroy = real_destroy
-    reaped = asyncio.run(executor.reap())
-    assert handle.machine_id in reaped
-    assert executor.ledger.entry(handle.machine_id) is None
+    clock.now += 30
+    assert mid in asyncio.run(executor.reap())
+    assert executor.ledger.entry(mid) is None
+    assert executor.ledger.snapshot(clock.now)["spend_usd"] == pytest.approx(
+        30 * executor.config.rate_per_second_usd
+    )
 
 
 def test_cancellation_still_terminates_before_release(fly_env):
@@ -776,49 +812,31 @@ def test_cancellation_still_terminates_before_release(fly_env):
     executor, _, revoked = make_executor(fake, record=None)
 
     async def go():
-        handle = await executor.launch(_job())
         started = asyncio.Event()
 
-        async def hanging_wait(*a, **k):
+        async def hanging_wait(machine_id, **k):
             started.set()
             await asyncio.Event().wait()
 
         executor.client.wait = hanging_wait
-        task = asyncio.create_task(executor.collect(handle))
+        task = asyncio.create_task(executor.run(_job()))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(go())
-    assert fake.calls("DELETE")
+    assert fake.calls("DELETE") and fake.machines == {}
     assert executor.ledger.snapshot()["in_flight"] == {}
     assert revoked == [MINTED]
 
 
 def test_login_machine_disconnect_stops_and_unconfirmed_blocks_reuse(fly_env, monkeypatch):
-    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
-    fake = FakeFly()
-    fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
-                                "config": {"mounts": []}}  # fmt: skip
+    fake = _codex_fake(monkeypatch)
+    fake.stop_effective = False  # the stop is never confirmed
     executor, _, revoked = make_executor(fake, record=None)
-
-    def codex_job():
-        return fly_runner.build_job(
-            provider="codex", role="lanius", cmd=["/x/codex", "exec", "-"], stdin=b"t",
-            timeout=60, repository="owner/repo", github_requested=True, mcp_config_path=None,
-        )  # fmt: skip
-
-    async def first():
-        handle = await executor.launch(codex_job())
-        fake.machines["m-codex"]["state"] = "started"
-        executor.client.wait = _async(_disconnect)  # the stop is never confirmed either
-        try:
-            await executor.collect(handle)
-        except httpx.ConnectError:
-            pass
-
-    asyncio.run(first())
+    executor.client.wait = _async(_disconnect)
+    asyncio.run(executor.run(_codex_job()))
     assert fake.calls("POST", "/stop")  # a stop was attempted
     entry = executor.ledger.entry("m-codex")
     assert entry is not None and entry["unconfirmed"] is True
@@ -828,21 +846,286 @@ def test_login_machine_disconnect_stops_and_unconfirmed_blocks_reuse(fly_env, mo
     # The next job may not start on it while the stop is unconfirmed.
     starts_before = len(fake.calls("POST", "/start"))
     with pytest.raises(fly_runner.FlyLaunchError, match="not confirmed stopped"):
-        asyncio.run(executor.launch(codex_job()))
+        asyncio.run(executor.run(_codex_job()))
     assert len(fake.calls("POST", "/start")) == starts_before
+    assert revoked == [MINTED, MINTED]  # the refused job's token too
 
-    # Once the machine is confirmed stopped, the next launch reconciles and runs.
-    fake.machines["m-codex"]["state"] = "stopped"
-    handle = asyncio.run(executor.launch(codex_job()))
-    assert handle.machine_id == "m-codex"
-    assert executor.ledger.entry("m-codex").get("unconfirmed") is None
+    # Once the machine stops, the next launch settles the old entry and runs.
+    fake.stop_effective = True
+    executor.client.wait = FakeFlyWaitOk(executor)
+    executor._read_result = _async(lambda run_id: {"run_id": run_id, "exit_code": 0})
+    assert asyncio.run(executor.run(_codex_job()))[0] == 0
+    assert executor.ledger.snapshot()["in_flight"] == {}
 
 
-def _async(fn):
-    async def wrapper(*a, **k):
-        return fn(*a, **k)
+class FakeFlyWaitOk:
+    """Restore the client's real wait after a test replaced it."""
 
-    return wrapper
+    def __init__(self, executor):
+        self._real = fly_runner.FlyMachinesClient.wait.__get__(executor.client)
+
+    async def __call__(self, *a, **k):
+        return await self._real(*a, **k)
+
+
+@pytest.mark.parametrize("stop_effective", [True, False])
+def test_login_start_response_lost_keeps_ownership_until_stopped(
+    fly_env, monkeypatch, stop_effective
+):
+    fake = _codex_fake(monkeypatch)
+    fake.start_lost = True  # the machine starts; the response says 500
+    fake.stop_effective = stop_effective
+    executor, _, revoked = make_executor(fake, record=None)
+    with pytest.raises(fly_runner.FlyLaunchError):
+        asyncio.run(executor.run(_codex_job()))
+    assert fake.calls("POST", "/stop")  # the uncertain start is reconciled
+    assert revoked == [MINTED]
+    assert not fly_runner._login_lock("codex").locked()
+    entry = executor.ledger.entry("m-codex")
+    if stop_effective:
+        assert fake.machines["m-codex"]["state"] == "stopped"
+        assert entry is None  # settled only after the stop was confirmed
+        assert fake.machines["m-codex"]["config"]["files"] == []  # job files cleared
+    else:
+        assert fake.machines["m-codex"]["state"] == "started"
+        assert entry is not None and entry["unconfirmed"] is True
+        fake.start_lost = False
+        with pytest.raises(fly_runner.FlyLaunchError, match="not confirmed stopped"):
+            asyncio.run(executor.run(_codex_job()))  # no reuse while unconfirmed
+
+
+def test_create_response_lost_destroys_the_machine_found_by_run_id(fly_env):
+    fake = FakeFly()
+    fake.create_lost = True  # the machine exists; the response says 500
+    executor, _, revoked = make_executor(fake, record=None)
+    with pytest.raises(fly_runner.FlyLaunchError):
+        asyncio.run(executor.run(_job()))
+    assert fake.calls("DELETE")
+    assert fake.machines == {}
+    assert executor.ledger.snapshot()["in_flight"] == {}
+    assert revoked == [MINTED]
+
+
+def test_create_response_lost_and_unlisted_keeps_the_pending_slot(fly_env):
+    fake = FakeFly()
+    fake.create_lost = True
+    executor, _, _ = make_executor(fake, record=None)
+
+    async def no_list():
+        raise httpx.ConnectError("injected list failure")
+
+    executor.client.list = no_list
+    with pytest.raises(fly_runner.FlyLaunchError):
+        asyncio.run(executor.run(_job()))
+    (key,) = executor.ledger.snapshot()["in_flight"]
+    assert key.startswith("pending:")
+    assert executor.ledger.entry(key)["unconfirmed"] is True
+
+
+def test_cancellation_during_login_start_settles_the_machine(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, _, revoked = make_executor(fake, record=None)
+
+    async def go():
+        entered = asyncio.Event()
+
+        async def hanging_start(machine_id):
+            fake.machines[machine_id]["state"] = "started"
+            entered.set()
+            await asyncio.Event().wait()
+
+        executor.client.start = hanging_start
+        task = asyncio.create_task(executor.run(_codex_job()))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert fake.machines["m-codex"]["state"] == "stopped"
+    assert executor.ledger.snapshot()["in_flight"] == {}
+    assert not fly_runner._login_lock("codex").locked()
+    assert revoked == [MINTED]
+
+
+# ── Recovery: one settlement path, cost charged exactly once ─────────────────
+
+
+def _seed_bound(executor, clock, machine_id="m-old", run_id="old-run", max_run=600):
+    executor.ledger.reserve(executor.config, run_id=run_id, max_run_seconds=max_run,
+                            now=clock.now)  # fmt: skip
+    executor.ledger.bind(run_id, machine_id, login=False)
+
+
+@pytest.mark.parametrize("listed", [True, False])
+def test_reaper_settles_an_overdue_reservation_and_charges_it(fly_env, listed):
+    """A dispatcher restart: the collector is gone and the reservation is
+    overdue. Whether its machine is still listed or already gone, the reaper
+    confirms termination, charges the capped runtime once, and releases."""
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    _seed_bound(executor, clock)
+    if listed:
+        fake.machines["m-old"] = {"id": "m-old", "state": "started"}
+    clock.now += 5000  # well past the 600 s window
+    assert "m-old" in asyncio.run(executor.reap())
+    assert fake.machines == {}
+    snap = executor.ledger.snapshot(clock.now)
+    assert snap["in_flight"] == {}
+    assert snap["spend_usd"] == pytest.approx(600 * executor.config.rate_per_second_usd)
+    # Exactly once: reaping again charges nothing more.
+    asyncio.run(executor.reap())
+    assert executor.ledger.snapshot(clock.now)["spend_usd"] == pytest.approx(snap["spend_usd"])
+
+
+def test_reaper_keeps_the_slot_when_a_delete_ack_is_not_confirmed(fly_env):
+    fake = FakeFly()
+    fake.sticky_delete = True  # delete acknowledged, machine still started
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock, max_concurrent=1)
+    _seed_bound(executor, clock)
+    fake.machines["m-old"] = {"id": "m-old", "state": "started"}
+    clock.now += 5000
+    assert asyncio.run(executor.reap()) == []
+    entry = executor.ledger.entry("m-old")
+    assert entry is not None and entry["unconfirmed"] is True
+    assert executor.ledger.snapshot(clock.now)["spend_usd"] == 0.0
+    # Its slot still counts: the next job is refused on concurrency.
+    with pytest.raises(fly_runner.FlyRefusal, match="concurrency"):
+        executor.ledger.reserve(executor.config, run_id="next", max_run_seconds=60,
+                                now=clock.now)  # fmt: skip
+    # Once the delete takes effect, the reaper settles and admission reopens.
+    fake.sticky_delete = False
+    assert "m-old" in asyncio.run(executor.reap())
+    executor.ledger.reserve(executor.config, run_id="next", max_run_seconds=60, now=clock.now)
+
+
+def test_reaped_spend_counts_toward_admission(fly_env):
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    _seed_bound(executor, clock, max_run=1920)
+    one = 1920 * executor.config.rate_per_second_usd
+    data = executor.ledger._load()
+    executor.ledger._roll(data, clock.now)
+    data["spend_usd"] = 20.0 - one - one / 2
+    executor.ledger._save(data)
+    clock.now += 5000
+    asyncio.run(executor.reap())
+    with pytest.raises(fly_runner.FlyRefusal, match="budget"):
+        executor.ledger.reserve(executor.config, run_id="n", max_run_seconds=1920,
+                                now=clock.now)  # fmt: skip
+
+
+def test_settle_is_idempotent(fly_env, tmp_path):
+    config = fly_runner.FlyConfig.from_env()
+    ledger = fly_runner.FlyLedger(tmp_path / "l.json")
+    ledger.reserve(config, run_id="a", max_run_seconds=100, now=1000.0)
+    ledger.bind("a", "m1", login=False)
+    first = ledger.settle("m1", config=config, now=1050.0)
+    second = ledger.settle("m1", config=config, now=1050.0)
+    assert first == pytest.approx(50 * config.rate_per_second_usd) and second == 0.0
+
+
+# ── Token lifecycle ──────────────────────────────────────────────────────────
+
+
+def test_token_minted_during_cancellation_is_still_revoked(fly_env):
+    import threading
+
+    release = threading.Event()
+    fake = FakeFly()
+
+    def slow_mint(repo, prefix):
+        release.wait(5)
+        return MINTED
+
+    executor, _, revoked = make_executor(fake, mint=slow_mint)
+
+    async def go():
+        task = asyncio.create_task(executor.run(_job()))
+        await asyncio.sleep(0.05)  # the mint is in flight in its thread
+        task.cancel()
+        threading.Timer(0.1, release.set).start()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert revoked == [MINTED]
+    assert fake.requests == []  # nothing launched
+
+
+@pytest.mark.parametrize("failure", ["refusal", "launch_error", "reconcile_refused"])
+def test_token_is_revoked_when_the_job_never_starts(fly_env, monkeypatch, failure):
+    if failure == "reconcile_refused":
+        fake = _codex_fake(monkeypatch)
+        fake.stop_effective = False
+        fake.machines["m-codex"]["state"] = "started"
+        executor, _, revoked = make_executor(fake)
+        executor.ledger.reserve(executor.config, run_id="old", max_run_seconds=60)
+        executor.ledger.bind("old", "m-codex", login=True)
+        job = _codex_job()
+        expected = fly_runner.FlyLaunchError
+    else:
+        fake = FakeFly()
+        if failure == "launch_error":
+            fake.create_status = 503
+        executor, _, revoked = make_executor(
+            fake, **({"budget_usd": 0.0} if failure == "refusal" else {})
+        )
+        job = _job()
+        expected = fly_runner.FlyRefusal if failure == "refusal" else fly_runner.FlyLaunchError
+    with pytest.raises(expected):
+        asyncio.run(executor.run(job))
+    assert revoked == [MINTED]
+    assert job.secrets == {}
+
+
+# ── Oversized output is never silent ──────────────────────────────────────────
+
+
+def test_truncated_output_is_flagged_and_marked(fly_env, caplog):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake, record={
+        "exit_code": 0, "stdout": "tail of report\nGATE_INHERITANCE: clear\n",
+        "stdout_truncated": True,
+    })  # fmt: skip
+    job = _job()
+    with caplog.at_level(logging.WARNING):
+        rc, out, err = asyncio.run(executor.run(job))
+    assert rc == 0
+    assert job.stdout_truncated is True
+    first_line = out.decode().splitlines()[0]
+    assert "output truncated" in first_line and job.run_id in first_line
+    assert out.decode().rstrip().endswith("GATE_INHERITANCE: clear")  # verdict still last
+    assert b"output truncated" in err
+    assert any("output truncated" in r.getMessage() for r in caplog.records
+               if r.levelno == logging.WARNING)  # fmt: skip
+
+
+def test_complete_output_is_not_flagged(fly_env):
+    executor, _, _ = make_executor(FakeFly(), record={"exit_code": 0, "stdout": "all\n",
+                                                      "stdout_truncated": False})  # fmt: skip
+    job = _job()
+    rc, out, err = asyncio.run(executor.run(job))
+    assert out == b"all\n" and job.stdout_truncated is False
+
+
+def test_seam_surfaces_truncation_on_the_result_and_harness_event(fly_env, seam, monkeypatch):
+    spawned, fake_exec = seam
+    events = []
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: events.append(kw))
+    executor, _, _ = make_executor(FakeFly(), record={
+        "exit_code": 0, "stdout": "GATE_INHERITANCE: clear\n", "stdout_truncated": True,
+    })  # fmt: skip
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+    assert result.ok and result.output_truncated is True
+    assert result.stdout.startswith("[fly runner: output truncated")
+    final = [e for e in events if e.get("success") == "true"]
+    assert final and "stdout_truncated=true" in final[-1]["output_summary"]
 
 
 # ── Review round 1: in-flight reservations count against the budget ──────────

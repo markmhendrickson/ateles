@@ -37,6 +37,11 @@ def test_scenario_set_covers_the_required_behaviours():
         "forced_fly_budget_deferral",
         "forced_fly_disconnect_cleans_up",
         "forced_fly_timeout_cleans_up",
+        "oversized_output_is_flagged",
+        "login_start_response_lost",
+        "expired_reservation_reaped_listed",
+        "expired_reservation_reaped_absent",
+        "unconfirmed_delete_keeps_capacity_reserved",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -70,3 +75,21 @@ def test_judge_goes_red_when_cleanup_is_skipped(tmp_path, monkeypatch):
     leaked = dataclasses.replace(trace, machines_remaining=["m1"], revoked=[], in_flight_after=1)
     problems = runner.judge(scenario, leaked)
     assert len(problems) >= 3
+
+
+def test_judge_goes_red_when_recovery_drops_cost_or_capacity(tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    settled = _by_id("expired_reservation_reaped_listed")
+    trace = runner.run_scenario(settled, tmp_path / "a", monkeypatch)
+    assert runner.judge(settled, dataclasses.replace(trace, spend_usd=0.0))
+    kept = _by_id("unconfirmed_delete_keeps_capacity_reserved")
+    trace = runner.run_scenario(kept, tmp_path / "b", monkeypatch)
+    assert runner.judge(kept, dataclasses.replace(trace, seed_entries_left=[]))
+
+
+def test_judge_goes_red_when_truncation_is_silent(tmp_path, monkeypatch):
+    scenario = _by_id("oversized_output_is_flagged")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    silent = dataclasses.replace(trace, envelope={**trace.envelope, "output_truncated": False})
+    assert runner.judge(scenario, silent)

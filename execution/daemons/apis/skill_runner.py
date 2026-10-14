@@ -1407,6 +1407,14 @@ class SkillResult:
     # failed, even when a later provider then succeeded — so a run that cost
     # frontier spend is never indistinguishable from one that stayed local.
     local_failure: str = ""
+    # True when the CLI's stdout was cut to its tail before it reached us (the
+    # Fly runner keeps the last 256 KB). The stdout then starts with a marker
+    # line saying so; a caller that needs the complete output must check this.
+    output_truncated: bool = False
+
+
+class _LocalSpawnError(Exception):
+    """The local CLI could not be started (an OSError from the spawn)."""
 
 
 # ── Harness adapters + capacity detection ─────────────────────────────────────
@@ -3068,11 +3076,14 @@ async def _run_skill_once(
     # (returncode, stdout, stderr). Reached only for an opted-in class or a
     # forced `runner="fly"`; with APIS_FLY_RUNNER_CLASSES unset and no runner
     # passed, `wants_fly` is False and nothing below changes.
-    _fly_handle = None
+    #
+    # `FlyExecutor.run` owns the whole Fly job lifetime: its own finally
+    # revokes the job's GitHub token and settles the machine on every path.
+    _fly_job = None
     _fly_note = ""
+    _fly_forced = runner == "fly"
+    _fly_reason = ""
     if fly_runner.wants_fly(runner, action_class):
-        _forced = runner == "fly"
-        _fly_reason = ""
         try:
             _fly_job = fly_runner.build_job(
                 provider=provider,
@@ -3090,46 +3101,39 @@ async def _run_skill_once(
                 owns_pending_gate=owns_pending_gate,
                 codex_outer_sandboxed=codex_outer_sandboxed,
             )
-            _fly_handle = await fly_runner.get_executor().launch(_fly_job)
-            _fly_note = f" fly_machine={_fly_handle.machine_id} fly_run={_fly_job.run_id}"
-        except fly_runner.FlyRefusal as exc:
-            _cleanup_launch_artifacts()
-            msg = f"fly runner refused: {exc}"
-            log.warning(f"[apis] {skill} dispatch deferred — {msg}")
-            return SkillResult(
-                skill, False, None, "", "", error=msg, provider=provider,
-                cooled_until=exc.cooled_until,
-            )  # fmt: skip
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
-        except fly_runner.FlyLaunchError as exc:
-            _fly_reason = f"Fly launch failed: {exc}"
-        if _fly_handle is None:
-            fallback_ok = (
-                not _forced
-                and (
-                    _fly_reason.startswith("not eligible")
-                    or fly_runner.get_executor().config.local_fallback
-                )
-            )
-            if not fallback_ok:
-                _cleanup_launch_artifacts()
-                msg = (
-                    f"{provider} launch failed: fly: {_fly_reason}"
-                    if _fly_reason.startswith("Fly launch failed")
-                    else f"fly runner refused: {_fly_reason}"
-                )
-                log.error(f"[apis] {skill} dispatch refused — {msg}")
-                return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
-            count = fly_runner.get_executor().ledger.count_local_fallback()
-            log.warning(
-                f"[apis] {skill} running locally instead of on Fly ({_fly_reason}); "
-                f"local fallback #{count} this ledger"
-            )
 
-    _start_ns = time.monotonic_ns()
+    def _fly_refusal_or_fallback(reason: str) -> SkillResult | None:
+        """A refusal to return, or None to run locally (logged and counted)."""
+        fallback_ok = not _fly_forced and (
+            reason.startswith("not eligible")
+            or fly_runner.get_executor().config.local_fallback
+        )
+        if not fallback_ok:
+            # Deliberately NOT the "<provider> launch failed:" shape: a Fly
+            # infrastructure failure says nothing about the provider, so it
+            # must not cool the provider or fail over as if it did.
+            msg = f"fly runner refused: {reason}"
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+        count = fly_runner.get_executor().ledger.count_local_fallback()
+        log.warning(
+            f"[apis] {skill} running locally instead of on Fly ({reason}); "
+            f"local fallback #{count} this ledger"
+        )
+        return None
+
+    if _fly_reason:
+        _refusal = _fly_refusal_or_fallback(_fly_reason)
+        if _refusal is not None:
+            _cleanup_launch_artifacts()
+            return _refusal
+
     proc = None
-    if _fly_handle is None:
+
+    async def _run_local() -> tuple[int | None, bytes, bytes]:
+        nonlocal proc
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -3141,7 +3145,49 @@ async def _run_skill_once(
                 start_new_session=True,
             )
         except OSError as exc:
-            _cleanup_launch_artifacts()
+            raise _LocalSpawnError(str(exc)) from exc
+        out, err = await asyncio.wait_for(
+            proc.communicate(
+                input=stdin_payload if stdin_payload is not None else prompt.encode()
+            ),
+            timeout=timeout,
+        )
+        return proc.returncode, out, err
+
+    _start_ns = time.monotonic_ns()
+    try:
+        try:
+            if _fly_job is not None:
+                try:
+                    returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                except fly_runner.FlyRefusal as exc:
+                    msg = f"fly runner refused: {exc}"
+                    log.warning(f"[apis] {skill} dispatch deferred — {msg}")
+                    return SkillResult(
+                        skill, False, None, "", "", error=msg, provider=provider,
+                        cooled_until=exc.cooled_until,
+                    )  # fmt: skip
+                except (fly_runner.FlyIneligible, fly_runner.FlyLaunchError) as exc:
+                    reason = (
+                        f"not eligible for Fly: {exc}"
+                        if isinstance(exc, fly_runner.FlyIneligible)
+                        else f"Fly launch failed: {exc}"
+                    )
+                    _refusal = _fly_refusal_or_fallback(reason)
+                    if _refusal is not None:
+                        return _refusal
+                    _fly_job = None
+                    _start_ns = time.monotonic_ns()
+                    returncode, stdout, stderr = await _run_local()
+                finally:
+                    if _fly_job is not None and _fly_job.machine_id:
+                        _fly_note = (
+                            f" fly_machine={_fly_job.machine_id} fly_run={_fly_job.run_id}"
+                            + (" stdout_truncated=true" if _fly_job.stdout_truncated else "")
+                        )
+            else:
+                returncode, stdout, stderr = await _run_local()
+        except _LocalSpawnError as exc:
             msg = f"{provider} launch failed: {exc}"
             log.warning(f"[apis] {skill} dispatch skipped — {msg}")
             return SkillResult(
@@ -3153,23 +3199,6 @@ async def _run_skill_once(
                 error=msg,
                 provider=provider,
             )
-
-    try:
-        try:
-            if _fly_handle is not None:
-                returncode, stdout, stderr = await fly_runner.get_executor().collect(
-                    _fly_handle
-                )
-            else:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(
-                        input=stdin_payload
-                        if stdin_payload is not None
-                        else prompt.encode()
-                    ),
-                    timeout=timeout,
-                )
-                returncode = proc.returncode
         except asyncio.TimeoutError:
             if proc is not None:
                 await _kill_spawned_process_group(proc)
@@ -3349,6 +3378,7 @@ async def _run_skill_once(
                 _delivery_conflicts if returncode == 0 else ()
             ),
             usage=_usage,
+            output_truncated=bool(_fly_job is not None and _fly_job.stdout_truncated),
         )
 
         # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────

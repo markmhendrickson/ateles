@@ -7,19 +7,66 @@
       "settings": {},
       "identity": "key",
       "github_app": "configured",
-      "fly": {"wait": "ok", "record": {"exit_code": 0, "stdout": "FLY GATE_INHERITANCE: clear\n"}},
-      "args": ["--action-class", "carry_forward_check", "--model", "eval-model"],
-      "expect": {"exit": 0, "ok": true, "stdout_contains": "LOCAL GATE_INHERITANCE: clear", "local_cli_ran": true, "fly_requests": 0, "minted": 0}
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "fly_requests": 0,
+        "minted": 0
+      }
     },
     {
       "id": "opted_in_class_runs_on_fly",
       "description": "The class is opted in and the role has its own AAuth key: the run goes to a per-job machine with a minted, revoked App token, and the machine's recorded result comes back as the dispatch result.",
-      "settings": {"APIS_FLY_RUNNER_CLASSES": "carry_forward_check"},
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+      },
       "identity": "key",
       "github_app": "configured",
-      "fly": {"wait": "ok", "record": {"exit_code": 0, "stdout": "FLY GATE_INHERITANCE: clear\n"}},
-      "args": ["--action-class", "carry_forward_check", "--model", "eval-model", "--github-delivery", "--github-token-env", "EVAL_LOCAL_SCOPED_GH", "--repository", "owner/repo"],
-      "expect": {"exit": 0, "ok": true, "stdout_contains": "FLY GATE_INHERITANCE: clear", "local_cli_ran": false, "machines_created": 1, "minted": 1, "revoked_all_minted": true, "in_flight_after": 0, "machine_gone": true}
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY GATE_INHERITANCE: clear",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "minted": 1,
+        "revoked_all_minted": true,
+        "in_flight_after": 0,
+        "machine_gone": true,
+        "output_truncated": false
+      }
     },
     {
       "id": "forced_fly_ineligible_role_refused",
@@ -27,9 +74,25 @@
       "settings": {},
       "identity": "none",
       "github_app": "configured",
-      "fly": {"wait": "ok", "record": null},
-      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
-      "expect": {"exit": 1, "ok": false, "reason_contains": "no Neotoma identity of its own", "local_cli_ran": false, "fly_requests": 0, "minted": 0}
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "no Neotoma identity of its own",
+        "local_cli_ran": false,
+        "fly_requests": 0,
+        "minted": 0
+      }
     },
     {
       "id": "forced_fly_without_app_refused_not_pat",
@@ -37,19 +100,54 @@
       "settings": {},
       "identity": "key",
       "github_app": "unconfigured",
-      "fly": {"wait": "ok", "record": null},
-      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
-      "expect": {"exit": 1, "ok": false, "reason_contains": "never falls back to a PAT", "local_cli_ran": false, "fly_requests": 0, "pat_absent": true}
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "never falls back to a PAT",
+        "local_cli_ran": false,
+        "fly_requests": 0,
+        "pat_absent": true
+      }
     },
     {
       "id": "forced_fly_budget_deferral",
       "description": "The monthly Fly budget cannot cover one more maximum-length run: the dispatch is deferred with cooled_until, and the minted token is revoked.",
-      "settings": {"APIS_FLY_MONTHLY_BUDGET_USD": "0.0001"},
+      "settings": {
+        "APIS_FLY_MONTHLY_BUDGET_USD": "0.0001"
+      },
       "identity": "key",
       "github_app": "configured",
-      "fly": {"wait": "ok", "record": null},
-      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
-      "expect": {"exit": 1, "ok": false, "reason_contains": "budget", "cooled_until": true, "local_cli_ran": false, "machines_created": 0, "revoked_all_minted": true}
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "budget",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "machines_created": 0,
+        "revoked_all_minted": true
+      }
     },
     {
       "id": "forced_fly_disconnect_cleans_up",
@@ -57,9 +155,27 @@
       "settings": {},
       "identity": "key",
       "github_app": "configured",
-      "fly": {"wait": "disconnect", "record": null},
-      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
-      "expect": {"exit": 1, "ok": false, "reason_contains": "error while waiting on machine", "local_cli_ran": false, "machines_created": 1, "machine_gone": true, "revoked_all_minted": true, "in_flight_after": 0}
+      "fly": {
+        "wait": "disconnect",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "error while waiting on machine",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "machine_gone": true,
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
     },
     {
       "id": "forced_fly_timeout_cleans_up",
@@ -67,9 +183,206 @@
       "settings": {},
       "identity": "key",
       "github_app": "configured",
-      "fly": {"wait": "timeout", "record": null},
-      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo", "--timeout", "5"],
-      "expect": {"exit": 1, "ok": false, "reason_contains": "timed out", "local_cli_ran": false, "machines_created": 1, "machine_gone": true, "revoked_all_minted": true, "in_flight_after": 0}
+      "fly": {
+        "wait": "timeout",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo",
+        "--timeout",
+        "5"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "timed out",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "machine_gone": true,
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
+    },
+    {
+      "id": "oversized_output_is_flagged",
+      "description": "The runner kept only the tail of an oversized stdout: the dispatch still succeeds (the verdict is the last line), but the envelope says output_truncated and the stdout opens with a marker naming the run.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "...tail of a long report\nGATE_INHERITANCE: clear\n",
+          "stdout_truncated": true
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "GATE_INHERITANCE: clear",
+        "output_truncated": true,
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
+    },
+    {
+      "id": "login_start_response_lost",
+      "description": "A Codex login machine starts but the start response is lost: the launch fails, and the machine is stopped and confirmed before its slot and lock are released; the token is revoked.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "start": "lost"
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "Fly launch failed",
+        "local_cli_ran": false,
+        "login_state": "stopped",
+        "login_lock_free": true,
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
+    },
+    {
+      "id": "expired_reservation_reaped_listed",
+      "description": "After a dispatcher restart an overdue reservation's machine is still running: the reaper destroys it, confirms, charges its capped runtime once, releases, and the new dispatch runs.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "seed": [
+        {
+          "machine": "m-old",
+          "state": "listed",
+          "age": 5000,
+          "window": 1920
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY GATE_INHERITANCE: clear",
+        "local_cli_ran": false,
+        "seed_settled": true,
+        "machine_gone": true,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "expired_reservation_reaped_absent",
+      "description": "After a dispatcher restart an overdue reservation's machine is already gone: the reaper confirms it, charges its capped runtime once, and releases.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "seed": [
+        {
+          "machine": "m-gone",
+          "state": "absent",
+          "age": 5000,
+          "window": 1920
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "local_cli_ran": false,
+        "seed_settled": true,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "unconfirmed_delete_keeps_capacity_reserved",
+      "description": "The reaper's delete is acknowledged but the machine keeps running: its reservation is kept (marked unconfirmed, not charged as settled), so with one concurrent slot the new dispatch is deferred with cooled_until.",
+      "settings": {
+        "APIS_FLY_MAX_CONCURRENT": "1"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "seed": [
+        {
+          "machine": "m-stuck",
+          "state": "sticky",
+          "age": 5000,
+          "window": 1920
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "concurrency",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "seed_settled": false,
+        "machines_created": 0,
+        "in_flight_at_least": 1,
+        "revoked_all_minted": true
+      }
     }
   ]
 }
