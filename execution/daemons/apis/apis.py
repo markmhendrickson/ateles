@@ -3429,6 +3429,17 @@ async def main() -> None:
                 )
             await asyncio.sleep(deferred_interval)
 
+    # Keep the App installation token minted so GitHub writes never fall back to
+    # the PAT (ateles#1381).
+    async def github_app_token_keepalive() -> None:
+        """Keep the swarm GitHub App installation token minted (ateles#1381)."""
+        try:
+            await dispatcher.keep_github_app_token_warm(
+                list(dispatcher.config.resume_repositories)
+            )
+        except Exception as exc:  # noqa: BLE001 — never kill the daemon
+            log.warning(f"[{DAEMON_NAME}] GitHub App token keep-warm stopped: {exc}")
+
     # Flush any aggregated unroutable report whose window has closed. Without
     # this the last report in a burst would wait for the NEXT unroutable task to
     # push it out — a report that exists and is never delivered is the silence
@@ -3460,6 +3471,7 @@ async def main() -> None:
         workflow_drift_check(),
         lens_identity_check(),
         unroutable_flush(),
+        github_app_token_keepalive(),
     )
 
 

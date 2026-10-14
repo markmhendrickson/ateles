@@ -3591,6 +3591,203 @@ def _clear_reviewer_app_installation_token_cache() -> None:
     _REVIEWER_APP_INSTALLATION_TOKEN_CACHE = None
 
 
+# ── dispatcher REST writes as the App installation (ateles#1381) ─────────────
+#
+# The dispatcher's own GitHub REST calls (in-flight markers, spec mirror, comment
+# supersession, review dismissal, ...) used to authenticate with the
+# `ATELES_AGENT_PAT` fine-grained PAT. A fine-grained PAT cannot write to a
+# repository another user owns, so every one of those writes answered 403
+# "Resource not accessible by personal access token". The swarm GitHub App is
+# installed on the repository with issues / pull_requests / contents write, so
+# the dispatcher now authenticates as the App installation and falls back to
+# the PAT only when the App is unconfigured or a token cannot be minted.
+#
+# `lib.github_app_token` already caches one token per installation for about an
+# hour and re-mints it ten minutes before expiry, but a mint is synchronous
+# urllib. `_github_headers` is a plain method called from dozens of async
+# paths, so it only ever READS this module's copy of the token (never touches
+# the network from the event loop). The copy is filled off-loop, by
+# `asyncio.to_thread`, from three places: an explicit `await
+# _ensure_app_write_token(repo)` at the write paths that matter most, the
+# background refresh `_github_headers` schedules when a token is missing or
+# close to expiry, and the dispatcher's keep-warm loop. Code with no running
+# event loop (a script, a plain test) mints inline: there is nothing to block.
+
+# repo (lower-cased) -> (token, expires_at). Process-local, never written out.
+_APP_WRITE_TOKENS: dict[str, tuple[str, datetime]] = {}
+# repo -> do not retry the mint before this instant (a failed mint is retried
+# soon, but not on every request).
+_APP_WRITE_MINT_RETRY_AT: dict[str, datetime] = {}
+_APP_WRITE_MINT_RETRY_AFTER = timedelta(seconds=60)
+# Stop using a token this long before GitHub expires it. A refresh starts once
+# the token has this long left, which is the library's own re-mint margin
+# (`github_app_token.REFRESH_MARGIN`), so the refresh really gets a new token.
+_APP_WRITE_TOKEN_SKEW = timedelta(minutes=2)
+_APP_WRITE_TOKEN_REFRESH_AHEAD = timedelta(minutes=10)
+_APP_WRITE_BACKGROUND_TASKS: set = set()
+_APP_WRITE_REFRESHING: set[str] = set()
+_APP_WRITE_FALLBACK_WARNED: dict[str, datetime] = {}
+_APP_WRITE_FALLBACK_WARN_EVERY = timedelta(minutes=10)
+
+
+def _clear_app_write_token_cache() -> None:
+    """Drop every cached dispatcher App token and retry gate (tests)."""
+    _APP_WRITE_TOKENS.clear()
+    _APP_WRITE_MINT_RETRY_AT.clear()
+    _APP_WRITE_FALLBACK_WARNED.clear()
+    _APP_WRITE_REFRESHING.clear()
+
+
+def _app_write_configured() -> bool:
+    return _github_app_token.app_configured(_REVIEWER_APP_ENV_PREFIX)
+
+
+def _app_write_token_cached(repo: str) -> tuple[str, datetime] | None:
+    """The usable cached App token for *repo*, with its expiry; never networks."""
+    entry = _APP_WRITE_TOKENS.get(repo.lower())
+    if entry is None:
+        return None
+    if datetime.now(timezone.utc) >= entry[1] - _APP_WRITE_TOKEN_SKEW:
+        return None
+    return entry
+
+
+def _warn_app_write_fallback(repo: str, reason: str) -> None:
+    """WARNING (throttled per repo) that GitHub calls are using the PAT."""
+    now = datetime.now(timezone.utc)
+    last = _APP_WRITE_FALLBACK_WARNED.get(repo.lower())
+    if last is not None and now - last < _APP_WRITE_FALLBACK_WARN_EVERY:
+        return
+    _APP_WRITE_FALLBACK_WARNED[repo.lower()] = now
+    log.warning(
+        f"[{DAEMON_NAME}] {repo}: falling back to the agent PAT for GitHub "
+        f"REST calls — {reason}. A fine-grained PAT cannot write to a "
+        "repository another account owns, so writes may answer 403 "
+        "(ateles#1381)."
+    )
+
+
+def _mint_app_write_token_blocking(repo: str) -> str | None:
+    """Mint (or take the library's cached) installation token for *repo*.
+
+    Synchronous and may use the network: call from a thread or with no event
+    loop running. Returns None, and logs a WARNING naming the PAT fallback,
+    when GitHub refuses; the message never carries a token.
+    """
+    if not _app_write_configured():
+        return None
+    now = datetime.now(timezone.utc)
+    retry_at = _APP_WRITE_MINT_RETRY_AT.get(repo.lower())
+    if retry_at is not None and now < retry_at:
+        return None
+    try:
+        info = _github_app_token.installation_token_info(
+            repo, prefix=_REVIEWER_APP_ENV_PREFIX
+        )
+    except Exception as exc:  # noqa: BLE001 — any mint failure falls back to the PAT
+        _APP_WRITE_MINT_RETRY_AT[repo.lower()] = now + _APP_WRITE_MINT_RETRY_AFTER
+        _warn_app_write_fallback(
+            repo, f"minting the GitHub App installation token failed ({exc})"
+        )
+        return None
+    _APP_WRITE_TOKENS[repo.lower()] = (info.token, info.expires_at)
+    _APP_WRITE_MINT_RETRY_AT.pop(repo.lower(), None)
+    return info.token
+
+
+async def _ensure_app_write_token(repo: str) -> str | None:
+    """The App installation token for *repo*, minted off the event loop if needed.
+
+    None means "use the PAT": the App is unconfigured or the mint failed (the
+    failure is already logged). After this returns a token, the synchronous
+    `SwarmDispatcher._github_headers(repo)` serves it from the cache.
+    """
+    if not repo or not _app_write_configured():
+        return None
+    cached = _app_write_token_cached(repo)
+    if cached is not None and (
+        cached[1] - datetime.now(timezone.utc) > _APP_WRITE_TOKEN_REFRESH_AHEAD
+    ):
+        return cached[0]
+    token = await asyncio.to_thread(_mint_app_write_token_blocking, repo)
+    if token is None and cached is not None:
+        return cached[0]  # the old token still has time; keep using it
+    return token
+
+
+def _schedule_app_write_token_refresh(repo: str) -> None:
+    """Fire-and-forget `_ensure_app_write_token` from sync code on a running loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    key = repo.lower()
+    if key in _APP_WRITE_REFRESHING:
+        return
+
+    async def _refresh() -> None:
+        try:
+            await _ensure_app_write_token(repo)
+        finally:
+            _APP_WRITE_REFRESHING.discard(key)
+
+    _APP_WRITE_REFRESHING.add(key)
+    task = loop.create_task(_refresh())
+    _APP_WRITE_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_APP_WRITE_BACKGROUND_TASKS.discard)
+
+
+def _app_write_token_for_sync(repo: str) -> str | None:
+    """The App token for a SYNC caller, or None to fall back to the PAT.
+
+    Never blocks a running event loop: with one running it serves the cache and
+    schedules a background (re)mint. With no loop running it mints inline.
+    """
+    if not repo or not _app_write_configured():
+        return None
+    cached = _app_write_token_cached(repo)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        if cached is not None:
+            return cached[0]
+        return _mint_app_write_token_blocking(repo)
+    if cached is None:
+        retry_at = _APP_WRITE_MINT_RETRY_AT.get(repo.lower())
+        if retry_at is None or datetime.now(timezone.utc) >= retry_at:
+            _schedule_app_write_token_refresh(repo)
+            _warn_app_write_fallback(
+                repo,
+                "the App installation token is not minted yet "
+                "(a background mint was started)",
+            )
+        return None
+    if cached[1] - datetime.now(timezone.utc) <= _APP_WRITE_TOKEN_REFRESH_AHEAD:
+        _schedule_app_write_token_refresh(repo)
+    return cached[0]
+
+
+def _log_github_403_body(resp, what: str) -> None:
+    """Log GitHub's explanation (first 300 chars of the body) on a 403.
+
+    A bare ``403 Forbidden`` hides whether the credential lacks scope, the App
+    lacks a permission, or a rate limit applies. The body is GitHub's JSON
+    message and carries no credential.
+    """
+    if getattr(resp, "status_code", None) != 403:
+        return
+    try:
+        body = (resp.text or "")[:300]
+    except Exception:  # noqa: BLE001
+        body = "<unreadable>"
+    log.warning(f"[{DAEMON_NAME}] {what} answered 403: {body}")
+
+
+def _app_bot_login_blocking() -> str:
+    """The login the App's installation token acts as (``<slug>[bot]``), casefolded."""
+    return _github_app_token.bot_login(_REVIEWER_APP_ENV_PREFIX).casefold()
+
+
 def _mint_reviewer_app_jwt() -> str:
     return _github_app_token.mint_app_jwt(_REVIEWER_APP_ENV_PREFIX)
 
@@ -4189,12 +4386,16 @@ class SwarmDispatcher:
             started_at=datetime.now(timezone.utc).isoformat(), stage=stage
         )
         try:
+            await _ensure_app_write_token(trigger.repository)
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     f"https://api.github.com/repos/{trigger.repository}/issues/"
                     f"{trigger.number}/comments",
                     json={"body": marker},
                     headers=self._github_headers(trigger.repository),
+                )
+                _log_github_403_body(
+                    resp, f"{trigger.repository}#{trigger.number}: in-flight marker POST"
                 )
                 resp.raise_for_status()
         except Exception as exc:
@@ -6540,6 +6741,7 @@ class SwarmDispatcher:
             f"{trigger.number}"
         )
         try:
+            await _ensure_app_write_token(trigger.repository)
             async with httpx.AsyncClient(timeout=30) as client:
                 # Read the CURRENT body so we splice against live content (the
                 # reporter or another agent may have edited it since open).
@@ -6559,6 +6761,10 @@ class SwarmDispatcher:
                     issue_url,
                     json={"body": new_body},
                     headers=self._github_headers(trigger.repository),
+                )
+                _log_github_403_body(
+                    patch,
+                    f"{trigger.repository}#{trigger.number}: spec mirror PATCH",
                 )
                 patch.raise_for_status()
                 log.info(
@@ -10041,6 +10247,7 @@ class SwarmDispatcher:
         counts = {"comments": 0, "reviews": 0, "failures": 0}
         if not head:
             return counts
+        await _ensure_app_write_token(repository)
         headers = self._github_headers(repository)
         failure_marker = self._SUPERSEDE_FAILURE_MARKER.format(sha=head)
         repeated_failure = False
@@ -12330,15 +12537,89 @@ class SwarmDispatcher:
                 numbers.append(number)
         return numbers
 
-    def _github_headers(self, repo: str = "") -> dict[str, str]:
-        """Return GitHub API request headers with the per-repo token (#95).
-
-        When `repo` is supplied the per-repo PAT is preferred (see
-        `_token_for_repo`); the instance-level `config.github_token` is used
-        as a final fallback so behaviour is unchanged for callers that do not
-        yet pass a repo.
+    async def keep_github_app_token_warm(
+        self, repositories: list[str], *, interval_s: float = 300.0
+    ) -> None:
+        """Mint the App installation token for each repository now, then keep
+        it fresh, so `_github_headers` (sync) always finds a token and never
+        has to fall back to the PAT. Runs forever; every mint happens off the
+        event loop and a failure is logged and retried next interval.
         """
-        token = _token_for_repo(repo) if repo else self.config.github_token
+        if not _app_write_configured():
+            log.warning(
+                f"[{DAEMON_NAME}] the swarm GitHub App is not configured "
+                f"({_REVIEWER_APP_ENV_PREFIX}_ID / "
+                f"{_REVIEWER_APP_ENV_PREFIX}_PRIVATE_KEY[_PATH]); GitHub REST "
+                "calls use the agent PAT, which cannot write to a repository "
+                "another account owns (ateles#1381)"
+            )
+            return
+        while True:
+            for repository in repositories:
+                try:
+                    await _ensure_app_write_token(repository)
+                except Exception as exc:  # noqa: BLE001 — never kill the daemon
+                    log.warning(
+                        f"[{DAEMON_NAME}] App token keep-warm for {repository} "
+                        f"failed: {exc}"
+                    )
+            await asyncio.sleep(interval_s)
+
+    async def _own_github_logins(
+        self, client: httpx.AsyncClient, repository: str
+    ) -> set[str]:
+        """The logins the dispatcher's own comments carry, casefolded.
+
+        With the App installation token that is ``<slug>[bot]`` (``GET /user``
+        answers 403 to an installation token, so it is not asked) PLUS the
+        agent PAT's account, best effort: markers and notices written before
+        the switch to the App are still the dispatcher's own, and a reader that
+        only knew the bot would post them a second time. With the PAT alone it
+        is the login the token resolves to, read live. Raises when no login is
+        readable; callers post nothing in that case.
+        """
+        logins: set[str] = set()
+        await _ensure_app_write_token(repository)
+        using_app = _app_write_token_cached(repository) is not None
+        if using_app:
+            logins.add(await asyncio.to_thread(_app_bot_login_blocking))
+        pat = _token_for_repo(repository)
+        if pat or not using_app:
+            try:
+                me = await client.get(
+                    "https://api.github.com/user",
+                    headers=(
+                        {
+                            "Accept": "application/vnd.github+json",
+                            "Authorization": f"Bearer {pat}",
+                        }
+                        if using_app
+                        else self._github_headers(repository)
+                    ),
+                )
+                me.raise_for_status()
+                login = str((me.json() or {}).get("login") or "").casefold()
+                if login:
+                    logins.add(login)
+            except Exception:  # noqa: BLE001 — the bot login alone is enough
+                if not using_app:
+                    raise
+        return logins
+
+    def _github_headers(self, repo: str = "") -> dict[str, str]:
+        """Return GitHub API request headers for *repo* (ateles#1381, #95).
+
+        When `repo` is supplied and the swarm GitHub App is configured, the
+        header carries the App's installation token (served from a cache, never
+        minted on the event loop; see `_app_write_token_for_sync`). A fine-grained
+        PAT cannot write to a repository another account owns, so the PAT is the
+        fallback only when the App is unconfigured or minting fails (logged at
+        WARNING). The per-repo PAT is `_token_for_repo`; the instance-level
+        `config.github_token` is used when no repo is given.
+        """
+        token = _app_write_token_for_sync(repo) if repo else None
+        if not token:
+            token = _token_for_repo(repo) if repo else self.config.github_token
         headers = {"Accept": "application/vnd.github+json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -13996,19 +14277,14 @@ class SwarmDispatcher:
                 # posted suppressed the notice. The login is the one the posting
                 # token resolves to, read live; an unreadable login raises into
                 # the handler below, which posts nothing.
-                me = await client.get(
-                    "https://api.github.com/user",
-                    headers=self._github_headers(t.repository),
-                )
-                me.raise_for_status()
-                own_login = str((me.json() or {}).get("login") or "").casefold()
-                if not own_login:
+                own_logins = await self._own_github_logins(client, t.repository)
+                if not own_logins:
                     raise RuntimeError("the dispatcher's own GitHub login is unreadable")
                 comments = await self._all_issue_comments(t.repository, t.number, client)
                 existing = "\n".join(
                     (c.get("body") or "")
                     for c in comments
-                    if str((c.get("user") or {}).get("login") or "").casefold() == own_login
+                    if str((c.get("user") or {}).get("login") or "").casefold() in own_logins
                 )
                 fresh = sorted(
                     g
@@ -14112,19 +14388,14 @@ class SwarmDispatcher:
         reason = GATE_VERDICT_UNREADABLE_REASON
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                me = await client.get(
-                    "https://api.github.com/user",
-                    headers=self._github_headers(t.repository),
-                )
-                me.raise_for_status()
-                own_login = str((me.json() or {}).get("login") or "").casefold()
-                if not own_login:
+                own_logins = await self._own_github_logins(client, t.repository)
+                if not own_logins:
                     raise RuntimeError("the dispatcher's own GitHub login is unreadable")
                 comments = await self._all_issue_comments(t.repository, t.number, client)
                 existing = "\n".join(
                     (c.get("body") or "")
                     for c in comments
-                    if str((c.get("user") or {}).get("login") or "").casefold() == own_login
+                    if str((c.get("user") or {}).get("login") or "").casefold() in own_logins
                 )
                 fresh = sorted(
                     {
