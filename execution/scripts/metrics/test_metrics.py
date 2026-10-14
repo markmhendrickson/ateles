@@ -450,18 +450,70 @@ def _write_cache_dir(tmp_path, fetched_at):
 
 
 def test_a_stale_cache_is_refused_and_with_allow_stale_every_reading_is_partial(tmp_path, monkeypatch, capsys):
-    _write_cache_dir(tmp_path, "2026-09-01T00:00:00Z")
-    monkeypatch.setattr(ops, "utcnow", lambda: NOW)
-    assert ops.main(["compute", "--cache-dir", str(tmp_path), "--swarm-artifact", SWARM]) == 2
+    # cache fetched 2026-10-13, read 20 days later: its fixture rows give real readings, so the
+    # downgrade is reached (a cache with no readings would exit 1 before getting there)
+    _write_cache_dir(tmp_path, "2026-10-13T10:00:00Z")
+    later = NOW + timedelta(days=20)
+    monkeypatch.setattr(ops, "utcnow", lambda: later)
+    args = ["compute", "--cache-dir", str(tmp_path), "--swarm-artifact", SWARM, "--first-week", "2026-10-05"]
+    assert ops.main(args) == 2
     assert "stale" in capsys.readouterr().err
-    # a deliberately stale read: nothing in it can be an ok zero
-    assert ops.main(["compute", "--cache-dir", str(tmp_path), "--swarm-artifact", SWARM, "--allow-stale",
-                     "--first-week", "2026-08-24"]) in (0, 1)
+    assert ops.main(args + ["--allow-stale"]) == 0
+    out = capsys.readouterr().out
+    count = int(out.split(" readings;")[0])
+    assert count > 0
+    assert "median" not in out  # partial readings never enter a baseline summary
     stamps = ops.stream_fetched_at(tmp_path)
-    assert ops.stale_streams(stamps, NOW, 7) == ["checkpoints", "shape_checks", "subprocess", "tasks"]
+    assert ops.stale_streams(stamps, later, 7) == ["checkpoints", "shape_checks", "subprocess", "tasks"]
     stale = ops.mark_stale(_all_fixture_readings(), "cache older than 7 days")
     assert {r["status"] for r in stale} == {"partial"} and max(r["coverage_ratio"] for r in stale) == 0.5
     assert weekly.summarize_readings(stale) == {}  # stale readings never enter a baseline
+
+
+def test_main_with_allow_stale_stores_every_reading_as_partial(tmp_path, monkeypatch):
+    _write_cache_dir(tmp_path, "2026-10-13T10:00:00Z")
+    monkeypatch.setattr(ops, "utcnow", lambda: NOW + timedelta(days=20))
+    seen = {}
+    monkeypatch.setattr(neotoma_io, "store_command", lambda recs, *a, **k: seen.setdefault("recs", recs) and 0)
+    assert ops.main(["store", "--cache-dir", str(tmp_path), "--swarm-artifact", SWARM, "--allow-stale",
+                     "--first-week", "2026-10-05"]) == 0
+    assert seen["recs"] and {r["status"] for r in seen["recs"]} == {"partial"}
+    assert all("cache older than" in r["coverage_note"] for r in seen["recs"])
+
+
+def test_main_refusal_of_a_stale_cache_stores_nothing(tmp_path, monkeypatch):
+    _write_cache_dir(tmp_path, "2026-10-13T10:00:00Z")
+    monkeypatch.setattr(ops, "utcnow", lambda: NOW + timedelta(days=20))
+    called = []
+    monkeypatch.setattr(neotoma_io, "store_command", lambda *a, **k: called.append(1) or 0)
+    assert ops.main(["store", "--cache-dir", str(tmp_path), "--swarm-artifact", SWARM]) == 2
+    assert not called
+
+
+def test_each_stream_reading_is_stamped_with_its_own_fetch_time():
+    stamp = {name: datetime(2026, 10, 12, hour, tzinfo=UTC)
+             for name, hour in (("subprocess", 9), ("tasks", 10), ("checkpoints", 11), ("shape_checks", 12),
+                                ("reviews", 13))}
+    prs = [{"repo": "o/r", "number": i, "merged_at": "2026-10-07T00:00:00Z", "review_commits": ["a"]}
+           for i in range(3)]
+    readings = ops.build_readings(
+        subprocess_rows=sub_rows(25), task_rows=done_tasks(5),
+        checkpoint_rows=[cp("c1", "2026-10-06T10:00:00Z", "approved")], shape_rows=[], review_prs=prs,
+        now=NOW + timedelta(days=30), swarm_artifact=SWARM, fetched_at=stamp, first_week=WEEK[0])
+    assert {r["metric_ref"]: r["sourced_at"] for r in readings} == {
+        "S2_dispatch_failure_rate": "2026-10-12T09:00:00Z", "S5_cost_per_task": "2026-10-12T09:00:00Z",
+        "S1_time_to_completion": "2026-10-12T10:00:00Z",
+        "S3p_operator_intervention_proxy": "2026-10-12T11:00:00Z",
+        "S4_review_rounds_per_pr": "2026-10-12T13:00:00Z"}
+
+
+def test_windows_end_before_the_oldest_fetch_not_the_newest():
+    old, new = datetime(2026, 9, 30, 8, tzinfo=UTC), datetime(2026, 10, 13, 8, tzinfo=UTC)
+    stamp = {"subprocess": new, "tasks": new, "checkpoints": old, "shape_checks": new, "reviews": new}
+    rows = [cp("c1", "2026-09-22T10:00:00Z", "approved"), cp("c2", "2026-10-07T10:00:00Z", "approved")]
+    readings = ops.build_readings(subprocess_rows=[], task_rows=[], checkpoint_rows=rows, shape_rows=[],
+                                  review_prs=[], now=new, swarm_artifact=SWARM, fetched_at=stamp)
+    assert [r["window_end"] for r in readings] == ["2026-09-28T00:00:00Z"]
 
 
 def test_a_fresh_cache_is_read_and_stamped_with_its_fetch_time(tmp_path, monkeypatch, capsys):
@@ -752,6 +804,12 @@ def test_s2_thin_week_boundary_is_20_dispatches(n, status):
     assert r["status"] == status and r["coverage_ratio"] == (0.5 if status == "partial" else 1.0)
 
 
+@pytest.mark.parametrize("n,status", [(19, "partial"), (20, "ok")])
+def test_s5_thin_week_boundary_is_20_dispatches(n, status):
+    r = build(subprocess_rows=sub_rows(n))["S5_cost_per_task|" + SWARM]
+    assert r["status"] == status and r["coverage_ratio"] == (0.5 if status == "partial" else 1.0)
+
+
 @pytest.mark.parametrize("n,status", [(4, "partial"), (5, "ok")])
 def test_s1_thin_week_boundary_is_5_done_tasks(n, status):
     r = build(task_rows=done_tasks(n))["S1_time_to_completion|" + SWARM]
@@ -853,6 +911,33 @@ def test_the_token_is_sent_only_to_the_github_api_host(two_hosts):
     a, b = two_hosts
     repo_baseline.http_get(f"http://127.0.0.1:{b.server_port}/downloads/range/a:b/p")
     assert b.seen == [("/downloads/range/a:b/p", None)]
+
+
+def test_the_token_is_not_sent_to_a_host_that_only_starts_with_the_api_address(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    seen = []
+
+    class Reply:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, *a):
+            return b"[]"
+
+    def opener(req, timeout=None):
+        seen.append((req.full_url, req.headers.get("Authorization")))
+        return Reply()
+
+    monkeypatch.setattr(repo_baseline._OPENER, "open", opener)
+    repo_baseline.http_get(repo_baseline.GITHUB_API + ".look-alike.example/x")
+    repo_baseline.http_get(repo_baseline.GITHUB_API + "/x")
+    assert [auth for _, auth in seen] == [None, f"Bearer {TOKEN}"]
 
 
 def test_a_token_with_trailing_whitespace_is_stripped_before_use(two_hosts, monkeypatch):

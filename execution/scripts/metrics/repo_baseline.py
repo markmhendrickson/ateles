@@ -4,9 +4,9 @@
 Metrics produced, one ``metric_reading`` per metric, artifact and week:
 
   D1 npm_downloads_weekly      npm downloads API, Monday-Sunday UTC weeks
-  D2 github_stars              weekly net new stars from ``starred_at``; cumulative in detail
+  D2 github_stars              weekly new stars still starred, from ``starred_at``; cumulative in detail
   D4 external_issues_opened    issues (not PRs) opened per week by outside authors; totals in detail
-  D5 external_contributors     distinct non-swarm authors of PRs merged in the trailing 28 days
+  D5 external_contributors     distinct authors of PRs merged in the trailing 28 days (owner, bots and swarm accounts excluded)
 
 Only public endpoints are used. A GitHub token is optional: if GITHUB_TOKEN (or
 GH_TOKEN) is in the process it raises the rate limit from 60 to 5000 requests
