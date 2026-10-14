@@ -37,10 +37,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import copy
+import fcntl
 import json
 import logging
 import os
+import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -255,6 +259,66 @@ def _reserved_cost(entry: dict, config: FlyConfig) -> float:
         return max(0.0, span) * config.rate_per_second_usd
 
 
+def process_start_token(pid: int) -> str | None:
+    """When *pid* started, as an opaque token; None when it is not running.
+
+    "" means running with an unreadable start time. Comparing tokens detects
+    a pid that was reused by a different process after its owner died.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass  # exists, owned by someone else
+    except OSError:
+        return ""
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():
+        try:
+            # Field 22 (starttime); fields after the parenthesised name start at 3.
+            return stat.read_text().rsplit(")", 1)[1].split()[19]
+        except (OSError, IndexError):
+            return ""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip()  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out or None
+
+
+def this_process_owner(instance_id: str) -> dict:
+    """The liveness proof recorded with every reservation this process makes."""
+    pid = os.getpid()
+    return {
+        "id": instance_id,
+        "pid": pid,
+        "start": process_start_token(pid) or "",
+        "host": socket.gethostname(),
+    }
+
+
+def owner_provably_dead(record: dict | None) -> bool:
+    """True only when the owner's process is provably gone: same host, and its
+    pid is not running or now belongs to a process that started at another
+    time. Anything unknown (another host, no record, unreadable start time)
+    is NOT proof of death; staleness rules decide those."""
+    if not record or record.get("host") != socket.gethostname():
+        return False
+    try:
+        pid = int(record.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    token = process_start_token(pid)
+    if token is None:
+        return True
+    recorded = str(record.get("start") or "")
+    return bool(token and recorded and token != recorded)
+
+
 class FlyLedgerError(Exception):
     """The ledger file exists but cannot be read: accounting is unknown."""
 
@@ -273,9 +337,37 @@ class FlyLedger:
     because resetting it would forget spend and running machines.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, owner: dict | None = None,
+                 clock: Callable[[], float] = time.time):  # fmt: skip
         self.path = Path(path)
         self._lock = threading.Lock()
+        # This process's liveness proof; refreshed (heartbeat) on every write.
+        self.owner = owner
+        self._clock = clock
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """This process's threads AND every other process sharing the file
+        (Apis and any ``dispatch_role --runner fly`` CLI) serialise here."""
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path.with_name(self.path.name + ".lock"), "a+") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def heartbeat(self) -> None:
+        """Refresh this process's owner heartbeat."""
+        if self.owner is None:
+            return
+        with self._locked():
+            try:
+                data = self._load()
+            except FlyLedgerError:
+                return
+            self._save(data)
 
     def _load(self) -> dict:
         if not self.path.exists():
@@ -291,6 +383,13 @@ class FlyLedger:
         return data
 
     def _save(self, data: dict) -> None:
+        if self.owner is not None:
+            owners = data.setdefault("owners", {})
+            owners[self.owner["id"]] = {**self.owner, "heartbeat": self._clock()}
+            # Keep the map small: drop owners that hold nothing any more.
+            holding = {str(e.get("owner") or "") for e in data["in_flight"].values()}
+            for oid in [o for o in owners if o not in holding and o != self.owner["id"]]:
+                del owners[oid]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, sort_keys=True, indent=1), encoding="utf-8")
@@ -305,7 +404,7 @@ class FlyLedger:
             data["launches_today"] = 0
 
     def snapshot(self, now: float | None = None) -> dict:
-        with self._lock:
+        with self._locked():
             data = self._load()
             self._roll(data, now or time.time())
             return copy.deepcopy(data)
@@ -325,7 +424,7 @@ class FlyLedger:
         reached (until the earliest held deadline).
         """
         now = time.time() if now is None else now
-        with self._lock:
+        with self._locked():
             try:
                 data = self._load()
             except FlyLedgerError as exc:
@@ -376,7 +475,7 @@ class FlyLedger:
         concurrency and budget until its termination is confirmed. Bypasses
         the caps: it records a fact, it is not an admission."""
         key = run_id or f"untracked-{machine_id}"
-        with self._lock:
+        with self._locked():
             data = self._load()
             data["in_flight"].setdefault(key, {
                 "run_id": key, "owner": owner, "machine_id": machine_id, "login": False,
@@ -388,7 +487,7 @@ class FlyLedger:
         return key
 
     def set_machine(self, run_id: str, machine_id: str) -> None:
-        with self._lock:
+        with self._locked():
             data = self._load()
             entry = data["in_flight"].get(run_id)
             if entry is not None:
@@ -398,7 +497,7 @@ class FlyLedger:
     def mark_unconfirmed(self, run_id: str, *, reason: str) -> None:
         """Keep *run_id*'s slot and reservation, flagged for the reaper: its
         machine's termination could not be confirmed, so it is still owned."""
-        with self._lock:
+        with self._locked():
             data = self._load()
             entry = data["in_flight"].get(run_id)
             if entry is None:
@@ -408,11 +507,11 @@ class FlyLedger:
             self._save(data)
 
     def entry(self, run_id: str) -> dict | None:
-        with self._lock:
+        with self._locked():
             return copy.deepcopy(self._load()["in_flight"].get(run_id))
 
     def find_by_machine(self, machine_id: str) -> dict[str, dict]:
-        with self._lock:
+        with self._locked():
             return {
                 rid: copy.deepcopy(e) for rid, e in self._load()["in_flight"].items()
                 if e.get("machine_id") == machine_id
@@ -420,7 +519,7 @@ class FlyLedger:
 
     def release(self, run_id: str) -> None:
         """Drop a reservation that provably never ran anything (no charge)."""
-        with self._lock:
+        with self._locked():
             data = self._load()
             if data["in_flight"].pop(run_id, None) is not None:
                 self._save(data)
@@ -434,7 +533,7 @@ class FlyLedger:
         only after termination is confirmed. Returns the dollars charged.
         """
         now = time.time() if now is None else now
-        with self._lock:
+        with self._locked():
             data = self._load()
             self._roll(data, now)
             entry = data["in_flight"].pop(run_id, None)
@@ -446,7 +545,7 @@ class FlyLedger:
             return cost
 
     def count_local_fallback(self) -> int:
-        with self._lock:
+        with self._locked():
             try:
                 data = self._load()
             except FlyLedgerError:
@@ -504,7 +603,9 @@ class FlyMachinesClient:
             raise _invalid(f"{method} {path.split('?')[0]} returned malformed JSON") from None
 
     @staticmethod
-    def _machine(data: Any, *, expect_id: str = "") -> dict:
+    def _machine(data: Any, *, expect_id: str = "", require_state: bool = True) -> dict:
+        """A machine object, or raise. Identity, state and the ownership
+        metadata are all checked, because each one drives a decision."""
         if not isinstance(data, dict):
             raise _invalid("machine is not an object")
         mid = data.get("id")
@@ -512,12 +613,25 @@ class FlyMachinesClient:
             raise _invalid("machine has no id")
         if expect_id and mid != expect_id:
             raise _invalid("machine id does not match the request")
-        if "state" in data and not isinstance(data["state"], str):
-            raise _invalid("machine state is not a string")
+        state = data.get("state")
+        if (require_state or state is not None) and (not isinstance(state, str) or not state):
+            raise _invalid("machine state is missing or not a string")
+        config = data.get("config")
+        if config is not None:
+            if not isinstance(config, dict):
+                raise _invalid("machine config is not an object")
+            metadata = config.get("metadata")
+            if metadata is not None:
+                if not isinstance(metadata, dict):
+                    raise _invalid("machine metadata is not an object")
+                run_id = metadata.get("ateles_run_id")
+                if run_id is not None and not isinstance(run_id, str):
+                    raise _invalid("machine run id is not a string")
         return data
 
     async def create(self, body: dict) -> dict:
-        return self._machine(await self._call("POST", "/machines", body=body))
+        return self._machine(await self._call("POST", "/machines", body=body),
+                             require_state=False)  # fmt: skip
 
     async def get(self, machine_id: str) -> dict | None:
         """The machine, or None ONLY for an explicit 404."""
@@ -533,10 +647,9 @@ class FlyMachinesClient:
         return machine
 
     async def update(self, machine_id: str, body: dict) -> dict:
+        """Update a machine's config; the answer must be THAT machine."""
         data = await self._call("POST", f"/machines/{machine_id}", body=body)
-        if not isinstance(data, dict):
-            raise _invalid("update result is not an object")
-        return data
+        return self._machine(data, expect_id=machine_id, require_state=False)
 
     async def start(self, machine_id: str) -> None:
         await self._call("POST", f"/machines/{machine_id}/start", parse=False)
@@ -560,7 +673,11 @@ class FlyMachinesClient:
         data = await self._call("GET", "/machines")
         if not isinstance(data, list):
             raise _invalid("machine listing is not a list")
-        return [self._machine(m) for m in data]
+        machines = [self._machine(m) for m in data]
+        ids = [m["id"] for m in machines]
+        if len(ids) != len(set(ids)):
+            raise _invalid("machine listing repeats an id")
+        return machines
 
     async def wait(self, machine_id: str, *, state: str, instance_id: str = "",
                    timeout_s: int = 60) -> str:  # fmt: skip
@@ -929,9 +1046,11 @@ TRUNCATION_MARKER = (
     "[fly runner: output truncated; only the last {cap} bytes of stdout were kept, "
     "the beginning of the output is missing (run {run_id})]"
 )
-# How long past its deadline a reservation of THIS process must be before the
-# reaper may treat it as abandoned (a live run settles its own well before).
+# How long past its deadline a reservation must be before the reaper may
+# treat it as abandoned (a live run settles its own well before that).
 REAP_GRACE_SECONDS = 300
+# A live executor refreshes its owner heartbeat this often while it runs.
+HEARTBEAT_INTERVAL_SECONDS = 30
 
 
 class FlyUncertainLaunch(Exception):
@@ -1046,15 +1165,54 @@ class FlyExecutor:
         self._clock = clock
         self._last_reap = 0.0
         self.instance_id = f"apis-{uuid.uuid4().hex[:16]}"
+        if self.ledger.owner is None:
+            self.ledger.owner = this_process_owner(self.instance_id)
+            self.ledger._clock = clock
+        else:
+            self.instance_id = self.ledger.owner["id"]
         self._active: set[str] = set()
-        self._admission: asyncio.Lock | None = None
+        self._admission_async: asyncio.Lock | None = None
         self._admission_loop: Any = None
 
     def _admission_lock(self) -> asyncio.Lock:
         loop = asyncio.get_running_loop()
-        if self._admission is None or self._admission_loop is not loop:
-            self._admission, self._admission_loop = asyncio.Lock(), loop
-        return self._admission
+        if self._admission_async is None or self._admission_loop is not loop:
+            self._admission_async, self._admission_loop = asyncio.Lock(), loop
+        return self._admission_async
+
+    @contextlib.asynccontextmanager
+    async def _admission(self):
+        """Admission and reaping are serialised across coroutines in this
+        process AND across processes sharing the ledger (an flock on a
+        dedicated file, polled without blocking so the event loop never
+        waits behind another process)."""
+        async with self._admission_lock():
+            path = self.ledger.path.with_name(self.ledger.path.name + ".admission.lock")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(path, "a+")
+            try:
+                # Non-blocking attempts with a short sleep: a cancelled waiter
+                # leaves no thread stuck inside flock().
+                while True:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        await asyncio.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+            try:
+                await asyncio.to_thread(self.ledger.heartbeat)
+            except Exception as exc:  # noqa: BLE001 — a missed beat is not fatal
+                log.warning(f"[fly] heartbeat failed: {type(exc).__name__}")
 
     # ── The job lifetime ─────────────────────────────────────────────────────
 
@@ -1071,6 +1229,7 @@ class FlyExecutor:
         tokens = _TokenOwner(self._revoke)
         launch = _LaunchState()
         self._active.add(job.run_id)
+        beat = asyncio.ensure_future(self._heartbeat_loop())
         try:
             try:
                 handle = await self._launch(job, tokens, launch)
@@ -1086,6 +1245,7 @@ class FlyExecutor:
                             await self._scrub_login_machine(launch.machine_id)
                 finally:
                     self._active.discard(job.run_id)
+                    beat.cancel()
                     if launch.lock is not None and launch.lock.locked():
                         launch.lock.release()
         finally:
@@ -1148,7 +1308,7 @@ class FlyExecutor:
             for name in ("GITHUB_TOKEN", "GH_TOKEN"):
                 if name not in job.child_credential_names:
                     job.child_credential_names.append(name)
-        async with self._admission_lock():
+        async with self._admission():
             login_id = self.config.login_machines.get(job.provider, "") if job.login else ""
             self.ledger.reserve(self.config, run_id=job.run_id, owner=self.instance_id,
                                 max_run_seconds=max_run, login=job.login, machine_id=login_id,
@@ -1223,6 +1383,7 @@ class FlyExecutor:
             ).encode()
         if outcome == "deadline":
             log.error(f"[fly] run={job.run_id} machine={handle.machine_id} passed its deadline")
+            job.outcome_unknown = True  # the task's own result was never observed
             raise asyncio.TimeoutError()
         record = await self._read_result(job.run_id)
         if not record:
@@ -1289,10 +1450,21 @@ class FlyExecutor:
             return False
         found = [
             m["id"] for m in machines
-            if _machine_run_id(m) == run_id and m.get("state") != "destroyed"
+            if _machine_run_id(m) == run_id and m["state"] != "destroyed"
         ]  # fmt: skip
-        results = [await self._terminate(mid, login=False) for mid in found]
-        return all(results)
+        if not found:
+            return True  # a valid listing shows no machine for this run
+        if not all([await self._terminate(mid, login=False) for mid in found]):
+            return False
+        # Confirm against a second valid listing, not only per-machine reads.
+        try:
+            after = await self.client.list()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[fly] could not re-list machines for run {run_id}: {exc}")
+            return False
+        return not any(
+            _machine_run_id(m) == run_id and m["state"] != "destroyed" for m in after
+        )
 
     async def _terminate(self, machine_id: str, *, login: bool) -> bool:
         """Stop a login machine, or destroy a per-job one, and CONFIRM it by
@@ -1322,12 +1494,21 @@ class FlyExecutor:
             return False
 
     async def _reconcile_login(self, machine_id: str, own_run_id: str) -> None:
-        """Before a login machine takes a new job, settle every other
-        reservation on it that no live run holds. Refuse the launch (nothing
-        has been sent yet) if any cannot be confirmed stopped."""
-        for run_id in self.ledger.find_by_machine(machine_id):
-            if run_id == own_run_id or run_id in self._active:
+        """Before a login machine takes a new job, account for every other
+        reservation on it. One held by a live run (here or in another process)
+        means the machine is busy: refuse with a retry time. One that is
+        provably abandoned is settled; if that cannot be confirmed, refuse.
+        Nothing has been sent to the machine yet in either case."""
+        now = self._clock()
+        owners = self.ledger.snapshot(now).get("owners", {})
+        for run_id, entry in self.ledger.find_by_machine(machine_id).items():
+            if run_id == own_run_id:
                 continue
+            if not self._reapable(run_id, entry, now, owners):
+                raise FlyRefusal(
+                    "login machine is busy with another dispatcher's run",
+                    _render_wall(now + 300),
+                )
             if not await self._settle(run_id):
                 raise FlyApiError(409, "login machine from a previous job is not confirmed stopped")
 
@@ -1355,14 +1536,29 @@ class FlyExecutor:
             log.warning(f"[fly] reaper failed: {exc}")
             return []
 
-    def _reapable(self, run_id: str, entry: dict, now: float) -> bool:
+    def _reapable(self, run_id: str, entry: dict, now: float, owners: dict) -> bool:
+        """Whether no live run holds this reservation.
+
+        A different owner id is NOT proof of a dead owner: Apis and a
+        ``dispatch_role --runner fly`` CLI run concurrently on one ledger.
+        Another owner's reservation is reapable only when that process is
+        provably dead (same host; pid gone, or reused by a process with a
+        different start time) or when it is past its deadline plus the grace
+        period AND its owner's heartbeat is stale by more than the grace.
+        """
         if run_id in self._active:
             return False  # a live run in this process owns it
-        if entry.get("owner") != self.instance_id:
-            return True  # left by a previous Apis process
-        if entry.get("unconfirmed"):
-            return True  # its run ended without confirming termination
-        return now > float(entry.get("deadline") or 0) + REAP_GRACE_SECONDS
+        past = now > float(entry.get("deadline") or 0) + REAP_GRACE_SECONDS
+        owner = str(entry.get("owner") or "")
+        if owner == self.instance_id:
+            # Not active here, so its run() has ended: an unconfirmed
+            # machine is ours to finish; otherwise only once overdue.
+            return bool(entry.get("unconfirmed")) or past
+        record = owners.get(owner)
+        if owner_provably_dead(record):
+            return True
+        heartbeat = float((record or {}).get("heartbeat") or 0)
+        return past and now - heartbeat > REAP_GRACE_SECONDS
 
     async def reap(self) -> list[str]:
         """Settle reservations no live run holds, and own untracked machines.
@@ -1373,11 +1569,13 @@ class FlyExecutor:
         skipped.
         """
         settled: list[str] = []
-        async with self._admission_lock():
+        async with self._admission():
             now = self._clock()
             for run_id in list(self.ledger.snapshot(now)["in_flight"]):
-                entry = self.ledger.entry(run_id)  # fresh: settlements may have run
-                if entry is None or not self._reapable(run_id, entry, now):
+                fresh = self.ledger.snapshot(now)  # settlements may have run
+                entry = fresh["in_flight"].get(run_id)
+                if entry is None or not self._reapable(run_id, entry, now,
+                                                       fresh.get("owners", {})):  # fmt: skip
                     continue
                 if entry.get("login"):
                     provider = next((p for p, m in self.config.login_machines.items()

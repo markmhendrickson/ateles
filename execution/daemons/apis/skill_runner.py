@@ -3257,6 +3257,21 @@ async def _run_skill_once(
                 await _kill_spawned_process_group(proc)
             duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
             msg = f"timed out after {timeout}s"
+            if _fly_job is not None:
+                # The remote task's own result was never observed. Say which
+                # run it was, what state its machine was left in, and that it
+                # must be checked before anything re-dispatches it.
+                _state = _fly_job.remote_state or "unconfirmed"
+                msg += (
+                    f"; remote run {_fly_job.run_id} (machine "
+                    f"{_fly_job.machine_id or 'unknown'}) has an UNKNOWN outcome, machine "
+                    f"{_state}"
+                    + (
+                        "; its reservation is kept for the reaper"
+                        if _state == "unconfirmed" else ""
+                    )
+                    + ". Not retried: check what the run did before dispatching it again."
+                )
             log.error(f"[apis] {skill} dispatch {msg}")
 
             # Stage 2: harness_event on timeout (failure)
@@ -3321,6 +3336,11 @@ async def _run_skill_once(
                 "",
                 error=msg,
                 provider=provider,
+                remote_outcome_unknown=_fly_job is not None,
+                remote_run_id=_fly_job.run_id if _fly_job is not None else "",
+                remote_machine_state=(
+                    (_fly_job.remote_state or "unconfirmed") if _fly_job is not None else ""
+                ),
             )
 
         duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
@@ -3436,6 +3456,12 @@ async def _run_skill_once(
             remote_run_id=_fly_job.run_id if _fly_job is not None else "",
             remote_machine_state=_fly_job.remote_state if _fly_job is not None else "",
         )
+        if _fly_job is not None and _fly_job.remote_state == "unconfirmed":
+            log.warning(
+                f"[apis] {skill}: remote run {_fly_job.run_id} finished and its result was "
+                f"recorded, but machine {_fly_job.machine_id} is not confirmed terminated; "
+                "its reservation is kept for the reaper"
+            )
 
         # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────
         # Checked regardless of exit code: the CLI logs "Ignoring --allowedTools
@@ -4090,6 +4116,12 @@ async def _run_provider_attempts(
             attempt(selected, fallback_model=pinned) if pinned else attempt(selected)
         )
         result.attempted_providers = tuple(attempted)
+        # ateles#1456: a remote run whose outcome is unknown may have done its
+        # work. It ends the whole dispatch here, BEFORE any classification of
+        # its text: no cooldown, no failover to another provider, no retry,
+        # even when an infrastructure message resembles a provider failure.
+        if result.remote_outcome_unknown:
+            return result
         # _run_skill_once carries an explicit delivery-only signal only after
         # independently excluding provider diagnostics from stderr. Preserve
         # that result before scanning the child's large stdout transcript:

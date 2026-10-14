@@ -25,7 +25,9 @@ import base64
 import contextlib
 import io
 import json
+import socket
 import stat
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +64,7 @@ class FakeFly:
     def __init__(self, wait_mode: str, *, start_lost: bool = False, create: str = "ok"):
         self.wait_mode = wait_mode
         self.start_lost = start_lost
+        self.lost_error = "eval: response lost"
         # "ok" | "lost" (created, response 500) | "refused" (422, nothing created)
         self.create = create
         self.sticky_all = False
@@ -84,7 +87,7 @@ class FakeFly:
             if self.sticky_all:
                 self.sticky.add(mid)
             if self.create == "lost":
-                return httpx.Response(500, json={"error": "eval: create response lost"})
+                return httpx.Response(500, json={"error": self.lost_error})
             return httpx.Response(201, json={"id": mid, "instance_id": f"i-{mid}"})
         if request.method == "GET" and rest == "/machines":
             return httpx.Response(200, json=list(self.machines.values()))
@@ -98,7 +101,8 @@ class FakeFly:
                 raise httpx.ConnectError("eval: connection dropped while waiting")
             if self.wait_mode == "timeout":
                 return httpx.Response(408, json={"error": "deadline exceeded"})
-            self.machines.pop(mid, None)  # auto_destroy after a clean exit
+            if mid not in self.sticky:
+                self.machines.pop(mid, None)  # auto_destroy after a clean exit
             return httpx.Response(200, json={"ok": True})
         if request.method == "GET":
             if mid in self.machines:
@@ -113,7 +117,7 @@ class FakeFly:
         if request.method == "POST" and parts[3:] == ["start"]:
             self.machines[mid]["state"] = "started"
             if self.start_lost:
-                return httpx.Response(500, json={"error": "eval: start response lost"})
+                return httpx.Response(500, json={"error": self.lost_error})
             return httpx.Response(200, json={"ok": True})
         if request.method == "POST" and parts[3:] == ["stop"]:
             if mid in self.machines:
@@ -214,8 +218,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         "APIS_FLY_CODEX_MACHINE_ID": "m-codex-login",
         **scenario.get("settings", {}),
     }
-    if scenario.get("provider") == "codex":
+    if scenario.get("provider") in ("codex", "router"):
         settings["APIS_HARNESS_PROVIDERS"] = "claude,codex"
+        settings["APIS_HARNESS_HEADROOM"] = '{"claude": 1.0, "codex": 1.0}'
     for name, value in settings.items():
         monkeypatch.setenv(name, value)
     if scenario["identity"] == "key":
@@ -250,6 +255,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     fake = FakeFly(scenario["fly"]["wait"], start_lost=scenario["fly"].get("start") == "lost",
                    create=scenario["fly"].get("create", "ok"))  # fmt: skip
     fake.sticky_all = bool(scenario["fly"].get("delete_ineffective"))
+    if scenario["fly"].get("lost_error"):
+        fake.lost_error = scenario["fly"]["lost_error"]
+        fake.start_lost = True
     fake.machines["m-codex-login"] = {"id": "m-codex-login", "state": "stopped", "login": True,
                                       "config": {"mounts": []}}  # fmt: skip
     config = fly_runner.FlyConfig.from_env()
@@ -297,6 +305,29 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
             fake.machines[mid] = {"id": mid, "state": "started"}
         if seed["state"] == "sticky":
             fake.sticky.add(mid)
+    # Another dispatcher (a separate process) holding a reservation of its own.
+    others: list = []
+    for other in scenario.get("other_dispatcher", []):
+        mid = other["machine"]
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        others.append(proc)
+        if not other.get("alive", True):
+            proc.kill()
+            proc.wait()
+        owner = {"id": f"apis-other-{mid}", "pid": proc.pid,
+                 "start": fly_runner.process_start_token(proc.pid) or "gone",
+                 "host": socket.gethostname(), "heartbeat": clock.now}  # fmt: skip
+        data = executor.ledger._load()
+        executor.ledger._roll(data, clock.now)
+        data["in_flight"][f"other-{mid}"] = {
+            "run_id": f"other-{mid}", "owner": owner["id"], "machine_id": mid, "login": False,
+            "started_at": clock.now, "deadline": clock.now + 1920,
+            "max_cost_usd": 1920 * config.rate_per_second_usd,
+        }  # fmt: skip
+        data.setdefault("owners", {})[owner["id"]] = owner
+        executor.ledger._save(data)
+        fake.machines[mid] = {"id": mid, "state": "started"}
+        seed_keys.append(f"other-{mid}")
     # Machines running that no reservation accounts for (a lost ledger).
     for ghost in scenario.get("untracked", []):
         fake.machines[ghost["machine"]] = {"id": ghost["machine"], "state": "started"}
@@ -310,11 +341,18 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
 
     # ── Drive the agent-facing CLI ───────────────────────────────────────────
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        exit_code = dispatch_role.main(
-            ["--role", ROLE, "--task", "Check the PR's gate inheritance.", "--provider",
-             scenario.get("provider", "claude"), "--json", *scenario["args"]]
-        )  # fmt: skip
+    provider = scenario.get("provider", "claude")
+    provider_args = [] if provider == "router" else ["--provider", provider]
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            exit_code = dispatch_role.main(
+                ["--role", ROLE, "--task", "Check the PR's gate inheritance.",
+                 *provider_args, "--json", *scenario["args"]]
+            )  # fmt: skip
+    finally:
+        for proc in others:
+            proc.kill()
+            proc.wait()
     stdout_text = out.getvalue()
     try:
         envelope = json.loads(stdout_text)
@@ -402,6 +440,20 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
     if "remote_machine_state" in e and env.get("remote_machine_state") != e["remote_machine_state"]:
         problems.append(f"remote machine state {env.get('remote_machine_state')!r}, "
                         f"expected {e['remote_machine_state']!r}")  # fmt: skip
+    if "attempts" in e and len(env.get("attempted_providers") or []) != e["attempts"]:
+        problems.append(f"attempted {env.get('attempted_providers')}, expected "
+                        f"{e['attempts']} attempt(s)")  # fmt: skip
+    if "stderr_contains" in e and e["stderr_contains"] not in trace.stderr_text:
+        problems.append(f"stderr lacks {e['stderr_contains']!r}")
+    if "error_contains_run_id" in e and env.get("remote_run_id") and (
+        env["remote_run_id"] not in str(env.get("error", ""))
+    ):
+        problems.append("the error does not name the remote run")
+    if e.get("seed_kept") and not trace.seed_entries_left:
+        problems.append("another dispatcher's live reservation was released")
+    for mid in e.get("machines_kept", []):
+        if mid not in trace.machines_remaining:
+            problems.append(f"another dispatcher's machine {mid} was terminated")
     if "login_state" in e and trace.login_state != e["login_state"]:
         problems.append(f"login machine is {trace.login_state}, expected {e['login_state']}")
     if e.get("login_lock_free") and trace.login_lock_held:

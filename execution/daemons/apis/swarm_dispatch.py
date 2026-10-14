@@ -6856,7 +6856,10 @@ class SwarmDispatcher:
             repository=trigger.repository,
         )
         verdict = parse_gate_verdict(lanius.stdout)
-        if verdict is None:
+        # A remote run with an unknown outcome is never re-dispatched
+        # (ateles#1456): it fails open into review below, like any other
+        # missing verdict, instead of being retried.
+        if verdict is None and not getattr(lanius, "remote_outcome_unknown", False):
             # PR-87 self-dogfood finding: Lanius sometimes replies without the
             # mandatory verdict line. One sharper retry before failing open.
             # Applies whether the skill run reported ok (verdict line simply

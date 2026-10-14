@@ -1065,13 +1065,15 @@ def main(argv: list[str] | None = None) -> int:
             "stderr": result.stderr,
             **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
             **({"output_truncated": True} if getattr(result, "output_truncated", False) else {}),
+            # Every Fly run reports its identity and machine state, whether
+            # its outcome is known or not: cleanup and outcome are separate.
             **(
                 {
-                    "remote_outcome_unknown": True,
+                    "remote_outcome_unknown": bool(result.remote_outcome_unknown),
                     "remote_run_id": result.remote_run_id,
                     "remote_machine_state": result.remote_machine_state,
                 }
-                if getattr(result, "remote_outcome_unknown", False)
+                if getattr(result, "remote_run_id", "")
                 else {}
             ),
         }
@@ -1085,6 +1087,20 @@ def main(argv: list[str] | None = None) -> int:
         f"rc={result.returncode}",
         file=sys.stderr,
     )
+    if getattr(result, "remote_run_id", ""):
+        if result.remote_outcome_unknown:
+            print(
+                f"dispatch_role: remote run {result.remote_run_id} has an UNKNOWN outcome "
+                f"(machine {result.remote_machine_state or 'unconfirmed'}); check what it did "
+                "before dispatching it again",
+                file=sys.stderr,
+            )
+        elif result.remote_machine_state == "unconfirmed":
+            print(
+                f"dispatch_role: warning: remote run {result.remote_run_id} finished, but its "
+                "machine is not confirmed terminated; its reservation is kept for the reaper",
+                file=sys.stderr,
+            )
     if result.local_failure:
         print(
             f"dispatch_role: claude-local failed ({result.local_failure})"

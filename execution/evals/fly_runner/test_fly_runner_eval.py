@@ -46,6 +46,11 @@ def test_scenario_set_covers_the_required_behaviours():
         "opted_in_lost_create_terminated_no_local_replay",
         "opted_in_create_refused_falls_back_locally",
         "untracked_unconfirmed_delete_keeps_capacity_reserved",
+        "concurrent_dispatchers_preserve_live_owner",
+        "abandoned_owner_is_recovered",
+        "unknown_outcome_never_fails_over",
+        "timeout_unconfirmed_keeps_recovery_metadata",
+        "recorded_success_unconfirmed_cleanup_is_visible",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -107,3 +112,15 @@ def test_judge_goes_red_on_a_local_replay_of_an_uncertain_launch(tmp_path, monke
         envelope={"ok": True, "stdout": "LOCAL GATE_INHERITANCE: clear"},
     )  # fmt: skip
     assert len(runner.judge(scenario, replayed)) >= 3
+
+
+def test_judge_goes_red_when_a_live_owner_is_reaped_or_a_dispatch_fails_over(tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    live = _by_id("concurrent_dispatchers_preserve_live_owner")
+    trace = runner.run_scenario(live, tmp_path / "a", monkeypatch)
+    assert runner.judge(live, dataclasses.replace(trace, machines_remaining=[]))
+    once = _by_id("unknown_outcome_never_fails_over")
+    trace = runner.run_scenario(once, tmp_path / "b", monkeypatch)
+    failed_over = {**trace.envelope, "attempted_providers": ["claude", "codex"]}
+    assert runner.judge(once, dataclasses.replace(trace, envelope=failed_over))

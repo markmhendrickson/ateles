@@ -1099,16 +1099,6 @@ def test_reaper_waits_out_the_grace_period_for_this_process(fly_env):
     assert "m-old" in fake.machines
 
 
-def test_reaper_settles_a_previous_process_reservation_at_once(fly_env):
-    fake = FakeFly()
-    clock = Clock()
-    executor, _, _ = make_executor(fake, clock=clock)
-    _seed(executor, clock, owner="apis-previous-process")
-    fake.machines["m-old"] = {"id": "m-old", "state": "started"}
-    assert "old-run" in asyncio.run(executor.reap())  # not overdue, but its owner is gone
-    assert fake.machines == {}
-
-
 def test_reaper_never_touches_a_live_run_even_past_its_deadline(fly_env):
     fake = FakeFly()
     clock = Clock()
@@ -1403,3 +1393,337 @@ def test_budget_counts_every_in_flight_reservation(fly_env, tmp_path):
     assert admitted == 1
     ledger.settle("r0", config=config, now=now + 60)
     ledger.reserve(config, run_id="r3", owner="t", max_run_seconds=max_run, now=now + 60)
+
+
+# ── Owner liveness and cross-process coordination (round 4) ─────────────────
+
+
+def _dead_pid() -> int:
+    import subprocess as sp
+
+    proc = sp.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _seed_foreign(executor, clock, *, owner: dict, run_id="their-run", machine_id="m-theirs",
+                  max_run=600, heartbeat=None):  # fmt: skip
+    """A reservation made by ANOTHER executor, with its liveness record."""
+    data = executor.ledger._load()
+    executor.ledger._roll(data, clock.now)
+    data["in_flight"][run_id] = {
+        "run_id": run_id, "owner": owner["id"], "machine_id": machine_id, "login": False,
+        "started_at": clock.now, "deadline": clock.now + max_run,
+        "max_cost_usd": max_run * executor.config.rate_per_second_usd,
+    }  # fmt: skip
+    data.setdefault("owners", {})[owner["id"]] = {
+        **owner, "heartbeat": clock.now if heartbeat is None else heartbeat,
+    }
+    executor.ledger._save(data)
+
+
+def _live_owner(oid="apis-live-cli"):
+    import os as _os
+
+    record = fly_runner.this_process_owner(oid)
+    assert record["pid"] == _os.getpid()
+    return record
+
+
+@pytest.mark.parametrize("case,reaped", [
+    ("live_fresh", False),          # a concurrent dispatcher, alive and beating
+    ("live_overdue_fresh", False),  # overdue, but its heartbeat is fresh
+    ("live_overdue_stale", True),   # overdue AND heartbeat stale beyond the grace
+    ("dead_pid", True),             # its process is gone
+    ("pid_reused", True),           # its pid now belongs to another process
+    ("other_host_fresh", False),    # cannot check another host's pid
+    ("other_host_overdue_stale", True),
+])  # fmt: skip
+def test_another_owner_is_reaped_only_when_provably_dead_or_stale(fly_env, case, reaped):
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    owner = _live_owner()
+    heartbeat = clock.now
+    if case == "dead_pid":
+        owner = {**owner, "pid": _dead_pid()}
+    elif case == "pid_reused":
+        owner = {**owner, "start": "a-different-start-time"}
+    elif case.startswith("other_host"):
+        owner = {**owner, "host": "another-host.invalid"}
+    _seed_foreign(executor, clock, owner=owner, heartbeat=heartbeat)
+    fake.machines["m-theirs"] = {"id": "m-theirs", "state": "started"}
+    if "overdue" in case:
+        clock.now += 600 + fly_runner.REAP_GRACE_SECONDS + 1
+        if case.endswith("fresh"):
+            data = executor.ledger._load()
+            data["owners"][owner["id"]]["heartbeat"] = clock.now
+            executor.ledger._save(data)
+    result = asyncio.run(executor.reap())
+    assert ("their-run" in result) is reaped
+    assert ("m-theirs" in fake.machines) is (not reaped)
+
+
+_HOLDER = r"""
+import json, sys, time
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
+import fly_runner
+from pathlib import Path
+mode, ledger_path = sys.argv[3], Path(sys.argv[4])
+config = fly_runner.FlyConfig(app="x", api_token="", image="", region="")
+owner = fly_runner.this_process_owner("apis-other-process")
+ledger = fly_runner.FlyLedger(ledger_path, owner=owner)
+if mode == "reserve":
+    ledger.reserve(config, run_id="their-live-run", owner=owner["id"], max_run_seconds=600)
+    ledger.set_machine("their-live-run", "m-their-live")
+    print("ready", flush=True)
+    sys.stdin.readline()
+elif mode == "admission":
+    import fcntl
+    fh = open(ledger_path.with_name(ledger_path.name + ".admission.lock"), "a+")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    print("ready", flush=True)
+    sys.stdin.readline()
+"""
+
+
+def _holder(tmp_path, mode, ledger_path):
+    import subprocess as sp
+
+    script = tmp_path / "holder.py"
+    script.write_text(_HOLDER)
+    proc = sp.Popen(
+        [sys.executable, str(script), str(_REPO_ROOT), str(_DAEMON_DIR), mode, str(ledger_path)],
+        stdin=sp.PIPE, stdout=sp.PIPE, text=True,
+    )  # fmt: skip
+    assert proc.stdout.readline().strip() == "ready"
+    return proc
+
+
+def test_two_processes_sharing_a_ledger_never_reap_each_others_live_run(fly_env, tmp_path):
+    """A second process (a CLI dispatcher) holds a live reservation in the
+    shared ledger. This executor's reaper must leave it alone, and settle it
+    only once that process has exited."""
+    fake = FakeFly()
+    import time as _time
+
+    executor, _, _ = make_executor(fake, clock=_time.time)  # real time: liveness is real
+    other = _holder(tmp_path, "reserve", executor.ledger.path)
+    try:
+        fake.machines["m-their-live"] = {"id": "m-their-live", "state": "started"}
+        assert asyncio.run(executor.reap()) == []
+        assert "m-their-live" in fake.machines
+        assert executor.ledger.entry("their-live-run") is not None
+    finally:
+        other.stdin.write("done\n")
+        other.stdin.flush()
+        other.wait(10)
+    assert "their-live-run" in asyncio.run(executor.reap())  # its owner is gone now
+    assert "m-their-live" not in fake.machines
+
+
+def test_admission_is_exclusive_across_processes(fly_env, tmp_path):
+    executor, _, _ = make_executor(FakeFly())
+    other = _holder(tmp_path, "admission", executor.ledger.path)
+
+    async def enter():
+        async with executor._admission():
+            return True
+
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            asyncio.run(asyncio.wait_for(enter(), 0.5))
+    finally:
+        other.stdin.write("done\n")
+        other.stdin.flush()
+        other.wait(10)
+    assert asyncio.run(asyncio.wait_for(enter(), 5)) is True
+
+
+def test_login_machine_held_by_a_live_dispatcher_elsewhere_is_busy(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, revoked = make_executor(fake, clock=clock)
+    _seed_foreign(executor, clock, owner=_live_owner(), run_id="their-codex-run",
+                  machine_id="m-codex")  # fmt: skip
+    data = executor.ledger._load()
+    data["in_flight"]["their-codex-run"]["login"] = True
+    executor.ledger._save(data)
+    fake.machines["m-codex"]["state"] = "started"
+    with pytest.raises(fly_runner.FlyRefusal, match="busy") as exc:
+        asyncio.run(executor.run(_codex_job()))
+    assert exc.value.cooled_until
+    assert not fake.calls("POST", "/start") and not fake.calls("POST", "/stop")
+    assert executor.ledger.entry("their-codex-run") is not None
+    assert revoked == [MINTED]
+
+
+def test_this_process_heartbeat_is_recorded_on_every_write(fly_env):
+    clock = Clock()
+    executor, _, _ = make_executor(FakeFly(), clock=clock)
+    executor.ledger.reserve(executor.config, run_id="r", owner=executor.instance_id,
+                            max_run_seconds=60, now=clock.now)  # fmt: skip
+    rec = executor.ledger._load()["owners"][executor.instance_id]
+    assert rec["pid"] and rec["host"] and rec["heartbeat"] == clock.now
+    clock.now += 45
+    executor.ledger.heartbeat()
+    assert executor.ledger._load()["owners"][executor.instance_id]["heartbeat"] == clock.now
+
+
+# ── Response validation on update, list and run-id termination (round 4) ────
+
+
+def test_an_update_answered_for_another_machine_aborts_before_start(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake)
+    real = fake.handler
+
+    def wrong_update(request):
+        response = real(request)
+        if request.method == "POST" and request.url.path.endswith("/machines/m-codex"):
+            return httpx.Response(200, json={"id": "someone-else", "state": "stopped"})
+        return response
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(wrong_update)
+    )
+    with pytest.raises(fly_runner.FlyLaunchError, match="invalid Machines API response"):
+        asyncio.run(executor.run(_codex_job()))
+    assert not fake.calls("POST", "/start")
+
+
+@pytest.mark.parametrize("bad_listing", [
+    [{"id": "m1", "state": "started"}, {"id": "m1", "state": "started"}],  # repeated id
+    [{"id": "m1"}],  # no state
+    [{"id": "m1", "state": "started", "config": {"metadata": {"ateles_run_id": 7}}}],
+    [{"id": "m1", "state": "started", "config": {"metadata": []}}],
+])  # fmt: skip
+def test_an_invalid_listing_entry_is_rejected(fly_env, bad_listing):
+    def handler(request):
+        return httpx.Response(200, json=bad_listing)
+
+    config = fly_runner.FlyConfig.from_env()
+    client = fly_runner.FlyMachinesClient(config, transport=httpx.MockTransport(handler))
+    with pytest.raises(fly_runner.FlyApiError, match="invalid Machines API response"):
+        asyncio.run(client.list())
+
+
+def test_run_id_termination_is_confirmed_against_a_second_listing(fly_env):
+    """A machine that reads back as gone but is still LISTED for the run is
+    not confirmed terminated."""
+    fake = FakeFly()
+    fake.create_mode = "lost"
+    executor, _, _ = make_executor(fake, record=None)
+    real = fake.handler
+    listed_ghost = {}
+
+    def handler(request):
+        if request.method == "DELETE":
+            mid = request.url.path.rsplit("/", 1)[1]
+            listed_ghost[mid] = fake.machines.get(mid)
+        response = real(request)
+        if request.method == "GET" and request.url.path.endswith("/machines") and listed_ghost:
+            ghosts = [m for m in listed_ghost.values() if m]
+            return httpx.Response(200, json=list(fake.machines.values()) + ghosts)
+        return response
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    job = _job()
+    with pytest.raises(fly_runner.FlyUncertainLaunch):
+        asyncio.run(executor.run(job))
+    assert job.remote_state == "unconfirmed"
+    assert executor.ledger.entry(job.run_id)["unconfirmed"] is True
+
+
+# ── The dispatch layer above the executor (round 4) ──────────────────────────
+
+
+def test_unknown_outcome_never_fails_over_to_another_provider(fly_env, seam, monkeypatch):
+    """Unpinned, two providers, an uncertain launch whose infrastructure
+    error text resembles a provider rate limit: exactly one attempt, and the
+    original remote identifiers come back."""
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"claude": 1.0, "codex": 1.0}')
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", "/usr/bin/codex-test")
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    fake = FakeFly()
+    fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
+                                "config": {"mounts": []}}  # fmt: skip
+    real = fake.handler
+
+    def handler(request):
+        response = real(request)
+        if request.method == "POST" and request.url.path.endswith("/machines"):
+            return httpx.Response(500, json={"error": "rate_limit_error: usage limit reached"})
+        if request.method == "POST" and request.url.path.endswith("/start"):
+            return httpx.Response(500, json={"error": "rate_limit_error: usage limit reached"})
+        return response
+
+    executor, _, _ = make_executor(fake)
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    import harness_router
+
+    harness_router.reset_state()
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = asyncio.run(skill_runner.run_skill(
+            "lanius", "check the gates", role="lanius", runner="fly",
+            repository="owner/repo", include_github_contract=True,
+        ))  # fmt: skip
+    assert len(result.attempted_providers) == 1, result.attempted_providers
+    assert result.remote_outcome_unknown and result.remote_run_id
+    assert not result.ok and spawned == []
+
+
+@pytest.mark.parametrize("terminates", [True, False])
+def test_timeout_keeps_the_remote_run_identity_and_state(fly_env, seam, monkeypatch, terminates):
+    spawned, fake_exec = seam
+    events = []
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: events.append(kw))
+    fake = FakeFly()
+    fake.wait_status = 408
+    fake.sticky_all = not terminates
+    clock = Clock()
+    executor, _, revoked = make_executor(fake, clock=clock)
+    real_wait = executor.client.wait
+
+    async def advancing_wait(machine_id, **k):
+        clock.now += 120
+        return await real_wait(machine_id, **k)
+
+    executor.client.wait = advancing_wait
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", include_github_contract=True,
+                       timeout=60)  # fmt: skip
+    state = "terminated" if terminates else "unconfirmed"
+    assert not result.ok and "timed out" in result.error
+    assert result.remote_outcome_unknown is True
+    assert result.remote_run_id and result.remote_machine_state == state
+    assert result.remote_run_id in result.error and "Not retried" in result.error
+    assert any("fly_outcome=unknown" in e.get("output_summary", "")
+               and f"fly_machine_state={state}" in e.get("output_summary", "")
+               for e in events)  # fmt: skip
+    assert (executor.ledger.snapshot(clock.now)["in_flight"] == {}) is terminates
+    assert spawned == [] and revoked == [MINTED]
+
+
+def test_a_recorded_result_with_unconfirmed_cleanup_keeps_its_remote_fields(
+    fly_env, seam, monkeypatch
+):
+    spawned, fake_exec = seam
+    fake = FakeFly()
+    fake.sticky_all = True
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "GATE: clear\n"})
+    executor.client.wait = _async(lambda *a, **k: "reached")
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+    assert result.ok  # the task's result is known
+    assert result.remote_outcome_unknown is False
+    assert result.remote_run_id and result.remote_machine_state == "unconfirmed"

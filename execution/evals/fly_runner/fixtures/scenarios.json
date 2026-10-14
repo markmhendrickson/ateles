@@ -204,7 +204,10 @@
         "machines_created": 1,
         "machine_gone": true,
         "revoked_all_minted": true,
-        "in_flight_after": 0
+        "in_flight_after": 0,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "terminated",
+        "error_contains_run_id": true
       }
     },
     {
@@ -526,6 +529,175 @@
         "seed_settled": false,
         "machines_created": 0,
         "in_flight_at_least": 1,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "concurrent_dispatchers_preserve_live_owner",
+      "description": "Another dispatcher (a separate, live process sharing the ledger) holds a reservation and a running machine. This dispatch's reaper runs, leaves that machine and reservation alone, and the dispatch runs on its own machine.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "other_dispatcher": [
+        {
+          "machine": "m-other-live",
+          "alive": true
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY GATE_INHERITANCE: clear",
+        "local_cli_ran": false,
+        "machines_kept": [
+          "m-other-live"
+        ],
+        "machines_created": 1,
+        "revoked_all_minted": true,
+        "seed_kept": true
+      }
+    },
+    {
+      "id": "abandoned_owner_is_recovered",
+      "description": "Control: the other dispatcher's process has exited. Its reservation is provably abandoned, so the reaper terminates its machine, charges it once and releases it, and the dispatch runs.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "other_dispatcher": [
+        {
+          "machine": "m-other-dead",
+          "alive": false
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "local_cli_ran": false,
+        "seed_settled": true,
+        "machine_gone": true,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "unknown_outcome_never_fails_over",
+      "description": "Unpinned routing over two providers. The launch is uncertain and Fly's error text looks like a provider rate limit. The dispatch stops after ONE attempt with its remote identifiers intact: no failover, no local replay.",
+      "provider": "router",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "lost",
+        "lost_error": "rate_limit_error: usage limit reached"
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "attempts": 1,
+        "local_cli_ran": false,
+        "remote_outcome_unknown": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "timeout_unconfirmed_keeps_recovery_metadata",
+      "description": "The machine outlives the deadline and also survives termination: a failed result with an unknown outcome, the run id named in the error, the machine unconfirmed, and its reservation kept.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "timeout",
+        "record": null,
+        "delete_ineffective": true
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo",
+        "--timeout",
+        "5"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "timed out",
+        "error_contains_run_id": true,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "stderr_contains": "UNKNOWN outcome",
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "recorded_success_unconfirmed_cleanup_is_visible",
+      "description": "The run finishes and records a result, but its machine is not confirmed terminated. The dispatch succeeds (its outcome is known) and still reports the remote run and its unconfirmed machine, with a warning, and keeps the reservation.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        },
+        "delete_ineffective": true
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_outcome_unknown": false,
+        "remote_machine_state": "unconfirmed",
+        "stderr_contains": "not confirmed terminated",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
         "revoked_all_minted": true
       }
     }
