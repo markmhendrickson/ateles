@@ -15,8 +15,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
+import tempfile
 import time
+import urllib.parse
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,6 +36,15 @@ Requester = Callable[..., "dict[str, Any]"]
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 BATCH_SIZE = 8
 REPAIR_ROUNDS = 2  # re-store only what the read-back could not find or match
+PAGE_PAUSE = 0.3  # seconds between sequential pages: hosted Neotoma is fragile
+MAX_PAGES = 400  # a read that needs more pages than this is a fault, not a big corpus
+# Repair-round keys carry this per-process nonce, so an immediate rerun of an
+# unchanged payload cannot replay a repair key that an earlier run already spent.
+_RUN_NONCE = uuid.uuid4().hex[:8]
+
+
+class ReadLimitError(RuntimeError):
+    """A paged read hit the page cap without reaching the end of the result."""
 
 
 def request(method: str, path: str, body: dict[str, Any] | None = None, *, retries: int = 3,
@@ -95,22 +109,34 @@ def store_entities(entities: list[dict[str, Any]], label: str, *,
 
 
 def query_all(entity_type: str, *, search: str | None = None, page: int = 100,
-              requester: Requester = request) -> list[dict[str, Any]]:
-    """All entities of a type with snapshots, paged sequentially."""
+              snapshot_filters: dict[str, Any] | None = None, max_pages: int | None = None,
+              pause: float | None = None, requester: Requester = request) -> list[dict[str, Any]]:
+    """All entities of a type with snapshots, paged sequentially.
+
+    Advances by the rows actually returned (a short page never skips rows),
+    pauses between pages, stops when the server reports no ``total`` (it cannot
+    be paged safely then, and looping on a server that ignores ``offset`` never
+    ends), and raises :class:`ReadLimitError` after ``max_pages`` pages.
+    """
     rows: list[dict[str, Any]] = []
     offset = 0
-    while True:
+    limit_pages = MAX_PAGES if max_pages is None else max_pages
+    for _ in range(limit_pages):
         body: dict[str, Any] = {"entity_type": entity_type, "include_snapshots": True,
                                 "limit": page, "offset": offset}
         if search:
             body["search"] = search
+        if snapshot_filters:
+            body["snapshot_filters"] = snapshot_filters
         res = requester("POST", "/entities/query", body)
         batch = res.get("entities") or []
         rows.extend(batch)
         total = res.get("total")
-        offset += page
-        if not batch or (total is not None and offset >= total):
+        offset += len(batch)
+        if not batch or total is None or offset >= total:
             return rows
+        time.sleep(PAGE_PAUSE if pause is None else pause)
+    raise ReadLimitError(f"{entity_type}: more than {limit_pages} pages of {page}; refusing to keep reading")
 
 
 def verify_detail(entities: list[dict[str, Any]], identity_field: str, *,
@@ -159,10 +185,12 @@ def store_and_verify(entities: list[dict[str, Any]], label: str, identity_field:
     problems: list[str] = []
     pending = entities
     for round_no in range(REPAIR_ROUNDS + 1):
-        suffix = "" if round_no == 0 else f"-repair{round_no}"
+        suffix = "" if round_no == 0 else f"-repair{round_no}-{_RUN_NONCE}"
         size = batch_size if round_no == 0 else max(1, batch_size // 4)
         problems = []
         for i in range(0, len(pending), size):
+            if i:
+                time.sleep(PAGE_PAUSE)  # back-to-back /store calls strain the hosted instance
             chunk = pending[i:i + size]
             res = store_entities(chunk, label + suffix, observation_source=observation_source,
                                  requester=requester)
@@ -179,7 +207,10 @@ def store_and_verify(entities: list[dict[str, Any]], label: str, identity_field:
                     problems.append(f"{ent.get('canonical_name')}: unknown fields {ent.get('unknown_fields')}")
         if not verify:
             return problems
-        detail = verify_detail(entities, identity_field, requester=requester)
+        try:
+            detail = verify_detail(entities, identity_field, requester=requester)
+        except ReadLimitError as exc:
+            return problems + [f"read-back incomplete: {exc}"]
         if not detail:
             # Earlier rounds' partial-write notes are history: the read-back is the proof.
             return [p for p in problems if "unknown" in p]
@@ -187,6 +218,33 @@ def store_and_verify(entities: list[dict[str, Any]], label: str, identity_field:
         pending = [e for e in entities if e[identity_field] in bad]
         problems += [p for _, p in detail]
     return problems
+
+
+def store_command(records: list[dict[str, Any]], label: str, identity_field: str, *,
+                  dry_run: bool = False) -> int:
+    """The shared tail of every ``store`` subcommand: name the target, then write and read back.
+
+    The target host is printed before any write (never the token), so an
+    ambient dev or client instance in the shell cannot be written to silently.
+    ``dry_run`` prints the target and counts and writes nothing.
+    """
+    try:
+        target = neotoma_http.base_url()
+        neotoma_http.bearer_token()
+    except neotoma_http.NeotomaConfigError as exc:
+        print(f"Refusing to store: {exc}", file=sys.stderr)
+        return 2
+    if dry_run:
+        print(f"dry run: would store {len(records)} {records[0]['entity_type'] if records else 'record'} "
+              f"records on {target}; nothing written")
+        return 0
+    print(f"Storing {len(records)} records on {target} ...")
+    problems = store_and_verify(records, label, identity_field)
+    if problems:
+        print("PROBLEMS:", *problems[:40], sep="\n  ", file=sys.stderr)
+        return 1
+    print(f"stored and read back {len(records)} records")
+    return 0
 
 
 # --- cached, sequential observation streams (derived reads) -----------------
@@ -201,38 +259,45 @@ def trim(fields: dict[str, Any], keep: tuple[str, ...]) -> dict[str, Any]:
 
 
 def fetch_entity_observations(entity_id: str, keep: tuple[str, ...], *, page: int = 500,
-                              requester: Requester = request, pause: float = 0.3) -> list[dict[str, Any]]:
+                              requester: Requester = request, pause: float | None = None,
+                              max_pages: int | None = None) -> list[dict[str, Any]]:
     """Every observation of one entity (newest first), trimmed to ``keep`` fields."""
     out: list[dict[str, Any]] = []
     offset = 0
-    while True:
-        res = requester("GET", f"/entities/{entity_id}/observations?limit={page}&offset={offset}")
+    quoted = urllib.parse.quote(str(entity_id), safe="")
+    limit_pages = MAX_PAGES if max_pages is None else max_pages
+    for _ in range(limit_pages):
+        res = requester("GET", f"/entities/{quoted}/observations?limit={page}&offset={offset}")
         batch = res.get("observations") or []
         for ob in batch:
             out.append({"entity_id": entity_id, "observed_at": ob.get("observed_at"),
                         "fields": trim(ob.get("fields") or {}, keep)})
-        offset += page
+        offset += len(batch)
         if not batch or offset >= (res.get("total") or 0):
             return out
-        time.sleep(pause)
+        time.sleep(PAGE_PAUSE if pause is None else pause)
+    raise ReadLimitError(f"entity {entity_id}: more than {limit_pages} pages of observations")
 
 
 def fetch_observation_stream(entity_type: str, keep: tuple[str, ...], *, page: int = 200,
-                             requester: Requester = request, pause: float = 0.3) -> list[dict[str, Any]]:
+                             requester: Requester = request, pause: float | None = None,
+                             max_pages: int | None = None) -> list[dict[str, Any]]:
     """Every observation of an entity type via the flat /observations/query stream."""
     out: list[dict[str, Any]] = []
     offset = 0
-    while True:
+    limit_pages = MAX_PAGES if max_pages is None else max_pages
+    for _ in range(limit_pages):
         res = requester("POST", "/observations/query",
                         {"entity_type": entity_type, "limit": page, "offset": offset})
         batch = res.get("observations") or []
         for ob in batch:
             out.append({"entity_id": ob.get("entity_id"), "observed_at": ob.get("observed_at"),
                         "fields": trim(ob.get("fields") or {}, keep)})
-        offset += page
+        offset += len(batch)
         if not batch or offset >= (res.get("total") or 0):
             return out
-        time.sleep(pause)
+        time.sleep(PAGE_PAUSE if pause is None else pause)
+    raise ReadLimitError(f"{entity_type}: more than {limit_pages} pages of observations")
 
 
 def read_cache(path: Path) -> list[dict[str, Any]] | None:
@@ -241,8 +306,52 @@ def read_cache(path: Path) -> list[dict[str, Any]] | None:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def write_cache(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text("\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n")
-    tmp.replace(path)
+META_NAME = "meta.json"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_cache(path: Path, rows: list[dict[str, Any]], *, fetched_at: str | None = None) -> None:
+    """Write one cache file (mode 0600, directory 0700, unique temp name) and record its fetch time.
+
+    The sidecar ``meta.json`` in the same directory holds, per cache name, when
+    the rows were fetched and how many there were, so a later run can refuse a
+    stale cache and stamp readings with the fetch time instead of its own clock.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n")
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    meta = read_meta(path.parent)
+    stamps = [r.get("observed_at") for r in rows if r.get("observed_at")]
+    meta[path.stem] = {"fetched_at": fetched_at or _now_iso(), "rows": len(rows),
+                       "newest_observed_at": max(stamps) if stamps else None}
+    write_meta(path.parent, meta)
+
+
+def read_meta(cache_dir: Path) -> dict[str, Any]:
+    path = cache_dir / META_NAME
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_meta(cache_dir: Path, meta: dict[str, Any]) -> None:
+    fd, tmp_name = tempfile.mkstemp(dir=cache_dir, prefix=META_NAME + ".", suffix=".tmp")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(meta, fh, sort_keys=True, indent=1)
+    os.chmod(tmp_name, 0o600)
+    os.replace(tmp_name, cache_dir / META_NAME)

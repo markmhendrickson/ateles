@@ -59,7 +59,7 @@ METRIC_READING_FIELDS: dict[str, tuple[str, str]] = {
     "coverage_note": ("string", "What is missing from the window, if anything"),
     "probe_ok": ("boolean", "Known-positive probe passed when this reading was taken"),
     "collector": ("string", "Script that produced the reading"),
-    "status": ("string", "ok | probe | partial"),
+    "status": ("string", "ok | probe | partial | invalid (superseded: do not read the value)"),
     "detail": ("object", "Extra context for the value (counts that sum to it, exclusions applied)"),
 }
 METRIC_READING_IDENTITY = ["reading_key"]

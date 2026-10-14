@@ -36,6 +36,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -59,21 +60,45 @@ Fetcher = Callable[[str, str], "tuple[Any, dict[str, str]]"]
 
 # --- HTTP ----------------------------------------------------------------------
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would forward the Authorization header to the new host."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _github_token() -> str:
+    """The optional token from the process, stripped; an empty value means no token."""
+    return (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+
+
+def _redact(text: str, token: str) -> str:
+    return text.replace(token, "[REDACTED]") if token else text
+
+
 def http_get(url: str, accept: str = "application/json", *, timeout: float = 30.0,
              retries: int = 3) -> tuple[Any, dict[str, str]]:
-    """GET JSON; the GitHub token (if any) goes only to api.github.com. Never printed."""
+    """GET JSON; the GitHub token (if any) goes only to api.github.com. Never printed.
+
+    Same protections as ``lib.capabilities.neotoma_http.request_json``: redirects
+    are never followed (so the token cannot ride a redirect to another host), the
+    token is stripped before use, and no exception raised from here carries it.
+    """
     headers = {"Accept": accept, "User-Agent": USER_AGENT}
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    token = _github_token()
     if token and url.startswith(GITHUB_API + "/"):
         headers["Authorization"] = f"Bearer {token}"
     delay = 2.0
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            with _OPENER.open(req, timeout=timeout) as resp:  # noqa: S310
                 return json.load(resp), {k.lower(): v for k, v in resp.headers.items()}
         except urllib.error.HTTPError as exc:
-            body = (exc.read() or b"")[:300].decode("utf-8", "replace")
+            body = _redact((exc.read() or b"")[:300].decode("utf-8", "replace"), token)
             if exc.status in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(delay)
                 delay *= 2
@@ -82,32 +107,54 @@ def http_get(url: str, accept: str = "application/json", *, timeout: float = 30.
                 raise RuntimeError("GitHub rate limit reached; run with an App installation token "
                                    "(lib/github_app_token.py exec) or wait for the reset") from None
             raise RuntimeError(f"HTTP {exc.status} for {url.split('?')[0]}: {body}") from None
-        except OSError:
+        except OSError as exc:
             if attempt == retries:
-                raise
+                raise OSError(_redact(str(exc), token)) from None
             time.sleep(delay)
             delay *= 2
+        except json.JSONDecodeError:
+            raise RuntimeError(f"non-JSON response from {url.split('?')[0]}") from None
+        except ValueError:
+            # http.client rejects a header value with CR/LF and quotes the whole value in its message.
+            raise RuntimeError(f"request to {url.split('?')[0]} failed: invalid request header "
+                               "(check GITHUB_TOKEN / GH_TOKEN for stray control characters)") from None
     raise RuntimeError("unreachable")
+
+
+class PaginationError(RuntimeError):
+    """A paged GitHub read could not be completed; a partial list must not be stored as complete."""
 
 
 def paginate(url: str, *, accept: str = "application/json", fetch: Fetcher | None = None,
              max_pages: int = 400) -> Iterable[Any]:
-    """Yield items across Link rel=next pages (same host only)."""
+    """Yield items across Link rel=next pages (same host only).
+
+    Raises :class:`PaginationError` when a next link points off-host or the page
+    cap is reached, rather than ending the list quietly.
+    """
     getter = fetch or http_get
     next_url: str | None = url
     pages = 0
-    while next_url and pages < max_pages:
+    while next_url:
+        if pages >= max_pages:
+            raise PaginationError(f"more than {max_pages} pages from {url.split('?')[0]}")
         data, headers = getter(next_url, accept)
         yield from data
         pages += 1
         match = re.search(r'<([^>]+)>;\s*rel="next"', headers.get("link", ""))
-        next_url = match.group(1) if match and match.group(1).startswith(GITHUB_API + "/") else None
+        if not match:
+            return
+        next_url = match.group(1)
+        if not next_url.startswith(GITHUB_API + "/"):
+            raise PaginationError(f"next link leaves {GITHUB_API} (from {url.split('?')[0]}); list incomplete")
 
 
 # --- parsers (pure) ---------------------------------------------------------------
 
 def parse_npm_range(payload: dict[str, Any]) -> dict[str, int]:
-    """npm range payload to {YYYY-MM-DD: downloads}."""
+    """npm range payload to {YYYY-MM-DD: downloads}; a payload with no ``downloads`` key is an error, not zero."""
+    if "downloads" not in payload:
+        raise ValueError("npm response has no 'downloads' key; refusing to read it as zero downloads")
     return {row["day"]: int(row["downloads"]) for row in payload.get("downloads", [])}
 
 
@@ -233,12 +280,31 @@ def build_readings(*, package: str, repo_data: dict[str, dict[str, Any]], npm_ro
 
 # --- collection ------------------------------------------------------------------------
 
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+PACKAGE_RE = re.compile(r"^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
+
+
+def validate_repo(repo: str) -> None:
+    """Arguments are interpolated into URLs; refuse anything that is not a plain owner/name slug."""
+    if not REPO_RE.match(repo):
+        raise ValueError(f"not an owner/name repository: {repo!r}")
+
+
+def validate_targets(package: str, repos: list[str]) -> None:
+    if not PACKAGE_RE.match(package):
+        raise ValueError(f"not an npm package name: {package!r}")
+    for repo in repos:
+        validate_repo(repo)
+
+
 def collect(*, package: str, repos: list[str], weeks: int, swarm_logins: set[str], now: datetime,
             fetch: Fetcher | None = None) -> list[dict[str, Any]]:
+    validate_targets(package, repos)
     getter = fetch or http_get
     windows = weekly.weeks_back(now, weeks, lag_days=NPM_LAG_DAYS)
     start, end = windows[0][0], windows[-1][1]
-    payload, _ = getter(f"{NPM_API}/downloads/range/{start:%Y-%m-%d}:{end:%Y-%m-%d}/{package}", "application/json")
+    payload, _ = getter(f"{NPM_API}/downloads/range/{start:%Y-%m-%d}:{end:%Y-%m-%d}/{urllib.parse.quote(package, safe='@')}",
+                        "application/json")
     npm_rows = weekly_npm(parse_npm_range(payload), windows)
 
     repo_data: dict[str, dict[str, Any]] = {}
@@ -290,25 +356,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--weeks", type=int, default=DEFAULT_WEEKS)
     parser.add_argument("--swarm-login", action="append", default=[],
                         help="GitHub login of a swarm agent account to exclude (repeatable; also METRICS_SWARM_LOGINS)")
+    parser.add_argument("--no-swarm-logins", action="store_true",
+                        help="deliberately exclude no agent accounts (agent accounts then count as external)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="store: compute and print the target instance and record counts, write nothing")
     args = parser.parse_args(argv)
-    swarm_logins = {x.strip().lower() for x in args.swarm_login + env_list("METRICS_SWARM_LOGINS")}
+    swarm_logins = {x.strip().lower() for x in args.swarm_login + env_list("METRICS_SWARM_LOGINS") if x.strip()}
+    if not swarm_logins and not args.no_swarm_logins:
+        parser.error("name at least one swarm account with --swarm-login or METRICS_SWARM_LOGINS "
+                     "(or pass --no-swarm-logins to count agent accounts as external on purpose)")
     repos = args.repo or env_list("METRICS_REPOS")
     if not repos:
         parser.error("name at least one repository with --repo owner/name or METRICS_REPOS")
     now = datetime.now(timezone.utc)
-    readings = collect(package=args.npm_package, repos=repos, weeks=args.weeks,
-                       swarm_logins=swarm_logins, now=now)
+    try:
+        readings = collect(package=args.npm_package, repos=repos, weeks=args.weeks,
+                           swarm_logins=swarm_logins, now=now)
+    except (ValueError, PaginationError) as exc:
+        print(f"Refusing to continue: {exc}", file=sys.stderr)
+        return 2
     print(f"{len(readings)} readings; window ends {min(r['window_end'] for r in readings)} .. "
           f"{max(r['window_end'] for r in readings)}")
     print(weekly.format_summary(weekly.summarize_readings(readings), UNITS))
     if args.command == "compute":
         return 0
-    problems = neotoma_io.store_and_verify(readings, "repo-baseline", "reading_key")
-    if problems:
-        print("PROBLEMS:", *problems[:40], sep="\n  ", file=sys.stderr)
-        return 1
-    print(f"stored and read back {len(readings)} metric_reading records")
-    return 0
+    return neotoma_io.store_command(readings, "repo-baseline", "reading_key", dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

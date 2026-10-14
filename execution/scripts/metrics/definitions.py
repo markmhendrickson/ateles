@@ -9,7 +9,7 @@ place. Rulings of 2026-10-13 encoded here:
 * Low-volume metrics are scored over pooled 4-week windows or 8-week horizons
   and name a leading indicator (``pooling``, ``leading_indicator``).
 * Anything derived from people is ``aggregate_only``.
-* Cost per task is measured in dispatch minutes, a proxy.
+* Cost is measured in dispatch minutes per dispatch, a proxy (most dispatches carry no task id).
 
 ``baseline_status`` says what can run now:
 ``exists`` (history retrievable, a collector in this package produces it),
@@ -66,7 +66,7 @@ def _spec(metric_id: str, title: str, description: str, source_system: str, arti
 _NPM = "execution/scripts/metrics/repo_baseline.py"
 _OPS = "execution/scripts/metrics/swarm_ops_baseline.py"
 _AWAIT_USAGE = "Neotoma usage_digest emitter is not built and hosted Neotoma is unopened; forward-only once it runs."
-_AWAIT_WEB = "Umami Cloud API key is not minted yet (operator decision 2); history retention unverified."
+_AWAIT_WEB = "The Umami Cloud API key is not minted yet; history retention is unverified."
 
 SPECS: list[dict[str, Any]] = [
     # --- product usage (awaiting source) -------------------------------------
@@ -143,13 +143,13 @@ SPECS: list[dict[str, Any]] = [
           {"adapter": "A2b", "read": "SendGrid contacts", "derive": "new - unsubscribed per week"},
           "subscribers", "up_good", ["newsletter_growth", "signup_form"],
           baseline_status="awaiting_source",
-          baseline_note="Needs a stats-only SendGrid key (operator decision 2) and a canonical list (decision 6)."),
+          baseline_note="Needs a stats-only SendGrid key (not minted yet) and a canonical subscriber list (not chosen yet)."),
     _spec("W5", "newsletter_click_rate",
           "Unique link clicks divided by delivered, per send.",
           "newsletter", "newsletter_send",
           {"adapter": "A2b", "read": "SendGrid stats", "derive": "unique clicks / delivered per send"},
           "ratio", "up_good", ["email_experiment", "newsletter_send"],
-          baseline_status="awaiting_source", baseline_note="Same key and list decisions as W4."),
+          baseline_status="awaiting_source", baseline_note="Same SendGrid key and canonical list as W4."),
     _spec("W6", "post_link_clicks",
           "Link clicks per post, per platform.",
           "social", "social_post",
@@ -165,17 +165,19 @@ SPECS: list[dict[str, Any]] = [
            "derive": "sum of daily downloads per Monday-Sunday week"},
           "downloads", "up_good", ["release", "distribution", "package_docs"],
           baseline_status="exists",
-          baseline_note="26 weeks backfilled by repo_baseline.py; noise floor is 40-85% of the median at today's volume.",
+          baseline_note="Weeks backfilled by repo_baseline.py. At today's volume the noise floor is about the size of the "
+                        "median, so pool 4 weeks; the readings carry the numbers, not this note.",
           collector=_NPM, leading_indicator="quickstart CTA clicks (W2) and docs visits (W1)",
-          probe={"expect": "last full week downloads > 0", "artifact": "npm:neotoma"}),
+          probe={"expect": "last full week downloads > 0", "artifact": "npm:<package>"}),
     _spec("D2", "github_stars",
-          "Weekly net new stars (value); cumulative stars at window end in detail.",
+          "Weekly new stars still starred (value); cumulative stars at window end in detail.",
           "repo", "repository",
           {"adapter": "A3a", "endpoint": "GET /repos/{repo}/stargazers (Accept: application/vnd.github.star+json)",
            "derive": "count of starred_at per week"},
           "stars", "up_good", ["launch_announcement", "outreach_post"],
           baseline_status="exists",
-          baseline_note="Full star history backfilled with starred_at timestamps.",
+          baseline_note="Star history backfilled from starred_at timestamps. Only stars that still exist are visible, so "
+                        "an unstar removes a past star and a past week can shrink when the reading is re-run.",
           collector=_NPM, leading_indicator="repo unique visitors (D3)",
           probe={"expect": "cumulative stars > 0", "artifact": "github:<owner>/<repo>"}),
     _spec("D3", "repo_unique_visitors_clones",
@@ -193,15 +195,18 @@ SPECS: list[dict[str, Any]] = [
           {"adapter": "A3a", "endpoint": "GET /repos/{repo}/issues?state=all", "derive": "external authors per week"},
           "issues", "up_good", ["community", "support_docs"],
           baseline_status="exists",
-          baseline_note="Backfilled 26 weeks; detail carries total opened, closed and the exclusion list applied.",
+          baseline_note="Backfilled weekly; detail carries total opened, closed and the exclusion list applied. "
+                        "Collaborator and team accounts count as external unless listed as swarm logins.",
           collector=_NPM, leading_indicator="repo unique visitors (D3)"),
     _spec("D5", "external_contributors",
-          "Distinct non-swarm authors of merged pull requests over the trailing 28 days, read weekly.",
+          "Distinct authors of merged pull requests over the trailing 28 days, read weekly, "
+          "excluding the repository owner, bots and the swarm's agents.",
           "repo", "repository",
           {"adapter": "A3a", "endpoint": "GET /repos/{repo}/pulls?state=closed", "derive": "distinct merged authors in 28d"},
           "contributors", "up_good", ["contributor_onboarding"],
           baseline_status="exists",
-          baseline_note="Pooled 28-day window by design (monthly metric read weekly).",
+          baseline_note="Pooled 28-day window by design (monthly metric read weekly). Collaborator and team accounts "
+                        "count as external unless listed as swarm logins.",
           collector=_NPM, pooling="Already pooled over 28 days; score over an 8-week horizon."),
     _spec("D6", "directory_listing_presence",
           "Per MCP directory: listed yes or no, listed version, and any visible installs or rank.",
@@ -218,7 +223,9 @@ SPECS: list[dict[str, Any]] = [
            "kind_field": "action_type"},
           "hours", "down_good", ["workflow_change", "dispatch_change"],
           baseline_status="exists",
-          baseline_note="Derived from task observations; the weekly median is the reading, per-kind medians are in detail.",
+          baseline_note="Derived from task observations; the weekly median is the reading, per-kind medians are in detail. "
+                        "Covers completed swarm tasks only (a task with routing metadata): open tasks and tasks first "
+                        "recorded already done are excluded (the latter counted in detail), so the median is biased low.",
           collector=_OPS, pooling=POOLING_ENOUGH,
           probe={"expect": "tasks with a done transition in the last 4 weeks > 0"}),
     _spec("S2", "dispatch_failure_rate",
@@ -227,18 +234,25 @@ SPECS: list[dict[str, Any]] = [
           {"read": "harness_event observations, event_type subprocess", "derive": "failed / completed dispatches"},
           "ratio", "down_good", ["reliability", "gate_change"],
           baseline_status="exists",
-          baseline_note="Counts completion rows only (those with a duration); start rows are not dispatches.",
+          baseline_note="Counts completion rows only (success true or false); start rows are not dispatches. A failure "
+                        "with no duration (a launch failure) is a failed dispatch and is counted.",
           collector=_OPS, pooling=POOLING_ENOUGH,
           probe={"expect": "completed dispatches in the last full week > 0"}),
     _spec("S3p", "operator_intervention_proxy",
-          "Interim proxy for S3: checkpoints resolved per week (value); decision_shape_check events per week in detail.",
+          "Interim proxy for S3: checkpoints whose status records a decision, per week (value); "
+          "decision_shape_check events per week in detail.",
           "swarm_ops", "swarm",
-          {"read": "checkpoint_brief and decision_shape_check observations", "derive": "resolved per week"},
+          {"read": "checkpoint_brief and decision_shape_check observations",
+           "derive": "checkpoints first reaching a decided status (approved, approved_no_release, rejected, redirected) per week"},
           "events", "down_good", ["automation"],
           baseline_status="exists",
-          baseline_note="Proxy only. S3 proper needs write attribution by principal, which the record lacks.",
+          baseline_note="Proxy only. The record carries no resolver identity, so this is an upper bound on operator "
+                        "interventions: decided statuses may include non-operator resolutions. Machine approvals "
+                        "(auto-build, by-dispatch), pending_* states, superseded, resolved and prepared are not counted. "
+                        "A week with no checkpoint record at all has no reading (absence is not zero); a week with "
+                        "records and no decision is a measured zero. S3 proper needs write attribution by principal.",
           collector=_OPS, pooling=POOLING_ENOUGH,
-          probe={"expect": "checkpoints resolved in the last 8 weeks > 0"}),
+          probe={"expect": "checkpoints decided in the last 8 weeks > 0"}),
     _spec("S3", "operator_interventions_per_task",
           "Writes attributed to the operator principal on a task after its first claim.",
           "swarm_ops", "swarm",
@@ -247,23 +261,31 @@ SPECS: list[dict[str, Any]] = [
           baseline_status="capture",
           baseline_note="Not derivable today: needs principal attribution on writes (foundation work). Use S3p meanwhile."),
     _spec("S4", "review_rounds_per_pr",
-          "Distinct head commits that received a formal review before merge, mean per merged PR, per week of merge.",
+          "Distinct head commits that received a formal review, mean per reviewed merged PR, per week of merge.",
           "swarm_ops", "pull_request",
           {"read": "GitHub pull requests and reviews", "derive": "distinct review commit_ids per merged PR"},
           "rounds", "down_good", ["review_process", "lens_change"],
           baseline_status="exists",
-          baseline_note="Counts formal reviews only; lens verdicts posted as plain comments are not seen. "
-                        "PRs with no formal review are counted in detail, not in the mean.",
+          baseline_note="Counts formal reviews only; lens verdicts posted as plain comments are not seen, so a "
+                        "prediction about lens or review-process changes is scored on a metric blind to that work. "
+                        "Reviews submitted after merge are not filtered out. PRs with no formal review are counted "
+                        "in detail, not in the mean.",
           collector=_OPS, pooling=POOLING_ENOUGH,
           probe={"expect": "merged PRs with a formal review in the last 8 weeks > 0"}),
     _spec("S5", "cost_per_task",
-          "Dispatch wall-clock minutes per task dispatched in the week (a proxy; dollar cost is not the marginal cost "
-          "on subscription logins). Tokens appear in detail only where a harness reported them; otherwise not metered.",
+          "Mean wall-clock minutes per completed, timed dispatch in the week. A proxy for cost, and not per task: "
+          "most dispatches carry no task id. Dollar cost is not the marginal cost here. Tokens appear in detail "
+          "only where a harness reported them; otherwise not metered.",
           "swarm_ops", "swarm",
-          {"read": "harness_event observations, event_type subprocess", "derive": "sum(duration_ms)/60000 / distinct tasks"},
-          "minutes_per_task", "down_good", ["cost_efficiency", "model_tiering"],
+          {"read": "harness_event observations, event_type subprocess",
+           "derive": "sum(duration_ms)/60000 / timed dispatches"},
+          "minutes_per_dispatch", "down_good", ["cost_efficiency", "model_tiering"],
           baseline_status="exists",
-          baseline_note="Operator ruling 2026-10-13: minutes as a proxy. Tokens are mostly unreported, never zero.",
+          baseline_note="Operator ruling 2026-10-13: minutes as a proxy. Dispatch count per task is not captured, so a "
+                        "change that cuts minutes per dispatch while adding dispatches per task would look like an "
+                        "improvement here. Per-task minutes appear in detail only where a task id exists (about 4% of "
+                        "dispatches). Tokens are mostly unreported, never zero; the token figure in detail is a partial "
+                        "sum over the dispatches that reported, next to how many did.",
           collector=_OPS, pooling=POOLING_ENOUGH,
           probe={"expect": "completed dispatches with a duration in the last full week > 0"}),
 ]
