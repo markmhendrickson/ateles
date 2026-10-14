@@ -1289,6 +1289,34 @@
         "ledger_untouched": true,
         "revoked_all_minted": true
       }
+    },
+    {
+      "id": "machine_is_destroyed_while_the_ledger_is_unusable",
+      "description": "The ledger becomes unusable while the run's machine is up, and the connection to the run is lost. Accounting stays frozen (nothing is charged, released or rewritten), but the machine this dispatch launched is still destroyed, and the outcome is reported unknown.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "disconnect",
+        "record": null,
+        "ledger_breaks_on_wait": "null"
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "remote_outcome_unknown": true,
+        "machine_gone": true,
+        "ledger_text_after": "null",
+        "local_cli_ran": false,
+        "revoked_all_minted": true
+      }
     }
   ]
 }

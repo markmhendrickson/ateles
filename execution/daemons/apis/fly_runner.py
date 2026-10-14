@@ -736,13 +736,15 @@ class FlyLedger:
 
     # ── the one validator ────────────────────────────────────────────────
 
-    def _read_document(self) -> dict | None:
-        """The raw file, parsed but NOT validated; None when there is no
-        ledger yet. Only ``_snapshot`` reads it."""
+    def _read_document(self) -> tuple[bool, Any]:
+        """``(exists, parsed)``: the raw file, parsed but NOT validated. Only
+        ``_snapshot`` reads it. Absence is decided ONLY by the file not
+        existing; an existing file is never "no ledger", whatever it holds."""
         if not self.path.exists():
-            return None
+            return False, None
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            # Strict UTF-8 (a byte-order mark or bad bytes are unreadable).
+            return True, json.loads(self.path.read_bytes().decode("utf-8", errors="strict"))
         except (OSError, ValueError):
             raise FlyLedgerError(f"Fly ledger {self.path.name} is unreadable") from None
 
@@ -759,13 +761,15 @@ class FlyLedger:
         stored beside them. The caller must hold ``_locked()``.
         """
         name = self.path.name
-        raw = self._read_document()
-        if raw is None:
-            # The only "new period" without a marker: no ledger at all yet.
+        exists, raw = self._read_document()
+        if not exists:
+            # The only "new period" without a marker: no ledger file at all.
             raw = {"month": None, "spend_usd": 0.0, "day": None, "launches_today": 0,
                    "local_fallbacks": 0, "in_flight": {}, "owners": {}}  # fmt: skip
         else:
             try:
+                # Any existing document, whatever its top level (null, a list,
+                # a string, an empty object...), must pass the validator.
                 validate("ledger", raw)
             except FlyInvalid as exc:
                 raise FlyLedgerError(f"Fly ledger {name}: {exc}") from None
@@ -1729,6 +1733,11 @@ class FlyExecutor:
         else:
             self.instance_id = self.ledger.owner["id"]
         self._active: set[str] = set()
+        # Machines THIS process launched, by run id: the machine id from the
+        # validated create answer (or the configured login machine) and the
+        # lease nonce this process holds. Recorded before any ledger write,
+        # so stopping them never depends on the ledger being readable.
+        self._launched: dict[str, dict] = {}
         self._admission_async: asyncio.Lock | None = None
         self._admission_loop: Any = None
 
@@ -1801,6 +1810,7 @@ class FlyExecutor:
                         job.remote_state = "terminated" if confirmed else "unconfirmed"
                     elif launch.reserved:
                         await self._release_unstarted(job.run_id, launch)
+                        self._launched.pop(job.run_id, None)  # provably never started
                 finally:
                     self._active.discard(job.run_id)
                     beat.cancel()
@@ -1889,6 +1899,8 @@ class FlyExecutor:
                     self._refuse_unless_free(pre, job)
                     nonce, expires = await self._acquire_lease(login_id, job, deadline)
                     launch.lease_nonce = nonce
+                    self._launched[job.run_id] = {"machine_id": login_id, "login": True,
+                                                  "nonce": nonce}  # fmt: skip
                     self.ledger.set_lease(job.run_id, nonce, expires)
                     if expires is not None:
                         # A run must never outlive its lease: its deadline is
@@ -1905,6 +1917,8 @@ class FlyExecutor:
                     )
                     machine_id = created["id"]
                     instance_id = str(created.get("instance_id") or "")
+                    self._launched[job.run_id] = {"machine_id": machine_id, "login": False,
+                                                  "nonce": ""}  # fmt: skip
                     self.ledger.set_machine(job.run_id, machine_id)
                     launch.machine_id = machine_id
             except (FlyApiError, httpx.HTTPError) as exc:
@@ -2156,10 +2170,63 @@ class FlyExecutor:
         """``_settle_steps``; an unusable ledger keeps the reservation as it
         is (nothing is charged or released) and reports it unconfirmed."""
         try:
-            return await self._settle_steps(run_id)
+            confirmed = await self._settle_steps(run_id)
         except FlyLedgerError as exc:
             log.error(f"[fly] run={run_id}: ledger unusable ({exc}); reservation kept")
+            # Accounting stays frozen, but a machine this process launched is
+            # still stopped (or destroyed): termination must not wait for
+            # the operator's repair.
+            await self._terminate_launched(run_id)
             return False
+        if confirmed:
+            self._launched.pop(run_id, None)
+        return confirmed
+
+    async def _terminate_launched(self, run_id: str) -> bool:
+        """Stop (login) or destroy (per-job) the machine THIS process launched
+        for *run_id*, without reading or writing the ledger.
+
+        Identification is the narrowest this process can trust: the machine
+        id recorded in memory at launch (from this app's validated create
+        answer, or the configured login machine whose lease this process
+        took), confirmed by the machine's live config still carrying this
+        run's id. Nothing is charged, released, scrubbed or rewritten; the
+        reservation stays held until the ledger is repaired. A run whose
+        create answer was lost has no recorded machine and is left to its
+        own in-machine deadline.
+        """
+        if run_id not in self._launched:
+            return False
+        rec = self._launched[run_id]
+        machine_id, login, nonce = rec["machine_id"], rec["login"], rec["nonce"]
+        try:
+            verdict = await self._ownership(machine_id, run_id, login=login)
+            if verdict in ("gone", "idle"):
+                confirmed = True
+            elif verdict == "ours":
+                confirmed = await self._terminate(machine_id, login=login, nonce=nonce)
+            else:
+                confirmed = False  # not provably this run's machine: untouched
+        except Exception as exc:  # noqa: BLE001 — reported; retried by the reaper
+            log.error(f"[fly] run={run_id}: termination without the ledger failed: {exc}")
+            return False
+        if confirmed:
+            self._launched.pop(run_id, None)
+            done = "already gone" if verdict == "gone" else (
+                "stopped" if login or verdict == "idle" else "destroyed")
+            log.error(
+                f"[fly] run={run_id} machine={machine_id}: {done} while the ledger is "
+                "unusable; its reservation stays held until the ledger is repaired"
+            )
+        return confirmed
+
+    async def _terminate_launched_inactive(self) -> list[str]:
+        """``_terminate_launched`` for every recorded run no live run() holds."""
+        done = []
+        for run_id in [r for r in list(self._launched) if r not in self._active]:
+            if await self._terminate_launched(run_id):
+                done.append(run_id)
+        return done
 
     async def _settle_steps(self, run_id: str) -> bool:
         """The one release path, in a strict order, with the admission lock
@@ -2397,43 +2464,53 @@ class FlyExecutor:
         """
         settled: list[str] = []
         async with self._admission():
-            now = self._clock()
-            for run_id in list(self.ledger.snapshot(now)["in_flight"]):
-                fresh = self.ledger.snapshot(now)  # settlements may have run
-                if run_id not in fresh["in_flight"]:
-                    continue
-                entry = fresh["in_flight"][run_id]
-                if not self._reapable(run_id, entry, now, fresh["owners"]):
-                    continue
-                provider = next((p for p, m in self.config.login_machines.items()
-                                 if m == entry.get("machine_id")), "")  # fmt: skip
-                if provider and _login_lock(provider).locked():
-                    continue  # a job holds that machine; its launch reconciles first
-                if await self._settle_locked(run_id):  # admission is held
-                    settled.append(run_id)
-            machines = await self.client.list()
-            current = self.ledger.snapshot(now)["in_flight"]  # after the await
-            # Every reservation naming a machine claims it (the snapshot is
-            # validated as a whole, so every reservation is readable here).
-            tracked_machines = {e["machine_id"] for e in current.values() if "machine_id" in e}
-            login_ids = set(self.config.login_machines.values())
-            for machine in machines:
-                mid = machine["id"]
-                run_id = _machine_run_id(machine)
-                if (mid in login_ids or mid in tracked_machines or machine.get("state") == "destroyed"
-                        or (run_id and (run_id in current or run_id in self._active))):  # fmt: skip
-                    continue
-                cap = DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS
-                created = _parse_ts(machine["created_at"]) if "created_at" in machine else None
-                key = self.ledger.record_untracked(
-                    machine_id=mid, run_id=run_id, owner=self.instance_id, config=self.config,
-                    # An unreadable creation time, or one later than now (which
-                    # would charge nothing), is charged the whole window.
-                    started_at=created if created is not None and created <= now else now - cap,
-                    max_run_seconds=cap,
-                )  # fmt: skip
-                if await self._settle_locked(key):  # admission is held
-                    settled.append(key)
+            try:
+                return await self._reap_locked(settled)
+            except FlyLedgerError:
+                # No accounting on an unusable ledger, but the machines this
+                # process launched are still stopped; then report it.
+                await self._terminate_launched_inactive()
+                raise
+
+    async def _reap_locked(self, settled: list[str]) -> list[str]:
+        """``reap`` with the admission lock held."""
+        now = self._clock()
+        for run_id in list(self.ledger.snapshot(now)["in_flight"]):
+            fresh = self.ledger.snapshot(now)  # settlements may have run
+            if run_id not in fresh["in_flight"]:
+                continue
+            entry = fresh["in_flight"][run_id]
+            if not self._reapable(run_id, entry, now, fresh["owners"]):
+                continue
+            provider = next((p for p, m in self.config.login_machines.items()
+                             if m == entry.get("machine_id")), "")  # fmt: skip
+            if provider and _login_lock(provider).locked():
+                continue  # a job holds that machine; its launch reconciles first
+            if await self._settle_locked(run_id):  # admission is held
+                settled.append(run_id)
+        machines = await self.client.list()
+        current = self.ledger.snapshot(now)["in_flight"]  # after the await
+        # Every reservation naming a machine claims it (the snapshot is
+        # validated as a whole, so every reservation is readable here).
+        tracked_machines = {e["machine_id"] for e in current.values() if "machine_id" in e}
+        login_ids = set(self.config.login_machines.values())
+        for machine in machines:
+            mid = machine["id"]
+            run_id = _machine_run_id(machine)
+            if (mid in login_ids or mid in tracked_machines or machine.get("state") == "destroyed"
+                    or (run_id and (run_id in current or run_id in self._active))):  # fmt: skip
+                continue
+            cap = DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS
+            created = _parse_ts(machine["created_at"]) if "created_at" in machine else None
+            key = self.ledger.record_untracked(
+                machine_id=mid, run_id=run_id, owner=self.instance_id, config=self.config,
+                # An unreadable creation time, or one later than now (which
+                # would charge nothing), is charged the whole window.
+                started_at=created if created is not None and created <= now else now - cap,
+                max_run_seconds=cap,
+            )  # fmt: skip
+            if await self._settle_locked(key):  # admission is held
+                settled.append(key)
         if settled:
             log.warning(f"[fly] reaper settled {settled}")
         return settled

@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -249,6 +250,14 @@ def _probe_paths_in_tmp(monkeypatch, tmp_path):
         run_job, "probe_paths_default",
         lambda: (str(tmp_path / "operator.env"), str(tmp_path / "age-keys.txt")),
     )  # fmt: skip
+    # Every run carries its whole-entrypoint deadline, as Apis sets it.
+    monkeypatch.setenv(run_job.DEADLINE_ENV, _deadline_in(600))
+
+
+def _deadline_in(seconds: float) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(time.time() + seconds, tz=timezone.utc).isoformat()
 
 
 class TestRunJob:
@@ -276,7 +285,7 @@ class TestRunJob:
         monkeypatch.setenv("PAVO_AGENT_PAT", "pavo-pat-canary")
         seen = {}
 
-        def fake_runner(argv, env, stdin, timeout, cwd, ident=None):
+        def fake_runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
             seen["argv"], seen["env"], seen["stdin"] = argv, env, stdin
             seen["job_dir_exists"] = job_dir.exists()
             cfg = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())
@@ -339,7 +348,7 @@ class TestRunJob:
                          "--other"])  # fmt: skip
         seen, stored = {}, {}
 
-        def fake_runner(argv, env, stdin, timeout, cwd, ident=None):
+        def fake_runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
             seen["argv"], seen["env"] = argv, env
             return 0, f"echo {jwk['d']}".encode(), b"", False
 
@@ -473,3 +482,124 @@ def test_the_runner_and_executor_agree_on_the_longest_job_timeout():
     import fly_runner
 
     assert run_job.MAX_JOB_TIMEOUT_SECONDS == fly_runner.MAX_JOB_TIMEOUT_SECONDS
+
+
+
+# ── The whole-entrypoint deadline (round 14) ────────────────────────────────
+
+
+@pytest.mark.parametrize("raw", [None, "", "soon", "2030-01-01", "2030-01-01T00:00:00",
+                                 "\uff12030-01-01T00:00:00+00:00", "nan", "inf",
+                                 "2000-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00"],
+                         ids=repr)  # fmt: skip
+def test_a_missing_or_malformed_deadline_is_refused(raw):
+    with pytest.raises(run_job.JobError, match=run_job.DEADLINE_ENV):
+        run_job.parse_deadline(raw, time.time())
+
+
+def test_a_valid_deadline_is_parsed():
+    now = time.time()
+    assert abs(run_job.parse_deadline(_deadline_in(60), now) - (now + 60)) < 1
+
+
+def test_without_a_deadline_nothing_runs(tmp_path, monkeypatch):
+    monkeypatch.delenv(run_job.DEADLINE_ENV)
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"})
+    stored, ran = {}, []
+
+    def writer(base_url, auth, record):
+        stored.update(record)
+        return True
+
+    rc = run_job.main(job_dir, writer=writer, runner=lambda *a, **k: ran.append(a))
+    assert rc == run_job.EXIT_JOB_INVALID and ran == []
+    assert run_job.DEADLINE_ENV in stored["refused"] and not job_dir.exists()
+
+
+_DRIVER = """
+import importlib.util, json, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("run_job_entry", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+m.probe_paths_default = lambda: ()
+record_path, mode = Path(sys.argv[3]), sys.argv[4]
+def writer(base_url, auth, record):
+    if mode == "slow-record":
+        time.sleep(60)
+    record_path.write_text(json.dumps(record))
+    return True
+sys.exit(m.main(Path(sys.argv[2]), writer=writer))
+"""
+
+# A CLI that leaves a long-running process behind and exits.
+_CLI = """
+import subprocess, sys
+p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                     start_new_session=True)
+open(sys.argv[1], "w").write(str(p.pid))
+print("cli started", flush=True)
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    status = Path(f"/proc/{pid}/status")
+    if status.exists():
+        return "\tZ" not in status.read_text().split("State:", 1)[-1][:6]
+    return True
+
+
+@pytest.mark.parametrize("mode", ["record", "slow-record"])
+def test_the_entrypoint_exits_by_its_deadline(tmp_path, mode):
+    """A real entrypoint process with a CLI that leaves work running, and
+    (slow-record) a record write that never finishes. The entrypoint exits
+    by its deadline either way."""
+    job_dir = tmp_path / "job"
+    pid_file = tmp_path / "descendant.pid"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},
+               argv=[sys.executable, "-c", _CLI, str(pid_file)])  # fmt: skip
+    driver = tmp_path / "driver.py"
+    driver.write_text(_DRIVER)
+    record = tmp_path / "record.json"
+    budget = 4.0
+    child_vars = {"PATH": os.environ["PATH"], run_job.DEADLINE_ENV: _deadline_in(budget)}
+    started = time.monotonic()
+    entry = subprocess.Popen(
+        [sys.executable, str(driver), str(_RUNNER_DIR / "run_job.py"), str(job_dir), str(record), mode],
+        env=child_vars, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )  # fmt: skip
+    try:
+        rc = entry.wait(timeout=budget + 6)
+        elapsed = time.monotonic() - started
+        assert elapsed < budget + 2, elapsed  # bounded by the deadline
+        if mode == "record":
+            data = json.loads(record.read_text())
+            assert data["timed_out"] is True and "cli started" in data["stdout"]
+            assert rc == run_job.EXIT_TIMEOUT
+        else:
+            assert rc == run_job.EXIT_DEADLINE and not record.exists()
+        descendant = int(pid_file.read_text())
+        if sys.platform.startswith("linux"):
+            # Linux (the runner's platform): everything the job started is gone.
+            for _ in range(40):
+                if not _alive(descendant):
+                    break
+                time.sleep(0.05)
+            assert not _alive(descendant)
+    finally:
+        if entry.poll() is None:
+            entry.kill()
+            entry.wait()
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), 9)
+            except OSError:
+                pass

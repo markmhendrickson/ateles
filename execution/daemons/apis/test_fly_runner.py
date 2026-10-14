@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import base64
+import contextlib
 import copy
 import json
 import logging
@@ -3602,8 +3603,16 @@ def test_reserve_never_admits_from_an_unvalidated_ledger(fly_env, tmp_path):
             applied.append((where, field, mode))
         path = tmp_path / f"l{case}.json"
         text = json.dumps(doc)  # NaN and Infinity are written as JSON allows
+        if case % 10 == 9:
+            # The whole document replaced: never "no ledger", always refused.
+            text = rng.choice(sorted(_WHOLE_DOCUMENTS.values()))
+            applied.append(("document", "", text[:20]))
         path.write_text(text)
-        valid, expected = _oracle(json.loads(text), config, 600)
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        valid, expected = _oracle(parsed, config, 600) if text.strip() else (False, False)
         ledger = fly_runner.FlyLedger(path, clock=lambda: _NOW)
         try:
             ledger.reserve(config, run_id="new", owner="t", max_run_seconds=600, now=_NOW)
@@ -3611,6 +3620,8 @@ def test_reserve_never_admits_from_an_unvalidated_ledger(fly_env, tmp_path):
         except fly_runner.FlyRefusal as exc:
             admitted = False
             reason = str(exc)
+        if case % 10 == 9:
+            valid = expected = False
         assert admitted == (valid and expected), (case, applied, admitted, valid, expected)
         if admitted:
             outcomes["admitted"] += 1
@@ -3622,3 +3633,109 @@ def test_reserve_never_admits_from_an_unvalidated_ledger(fly_env, tmp_path):
             assert path.read_text() == text, (case, applied)  # never rewritten
     # Every outcome is exercised, many times.
     assert min(outcomes.values()) >= 20, outcomes
+
+
+
+# ── An existing ledger file is never "no ledger" (round 14) ─────────────────
+
+_WHOLE_DOCUMENTS = {
+    "null": "null", "list": "[]", "list-of-ledger": "[{}]", "string": '"ledger"',
+    "number": "0", "true": "true", "false": "false", "empty-object": "{}",
+    "empty-file": "", "whitespace": "  \n\t ", "bom-prefixed": "\ufeff{}",
+    "truncated": '{"month": "2027-01", "day": "2027-01-15", "spend_usd": 1.',
+}
+
+
+@pytest.mark.parametrize("name", sorted(_WHOLE_DOCUMENTS))
+def test_an_existing_ledger_that_is_not_a_ledger_document_is_refused(fly_env, tmp_path, name):
+    config = fly_runner.FlyConfig.from_env()
+    path = tmp_path / "l.json"
+    raw = _WHOLE_DOCUMENTS[name].encode("utf-8")
+    path.write_bytes(raw)
+    ledger = fly_runner.FlyLedger(path, clock=lambda: _NOW)
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair"):
+        ledger.reserve(config, run_id="new", owner="t", max_run_seconds=600, now=_NOW)
+    for read in (ledger.snapshot, lambda: ledger.release("r1"), ledger.count_local_fallback):
+        try:
+            read()
+        except fly_runner.FlyLedgerError:
+            pass
+    assert path.read_bytes() == raw  # byte-identical: never initialised over
+
+
+def test_only_an_absent_ledger_file_initialises(fly_env, tmp_path):
+    config = fly_runner.FlyConfig.from_env()
+    path = tmp_path / "l.json"
+    ledger = fly_runner.FlyLedger(path, clock=lambda: _NOW)
+    ledger.reserve(config, run_id="new", owner="t", max_run_seconds=600, now=_NOW)
+    data = json.loads(path.read_text())
+    assert set(data["in_flight"]) == {"new"} and data["launches_today"] == 1
+
+
+def test_the_ledger_validator_rejects_every_non_object_document():
+    for value in (None, [], [{}], "x", 0, 1.5, True, False):
+        with pytest.raises(fly_runner.FlyInvalid):
+            fly_runner.validate("ledger", value)
+
+
+# ── Termination does not wait for the ledger (round 14) ─────────────────────
+
+
+def _break_ledger_while_running(executor, contents=b"null"):
+    """The ledger becomes unusable while the machine is still running, and
+    the connection to the run is lost: the machine is still up when the run
+    is settled."""
+    async def wait(machine_id, **k):
+        executor.ledger.path.write_bytes(contents)
+        raise httpx.ConnectError("injected disconnect")
+
+    executor.client.wait = wait
+
+
+def test_a_per_job_machine_is_destroyed_while_the_ledger_is_invalid(fly_env):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake, record=None)
+    _break_ledger_while_running(executor)
+    job = _job()
+    with contextlib.suppress(Exception):
+        asyncio.run(executor.run(job))
+    assert job.machine_id
+    (delete,) = fake.calls("DELETE")
+    assert delete.url.path.endswith(f"/machines/{job.machine_id}")
+    assert job.machine_id not in fake.machines
+    assert executor.ledger.path.read_bytes() == b"null"  # nothing rewritten
+
+
+def test_a_login_machine_is_stopped_while_the_ledger_is_invalid(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake, record=None)
+    _break_ledger_while_running(executor, b"[]")
+    job = _codex_job()
+    with contextlib.suppress(Exception):
+        asyncio.run(executor.run(job))
+    stops = fake.calls("POST", "/stop")
+    assert stops and all(r.headers.get("fly-machine-lease-nonce") for r in stops)
+    assert fake.machines["m-codex"]["state"] == "stopped"
+    assert not fake.calls("DELETE")  # a login machine is never destroyed
+    assert executor.ledger.path.read_bytes() == b"[]"
+
+
+def test_the_reaper_stops_only_machines_this_process_launched_while_invalid(fly_env):
+    fake = FakeFly()
+    fake.sticky_all = True  # the run's own destroy is not confirmed
+    executor, _, _ = make_executor(fake, record=None)
+    executor.client.wait = _async(_disconnect)
+    job = _job()
+    with contextlib.suppress(Exception):
+        asyncio.run(executor.run(job))
+    assert job.machine_id in fake.machines
+    fake.sticky_all = False
+    fake.machines["m-other"] = {"id": "m-other", "state": "started"}  # not ours
+    executor.ledger.path.write_bytes(b"{}")
+    deletes_before = len(fake.calls("DELETE"))
+    with pytest.raises(fly_runner.FlyLedgerError):
+        asyncio.run(executor.reap())
+    new = fake.calls("DELETE")[deletes_before:]
+    assert {r.url.path.rsplit("/", 1)[-1] for r in new} == {job.machine_id}
+    assert job.machine_id not in fake.machines and "m-other" in fake.machines
+    assert executor.ledger.path.read_bytes() == b"{}"

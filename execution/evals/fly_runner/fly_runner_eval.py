@@ -256,6 +256,7 @@ class Trace:
     login_stop_requests: int = 0
     login_mutations: int = 0
     ledger_after: object = None
+    ledger_text_after: object = None
     login_lease_holder: str = ""
     lease_released: bool = False
     envelopes: list = field(default_factory=list)
@@ -415,6 +416,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
 
     async def wait_and_advance(*a, **k):
         clock.now += 60
+        if "ledger_breaks_on_wait" in scenario["fly"]:
+            # The ledger becomes unusable while the machine is running.
+            executor.ledger.path.write_text(scenario["fly"]["ledger_breaks_on_wait"])
         return await real_wait(*a, **k)
 
     client.wait = wait_and_advance
@@ -554,9 +558,20 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         exit_codes=exit_codes,
         starts=list(fake.starts),
         everything_sent=sent,
-        ledger_after=(json.loads(executor.ledger.path.read_text())
-                      if executor.ledger.path.exists() else None),
+        ledger_after=_ledger_file_json(executor.ledger.path),
+        ledger_text_after=(executor.ledger.path.read_text()
+                           if executor.ledger.path.exists() else None),
     )
+
+
+def _ledger_file_json(path: Path) -> object:
+    """The ledger file as parsed JSON (None when absent or not JSON)."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except ValueError:
+        return None
 
 
 def judge(scenario: dict, trace: Trace) -> list[str]:
@@ -666,6 +681,8 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
                         f"expected {e['login_lease_holder']!r}")  # fmt: skip
     if e.get("lease_released") and not trace.lease_released:
         problems.append("the run's lease was never released")
+    if "ledger_text_after" in e and trace.ledger_text_after != e["ledger_text_after"]:
+        problems.append("the unusable ledger was rewritten")
     if e.get("ledger_untouched") and trace.ledger_after != scenario.get("ledger_raw"):
         problems.append("the damaged ledger was rewritten (reset) instead of refused")
     if "login_mutations" in e and trace.login_mutations != e["login_mutations"]:

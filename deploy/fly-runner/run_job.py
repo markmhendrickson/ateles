@@ -13,7 +13,10 @@ under ``/run/job/`` and starts the machine. This entrypoint then:
 3. deletes ``/run/job`` before the CLI starts, and refuses to run if it cannot;
 4. runs the credential-absence probe (names only, never values) and refuses to
    run the CLI when any forbidden credential is reachable;
-5. runs the CLI under a hard timeout;
+5. runs the CLI under a hard timeout, inside a hard deadline for the whole
+   entrypoint (``ATELES_RUN_DEADLINE``): at that deadline everything the job
+   started is killed and this process exits, whatever it is waiting on, so
+   the machine stops;
 6. removes exact copies of this job's own secrets from the output;
 7. writes ONE result record to Neotoma under the role's own identity, keyed by
    the run id. Apis reads that record back; the machine's logs are only a
@@ -27,15 +30,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -73,9 +79,24 @@ MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
 # The longest timeout a job may carry (fly_runner.MAX_JOB_TIMEOUT_SECONDS).
 MAX_JOB_TIMEOUT_SECONDS = 6 * 3600
 EXIT_TIMEOUT = 124
+EXIT_DEADLINE = 98
 EXIT_PROBE_FAILED = 97
 EXIT_JOB_INVALID = 96
 EXIT_RECORD_FAILED = 95
+
+# The whole entrypoint's deadline, set by Apis in the machine environment.
+DEADLINE_ENV = "ATELES_RUN_DEADLINE"
+# How far ahead a deadline may be: the longest job plus Apis's grace.
+MAX_DEADLINE_AHEAD_SECONDS = MAX_JOB_TIMEOUT_SECONDS + 600
+# Time kept back from the CLI, before the deadline, to write the record (at
+# most this, and at most a quarter of what is left).
+RECORD_RESERVE_SECONDS = 45.0
+# The longest wait for the CLI's output once it has been killed.
+COLLECT_GRACE_SECONDS = 5.0
+# Without a usable deadline nothing runs; the refusal itself is bounded too.
+REFUSAL_BOUND_SECONDS = 120.0
+_DEADLINE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(Z|[+-][0-9]{2}:[0-9]{2})",
+                          re.ASCII)  # fmt: skip
 
 # Names that must never be readable on the runner. Another role's PAT and the
 # operator's canary name arrive in job.json (names only).
@@ -392,16 +413,145 @@ def credential_probe(
     }
 
 
+def parse_deadline(raw: str | None, now: float) -> float:
+    """``ATELES_RUN_DEADLINE`` (ISO 8601 with a UTC offset) as epoch seconds.
+    Missing, malformed, without an offset, already past or further ahead
+    than the longest job allows: ``JobError``, and nothing runs."""
+    if raw is None:
+        raise JobError(f"{DEADLINE_ENV} is missing")
+    if not _DEADLINE_RE.fullmatch(raw):
+        raise JobError(f"{DEADLINE_ENV} is malformed")
+    try:
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise JobError(f"{DEADLINE_ENV} is malformed") from None
+    if when.tzinfo is None:
+        raise JobError(f"{DEADLINE_ENV} has no UTC offset")
+    deadline = when.timestamp()
+    if not now < deadline <= now + MAX_DEADLINE_AHEAD_SECONDS:
+        raise JobError(f"{DEADLINE_ENV} is outside the allowed window")
+    return deadline
+
+
+# What the job started, for the cleanup at a timeout or at the deadline.
+_JOB_PROCESSES: dict[str, int | None] = {"pgid": None, "uid": None}
+
+
+def become_subreaper() -> bool:
+    """On Linux, make this process the reaper of every orphaned descendant,
+    so a process the job detaches still counts as one of ours."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+    except (OSError, AttributeError):
+        return False
+
+
+def _proc_table() -> dict[int, tuple[int, int]]:
+    """``pid -> (ppid, real uid)`` from /proc; empty where there is none."""
+    table: dict[int, tuple[int, int]] = {}
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return table
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = (entry / "status").read_text()
+        except OSError:
+            continue
+        fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
+        try:
+            ppid = int(fields["PPid"].split()[0])
+            uid = int(fields["Uid"].split()[0])
+        except (KeyError, ValueError, IndexError):
+            continue
+        table[int(entry.name)] = (ppid, uid)
+    return table
+
+
+def job_processes(me: int, child_uid: int | None) -> set[int]:
+    """Every process the job started: all descendants of this process
+    (orphans are re-parented here, see ``become_subreaper``) and, when the
+    CLI runs as its own unprivileged user, every process of that user."""
+    table = _proc_table()
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _uid) in table.items():
+        if ppid not in children:
+            children[ppid] = []
+        children[ppid].append(pid)
+    found: set[int] = set()
+    stack = list(children[me]) if me in children else []
+    while stack:
+        pid = stack.pop()
+        if pid not in found:
+            found.add(pid)
+            stack.extend(children[pid] if pid in children else [])
+    if child_uid is not None and child_uid != os.getuid():
+        found |= {pid for pid, (_ppid, uid) in table.items() if uid == child_uid}
+    found.discard(me)
+    return found
+
+
+def kill_job_processes(rounds: int = 5) -> None:
+    """SIGKILL everything the job started: its process group, then every
+    descendant and every process of the child user, repeated so that a
+    process forked meanwhile is caught too."""
+    pgid, uid = _JOB_PROCESSES["pgid"], _JOB_PROCESSES["uid"]
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass
+    for _ in range(rounds):
+        pids = job_processes(os.getpid(), uid)
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.05)
+
+
+def arm_hard_deadline(deadline: float, *, clock=time.time, hard_exit=os._exit,
+                      kill=kill_job_processes) -> threading.Timer:  # fmt: skip
+    """At *deadline*, kill everything the job started and exit this process
+    at once, whatever it is waiting on, so the machine stops."""
+    def fire() -> None:
+        try:
+            print("fly-runner: hard deadline reached; stopping the job", flush=True)
+            kill()
+        finally:
+            hard_exit(EXIT_DEADLINE)
+
+    timer = threading.Timer(max(0.0, deadline - clock()), fire)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def run_cli(
     argv: list[str],
     env: dict[str, str],
     stdin: bytes | None,
-    timeout: int,
+    timeout: float,
     cwd: str,
     ident: tuple[int, int] | None = None,
+    collect_by: float | None = None,
 ) -> tuple[int, bytes, bytes, bool]:
-    """Run the CLI in its own process group under a hard timeout, as the
-    unprivileged user when one is given."""
+    """Run the CLI in its own session under a hard timeout, as the
+    unprivileged user when one is given.
+
+    Termination and output collection are both bounded: at the timeout
+    everything the job started is killed, the remaining output is collected
+    for at most ``COLLECT_GRACE_SECONDS`` (and never past the wall-clock
+    ``collect_by``), and then the pipes are abandoned."""
     exe = shutil.which(argv[0], path=env.get("PATH")) or argv[0]
     drop = {} if ident is None else {"user": ident[0], "group": ident[1], "extra_groups": []}
     try:
@@ -417,17 +567,37 @@ def run_cli(
         )
     except OSError as exc:
         return 127, b"", f"runner: could not start {argv[0]}: {exc}".encode(), False
+    _JOB_PROCESSES["pgid"] = proc.pid
+    _JOB_PROCESSES["uid"] = ident[0] if ident is not None else None
     try:
         out, err = proc.communicate(input=stdin or b"", timeout=timeout)
         return proc.returncode, out, err, False
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            proc.kill()
-        out, err = proc.communicate()
-        err += f"\nrunner: timed out after {timeout}s".encode()
-        return EXIT_TIMEOUT, out, err, True
+        pass
+    exited_first = proc.poll() is not None
+    kill_job_processes()
+    grace = COLLECT_GRACE_SECONDS
+    if collect_by is not None:
+        grace = max(0.1, min(grace, (collect_by - time.time()) / 2))
+    try:
+        out, err = proc.communicate(timeout=grace)
+    except subprocess.TimeoutExpired as exc:
+        # Collection did not finish within its bound: keep what arrived
+        # and stop reading.
+        out, err = exc.stdout or b"", exc.stderr or b""
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    why = ("output collection did not finish within its bound" if exited_first
+           else f"timed out after {timeout:g}s")  # fmt: skip
+    err += f"\nrunner: {why}".encode()
+    return EXIT_TIMEOUT, out, err, True
 
 
 def _scrub_values(secrets: dict[str, str]) -> dict[str, str]:
@@ -620,8 +790,27 @@ def write_record(base_url: str, auth, record: dict, *, attempts: int = 3) -> boo
     return False
 
 
-def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli) -> int:
+def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli,
+         environ=None, hard_exit=os._exit) -> int:  # fmt: skip
     started = time.monotonic()
+    environ = os.environ if environ is None else environ
+    become_subreaper()
+    now = time.time()
+    try:
+        deadline = parse_deadline(environ[DEADLINE_ENV] if DEADLINE_ENV in environ else None, now)
+        deadline_problem = ""
+    except JobError as exc:
+        # Nothing runs without a deadline; the refusal itself is bounded.
+        deadline, deadline_problem = now + REFUSAL_BOUND_SECONDS, str(exc)
+    timer = arm_hard_deadline(deadline, hard_exit=hard_exit)
+    try:
+        return _main(job_dir, writer, runner, started, deadline, deadline_problem)
+    finally:
+        timer.cancel()
+
+
+def _main(job_dir: Path, writer, runner, started: float, deadline: float,
+          deadline_problem: str) -> int:  # fmt: skip
     try:
         job = load_job(job_dir)
     except JobError as exc:
@@ -637,7 +826,15 @@ def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli
         except RuntimeError as exc:
             ident, identity_problem = None, str(exc)
         argv, child_env = prepare_child(job, home, os.environ, ident)
-        if identity_problem:
+        remaining = deadline - time.time()
+        cli_budget = min(float(job.timeout_seconds),
+                         remaining - min(RECORD_RESERVE_SECONDS, remaining / 4))  # fmt: skip
+        if deadline_problem:
+            delete_job_dir(job_dir)
+            refused = deadline_problem
+            probe = {"ok": False, "present": ["<deadline>"]}
+            rc, out, err, timed_out = EXIT_JOB_INVALID, b"", refused.encode(), False
+        elif identity_problem:
             delete_job_dir(job_dir)
             refused = identity_problem
             probe = {"ok": False, "present": ["<child user>"]}
@@ -652,14 +849,18 @@ def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli
             if not probe["ok"]:
                 refused = "credential probe found: " + ", ".join(probe["present"])
                 rc, out, err, timed_out = EXIT_PROBE_FAILED, b"", refused.encode(), False
+            elif not cli_budget >= 1:
+                refused = "no time left before the run's deadline"
+                rc, out, err, timed_out = EXIT_TIMEOUT, b"", refused.encode(), True
             else:
                 rc, out, err, timed_out = runner(
                     argv,
                     child_env,
                     job.stdin,
-                    job.timeout_seconds,
+                    cli_budget,
                     str(home),
                     ident,
+                    deadline,
                 )
         record = build_record(
             job,

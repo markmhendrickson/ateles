@@ -32,6 +32,10 @@ FILES = (
 _EMPTY_CALLS = {"dict", "list", "tuple", "set", "str", "frozenset"}
 
 ALLOWLIST: dict[str, str] = {
+    "deploy/fly-runner/run_job.py:run_cli:exc.stderr or b''":
+        'a bounded collection that timed out carries None when no output arrived; reported as a timeout',
+    "deploy/fly-runner/run_job.py:run_cli:exc.stdout or b''":
+        'a bounded collection that timed out carries None when no output arrived; reported as a timeout',
     "deploy/fly-runner/run_job.py:<module>:os.environ.get('ATELES_RUNNER_JOB_DIR') or DEFAULT_JOB_DIR":
         'unset means the fixed job directory',
     'deploy/fly-runner/run_job.py:_readable:return True':
