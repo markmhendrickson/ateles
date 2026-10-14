@@ -167,6 +167,8 @@ class Trace:
     seed_entries_left: list[str] = field(default_factory=list)
     login_state: str = ""
     login_lock_held: bool = False
+    login_config_run_id: str = ""
+    login_stop_requests: int = 0
     envelopes: list = field(default_factory=list)
     exit_codes: list = field(default_factory=list)
     starts: list = field(default_factory=list)
@@ -281,6 +283,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
 
     async def read_result(run_id):
         record = scenario["fly"]["record"]
+        if record == "malformed":
+            # The REAL reader, against a result store that answers nonsense.
+            transport = httpx.MockTransport(lambda request: httpx.Response(200, json=[1]))
+            return await fly_runner.read_result_record(run_id, transport=transport,
+                                                       attempts=1, delay=0)  # fmt: skip
         if record is None:
             return None
         return {"run_id": run_id, **record,
@@ -331,17 +338,28 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         owner = {"id": f"apis-other-{mid}", "pid": proc.pid,
                  "start": fly_runner.process_start_token(proc.pid) or "gone",
                  "host": socket.gethostname(), "heartbeat": clock.now}  # fmt: skip
+        login = bool(other.get("login"))
+        rid = f"other-{mid}-{'live' if other.get('alive', True) else 'dead'}"
+        owner["id"] = f"apis-{rid}"
         data = executor.ledger._load()
         executor.ledger._roll(data, clock.now)
-        data["in_flight"][f"other-{mid}"] = {
-            "run_id": f"other-{mid}", "owner": owner["id"], "machine_id": mid, "login": False,
+        data["in_flight"][rid] = {
+            "run_id": rid, "owner": owner["id"], "machine_id": mid, "login": login,
             "started_at": clock.now, "deadline": clock.now + 1920,
             "max_cost_usd": 1920 * config.rate_per_second_usd,
         }  # fmt: skip
         data.setdefault("owners", {})[owner["id"]] = owner
         executor.ledger._save(data)
-        fake.machines[mid] = {"id": mid, "state": "started"}
-        seed_keys.append(f"other-{mid}")
+        if other.get("job_on_machine"):
+            # This dispatcher's job is the one running on the machine now.
+            fake.machines.setdefault(mid, {"id": mid, "login": login})
+            fake.machines[mid].update({"state": "started", "config": {
+                "files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+                "env": {"ATELES_RUN_ID": rid}, "metadata": {"ateles_run_id": rid},
+            }})  # fmt: skip
+        elif not login:
+            fake.machines[mid] = {"id": mid, "state": "started"}
+        seed_keys.append(rid)
     # Machines running that no reservation accounts for (a lost ledger).
     for ghost in scenario.get("untracked", []):
         fake.machines[ghost["machine"]] = {"id": ghost["machine"], "state": "started"}
@@ -396,6 +414,10 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         seed_entries_left=[k for k in seed_keys if executor.ledger.entry(k) is not None],
         login_state=str(fake.machines.get("m-codex-login", {}).get("state", "")),
         login_lock_held=fly_runner._login_lock("codex").locked(),
+        login_config_run_id=str(((fake.machines.get("m-codex-login", {}).get("config") or {})
+                                 .get("metadata") or {}).get("ateles_run_id") or ""),
+        login_stop_requests=sum(1 for r in fake.requests if r.method == "POST"
+                                and r.url.path.endswith("/m-codex-login/stop")),
         envelopes=envelopes,
         exit_codes=exit_codes,
         starts=list(fake.starts),
@@ -500,6 +522,11 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
                 problems.append("the second dispatch's result is not its own")
         if "starts" in second and len(trace.starts) != second["starts"]:
             problems.append(f"{len(trace.starts)} machine starts, expected {second['starts']}")
+    if "login_config_run_id" in e and trace.login_config_run_id != e["login_config_run_id"]:
+        problems.append(f"login machine config belongs to {trace.login_config_run_id!r}, "
+                        f"expected {e['login_config_run_id']!r}")  # fmt: skip
+    if "login_stop_requests" in e and trace.login_stop_requests != e["login_stop_requests"]:
+        problems.append(f"{trace.login_stop_requests} stop request(s) on the login machine")
     if e.get("seed_kept") and not trace.seed_entries_left:
         problems.append("another dispatcher's live reservation was released")
     for mid in e.get("machines_kept", []):

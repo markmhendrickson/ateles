@@ -53,6 +53,8 @@ def test_scenario_set_covers_the_required_behaviours():
         "recorded_success_unconfirmed_cleanup_is_visible",
         "login_back_to_back_dispatchers_keep_their_own_payload",
         "login_cleanup_unverified_blocks_readmission",
+        "abandoned_login_reservation_never_stops_a_live_run",
+        "malformed_result_read_keeps_outcome_unknown",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -133,3 +135,11 @@ def test_judge_goes_red_when_a_login_handoff_loses_a_payload(tmp_path, monkeypat
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
     erased = dataclasses.replace(trace, starts=[trace.starts[0], ""])
     assert runner.judge(scenario, erased)
+
+
+def test_judge_goes_red_when_a_live_login_job_is_stopped(tmp_path, monkeypatch):
+    scenario = _by_id("abandoned_login_reservation_never_stops_a_live_run")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    stopped = dataclasses.replace(trace, login_state="stopped", login_stop_requests=1,
+                                  login_config_run_id="")  # fmt: skip
+    assert len(runner.judge(scenario, stopped)) >= 3

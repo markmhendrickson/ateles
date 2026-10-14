@@ -3187,14 +3187,28 @@ async def _run_skill_once(
                     _fly_job = None
                     _start_ns = time.monotonic_ns()
                     returncode, stdout, stderr = await _run_local()
-                except fly_runner.FlyUncertainLaunch as exc:
+                except (fly_runner.FlyUncertainLaunch, Exception) as exc:
+                    if isinstance(exc, (asyncio.TimeoutError, _LocalSpawnError)):
+                        raise  # the deadline path below carries its own metadata
+                    if not isinstance(exc, fly_runner.FlyUncertainLaunch) and not (
+                        _fly_job.launch_requested
+                    ):
+                        raise  # nothing was sent to Fly: an ordinary error
+                    # Any failure once a create/start was sent (an uncertain
+                    # launch, or an unexpected error later) leaves the remote
+                    # outcome unknown: keep it intact end to end.
+                    _what = (
+                        "an uncertain launch"
+                        if isinstance(exc, fly_runner.FlyUncertainLaunch)
+                        else f"an unexpected {type(exc).__name__}"
+                    )
                     # The remote run may have happened. Never replayed here,
                     # whatever the fallback setting: report it, unresolved.
                     state = _fly_job.remote_state or "unconfirmed"
                     msg = (
                         f"fly runner: remote run {_fly_job.run_id} (machine "
-                        f"{_fly_job.machine_id or 'unknown'}) has an UNKNOWN outcome after an "
-                        f"uncertain launch ({exc}); machine {state}"
+                        f"{_fly_job.machine_id or 'unknown'}) has an UNKNOWN outcome after "
+                        f"{_what} ({str(exc)[:200]}); machine {state}"
                         + (
                             "; its reservation is kept for the reaper"
                             if state == "unconfirmed" else ""

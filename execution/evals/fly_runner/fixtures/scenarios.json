@@ -774,6 +774,80 @@
           "starts": 1
         }
       }
+    },
+    {
+      "id": "abandoned_login_reservation_never_stops_a_live_run",
+      "description": "Another dispatcher (a live separate process) is running its job on the Codex login machine, and an abandoned reservation from a dead dispatcher also names that machine. This dispatch's reaper leaves the live job running with its config intact and keeps the abandoned reservation unconfirmed; the dispatch is told the machine is busy, with a retry time.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "other_dispatcher": [
+        {
+          "machine": "m-codex-login",
+          "alive": true,
+          "login": true,
+          "job_on_machine": true
+        },
+        {
+          "machine": "m-codex-login",
+          "alive": false,
+          "login": true
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "busy",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "login_state": "started",
+        "login_config_run_id": "other-m-codex-login-live",
+        "login_stop_requests": 0,
+        "seed_kept": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "malformed_result_read_keeps_outcome_unknown",
+      "description": "The run finishes but the result store answers with a malformed page. The outcome is unknown, not 'no result': the dispatch fails with remote_outcome_unknown, the remote run named, after one attempt and with no local replay.",
+      "provider": "router",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": "malformed"
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "attempts": 1,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "terminated",
+        "reason_contains": "outcome is unknown",
+        "local_cli_ran": false,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
     }
   ]
 }

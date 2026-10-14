@@ -795,8 +795,16 @@ def revoke_job_github_token(token: str) -> None:
 # ── Neotoma result record (read on the Mac with Apis's own access) ───────────
 
 
+class FlyResultUnreadable(Exception):
+    """The result record could not be read or was malformed: the run's
+    outcome is unknown, which is different from a record that is absent."""
+
+
 async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport | None = None,
                              attempts: int = 3, delay: float = 2.0) -> dict | None:  # fmt: skip
+    """The run's result record; None when a well-formed answer says there is
+    none. Raises ``FlyResultUnreadable`` when every attempt failed or came
+    back malformed. Either way the caller treats the outcome as unknown."""
     base = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not base or not token:
@@ -808,6 +816,7 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
         "include_snapshots": True,
         "snapshot_filters": {"run_id": {"op": "eq", "value": run_id}},
     }
+    well_formed_empty = False
     for attempt in range(attempts):
         try:
             async with httpx.AsyncClient(
@@ -815,18 +824,28 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             ) as client:  # fmt: skip
                 resp = await client.post(f"{base}/entities/query", json=body)
-            if resp.status_code == 200:
-                for row in (resp.json() or {}).get("entities") or []:
-                    snap = row.get("snapshot") if isinstance(row, dict) else None
-                    if isinstance(snap, dict) and isinstance(snap.get("snapshot"), dict):
-                        snap = snap["snapshot"]
-                    if isinstance(snap, dict) and snap.get("run_id") == run_id:
-                        return snap
+            if resp.status_code != 200:
+                raise ValueError(f"HTTP {resp.status_code}")
+            data = resp.json()
+            rows = data.get("entities") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("result query answer is not an entity page")
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("result query row is not an object")
+                snap = row.get("snapshot")
+                if isinstance(snap, dict) and isinstance(snap.get("snapshot"), dict):
+                    snap = snap["snapshot"]
+                if isinstance(snap, dict) and snap.get("run_id") == run_id:
+                    return snap
+            well_formed_empty = True
         except (httpx.HTTPError, ValueError) as exc:
             log.debug(f"[fly] result read attempt {attempt + 1} failed: {type(exc).__name__}")
         if attempt + 1 < attempts:
             await asyncio.sleep(delay)
-    return None
+    if well_formed_empty:
+        return None
+    raise FlyResultUnreadable(f"result record for run {run_id} could not be read")
 
 
 # ── Job assembly ─────────────────────────────────────────────────────────────
@@ -858,6 +877,9 @@ class FlyJob:
     # lost wait or a missing result record).
     remote_state: str = ""
     outcome_unknown: bool = False
+    # Set the moment a create/start request is sent: from then on the job
+    # may have run, so any failure surfaces as an unknown outcome.
+    launch_requested: bool = False
 
     @property
     def login(self) -> bool:
@@ -1295,10 +1317,12 @@ class FlyExecutor:
         except Exception as exc:  # noqa: BLE001 — best-effort; the token expires anyway
             log.warning(f"[fly] GitHub job token revocation failed: {type(exc).__name__}")
 
-    async def _request(self, launch: _LaunchState, coro) -> Any:
+    async def _request(self, launch: _LaunchState, coro, job: "FlyJob | None" = None) -> Any:
         """Send a create/start. Its failure is a definite launch failure only
         when the request provably did not take effect; otherwise uncertain."""
         launch.requested = True
+        if job is not None:
+            job.launch_requested = True
         try:
             return await coro
         except (FlyApiError, httpx.HTTPError) as exc:
@@ -1344,11 +1368,12 @@ class FlyExecutor:
                     await self._reconcile_login(login_id, job.run_id)
                     launch.config_written = True
                     await self._write_login_config(login_id, job, deadline)
-                    await self._request(launch, self.client.start(login_id))
+                    await self._request(launch, self.client.start(login_id), job)
                     machine_id, instance_id = login_id, ""
                 else:
                     created = await self._request(
-                        launch, self.client.create(per_job_machine_body(job, self.config, deadline))
+                        launch, self.client.create(per_job_machine_body(job, self.config, deadline)),
+                        job,
                     )
                     machine_id = created["id"]
                     instance_id = str(created.get("instance_id") or "")
@@ -1445,19 +1470,35 @@ class FlyExecutor:
             log.error(f"[fly] run={job.run_id} machine={handle.machine_id} passed its deadline")
             job.outcome_unknown = True  # the task's own result was never observed
             raise asyncio.TimeoutError()
-        record = await self._read_result(job.run_id)
-        if not record:
+        try:
+            record = await self._read_result(job.run_id)
+            if not record:
+                job.outcome_unknown = True
+                return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
+            return self._result_from_record(job, record)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — unreadable or malformed: outcome unknown
+            log.error(f"[fly] run={job.run_id}: result unreadable ({type(exc).__name__})")
             job.outcome_unknown = True
-            return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
-        return self._result_from_record(job, record)
+            return 1, b"", (
+                f"fly runner: the result of run {job.run_id} could not be read "
+                f"({type(exc).__name__}); the run's outcome is unknown"
+            ).encode()
 
     def _result_from_record(self, job: FlyJob, record: dict) -> tuple[int, bytes, bytes]:
+        """The CLI's result, from a VALIDATED record. A record that is not
+        this run's, or whose fields have the wrong types, is unreadable."""
+        if not isinstance(record, dict) or record.get("run_id") != job.run_id:
+            raise FlyResultUnreadable("result record does not belong to this run")
+        rc = record.get("exit_code")
+        if isinstance(rc, bool) or not isinstance(rc, int):
+            raise FlyResultUnreadable("result record has no integer exit code")
+        for name in ("stdout", "stderr_tail", "refused"):
+            if record.get(name) is not None and not isinstance(record.get(name), str):
+                raise FlyResultUnreadable(f"result record field {name} is not text")
         if record.get("probe_ok") is False:
             log.error(f"[fly] run={job.run_id} credential probe failed: {record.get('refused')}")
-        try:
-            rc = int(record.get("exit_code"))
-        except (TypeError, ValueError):
-            rc = 1
         stdout = str(record.get("stdout") or "")
         stderr = str(record.get("stderr_tail") or "")
         if record.get("stdout_truncated"):
@@ -1499,11 +1540,26 @@ class FlyExecutor:
         machine_id = str(entry.get("machine_id") or "")
         login = bool(entry.get("login"))
         if machine_id:
-            confirmed = await self._terminate(machine_id, login=login)
+            verdict = await self._ownership(machine_id, run_id, login=login)
+            if verdict == "gone":
+                confirmed = True
+            elif verdict == "ours":
+                confirmed = await self._terminate(machine_id, login=login)
+                if confirmed and login:
+                    confirmed = await self._scrub_login_machine(machine_id, run_id)
+            elif verdict == "idle":
+                confirmed = True  # a stopped login machine holding no job at all
+            else:
+                # Another run's job, or one nobody can attribute: this
+                # reservation has no right to touch the machine. Nothing is
+                # stopped or scrubbed; the reservation is kept and reported.
+                confirmed = False
+                log.error(
+                    f"[fly] run={run_id}: machine {machine_id} is not this run's "
+                    f"({verdict}); left untouched, reservation kept unconfirmed"
+                )
         else:
             confirmed = await self._terminate_by_run_id(run_id)
-        if confirmed and login and machine_id:
-            confirmed = await self._scrub_login_machine(machine_id, run_id)
         if confirmed:
             self.ledger.settle(run_id, config=self.config, now=self._clock())
         else:
@@ -1514,6 +1570,34 @@ class FlyExecutor:
             )
         return confirmed
 
+    async def _ownership(self, machine_id: str, run_id: str, *, login: bool) -> str:
+        """Whose is this machine RIGHT NOW, read from its current config?
+
+        ``"ours"``: its config carries this run's id (or, for a per-job
+        machine, carries none; a per-job machine is created for one run).
+        ``"gone"``: it no longer exists. ``"idle"``: a stopped login machine
+        with no job config at all. ``"other"``: another run's id, an
+        unattributed job config, a running login machine with no job, or an
+        unreadable state. Only ``"ours"`` may be stopped or scrubbed."""
+        try:
+            machine = await self.client.get(machine_id)
+        except Exception as exc:  # noqa: BLE001 — unknown state: not ours to touch
+            log.warning(f"[fly] could not read machine {machine_id}: {exc}")
+            return "other"
+        if machine is None or machine["state"] == "destroyed":
+            return "gone"
+        cfg = machine.get("config") or {}
+        owner = _config_run_id(cfg)
+        if owner == run_id:
+            return "ours"
+        if owner:
+            return "other"
+        if not login:
+            return "ours"
+        if cfg.get("files") or cfg.get("env"):
+            return "other"  # a job config nobody can attribute
+        return "idle" if machine["state"] == "stopped" else "other"
+
     async def _terminate_by_run_id(self, run_id: str) -> bool:
         """Terminate every machine carrying *run_id*. True only when a valid
         listing was read and each such machine was confirmed terminated."""
@@ -1522,9 +1606,11 @@ class FlyExecutor:
         except Exception as exc:  # noqa: BLE001 — unknown state keeps the reservation
             log.warning(f"[fly] could not list machines to find run {run_id}: {exc}")
             return False
+        login_ids = set(self.config.login_machines.values())
         found = [
             m["id"] for m in machines
             if _machine_run_id(m) == run_id and m["state"] != "destroyed"
+            and m["id"] not in login_ids  # a login machine is never destroyed
         ]  # fmt: skip
         if not found:
             return True  # a valid listing shows no machine for this run
@@ -1537,7 +1623,9 @@ class FlyExecutor:
             log.warning(f"[fly] could not re-list machines for run {run_id}: {exc}")
             return False
         return not any(
-            _machine_run_id(m) == run_id and m["state"] != "destroyed" for m in after
+            _machine_run_id(m) == run_id and m["state"] != "destroyed"
+            and m["id"] not in login_ids
+            for m in after
         )
 
     async def _terminate(self, machine_id: str, *, login: bool) -> bool:
@@ -1575,14 +1663,17 @@ class FlyExecutor:
         Nothing has been sent to the machine yet in either case."""
         now = self._clock()
         owners = self.ledger.snapshot(now).get("owners", {})
-        for run_id, entry in self.ledger.find_by_machine(machine_id).items():
-            if run_id == own_run_id:
-                continue
-            if not self._reapable(run_id, entry, now, owners):
-                raise FlyRefusal(
-                    "login machine is busy with another dispatcher's run",
-                    _render_wall(now + 300),
-                )
+        others = {
+            rid: e for rid, e in self.ledger.find_by_machine(machine_id).items()
+            if rid != own_run_id
+        }  # fmt: skip
+        # A live run anywhere means busy: say so first, touching nothing.
+        if any(not self._reapable(rid, e, now, owners) for rid, e in others.items()):
+            raise FlyRefusal(
+                "login machine is busy with another dispatcher's run",
+                _render_wall(now + 300),
+            )
+        for run_id in others:
             if not await self._settle_locked(run_id):  # admission is held
                 raise FlyApiError(409, "login machine from a previous job is not confirmed stopped")
 

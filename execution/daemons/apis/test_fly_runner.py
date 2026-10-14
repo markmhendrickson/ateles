@@ -1910,10 +1910,14 @@ def test_cleanup_never_touches_a_config_that_belongs_to_another_run(fly_env, mon
              "env": {"ATELES_RUN_ID": "newer-run"},
              "metadata": {"ateles_run_id": "newer-run"}}  # fmt: skip
     fake.machines["m-codex"]["config"] = newer
-    assert asyncio.run(executor._settle("old-run")) is True
-    assert fake.machines["m-codex"]["config"] == newer  # untouched
-    assert not [r for r in fake.requests if r.method == "POST"
-                and r.url.path.endswith("/machines/m-codex")]  # fmt: skip
+    fake.machines["m-codex"]["state"] = "started"  # the newer run is live on it
+    # Not this run's machine any more: nothing is touched, and the old
+    # reservation stays unconfirmed (reported) rather than claiming success.
+    assert asyncio.run(executor._settle("old-run")) is False
+    assert fake.machines["m-codex"]["config"] == newer
+    assert fake.machines["m-codex"]["state"] == "started"
+    assert not [r for r in fake.requests if r.method == "POST"]
+    assert executor.ledger.entry("old-run")["unconfirmed"] is True
 
 
 def test_an_unverified_scrub_keeps_the_login_reservation(fly_env, monkeypatch):
@@ -1983,3 +1987,176 @@ def test_api_error_text_never_carries_an_encoded_blob():
     err = fly_runner.FlyApiError(400, f"invalid config: files[0].raw_value={blob}")
     assert blob not in str(err) and "[redacted]" in str(err)
     assert err.status == 400
+
+
+# ── Ownership before any stop (round 6) ──────────────────────────────────────
+
+
+_LOGIN_HOLDER = r"""
+import sys
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
+import fly_runner
+from pathlib import Path
+ledger_path, machine = Path(sys.argv[3]), sys.argv[4]
+config = fly_runner.FlyConfig(app="x", api_token="", image="", region="", max_concurrent=10)
+owner = fly_runner.this_process_owner("apis-process-b-live")
+ledger = fly_runner.FlyLedger(ledger_path, owner=owner)
+ledger.reserve(config, run_id="b-live-run", owner=owner["id"], max_run_seconds=600,
+               login=True, machine_id=machine)
+print("ready", flush=True)
+sys.stdin.readline()
+"""
+
+
+def test_settling_an_abandoned_login_reservation_never_stops_another_live_run(
+    fly_env, tmp_path, monkeypatch
+):
+    """Process B (real, live) is running its job on the login machine. A
+    holds an abandoned reservation on the same machine (its owner died before
+    reconciling). A's reaper must leave B's machine running, its config and
+    its reservation untouched, and keep its own reservation unconfirmed."""
+    import subprocess as sp
+    import time as _time
+
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake, clock=_time.time)
+    b_config = {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+                "env": {"ATELES_RUN_ID": "b-live-run"},
+                "metadata": {"ateles_run_id": "b-live-run"}}  # fmt: skip
+    fake.machines["m-codex"].update({"state": "started", "config": dict(b_config)})
+    script = tmp_path / "login_holder.py"
+    script.write_text(_LOGIN_HOLDER)
+    proc = sp.Popen([sys.executable, str(script), str(_REPO_ROOT), str(_DAEMON_DIR),
+                     str(executor.ledger.path), "m-codex"], stdin=sp.PIPE, stdout=sp.PIPE,
+                    text=True)  # fmt: skip
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        dead = {**fly_runner.this_process_owner("apis-dead-a"), "pid": _dead_pid()}
+        data = executor.ledger._load()
+        now = _time.time()
+        data["in_flight"]["a-abandoned-run"] = {
+            "run_id": "a-abandoned-run", "owner": dead["id"], "machine_id": "m-codex",
+            "login": True, "started_at": now, "deadline": now + 600, "max_cost_usd": 0.01,
+        }  # fmt: skip
+        data.setdefault("owners", {})[dead["id"]] = {**dead, "heartbeat": now}
+        executor.ledger._save(data)
+        reaped = asyncio.run(executor.reap())
+        assert reaped == []
+        assert fake.machines["m-codex"]["state"] == "started"
+        assert fake.machines["m-codex"]["config"] == b_config
+        assert not [r for r in fake.requests if r.method in ("POST", "DELETE")]
+        assert executor.ledger.entry("b-live-run") is not None
+        assert executor.ledger.entry("a-abandoned-run")["unconfirmed"] is True
+    finally:
+        proc.stdin.write("done\n")
+        proc.stdin.flush()
+        proc.wait(10)
+
+
+def test_a_per_job_machine_carrying_another_runs_id_is_never_destroyed(fly_env):
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    _seed(executor, clock)  # this run's reservation names m-old
+    fake.machines["m-old"] = {"id": "m-old", "state": "started",
+                              "config": {"metadata": {"ateles_run_id": "someone-else"}}}  # fmt: skip
+    clock.now += 600 + fly_runner.REAP_GRACE_SECONDS + 1
+    assert asyncio.run(executor.reap()) == []
+    assert fake.machines["m-old"]["state"] == "started"
+    assert not fake.calls("DELETE") and not fake.calls("POST", "/stop")
+    assert executor.ledger.entry("old-run")["unconfirmed"] is True
+
+
+# ── Keep an unknown remote outcome intact end to end (round 6) ──────────────
+
+
+@pytest.mark.parametrize("answer", [
+    httpx.Response(200, json=[1]),
+    httpx.Response(200, json={"entities": 1}),
+    httpx.Response(200, json={"entities": [1]}),
+    httpx.Response(200, content=b"{not json"),
+    httpx.Response(503, json={"error": "down"}),
+])  # fmt: skip
+def test_an_unreadable_result_read_raises_instead_of_reading_as_absent(fly_env, answer):
+    transport = httpx.MockTransport(lambda request: answer)
+    with pytest.raises(fly_runner.FlyResultUnreadable):
+        asyncio.run(fly_runner.read_result_record("r1", transport=transport, attempts=2, delay=0))
+
+
+def test_a_well_formed_empty_answer_reads_as_absent(fly_env):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"entities": []}))
+    assert asyncio.run(fly_runner.read_result_record("r1", transport=transport, attempts=1)) is None
+
+
+@pytest.mark.parametrize("record", [
+    "raise",
+    {"exit_code": "0", "stdout": "x"},       # wrong type
+    {"exit_code": True},                     # bool is not an exit code
+    {"exit_code": 0, "stdout": 7},           # non-text output
+    {"exit_code": 0, "run_id": "another"},   # not this run's record
+])  # fmt: skip
+def test_a_malformed_or_unreadable_record_is_an_unknown_outcome(fly_env, record):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake)
+
+    async def read(run_id):
+        if record == "raise":
+            raise fly_runner.FlyResultUnreadable("synthetic")
+        return {"run_id": run_id, **record}
+
+    executor._read_result = read
+    job = _job()
+    rc, out, err = asyncio.run(executor.run(job))
+    assert rc == 1 and job.outcome_unknown is True
+    assert b"outcome is unknown" in err
+
+
+def test_seam_turns_a_malformed_result_into_an_unknown_outcome(fly_env, seam, monkeypatch):
+    spawned, fake_exec = seam
+    executor, _, _ = make_executor(FakeFly())
+
+    async def read(run_id):
+        raise TypeError("synthetic malformed answer")
+
+    executor._read_result = read
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+    assert not result.ok and result.remote_outcome_unknown is True
+    assert result.remote_run_id and spawned == []
+
+
+@pytest.mark.parametrize("after_launch", [True, False])
+def test_seam_unexpected_errors_after_a_launch_stay_unknown(fly_env, seam, monkeypatch,
+                                                            after_launch):  # fmt: skip
+    spawned, fake_exec = seam
+    executor, _, _ = make_executor(FakeFly())
+
+    async def exploding_run(job):
+        job.launch_requested = after_launch
+        raise RuntimeError("synthetic failure")
+
+    executor.run = exploding_run
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        if after_launch:
+            result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+            assert result.remote_outcome_unknown is True and not result.ok
+            assert "UNKNOWN outcome" in result.error
+        else:
+            with pytest.raises(RuntimeError):
+                _once(runner="fly", repository="owner/repo", include_github_contract=True)
+    assert spawned == []
+
+
+def test_run_id_termination_never_destroys_a_login_machine(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    fake.create_mode = "lost"
+    executor, _, _ = make_executor(fake, record=None)
+    job = _job()
+    fake.machines["m-codex"]["config"] = {"metadata": {"ateles_run_id": job.run_id}}
+    with pytest.raises(fly_runner.FlyUncertainLaunch):
+        asyncio.run(executor.run(job))
+    assert "m-codex" in fake.machines
+    deleted = [r.url.path.rsplit("/", 1)[1] for r in fake.calls("DELETE")]
+    assert "m-codex" not in deleted

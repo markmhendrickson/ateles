@@ -450,8 +450,14 @@ def _variants(value: str) -> set[str]:
 
 
 def scrub(text: str, secrets: dict[str, str]) -> str:
-    """Replace every copy of a job secret (and its common encodings) with a
-    named marker."""
+    """Replace every copy of a job secret, and of each listed single-layer
+    encoding of it, with a named marker.
+
+    Best effort, not a guarantee: a finite list of exact variants cannot
+    catch every transformation (a nested or custom encoding survives). It
+    keeps routine echoes of a job secret out of the record; it does not stop
+    a CLI that is trying to exfiltrate one. The real boundary is that the job
+    holds only short-lived, single-job credentials."""
     pairs = [
         (name, variant)
         for name, value in _scrub_values(secrets).items()
