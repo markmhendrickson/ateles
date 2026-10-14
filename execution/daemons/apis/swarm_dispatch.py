@@ -6851,6 +6851,9 @@ class SwarmDispatcher:
             notifier=self.notifier,
             action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
             escalation_signals=lanius_signals,
+            # Scopes a Fly job's per-job GitHub App token (ateles#1456); unused
+            # on the local executor.
+            repository=trigger.repository,
         )
         verdict = parse_gate_verdict(lanius.stdout)
         if verdict is None:
@@ -6879,6 +6882,7 @@ class SwarmDispatcher:
                 include_github_contract=True,
                 notifier=self.notifier,
                 action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
+                repository=trigger.repository,
                 # The retry exists because the first attempt failed to produce
                 # a verdict: that is the "failed prior attempt" signal.
                 escalation_signals=dataclasses.replace(

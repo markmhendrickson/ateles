@@ -70,6 +70,7 @@ from foundation import (  # noqa: E402
 )
 import local_provider  # noqa: E402
 import model_tiering  # noqa: E402
+import fly_runner  # noqa: E402
 from harness_router import (  # noqa: E402
     cool_down,
     cooled_until_all,
@@ -2183,9 +2184,20 @@ async def _run_skill_once(
     model: str | None = None,
     precomputed_tier: "model_tiering.ResolvedTier | None" = None,
     inference_only: bool = False,
+    runner: str | None = None,
+    repository: str = "",
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
+
+    ``runner`` / ``repository`` (ateles#1456): which executor runs the CLI.
+    ``None`` (every call site that predates this) runs locally unless the
+    dispatch's ``action_class`` is listed in ``APIS_FLY_RUNNER_CLASSES``;
+    ``"local"`` always runs locally; ``"fly"`` forces the Fly executor and
+    refuses, with the reason, when the job is not eligible for it. Everything
+    before the spawn (gates, tiering, prompt, argv) is identical on both, and
+    both return the same ``(returncode, stdout, stderr)``. ``repository``
+    scopes the Fly job's per-job GitHub App token.
 
     Stage 1: loads the role's agent_definition and live agent_policy (role
     defaults to skill when not passed — skill name == role name in this
@@ -2454,7 +2466,9 @@ async def _run_skill_once(
     # `SkillResult` on failure, never an exception (see this module's own
     # docstring on failures never raising, and `_run_provider_attempts`'s
     # `await attempt(selected)` call, which has no try/except around it).
-    if include_github_contract and not github_token:
+    # A forced Fly run never runs locally: its GitHub credential is a
+    # per-job App installation token minted at launch, not this argument.
+    if include_github_contract and not github_token and runner != "fly":
         msg = (
             "include_github_contract=True (network-enabled GitHub delivery) "
             "requires an explicit GitHub credential binding via github_token, "
@@ -2477,7 +2491,7 @@ async def _run_skill_once(
     # github_token="" (requested but resolved EMPTY, distinct from not
     # requested at all — see the subprocess_env block below) must not fall
     # through to the daemon's ambient identity either.
-    if not include_github_contract and github_token == "":
+    if not include_github_contract and github_token == "" and runner != "fly":
         msg = (
             "github_token was explicitly requested for this dispatch but "
             "resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
@@ -3039,18 +3053,7 @@ async def _run_skill_once(
                     "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
                 )
 
-    _start_ns = time.monotonic_ns()
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=subprocess_env,
-            cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree
-            start_new_session=True,
-        )
-    except OSError as exc:
+    def _cleanup_launch_artifacts() -> None:
         if _mcp_tmp_path is not None:
             try:
                 os.unlink(_mcp_tmp_path)
@@ -3058,30 +3061,118 @@ async def _run_skill_once(
                 pass
         if _codex_gate_config is not None:
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
-        msg = f"{provider} launch failed: {exc}"
-        log.warning(f"[apis] {skill} dispatch skipped — {msg}")
-        return SkillResult(
-            skill,
-            False,
-            None,
-            "",
-            "",
-            error=msg,
-            provider=provider,
-        )
+
+    # ── Executor choice (ateles#1456) ──────────────────────────────────────────
+    # Local is today's code, unchanged. The fly executor takes the SAME argv,
+    # stdin and timeout plus an explicit credential set and returns the same
+    # (returncode, stdout, stderr). Reached only for an opted-in class or a
+    # forced `runner="fly"`; with APIS_FLY_RUNNER_CLASSES unset and no runner
+    # passed, `wants_fly` is False and nothing below changes.
+    _fly_handle = None
+    _fly_note = ""
+    if fly_runner.wants_fly(runner, action_class):
+        _forced = runner == "fly"
+        _fly_reason = ""
+        try:
+            _fly_job = fly_runner.build_job(
+                provider=provider,
+                role=_role,
+                cmd=cmd,
+                stdin=stdin_payload if stdin_payload is not None else prompt.encode(),
+                timeout=timeout,
+                repository=repository,
+                github_requested=github_token is not None or include_github_contract,
+                mcp_config_path=_mcp_tmp_path,
+                local_review=local_review,
+                inference_only=inference_only,
+                command_wrapper=command_wrapper,
+                cwd=cwd,
+                owns_pending_gate=owns_pending_gate,
+                codex_outer_sandboxed=codex_outer_sandboxed,
+            )
+            _fly_handle = await fly_runner.get_executor().launch(_fly_job)
+            _fly_note = f" fly_machine={_fly_handle.machine_id} fly_run={_fly_job.run_id}"
+        except fly_runner.FlyRefusal as exc:
+            _cleanup_launch_artifacts()
+            msg = f"fly runner refused: {exc}"
+            log.warning(f"[apis] {skill} dispatch deferred — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                cooled_until=exc.cooled_until,
+            )  # fmt: skip
+        except fly_runner.FlyIneligible as exc:
+            _fly_reason = f"not eligible for Fly: {exc}"
+        except fly_runner.FlyLaunchError as exc:
+            _fly_reason = f"Fly launch failed: {exc}"
+        if _fly_handle is None:
+            fallback_ok = (
+                not _forced
+                and (
+                    _fly_reason.startswith("not eligible")
+                    or fly_runner.get_executor().config.local_fallback
+                )
+            )
+            if not fallback_ok:
+                _cleanup_launch_artifacts()
+                msg = (
+                    f"{provider} launch failed: fly: {_fly_reason}"
+                    if _fly_reason.startswith("Fly launch failed")
+                    else f"fly runner refused: {_fly_reason}"
+                )
+                log.error(f"[apis] {skill} dispatch refused — {msg}")
+                return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+            count = fly_runner.get_executor().ledger.count_local_fallback()
+            log.warning(
+                f"[apis] {skill} running locally instead of on Fly ({_fly_reason}); "
+                f"local fallback #{count} this ledger"
+            )
+
+    _start_ns = time.monotonic_ns()
+    proc = None
+    if _fly_handle is None:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=subprocess_env,
+                cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree
+                start_new_session=True,
+            )
+        except OSError as exc:
+            _cleanup_launch_artifacts()
+            msg = f"{provider} launch failed: {exc}"
+            log.warning(f"[apis] {skill} dispatch skipped — {msg}")
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=msg,
+                provider=provider,
+            )
 
     try:
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(
-                    input=stdin_payload
-                    if stdin_payload is not None
-                    else prompt.encode()
-                ),
-                timeout=timeout,
-            )
+            if _fly_handle is not None:
+                returncode, stdout, stderr = await fly_runner.get_executor().collect(
+                    _fly_handle
+                )
+            else:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(
+                        input=stdin_payload
+                        if stdin_payload is not None
+                        else prompt.encode()
+                    ),
+                    timeout=timeout,
+                )
+                returncode = proc.returncode
         except asyncio.TimeoutError:
-            await _kill_spawned_process_group(proc)
+            if proc is not None:
+                await _kill_spawned_process_group(proc)
             duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
             msg = f"timed out after {timeout}s"
             log.error(f"[apis] {skill} dispatch {msg}")
@@ -3097,7 +3188,7 @@ async def _run_skill_once(
                     event_type="subprocess",
                     tool_name=f"{provider}:{skill}",
                     success="false",
-                    output_summary=f"timeout after {timeout}s",
+                    output_summary=f"timeout after {timeout}s{_fly_note}",
                     duration_ms=duration_ms,
                     # A killed child's stdout is discarded, so no token counts
                     # exist for a timeout — but the provider and the requested
@@ -3179,11 +3270,11 @@ async def _run_skill_once(
             if (
                 len(_delivery_reasons) == 1
                 and not _delivery_conflicts
-                and proc.returncode == 0
+                and returncode == 0
             )
             else ""
         )
-        if _delivery_denial and proc.returncode == 0:
+        if _delivery_denial and returncode == 0:
             log.error(
                 f"[apis] {skill} dispatch via {provider} exited 0 but could not "
                 f"deliver: {_delivery_denial}"
@@ -3210,7 +3301,7 @@ async def _run_skill_once(
         # The effective outcome, computed once: the ledger's usage row and the
         # authoritative SkillResult below must never disagree about it.
         _dispatch_ok = _dispatch_succeeded(
-            proc.returncode, _delivery_denial, _postcondition_failure
+            returncode, _delivery_denial, _postcondition_failure
         )
 
         # ── Per-dispatch usage attribution ───────────────────────────────────────
@@ -3241,21 +3332,21 @@ async def _run_skill_once(
         result = SkillResult(
             skill=skill,
             ok=_dispatch_ok,
-            returncode=proc.returncode,
+            returncode=returncode,
             stdout=_stdout_text,
             stderr=_stderr_text,
             provider=provider,
             error=(
                 _delivery_denial
-                if (_delivery_denial and proc.returncode == 0)
+                if (_delivery_denial and returncode == 0)
                 else (_postcondition_failure or "")
             ),
             delivery_failure_reason=_delivery_only_reason,
             delivery_failure_reasons=(
-                _delivery_reasons if proc.returncode == 0 else ()
+                _delivery_reasons if returncode == 0 else ()
             ),
             delivery_failure_conflicts=(
-                _delivery_conflicts if proc.returncode == 0 else ()
+                _delivery_conflicts if returncode == 0 else ()
             ),
             usage=_usage,
         )
@@ -3273,7 +3364,7 @@ async def _run_skill_once(
         )
         if dropped_rules:
             _notify_dropped_allowlist_rules(
-                notifier, role=_role, rules=dropped_rules, returncode=proc.returncode
+                notifier, role=_role, rules=dropped_rules, returncode=returncode
             )
 
         # ── Stage 2: harness_event at completion ──────────────────────────────────
@@ -3294,7 +3385,7 @@ async def _run_skill_once(
                     success="true",
                     output_summary=(
                         f"provider={provider} {len(result.stdout)}B stdout rc=0"
-                        f" {_usage.summary()}"
+                        f" {_usage.summary()}{_fly_note}"
                     ),
                     duration_ms=duration_ms,
                     usage=_usage,
@@ -3309,7 +3400,7 @@ async def _run_skill_once(
                 write_dispatch_failure_log,
                 skill=skill,
                 role=_role,
-                returncode=proc.returncode,
+                returncode=returncode,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 task_entity_id=task_entity_id,
@@ -3321,7 +3412,7 @@ async def _run_skill_once(
 
             log.error(
                 f"[apis] {skill} dispatch via {provider} failed "
-                f"(rc={proc.returncode}); "
+                f"(rc={returncode}); "
                 f"full output: {path_note} "
                 f"(stdout {len(result.stdout)}B, stderr {len(result.stderr)}B); "
                 f"stderr head: {result.stderr[:500]}"
@@ -3337,7 +3428,7 @@ async def _run_skill_once(
                     tool_name=f"{provider}:{skill}",
                     success="false",
                     output_summary=(
-                        f"provider={provider} rc={proc.returncode} "
+                        f"provider={provider} rc={returncode}{_fly_note} "
                         f"{_usage.summary()} "
                         f"full_output={path_note} "
                         f"{result.stderr[:200]}"
@@ -3359,7 +3450,7 @@ async def _run_skill_once(
                     notifier,
                     skill=skill,
                     role=_role,
-                    returncode=proc.returncode,
+                    returncode=returncode,
                     stderr=result.stderr,
                     task_entity_id=task_entity_id,
                     log_path=failure_log_path,
@@ -3445,8 +3536,13 @@ async def run_skill(
     model: str | None = None,
     resolved_tier: "model_tiering.ResolvedTier | None" = None,
     inference_only: bool = False,
+    runner: str | None = None,
+    repository: str = "",
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
+    attempt; see that function (ateles#1456, the Fly executor).
 
     ``resolved_tier``: a tier the caller already resolved (and, for a caller
     that enforces a ceiling, already checked). It is used as-is for every
@@ -3569,6 +3665,8 @@ async def run_skill(
             model=fallback_model or model,
             precomputed_tier=precomputed_tier,
             inference_only=inference_only,
+            runner=runner,
+            repository=repository,
         )
 
     local_first = (

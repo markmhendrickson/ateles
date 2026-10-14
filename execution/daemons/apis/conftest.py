@@ -102,3 +102,15 @@ def _isolate_lens_comment_identities(monkeypatch):
     monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
     monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: "")
     lens_authors.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _fly_runner_off_and_isolated(monkeypatch, tmp_path):
+    """The Fly executor is off by default (ateles#1456): no test inherits an
+    operator's ``APIS_FLY_RUNNER_CLASSES``, and none touches the real ledger."""
+    import fly_runner
+
+    monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "isolated-fly-ledger.json"))
+    monkeypatch.setattr(fly_runner, "_EXECUTOR", None)
+    fly_runner._LOGIN_LOCKS.clear()
