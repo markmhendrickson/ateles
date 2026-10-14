@@ -133,6 +133,96 @@ class FlyLeaseBusy(FlyApiError):
     """Another holder has the machine's lease."""
 
 
+# ── Strict validation, one validator per response or record type ──────────────
+#
+# Each validator returns the object only when EVERY required field is present,
+# non-null and of the right type; otherwise it raises ``FlyInvalid``. Nothing
+# downstream turns absence into a value: an INVALID answer means "unknown",
+# and in settlement, cleanup, lease release, reaping and recovery "unknown"
+# keeps the reservation (unconfirmed, nonce retained). The field lists below
+# are what the tests parametrise over, so a field added here is tested.
+
+NONEMPTY_STR = "non-empty string"
+OBJECT = "object"
+NUMBER = "number"
+BOOLEAN = "boolean"
+
+REQUIRED_FIELDS: dict[str, dict[str, str]] = {
+    # GET /machines/{id}: everything a decision reads.
+    "machine": {"id": NONEMPTY_STR, "state": NONEMPTY_STR, "instance_id": NONEMPTY_STR,
+                "config": OBJECT},
+    # Each entry of GET /machines.
+    "list_entry": {"id": NONEMPTY_STR, "state": NONEMPTY_STR, "instance_id": NONEMPTY_STR,
+                   "config": OBJECT},
+    # The data of GET /machines/{id}/lease: the holder identity is required.
+    "lease_view": {"description": NONEMPTY_STR, "expires_at": NUMBER},
+    # The data of POST /machines/{id}/lease.
+    "lease_grant": {"nonce": NONEMPTY_STR, "expires_at": NUMBER},
+    # A reservation in the ledger.
+    "ledger_entry": {"run_id": NONEMPTY_STR, "owner": NONEMPTY_STR, "started_at": NUMBER,
+                     "deadline": NUMBER, "max_cost_usd": NUMBER, "login": BOOLEAN},
+}  # fmt: skip
+
+# Optional fields: may be absent, but when present must have this type.
+OPTIONAL_FIELDS: dict[str, dict[str, type | tuple]] = {
+    "machine_config": {"files": list, "env": dict, "metadata": dict},
+    "config_metadata": {"ateles_run_id": str},
+    "config_env": {"ATELES_RUN_ID": str},
+    "ledger_entry": {"machine_id": str, "lease_nonce": str, "unconfirmed": bool,
+                     "lease_expires": (int, float, type(None))},
+    "owner_record": {"pid": int, "host": str, "start": str, "heartbeat": (int, float)},
+}  # fmt: skip
+
+
+class FlyInvalid(FlyApiError):
+    """A response or record that does not pass its validator: unknown."""
+
+    def __init__(self, kind: str, why: str):
+        super().__init__(0, f"invalid {kind}: {why}")
+        self.kind = kind
+
+
+def _type_ok(value: Any, expected: str) -> bool:
+    if expected == NONEMPTY_STR:
+        return isinstance(value, str) and bool(value)
+    if expected == OBJECT:
+        return isinstance(value, dict)
+    if expected == NUMBER:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == BOOLEAN:
+        return isinstance(value, bool)
+    raise ValueError(expected)
+
+
+def validate(kind: str, data: Any) -> dict:
+    """The validated object for *kind*, or raise ``FlyInvalid``."""
+    if not isinstance(data, dict):
+        raise FlyInvalid(kind, "not an object")
+    for name, expected in REQUIRED_FIELDS[kind].items():
+        if name not in data or data[name] is None:
+            raise FlyInvalid(kind, f"{name} is missing")
+        if not _type_ok(data[name], expected):
+            raise FlyInvalid(kind, f"{name} is not a {expected}")
+    for name, expected in OPTIONAL_FIELDS.get(kind, {}).items():
+        if name in data and not isinstance(data[name], expected):
+            raise FlyInvalid(kind, f"{name} has the wrong type")
+    if kind in ("machine", "list_entry"):
+        _validate_config(kind, data["config"])
+    return data
+
+
+def _validate_config(kind: str, config: dict) -> None:
+    for name, expected in OPTIONAL_FIELDS["machine_config"].items():
+        if name in config and not isinstance(config[name], expected):
+            raise FlyInvalid(kind, f"config.{name} has the wrong type")
+    for section, spec in (("metadata", "config_metadata"), ("env", "config_env")):
+        values = config.get(section) if section in config else None
+        if isinstance(values, dict):
+            for name, expected in OPTIONAL_FIELDS[spec].items():
+                if name in values and not isinstance(values[name], expected):
+                    raise FlyInvalid(kind, f"config.{section}.{name} has the wrong type")
+
+
 def _render_wall(ts: float) -> str:
     return datetime.fromtimestamp(ts).astimezone().isoformat(timespec="minutes")
 
@@ -292,13 +382,12 @@ def _next_day_start(ts: float) -> float:
 
 
 def _reserved_cost(entry: dict, config: FlyConfig) -> float:
-    """An in-flight entry's reserved maximum cost (derived from its window for
-    an entry written before costs were stored)."""
-    try:
-        return float(entry["max_cost_usd"])
-    except (KeyError, TypeError, ValueError):
-        span = float(entry.get("deadline") or 0) - float(entry.get("started_at") or 0)
-        return max(0.0, span) * config.rate_per_second_usd
+    """An in-flight entry's reserved maximum cost. An entry whose cost cannot
+    be read reserves the whole default window, never nothing."""
+    value = entry.get("max_cost_usd") if isinstance(entry, dict) else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return (DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS) * config.rate_per_second_usd
 
 
 def process_start_token(pid: int) -> str | None:
@@ -414,14 +503,23 @@ class FlyLedger:
     def _load(self) -> dict:
         if not self.path.exists():
             return {"month": "", "spend_usd": 0.0, "day": "", "launches_today": 0,
-                    "local_fallbacks": 0, "in_flight": {}}  # fmt: skip
+                    "local_fallbacks": 0, "in_flight": {}, "owners": {}}  # fmt: skip
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raise FlyLedgerError(f"Fly ledger {self.path.name} is unreadable") from None
-        if not isinstance(data, dict) or not isinstance(data.get("in_flight", {}), dict):
+        if not isinstance(data, dict) or not isinstance(data.get("in_flight"), dict):
+            # An existing ledger without its reservations is not "no
+            # reservations": it fails closed.
             raise FlyLedgerError(f"Fly ledger {self.path.name} has an unexpected shape")
-        data.setdefault("in_flight", {})
+        if "owners" not in data:
+            data["owners"] = {}  # older files carry no owner records: liveness unknown
+        if not isinstance(data["owners"], dict):
+            raise FlyLedgerError(f"Fly ledger {self.path.name} has unreadable owner records")
+        for key in ("spend_usd", "launches_today"):
+            if key in data and (isinstance(data[key], bool)
+                                or not isinstance(data[key], (int, float))):  # fmt: skip
+                raise FlyLedgerError(f"Fly ledger {self.path.name} has an unreadable {key}")
         return data
 
     def _save(self, data: dict) -> None:
@@ -444,9 +542,13 @@ class FlyLedger:
         if data.get("month") != _month_key(now):
             data["month"] = _month_key(now)
             data["spend_usd"] = 0.0
+        elif "spend_usd" not in data:
+            raise FlyLedgerError("Fly ledger has a month but no spend: refusing to assume zero")
         if data.get("day") != _day_key(now):
             data["day"] = _day_key(now)
             data["launches_today"] = 0
+        elif "launches_today" not in data:
+            raise FlyLedgerError("Fly ledger has a day but no launch count")
 
     def snapshot(self, now: float | None = None) -> dict:
         with self._locked():
@@ -481,7 +583,7 @@ class FlyLedger:
                 _reserved_cost(entry, config) for entry in data["in_flight"].values()
             )
             committed = (
-                float(data.get("spend_usd") or 0.0)
+                float(data["spend_usd"])  # present and numeric after _load/_roll
                 + config.monthly_storage_usd()
                 + outstanding
             )
@@ -492,7 +594,7 @@ class FlyLedger:
                     f"exceed APIS_FLY_MONTHLY_BUDGET_USD=${config.budget_usd:.2f}",
                     _render_wall(_next_month_start(now)),
                 )
-            if int(data.get("launches_today") or 0) >= config.max_per_day:
+            if int(data["launches_today"]) >= config.max_per_day:
                 raise FlyRefusal(
                     f"Fly daily machine cap reached (APIS_FLY_MAX_MACHINES_PER_DAY="
                     f"{config.max_per_day})",
@@ -500,13 +602,15 @@ class FlyLedger:
                 )
             in_flight = data["in_flight"]
             if len(in_flight) >= config.max_concurrent:
-                earliest = min(float(v.get("deadline") or now + 60) for v in in_flight.values())
+                deadlines = [v["deadline"] for v in in_flight.values() if isinstance(v, dict)
+                             and isinstance(v.get("deadline"), (int, float))]  # fmt: skip
+                earliest = min(deadlines) if deadlines else now + 60  # a retry hint only
                 raise FlyRefusal(
                     f"Fly concurrency cap reached (APIS_FLY_MAX_CONCURRENT="
                     f"{config.max_concurrent})",
                     _render_wall(max(earliest, now + 60)),
                 )
-            data["launches_today"] = int(data.get("launches_today") or 0) + 1
+            data["launches_today"] = int(data["launches_today"]) + 1
             in_flight[run_id] = {
                 "run_id": run_id, "owner": owner, "machine_id": machine_id, "login": login,
                 "started_at": now, "deadline": now + max_run_seconds, "max_cost_usd": worst,
@@ -605,7 +709,7 @@ class FlyLedger:
             if entry is None:
                 return 0.0
             cost = _charged_seconds(entry, now) * config.rate_per_second_usd
-            data["spend_usd"] = float(data.get("spend_usd") or 0.0) + cost
+            data["spend_usd"] = float(data["spend_usd"]) + cost
             self._save(data)
             return cost
 
@@ -700,16 +804,16 @@ class FlyMachinesClient:
                              require_state=False)  # fmt: skip
 
     async def get(self, machine_id: str) -> dict | None:
-        """The machine, or None ONLY for an explicit 404."""
+        """The machine, fully validated, or None ONLY for an explicit 404."""
         try:
             data = await self._call("GET", f"/machines/{machine_id}")
         except FlyApiError as exc:
             if exc.status == 404:
                 return None
             raise
-        machine = self._machine(data, expect_id=machine_id)
-        if not isinstance(machine.get("state"), str):
-            raise _invalid("machine has no state")
+        machine = validate("machine", data)
+        if machine["id"] != machine_id:
+            raise FlyInvalid("machine", "id does not match the request")
         return machine
 
     async def update(self, machine_id: str, body: dict, *, nonce: str = "") -> dict:
@@ -744,17 +848,11 @@ class FlyMachinesClient:
             if exc.status == 409:
                 raise FlyLeaseBusy(409, "machine is leased by another holder") from None
             raise
-        payload = data.get("data") if isinstance(data, dict) else None
-        if not isinstance(payload, dict):
-            raise _invalid("lease answer has no data object")
-        nonce = payload.get("nonce")
-        if not isinstance(nonce, str) or not nonce:
-            raise _invalid("lease answer has no nonce")
-        _LEASE_NONCES.add(nonce)
-        expires = payload.get("expires_at")
-        if isinstance(expires, bool) or not isinstance(expires, (int, float)):
-            expires = None
-        return nonce, (float(expires) if expires is not None else None)
+        if not isinstance(data, dict) or "data" not in data:
+            raise FlyInvalid("lease_grant", "no data object")
+        grant = validate("lease_grant", data["data"])
+        _LEASE_NONCES.add(grant["nonce"])
+        return grant["nonce"], float(grant["expires_at"])
 
     async def release_lease(self, machine_id: str, nonce: str) -> None:
         await self._call("DELETE", f"/machines/{machine_id}/lease", parse=False, nonce=nonce)
@@ -767,10 +865,9 @@ class FlyMachinesClient:
             if exc.status == 404:
                 return None
             raise
-        payload = data.get("data") if isinstance(data, dict) else None
-        if not isinstance(payload, dict):
-            raise _invalid("lease view has no data object")
-        return payload
+        if not isinstance(data, dict) or "data" not in data:
+            raise FlyInvalid("lease_view", "no data object")
+        return validate("lease_view", data["data"])
 
     async def destroy(self, machine_id: str) -> None:
         try:
@@ -784,7 +881,7 @@ class FlyMachinesClient:
         data = await self._call("GET", "/machines")
         if not isinstance(data, list):
             raise _invalid("machine listing is not a list")
-        machines = [self._machine(m) for m in data]
+        machines = [validate("list_entry", m) for m in data]
         ids = [m["id"] for m in machines]
         if len(ids) != len(set(ids)):
             raise _invalid("machine listing repeats an id")
@@ -1456,7 +1553,7 @@ class FlyExecutor:
                     await self._reconcile_login(login_id, job.run_id)
                     # Cheap pre-check: an incomplete or busy machine is refused
                     # before even a lease is asked for.
-                    pre = await self.client.get(login_id)
+                    pre = await self._read_login_machine(login_id, job)
                     if pre is None:
                         raise FlyApiError(404, f"{job.provider} login machine not found")
                     self._refuse_unless_free(pre, job)
@@ -1490,6 +1587,18 @@ class FlyExecutor:
         )
         return FlyHandle(job, machine_id, instance_id, started, deadline)
 
+    async def _read_login_machine(self, machine_id: str, job: FlyJob) -> dict | None:
+        """The login machine for admission. An incomplete answer is never
+        availability: it is a retry-later refusal, with nothing written."""
+        try:
+            return await self.client.get(machine_id)
+        except FlyInvalid as exc:
+            raise FlyRefusal(
+                f"{job.provider} login machine is not free (its answer is incomplete: "
+                f"{exc}); nothing was changed",
+                _render_wall(self._clock() + 300),
+            ) from None
+
     def _refuse_unless_free(self, machine: dict, job: FlyJob) -> None:
         refusal = _login_admission_refusal(machine, job.run_id)
         if refusal:
@@ -1517,18 +1626,23 @@ class FlyExecutor:
         )
 
     async def _release_lease(self, machine_id: str, nonce: str, run_id: str) -> bool:
-        """Release this run's lease; True when it is verifiably no longer
-        held by this run (released, expired, or now someone else's)."""
+        """Release this run's lease. True only on POSITIVE evidence that this
+        run no longer holds it, read back after the release attempt: a
+        validated answer showing no lease (an explicit 404), or a validated
+        lease whose holder identity is present and is not this run's. A
+        missing or malformed holder is unknown, never "someone else"."""
         try:
             await self.client.release_lease(machine_id, nonce)
-            return True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — the read-back decides
             log.warning(f"[fly] lease release on {machine_id} failed: {type(exc).__name__}")
         try:
             lease = await self.client.get_lease(machine_id)
-        except Exception:  # noqa: BLE001 — unknown: the run keeps its reservation
+        except Exception as exc:  # noqa: BLE001 — unknown: the run keeps its reservation
+            log.warning(f"[fly] lease read-back on {machine_id} failed: {type(exc).__name__}")
             return False
-        return lease is None or lease.get("description") != _lease_description(run_id)
+        if lease is None:
+            return True
+        return lease["description"] != _lease_description(run_id)
 
     async def _write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
                                   launch: "_LaunchState", nonce: str) -> None:  # fmt: skip
@@ -1545,7 +1659,7 @@ class FlyExecutor:
         precondition, and the stored config is read back afterwards: unless
         it is this run's, the launch fails closed before any start.
         """
-        machine = await self.client.get(machine_id)  # re-read under the lease
+        machine = await self._read_login_machine(machine_id, job)  # re-read under the lease
         if machine is None:
             raise FlyApiError(404, f"{job.provider} login machine not found")
         self._refuse_unless_free(machine, job)
@@ -1555,7 +1669,8 @@ class FlyExecutor:
         cfg["restart"] = {"policy": "no"}
         cfg["env"] = machine_env(job, deadline)
         cfg["files"] = job_files(job, self.config)
-        cfg["metadata"] = {**dict(cfg.get("metadata") or {}), "ateles_run_id": job.run_id}
+        metadata = dict(cfg["metadata"]) if "metadata" in cfg else {}
+        cfg["metadata"] = {**metadata, "ateles_run_id": job.run_id}
         # The version precondition is mandatory: _refuse_unless_free has
         # already refused a machine whose answer carried no usable version.
         body: dict = {"config": cfg, "skip_launch": True,
@@ -1573,7 +1688,7 @@ class FlyExecutor:
             raise
         after = await self.client.get(machine_id)
         if (after is None or after["state"] != "stopped"
-                or _config_run_id(after.get("config") or {}) != job.run_id):  # fmt: skip
+                or _config_run_id(after["config"]) != job.run_id):  # fmt: skip
             raise FlyApiError(409, "login machine config is not this run's after the write")
 
     async def _scrub_login_machine(self, machine_id: str, run_id: str, nonce: str = "") -> bool:
@@ -1588,33 +1703,36 @@ class FlyExecutor:
         is left alone and the result is False. Callers hold the admission lock
         and still own the reservation, so no other dispatcher can be writing
         this machine meanwhile."""
+        # Positive evidence only: every read below is fully validated (a missing
+        # or null config is INVALID, never "empty"), and only an explicit 404
+        # means the machine is gone.
         try:
             machine = await self.client.get(machine_id)
             if machine is None:
                 return True
-            cfg = copy.deepcopy(machine.get("config") or {})
+            cfg = copy.deepcopy(machine["config"])
             owner = _config_run_id(cfg)
             if owner and owner != run_id:
-                return True
-            if not owner and (cfg.get("files") or cfg.get("env")):
+                return True  # positively another run's config: this run's job is not stored
+            if not owner and _has_job_config(cfg):
                 log.warning(f"[fly] login machine {machine_id} holds an unattributed job config")
                 return False
             if owner == run_id:
-                if machine["state"] != "stopped" or _login_machine_problem(machine):
-                    return False  # never rewrite a running or incompletely known machine
+                if machine["state"] != "stopped":
+                    return False  # never rewrite a running machine
                 cfg["files"] = []
                 cfg["env"] = {}
-                metadata = dict(cfg.get("metadata") or {})
-                metadata.pop("ateles_run_id", None)
-                cfg["metadata"] = metadata
+                if "metadata" in cfg:
+                    cfg["metadata"] = {k: v for k, v in cfg["metadata"].items()
+                                       if k != "ateles_run_id"}  # fmt: skip
                 body: dict = {"config": cfg, "skip_launch": True,
                               "current_version": machine["instance_id"]}  # fmt: skip
                 await self.client.update(machine_id, body, nonce=nonce)
             after = await self.client.get(machine_id)
             if after is None:
                 return True
-            after_cfg = after.get("config") or {}
-            return _config_run_id(after_cfg) != run_id and not after_cfg.get("files")
+            # Cleared means: a validated, present config carrying no job at all.
+            return not _has_job_config(after["config"])
         except Exception as exc:  # noqa: BLE001 — unknown state keeps the reservation
             log.warning(f"[fly] could not clear job files from login machine: {type(exc).__name__}")
             return False
@@ -1720,9 +1838,18 @@ class FlyExecutor:
         entry = self.ledger.entry(run_id)
         if entry is None:
             return True  # already settled
-        machine_id = str(entry.get("machine_id") or "")
-        login = bool(entry.get("login"))
-        nonce = str(entry.get("lease_nonce") or "")
+        try:
+            entry = validate("ledger_entry", entry)
+        except FlyInvalid as exc:
+            # A reservation we cannot read is one we cannot safely act on.
+            self.ledger.mark_unconfirmed(run_id, reason=str(exc))
+            log.error(f"[fly] run={run_id}: reservation unreadable ({exc}); kept")
+            return False
+        machine_id = entry["machine_id"] if "machine_id" in entry else ""
+        # A machine configured as a login machine is one, whatever the entry
+        # says: a login machine is never destroyed.
+        login = entry["login"] or machine_id in set(self.config.login_machines.values())
+        nonce = entry["lease_nonce"] if "lease_nonce" in entry else ""
         if machine_id:
             verdict = await self._ownership(machine_id, run_id, login=login)
             if verdict == "gone":
@@ -1776,9 +1903,7 @@ class FlyExecutor:
             return "other"
         if machine is None or machine["state"] == "destroyed":
             return "gone"
-        if login and _login_machine_problem(machine):
-            return "other"  # incompletely known: not ours to touch
-        cfg = machine.get("config") or {}
+        cfg = machine["config"]  # validated: present, an object
         owner = _config_run_id(cfg)
         if owner == run_id:
             return "ours"
@@ -1786,7 +1911,7 @@ class FlyExecutor:
             return "other"
         if not login:
             return "ours"
-        if cfg.get("files") or cfg.get("env"):
+        if _has_job_config(cfg):
             return "other"  # a job config nobody can attribute
         return "idle" if machine["state"] == "stopped" else "other"
 
@@ -1854,7 +1979,7 @@ class FlyExecutor:
         provably abandoned is settled; if that cannot be confirmed, refuse.
         Nothing has been sent to the machine yet in either case."""
         now = self._clock()
-        owners = self.ledger.snapshot(now).get("owners", {})
+        owners = self.ledger.snapshot(now)["owners"]
         others = {
             rid: e for rid, e in self.ledger.find_by_machine(machine_id).items()
             if rid != own_run_id
@@ -1905,16 +2030,23 @@ class FlyExecutor:
         """
         if run_id in self._active:
             return False  # a live run in this process owns it
-        past = now > float(entry.get("deadline") or 0) + REAP_GRACE_SECONDS
-        owner = str(entry.get("owner") or "")
+        try:
+            entry = validate("ledger_entry", entry)
+        except FlyInvalid as exc:
+            log.error(f"[fly] reservation {run_id} is unreadable ({exc}); never auto-settled")
+            return False
+        past = now > entry["deadline"] + REAP_GRACE_SECONDS
+        owner = entry["owner"]
         if owner == self.instance_id:
             # Not active here, so its run() has ended: an unconfirmed
             # machine is ours to finish; otherwise only once overdue.
-            return bool(entry.get("unconfirmed")) or past
-        record = owners.get(owner)
+            return entry.get("unconfirmed") is True or past
+        record = owners[owner] if owner in owners else None
         if owner_provably_dead(record):
             return True
-        heartbeat = float((record or {}).get("heartbeat") or 0)
+        heartbeat = _owner_heartbeat(record)
+        if heartbeat is None:
+            return False  # no readable heartbeat: liveness unknown, never stale
         return past and now - heartbeat > REAP_GRACE_SECONDS
 
     async def reap(self) -> list[str]:
@@ -1930,20 +2062,23 @@ class FlyExecutor:
             now = self._clock()
             for run_id in list(self.ledger.snapshot(now)["in_flight"]):
                 fresh = self.ledger.snapshot(now)  # settlements may have run
-                entry = fresh["in_flight"].get(run_id)
-                if entry is None or not self._reapable(run_id, entry, now,
-                                                       fresh.get("owners", {})):  # fmt: skip
+                if run_id not in fresh["in_flight"]:
                     continue
-                if entry.get("login"):
-                    provider = next((p for p, m in self.config.login_machines.items()
-                                     if m == entry.get("machine_id")), "")  # fmt: skip
-                    if provider and _login_lock(provider).locked():
-                        continue  # a job holds that machine; its launch reconciles first
+                entry = fresh["in_flight"][run_id]
+                if not self._reapable(run_id, entry, now, fresh["owners"]):
+                    continue
+                provider = next((p for p, m in self.config.login_machines.items()
+                                 if m == entry.get("machine_id")), "")  # fmt: skip
+                if provider and _login_lock(provider).locked():
+                    continue  # a job holds that machine; its launch reconciles first
                 if await self._settle_locked(run_id):  # admission is held
                     settled.append(run_id)
             machines = await self.client.list()
             current = self.ledger.snapshot(now)["in_flight"]  # after the await
-            tracked_machines = {str(e.get("machine_id") or "") for e in current.values()}
+            # Any reservation naming a machine claims it, readable or not: an
+            # unreadable reservation's machine is never treated as a stray.
+            tracked_machines = {e["machine_id"] for e in current.values()
+                                if isinstance(e, dict) and isinstance(e.get("machine_id"), str)}
             login_ids = set(self.config.login_machines.values())
             for machine in machines:
                 mid = machine["id"]
@@ -1951,11 +2086,13 @@ class FlyExecutor:
                 if (mid in login_ids or mid in tracked_machines or machine.get("state") == "destroyed"
                         or (run_id and (run_id in current or run_id in self._active))):  # fmt: skip
                     continue
-                created = _parse_ts(machine.get("created_at"))
+                cap = DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS
+                created = _parse_ts(machine["created_at"]) if "created_at" in machine else None
                 key = self.ledger.record_untracked(
                     machine_id=mid, run_id=run_id, owner=self.instance_id, config=self.config,
-                    started_at=created if created is not None else now,
-                    max_run_seconds=DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS,
+                    # An unreadable creation time is charged the whole window.
+                    started_at=created if created is not None else now - cap,
+                    max_run_seconds=cap,
                 )  # fmt: skip
                 if await self._settle_locked(key):  # admission is held
                     settled.append(key)
@@ -1965,7 +2102,18 @@ class FlyExecutor:
 
 
 def _machine_run_id(machine: dict) -> str:
-    return str(((machine.get("config") or {}).get("metadata") or {}).get("ateles_run_id") or "")
+    """The run id of a VALIDATED machine or list entry."""
+    return _config_run_id(machine["config"])
+
+
+def _owner_heartbeat(record: dict | None) -> float | None:
+    """A readable owner heartbeat, or None (unknown)."""
+    if not isinstance(record, dict) or "heartbeat" not in record:
+        return None
+    value = record["heartbeat"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 LEASE_SAFETY_SECONDS = 60
@@ -1997,24 +2145,38 @@ def _login_admission_refusal(machine: dict, run_id: str) -> str:
     problem = _login_machine_problem(machine)
     if problem:
         return problem
-    state = machine.get("state")
+    state = machine["state"]
     cfg = machine["config"]
     owner = _config_run_id(cfg)
     if state != "stopped":
         return f"it is {state}"
     if owner and owner != run_id:
         return "it holds another run's job"
-    if not owner and (cfg.get("files") or cfg.get("env")):
+    if not owner and _has_job_config(cfg):
         return "it holds a job nobody can attribute"
     return ""
 
 
 def _config_run_id(config: dict) -> str:
-    """The run a machine config belongs to: its metadata marker, or the
-    non-secret run id in its environment."""
-    metadata = config.get("metadata") or {}
-    machine_vars = config.get("env") or {}  # the machine's config, not ours
-    return str(metadata.get("ateles_run_id") or machine_vars.get("ATELES_RUN_ID") or "")
+    """The run a VALIDATED machine config belongs to: its metadata marker,
+    else the non-secret run id in its environment, else "" (the config is
+    present and carries no marker; that is a reading, not a default)."""
+    if "metadata" in config and "ateles_run_id" in config["metadata"]:
+        if config["metadata"]["ateles_run_id"]:
+            return config["metadata"]["ateles_run_id"]
+    if "env" in config and "ATELES_RUN_ID" in config["env"]:
+        return config["env"]["ATELES_RUN_ID"]
+    return ""
+
+
+def _has_job_config(config: dict) -> bool:
+    """Whether a VALIDATED machine config carries any job at all: job files,
+    job environment, or a run marker."""
+    return bool(
+        ("files" in config and config["files"])
+        or ("env" in config and config["env"])
+        or _config_run_id(config)
+    )
 
 
 DISPATCH_TIMEOUT_DEFAULT = 1800
@@ -2022,10 +2184,13 @@ DISPATCH_TIMEOUT_DEFAULT = 1800
 
 def _charged_seconds(entry: dict, now: float) -> float:
     """Machine-seconds to charge for an entry released after the fact: its
-    elapsed time, capped at its reserved window."""
-    started = float(entry.get("started_at") or now)
-    deadline = float(entry.get("deadline") or now)
-    return max(0.0, min(now, deadline) - started)
+    elapsed time, capped at its reserved window. An entry whose times cannot
+    be read is charged the whole default window, never nothing."""
+    try:
+        entry = validate("ledger_entry", entry)
+    except FlyInvalid:
+        return float(DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS)
+    return max(0.0, min(now, entry["deadline"]) - entry["started_at"])
 
 
 def _parse_ts(raw: Any) -> float | None:

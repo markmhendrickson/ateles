@@ -38,6 +38,29 @@ CANARY = "operator-canary-value-0007"
 FORBIDDEN_VALUES = (FLY_TOKEN, SHARED_BEARER, SHARED_PAT, DAEMON_GH, CANARY)
 
 
+def _present(machine: dict) -> dict:
+    """A machine as the Machines API answers for it: always with a version
+    and a config object (the double fills them in) unless a test marks the
+    machine ``_raw`` to serve an incomplete answer on purpose."""
+    out = {k: v for k, v in machine.items() if k != "_raw"}
+    if not machine.get("_raw"):
+        out.setdefault("instance_id", "v0")
+        out.setdefault("config", {})
+    return out
+
+
+def _corrupt(data, field: str, mode: str):
+    """Make one field of an answer absent, null or the wrong type."""
+    data = dict(data)
+    if mode == "absent":
+        data.pop(field, None)
+    elif mode == "null":
+        data[field] = None
+    else:
+        data[field] = 12345 if isinstance(data.get(field), str) else "wrong-type"
+    return data
+
+
 class FakeFly:
     """A stateful stand-in for the Machines API, with failure knobs."""
 
@@ -59,6 +82,10 @@ class FakeFly:
         self.lease_log: list[tuple[str, str]] = []
         self.lease_mode = "ok"  # "ok" | "error" | "no_nonce"
         self.enforce_version = True  # Fly documents the field, not its mismatch status
+        # {"kind": "machine"|"list_entry"|"lease_view"|"lease_grant", "field",
+        #  "mode": "absent"|"null"|"wrong", "when": callable(request) -> bool}
+        self.corrupt: dict | None = None
+        self.lease_view_override = None  # a raw GET /lease answer, e.g. {"data": {}}
         self.release_fails = False
         # Malformed answers: {"list": "malformed"|"object"|"null", "get": "null"|"other-id"}
         self.bad: dict[str, str] = {}
@@ -106,7 +133,11 @@ class FakeFly:
                 return httpx.Response(200, json={})
             if mode == "null":
                 return httpx.Response(200, json=None)
-            return httpx.Response(200, json=list(self.machines.values()))
+            listing = [_present(m) for m in self.machines.values()]
+            if self.corrupt and self.corrupt["kind"] == "list_entry" and self._when(request):
+                listing = [_corrupt(m, self.corrupt["field"], self.corrupt["mode"])
+                           for m in listing]  # fmt: skip
+            return httpx.Response(200, json=listing)
         parts = rest.split("/")  # ['', 'machines', id, ...]
         mid = parts[2]
         # ── Leases, as Fly documents them: an exclusive lock on modifying a
@@ -129,10 +160,19 @@ class FakeFly:
                 self.leases[mid] = {"nonce": nonce, "description": body.get("description", ""),
                                     "expires_at": 4_000_000_000}  # fmt: skip
                 self.lease_log.append(("acquire", mid))
-                return httpx.Response(200, json={"status": "success", "data": {
-                    "nonce": nonce, "expires_at": 4_000_000_000,
-                    "description": body.get("description", "")}})  # fmt: skip
+                grant = {"nonce": nonce, "expires_at": 4_000_000_000,
+                         "description": body.get("description", "")}
+                if self.corrupt and self.corrupt["kind"] == "lease_grant" and self._when(request):
+                    grant = _corrupt(grant, self.corrupt["field"], self.corrupt["mode"])
+                return httpx.Response(200, json={"status": "success", "data": grant})
             if method == "GET":
+                if self.corrupt and self.corrupt["kind"] == "lease_view" and self._when(request):
+                    view = {"description": (held or {}).get("description", "x"),
+                            "expires_at": (held or {}).get("expires_at", 4_000_000_000)}
+                    view = _corrupt(view, self.corrupt["field"], self.corrupt["mode"])
+                    return httpx.Response(200, json={"status": "success", "data": view})
+                if self.lease_view_override is not None:
+                    return httpx.Response(200, json=self.lease_view_override)
                 if not held:
                     return httpx.Response(404, json={"error": "no lease"})
                 return httpx.Response(200, json={"status": "success", "data": {
@@ -169,7 +209,10 @@ class FakeFly:
                 return httpx.Response(200, json={**self.machines[mid], "id": "someone-else"})
             if mid not in self.machines:
                 return httpx.Response(404, json={"error": "not found"})
-            return httpx.Response(200, json=self.machines[mid])
+            answer = _present(self.machines[mid])
+            if self.corrupt and self.corrupt["kind"] == "machine" and self._when(request):
+                answer = _corrupt(answer, self.corrupt["field"], self.corrupt["mode"])
+            return httpx.Response(200, json=answer)
         if method == "POST" and len(parts) == 3:  # update
             body = json.loads(request.content)
             machine = self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})
@@ -198,6 +241,10 @@ class FakeFly:
                 self.machines.pop(mid, None)
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(500, json={"error": f"unhandled {method} {rest}"})
+
+    def _when(self, request) -> bool:
+        when = (self.corrupt or {}).get("when")
+        return True if when is None else bool(when(request))
 
     def calls(self, method: str, suffix: str = "") -> list[httpx.Request]:
         return [r for r in self.requests if r.method == method and r.url.path.endswith(suffix)]
@@ -1361,7 +1408,9 @@ def test_token_is_revoked_when_the_job_never_completes(fly_env, monkeypatch, fai
         executor.ledger.reserve(executor.config, run_id="old", owner="apis-other",
                                 max_run_seconds=60, login=True, machine_id="m-codex")  # fmt: skip
         job = _codex_job()
-        expected = fly_runner.FlyLaunchError
+        # Its owner left no liveness record: unknown, never presumed dead, so
+        # the machine is busy (a retry-later refusal) rather than reclaimed.
+        expected = fly_runner.FlyRefusal
     else:
         fake = FakeFly()
         fake.create_mode = {"launch_error": "refused", "uncertain": "lost"}.get(failure, "ok")
@@ -1662,7 +1711,7 @@ def test_an_invalid_listing_entry_is_rejected(fly_env, bad_listing):
 
     config = fly_runner.FlyConfig.from_env()
     client = fly_runner.FlyMachinesClient(config, transport=httpx.MockTransport(handler))
-    with pytest.raises(fly_runner.FlyApiError, match="invalid Machines API response"):
+    with pytest.raises(fly_runner.FlyApiError, match="invalid"):
         asyncio.run(client.list())
 
 
@@ -2457,6 +2506,7 @@ def test_an_incompletely_known_login_machine_is_refused_with_no_writes(
 ):
     fake = _codex_fake(monkeypatch)
     machine = fake.machines["m-codex"]
+    machine["_raw"] = True  # serve the incomplete answer as is
     if damage == "no_version":
         machine.pop("instance_id")
     elif damage == "empty_version":
@@ -2466,7 +2516,7 @@ def test_an_incompletely_known_login_machine_is_refused_with_no_writes(
     else:
         machine["config"] = None
     executor, _, revoked = make_executor(fake)
-    with pytest.raises(fly_runner.FlyRefusal, match="missing") as exc:
+    with pytest.raises(fly_runner.FlyRefusal, match="not free") as exc:
         asyncio.run(executor.run(_codex_job()))
     assert exc.value.cooled_until
     assert _machine_writes(fake) == [] and fake.lease_log == []
@@ -2653,3 +2703,219 @@ def test_the_run_deadline_never_outlives_the_lease(fly_env, monkeypatch):
     # Deadline = lease expiry - LEASE_SAFETY_SECONDS = 40 s from start.
     assert seen["first_budget"] <= 100 - fly_runner.LEASE_SAFETY_SECONDS
     assert fake.leases == {}  # stopped, cleaned and released at that deadline
+
+
+# ── Settlement accepts only positive evidence (round 9) ──────────────────────
+#
+# Parametrised from the validators' own field lists: a field added to
+# fly_runner.REQUIRED_FIELDS is tested here without anyone editing this file.
+
+MODES = ("absent", "null", "wrong")
+
+
+def _field_cases(kind):
+    return [(field, mode) for field in fly_runner.REQUIRED_FIELDS[kind] for mode in MODES]
+
+
+def _settling_run(fake, executor, monkeypatch):
+    """A codex login run that completes; ``phase["settling"]`` turns true
+    once its result is read, i.e. for settlement's reads only."""
+    phase = {"settling": False}
+
+    async def read(run_id):
+        phase["settling"] = True
+        return {"run_id": run_id, "exit_code": 0, "stdout": "done"}
+
+    executor._read_result = read
+    return phase
+
+
+def _assert_kept_with_nonce(executor, job):
+    assert job.remote_state == "unconfirmed"
+    entry = executor.ledger.entry(job.run_id)
+    assert entry is not None, "the reservation was released on incomplete evidence"
+    assert entry["unconfirmed"] is True
+    assert entry["lease_nonce"], "the nonce must be kept for the reaper"
+
+
+@pytest.mark.parametrize("field,mode", _field_cases("machine"))
+def test_an_incomplete_machine_answer_never_settles(fly_env, monkeypatch, field, mode):
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake)
+    phase = _settling_run(fake, executor, monkeypatch)
+    fake.corrupt = {"kind": "machine", "field": field, "mode": mode,
+                    "when": lambda request: phase["settling"]}  # fmt: skip
+    job = _codex_job()
+    asyncio.run(executor.run(job))
+    _assert_kept_with_nonce(executor, job)
+    assert "m-codex" in fake.leases  # the lease is not released either
+
+
+@pytest.mark.parametrize("mode", ["absent", "null"])
+def test_a_missing_config_on_the_cleanup_read_back_never_settles(fly_env, monkeypatch, mode):
+    """Finding: the read after the clean-up update had no config."""
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+
+    def after_cleanup(request):
+        return (request.method == "GET" and request.url.path.endswith("/machines/m-codex")
+                and bool(fake.stored) and fake.stored[-1] == "")  # fmt: skip
+
+    fake.corrupt = {"kind": "machine", "field": "config", "mode": mode, "when": after_cleanup}
+    job = _codex_job()
+    asyncio.run(executor.run(job))
+    _assert_kept_with_nonce(executor, job)
+
+
+@pytest.mark.parametrize("field,mode", _field_cases("lease_view"))
+def test_an_incomplete_lease_answer_after_a_failed_release_never_settles(
+    fly_env, monkeypatch, field, mode
+):
+    fake = _codex_fake(monkeypatch)
+    fake.release_fails = True
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    fake.corrupt = {"kind": "lease_view", "field": field, "mode": mode}
+    job = _codex_job()
+    asyncio.run(executor.run(job))
+    _assert_kept_with_nonce(executor, job)
+
+
+def test_an_empty_lease_answer_after_a_failed_release_never_settles(fly_env, monkeypatch):
+    """Finding: ``{"data": {}}`` must not read as "another holder"."""
+    fake = _codex_fake(monkeypatch)
+    fake.release_fails = True
+    fake.lease_view_override = {"status": "success", "data": {}}
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    job = _codex_job()
+    asyncio.run(executor.run(job))
+    _assert_kept_with_nonce(executor, job)
+
+
+@pytest.mark.parametrize("view,settles", [
+    (None, True),                                                      # explicit 404
+    ({"status": "success", "data": {"description": "someone else",
+                                    "expires_at": 4_000_000_000}}, True),  # named other
+])  # fmt: skip
+def test_positive_evidence_after_a_failed_release_settles(fly_env, monkeypatch, view, settles):
+    fake = _codex_fake(monkeypatch)
+    fake.release_fails = True
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    job = _codex_job()
+    real = fake.handler
+
+    def handler(request):
+        if request.method == "GET" and request.url.path.endswith("/lease"):
+            if view is None:
+                return httpx.Response(404, json={"error": "no lease"})
+            return httpx.Response(200, json=view)
+        return real(request)
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    asyncio.run(executor.run(job))
+    assert (executor.ledger.entry(job.run_id) is None) is settles
+
+
+@pytest.mark.parametrize("field,mode", _field_cases("list_entry"))
+def test_an_incomplete_listing_never_settles_an_uncertain_create(fly_env, field, mode):
+    fake = FakeFly()
+    fake.create_mode = "lost"
+    fake.corrupt = {"kind": "list_entry", "field": field, "mode": mode}
+    executor, _, _ = make_executor(fake, record=None)
+    job = _job()
+    with pytest.raises(fly_runner.FlyUncertainLaunch):
+        asyncio.run(executor.run(job))
+    assert job.remote_state == "unconfirmed"
+    assert executor.ledger.entry(job.run_id)["unconfirmed"] is True
+    assert fake.machines  # the machine was not presumed gone
+
+
+@pytest.mark.parametrize("field,mode", _field_cases("lease_grant"))
+def test_an_incomplete_lease_grant_is_refused_with_no_writes(fly_env, monkeypatch, field, mode):
+    fake = _codex_fake(monkeypatch)
+    fake.corrupt = {"kind": "lease_grant", "field": field, "mode": mode}
+    executor, _, _ = make_executor(fake)
+    with pytest.raises(fly_runner.FlyRefusal, match="lease could not be taken"):
+        asyncio.run(executor.run(_codex_job()))
+    assert _machine_writes(fake) == []
+    assert executor.ledger.snapshot()["in_flight"] == {}
+
+
+@pytest.mark.parametrize("field,mode", _field_cases("ledger_entry"))
+def test_an_unreadable_reservation_is_never_reaped(fly_env, field, mode):
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    dead = {**fly_runner.this_process_owner("apis-dead"), "pid": _dead_pid(), "heartbeat": 0}
+    entry = {"run_id": "r-bad", "owner": dead["id"], "machine_id": "m-old", "login": False,
+             "started_at": clock.now - 10_000, "deadline": clock.now - 9_000,
+             "max_cost_usd": 0.01}  # fmt: skip
+    entry = _corrupt(entry, field, mode)
+    data = executor.ledger._load()
+    executor.ledger._roll(data, clock.now)
+    data["in_flight"]["r-bad"] = entry
+    data["owners"][dead["id"]] = dead
+    executor.ledger._save(data)
+    fake.machines["m-old"] = {"id": "m-old", "state": "started"}
+    assert "r-bad" not in asyncio.run(executor.reap())
+    assert "m-old" in fake.machines and not fake.calls("DELETE")
+    assert "r-bad" in executor.ledger.snapshot(clock.now)["in_flight"]
+
+
+def test_the_reaper_finishes_once_complete_answers_return(fly_env, monkeypatch):
+    """Recovery after a later valid answer: the kept reservation, with its
+    nonce, is settled and the lease released by the reaper."""
+    fake = _codex_fake(monkeypatch)
+    fake.release_fails = True
+    fake.lease_view_override = {"status": "success", "data": {}}
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    job = _codex_job()
+    asyncio.run(executor.run(job))
+    assert executor.ledger.entry(job.run_id)["lease_nonce"]
+    fake.release_fails = False
+    fake.lease_view_override = None
+    assert job.run_id in asyncio.run(executor.reap())
+    assert fake.leases == {} and executor.ledger.entry(job.run_id) is None
+
+
+def test_validator_field_lists_cover_every_decision_field():
+    assert set(fly_runner.REQUIRED_FIELDS) == {
+        "machine", "list_entry", "lease_view", "lease_grant", "ledger_entry"}
+    assert "config" in fly_runner.REQUIRED_FIELDS["machine"]
+    assert "description" in fly_runner.REQUIRED_FIELDS["lease_view"]
+    for kind, fields in fly_runner.REQUIRED_FIELDS.items():
+        for field in fields:
+            for mode in MODES:
+                sample = {name: _sample(spec) for name, spec in fields.items()}
+                with pytest.raises(fly_runner.FlyInvalid):
+                    fly_runner.validate(kind, _corrupt(sample, field, mode))
+        fly_runner.validate(kind, {name: _sample(spec) for name, spec in fields.items()})
+
+
+def _sample(spec):
+    return {fly_runner.NONEMPTY_STR: "x", fly_runner.OBJECT: {}, fly_runner.NUMBER: 1.0,
+            fly_runner.BOOLEAN: False}[spec]  # fmt: skip
+
+
+def test_runner_probe_treats_an_unreadable_path_as_reachable(monkeypatch, tmp_path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "fly_run_job_r9", _REPO_ROOT / "deploy" / "fly-runner" / "run_job.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["fly_run_job_r9"] = module
+    spec.loader.exec_module(module)
+
+    def broken(*a, **k):
+        raise OSError("cannot tell")
+
+    monkeypatch.setattr(module.os, "access", broken)
+    (tmp_path / "f").write_text("x")
+    assert module._readable(tmp_path / "f") is True
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    import pwd
+
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
+    with pytest.raises(RuntimeError, match="unprivileged"):
+        module.child_identity("agent")

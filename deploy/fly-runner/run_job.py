@@ -187,10 +187,17 @@ def load_job(job_dir: Path) -> Job:
     run_id = str(spec.get("run_id") or "")
     if not run_id:
         raise JobError("run_id missing")
+    for required in ("role", "provider"):
+        if not isinstance(spec.get(required), str) or not spec[required]:
+            raise JobError(f"{required} missing")
+    for listed in ("probe_env_names", "probe_paths", "credential_names",
+                   "child_credential_names"):  # fmt: skip
+        if listed in spec and not isinstance(spec[listed], list):
+            raise JobError(f"{listed} is not a list")
     return Job(
         run_id=run_id,
-        role=str(spec.get("role") or ""),
-        provider=str(spec.get("provider") or ""),
+        role=spec["role"],
+        provider=spec["provider"],
         repository=str(spec.get("repository") or ""),
         timeout_seconds=timeout_seconds,
         argv=list(argv),
@@ -214,14 +221,18 @@ def child_identity(name: str) -> tuple[int, int] | None:
     unprivileged user exists. Running the CLI as a separate user is what keeps
     it out of this process's memory and files (the role's signing key and
     Neotoma credential stay with the runner, never with the agent)."""
-    if os.geteuid() != 0 or not name:
+    if os.geteuid() != 0:
         return None
     try:
         import pwd
 
-        entry = pwd.getpwnam(name)
+        entry = pwd.getpwnam(name) if name else None
     except (ImportError, KeyError):
-        return None
+        entry = None
+    if entry is None:
+        # Running the CLI as root would hand it the runner's own secrets:
+        # without the unprivileged user, the job does not run at all.
+        raise RuntimeError("the unprivileged child user is unavailable")
     return entry.pw_uid, entry.pw_gid
 
 
@@ -267,7 +278,8 @@ def write_mcp_config(home: Path, base_url: str, token: str) -> Path:
     return path
 
 
-def prepare_child(job: Job, home: Path, base_env) -> tuple[list[str], dict[str, str]]:
+def prepare_child(job: Job, home: Path, base_env,
+                  ident: tuple[int, int] | None = None) -> tuple[list[str], dict[str, str]]:
     """The argv and environment the CLI runs with."""
     argv = list(job.argv)
     if MCP_CONFIG_PLACEHOLDER in argv:
@@ -295,7 +307,7 @@ def prepare_child(job: Job, home: Path, base_env) -> tuple[list[str], dict[str, 
         "NEOTOMA_BASE_URL": job.neotoma_base_url,
     }
     (home / "tmp").mkdir(mode=0o700, exist_ok=True)
-    _chown_tree(home, child_identity(job.child_user))
+    _chown_tree(home, ident)
     if job.codex_home:
         overrides["CODEX_HOME"] = job.codex_home
     credentials = {name: job.secrets[name] for name in job.child_credential_names}
@@ -329,7 +341,7 @@ def _readable(path: Path) -> bool:
     try:
         return path.exists() and os.access(path, os.R_OK)
     except OSError:
-        return False
+        return True  # cannot tell: treated as reachable, so the probe fails closed
 
 
 def credential_probe(
@@ -616,8 +628,18 @@ def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli
 
     home = ram_home(job.run_id)
     try:
-        argv, child_env = prepare_child(job, home, os.environ)
-        if not delete_job_dir(job_dir):
+        try:
+            ident = child_identity(job.child_user)
+            identity_problem = ""
+        except RuntimeError as exc:
+            ident, identity_problem = None, str(exc)
+        argv, child_env = prepare_child(job, home, os.environ, ident)
+        if identity_problem:
+            delete_job_dir(job_dir)
+            refused = identity_problem
+            probe = {"ok": False, "present": ["<child user>"]}
+            rc, out, err, timed_out = EXIT_PROBE_FAILED, b"", refused.encode(), False
+        elif not delete_job_dir(job_dir):
             refused = "job directory could not be deleted"
             probe = {"ok": False, "present": ["<job dir>"]}
             rc, out, err, timed_out = EXIT_PROBE_FAILED, b"", refused.encode(), False
@@ -634,7 +656,7 @@ def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli
                     job.stdin,
                     job.timeout_seconds,
                     str(home),
-                    child_identity(job.child_user),
+                    ident,
                 )
         record = build_record(
             job,

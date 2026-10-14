@@ -59,6 +59,9 @@ def test_scenario_set_covers_the_required_behaviours():
         "login_machine_started_with_foreign_job_and_no_ledger_entry_is_refused",
         "login_machine_leased_elsewhere_is_refused",
         "login_machine_without_version_is_refused",
+        "cleanup_read_back_config_absent_keeps_the_reservation",
+        "cleanup_read_back_config_null_keeps_the_reservation",
+        "lease_release_unverifiable_keeps_the_reservation",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -161,3 +164,13 @@ def test_judge_goes_red_when_a_foreign_lease_is_overridden(tmp_path, monkeypatch
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
     taken = dataclasses.replace(trace, login_lease_holder="ateles-fly-runner x", login_mutations=2)
     assert len(runner.judge(scenario, taken)) >= 2
+
+
+def test_judge_goes_red_when_settlement_trusts_an_incomplete_answer(tmp_path, monkeypatch):
+    scenario = _by_id("lease_release_unverifiable_keeps_the_reservation")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    trusted = dataclasses.replace(
+        trace, in_flight_after=0,
+        envelope={**trace.envelope, "remote_machine_state": "terminated"},
+    )  # fmt: skip
+    assert len(runner.judge(scenario, trusted)) >= 2

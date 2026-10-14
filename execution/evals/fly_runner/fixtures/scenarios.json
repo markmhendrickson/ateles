@@ -973,12 +973,112 @@
       "expect": {
         "exit": 1,
         "ok": false,
-        "reason_contains": "version is missing",
+        "reason_contains": "instance_id is missing",
         "cooled_until": true,
         "local_cli_ran": false,
         "login_mutations": 0,
         "login_lease_holder": "",
         "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "cleanup_read_back_config_absent_keeps_the_reservation",
+      "description": "The run finishes, but after the clean-up update the Machines API answers for the login machine with its config absent. That is no evidence the job config was cleared: the dispatch reports the machine unconfirmed and the reservation (with its lease nonce) is kept for the reaper.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "done\n"
+        },
+        "corrupt_after_scrub": "absent"
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "stderr_contains": "not confirmed terminated",
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "cleanup_read_back_config_null_keeps_the_reservation",
+      "description": "The run finishes, but after the clean-up update the Machines API answers for the login machine with its config null. That is no evidence the job config was cleared: the dispatch reports the machine unconfirmed and the reservation (with its lease nonce) is kept for the reaper.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "done\n"
+        },
+        "corrupt_after_scrub": "null"
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "stderr_contains": "not confirmed terminated",
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "lease_release_unverifiable_keeps_the_reservation",
+      "description": "The lease release fails and the lease read-back answers with an empty data object. A missing holder is unknown, not another holder: the dispatch reports the machine unconfirmed and the reservation is kept.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "done\n"
+        },
+        "release_fails": true,
+        "lease_view_override": {
+          "status": "success",
+          "data": {}
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "stderr_contains": "not confirmed terminated",
         "revoked_all_minted": true
       }
     }

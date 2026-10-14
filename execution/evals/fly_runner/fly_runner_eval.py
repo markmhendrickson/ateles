@@ -56,6 +56,29 @@ LOCAL_SCOPED_GH = "eval-local-scoped-gh-0006"
 ROLE = "lanius"
 
 
+def _present(machine: dict) -> dict:
+    """A machine as the Machines API answers for it: always with a version
+    and a config object (the double fills them in) unless a test marks the
+    machine ``_raw`` to serve an incomplete answer on purpose."""
+    out = {k: v for k, v in machine.items() if k != "_raw"}
+    if not machine.get("_raw"):
+        out.setdefault("instance_id", "v0")
+        out.setdefault("config", {})
+    return out
+
+
+def _corrupt(data, field: str, mode: str):
+    """Make one field of an answer absent, null or the wrong type."""
+    data = dict(data)
+    if mode == "absent":
+        data.pop(field, None)
+    elif mode == "null":
+        data[field] = None
+    else:
+        data[field] = 12345 if isinstance(data.get(field), str) else "wrong-type"
+    return data
+
+
 def load_scenarios() -> list[dict]:
     return json.loads((HERE / "fixtures" / "scenarios.json").read_text())["scenarios"]
 
@@ -79,6 +102,9 @@ class FakeFly:
         self.lease_log: list[tuple[str, str]] = []
         self.lease_mode = "ok"
         self.release_fails = False
+        self.corrupt_after_scrub = ""  # "absent"|"null": the config read after a clean-up
+        self.scrubbed: dict[str, bool] = {}
+        self.lease_view_override = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -96,7 +122,7 @@ class FakeFly:
                 return httpx.Response(500, json={"error": self.lost_error})
             return httpx.Response(201, json={"id": mid, "instance_id": f"i-{mid}"})
         if request.method == "GET" and rest == "/machines":
-            return httpx.Response(200, json=list(self.machines.values()))
+            return httpx.Response(200, json=[_present(m) for m in self.machines.values()])
         parts = rest.split("/")
         mid = parts[2]
         method = request.method
@@ -124,6 +150,8 @@ class FakeFly:
                     "nonce": nonce, "expires_at": 4_000_000_000,
                     "description": body.get("description", "")}})  # fmt: skip
             if method == "GET":
+                if self.lease_view_override is not None:
+                    return httpx.Response(200, json=self.lease_view_override)
                 if not held:
                     return httpx.Response(404, json={"error": "no lease"})
                 return httpx.Response(200, json={"status": "success", "data": {
@@ -157,7 +185,10 @@ class FakeFly:
             return httpx.Response(200, json={"ok": True})
         if request.method == "GET":
             if mid in self.machines:
-                return httpx.Response(200, json=self.machines[mid])
+                answer = _present(self.machines[mid])
+                if self.corrupt_after_scrub and self.scrubbed.get(mid):
+                    answer = _corrupt(answer, "config", self.corrupt_after_scrub)
+                return httpx.Response(200, json=answer)
             return httpx.Response(404, json={"error": "not found"})
         if request.method == "POST" and len(parts) == 3:  # update a login machine
             body = json.loads(request.content)
@@ -166,6 +197,8 @@ class FakeFly:
             if "current_version" in body and current and body["current_version"] != current:
                 return httpx.Response(412, json={"error": "machine version changed"})
             clearing = body["config"].get("files") == []
+            if clearing:
+                self.scrubbed[mid] = True
             if not (clearing and self.scrub_ignored):
                 machine["config"] = body["config"]
                 if current:
@@ -324,6 +357,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
                    create=scenario["fly"].get("create", "ok"))  # fmt: skip
     fake.sticky_all = bool(scenario["fly"].get("delete_ineffective"))
     fake.scrub_ignored = bool(scenario["fly"].get("scrub_ignored"))
+    fake.corrupt_after_scrub = scenario["fly"].get("corrupt_after_scrub", "")
+    fake.release_fails = bool(scenario["fly"].get("release_fails"))
+    fake.lease_view_override = scenario["fly"].get("lease_view_override")
     if scenario["fly"].get("lost_error"):
         fake.lost_error = scenario["fly"]["lost_error"]
         fake.start_lost = True
@@ -336,6 +372,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     if "login_version" in scenario["fly"]:
         if scenario["fly"]["login_version"] is None:
             fake.machines["m-codex-login"].pop("instance_id")
+            fake.machines["m-codex-login"]["_raw"] = True
         else:
             fake.machines["m-codex-login"]["instance_id"] = scenario["fly"]["login_version"]
     busy = scenario["fly"].get("login_machine")
