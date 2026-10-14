@@ -28,6 +28,7 @@ to it; nothing else from the repository is needed.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -95,6 +96,9 @@ RECORD_RESERVE_SECONDS = 45.0
 COLLECT_GRACE_SECONDS = 5.0
 # Without a usable deadline nothing runs; the refusal itself is bounded too.
 REFUSAL_BOUND_SECONDS = 120.0
+# At the hard deadline, the longest the cleanup may take before the process
+# exits anyway: the exit happens by the deadline plus this tolerance.
+HARD_EXIT_CLEANUP_SECONDS = 1.0
 _DEADLINE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(Z|[+-][0-9]{2}:[0-9]{2})",
                           re.ASCII)  # fmt: skip
 
@@ -497,16 +501,22 @@ def job_processes(me: int, child_uid: int | None) -> set[int]:
     return found
 
 
-def kill_job_processes(rounds: int = 5) -> None:
-    """SIGKILL everything the job started: its process group, then every
-    descendant and every process of the child user, repeated so that a
-    process forked meanwhile is caught too."""
-    pgid, uid = _JOB_PROCESSES["pgid"], _JOB_PROCESSES["uid"]
+def _kill_job_group() -> None:
+    """SIGKILL the job's own process group: one signal, never blocks."""
+    pgid = _JOB_PROCESSES["pgid"]
     if pgid is not None:
         try:
             os.killpg(pgid, signal.SIGKILL)
         except OSError:
             pass
+
+
+def kill_job_processes(rounds: int = 5) -> None:
+    """SIGKILL everything the job started: its process group, then every
+    descendant and every process of the child user, repeated so that a
+    process forked meanwhile is caught too."""
+    uid = _JOB_PROCESSES["uid"]
+    _kill_job_group()
     for _ in range(rounds):
         pids = job_processes(os.getpid(), uid)
         if not pids:
@@ -519,14 +529,38 @@ def kill_job_processes(rounds: int = 5) -> None:
         time.sleep(0.05)
 
 
+def _note_nonblocking(message: bytes) -> None:
+    """One best-effort diagnostic line on stderr that can never block: a
+    single non-blocking write to the file descriptor, every error swallowed.
+    Never through print, logging or sys.stderr (their locks and buffers may
+    be held by a thread that is itself blocked)."""
+    try:
+        flags = fcntl.fcntl(2, fcntl.F_GETFL)
+        fcntl.fcntl(2, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        os.write(2, message)
+    except BaseException:  # noqa: BLE001 — a diagnostic must never stop the exit
+        pass
+
+
 def arm_hard_deadline(deadline: float, *, clock=time.time, hard_exit=os._exit,
-                      kill=kill_job_processes) -> threading.Timer:  # fmt: skip
-    """At *deadline*, kill everything the job started and exit this process
-    at once, whatever it is waiting on, so the machine stops."""
+                      kill=None) -> threading.Timer:  # fmt: skip
+    """At *deadline*, kill everything the job started and exit this process,
+    whatever any other thread is waiting on, so the machine stops.
+
+    Nothing that can block sits before the exit: the job's process group is
+    signalled directly, the full cleanup (which reads /proc) runs on its own
+    thread for at most ``HARD_EXIT_CLEANUP_SECONDS``, and the exit happens
+    then whether or not it finished. No print, logging or shared lock."""
     def fire() -> None:
         try:
-            print("fly-runner: hard deadline reached; stopping the job", flush=True)
-            kill()
+            _note_nonblocking(b"fly-runner: hard deadline reached; stopping the job\n")
+            _kill_job_group()
+            cleanup = threading.Thread(
+                target=kill if kill is not None else kill_job_processes, daemon=True)
+            cleanup.start()
+            cleanup.join(HARD_EXIT_CLEANUP_SECONDS)
+        except BaseException:  # noqa: BLE001 — the exit below must always run
+            pass
         finally:
             hard_exit(EXIT_DEADLINE)
 

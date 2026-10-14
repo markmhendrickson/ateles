@@ -518,7 +518,7 @@ def test_without_a_deadline_nothing_runs(tmp_path, monkeypatch):
 
 
 _DRIVER = """
-import importlib.util, json, sys, time
+import fcntl, importlib.util, json, os, sys, time
 from pathlib import Path
 spec = importlib.util.spec_from_file_location("run_job_entry", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
@@ -526,9 +526,29 @@ sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 m.probe_paths_default = lambda: ()
 record_path, mode = Path(sys.argv[3]), sys.argv[4]
+marker = record_path.with_name("cleanup-reached")
+real_kill = m.kill_job_processes
+def kill_and_mark(*a, **k):
+    marker.write_text("1")
+    return real_kill(*a, **k)
+m.kill_job_processes = kill_and_mark
+if mode in ("full-output", "output-held"):
+    # Fill this process's stdout and stderr pipes (nobody reads them).
+    for fd in (1, 2):
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            while True:
+                os.write(fd, b"x" * 4096)
+        except BlockingIOError:
+            pass
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
 def writer(base_url, auth, record):
-    if mode == "slow-record":
+    if mode in ("slow-record", "full-output"):
         time.sleep(60)
+    if mode == "output-held":
+        sys.stdout.write("y" * 1_000_000)  # blocks inside the stdout buffer
+        sys.stdout.flush()
     record_path.write_text(json.dumps(record))
     return True
 sys.exit(m.entrypoint(Path(sys.argv[2]), writer=writer))
@@ -618,3 +638,73 @@ def test_calling_main_never_changes_the_callers_process(tmp_path):
     flag = ctypes.c_int(-1)
     assert libc.prctl(37, ctypes.byref(flag), 0, 0, 0) == 0  # PR_GET_CHILD_SUBREAPER
     assert flag.value == 0
+
+
+
+@pytest.mark.parametrize("mode", ["full-output", "output-held"])
+def test_the_deadline_exit_never_waits_on_output(tmp_path, mode):
+    """A real entrypoint whose stdout and stderr nobody reads, full before
+    the deadline (and, output-held, with the main thread inside a write).
+    It still runs its cleanup and exits 98 by the deadline plus the
+    cleanup tolerance."""
+    job_dir = tmp_path / "job"
+    pid_file = tmp_path / "descendant.pid"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},
+               argv=[sys.executable, "-c", _CLI, str(pid_file)])  # fmt: skip
+    driver = tmp_path / "driver.py"
+    driver.write_text(_DRIVER)
+    record = tmp_path / "record.json"
+    budget = 3.0
+    child_vars = {"PATH": os.environ["PATH"], run_job.DEADLINE_ENV: _deadline_in(budget)}
+    started = time.monotonic()
+    entry = subprocess.Popen(
+        [sys.executable, str(driver), str(_RUNNER_DIR / "run_job.py"), str(job_dir), str(record),
+         mode],
+        env=child_vars, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )  # fmt: skip
+    try:
+        rc = entry.wait(timeout=budget + 8)
+        elapsed = time.monotonic() - started
+        assert rc == run_job.EXIT_DEADLINE
+        assert elapsed < budget + run_job.HARD_EXIT_CLEANUP_SECONDS + 1.5, elapsed
+        assert (tmp_path / "cleanup-reached").exists()  # the cleanup ran
+        if sys.platform.startswith("linux") and pid_file.exists():
+            descendant = int(pid_file.read_text())
+            for _ in range(40):
+                if not _alive(descendant):
+                    break
+                time.sleep(0.05)
+            assert not _alive(descendant)
+    finally:
+        if entry.poll() is None:
+            entry.kill()
+            entry.wait()
+        for stream in (entry.stdout, entry.stderr):
+            stream.close()
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), 9)
+            except OSError:
+                pass
+
+
+def test_a_cleanup_that_never_finishes_does_not_delay_the_exit():
+    import threading
+
+    release, exited = threading.Event(), threading.Event()
+    codes = []
+
+    def hard_exit(code):
+        codes.append(code)
+        exited.set()
+
+    started = time.monotonic()
+    timer = run_job.arm_hard_deadline(time.time() + 0.1, hard_exit=hard_exit,
+                                      kill=lambda: release.wait(30))  # fmt: skip
+    try:
+        assert exited.wait(0.1 + run_job.HARD_EXIT_CLEANUP_SECONDS + 1.0)
+        assert codes == [run_job.EXIT_DEADLINE]
+        assert time.monotonic() - started < 0.1 + run_job.HARD_EXIT_CLEANUP_SECONDS + 0.5
+    finally:
+        release.set()
+        timer.cancel()
