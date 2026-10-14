@@ -1458,7 +1458,7 @@ action's class, its confidence, the `action_policy`, and the class's action seri
 and whose resolution it records (`workflows.md#outreach`, `workflows.md#payment`,
 `workflows.md#social-content`). Where the gate would not hold — the class is low blast at threshold, its action
 series has graduated, or, for a `payment`, the five conditions of decision 144 hold and the payee has not already been released in the
-period (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`)
+period, or since the reference checkpoint where it has no schedule (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`)
 — no checkpoint is written and the step carries nothing, which is what `workflows.md#payment` means when it says
 that the gate holding nothing changes whether `consent` carries a checkpoint and not whether the step exists. The
 second moment is the take: at `send`, `pay`, or `post` the adapter asks the gate again, at the moment the action
@@ -1495,7 +1495,7 @@ taken again.
 **A payment released without a checkpoint is permitted on a different first input, and the other three are
 unchanged.** Where the first evaluation wrote no checkpoint because the five conditions of decision 144 held,
 the first of the four has no checkpoint to read. The take-time evaluation reads in its place the five conditions
-and the bound on releases from the record as it then stands, on parameters equal to those the `verify` verdict recorded (the second of the
+and the bound on releases from the record as it then stands, the period of the bound found from the engine's recorded time of the take, on parameters equal to those the `verify` verdict recorded (the second of the
 four, at the class's `consent_tolerance`), and it reads the destination once, writes it on the action, and the adapter submits that value. The engine writes its reading before the adapter submits. A condition that no longer holds, or cannot be read, writes a
 checkpoint at the take, reason `gate_hold`, and the step returns as it does for a difference in the parameters; the fourth input is unchanged, and a confirmation on the key is an action already taken and writes no checkpoint.
 What the conditions are and how each is read is `payments.md`'s
@@ -1510,7 +1510,11 @@ decides, a lapse makes the step claimable again, and the re-claim takes the same
 time bound on a resolution would be a number the design invented, and the reasoning that made the tolerance
 a policy value with a zero default (decision 28) applies to it unchanged: the shape is a per-class value on
 the `action_policy`, and the number, where an operator wants one, is the operator's. Absent a value there
-is no clock, because the four inputs already name every way a take can differ from what was consented to.
+is no clock, because the four inputs already name every way a take can differ from what was consented to. The one
+place a release reads time is the bound on releases of decision 144: the engine's ingestion time of the take,
+read against the dated window each schedule entry the reference checkpoint carried states
+(`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
+It is a bound on a release, and not a time bound on a resolution or an expiry on a reference.
 
 **Why the checkpoint is written at `consent` and not at the take.** The alternative reading — the gate
 writes the checkpoint only at `send`, and `consent` is a step that shows the operator a draft — leaves
@@ -1593,7 +1597,7 @@ series clears its count; `NEVER` short-circuits ahead of the confidence axis and
 payment class is the one case where a `NEVER` is released by the action's own parameters and by neither of those:
 it is taken without a checkpoint only when the five conditions of `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record` hold on the
 action, read from the record at the evaluation, and otherwise it resolves as any `NEVER` class does (decision
-144). The release lifts only the never-set membership the design supplies for `payment`: a class the policy itself lists as `operator_only`, and an action carrying `operator_only`, keeps its checkpoint whatever the five conditions say, so a policy still cannot demote an `operator_only` class, and the one exception to "a policy cannot demote it" is the design's own never-set membership of `payment`, released by its parameters. That adds a read to the decision function and no tier. The
+144). The release lifts only the never-set membership the design supplies for `payment`: a class the policy itself lists as `operator_only`, and an action carrying `operator_only`, keeps its checkpoint whatever the five conditions say, so a policy still cannot demote an `operator_only` class, and the one exception in this revision to "a policy cannot demote it" is the design's own never-set membership of `payment`, released by its parameters. That adds a read to the decision function and no tier. The
 advisory path (`route_task`) resolves a `payment` as held, the restrictive branch, and only the enforcing path reads the conditions; the two otherwise resolve identically, and a parity test holds the
 duplicated never-set equal across the two modules. An unreachable policy source is a halt
 (`failure_posture.md`), not a fallback policy with an empty low-blast set.

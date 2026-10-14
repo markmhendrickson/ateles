@@ -1446,7 +1446,9 @@ bound to one operator are two distinct signers here
 is not an `action_policy` value.
 
 **Decision 144 (2026-10-13) reads the payer and the verifier of a payment the same way, where no checkpoint is
-written.** A payment released without a checkpoint (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`)
+written.** This is a default applied by consistency with decision 143, not a word of the operator's ruling, and it
+meets the reopening clause of decision 49 again (above): the check's inputs are the verdict's signer, the roster and
+the leases, not a checkpoint's principal edges. A payment released without a checkpoint (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`)
 has no resolution for the checkpoint's principal edges to be read over, so the structural check is a read the gate makes of the verdict's
 signer against the payer: at the first evaluation the signer of the `prepare` verdict and the agents the roster seats in the `pay` role, at the take the credential presenting it, and the verifier holds none of the payer-slot leases. It is read on the agent's own binding and not the acts-as binding, because
 under decision 48's counting rule two agents of one operator are one interest and the condition could never

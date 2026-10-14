@@ -989,6 +989,21 @@ writes the design permits it.
 
 ---
 
+**G13 · A payment taken without a checkpoint, and the cap that allowed it, have no screen.**
+
+*Specifying:* where the operator reads the payments the gate released without a checkpoint (decision 144).
+
+*Not answered:* S1 is the queue of open checkpoints, which by definition never lists an unattended payment, and the
+"no screen" table lists `action` as having none. The design says such a payment is found as a `payment` action that
+has the engine's take-time reading and no `gate_hold` checkpoint resolved before it, but gives the operator no read
+of that on the screen they work in: the list of such actions by period, the engine's reading of the five conditions
+beside each, and the cap with the checkpoint that permitted it. S1 must not grow a second queue (section 5), so this
+is a read and not a list of things awaiting the operator.
+
+*Would own it:* S2 or S3, as a read over the `payment` action.
+
+---
+
 ## 7. Sequencing
 
 Not a schedule; the order in which the screens stop being wrong.

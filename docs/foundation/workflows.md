@@ -147,8 +147,9 @@ Each is stated here without naming a role and is argued where it is cited.
    reviewer (decision 143), and the first place below where the payment is taken without a checkpoint, the payer
    and the verifier (decision 144). The design requires it in at least four places:
    - in the payment workflow, whoever verifies and reconciles a payment is not whoever prepares and takes it
-     and, where the payment is taken without a checkpoint, the verifier is also a different agent from the one that
-     takes `pay` (`#payment`, `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`);
+     and, where the payment is taken without a checkpoint, the verifier is also a different agent from every holder
+     of a payer-slot step: the signer of `prepare`, the agents seated in `pay`, the holders of the payer-slot
+     leases, and the agent that takes `pay` (`#payment`, `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`);
    - on every checkpoint, whoever raised it does not resolve it, except the operator resolving a checkpoint the
      operator raised, which is marked (`gates_and_workflows.md#the-checkpoint`, decision 47);
    - on every new or amended declaration, the swarm's approval is never the proposer's
@@ -711,7 +712,7 @@ one. The consent step is named `consent`, not `checkpoint`: a checkpoint is the 
 written when `consent` opens and the gate holds the action; `pay` asks the gate again at the take, on the
 standing resolution, the figures against the tolerance (decision 28), the policy as read then, and the
 key (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
-Where the five conditions of decision 144 hold and the payee has not already been released in the period, the gate holds nothing at `consent` and reads all of them again at
+Where the five conditions of decision 144 hold and the payee has not already been released in the period, or since the reference checkpoint where it has no schedule, the gate holds nothing at `consent` and reads all of them again at
 the take, and a difference at the take writes a checkpoint then (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
 
 **Stages:** preparation (`prepare`, `verify`); consent (`consent`); settlement (`pay`, `reconcile`).

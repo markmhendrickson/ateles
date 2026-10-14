@@ -147,13 +147,14 @@ ALLOWLIST_WORDS = frozenset(
     resolves resolved resolving pass passes passed declares declared declaring taken taking bound
     definition question shape list default exists existing cannot side
     fields surface their then half thing later different stays reaches refused refuses stored
-    request answer defect
+    request answer defect confirmed release
     """.split()
 )
 # `fields` tipped the advisory bound on ateles#899 (decision-93 ruling prose merged with main);
 # `side` tipped it on ateles#914 after the same merge; `surface` tipped it again on ateles#916
 # (decision-101 deny-table prose); the rest are ordinary English that had crossed threshold
-# without being load-bearing terms.
+# without being load-bearing terms. `confirmed` and `release` crossed it on ateles#1455 (the
+# conditioned-payment ruling's prose, decision 144), as the plain verb and adjective they are.
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']*")
 _TESTID_ABBREVIATIONS = frozenset(
