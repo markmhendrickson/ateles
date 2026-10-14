@@ -405,3 +405,160 @@ async def test_keep_warm_mints_for_each_repository_then_waits(monkeypatch):
         await task
     assert sorted(c[0] for c in calls) == ["owner/other", REPO]
     assert _bearer(_dispatcher()._github_headers(REPO)) == APP_TOKEN
+
+
+# ── App-only operation: no PAT anywhere ──────────────────────────────────────
+
+
+@pytest.fixture
+def no_pat(monkeypatch):
+    monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+    monkeypatch.delenv("NEOTOMA_AGENT_PAT", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+
+def _recorder(monkeypatch, responder):
+    """Replace httpx with a MockTransport that records (method, path, auth)."""
+    seen: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("Authorization", "")))
+        return responder(request)
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", _client_factory(handler))
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_app_only_spec_mirror_writes_as_the_app(monkeypatch, no_pat):
+    _configure_app(monkeypatch)
+    state = sd.SpecState(repo=REPO, issue_number=11, title="t", sections={"problem": "p"})
+
+    def responder(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"body": "human text"})
+        return httpx.Response(200, json={})
+
+    seen = _recorder(monkeypatch, responder)
+    await _dispatcher()._mirror_spec_to_issue(_trigger(), state)
+    assert [m for m, _, _ in seen] == ["GET", "PATCH"]
+    assert {a for _, _, a in seen} == {f"Bearer {APP_TOKEN}"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["_surface_unverified_signed_off_gates", "_surface_unreadable_gate_verdicts"])
+async def test_app_only_gate_notices_are_delivered_and_deduped_under_the_bot(
+    monkeypatch, no_pat, method
+):
+    _configure_app(monkeypatch)
+    head = "c" * 40
+    comments: list[dict] = []
+
+    def responder(request):
+        if request.method == "POST":
+            body = request.content.decode()
+            comments.append({"body": body, "user": {"login": BOT}})
+            return httpx.Response(201, json={})
+        return httpx.Response(200, json=list(comments))
+
+    seen = _recorder(monkeypatch, responder)
+    d = _dispatcher()
+    if method == "_surface_unverified_signed_off_gates":
+        call = lambda: d._surface_unverified_signed_off_gates(_trigger(), None, {"ux"}, head)
+    else:
+        entry = ("ux", "accipiter", "**🤖 Accipiter — Ateles swarm, ux review**", "no verdict line")
+        call = lambda: d._surface_unreadable_gate_verdicts(_trigger(), None, [entry], head)
+    await call()
+    posts = [x for x in seen if x[0] == "POST"]
+    assert len(posts) == 1, "the notice must be delivered with no PAT configured"
+    assert {a for _, _, a in seen} == {f"Bearer {APP_TOKEN}"}
+    await call()
+    assert len([x for x in seen if x[0] == "POST"]) == 1, "the bot's own marker must dedupe a repeat"
+
+
+@pytest.mark.asyncio
+async def test_no_credential_at_all_skips_visibly(monkeypatch, no_pat, caplog):
+    _unconfigure_app(monkeypatch)
+    state = sd.SpecState(repo=REPO, issue_number=11, title="t", sections={"problem": "p"})
+    seen = _recorder(monkeypatch, lambda request: httpx.Response(200, json={}))
+    with caplog.at_level(logging.WARNING):
+        await _dispatcher()._mirror_spec_to_issue(_trigger(), state)
+        await _dispatcher()._surface_unverified_signed_off_gates(_trigger(), None, {"ux"}, "d" * 40)
+    assert seen == []
+    text = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "spec mirror skipped" in text and "no usable GitHub write credential" in text
+    assert "surface unverified signed off gates skipped" in text
+
+
+@pytest.mark.asyncio
+async def test_empty_gate_inputs_stay_silent_no_ops(monkeypatch, no_pat, caplog):
+    _unconfigure_app(monkeypatch)
+    seen = _recorder(monkeypatch, lambda request: httpx.Response(200, json={}))
+    with caplog.at_level(logging.WARNING):
+        await _dispatcher()._surface_unverified_signed_off_gates(_trigger(), None, set(), "e" * 40)
+    assert seen == [] and caplog.records == []
+
+
+# ── cold start: the App is awaited before any write; the PAT only after failure ──
+
+
+@pytest.mark.asyncio
+async def test_cold_start_checkpoint_comment_goes_out_as_the_app(monkeypatch):
+    """A caller that never awaits readiness itself (cold cache, PAT also set)
+    must still write as the App: the write boundary awaits the mint."""
+    calls: list = []
+    _configure_app(monkeypatch, calls=calls)
+    seen = _recorder(monkeypatch, lambda request: httpx.Response(201, json={}))
+    assert sd._app_write_token_cached(REPO) is None
+    await _dispatcher()._post_checkpoint_verdict_comment(_trigger(), "verdict text")
+    assert [(m, a) for m, _, a in seen] == [("POST", f"Bearer {APP_TOKEN}")]
+    assert PAT not in "".join(a for _, _, a in seen)
+
+
+@pytest.mark.asyncio
+async def test_pat_is_used_only_after_the_mint_has_failed(monkeypatch, caplog):
+    def _boom(repo):
+        raise sd._github_app_token.AppTokenError("HTTP 500")
+
+    _configure_app(monkeypatch, mint=_boom)
+    seen = _recorder(monkeypatch, lambda request: httpx.Response(201, json={}))
+    with caplog.at_level(logging.WARNING):
+        await _dispatcher()._post_checkpoint_verdict_comment(_trigger(), "verdict text")
+    assert [a for _, _, a in seen] == [f"Bearer {PAT}"]
+    assert any("falling back to the agent PAT" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_entry_points_await_readiness_before_working(monkeypatch):
+    calls: list = []
+    _configure_app(monkeypatch, calls=calls)
+    seen = _recorder(monkeypatch, lambda request: httpx.Response(200, json=[]))
+    await _dispatcher().resume_interrupted_pipelines([REPO])
+    assert [c[0] for c in calls] == [REPO]
+    assert seen and {a for _, _, a in seen} == {f"Bearer {APP_TOKEN}"}
+
+
+@pytest.mark.asyncio
+async def test_startup_warm_up_mints_every_repository_and_is_bounded(monkeypatch):
+    calls: list = []
+    _configure_app(monkeypatch, calls=calls)
+    d = _dispatcher()
+    assert await d.warm_github_app_token([REPO, "owner/other"], timeout_s=5) is True
+    assert sorted(c[0] for c in calls) == ["owner/other", REPO]
+
+    sd._clear_app_write_token_cache()
+    import time
+
+    def _slow(repo):
+        time.sleep(0.5)
+        raise sd._github_app_token.AppTokenError("slow")
+
+    _configure_app(monkeypatch, mint=_slow)
+    assert await d.warm_github_app_token([REPO], timeout_s=0.05) is False
+    await asyncio.sleep(0.6)  # let the abandoned worker thread finish
+
+
+@pytest.mark.asyncio
+async def test_warm_up_is_a_no_op_without_the_app(monkeypatch):
+    _unconfigure_app(monkeypatch)
+    assert await _dispatcher().warm_github_app_token([REPO]) is False

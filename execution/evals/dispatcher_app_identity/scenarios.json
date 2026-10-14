@@ -1,0 +1,90 @@
+{
+  "_comment": "Public-safe synthetic scenarios for the credential the Apis dispatcher writes to GitHub with (ateles#1381). Each drives the real SwarmDispatcher write paths (in-flight marker, spec mirror, checkpoint verdict comment, gate notice); only the network (httpx transport) and the App token mint are stubbed. Credential labels: app = the App installation token, pat = the agent PAT, none = no Authorization header.",
+  "scenarios": [
+    {
+      "id": "app_only_marker_and_spec_mirror_go_out_as_the_app",
+      "why": "with the App configured and NO PAT, the durable in-flight marker and the spec mirror are written, as the App; nothing is skipped",
+      "app": "healthy", "pat": false, "cache": "cold",
+      "actions": ["mark_inflight", "mirror_spec"],
+      "expect": {
+        "requests": [["POST", "issue_comment", "app"], ["GET", "issue", "app"], ["PATCH", "issue", "app"]],
+        "warnings_contain": [],
+        "warnings_absent": ["falling back", "skipped"]
+      }
+    },
+    {
+      "id": "cold_start_with_a_pat_present_still_writes_as_the_app",
+      "why": "a cold cache must not send the first write as the PAT while a healthy App is initialising: the write boundary awaits the mint",
+      "app": "healthy", "pat": true, "cache": "cold",
+      "actions": ["checkpoint_comment", "mark_inflight"],
+      "expect": {
+        "requests": [["POST", "issue_comment", "app"], ["POST", "issue_comment", "app"]],
+        "warnings_absent": ["falling back"]
+      }
+    },
+    {
+      "id": "expired_token_is_recovered_without_stalling_the_event_loop",
+      "why": "a cached token past its expiry is never sent; the re-mint runs off the loop (the loop keeps ticking during a slow mint) and the write goes out as the App",
+      "app": "slow", "pat": true, "cache": "expired",
+      "actions": ["mark_inflight"],
+      "expect": {
+        "requests": [["POST", "issue_comment", "app"]],
+        "loop_ticks_min": 3
+      }
+    },
+    {
+      "id": "mint_failure_falls_back_to_the_pat_with_a_logged_warning",
+      "why": "only after the App mint has actually failed does the PAT carry the write, and the fallback is named in a WARNING",
+      "app": "fails", "pat": true, "cache": "cold",
+      "actions": ["mark_inflight"],
+      "expect": {
+        "requests": [["POST", "issue_comment", "pat"]],
+        "warnings_contain": ["falling back to the agent PAT"]
+      }
+    },
+    {
+      "id": "app_unconfigured_uses_the_pat",
+      "why": "a deployment without the App keeps today's behaviour exactly",
+      "app": "unconfigured", "pat": true, "cache": "cold",
+      "actions": ["mark_inflight"],
+      "expect": {"requests": [["POST", "issue_comment", "pat"]]}
+    },
+    {
+      "id": "no_credential_skips_visibly",
+      "why": "with neither the App nor a PAT usable, a write is skipped with a WARNING that gives the reason; nothing is sent unauthenticated",
+      "app": "unconfigured", "pat": false, "cache": "cold",
+      "actions": ["mirror_spec", "gate_notice"],
+      "expect": {
+        "requests": [],
+        "warnings_contain": ["spec mirror skipped", "no usable GitHub write credential"]
+      }
+    },
+    {
+      "id": "a_bot_authored_gate_notice_is_not_reposted",
+      "why": "the dispatcher recognises its own marker under the App's bot login, so a re-check at the same head posts nothing",
+      "app": "healthy", "pat": false, "cache": "cold",
+      "existing_comments": [{"login": "ateles-agents[bot]", "marker": "gate_cleared_unverified"}],
+      "actions": ["gate_notice"],
+      "expect": {"requests": [["GET", "issue_comment", "app"]]}
+    },
+    {
+      "id": "a_pat_authored_gate_notice_from_before_the_switch_is_not_reposted",
+      "why": "a notice the PAT account wrote before the cutover is still the dispatcher's own, so the cutover does not repost it",
+      "app": "healthy", "pat": true, "cache": "cold",
+      "existing_comments": [{"login": "ateles-agent", "marker": "gate_cleared_unverified"}],
+      "actions": ["gate_notice"],
+      "expect": {"requests": [["GET", "user", "pat"], ["GET", "issue_comment", "app"]]}
+    },
+    {
+      "id": "a_403_logs_the_response_body_and_no_credential",
+      "why": "the next permission failure explains itself: GitHub's message is logged (300 chars), never a token",
+      "app": "healthy", "pat": true, "cache": "cold",
+      "respond": {"status": 403, "text": "Resource not accessible by integration"},
+      "actions": ["mark_inflight"],
+      "expect": {
+        "requests": [["POST", "issue_comment", "app"]],
+        "warnings_contain": ["answered 403", "Resource not accessible by integration"]
+      }
+    }
+  ]
+}

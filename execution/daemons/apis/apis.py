@@ -3211,6 +3211,13 @@ async def main() -> None:
     #    pull_request.* → Lanius → review panel → Vanellus. Runs alongside
     #    the SSE task loop.
     dispatcher = SwarmDispatcher(notifier)
+    # Mint the App installation token before the gateway can accept a webhook,
+    # so the first write of this process is already the App's (ateles#1381).
+    # Bounded: a slow or failing mint never holds up boot; every dispatcher
+    # entry point also awaits readiness, and the keep-warm loop refreshes it.
+    await dispatcher.warm_github_app_token(
+        list(dispatcher.config.resume_repositories), timeout_s=10.0
+    )
     gateway_app = github_gateway.make_app(
         GITHUB_WEBHOOK_SECRET,
         dispatcher.handle_trigger,
