@@ -134,4 +134,5 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 119 | how an authorized principal commissions an entire plan or project for autonomous … | yes | yes | unknown | decisions 14, 18, 30, 41, 46, 47, 53, 56, 57, and 92; the existing … |
 | 142 | whether the foundation fixes a role set, or treats a role as … | yes | yes | unknown | nothing in the design; `owner_role`, `swarm_roster`, and the declaration-time and claim-time resolution checks are … |
 | 143 | whether the builder of a change may sign the required review of … | yes | yes | unknown | nothing in the design; the lapsed-lease and contradicting-conclusion refusals and the `waived` verdict are … |
+| 144 | whether a payment resolved by its parameters may be taken without a … | yes | yes | unknown | nothing in the design; the dedup key, the unknown case, the disjoint `reconcile`, and … |
 

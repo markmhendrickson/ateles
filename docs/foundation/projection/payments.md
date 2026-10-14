@@ -5,7 +5,7 @@
 
 Every rule `payments.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`payments.md`](../payments.md) and are not repeated here (decision 66).
 
-17 rules.
+30 rules.
 
 ## [The dedup key, and what it is keyed on](../payments.md#the-dedup-key-and-what-it-is-keyed-on)
 
@@ -45,7 +45,7 @@ Every rule `payments.md` owns, one entry each: the rule's own statement from `co
 
 ## [Outbound: the operations a step takes on a rail](../payments.md#outbound-the-operations-a-step-takes-on-a-rail)
 
-- **PY-8** — `payment` is in the never-set and never graduates; the adapter never writes `reconcile` *[M]*
+- **PY-8** — `payment` is in the never-set and no count of successes graduates it; the adapter never writes `reconcile` *[M]*
 
 ## [What the adapter refuses, and why](../payments.md#what-the-adapter-refuses-and-why)
 
@@ -61,7 +61,7 @@ Every rule `payments.md` owns, one entry each: the rule's own statement from `co
 
 ## [What gates a payment, and why it is not a new mechanism](../payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism)
 
-- **PY-12** — four existing mechanisms compose; no second gate; `payment` never graduates *[M]*
+- **PY-12** — four existing mechanisms compose; no second gate; `payment` never graduates by count; the value ceiling is the policy value `payee_caps[]` and no mechanism beside the gate *[M]*
 
 ## [Events about money the swarm did not send](../payments.md#events-about-money-the-swarm-did-not-send)
 
@@ -74,3 +74,19 @@ Every rule `payments.md` owns, one entry each: the rule's own statement from `co
 ## [How the five rules apply here](../payments.md#how-the-five-rules-apply-here)
 
 - **PY-15** — the payee is resolved by reference to the profile, never by matching a name, an address, or a reference string; a rail's indeterminate state is `unknown`, never pending or failed *[M]*
+
+## [A payment on known terms is taken without a checkpoint, and only on five conditions read from the record](../payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record)
+
+- **PY-16** — (decision 144): when all five conditions hold the gate writes no checkpoint, `consent` closes on a verdict that names what the gate read, and `pay` is permitted; the positive control the refusals below are measured against, and each refusal below changes one thing from this setup, fails one condition, and is red also when it writes no checkpoint with reason `gate_hold` carrying PY-10's content *[M]*
+- **PY-16a** — the same, condition 1 (the payee is known): a payee is known only by a reference checkpoint; where a case leaves the payee with none, the conditions that read it fail with it *[M]*
+- **PY-16b** — the same, condition 2 (the amount is the expected amount): the reference is the amount the reference checkpoint carried, or the schedule entry it carried for the period, compared exactly *[M]*
+- **PY-16c** — the same, condition 3 (the bank details are unchanged): the one destination the gate compared, on every field the rail routes on, equals what the reference checkpoint carried and is the value the adapter submits *[M]*
+- **PY-16d** — the same, condition 4 (the payment is under the per-payee cap): the amount the operator pays, fees included, and the amount the payee receives each do not exceed the cap, in the cap's currency; the cap is read by the checkpoint that permitted its write; PY-16 is the at-the-cap case, released *[M]*
+- **PY-16e** — the same, the bound on releases: at most one release per payee per scheduled period, and for a payee with no schedule at most one between operator-resolved checkpoints; the dedup key does not make this refusal, the period is found by the gate from the engine's recorded time of the take against the dated window of a carried schedule entry, and the bound is counted from the engine's readings *[M]*
+- **PY-16f** — the same, the reference checkpoint: conditions 1, 2 and 3 read the one reference, the payee's most recent closed payment checkpoint by the engine's ingestion time of the close, where the operator resolved it `approved` and its action is confirmed, and no other *[M]*
+- **PY-16g** — the same: nothing the payer wrote is a comparand, and a control that only adds a checkpoint keeps it *[M]*
+- **PY-17** — the same: an absent cap holds nothing, and an unreadable one is no cap *[M (PR-5 at this class)]*
+- **PY-18** — the same, condition 5 (a second principal, not the payer, verifies it) and decision 143: distinctness is checked on the agent itself, the verifier holds no payer-slot lease and signs after the last write of the figures *[M (AU-18 at this class)]*
+- **PY-19** — the same: the gate reads the five conditions and the bound on releases again at the take, and a condition that no longer holds writes a checkpoint then and does not re-use the release; the destination is read once and submitted as written; two takes for one payee are one step *[M]*
+- **PY-20** — the same, the money rules: a new payee, a changed destination, and an over-cap payment keep the operator *[M]*
+- **PY-21** — the same: a condition that cannot be read leaves the checkpoint, and writes no new state *[M]*

@@ -80,7 +80,7 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 ## [Confidence and three blast tiers](../gates_and_workflows.md#confidence-and-three-blast-tiers)
 
 - **GW-40** — the order is load-bearing *[M]*
-- **GW-41** — the same: advisory and enforcing paths resolve identically *[M]*
+- **GW-41** — the same: advisory and enforcing paths resolve identically, except that the advisory path resolves a `payment` as held whatever the five conditions say and only the enforcing path may release it (decision 144) *[M]*
 
 ## [An unreadable workflow is unknown, and unknown holds](../gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds)
 

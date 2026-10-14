@@ -34,7 +34,7 @@ terms; this table keeps the tuple's own short spelling).
 | domain | the region the authority covers: entity types, repositories, a workflow, a queue | `agent_grant.capabilities`; `ownership_grant` |
 | scope | the operations within the domain, with per-tool parameter constraints | `agent_grant.capabilities`, `param_constraints`; `action_policy.permission_scope` |
 | action | the class of an `action` entity, its `action_type`, resolved to a blast tier | `gating` (`gates_and_workflows.md`) |
-| conditions | confidence threshold, recurrence graduation, per-boundary checkpoints, `operator_only` | `action_policy` |
+| conditions | confidence threshold, recurrence graduation, per-boundary checkpoints, a payment's per-payee cap, `operator_only` | `action_policy` |
 | time | an expiry on every grant and delegation, evaluated at check time; the lease's `expires_at` is the same term on work | `agent_grant.expires_at`; `delegation_edge.expires_at` |
 
 The shape is ABAC (XACML; Cedar). The gate and the grant checker are the policy decision points; their call
@@ -1388,8 +1388,9 @@ the one type, told apart by `credential_kind` (decision 101,
 `#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal`): its
 AAuth edge ends at the **agent**, and its acts-as edge ends at the **operator**. This rule reads the
 acts-as edge and so counts the operator. Reading the AAuth edge instead would count the agent, which is the
-attack this section exists to prevent — two agents under one operator would then be two interests. The one
-exception is the builder and review pair, which decision 143 reads on the AAuth edge
+attack this section exists to prevent — two agents under one operator would then be two interests. The
+exceptions are the builder and review pair, which decision 143 reads on the AAuth edge, and the payer and
+verifier of a payment released without a checkpoint, which decision 144 reads the same way
 (`#structural-checks-are-reads-over-the-checkpoints-principal-edges`).
 
 **Why.** Principle 5 chooses the restrictive branch: counting an agent as its principal yields fewer
@@ -1436,12 +1437,23 @@ actors recorded on the artifact's observations. That is the condition the reopen
 decision 143 meets it once, deliberately, as a default applied by consistency
 (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`), not as a word of the operator's
 ruling: it extends decision 49 from the checkpoint's principal edges to the verdict's signer and the batch's
-artifacts, naming the verdict as the object it checks. What survives of decision 49 is the ground it gives for refusing a second mechanism: the extension adds no vote
-entity, no tally and no held state, and needs no process to keep it true (principle 11). It also departs from
-decision 48 for this pair alone: it reads the agent's own binding, the one that ends at the agent, and not the
-acts-as binding that ends at the operator, so two agents bound to one operator are two distinct signers here
-(`#the-counting-rule-an-agent-counts-as-its-bound-principal`, decision 143). The pair is fixed by the design
-and is not an `action_policy` value.
+artifacts, naming the verdict as the object it checks. What survives of decision 49 is the ground it gives for
+refusing a second mechanism: the extension adds no vote entity, no tally and no held state, and needs no process
+to keep it true (principle 11). It also departs from decision 48 for this pair alone: it reads the agent's own
+binding, the one that ends at the agent, and not the acts-as binding that ends at the operator, so two agents
+bound to one operator are two distinct signers here
+(`#the-counting-rule-an-agent-counts-as-its-bound-principal`, decision 143). The pair is fixed by the design and
+is not an `action_policy` value.
+
+**Decision 144 (2026-10-13) reads the payer and the verifier of a payment the same way, where no checkpoint is
+written.** This is a default applied by consistency with decision 143, not a word of the operator's ruling, and it
+meets the reopening clause of decision 49 again (above): the check's inputs are the verdict's signer, the roster and
+the leases, not a checkpoint's principal edges. A payment released without a checkpoint (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`)
+has no resolution for the checkpoint's principal edges to be read over, so the structural check is a read the gate makes of the verdict's
+signer against the payer: at the first evaluation the signer of the `prepare` verdict and the agents the roster seats in the `pay` role, at the take the credential presenting it, and the verifier holds none of the payer-slot leases. It is read on the agent's own binding and not the acts-as binding, because
+under decision 48's counting rule two agents of one operator are one interest and the condition could never
+hold in a deployment whose agents all act for the operator. The payer and verifier of a payment that does wait
+on a checkpoint are unchanged.
 
 ### The threshold's home is the `action_policy`, per class
 

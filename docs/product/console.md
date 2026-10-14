@@ -281,8 +281,8 @@ a defined key, and the row count under it must equal the number of resolutions w
 forty archives is forty rows any reader can count, and a refusal of one of them is a refusal of one."
 A refusal of one member must be reachable without leaving the set.
 
-**A payment checkpoint shows exactly what the verifier signed** — payee, amount, currency, period, and
-rail, as the `verify` sign-off recorded them (decision 27,
+**A payment checkpoint shows exactly what the verifier signed** — payee, amount, currency, period, rail,
+destination, and any schedule entries, as the `verify` sign-off recorded them (decision 27,
 `payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`). Not the current values read
 fresh; the recorded ones. This is a screen-level rule with a conformance row behind it.
 
@@ -986,6 +986,21 @@ decision as landed, and what it shows while the read-back is outstanding, is uns
 writes the design permits it.
 
 *Would own it:* `data_model.md#write-contract`, as the counterpart to G1's retrieval row.
+
+---
+
+**G13 · A payment taken without a checkpoint, and the cap that allowed it, have no screen.**
+
+*Specifying:* where the operator reads the payments the gate released without a checkpoint (decision 144).
+
+*Not answered:* S1 is the queue of open checkpoints, which by definition never lists an unattended payment, and the
+"no screen" table lists `action` as having none. The design says such a payment is found as a `payment` action that
+has the engine's take-time reading and no `gate_hold` checkpoint resolved before it, but gives the operator no read
+of that on the screen they work in: the list of such actions by period, the engine's reading of the five conditions
+beside each, and the cap with the checkpoint that permitted it. S1 must not grow a second queue (section 5), so this
+is a read and not a list of things awaiting the operator.
+
+*Would own it:* S2 or S3, as a read over the `payment` action.
 
 ---
 

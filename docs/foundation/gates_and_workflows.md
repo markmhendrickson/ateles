@@ -65,7 +65,7 @@ opens again, with `rounds_cap`, the rounds that loop may take, below — plus `r
 `unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`, with
 `none_permitted` (`#sequencing-is-data-successors-and-the-chain`). `owner_role` holds a **role**, never an agent name: the
 roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
-declaration serves every scope and a renamed agent leaves no stale name in it. The role is a **slot**: the design fixes no role set, each implementation defines its own and fills each slot it uses, and the constraints any role set must satisfy are `workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`. Step names are data: a workflow may declare steps
+declaration serves every scope and a renamed agent leaves no stale name in it. The role names a **slot**: the design fixes no role set, each implementation defines its own and fills each slot it uses, and the constraints any role set must satisfy are `workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`. Step names are data: a workflow may declare steps
 beyond the review sequence (a draft step, a deterministic lint, an operator preview). A contiguous named
 group of steps is a stage.
 
@@ -751,8 +751,9 @@ which is the return `principles.md#the-autonomy-the-design-is-for-the-operator-i
 calls a defect. Second, the failure the pair exists to prevent is one agent judging its own work, and the
 check on the agent itself closes exactly that. What it leaves is a cost, stated under *Cost accepted*.
 
-**Defaults applied by consistency (2026-10-13), each following from the ruling it names.** The operator ruled the first two paragraphs of this section and nothing else here; the rest of the
-section is how the design carries them out, and each choice follows from something already ruled or stated:
+**Defaults applied by consistency (2026-10-13), each following from the ruling it names.** The operator ruled the
+two bold sentences above that open with *Ruled*, and what they state, and nothing else here; the rest of the section
+is how the design carries them out, and each choice follows from something already ruled or stated:
 
 - a step carries a declared class, and an absent class reads as `review`: principle 5, and the rule that an
   amendment weakening a review step is the operator's (`workflows.md#who-approves-a-new-or-amended-declaration`);
@@ -808,15 +809,14 @@ not dropped from the set. The binding is read as of the delivery and never again
 advance drops no author.
 
 **What authorship then means.** A remedy routed to an implementer after a blocking finding moves the head, so
-that implementer becomes an author and cannot sign the step that re-judges it, which is routing the remedy
-never transferring the conclusion (`#findings-conclusions-and-what-a-blocking-finding-obliges`) restated for the
+that implementer becomes an author and cannot sign the step that re-judges it, which is routing the remedy never
+transferring the conclusion (`#findings-conclusions-and-what-a-blocking-finding-obliges`) restated for the
 signer. An actor recorded `unresolved`, or no actor recorded at all, is unknown authorship, and unknown holds
 (`principles.md`, invariant 7). An actor recorded `external`, which is a credential that binds to no principal
-at all, is no author, and neither is an actor that an adapter's document declares host automation that authors
-nothing; a pull request whose every author is one of these is outside this rule. Authors are the actors of head
-advances: a co-author named in a commit trailer is not read, a reviewer who uses the host's update-branch
-control becomes an author and is then barred from that step, and a rebase or force-update by another agent adds
-that agent.
+at all, is no author; a pull request whose every author is `external` is outside this rule. Authors are the
+actors of head advances: a co-author named in a commit trailer is not read, a reviewer who uses the host's
+update-branch control becomes an author and is then barred from that step, and a rebase or force-update by
+another agent adds that agent.
 
 **It is refused at the verdict write, beside the lease check.** A verdict that closes a step declared `review`
 as `signed` or as a blocking conclusion is refused when its signer is an author of an artifact the
@@ -832,9 +832,11 @@ held state, only a read over edges the verdict and the batch already carry.
 
 **What fires, and what the signer sees.** The refusal fires on one thing: a verdict on a `review` step, written
 by an agent, or the operator, that made one of the batch's artifacts. The signer receives it as an error on its
-write, which names this rule, and the step stays unsigned. It closes when a different agent signs it, or when the operator
-writes `waived` (below); where the declaration sets `unclaimed_after`, a step nobody can sign raises
-`unclaimed_step` (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`).
+write, which names this rule, and the step stays unsigned. It closes when a different agent signs it, or when
+the operator writes `waived` (below). A step nobody has claimed raises `unclaimed_step` where the declaration
+sets `unclaimed_after` (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); a step claimed by an
+author holds by its lease, which lapses and is claimed again until the declared `lapse_cap` ends it in
+`repeated_lapse` (`failure_posture.md#repeated-lapse-raises-a-checkpoint`).
 
 **The operator's `waived` verdict is not refused, and it is how a held review step is released.** A `waived`
 verdict is the operator principal closing an unsigned required step, attributed and carrying its reason; it is
@@ -1434,7 +1436,8 @@ of where they go, but because of what they can destroy. The word for the far sid
 ### The action gate is PR-independent
 
 A principal evaluating the action gate supplies the action's class, confidence, the policy, and
-successful recurrences — no PR, issue, or repository. The checkpoint the gate writes keys on the action
+successful recurrences — no PR, issue, or repository; for a `payment`, the evaluator also supplies the payment's own
+parameters and reads the records its five conditions name (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`). The checkpoint the gate writes keys on the action
 and its task. The consent gate for outbound non-code work is this gate: a policy lists
 `send_external_comms` and `publish` as high blast, the content agents' actions carry those classes, the
 runner subscribes to the checkpoint, and the task is re-claimed on resolution. Do not build a second
@@ -1445,20 +1448,21 @@ traced through this gate and the grant checker together is
 
 ### The checkpoint is written where the gate first holds the action, and the permit is decided at the take
 
-**A workflow that declares a `consent` step obtains the gate's hold ahead of the take, and the gate is
-evaluated once more when the action is taken.** The gate is one decision function, asked whenever a
-principal needs to know whether an action may be taken, and for an action whose workflow places `consent`
-before `send`, `pay`, or `post` it is asked at two moments. The first is when the action becomes known and
-the `consent` step opens — the drafts have passed `review`, or the `verify` verdict has recorded the
-figures: the gate is evaluated on the action's class, its confidence, the `action_policy`, and the class's
-action series, and where it would hold, **the checkpoint is written then**, reason `gate_hold`. That is the
-checkpoint the step carries to the operator and whose resolution it records (`workflows.md#outreach`,
-`workflows.md#payment`, `workflows.md#social-content`). Where the gate would not hold — the class is low
-blast at threshold, or its action series has graduated — no checkpoint is written and the step carries
-nothing, which is what `workflows.md#payment` means by a graduation changing whether `consent` carries a
-checkpoint and not whether the step exists. The second moment is the take: at `send`, `pay`, or `post`
-the adapter asks the gate again, at the moment the action would be taken, as
-`#actions-are-entities-only-actions-are-taken` says of every action.
+**A workflow that declares a `consent` step obtains the gate's hold ahead of the take, and the gate is evaluated
+once more when the action is taken.** The gate is one decision function, asked whenever a principal needs to
+know whether an action may be taken, and for an action whose workflow places `consent` before `send`, `pay`, or
+`post` it is asked at two moments. The first is when the action becomes known and the `consent` step opens — the
+drafts have passed `review`, or the `verify` verdict has recorded the figures: the gate is evaluated on the
+action's class, its confidence, the `action_policy`, and the class's action series, and where it would hold,
+**the checkpoint is written then**, reason `gate_hold`. That is the checkpoint the step carries to the operator
+and whose resolution it records (`workflows.md#outreach`, `workflows.md#payment`,
+`workflows.md#social-content`). Where the gate would not hold — the class is low blast at threshold, its action
+series has graduated, or, for a `payment`, the five conditions of decision 144 hold and the payee has not already been released in the
+period, or since the reference checkpoint where it has no schedule (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`)
+— no checkpoint is written and the step carries nothing, which is what `workflows.md#payment` means when it says
+that the gate holding nothing changes whether `consent` carries a checkpoint and not whether the step exists. The
+second moment is the take: at `send`, `pay`, or `post` the adapter asks the gate again, at the moment the action
+would be taken, as `#actions-are-entities-only-actions-are-taken` says of every action.
 
 **A hold may be decided early; a permit is decided only at the take.** This asymmetry is what makes the two
 evaluations one gate rather than two (principle 6). The first evaluation can only stop the action or write
@@ -1476,7 +1480,7 @@ and the write is what is read — and the gate permits the take when four things
    `payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`,
    `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero`);
 3. the `action_policy`, as read at the take, still resolves the class as it did when the hold was written —
-   a class the operator has since reserved resolves to `NEVER` whatever the resolution says, since the
+   a class the operator has since reserved, or listed `operator_only`, resolves to `NEVER` whatever the resolution says, since the
    never-set wins ahead of any policy (`#confidence-and-three-blast-tiers`) and a standing approval is not
    a policy;
 4. no confirmation exists for the action's `dedup_key`
@@ -1488,6 +1492,16 @@ the third is a `NEVER` at the gate, which holds the action and awaits the operat
 the fourth is an action already taken, which is confirmed by reading the external system back and is not
 taken again.
 
+**A payment released without a checkpoint is permitted on a different first input, and the other three are
+unchanged.** Where the first evaluation wrote no checkpoint because the five conditions of decision 144 held,
+the first of the four has no checkpoint to read. The take-time evaluation reads in its place the five conditions
+and the bound on releases from the record as it then stands, the period of the bound found from the engine's recorded time of the take, on parameters equal to those the `verify` verdict recorded (the second of the
+four, at the class's `consent_tolerance`), and it reads the destination once, writes it on the action, and the adapter submits that value. The engine writes its reading before the adapter submits. A condition that no longer holds, or cannot be read, writes a
+checkpoint at the take, reason `gate_hold`, and the step returns as it does for a difference in the parameters; the fourth input is unchanged, and a confirmation on the key is an action already taken and writes no checkpoint.
+What the conditions are and how each is read is `payments.md`'s
+(`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`);
+this section states only where the gate asks.
+
 **What the design does not supply is a clock.** The four inputs are everything that can make a standing
 resolution stale, and none of them is elapsed time: an approval given on one day and taken on another, on
 the same parameters under the same policy, is approval of the same thing, and the interval between
@@ -1496,7 +1510,11 @@ decides, a lapse makes the step claimable again, and the re-claim takes the same
 time bound on a resolution would be a number the design invented, and the reasoning that made the tolerance
 a policy value with a zero default (decision 28) applies to it unchanged: the shape is a per-class value on
 the `action_policy`, and the number, where an operator wants one, is the operator's. Absent a value there
-is no clock, because the four inputs already name every way a take can differ from what was consented to.
+is no clock, because the four inputs already name every way a take can differ from what was consented to. The one
+place a release reads time is the bound on releases of decision 144: the engine's ingestion time of the take,
+read against the dated window each schedule entry the reference checkpoint carried states
+(`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
+It is a bound on a release, and not a time bound on a resolution or an expiry on a reference.
 
 **Why the checkpoint is written at `consent` and not at the take.** The alternative reading — the gate
 writes the checkpoint only at `send`, and `consent` is a step that shows the operator a draft — leaves
@@ -1576,7 +1594,11 @@ accident of absence (decision 18,
 that resolution and not a fourth tier, so a step whose work is a governance write declares the class and its
 checkpoint is `gate_hold` like any other held action's. `NEVER` is a third tier: `HIGH` is still taken without a checkpoint once a recurring
 series clears its count; `NEVER` short-circuits ahead of the confidence axis and the recurrence path. The
-advisory path (`route_task`) and the enforcing path resolve identically, and a parity test holds the
+payment class is the one case where a `NEVER` is released by the action's own parameters and by neither of those:
+it is taken without a checkpoint only when the five conditions of `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record` hold on the
+action, read from the record at the evaluation, and otherwise it resolves as any `NEVER` class does (decision
+144). The release lifts only the never-set membership the design supplies for `payment`: a class the policy itself lists as `operator_only`, and an action carrying `operator_only`, keeps its checkpoint whatever the five conditions say, so a policy still cannot demote an `operator_only` class, and the one exception in this revision to "a policy cannot demote it" is the design's own never-set membership of `payment`, released by its parameters. That adds a read to the decision function and no tier. The
+advisory path (`route_task`) resolves a `payment` as held, the restrictive branch, and only the enforcing path reads the conditions; the two otherwise resolve identically, and a parity test holds the
 duplicated never-set equal across the two modules. An unreachable policy source is a halt
 (`failure_posture.md`), not a fallback policy with an empty low-blast set.
 

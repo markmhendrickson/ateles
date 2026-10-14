@@ -55,7 +55,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [payment](../workflows.md#payment)
 
-- **WF-17** — a task naming payee or amount inline fails `classify`; `prepare` from the profile; `verify` disjoint; `consent` carries payee, amount, reference; `pay` keyed; `reconcile` reads terminal state, writes `transaction`, is the verifier's *[M]*
+- **WF-17** — a task naming payee or amount inline fails `classify`; `prepare` from the profile; `verify` disjoint; `consent` carries payee, amount, reference, or closes on a verdict naming what the gate read where the five conditions of decision 144 held (PY-16); `pay` keyed; `reconcile` reads terminal state, writes `transaction`, is the verifier's *[M]*
 
 ## [research and analysis](../workflows.md#research-and-analysis)
 
