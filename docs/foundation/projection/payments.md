@@ -5,7 +5,7 @@
 
 Every rule `payments.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`payments.md`](../payments.md) and are not repeated here (decision 66).
 
-27 rules.
+30 rules.
 
 ## [The dedup key, and what it is keyed on](../payments.md#the-dedup-key-and-what-it-is-keyed-on)
 
@@ -77,13 +77,16 @@ Every rule `payments.md` owns, one entry each: the rule's own statement from `co
 
 ## [A payment on known terms is taken without a checkpoint, and only on five conditions read from the record](../payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record)
 
-- **PY-16** — (decision 144): when all five conditions hold the gate writes no checkpoint, `consent` closes on the gate's recorded reading, and `pay` is permitted; the positive control the refusals below are measured against *[M]*
-- **PY-16a** — the same, condition 1 (the payee is known): a payee is known only by a checkpoint the operator resolved *[M]*
-- **PY-16b** — the same, condition 2 (the amount is the expected amount): the reference is the schedule's amount the record held at the last operator-resolved checkpoint, else that checkpoint's amount, within `consent_tolerance`, zero where absent *[M]*
-- **PY-16c** — the same, condition 3 (the bank details are unchanged): the destination, on the identifiers the rail uses, and the rail equal what the last operator-resolved checkpoint carried *[M]*
-- **PY-16d** — the same, condition 4 (the payment is under the per-payee cap): the amount the operator pays, fees included, and the amount the payee receives each do not exceed the cap, in the payment's currency *[M]*
+- **PY-16** — (decision 144): when all five conditions hold the gate writes no checkpoint, `consent` closes on a verdict that names what the gate read, and `pay` is permitted; the positive control the refusals below are measured against, and each refusal below changes one thing from this setup, fails one condition, and is red also when it writes no checkpoint with reason `gate_hold` carrying PY-10's content *[M]*
+- **PY-16a** — the same, condition 1 (the payee is known): a payee is known only by a reference checkpoint; where a case leaves the payee with none, the conditions that read it fail with it *[M]*
+- **PY-16b** — the same, condition 2 (the amount is the expected amount): the reference is the amount the reference checkpoint carried, or the schedule entry it carried for the period, compared exactly *[M]*
+- **PY-16c** — the same, condition 3 (the bank details are unchanged): the one destination the gate compared, on every field the rail routes on, equals what the reference checkpoint carried and is the value the adapter submits *[M]*
+- **PY-16d** — the same, condition 4 (the payment is under the per-payee cap): the amount the operator pays, fees included, and the amount the payee receives each do not exceed the cap, in the cap's currency; the cap is read by the checkpoint that permitted its write; PY-16 is the at-the-cap case, released *[M]*
+- **PY-16e** — the same, the bound on releases: at most one release per payee per scheduled period, and for a payee with no schedule at most one between operator-resolved checkpoints; the dedup key does not make this refusal and the period is the carried schedule entry's *[M]*
+- **PY-16f** — the same, the reference checkpoint: conditions 1, 2 and 3 read the one reference, the payee's most recent operator-resolved payment checkpoint where it was resolved `approved` and its action confirmed, and no other *[M]*
+- **PY-16g** — the same: nothing the payer wrote is a comparand, and a control that only adds a checkpoint keeps it *[M]*
 - **PY-17** — the same: an absent cap holds nothing, and an unreadable one is no cap *[M (PR-5 at this class)]*
-- **PY-18** — the same, condition 5 (a second principal, not the payer, verifies it) and decision 143: distinctness is checked on the agent itself *[M (AU-18 at this class)]*
-- **PY-19** — the same: the gate reads the five conditions again at the take, and a condition that no longer holds writes a checkpoint then and does not re-use the release *[M]*
+- **PY-18** — the same, condition 5 (a second principal, not the payer, verifies it) and decision 143: distinctness is checked on the agent itself, the verifier holds no payer-slot lease and signs after the last write of the figures *[M (AU-18 at this class)]*
+- **PY-19** — the same: the gate reads the five conditions and the bound on releases again at the take, and a condition that no longer holds writes a checkpoint then and does not re-use the release; the destination is read once and submitted as written *[M]*
 - **PY-20** — the same, the money rules: a new payee, a changed destination, and an over-cap payment keep the operator *[M]*
 - **PY-21** — the same: a condition that cannot be read leaves the checkpoint, and writes no new state *[M]*

@@ -31,7 +31,7 @@ declaration scope is `swarm_roster` on the record, never this file; the agent de
 | implementer | the `impl` step |
 | steward | the `merge` step, whose work is the merge action (`foundation/vocabulary.md#steward`) |
 | release steward | the `criteria` and `release` steps of the release workflow |
-| deployment verifier | the `verify_deployed` step of the release workflow, a slot distinct from the release steward's |
+| deployment verifier | the `verify_deployed` step of the release workflow, a role distinct from the release steward's |
 | copywriter | the `copy` step |
 | content author | the drafting and posting steps of social content and outreach |
 | lint runner | a deterministic step whose work is a script and whose verdict is the script's result |

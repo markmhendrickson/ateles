@@ -960,7 +960,7 @@ another is load-bearing — the same calendar write being `external_api_write` o
 **Definition:** the tier an [action_type](#action_type) resolves to under an [action_policy](#action_policy), one of `LOW`, `HIGH`, or
 `NEVER`.
 `LOW` is taken at or above the [confidence](#confidence) threshold or once an [action series](#action-series) graduates; `HIGH` is
-[checkpointed](#checkpoint) until an action series graduates; `NEVER` is cleared by no confidence and no recurrence; the one other clearing is a payment's, by its own
+[checkpointed](#checkpoint) until an action series graduates; `NEVER` is cleared by no confidence and no recurrence; the only clearing is a payment's, by its own
 parameters (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** "risk level" (unbounded).
@@ -1708,9 +1708,10 @@ principal where none is set (decision 50).
 **Definition:** a structural check requiring disjointness between two duties. For the pairs a class requires, such as a
 [checkpoint](#checkpoint)'s raiser and resolver, it is read over the checkpoint's principal [edges](#edge), an
 [agent](#agent) counting as its bound [principal](#principal) (decisions 48 and 49), and the pairs a class requires are its
-`disjoint_roles[]` on the `action_policy` (decision 50). For the builder and review pair, which the design fixes, it is read over
-a [verdict](#verdict)'s signer and the [batch](#batch)'s [artifacts](#artifact) at the verdict write, on the agent itself
-and not its bound principal (decision 143, extending decision 49).
+`disjoint_roles[]` on the `action_policy` (decision 50). For the builder and review pair, which the design fixes, it is read on the agent itself and not its bound principal, over
+a [verdict](#verdict)'s signer and the [batch](#batch)'s [artifacts](#artifact) at the verdict write (decision 143, extending
+decision 49); for the payer and verifier of a payment taken without a checkpoint it is read the same way, over the verdict's
+signer and the agent that takes `pay` (decision 144).
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties),
 [`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review).
 **Never:** —

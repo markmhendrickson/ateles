@@ -281,8 +281,8 @@ a defined key, and the row count under it must equal the number of resolutions w
 forty archives is forty rows any reader can count, and a refusal of one of them is a refusal of one."
 A refusal of one member must be reachable without leaving the set.
 
-**A payment checkpoint shows exactly what the verifier signed** — payee, amount, currency, period, and
-rail, as the `verify` sign-off recorded them (decision 27,
+**A payment checkpoint shows exactly what the verifier signed** — payee, amount, currency, period, rail,
+destination, and any schedule entries, as the `verify` sign-off recorded them (decision 27,
 `payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`). Not the current values read
 fresh; the recorded ones. This is a screen-level rule with a conformance row behind it.
 

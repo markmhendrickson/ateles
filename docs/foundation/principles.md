@@ -356,7 +356,7 @@ quantity of them as good or bad. Each thing that pulls the operator in is judged
 necessity, and the corpus already distinguishes the classes that pass. A return is **necessary** when only a
 principal can supply what the swarm lacks: an action the policy places in the never-set, where `NEVER`
 short-circuits ahead of confidence and ahead of any recurrence graduation
-(`gates_and_workflows.md#confidence-and-three-blast-tiers`); a capability the grant does not name, where
+(`gates_and_workflows.md#confidence-and-three-blast-tiers`), except a `payment` released on its own parameters (decision 144); a capability the grant does not name, where
 denial is `capability_denied` and the checkpoint it raises is a request and never a grant
 (`authority_model.md#grants`); an input the record cannot resolve, of which `undetermined_scope` is the
 design's own stated case — a scope put to the operator rather than guessed

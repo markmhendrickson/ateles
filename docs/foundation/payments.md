@@ -103,7 +103,7 @@ each already in the design, and their composition is what a payment gets:
 
 | Mechanism | What it contributes | Where it is stated |
 |---|---|---|
-| the action gate, on a class the policy places in the never-set | the effect is not taken without a principal's decision; `NEVER` short-circuits ahead of confidence and ahead of any recurrence graduation, so **no series of successful payments ever graduates into taking one unattended**; the one release from it reads the payment's own parameters and never a count (`#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, decision 144) | `gates_and_workflows.md#confidence-and-three-blast-tiers` |
+| the action gate, on a class the policy places in the never-set | the effect is not taken without a principal's decision; `NEVER` short-circuits ahead of confidence and ahead of any recurrence graduation, so **no series of successful payments ever graduates into taking one unattended**; the only release from it reads the payment's own parameters and never a count to admit one (`#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, decision 144) | `gates_and_workflows.md#confidence-and-three-blast-tiers` |
 | the checkpoint the gate writes, resolved by a required approver | the decision is attributed, authorized against the required approvers, and terminal; silence never accepts | `gates_and_workflows.md#the-checkpoint`, `authority_model.md#approval` |
 | separation of duties: `verify` and `reconcile` belong to a principal disjoint from the payer | one principal never both proposes and confirms a movement of money — the smallest structural check the authority model names, applied where it matters most | `workflows.md#payment`, `authority_model.md#structural-checks-quorum-and-separation-of-duties` |
 | the workflow's own ordering: `prepare`, `verify`, `consent`, `pay`, `reconcile` | the payee and amount are checked against the profile **before** the operator is asked, so the operator consents to something already verified rather than to the payer's own assertion | `workflows.md#payment` |
@@ -114,7 +114,7 @@ and a verification by a second principal that must have happened first. The recu
 `HIGH`-blast class graduate into being taken without a checkpoint is unavailable to it, which is the specific
 property that matters — a payment that has been made correctly a hundred times is gated exactly as the
 hundred-and-first. What lifts the checkpoint is never that history. It is the payment's own parameters, read
-against what the operator resolved and wrote, and only when all five conditions of decision 144 hold
+against what the operator resolved and wrote, and only when all five conditions of decision 144 hold and the payee has not already been released in the period
 (`#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`); a payment that fails any one is gated as described here.
 
 **What a second gate would cost, stated because the temptation is real.** The instinct at this boundary is
@@ -535,7 +535,7 @@ submission's return.
 first. It never constructs a second transaction for an obligation whose signed transaction it already holds. It
 never attaches metadata a policy suppressed. It never widens an amount, a payee, or a rail beyond what the
 checkpoint named. It never takes a payment because a balance was sufficient, a schedule came due, or a previous
-payment in a series succeeded; a count of earlier payments is not among the five conditions. It never supplies
+payment in a series succeeded; a count of earlier payments never admits one. It never supplies
 identity or compliance documentation to a rail — that is operator-only. And it never writes the `reconcile`
 verdict, whatever it read: the adapter that took the `pay` action is on the payer's side of a separation of
 duties the workflow declares, and a confirmation it wrote is an observation for the verifier to read, not the
@@ -683,7 +683,7 @@ this document opened are ruled in the three sections that follow.
 **Ruled (decision 27, 2026-09-05): yes.** Registered in `conformance.md#the-register-of-open-design-decisions`.
 The checkpoint the `consent` step carries to the operator carries the obligation **as the `verify` verdict
 recorded it** — the payee as the profile names it, the amount, the currency, the period or instance being
-settled, the rail, and, since decision 144, the destination the verifier matched — together with the verifier's
+settled, the rail, and, since decision 144, the destination the verifier matched and, where the obligation has a schedule, the schedule entries the operator was shown — together with the verifier's
 identity and the fact that these are the figures it matched against the profile. Not a summary, not the payer's
 restatement, not a rounded figure: the values the verifier signed, carried verbatim from that verdict into the
 checkpoint's `needed_input`, with the checkpoint referring to the verdict it carries them from. And the consent
@@ -710,7 +710,7 @@ differ from what was consented to are a different key, and the adapter's refusal
 the checkpoint did not cover is the same refusal it makes for every action.
 
 **The cost accepted** is longer checkpoint messages on the chat channel: every payment checkpoint states the
-payee, the amount, the currency, the period, the rail, and who verified them, where a shorter message would
+payee, the amount, the currency, the period, the rail, the destination, and who verified them, where a shorter message would
 say "pay the invoice". Accepted without reservation; the channel's message limits are far above this, and the
 length is the operator reading what they are approving. **What would reopen it:** nothing about payments. It
 is the general rule for consent stated at the boundary where getting it wrong is paid in money, and if it
@@ -758,48 +758,89 @@ prices expire, and for that rail the remedy is a value, not a change of shape.
 - A payment is taken without a checkpoint only when the payee is known, the amount is the expected amount, the
   bank details are unchanged, the payment is under the per-payee cap the operator sets, and a second principal,
   not the payer, verifies it.
-- Each condition is read from the record by the gate, never from the payer's own claim, and a condition that
-  cannot be read does not hold.
-- The cap is the operator's, a value of the `action_policy`, and an absent cap holds nothing.
-- A new payee, a changed amount, changed bank details, or an amount over the cap keeps the checkpoint.
-- The second principal is a different agent from the payer, checked on the agent itself.
+- Each condition is read from the record by the gate, against one reference checkpoint and never from the
+  payer's own claim, and a condition that cannot be read does not hold.
+- The cap is the operator's, a value of the `action_policy` that an operator-approved checkpoint permitted, and
+  an absent cap holds nothing. A payment equal to the cap is under it.
+- At most one payment per payee is released in each scheduled period, and for a payee with no schedule at most
+  one between operator-resolved checkpoints.
+- A new payee, a changed amount, changed bank details, an amount over the cap, or a second release in the
+  period keeps the checkpoint.
+- The destination the gate compared is the destination the adapter submits.
+- The second principal is a different agent from the payer, checked on the agent itself, and signs after the
+  figures were last written.
+- Each payee costs the operator one resolved checkpoint before this applies, and a payee whose amount varies
+  from period to period never qualifies.
+- A payment taken this way is found afterwards as a `payment` action that has `taken_at` and no `CHECKPOINTS`
+  edge, and the `consent` verdict names what the gate read.
 
 **Ruled (decision 144, 2026-10-13, the operator's): a payment is taken without a checkpoint only when the payee
 is known, the amount is the expected amount, the bank details are unchanged, the payment is under the per-payee
 cap the operator sets, and a second principal, not the payer, verifies it.** Registered in
 `conformance.md#the-register-of-open-design-decisions`. It amends the rule this document stated before, that
 every payment waits on a checkpoint and nothing ever changes that, and it replaces the sentence of
-`workflows.md#payment` that let a recurring payment graduate by count. The source is the operator's
-responsibility charter, which has known payees under their cap paid and verified automatically. What the ruling
-leaves in force is stated below, and it is most of the document: the dedup key, the unknown case, the read-back
-at the declared terminal state, the disjoint `reconcile`, and the rule that the first payment to any payee, and
-every payment that differs from the last one the operator resolved, still waits on the operator.
+`workflows.md#payment` that let a recurring payment graduate by count. The source is the operator's own
+statement of the ruling, held outside the foundation and named in the register row. What the ruling leaves in
+force is the dedup key, the unknown case, the read-back at the declared terminal state, and the disjoint
+`reconcile` (*What the release does not change*, below). It adds that the first payment to any payee, and every
+payment whose amount, currency, or destination differs from what the operator last resolved, still waits on the
+operator.
+
+**Ruled (decision 144, 2026-10-14, the operator's), three points.** The cap is inclusive: a payment equal to the
+cap may go out without a checkpoint. The two routes to a payment with no checkpoint coexist: this section, and
+the standing consent of decision 127, which is proposed in an open change and not yet merged. And a payee is
+released at most once per scheduled period, and for a payee with no schedule at most once between
+operator-resolved checkpoints; anything beyond that writes a checkpoint. Each is stated where it applies,
+below.
 
 **It is the gate resolving a class by its parameters, and not graduation.** The section on why a payment gets no
 second gate named this shape before it was ruled: "a ceiling is the policy resolving a class by its parameters."
 Graduation is a function of how many earlier actions of the class succeeded, and it admits the next one whatever
 its parameters. This is a function of the next payment's own parameters read against what the operator resolved
-and wrote, and the count of earlier payments is read nowhere in it. So a hundred confirmed payments to a payee
+and wrote, and no count of earlier payments is read to admit one. So a hundred confirmed payments to a payee
 with no cap written, or to a payee whose destination has changed, are gated exactly as the first: `NEVER` still
 short-circuits ahead of confidence and ahead of any recurrence graduation
 (`gates_and_workflows.md#confidence-and-three-blast-tiers`), and the release on the five conditions below is the
-one other way a `payment` action is taken with no checkpoint written. Nor is it a standing approval: nothing is approved
-once and then re-used, and each condition is read afresh at each evaluation.
+only way this document states for a `payment` action to be taken with no checkpoint written. The release lifts
+only the never-set membership the design supplies for `payment`: a class the policy itself lists as
+`operator_only`, and an action carrying `operator_only`, keeps its checkpoint whatever the five conditions say, and a
+`transfer` class the policy distinguishes from `payment` is not covered by this section.
+Nor is it a standing approval: nothing is approved once and then re-used, and each condition is read afresh at
+each evaluation.
+
+**Two routes coexist, the rules say which applies to a payee, and a payee under both takes the stricter
+guard.** This section is one route. The other is the standing consent of decision 127, as that change proposes
+it: the operator's approval of an exact figure, with an expiry and a use count. Both stand. A payee with a cap
+written under this section is under this route; a payee with a standing consent in force is under the other; a
+payee with neither keeps its checkpoint. A payee under both is released without a checkpoint only where neither
+route's guard stops the payment, which is the stricter of the two by construction. Approving a standing consent
+does not make a payee known under condition 1: only a payment checkpoint the operator resolved does.
+
+**The reference checkpoint.** Conditions 1, 2 and 3 and the bound on releases below are read against one
+record, the payee's reference checkpoint: the payee's most recent payment checkpoint that the operator principal
+resolved, provided it was resolved `approved` and its action was confirmed at its declared terminal state. A
+payee whose most recent operator-resolved payment checkpoint was resolved otherwise (`denied` or `vetoed`), or
+whose action is `unknown`, failed, or not yet confirmed, has no reference checkpoint, and no condition that
+reads one holds until a checkpoint is resolved `approved` after it and its action is confirmed. A checkpoint
+withdrawn, expired, or superseded is never a reference. The payee is the profile, by reference, and the path
+from payee to checkpoint is the existing edges: the task `REFERS_TO` the profile and the obligation, the task
+`PRODUCES` the action, the checkpoint `CHECKPOINTS` the action (`action` carries no payee field). The reference
+amount and the reference destination are what that checkpoint carried and nothing else.
 
 **The five conditions, and how each is read.** Each is read by the gate from the record at the evaluation, with
 the payee resolved by reference to its profile and never by name (`#how-the-five-rules-apply-here`). No
 condition is read from the payer's statement, from a field the payer's step wrote about itself, or from a flag
 on a profile: the comparands below are written by the operator's resolution of a checkpoint, by the operator's
-write of the `action_policy`, and by a verifier other than the payer, and the thing tested is the payment's own
-parameters.
+permitted write of the `action_policy`, and by a verifier other than the payer, and the thing tested is the
+payment's own parameters.
 
 | # | Condition | It holds when | Read from |
 |---|---|---|---|
-| 1 | the payee is known | the payee resolves by reference to a `payment_profile`, or the equivalent record the workflow's entry condition already requires, and the record holds a prior payment to that payee whose action was confirmed at its declared terminal state and whose checkpoint was resolved `approved` by the operator principal | the profile, and the action's checkpoint and confirmation edges. A payment released under this section does not make a payee known; only a checkpoint the operator resolved does |
-| 2 | the amount is the expected amount | the currency equals the reference currency and the amount equals the reference amount within the class's `consent_tolerance` (decision 28; zero where absent). The reference amount is the schedule's amount for the period where the obligation carries a schedule the record already held at the payee's most recent operator-resolved checkpoint, and otherwise the amount that checkpoint carried | the obligation and that checkpoint's `needed_input`. A schedule entry written after the checkpoint is a changed amount and not a reference. The reference moves only when the operator resolves a checkpoint, so a tolerance cannot ratchet upward across unattended payments |
-| 3 | the bank details are unchanged | the destination the payment would go to, on the identifiers the rail uses and never a display name, together with the rail, equals the destination that same checkpoint carried | the profile as it stands at the evaluation, compared with that checkpoint's `needed_input`. A destination edited since is a change, whoever made it and whatever the profile now says |
-| 4 | the payment is under the per-payee cap | the amount the operator pays, fees included, and the amount the payee receives each do not exceed the cap written for that payee, in the payment's currency | the `action_policy`'s `payee_caps[]`: an entry naming the payee by reference, a currency, and an amount, whose last write is attributed to the operator principal. No entry, an entry in another currency, an entry written by anyone else, or one the gate cannot read is no cap |
-| 5 | a second principal verifies it | the `verify` step is signed, with a `signed` conclusion and not `waived`, on the figures the payment would be taken on, by an agent other than the one that takes `pay`; distinctness is checked on the agents themselves, by each credential's own principal binding, as decision 143 checks the builder and the reviewer | the `verify` verdict's signer, and the actor of the `pay` action, resolved through the credential binding. An unresolved signer or actor is unknown and does not hold |
+| 1 | the payee is known | the payee resolves by reference to a `payment_profile`, or the equivalent record the workflow's entry condition already requires, and has a reference checkpoint | the profile and the reference checkpoint with its action's confirmation. A payment released under this section writes no checkpoint, so it never makes a payee known; only a checkpoint the operator resolved does |
+| 2 | the amount is the expected amount | the currency equals the reference currency and the amount equals the reference amount exactly. The reference amount is the amount the reference checkpoint carried; where that checkpoint carried a schedule (entries of period and figure, as the operator was shown them), the reference for a later period is that entry | the obligation and the reference checkpoint's `needed_input`. A schedule entry the checkpoint did not carry is not a reference, whenever it was written. The reference moves only when the operator resolves a checkpoint, so nothing released unattended moves it |
+| 3 | the bank details are unchanged | the destination the adapter will submit, as the exact value the gate compared, is the profile's destination and equals the reference checkpoint's, on the same rail | the profile as it stands at the take, and the reference checkpoint's `needed_input`. A checkpoint that carries no destination is no reference for this condition. A destination edited since is a change, whoever made it and whatever the profile now says |
+| 4 | the payment is under the per-payee cap | the amount the operator pays, fees included, and the amount the payee receives each do not exceed the cap written for that payee, in the cap's currency; a payment equal to the cap is under it | the `action_policy`'s `payee_caps[]`: an entry naming the payee by reference, a currency, and an amount, whose write a checkpoint resolved `approved` by the operator principal permitted (below). No entry, an entry of zero, an entry in another currency, an entry with no such permitting checkpoint, or one the gate cannot read is no cap |
+| 5 | a second principal verifies it | the `verify` step is signed with a `signed` conclusion and not `waived`, on the figures the payment would be taken on, after the last write of any of those figures, by an agent that holds the lease of none of the batch's payer-slot steps (`prepare`, `pay`) and is not the agent that takes `pay`; distinctness is checked on the agents themselves, by each credential's own principal binding, as decision 143 checks the builder and the reviewer | the `verify` verdict's signer and `signed_at`, the `prepare` verdict's signer, the roster's seating of the `pay` role, the leases the batch's steps carry, and at the take the credential presenting it. An unresolved or unrecorded signer, lease holder, or credential is unknown and does not hold |
 
 **Each condition fails closed, and failing one is not an error.** A condition that does not hold, or that cannot
 be read, leaves the payment on the path it has always had: the gate holds the action, the checkpoint is written
@@ -807,40 +848,97 @@ with reason `gate_hold`, and the `consent` step carries it to the operator. Ther
 new failure; an unreadable condition is the default branch, which is the checkpoint, and not a wait on the
 condition (principle 5). An unreachable policy source remains a halt (`failure_posture.md`), not a release.
 
-**The money rules, restated as what the five conditions already say.** No new payee is paid without the
-operator, because condition 1 holds only for a payee the operator has resolved a payment to. No change of
-destination is paid without the operator, because condition 3 compares it with the one the operator resolved. No
-amount over the cap is paid without the operator, because condition 4 compares it with the cap, and an amount
-that differs from the one the operator resolved is a changed amount under condition 2. A second payment against
-the same obligation is refused by the dedup key whatever its size, so a payment split into several under the cap
-is not a way round the cap (`#the-dedup-key-and-what-it-is-keyed-on`). A profile may require the checkpoint for
-its payee whatever the five conditions say, and may never waive one, which is the direction of composition
-decision 28 fixes for tolerance. A boundary the `action_policy` lists in `always_checkpoint_boundaries[]` keeps
-its checkpoint whatever the five conditions say.
+**The second principal, and the one that takes `pay`.** The agent that takes `pay` is the agent that presents the
+take to the gate, whose credential the adapter acts on: the adapter performs the operation as that agent's
+hands, and is not a payer of its own. The verifier is compared with the payer at both moments. At the first
+evaluation, before `pay` is claimed, it is compared with the signer of the batch's `prepare` verdict and with
+every agent the roster seats in the `pay` step's role for the declaration's scope. At the take it is compared with
+the credential presenting the take, resolved through its own principal binding. The verifier holds none of the
+payer-slot leases, and its `verify` verdict is signed after the last write of any figure it covers; a verdict
+signed before such a write does not hold. A `waived` verdict never holds this condition.
 
-**The checkpoint carries the destination, which decision 27's list did not name.** Condition 3 compares with the
-destination the last operator-resolved checkpoint carried, so the checkpoint of every payment carries, among the
+**One destination is compared and submitted.** The gate reads the destination once, at the take, as the full
+set of fields the adapter submits to the rail: every identifier the rail routes on, as the rail's adapter
+document declares them (a field it does not declare as non-routing counts as routing), in the rail's canonical
+form, compared by exact equality and never by display name. The gate writes that value on the action, and the
+adapter submits exactly that value and refuses on any other. The `verify` step matches the same value to the
+profile and the obligation, compares it with the reference checkpoint's, and its verdict records it. A
+destination that comes from anywhere but the action's own written value, such as the task, is not the one
+compared.
+
+**A figure the gate cannot read is unreadable, and where the payee receives another currency the condition
+needs a recorded rate.** A figure the gate cannot read at the evaluation, including a fee fixed only at
+construction, is unreadable and condition 4 does not hold at that evaluation. Where the payee receives a
+different currency from the cap's, condition 4 does not hold unless the rail's adapter document declares a rate
+source and the gate compares the converted amount at the rate recorded on the verified quote.
+
+**The cap is the operator's, and it is read by the checkpoint that permitted its write.** The reasoning of
+decision 28 applies: the value is not on the checkpoint, where the payer would propose it to the approver, and
+not on the profile, where the record the payer works from would carry the limit on its own payments. A write to
+the `action_policy` is a governance write and an action of its own
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), and the engine
+is the only writer of a governance write (decision 56), so the writer of every cap is the engine and says nothing
+about who decided. The cap is therefore read from the write's permitting action: an entry of `payee_caps[]` is a
+cap only if a checkpoint the operator principal resolved `approved` permitted the write that put it there. The
+field is written whole, so the rule is read on the field: every entry stands only if the field's last write has
+such a checkpoint, and a field rewritten since without one holds no cap. For a cap the permitting checkpoint is
+required whatever tier governance writes are placed in (decision 18). The design owns the shape and the operator
+owns the number; absent a number there is no cap, and a payee with no cap is a payee whose every payment waits on
+a checkpoint. A cap deleted, set to zero, or never written is the operator's way to keep a payee's checkpoint. A
+profile's flag requiring a checkpoint is a convenience that can only add one, and the control is the cap, which
+the payer's records do not carry. The cap bounds one payment and not a period; the period is bounded by the rule
+that follows.
+
+**At most one release per payee per period, between operator-resolved checkpoints.** Ruled (decision 144,
+2026-10-14, the operator's). A payment is not released where the record already holds, for the same payee, a
+`payment` action that the gate released without a checkpoint, in any state other than a confirmed failure, and
+either the reference checkpoint carried a schedule and that action settles the same scheduled period, or it
+carried none. So a payee with a schedule is released at most once per scheduled period, and a payee with no
+schedule at most once between operator-resolved checkpoints; anything beyond that writes a checkpoint, reason
+`gate_hold`. The period is the schedule entry's, as the reference checkpoint carried it, and never a label the
+payer supplies: a period no carried entry holds has no reference amount, and an amount outside the carried
+entries is a changed amount under condition 2. A release counts from the moment its take-time reading is on
+the record, so an action left `unknown` or not yet confirmed counts, and the count is of actions, not of
+confirmations. The dedup key does not make this refusal; it is keyed on the obligation and answers a different
+question (`#the-dedup-key-and-what-it-is-keyed-on`). This read can only refuse. It admits nothing, and it reads
+no count of confirmed payments, so it is not graduation. A value in the `action_policy` may later allow more than
+one release, and it must be written; absent a value the bound is one.
+
+**The money rules, restated as what the five conditions already say.** No new payee is paid without the
+operator, because condition 1 holds only for a payee that has a reference checkpoint. No change of destination is
+paid without the operator, because condition 3 compares it with the one the reference checkpoint carried. No
+amount over the cap is paid without the operator, because condition 4 compares it with the cap, and an amount that
+differs from the reference is a changed amount under condition 2. A payment split into several under the cap is
+stopped by condition 2, since a part is not the expected amount, and by the bound on releases above. A profile may
+require the checkpoint for its payee whatever the five conditions say, and may never waive one, which is the
+direction of composition decision 28 fixes for tolerance.
+
+**The checkpoint carries the destination and the schedule, which decision 27's list did not name.** Conditions 2
+and 3 compare with what the reference checkpoint carried, so the checkpoint of every payment carries, among the
 figures decision 27 lists, the destination the verifier matched to the profile, as the identifiers the rail
-uses. A checkpoint resolved before this was so carries none, and condition 3 cannot hold against it: that
+uses, and, where the obligation has a schedule, the schedule entries (period and figure) the operator was shown.
+A checkpoint resolved before this was so carries no destination, and condition 3 cannot hold against it: that
 payee's next payment waits on a checkpoint that does, and after it the payee can meet the conditions.
 
 **Applied by consistency (2026-10-13), the author's and not words of the ruling.** That a payee is known only by
 a checkpoint the operator resolved, so that no unattended payment can make one known; that the reference amount
-moves only on an operator-resolved checkpoint; that the cap bounds one payment and is met at the cap and
-exceeded above it; that the payer and the verifier are told apart by the agent and not by whose interest it
-serves; and that a profile, or a boundary in `always_checkpoint_boundaries[]`, can keep a checkpoint the five
-conditions would release. Each follows from the ruling's own rule that anything unresolved keeps the checkpoint
-(principle 5), and each is the narrower of the readings the words allow.
-
-**The cap is the operator's and lives on the `action_policy`, per payee.** The reasoning of decision 28 applies:
-the value is not on the checkpoint, where the payer would propose it to the approver, and not on the profile,
-where the record the payer works from would carry the limit on its own payments. A write to the `action_policy`
-is a governance write and an action of its own
-(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), held for the
-operator, so no agent widens a cap by writing one. The design owns the shape and the operator owns the number;
-absent a number there is no cap, and a payee with no cap is a payee whose every payment waits on a checkpoint.
-The cap bounds one payment and not a period; a bound over a period is a further `action_policy` value the
-operator may write if wanted, and not a new mechanism.
+and destination are what the reference checkpoint carried and move only when the operator resolves one; that
+the amount is compared exactly, in the same currency, with no tolerance; that the cap is read on both the figure
+the operator pays, fees included, and the figure the payee receives; that a `waived` verification is not a
+second principal; that the payer is any agent holding a payer-slot step, not the taker of `pay` alone; that the
+payer and the verifier are told apart by the agent and not by whose interest it serves; that the release covers
+the `payment` class only; and that a profile can keep a checkpoint the five conditions would release. Eight of
+the nine narrow the readings the words allow, and
+follow from the ruling's own rule that anything unresolved keeps the checkpoint (principle 5). One widens: the
+payer and the verifier told apart by the agent, because under decision 48's counting rule the release could never
+hold where every agent acts for the operator, which is the ground decision 143 gave for the same choice. It is
+the one default still for the operator to confirm. The table also reads "expected" as the amount the reference
+checkpoint carried, "under the cap" on both figures, and "known" by a confirmed prior payment under an approved
+checkpoint; these are the design's reading of the ruling's words, and each narrows. **Ruled, and no longer a
+default (2026-10-14, the operator's):** the cap is inclusive, so a payment equal to the cap is under it. That is
+the wider of the two readings the word "under" allows, and it is the operator's, not the author's. That the cap
+bounds one payment is the plain reading of "the payment is under the cap"; the bound on releases is a separate
+rule.
 
 **The second principal is checked on the agent, and why not on whose interest it serves.** The payer and the
 verifier of the payment workflow are disjoint (`workflows.md#payment`,
@@ -849,20 +947,31 @@ signature is the only second control the payment carries. Decision 48's counting
 operator as one interest, so under it condition 5 could never hold in a deployment whose agents all act for the
 operator, and no payment would ever be released. Decision 143 faced the same choice for the builder and the
 reviewer and read the agent's own binding, the one that ends at the agent
-(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`); this section applies that check to
-the payer and the verifier of a payment released without a checkpoint. It stays a fixed pair and not an
-`action_policy` value: one agent never verifies a payment it takes.
+(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`); this section applies that reading to
+the payer and the verifier of a payment released without a checkpoint. The mechanism is not decision 143's: a
+payment has no artifact at `verify` for a refusal at the verdict write to be read against, so the check is a read
+the gate makes at each evaluation. It stays a fixed pair and not an `action_policy` value: one agent never
+verifies a payment it prepares or takes.
 
 **It is evaluated at the two moments the gate is always evaluated.** At the first, when the `verify` verdict has
-recorded the figures and `consent` opens, the gate reads the five conditions; where all hold it writes no
-checkpoint, and the gate's reading of each condition, with what it read and from where, is recorded on the
-action so that an unattended payment is findable afterwards. `consent` then closes on that reading and not on a
-resolution (`workflows.md#payment`). At the second, the take, the gate reads all five again from the record as
-it then stands, the parameters must equal those `verify` signed (decision 27, at the tolerance of decision 28),
-the policy must still resolve the class as it did, and no confirmation may exist for the action's `dedup_key`. A
-difference on any is never a stale release re-used: a checkpoint is written then, reason `gate_hold`, and the
-step returns as decision 28 returns it
+recorded the figures and `consent` opens, the gate reads the five conditions and the bound on releases; where all
+hold it writes no checkpoint. At the second, the take, the gate reads all of them again from the record as it then
+stands, and reads the destination once as above. At each moment the engine, and not a step owner, writes the gate's
+reading of each condition, with what it read and from where. The reading is not a stored decision and not a field
+of the action: it is an observation that names, by `REFERS_TO`, the records it read (the action, the
+`action_policy` and the write that permitted the cap, the profile, the reference checkpoint, the `verify`
+verdict), reproducible as of its time along ingestion time. At the first moment the `consent` verdict names that
+reading and closes `consent` as a record and never as a permit (`workflows.md#payment`). At the take the reading
+is written before the adapter submits, and the adapter submits only after it exists. An unattended payment is
+found afterwards as a `payment` action that has `taken_at` and no `CHECKPOINTS` edge. At the take the parameters
+must equal those `verify` signed (decision 27, at the tolerance of decision 28), though condition 2 is exact, so a
+re-quote inside the tolerance still writes a checkpoint. A difference on any of the five conditions, the
+parameters, or the bound on releases is never a stale release re-used: a checkpoint is written then, reason
+`gate_hold`, and the step returns as decision 28 returns it
 (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
+That checkpoint is the action's one open checkpoint, and a later first evaluation finds it and writes no second.
+A confirmation on the action's `dedup_key` is an action already taken, confirmed by reading the rail, and writes
+no checkpoint.
 
 **What the release does not change.** `verify` still happens first, by a principal other than the payer. The
 adapter still takes the action on a permit and confirms by reading the rail at the declared terminal state, a
@@ -884,14 +993,16 @@ five conditions, and it is not lowered for any payment that fails one.
 
 **Cost accepted.** An unattended payment rests on a verifier and on the record. Were both wrong at once, a
 payment goes out up to the cap and cannot be recalled (`#recovery-what-undoes-a-payment`); the cap is the bound
-on that loss, which is why an absent cap holds nothing. Each payee costs the operator one resolved checkpoint
-before any of this applies, and a payee whose amount varies from period to period never meets condition 2 and
-keeps its checkpoint, by design.
+on that payment and the bound on releases limits how many go out between operator-resolved checkpoints, which is
+why an absent cap holds nothing. Each payee costs the operator one resolved checkpoint before any of this
+applies (a payee whose last checkpoint pre-dates this change needs one more, since it carries no destination), a payee with no schedule needs another after each release, and a payee whose amount varies from period
+to period never meets condition 2 and keeps its checkpoint, by design. Telling the payer from the verifier by the
+agent means two agents of one operator can fill the pair, a weaker separation on paper than the counting rule
+gives a payment that waits on a checkpoint.
 
 **What would reopen it.** A payment released with every condition holding that the operator would have refused.
 That would argue for another condition, not for a looser one, and the shape would be another `action_policy`
-value read the same way: a bound over a period, an expiry on a cap, or a count of releases between
-operator-resolved checkpoints.
+value read the same way: an expiry on a cap, or a count of releases other than one.
 
 ## Terminal is declared in the rail's adapter document, and the value is bound per instance
 

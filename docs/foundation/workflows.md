@@ -143,10 +143,12 @@ Each is stated here without naming a role and is argued where it is cited.
 
 1. **Separation of duties.** Where the design requires two duties to be held by distinct principals, the roles
    an implementation defines for them must resolve to distinct principals, an agent counting as the principal
-   it is bound to (decision 48), except in the fourth place below, which is checked on the agent itself
-   (decision 143). The design requires it in at least four places:
+   it is bound to (decision 48), except in two places, which are checked on the agent itself: the fourth place below, the builder and the
+   reviewer (decision 143), and the first place below where the payment is taken without a checkpoint, the payer
+   and the verifier (decision 144). The design requires it in at least four places:
    - in the payment workflow, whoever verifies and reconciles a payment is not whoever prepares and takes it
-     (`#payment`, `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`);
+     and, where the payment is taken without a checkpoint, the verifier is also a different agent from the one that
+     takes `pay` (`#payment`, `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`);
    - on every checkpoint, whoever raised it does not resolve it, except the operator resolving a checkpoint the
      operator raised, which is marked (`gates_and_workflows.md#the-checkpoint`, decision 47);
    - on every new or amended declaration, the swarm's approval is never the proposer's
@@ -692,9 +694,9 @@ profile, fails `classify` at intake.
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `prepare` | payer | yes | | the payee, amount, currency, rail, and reference are assembled from the profile and the obligation and stored on the task; the profile's constraints (no memo, attendance gate, cadence) are applied |
-| 2 | `verify` | verifier | yes | on fail: `prepare` | payee and amount match the profile and the obligation; the verifier is a principal disjoint from the payer (`authority_model.md#structural-checks-quorum-and-separation-of-duties`), and where the payment may go without a checkpoint, a different agent from the one that takes `pay` (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, decision 144) |
-| 3 | `consent` | operator-facing agent | yes | on fail: `prepare` | the checkpoint on the `payment` action is resolved by the operator; it carries the payee, amount, currency, period, rail, and destination exactly as the `verify` verdict recorded them, and refers to that verdict (`payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`, decision 27); or, where the gate read the five conditions of decision 144 as holding, no checkpoint is written and the step closes on the gate's reading, recorded on the action |
+| 1 | `prepare` | payer | yes | | the payee, amount, currency, rail, destination, and reference are assembled from the profile and the obligation and stored on the task; the profile's constraints (no memo, attendance gate, cadence) are applied |
+| 2 | `verify` | verifier | yes | on fail: `prepare` | payee, amount, and destination match the profile and the obligation, and the destination is compared with the reference checkpoint's; the verifier is a principal disjoint from the payer (`authority_model.md#structural-checks-quorum-and-separation-of-duties`), and where the payment may go without a checkpoint, an agent that holds the lease of none of the payer-slot steps (`prepare`, `pay`), is not the one that takes `pay`, and signs after the last write of any figure it covers (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, decision 144) |
+| 3 | `consent` | operator-facing agent | yes | on fail: `prepare` | the checkpoint on the `payment` action is resolved by the operator; it carries the payee, amount, currency, period, rail, and destination exactly as the `verify` verdict recorded them, and refers to that verdict (`payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`, decision 27); or, where the gate read the five conditions of decision 144 as holding, no checkpoint is written and the step closes on a verdict that names what the gate read, as a record and never as a permit |
 | 4 | `pay` | payer | yes | | the `payment` action taken through the action gate, keyed on its dedup key so a re-claim never pays twice (`work_model.md#at-least-once-implies-effect-dedup`) |
 | 5 | `reconcile` | verifier | yes | on fail: `pay` | the transfer is read back from the rail at its terminal status, matched to the obligation, and recorded as a `transaction` entity; the verdict closes the batch |
 
@@ -709,7 +711,7 @@ one. The consent step is named `consent`, not `checkpoint`: a checkpoint is the 
 written when `consent` opens and the gate holds the action; `pay` asks the gate again at the take, on the
 standing resolution, the figures against the tolerance (decision 28), the policy as read then, and the
 key (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
-Where the five conditions of decision 144 hold, the gate holds nothing at `consent` and reads all five again at
+Where the five conditions of decision 144 hold and the payee has not already been released in the period, the gate holds nothing at `consent` and reads all of them again at
 the take, and a difference at the take writes a checkpoint then (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
 
 **Stages:** preparation (`prepare`, `verify`); consent (`consent`); settlement (`pay`, `reconcile`).
