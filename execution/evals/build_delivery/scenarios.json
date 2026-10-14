@@ -62,7 +62,19 @@
         "commit_on_remote": false,
         "prs": 0,
         "result_ok": false,
-        "claim_released": true
+        "claim_released": true,
+        "operator_text_contains": [
+          "NOT started",
+          "origin that is not",
+          "Before retrying",
+          "https://github.com/eval-owner/eval-repo.git",
+          "ATELES_BUILD_CLONES"
+        ],
+        "operator_text_excludes": [
+          "spec may be incomplete",
+          "approve the build",
+          "opened NO PR"
+        ]
       }
     },
     {
@@ -76,7 +88,14 @@
         "commit_on_remote": false,
         "prs": 0,
         "result_ok": false,
-        "result_error_contains": "origin that is not"
+        "result_error_contains": "origin that is not",
+        "operator_text_contains": [
+          "build not started",
+          "origin that is not",
+          "Before retrying",
+          "https://github.com/eval-owner/eval-repo.git",
+          "ATELES_BUILD_CLONES"
+        ]
       }
     },
     {
@@ -88,7 +107,19 @@
         "launches": 0,
         "worktree_dirs": 0,
         "prs": 0,
-        "result_ok": false
+        "result_ok": false,
+        "operator_text_contains": [
+          "NOT started",
+          "no local clone",
+          "Before retrying",
+          "clone https://github.com/eval-owner/eval-repo.git",
+          "ATELES_BUILD_CLONES"
+        ],
+        "operator_text_excludes": [
+          "spec may be incomplete",
+          "approve the build",
+          "opened NO PR"
+        ]
       }
     },
     {
@@ -101,14 +132,23 @@
         "worktree_dirs": 0,
         "prs": 0,
         "result_ok": false,
-        "result_error_contains": "no local clone"
+        "result_error_contains": "no local clone",
+        "operator_text_contains": [
+          "build not started",
+          "no local clone",
+          "Before retrying",
+          "clone https://github.com/eval-owner/eval-repo.git",
+          "ATELES_BUILD_CLONES"
+        ]
       }
     },
     {
       "id": "non_delivery_task_runs_unchanged",
       "why": "a local-edit task gets no worktree, no git roots and no network: the sandbox is widened for a dispatch that delivers and for nothing else",
       "path": "task",
-      "task": {"action_type": "local_edit"},
+      "task": {
+        "action_type": "local_edit"
+      },
       "expect": {
         "launches": 1,
         "child_in_daemon_cwd": true,
@@ -124,8 +164,14 @@
       "id": "tracking_task_mid_build_adds_no_launch_and_no_status_write",
       "why": "the task the build files for itself carries the run marker the child was given; it is not dispatched, and nothing is launched or written for it",
       "path": "mid_build",
-      "child": {"hold": true},
-      "events": [{"marker": true}],
+      "child": {
+        "hold": true
+      },
+      "events": [
+        {
+          "marker": true
+        }
+      ],
       "expect": {
         "run_id_in_prompt": true,
         "mid_launches": 1,
@@ -137,28 +183,59 @@
     },
     {
       "id": "independent_task_mid_build_is_deferred_then_run",
-      "why": "a task about the same issue that is NOT the build's own waits, and is re-dispatched once when the build's claim is released; redelivery of its event changes nothing",
+      "why": "a task about the same issue that is NOT the build's own is marked deferred ON THE TASK (with a readable reason) before it is acknowledged, then re-dispatched once when the build's claim is released; redelivery of its event changes nothing",
       "path": "mid_build",
-      "child": {"hold": true},
-      "events": [{"deliveries": 3}],
+      "child": {
+        "hold": true
+      },
+      "events": [
+        {
+          "deliveries": 3
+        }
+      ],
       "expect": {
         "mid_launches": 1,
-        "mid_status_writes": 0,
+        "mid_status_writes": 1,
         "mid_spawns": 0,
-        "final_spawns": [["ent_eval_mid_0000", "build_released"]],
-        "claim_released": true
+        "final_spawns": [
+          [
+            "ent_eval_mid_0000",
+            "build_released"
+          ]
+        ],
+        "claim_released": true,
+        "mid_deferred_on_the_task": [
+          "ent_eval_mid_0000"
+        ],
+        "mid_status_values": [
+          "pending"
+        ]
       }
     },
     {
       "id": "control_task_for_a_different_issue_is_not_held",
       "why": "control: a task about another issue is dispatched immediately",
       "path": "mid_build",
-      "child": {"hold": true},
-      "events": [{"task": {"issue_number": 1449, "description": "Implement the spec in eval-owner/eval-repo#1449."}}],
+      "child": {
+        "hold": true
+      },
+      "events": [
+        {
+          "task": {
+            "issue_number": 1449,
+            "description": "Implement the spec in eval-owner/eval-repo#1449."
+          }
+        }
+      ],
       "expect": {
         "mid_launches": 1,
         "mid_spawns": 1,
-        "final_spawns": [["ent_eval_mid_0000", "created"]],
+        "final_spawns": [
+          [
+            "ent_eval_mid_0000",
+            "created"
+          ]
+        ],
         "claim_released": true
       }
     },
@@ -166,12 +243,23 @@
       "id": "control_gate_override_is_not_held",
       "why": "control: an operator-approved release is dispatched even while a build runs",
       "path": "mid_build",
-      "child": {"hold": true},
-      "events": [{"override": true}],
+      "child": {
+        "hold": true
+      },
+      "events": [
+        {
+          "override": true
+        }
+      ],
       "expect": {
         "mid_launches": 1,
         "mid_spawns": 1,
-        "final_spawns": [["ent_eval_mid_0000", "approved"]],
+        "final_spawns": [
+          [
+            "ent_eval_mid_0000",
+            "approved"
+          ]
+        ],
         "claim_released": true
       }
     },
@@ -179,14 +267,119 @@
       "id": "claim_is_released_and_deferred_task_runs_after_a_failed_build",
       "why": "control: the build crashes; its claim is still released and the deferred task still runs",
       "path": "mid_build",
-      "child": {"hold": true, "crash": true},
-      "events": [{}],
+      "child": {
+        "hold": true,
+        "crash": true
+      },
+      "events": [
+        {}
+      ],
       "expect": {
         "mid_launches": 1,
         "mid_spawns": 0,
         "result_ok": false,
-        "final_spawns": [["ent_eval_mid_0000", "build_released"]],
-        "claim_released": true
+        "final_spawns": [
+          [
+            "ent_eval_mid_0000",
+            "build_released"
+          ]
+        ],
+        "claim_released": true,
+        "mid_deferred_on_the_task": [
+          "ent_eval_mid_0000"
+        ]
+      }
+    },
+    {
+      "id": "restart_redispatches_a_deferred_task_through_the_gates",
+      "why": "a task deferred behind a build survives losing ALL process state: after a restart with no creation event, the startup sweep finds it on the task itself and dispatches it through the normal gates",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "expect": {
+        "marked_before_restart": [
+          "ent_eval_rst_0000"
+        ],
+        "spawns_after_wipe": 0,
+        "final_spawns": [
+          [
+            "ent_eval_rst_0000",
+            "build_released"
+          ]
+        ],
+        "restart_statuses": {
+          "ent_eval_rst_0000": [
+            "routed",
+            "executing"
+          ]
+        }
+      }
+    },
+    {
+      "id": "restart_does_not_run_a_deferred_task_the_build_completed",
+      "why": "control: the build finished the deferred task while Apis was down; it is not run again",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "while_down": {
+        "ent_eval_rst_0000": "complete"
+      },
+      "expect": {
+        "marked_before_restart": [
+          "ent_eval_rst_0000"
+        ],
+        "final_spawns": [],
+        "restart_status_not": {
+          "ent_eval_rst_0000": [
+            "routed",
+            "executing"
+          ]
+        }
+      }
+    },
+    {
+      "id": "restart_duplicate_delivery_does_not_double_dispatch",
+      "why": "control: two startup sweeps at once and an SSE redelivery of the task's creation dispatch it exactly once",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "startup_sweeps": 2,
+      "redelivered_creates": 1,
+      "expect": {
+        "marked_before_restart": [
+          "ent_eval_rst_0000"
+        ],
+        "final_spawns": [
+          [
+            "ent_eval_rst_0000",
+            "build_released"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "restart_surfaces_a_deferred_task_it_cannot_re_read",
+      "why": "a deferred task the sweep cannot read is not skipped silently: the operator is told the task and the next action, and nothing is dispatched",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "while_down": {
+        "ent_eval_rst_0000": "unreadable"
+      },
+      "expect": {
+        "marked_before_restart": [
+          "ent_eval_rst_0000"
+        ],
+        "final_spawns": [],
+        "notification_contains": [
+          "ent_eval_rst_0000",
+          "could not be re-read",
+          "re-dispatch it by hand"
+        ]
       }
     }
   ]

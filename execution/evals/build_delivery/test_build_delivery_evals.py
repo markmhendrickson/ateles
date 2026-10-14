@@ -58,6 +58,11 @@ def test_the_eval_covers_every_required_behaviour():
         "control_task_for_a_different_issue_is_not_held",
         "control_gate_override_is_not_held",
         "claim_is_released_and_deferred_task_runs_after_a_failed_build",
+        # a deferral survives a restart, with controls
+        "restart_redispatches_a_deferred_task_through_the_gates",
+        "restart_does_not_run_a_deferred_task_the_build_completed",
+        "restart_duplicate_delivery_does_not_double_dispatch",
+        "restart_surfaces_a_deferred_task_it_cannot_re_read",
     }
     assert required <= set(IDS)
 
@@ -107,3 +112,23 @@ def test_a_wrong_clone_gets_no_fetch_worktree_or_child(tmp_path):
     world = obs["world"]
     assert obs["launches"] == [] and obs["worktree_dirs"] == []
     assert harness._git(world.clone, "worktree", "list").count("\n") == 0
+
+
+# The restart guarantee has two halves, and each must be load-bearing: the record
+# on the task, and the sweep that reads it.
+RESTART = [i for i in IDS if i.startswith("restart_redispatches")]
+
+
+@pytest.mark.parametrize("mutation", ["no_durable_record", "no_startup_sweep"])
+def test_the_restart_scenario_goes_red_without_either_half(mutation, tmp_path):
+    scenario = BY_ID["restart_redispatches_a_deferred_task_through_the_gates"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation=mutation)
+    problems = harness.check(scenario, obs)
+    assert problems, f"{mutation} did not break the restart scenario"
+    assert obs["spawns"] == [], "the task was dispatched without its half of the mechanism"
+
+
+def test_the_durable_record_is_what_the_mid_build_scenario_checks(tmp_path):
+    scenario = BY_ID["independent_task_mid_build_is_deferred_then_run"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="no_durable_record")
+    assert any("marked deferred on the task" in p for p in harness.check(scenario, obs))

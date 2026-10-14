@@ -272,6 +272,27 @@ def _correct(entity_id: str, field: str, value, idempotency_key: str) -> bool:
         return False
 
 
+def set_task_field(
+    task_entity_id: str,
+    field: str,
+    value,
+    *,
+    handler: str,
+    key_suffix: str = "",
+) -> bool:
+    """Write one task field to Neotoma; True only if the write succeeded.
+
+    For companions of a lifecycle write that `set_task_status` has no parameter
+    for. Same best-effort contract as `set_task_status`: never raises, and a False
+    return is the caller's to act on.
+    """
+    suffix = f"-{key_suffix}" if key_suffix else ""
+    return _correct(
+        task_entity_id, field, value,
+        idempotency_key=f"taskfield-{handler}-{task_entity_id}-{field}{suffix}",
+    )
+
+
 def set_task_status(
     task_entity_id: str,
     status: "TaskStatus | str",

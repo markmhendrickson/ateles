@@ -131,3 +131,4 @@ def _isolate_build_worktrees(monkeypatch, tmp_path):
     _fake_prepare.real = build_delivery.prepare_build_worktree
     monkeypatch.setattr(build_delivery, "prepare_build_worktree", _fake_prepare)
     monkeypatch.setattr(build_delivery, "_inflight", {})
+    monkeypatch.setattr(build_delivery, "_release_hook", None)

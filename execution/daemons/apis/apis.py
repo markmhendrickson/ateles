@@ -273,6 +273,7 @@ from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     complete_task_with_result,
     is_terminal,
     normalize as normalize_status,
+    set_task_field,
     set_task_status,
 )
 from lib.daemon_runtime.artifact_contract import (  # noqa: E402
@@ -808,7 +809,10 @@ async def _spawn_harness_skill(
                     repository, f"task-{entity_id[-8:]}"
                 )
             except build_delivery.BuildWorktreeError as exc:
-                msg = f"delivery worktree could not be provisioned: {exc}"
+                # Says what the operator needs: nothing ran, and what to fix first.
+                msg = f"build not started: {exc.reason}." + (
+                    f" Before retrying: {exc.fix}" if exc.fix else ""
+                )
                 log.error(f"[{DAEMON_NAME}] {skill} task {entity_id} not started — {msg}")
                 return SkillResult(skill, False, None, "", "", error=msg)
             delivery = {
@@ -879,38 +883,236 @@ def _scoring_summary(
     return ""
 
 
-def _deferred_retry(entity_id: str, snapshot: dict, notifier: Notifier):
-    """The retry that re-dispatches a task deferred behind an in-flight build.
+# ── Deferral behind an in-flight build: durable record + recovery sweep ──────
+#
+# A cicada task about an issue that is being built right now is independent work:
+# it waits, and runs when the build ends. `task.created` arrives once per entity
+# per process, so the wait cannot live in memory — a restart would drop it with
+# no trace. The deferral is therefore written on the task itself (existing task
+# fields, see build_delivery) and a bounded sweep, run at startup and whenever a
+# build's claim is released, re-dispatches exactly the tasks this mechanism marked
+# whose build is no longer running. General reconciliation stays off and the
+# historical backlog is never read for dispatch.
 
-    Re-reads the task first: the build it waited on may have finished it, and a
-    finished task is not dispatchable. A task that cannot be read is NOT
-    dispatched on a stale copy — the operator is told, since this retry is the
-    only thing that will ever look at it again.
-    """
+_DEFERRED_SWEEP_LIMIT = 50
+_recovery_lock = asyncio.Lock()
+_recovering: set[str] = set()
+# Deferrals whose durable record could not be written: still retried in-process
+# on release, and the operator has been told they will not survive a restart.
+_unrecorded_deferrals: dict[str, tuple[dict, tuple[str, int]]] = {}
+_recovery_notifier: "Notifier | None" = None
 
-    async def _retry() -> None:
-        fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
-        if fresh is None:
-            log.warning(
-                f"[{DAEMON_NAME}] deferred task {entity_id!r} could not be re-read "
-                "after its build ended — not dispatching on a stale copy"
+
+async def _record_deferral(
+    entity_id: str, snapshot: dict, claim: "build_delivery.BuildClaim", notifier: Notifier
+) -> bool:
+    """Mark the task deferred behind ``claim``; False (and loud) if it can't be."""
+
+    def _write() -> bool:
+        suffix = f"deferred-{claim.run_id}"
+        return all(
+            (
+                set_task_field(
+                    entity_id, "disposition", build_delivery.DEFERRED_DISPOSITION,
+                    handler=DAEMON_NAME, key_suffix=suffix,
+                ),
+                set_task_field(
+                    entity_id, "dispatch_context", build_delivery.deferral_context(claim),
+                    handler=DAEMON_NAME, key_suffix=suffix,
+                ),
+                set_task_status(
+                    entity_id,
+                    TaskStatus.PENDING,
+                    handler=DAEMON_NAME,
+                    reason=build_delivery.deferral_reason(claim),
+                    key_suffix=suffix,
+                ),
             )
+        )
+
+    recorded = await asyncio.to_thread(_write)
+    if not recorded:
+        key = (claim.repository, claim.number)
+        _unrecorded_deferrals[entity_id] = (snapshot, key)
+        log.error(
+            f"[{DAEMON_NAME}] could not record the deferral of task {entity_id} on "
+            "the task — it will be retried in this process only"
+        )
+        notifier.send(
+            f"Task {entity_id} waits for the build of {claim.repository}#"
+            f"{claim.number}, but Apis could not record that on the task. It will "
+            "re-run when the build ends unless Apis restarts first; if it does, "
+            "re-dispatch the task by hand.",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+    return recorded
+
+
+def install_build_release_hook(notifier: Notifier) -> None:
+    """Sweep for deferred tasks whenever a build's claim is released."""
+    global _recovery_notifier
+    _recovery_notifier = notifier
+
+    def _released(key: tuple[str, int]) -> None:
+        schedule_deferred_recovery()
+
+    build_delivery.set_release_hook(_released)
+
+
+async def start_deferred_recovery(notifier: Notifier) -> dict:
+    """What Apis does at startup for deferred tasks: arm the release hook, then sweep.
+
+    The hook goes in first so a build that ends while the sweep runs is not missed.
+    """
+    install_build_release_hook(notifier)
+    return await recover_deferred_tasks(notifier)
+
+
+def schedule_deferred_recovery() -> None:
+    """Start a recovery sweep in the background (no-op without a loop/notifier)."""
+    if _recovery_notifier is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        log.error(
+            f"[{DAEMON_NAME}] build released outside an event loop — deferred "
+            "tasks will be picked up at the next startup sweep"
+        )
+        return
+    task = loop.create_task(
+        recover_deferred_tasks(_recovery_notifier), name="apis-deferred-recovery"
+    )
+    _background_dispatch_tasks.add(task)
+    task.add_done_callback(_background_dispatch_done)
+
+
+async def recover_deferred_tasks(notifier: Notifier) -> dict:
+    """Re-dispatch the tasks deferred behind a build that is no longer running.
+
+    Selects ONLY tasks this mechanism marked (`pending` + the deferral
+    disposition), at most ``_DEFERRED_SWEEP_LIMIT`` per sweep. Each goes through
+    ``dispatch_task``, so the readiness and execution gates apply as for any task.
+    A task that cannot be read or resolved is never skipped silently: the
+    operator is notified with the task and the next action. Never raises.
+    """
+    counts = {"found": 0, "redispatched": 0, "still_building": 0, "no_longer_deferred": 0, "surfaced": 0}
+    async with _recovery_lock:
+        try:
+            rows = await asyncio.to_thread(
+                query_all_entities,
+                "task",
+                snapshot_filters={
+                    "status": {"op": "eq", "value": TaskStatus.PENDING.value},
+                    "disposition": {"op": "eq", "value": build_delivery.DEFERRED_DISPOSITION},
+                },
+                limit=_DEFERRED_SWEEP_LIMIT,
+            )
+        except Exception as exc:  # noqa: BLE001 — never raise out of the sweep
+            log.exception(f"[{DAEMON_NAME}] deferred-task query crashed")
+            rows = None
+            reason = f"{type(exc).__name__}: {exc}"
+        else:
+            reason = "the task query failed"
+        if rows is None:
+            counts["surfaced"] += 1
             notifier.send(
-                f"Deferred task {entity_id} could not be re-read after the build "
-                "it waited on ended; it was not dispatched.",
+                "Apis could not list the tasks deferred behind a build "
+                f"({reason}). Deferred tasks stay pending and are not lost; open "
+                "the task list, find tasks whose reason starts 'Deferred:', and "
+                "re-dispatch them once the build has ended.",
                 priority=Priority.WARN,
                 handler=DAEMON_NAME,
             )
-            return
+            rows = []
+        wanted: dict[str, None] = {
+            str(r.get("entity_id") or ""): None for r in rows if r.get("entity_id")
+        }
+        for entity_id in _unrecorded_deferrals:
+            wanted.setdefault(entity_id, None)
+        counts["found"] = len(wanted)
+        if len(rows) >= _DEFERRED_SWEEP_LIMIT:
+            notifier.send(
+                f"{_DEFERRED_SWEEP_LIMIT}+ tasks are deferred behind builds; this "
+                "sweep handled the first batch and the rest follow at the next "
+                "build release or restart.",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+
+        for entity_id in wanted:
+            if entity_id in _recovering:
+                continue
+            fallback = _unrecorded_deferrals.get(entity_id)
+            fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+            if fresh is None:
+                counts["surfaced"] += 1
+                notifier.send(
+                    f"Deferred task {entity_id} could not be re-read, so it was "
+                    "not re-dispatched. Open it in Neotoma and re-dispatch it by "
+                    "hand once its build has ended.",
+                    priority=Priority.WARN,
+                    handler=DAEMON_NAME,
+                )
+                continue
+            snap = {**(fallback[0] if fallback else {}), **fresh}
+            marked = snap.get("disposition") == build_delivery.DEFERRED_DISPOSITION
+            if normalize_status(snap.get("status")) != TaskStatus.PENDING.value or (
+                not marked and not fallback
+            ):
+                counts["no_longer_deferred"] += 1
+                _unrecorded_deferrals.pop(entity_id, None)
+                log.info(
+                    f"[{DAEMON_NAME}] deferred task {entity_id!r} is no longer "
+                    f"deferred (status={snap.get('status')!r}) — not re-dispatching"
+                )
+                continue
+            if fallback and not marked:
+                waiting_for = fallback[1]
+            else:
+                context = build_delivery.parse_deferral_context(
+                    snap.get("dispatch_context")
+                )
+                waiting_for = (context[0], context[1]) if context else None
+            if waiting_for is None:
+                counts["surfaced"] += 1
+                notifier.send(
+                    f"Deferred task {entity_id} does not say which build it waits "
+                    "for, so it was not re-dispatched. Check that no build of its "
+                    "issue is running, then re-dispatch it by hand.",
+                    priority=Priority.WARN,
+                    handler=DAEMON_NAME,
+                )
+                continue
+            if build_delivery.active_build(*waiting_for):
+                counts["still_building"] += 1
+                continue
+            _unrecorded_deferrals.pop(entity_id, None)
+            _recovering.add(entity_id)
+            counts["redispatched"] += 1
+            task = asyncio.get_running_loop().create_task(
+                _redispatch_deferred(entity_id, snap, notifier),
+                name=f"apis-deferred-{entity_id}",
+            )
+            _background_dispatch_tasks.add(task)
+            task.add_done_callback(_background_dispatch_done)
+    if counts["found"]:
+        log.info(f"[{DAEMON_NAME}] deferred-task recovery: {counts}")
+    return counts
+
+
+async def _redispatch_deferred(entity_id: str, snapshot: dict, notifier: Notifier) -> None:
+    try:
         await dispatch_task(
             entity_id,
-            {**snapshot, **fresh},
+            snapshot,
             trigger="build_released",
             notifier=notifier,
             snapshot_hydrated=True,
         )
-
-    return _retry
+    finally:
+        _recovering.discard(entity_id)
 
 
 async def dispatch_task(
@@ -992,6 +1194,22 @@ async def dispatch_task(
         log.info(
             f"[{DAEMON_NAME}] task {entity_id!r} has a completed effect with "
             f"pending provenance (trigger={trigger}) — not dispatching"
+        )
+        return
+
+    # A task the deferral mechanism marked is owned by its recovery sweep: nothing
+    # else may dispatch it (an SSE redelivery, the reconciler, the watchdog), or it
+    # would run twice. Only the sweep's own re-dispatch (`build_released`) and an
+    # operator-approved release pass.
+    if (
+        trigger != "build_released"
+        and not gate_override
+        and snapshot.get("disposition") == build_delivery.DEFERRED_DISPOSITION
+        and normalize_status(current_status) == TaskStatus.PENDING.value
+    ):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is deferred behind a build and "
+            f"owned by the recovery sweep — not dispatching it here (trigger={trigger})"
         )
         return
 
@@ -1155,14 +1373,19 @@ async def dispatch_task(
             return
         key = build_delivery.issue_key(snapshot, _dispatch_repo_from_snapshot(snapshot))
         holder = build_delivery.active_build(*key) if key else None
-        if holder and build_delivery.defer_until_released(
-            key, _deferred_retry(entity_id, snapshot, notifier)
-        ):
+        if holder:
+            # Recorded ON THE TASK before it is acknowledged: nothing in memory
+            # carries this deferral, so a restart cannot strand it.
+            await _record_deferral(entity_id, snapshot, holder, notifier)
             log.info(
                 f"[{DAEMON_NAME}] task {entity_id!r} is about {key[0]}#{key[1]}, "
-                f"which {holder.holder!r} is building — deferring it until that "
+                f"which {holder.holder!r} is building — deferred until that "
                 f"build ends (trigger={trigger})"
             )
+            if build_delivery.active_build(*key) is None:
+                # The build ended while the deferral was being recorded, and its
+                # release sweep may already have run.
+                schedule_deferred_recovery()
             return
 
     job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
@@ -3372,6 +3595,21 @@ async def main() -> None:
     async def reconcile_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
         await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
 
+    # 6c. Deferred-task recovery (ateles#1448): tasks deferred behind a running
+    #     build are marked on the task itself. Run the sweep for them now — a
+    #     restart is exactly when no in-process state survives — and again on
+    #     every build release. ON by default and narrow: it selects only tasks
+    #     the deferral mechanism marked, never the general backlog (the
+    #     reconciler above stays opt-in). Fire-and-forget, never blocks boot.
+    async def deferred_recovery_sweep() -> None:
+        try:
+            await start_deferred_recovery(notifier)
+        except Exception as exc:  # noqa: BLE001 — never let recovery kill startup
+            log.error(
+                f"[{DAEMON_NAME}] deferred-task recovery sweep failed: {exc}",
+                exc_info=True,
+            )
+
     # 7. Issue-pipeline resume sweep: the task watchdog above resumes `task`
     #    work left mid-flight by a restart, but the GitHub issue pipeline
     #    creates no task entity, so it was invisible to that sweeper — a
@@ -3572,6 +3810,7 @@ async def main() -> None:
         github_gateway.serve(gateway_app, GITHUB_WEBHOOK_PORT),
         watchdog.run(notifier, watchdog_dispatch),
         reconciler.run(reconcile_dispatch),
+        deferred_recovery_sweep(),
         resume_sweep(),
         clear_closed_issue_markers_sweep(),
         deferred_review_sweep(),

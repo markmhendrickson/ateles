@@ -57,7 +57,9 @@ from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
 from lib.daemon_runtime.sse_client import NeotomaEvent  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
-MUTATIONS = ("none", "no_grants", "no_network", "no_git_roots")
+MUTATIONS = (
+    "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep"
+)
 
 REPO = "eval-owner/eval-repo"
 ISSUE = 1448
@@ -324,6 +326,44 @@ class _Notifier:
         pass
 
 
+class _TaskStore:
+    """The task rows as Neotoma holds them: they outlive any process state."""
+
+    def __init__(self, obs: dict):
+        self.rows: dict[str, dict] = {}
+        self.obs = obs
+        self.unreadable: set[str] = set()
+
+    def put(self, entity_id: str, snapshot: dict) -> None:
+        self.rows[entity_id] = dict(snapshot)
+
+    def field(self, entity_id, field, value, **kw) -> bool:
+        self.rows.setdefault(entity_id, {})[field] = value
+        return True
+
+    def status(self, entity_id, status, **kw) -> bool:
+        value = getattr(status, "value", status)
+        row = self.rows.setdefault(entity_id, {})
+        row["status"] = value
+        if kw.get("reason") is not None:
+            row["blocked_reason"] = kw["reason"]
+        self.obs["statuses"].append((entity_id, value))
+        return True
+
+    def query(self, entity_type, *, snapshot_filters, limit=None, **kw):
+        found = [
+            {"entity_id": eid, "snapshot": dict(row)}
+            for eid, row in self.rows.items()
+            if all(row.get(k) == f["value"] for k, f in snapshot_filters.items())
+        ]
+        return found[:limit] if limit else found
+
+    def read(self, entity_id):
+        if entity_id in self.unreadable or entity_id not in self.rows:
+            return None
+        return dict(self.rows[entity_id])
+
+
 def _trigger() -> SwarmTrigger:
     return SwarmTrigger(
         kind="issue_opened",
@@ -384,11 +424,13 @@ async def _wait_for(path: Path, timeout: float = 30.0) -> None:
 
 
 async def _settle() -> None:
+    """Let any recovery sweep and the dispatches it started run to completion."""
     for _ in range(5):
         await asyncio.sleep(0)
-    background = list(getattr(build_delivery, "_background", ()))
-    if background:
-        await asyncio.gather(*background)
+    pending = list(apis._background_dispatch_tasks)
+    while pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        pending = [t for t in apis._background_dispatch_tasks if not t.done()]
 
 
 def run_scenario(scenario: dict, tmp_path: Path, *, mutation: str = "none") -> dict:
@@ -424,6 +466,15 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     mp.setenv("APIS_USAGE_PROBE", "off")
     mp.setenv("APIS_TIER_LEDGER_FILE", str(root / "tier-ledger.jsonl"))
     mp.setenv("NEOTOMA_BASE_URL", "http://eval.invalid")
+    # Production allows no rewrite of a clone's github.com remote. The eval's only
+    # one is the local bare repository that stands in for GitHub; it is named here
+    # in code (never in the environment) for this process only.
+    mp.setattr(
+        build_delivery,
+        "TEST_ONLY_LOCAL_TRANSPORTS",
+        frozenset({str(world.bare)}),
+        raising=False,
+    )
     mp.setattr(skill_runner, "CODEX_BIN", str(world.codex))
     # The SKILL.md it loads is this checkout's, not whatever ~/repos/ateles holds
     # on the machine running the eval.
@@ -449,11 +500,21 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
         "none": (),
         "no_grants": ("cwd", "include_github_contract", "github_token"),
         "no_network": ("include_github_contract", "github_token"),
-        "no_git_roots": (),
-    }[mutation]
+    }.get(mutation, ())
     wrapped = _strip_grants(real, drop)
     mp.setattr(apis, "run_skill", wrapped)
     mp.setattr(swarm_dispatch, "run_skill", wrapped)
+    if mutation == "no_durable_record":
+        async def _forget(*a, **k):
+            return True
+
+        mp.setattr(apis, "_record_deferral", _forget, raising=False)
+    if mutation == "no_startup_sweep":
+        async def _hook_only(notifier):
+            apis.install_build_release_hook(notifier)
+            return {}
+
+        mp.setattr(apis, "start_deferred_recovery", _hook_only, raising=False)
     if mutation == "no_git_roots":
         mp.setattr(skill_runner, "_git_roots_for_sandbox", lambda cwd: [])
 
@@ -469,11 +530,16 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     mp.setattr(apis, "_created_seen", {})
     mp.setattr(apis, "READINESS_GATE", False)
     mp.setattr(apis, "RUN_CONVERSATIONS", False)
-    mp.setattr(
-        apis,
-        "set_task_status",
-        lambda eid, status, **kw: obs["statuses"].append((eid, getattr(status, "value", status))) or True,
-    )
+    store = _TaskStore(obs)
+    obs["store"] = store
+    mp.setattr(apis, "set_task_status", store.status)
+    mp.setattr(apis, "set_task_field", store.field, raising=False)
+    mp.setattr(apis, "query_all_entities", store.query)
+    mp.setattr(apis, "fetch_task_snapshot", store.read)
+    mp.setattr(apis, "_recovering", set(), raising=False)
+    mp.setattr(apis, "_unrecorded_deferrals", {}, raising=False)
+    mp.setattr(apis, "_recovery_notifier", None, raising=False)
+    mp.setattr(build_delivery, "_release_hook", None, raising=False)
     mp.setattr(apis, "write_checkpoint_brief", lambda **kw: "ent_brief")
     mp.setattr(apis, "_release_lifecycle_proven", lambda *a, **k: True)
 
@@ -481,8 +547,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
         return None
 
     mp.setattr(apis, "hydrate_snapshot", _no_hydrate)
-    mp.setattr(apis, "fetch_task_snapshot", lambda _id: {"status": "pending"})
-    if scenario["path"] == "mid_build":
+    if scenario["path"] in ("mid_build", "restart"):
         # What gets dispatched for the OTHER tasks is not the subject; the child
         # the build itself launched still goes through the real run_skill.
         mp.setattr(apis, "_spawn_harness_skill", _recording_spawn(obs))
@@ -505,21 +570,97 @@ def _recording_spawn(obs: dict):
     return _spawn
 
 
+def _dispatcher(notifier):
+    return swarm_dispatch.SwarmDispatcher(
+        notifier,
+        swarm_dispatch.DispatchConfig(
+            neotoma_token="", github_token="", auto_merge=False, auto_rereview_on_push=False
+        ),
+    )
+
+
+def _spec_state() -> SpecState:
+    state = SpecState(repo=REPO, issue_number=ISSUE, title="Build the change")
+    state.sections = {"eng": "Add delivered.txt."}
+    return state
+
+
+def _wipe_process_state() -> None:
+    """Everything a restart destroys: no claim, hook, dedupe, or in-flight record."""
+    build_delivery._release_hook = None
+    build_delivery._inflight.clear()
+    build_delivery._runs.clear()
+    apis._created_seen.clear()
+    apis._recovering.clear()
+    apis._unrecorded_deferrals.clear()
+    apis._recovery_notifier = None
+    for task in list(apis._background_dispatch_tasks):
+        task.cancel()
+    apis._background_dispatch_tasks.clear()
+
+
+async def _drive_restart(scenario: dict, world: World, obs: dict, notifier) -> None:
+    """Defer a task behind a build, lose ALL process state, restart, observe.
+
+    No creation event is delivered after the restart: the only thing that can find
+    the task is what was written on it.
+    """
+    store = obs["store"]
+    apis.install_build_release_hook(notifier)
+    claim_cm = build_delivery.claim_build(REPO, ISSUE, "swarm-build-handoff")
+    claim_cm.__enter__()
+    for n, event in enumerate(scenario["events"]):
+        entity_id = f"ent_eval_rst_{n:04d}"
+        task = _task_snapshot(action_type="local_edit", **(event.get("task") or {}))
+        store.put(entity_id, task)
+        await apis.handle_event(_created(entity_id, task), notifier)
+    obs["before_restart"] = {k: dict(v) for k, v in store.rows.items()}
+    obs["spawns_before_restart"] = list(obs["spawns"])
+
+    _wipe_process_state()
+    claim_cm.__exit__(None, None, None)  # released into a process with no hook
+    await _settle()
+    obs["spawns_after_wipe"] = list(obs["spawns"])
+
+    for entity_id, change in (scenario.get("while_down") or {}).items():
+        if change == "complete":
+            store.rows[entity_id]["status"] = "done"
+        elif change == "unreadable":
+            store.unreadable.add(entity_id)
+
+    fresh = _Notifier()  # a fresh Apis context
+    obs["notifier"] = fresh
+    obs["restart_events"] = 0
+    for _ in range(scenario.get("redelivered_creates", 0)):
+        # An SSE redelivery of a creation the dead process had already handled,
+        # hydrated from the task as Neotoma now holds it.
+        entity_id = "ent_eval_rst_0000"
+        await apis.handle_event(_created(entity_id, store.read(entity_id)), fresh)
+    runs = scenario.get("startup_sweeps", 1)
+    await asyncio.gather(*[apis.start_deferred_recovery(fresh) for _ in range(runs)])
+    await _settle()
+    obs["after_restart"] = {k: dict(v) for k, v in store.rows.items()}
+
+
 async def _drive(scenario: dict, world: World, obs: dict) -> None:
     path = scenario["path"]
     notifier = _Notifier()
     obs["notifier"] = notifier
 
     if path == "handoff":
-        dispatcher = swarm_dispatch.SwarmDispatcher(
-            notifier,
-            swarm_dispatch.DispatchConfig(
-                neotoma_token="", github_token="", auto_merge=False, auto_rereview_on_push=False
-            ),
-        )
-        state = SpecState(repo=REPO, issue_number=ISSUE, title="Build the change")
-        state.sections = {"eng": "Add delivered.txt."}
-        obs["result"] = await dispatcher._open_implementation_pr(_trigger(), state)
+        dispatcher = _dispatcher(notifier)
+        state = _spec_state()
+        if scenario.get("fault"):
+            # The caller that talks to the operator, not just the launcher.
+            await dispatcher._hand_off_to_build(
+                _trigger(), state, completed=["pm", "eng"],
+                spec_action="Open the issue and approve the build.",
+                spec_ready_key="eval-spec-ready",
+            )
+            obs["result"] = None
+            obs["operator_text"] = "\n".join(notifier.sent)
+        else:
+            obs["result"] = await dispatcher._open_implementation_pr(_trigger(), state)
         return
 
     if path == "task":
@@ -527,26 +668,25 @@ async def _drive(scenario: dict, world: World, obs: dict) -> None:
         obs["result"] = await apis._spawn_harness_skill(
             "cicada", "ent_eval_task_0001", snap, "created", notifier, role="cicada"
         )
+        obs["operator_text"] = getattr(obs["result"], "error", "") or ""
         return
 
     if path == "mid_build":
-        dispatcher = swarm_dispatch.SwarmDispatcher(
-            notifier,
-            swarm_dispatch.DispatchConfig(
-                neotoma_token="", github_token="", auto_merge=False, auto_rereview_on_push=False
-            ),
-        )
-        state = SpecState(repo=REPO, issue_number=ISSUE, title="Build the change")
-        state.sections = {"eng": "Add delivered.txt."}
+        apis.install_build_release_hook(notifier)
+        dispatcher = _dispatcher(notifier)
+        state = _spec_state()
         build = asyncio.create_task(dispatcher._open_implementation_pr(_trigger(), state))
         await _wait_for(world.held_file)
         run_id = json.loads(world.held_file.read_text())["run_id"]
         obs["run_id_in_prompt"] = run_id
+        store = obs["store"]
         for n, event in enumerate(scenario["events"]):
             entity_id = f"ent_eval_mid_{n:04d}"
             task = _task_snapshot(action_type="local_edit", **(event.get("task") or {}))
             if event.get("marker"):
                 task["description"] += f"\nbuild-run: {run_id}"
+            if entity_id not in store.rows:
+                store.put(entity_id, task)
             if event.get("override"):
                 await apis.dispatch_task(
                     entity_id, task, trigger="approved", notifier=notifier,
@@ -559,10 +699,15 @@ async def _drive(scenario: dict, world: World, obs: dict) -> None:
             "launches": len(world.launches()),
             "statuses": list(obs["statuses"]),
             "spawns": list(obs["spawns"]),
+            "rows": {k: dict(v) for k, v in store.rows.items()},
         }
         world.release_file.write_text("go")
         obs["result"] = await build
         await _settle()
+        return
+
+    if path == "restart":
+        await _drive_restart(scenario, world, obs, notifier)
         return
 
     raise AssertionError(f"unknown path {path!r}")
@@ -593,6 +738,10 @@ def _result_ok(result) -> bool | None:
     if isinstance(result, str):
         return True  # the handoff returns the PR URL
     return bool(getattr(result, "ok", False))
+
+
+def mid_row(obs: dict, entity_id: str) -> dict | None:
+    return (obs.get("mid") or {}).get("rows", {}).get(entity_id)
 
 
 def check(scenario: dict, obs: dict) -> list[str]:
@@ -661,11 +810,65 @@ def check(scenario: dict, obs: dict) -> list[str]:
     if "run_id_in_prompt" in exp:
         want("child told its run marker", bool(obs.get("run_id_in_prompt")), exp["run_id_in_prompt"])
 
+    text = obs.get("operator_text", "")
+    for needle in exp.get("operator_text_contains", []):
+        if needle not in text:
+            bad.append(f"the operator is not told {needle!r}; got: {text[:300]!r}")
+    for needle in exp.get("operator_text_excludes", []):
+        if needle in text:
+            bad.append(f"the operator is wrongly told {needle!r}")
+
+    def _marked(row: dict | None) -> bool:
+        ctx = build_delivery.parse_deferral_context((row or {}).get("dispatch_context"))
+        return bool(
+            row
+            and row.get("disposition") == build_delivery.DEFERRED_DISPOSITION
+            and row.get("status") == "pending"
+            and str(row.get("blocked_reason", "")).startswith("Deferred:")
+            and ctx
+            and ctx[0] == REPO.lower()
+            and ctx[1] == ISSUE
+        )
+
+    for entity_id in exp.get("mid_deferred_on_the_task", []):
+        want(f"{entity_id} marked deferred on the task", _marked(mid_row(obs, entity_id)), True)
+    for entity_id in exp.get("marked_before_restart", []):
+        want(
+            f"{entity_id} marked deferred on the task before the restart",
+            _marked((obs.get("before_restart") or {}).get(entity_id)),
+            True,
+        )
+    if "spawns_after_wipe" in exp:
+        want("dispatches while nothing was running", len(obs.get("spawns_after_wipe", [])), exp["spawns_after_wipe"])
+    if "restart_statuses" in exp:
+        for entity_id, expected in exp["restart_statuses"].items():
+            got = [st for eid, st in obs["statuses"] if eid == entity_id]
+            for status in expected:
+                if status not in got:
+                    bad.append(f"{entity_id} never reached {status!r} (saw {got})")
+    if "restart_status_not" in exp:
+        for entity_id, statuses in exp["restart_status_not"].items():
+            got = [st for eid, st in obs["statuses"] if eid == entity_id]
+            for status in statuses:
+                if status in got:
+                    bad.append(f"{entity_id} unexpectedly reached {status!r}")
+    if "notification_contains" in exp:
+        sent = "\n".join(getattr(obs.get("notifier"), "sent", []))
+        for needle in exp["notification_contains"]:
+            if needle not in sent:
+                bad.append(f"no notification says {needle!r}; got: {sent[:300]!r}")
+
     mid = obs.get("mid") or {}
     if "mid_launches" in exp:
         want("launches while the build ran", mid.get("launches"), exp["mid_launches"])
     if "mid_status_writes" in exp:
         want("status writes while the build ran", len(mid.get("statuses", [])), exp["mid_status_writes"])
+    if "mid_status_values" in exp:
+        want(
+            "the only status written while the build ran",
+            sorted({st for _, st in mid.get("statuses", [])}),
+            sorted(exp["mid_status_values"]),
+        )
     if "mid_spawns" in exp:
         want("tasks dispatched while the build ran", len(mid.get("spawns", [])), exp["mid_spawns"])
     if "final_spawns" in exp:

@@ -103,6 +103,11 @@ def clone(tmp_path, monkeypatch) -> Path:
     # The clone says it is the real repository; only the transport is local.
     _git(work, "remote", "set-url", "origin", f"https://github.com/{REPO}.git")
     route_origin_to(work, origin)
+    # The one place a rewrite of the github.com remote is allowed: this test's
+    # own bare repository. Production's allowance is empty.
+    monkeypatch.setattr(
+        build_delivery, "TEST_ONLY_LOCAL_TRANSPORTS", frozenset({str(origin)})
+    )
     monkeypatch.setenv(build_delivery.BUILD_CLONES_ENV, f"{REPO}={work}")
     # conftest fakes worktree provisioning for every test; these use the real one.
     monkeypatch.setattr(
@@ -224,13 +229,14 @@ def test_delivery_task_with_no_worktree_fails_loudly_without_running(
     run_skill_calls, monkeypatch
 ):
     async def _no_clone(repository, label):
-        raise build_delivery.BuildWorktreeError("no local clone")
+        raise build_delivery.BuildWorktreeError("no local clone", fix="clone it first")
 
     monkeypatch.setattr(build_delivery, "prepare_build_worktree", _no_clone)
     result = _spawn(_task_snapshot())
 
     assert result.ok is False
-    assert "worktree could not be provisioned" in result.error
+    # What happened, and what to fix before retrying.
+    assert result.error == "build not started: no local clone. Before retrying: clone it first"
     assert run_skill_calls == [], "a builder ran with nowhere to deliver from"
 
 
@@ -302,17 +308,68 @@ class _RecNotifier(_Notifier):
         self.sent.append(message)
 
 
+class _TaskStore:
+    """A stand-in for the task rows in Neotoma: durable across 'restarts'."""
+
+    def __init__(self):
+        self.rows: dict[str, dict] = {}
+        self.fail_writes = False
+        self.fail_reads: set[str] = set()
+        self.fail_query = False
+
+    def put(self, entity_id: str, snapshot: dict) -> None:
+        self.rows[entity_id] = dict(snapshot)
+
+    def field(self, entity_id, field, value, **kw) -> bool:
+        if self.fail_writes:
+            return False
+        self.rows.setdefault(entity_id, {})[field] = value
+        return True
+
+    def status(self, entity_id, status, **kw) -> bool:
+        if self.fail_writes:
+            return False
+        row = self.rows.setdefault(entity_id, {})
+        row["status"] = getattr(status, "value", status)
+        if kw.get("reason") is not None:
+            row["blocked_reason"] = kw["reason"]
+        return True
+
+    def query(self, entity_type, *, snapshot_filters, limit=None, **kw):
+        if self.fail_query:
+            return None
+        out = []
+        for eid, row in self.rows.items():
+            if all(row.get(k) == f["value"] for k, f in snapshot_filters.items()):
+                out.append({"entity_id": eid, "snapshot": dict(row)})
+        return out[:limit] if limit else out
+
+    def read(self, entity_id):
+        if entity_id in self.fail_reads:
+            return None
+        return dict(self.rows[entity_id]) if entity_id in self.rows else None
+
+
 @pytest.fixture
 def dispatch_env(monkeypatch, tmp_path):
     monkeypatch.setattr(apis, "_unroutable", UnroutableLedger(path=tmp_path / "l.json"))
     monkeypatch.setattr(apis, "_created_seen", {})
+    monkeypatch.setattr(apis, "_recovering", set())
+    monkeypatch.setattr(apis, "_unrecorded_deferrals", {})
     monkeypatch.setattr(apis, "READINESS_GATE", False)
     monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
+    store = _TaskStore()
     writes: list[tuple] = []
     spawns: list[tuple] = []
-    monkeypatch.setattr(
-        apis, "set_task_status", lambda eid, status, **kw: writes.append((eid, status)) or True
-    )
+
+    def _status(eid, status, **kw):
+        writes.append((eid, getattr(status, "value", status)))
+        return store.status(eid, status, **kw)
+
+    monkeypatch.setattr(apis, "set_task_status", _status)
+    monkeypatch.setattr(apis, "set_task_field", store.field)
+    monkeypatch.setattr(apis, "query_all_entities", store.query)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", store.read)
     monkeypatch.setattr(apis, "write_checkpoint_brief", lambda **kw: "ent_brief")
 
     async def _spawn_stub(skill, entity_id, snapshot, trigger, *a, **kw):
@@ -325,10 +382,7 @@ def dispatch_env(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setattr(apis, "hydrate_snapshot", _no_hydrate)
-    # What the task looks like when re-read after the build ends.
-    fresh: dict = {"status": "pending"}
-    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: fresh)
-    return writes, spawns, fresh
+    return writes, spawns, store
 
 
 def _local(**over) -> dict:
@@ -349,29 +403,38 @@ def _created(entity_id: str, snapshot: dict):
 
 
 async def _settle():
-    """Let a released build's deferred retries run to completion."""
+    """Let a released build's recovery sweep and its dispatches run to completion."""
     for _ in range(5):
         await asyncio.sleep(0)
-    if build_delivery._background:
-        await asyncio.gather(*list(build_delivery._background))
+    pending = list(apis._background_dispatch_tasks)
+    while pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        pending = [t for t in apis._background_dispatch_tasks if not t.done()]
 
 
-def _during_build(dispatch_env, *events, fail=False, notifier=None):
+def _during_build(dispatch_env, *events, fail=False, notifier=None, release=True):
     """Deliver `events` while a build of the issue holds its claim; then release it.
 
-    Returns the claim and the notifier.
+    Each event's task is first put in the (stand-in) task store, as Neotoma would
+    hold it. Returns what was observed mid-build, and the notifier.
     """
+    _, _, store = dispatch_env
     notifier = notifier or _RecNotifier()
     out: dict = {}
+    apis.install_build_release_hook(notifier)
 
     async def _go():
         try:
             with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff") as claim:
                 out["claim"] = claim
                 for make in events:
-                    await apis.handle_event(make(claim), notifier)
+                    event = make(claim)
+                    if event.entity_id not in store.rows:
+                        store.put(event.entity_id, event.snapshot)
+                    await apis.handle_event(event, notifier)
                 out["spawns_mid_build"] = list(dispatch_env[1])
                 out["writes_mid_build"] = list(dispatch_env[0])
+                out["rows_mid_build"] = {k: dict(v) for k, v in store.rows.items()}
                 if fail:
                     raise RuntimeError("build crashed")
         except RuntimeError:
@@ -393,8 +456,9 @@ def test_the_builds_own_tracking_task_is_not_dispatched(dispatch_env):
 
     assert out["spawns_mid_build"] == [], "a duplicate builder was dispatched"
     assert out["writes_mid_build"] == [], "the build's own task was rewritten"
-    # Nor is it picked up again once the build ends: it is not deferred.
+    # Nor is it deferred: it is the build, so there is nothing to retry.
     assert spawns == [] and writes == []
+    assert "disposition" not in out["rows_mid_build"]["ent_bf6382acd3f0cf83c641437c"]
 
 
 def test_a_marker_from_no_running_build_proves_nothing(dispatch_env):
@@ -407,13 +471,24 @@ def test_a_marker_from_no_running_build_proves_nothing(dispatch_env):
     assert spawns == [("cicada", "ent_forged_000001", "build_released")]  # ... but run later
 
 
-def test_an_independent_task_is_deferred_and_run_when_the_build_ends(dispatch_env):
-    writes, spawns, _ = dispatch_env
+def test_an_independent_task_is_deferred_durably_then_run_when_the_build_ends(dispatch_env):
+    writes, spawns, store = dispatch_env
     out, _ = _during_build(
         dispatch_env, lambda c: _created("ent_followup_00001", _local())
     )
 
-    assert out["spawns_mid_build"] == [] and out["writes_mid_build"] == []
+    assert out["spawns_mid_build"] == []
+    # The deferral is on the task, with a reason the operator can read, BEFORE
+    # anything is acknowledged.
+    row = out["rows_mid_build"]["ent_followup_00001"]
+    claim = out["claim"]
+    assert row["disposition"] == build_delivery.DEFERRED_DISPOSITION
+    assert build_delivery.parse_deferral_context(row["dispatch_context"]) == (
+        REPO.lower(), 1448, claim.run_id,
+    )
+    assert row["status"] == "pending"
+    assert row["blocked_reason"].startswith("Deferred:")
+    assert "swarm-build-handoff" in row["blocked_reason"] and claim.run_id in row["blocked_reason"]
     assert spawns == [("cicada", "ent_followup_00001", "build_released")]
 
 
@@ -440,33 +515,106 @@ def test_redelivery_neither_defers_twice_nor_redispatches(dispatch_env):
     assert spawns == [("cicada", "ent_followup_00001", "build_released")]
 
 
+def test_two_sweeps_at_once_dispatch_a_deferred_task_once(dispatch_env):
+    _, spawns, _ = dispatch_env
+    n = _RecNotifier()
+
+    async def _go():
+        with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff") as claim:
+            event = _created("ent_followup_00001", _local())
+            dispatch_env[2].put(event.entity_id, event.snapshot)
+            await apis.handle_event(event, n)
+        await asyncio.gather(apis.recover_deferred_tasks(n), apis.recover_deferred_tasks(n))
+        await _settle()
+
+    asyncio.run(_go())
+    assert spawns == [("cicada", "ent_followup_00001", "build_released")]
+
+
 def test_a_deferred_task_the_build_finished_is_not_run(dispatch_env):
-    _, spawns, fresh = dispatch_env
-    fresh["status"] = "done"
-    _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
+    _, spawns, store = dispatch_env
+    n = _RecNotifier()
+    apis.install_build_release_hook(n)
+
+    async def _go():
+        with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff"):
+            event = _created("ent_followup_00001", _local())
+            store.put(event.entity_id, event.snapshot)
+            await apis.handle_event(event, n)
+            store.rows[event.entity_id]["status"] = "done"  # the build completed it
+        await _settle()
+
+    asyncio.run(_go())
     assert spawns == []
 
 
-def test_a_deferred_task_that_cannot_be_re_read_is_reported_not_run(
-    dispatch_env, monkeypatch
-):
-    _, spawns, _ = dispatch_env
-    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: None)
+def test_a_deferred_task_that_cannot_be_re_read_is_surfaced_not_run(dispatch_env):
+    _, spawns, store = dispatch_env
+    store.fail_reads.add("ent_followup_00001")
     _, notifier = _during_build(
         dispatch_env, lambda c: _created("ent_followup_00001", _local())
     )
     assert spawns == []
-    assert any("ent_followup_00001" in m and "not dispatched" in m for m in notifier.sent)
+    assert any("ent_followup_00001" in m and "re-dispatch it by hand" in m for m in notifier.sent)
 
 
-def test_several_deferred_tasks_each_run_once_in_order(dispatch_env):
+def test_a_failed_task_query_is_surfaced_not_silent(dispatch_env):
+    _, spawns, store = dispatch_env
+    store.fail_query = True
+    _, notifier = _during_build(
+        dispatch_env, lambda c: _created("ent_followup_00001", _local())
+    )
+    assert spawns == []
+    assert any("could not list the tasks deferred" in m for m in notifier.sent)
+
+
+def test_a_deferral_that_cannot_be_recorded_is_reported_and_still_retried_in_process(
+    dispatch_env,
+):
+    _, spawns, store = dispatch_env
+    store.fail_writes = True
+    out, notifier = _during_build(
+        dispatch_env, lambda c: _created("ent_followup_00001", _local())
+    )
+    assert any("could not record" in m for m in notifier.sent)
+    assert out["spawns_mid_build"] == []
+
+
+def test_a_deferred_task_with_an_unreadable_record_is_surfaced(dispatch_env):
+    _, spawns, store = dispatch_env
+    n = _RecNotifier()
+
+    async def _go():
+        store.put(
+            "ent_bad_record_0001",
+            {**_local(), "status": "pending", "disposition": build_delivery.DEFERRED_DISPOSITION,
+             "dispatch_context": "garbled"},
+        )
+        await apis.recover_deferred_tasks(n)
+        await _settle()
+
+    asyncio.run(_go())
+    assert spawns == []
+    assert any("ent_bad_record_0001" in m and "does not say which build" in m for m in n.sent)
+
+
+def test_the_sweep_leaves_the_historical_backlog_alone(dispatch_env):
+    """Pending tasks no deferral marked are never selected or dispatched."""
+    _, spawns, store = dispatch_env
+    for i in range(5):
+        store.put(f"ent_old_pending_{i:04d}", {**_local(), "status": "pending"})
+    asyncio.run(apis.recover_deferred_tasks(_RecNotifier()))
+    assert spawns == []
+
+
+def test_several_deferred_tasks_each_run_once(dispatch_env):
     _, spawns, _ = dispatch_env
     _during_build(
         dispatch_env,
         lambda c: _created("ent_followup_00001", _local()),
         lambda c: _created("ent_followup_00002", _local()),
     )
-    assert [e for _, e, _ in spawns] == ["ent_followup_00001", "ent_followup_00002"]
+    assert sorted(e for _, e, _ in spawns) == ["ent_followup_00001", "ent_followup_00002"]
 
 
 def test_task_for_a_different_issue_is_dispatched_at_once(dispatch_env):
@@ -585,9 +733,11 @@ def test_build_handoff_with_no_worktree_does_not_dispatch(monkeypatch):
     monkeypatch.setattr(build_delivery, "prepare_build_worktree", _no_clone)
 
     d = SwarmDispatcher(_StubNotifier(), _config())
-    url = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+    with pytest.raises(build_delivery.BuildNotStarted) as raised:
+        asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
 
-    assert url is None and ran == []
+    assert ran == []
+    assert "NOT started" in raised.value.operator_text()
 
 
 # ── the worktree itself, against a real repository ───────────────────────────
@@ -642,8 +792,11 @@ def test_branches_from_the_fetched_main_not_a_stale_one(clone, tmp_path):
     assert wt.base_sha == new_head
 
 
-def test_a_failed_fetch_still_builds_and_says_the_base_may_be_stale(clone):
+def test_a_failed_fetch_still_builds_and_says_the_base_may_be_stale(clone, monkeypatch):
     route_origin_to(clone, "/nonexistent/origin.git")
+    monkeypatch.setattr(
+        build_delivery, "TEST_ONLY_LOCAL_TRANSPORTS", frozenset({"/nonexistent/origin.git"})
+    )
     wt = asyncio.run(build_delivery.prepare_build_worktree(REPO, "issue-1448"))
 
     assert wt.base_fresh is False
@@ -742,7 +895,6 @@ def test_claim_is_released_on_error_and_only_by_its_holder():
         f"git@github.com:{REPO}.git",
         f"ssh://git@github.com/{REPO}.git",
         f"ssh://git@github.com:22/{REPO}.git",
-        f"https://github.com/{REPO}/",
     ],
 )
 def test_every_remote_form_of_the_repository_matches(url):
@@ -841,7 +993,8 @@ def test_the_handoff_refuses_a_mismatched_clone_too(clone, monkeypatch):
     monkeypatch.setattr("swarm_dispatch._token_for_agent_on_repo", lambda *a: spy.tokens.append(a) or "t")
 
     d = SwarmDispatcher(_StubNotifier(), _config())
-    assert asyncio.run(d._open_implementation_pr(trig, _empty_spec_state())) is None
+    with pytest.raises(build_delivery.BuildNotStarted):
+        asyncio.run(d._open_implementation_pr(trig, _empty_spec_state()))
     assert ran == [] and spy.mutating() == [] and spy.tokens == []
 
 
@@ -886,3 +1039,273 @@ def test_malformed_repository_names_are_refused(name, monkeypatch):
 )
 def test_ordinary_repository_names_are_accepted(name):
     assert build_delivery.validate_repository(name) == name
+
+
+# ── remote URLs: only github.com over https or ssh, exactly two segments ────
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # other transports
+        f"http://github.com/{REPO}.git",
+        f"git://github.com/{REPO}.git",
+        f"file:///srv/git/{REPO}.git",
+        f"ftp://github.com/{REPO}.git",
+        f"ext::sh -c 'touch /tmp/x' %s",
+        f"ext::https://github.com/{REPO}.git",
+        f"https+ssh://github.com/{REPO}.git",
+        f"/srv/git/{REPO}.git",
+        f"./{REPO}",
+        # query, fragment, params
+        f"https://github.com/{REPO}.git?ref=main",
+        f"https://github.com/{REPO}.git#main",
+        f"https://github.com/{REPO}.git?",
+        f"https://github.com/{REPO};x=1.git",
+        # ports
+        f"https://github.com:8443/{REPO}.git",
+        f"https://github.com:80/{REPO}.git",
+        f"https://github.com:/{REPO}.git",
+        f"https://github.com:abc/{REPO}.git",
+        f"ssh://git@github.com:2222/{REPO}.git",
+        f"https://github.com:22/{REPO}.git",
+        # path shape
+        f"https://github.com/{REPO}/",
+        f"https://github.com/{REPO}/extra",
+        f"https://github.com/{REPO}.git/",
+        "https://github.com/owner",
+        "https://github.com/",
+        "https://github.com",
+        f"https://github.com//{REPO}.git",
+        f"https://github.com/owner//repo.git",
+        "https://github.com/owner/repo.git.git",
+        "https://github.com/owner/..",
+        "https://github.com/../repo.git",
+        "git@github.com:owner",
+        "git@github.com:owner/repo/extra.git",
+        "git@github.com:/owner/repo.git",
+        # encodings
+        "https://github.com/own%65r/repo.git",
+        "https://github.com/owner/re%2Fpo.git",
+        "https://git%68ub.com/owner/repo.git",
+        "https://github.com/owner/repo%2egit",
+        "https://github.com/owner/repo%00.git",
+        "git@github.com:own%65r/repo.git",
+        # non-ASCII (look-alike letters, full-width forms, trailing dot variants)
+        "https://github.com/öwner/repo.git",
+        "https://github.com/owner/repо.git",
+        "https://gіthub.com/owner/repo.git",
+        "https://github．com/owner/repo.git",
+        "https://github.com。/owner/repo.git",
+        # host
+        "https://github.com./owner/repo.git",
+        "https://github.com.evil.example/owner/repo.git",
+        "https://evilgithub.com/owner/repo.git",
+        "https://www.github.com/owner/repo.git",
+        "https://gist.github.com/owner/repo.git",
+        "https://github.co/owner/repo.git",
+        "git@github.com.evil.example:owner/repo.git",
+        "git@gitlab.com:owner/repo.git",
+        # ambiguous userinfo/host split
+        "https://a<at>b<at>github.com/owner/repo.git",
+        "https://github.com<at>evil.example/owner/repo.git",
+        "https://github.com:pw<at>evil.example/owner/repo.git",
+        "https://evil.example\\<at>github.com/owner/repo.git",
+        "https://github.com\\.evil.example/owner/repo.git",
+        "https://user:p:w<at>github.com/owner/repo.git",
+        "https://us er<at>github.com/owner/repo.git",
+        "ssh://someone<at>github.com/owner/repo.git",
+        "ssh://git:pw<at>github.com/owner/repo.git",
+        "someone<at>github.com:owner/repo.git",
+        "git@@github.com:owner/repo.git",
+        # whitespace, control characters, non-strings
+        " https://github.com/owner/repo.git",
+        "https://github.com/owner/repo.git ",
+        "https://github.com/owner/repo.git\n",
+        "https://github.com/owner/repo.git\x00",
+        "https://github.com/owner/re\tpo.git",
+        "",
+        None,
+        7,
+        b"https://github.com/owner/repo.git",
+    ],
+)
+def test_every_other_remote_shape_is_rejected(url):
+    # `<at>` stands for "@": written out, a user@host literal reads as an email
+    # address to the repository's PII scanner.
+    url = url.replace("<at>", "@") if isinstance(url, str) else url
+    assert build_delivery.normalise_remote(url) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com:443/owner/repo.git",
+        "ssh://git@github.com:22/owner/repo.git",
+        "ssh://github.com/owner/repo",
+        "https://user:token<at>github.com/owner/repo",
+        "git@GITHUB.COM:Owner/Repo.git",
+        "HTTPS://GITHUB.COM/Owner/Repo",
+    ],
+)
+def test_the_accepted_remote_forms_normalise_to_one_name(url):
+    url = url.replace("<at>", "@")
+    assert build_delivery.normalise_remote(url) == "github.com/owner/repo"
+
+
+# ── verification fails closed ────────────────────────────────────────────────
+
+
+def _injected_git(monkeypatch, overrides):
+    """Real git, except for the (args-prefix -> result) pairs in ``overrides``."""
+    real = build_delivery._git
+
+    async def _git_inj(args, cwd, timeout=120):
+        for prefix, result in overrides.items():
+            if tuple(args[: len(prefix)]) == prefix:
+                return result
+        return await real(args, cwd, timeout)
+
+    monkeypatch.setattr(build_delivery, "_git", _git_inj)
+
+
+PUSHURL_QUERY = ("config", "--get-all", "remote.origin.pushurl")
+EFFECTIVE_FETCH = ("remote", "get-url", "--all", "origin")
+EFFECTIVE_PUSH = ("remote", "get-url", "--push", "--all", "origin")
+
+
+@pytest.mark.parametrize(
+    "query,result",
+    [
+        (PUSHURL_QUERY, (128, "", "fatal: bad config line 3 in file .git/config")),
+        (PUSHURL_QUERY, (2, "", "error: could not lock config file")),
+        (PUSHURL_QUERY, (1, "", "error: something went wrong")),  # not the quiet 'unset'
+        (PUSHURL_QUERY, (1, "partial\n", "")),
+        (PUSHURL_QUERY, (-1, "", "TimeoutError: git timed out")),
+        (("config", "--get-all", "remote.origin.url"), (-1, "", "TimeoutError")),
+        (("config", "--get-all", "remote.origin.url"), (128, "", "fatal: not a git repository")),
+        (EFFECTIVE_FETCH, (128, "", "fatal: bad config")),
+        (EFFECTIVE_FETCH, (-1, "", "TimeoutError")),
+        (EFFECTIVE_FETCH, (0, "", "")),  # git says there is no URL
+        (EFFECTIVE_PUSH, (2, "", "error: No such remote 'origin'")),
+        (EFFECTIVE_PUSH, (-1, "", "OSError: git not found")),
+        (EFFECTIVE_PUSH, (0, "", "")),
+    ],
+)
+def test_any_git_error_refuses(clone, monkeypatch, query, result):
+    _injected_git(monkeypatch, {query: result})
+    with pytest.raises(build_delivery.BuildWorktreeError):
+        asyncio.run(build_delivery.verify_clone_identity(clone, REPO))
+
+
+def test_git_reporting_a_key_as_unset_is_not_an_error(clone):
+    """The one tolerated non-zero: no pushurl configured (`git config` exits 1, silent)."""
+    asyncio.run(build_delivery.verify_clone_identity(clone, REPO))
+
+
+def test_a_refusal_names_the_prerequisite_to_fix(clone):
+    _git(clone, "remote", "set-url", "origin", "https://github.com/other/repo.git")
+    with pytest.raises(build_delivery.BuildWorktreeError) as raised:
+        asyncio.run(build_delivery.verify_clone_identity(clone, REPO))
+    assert str(clone) in raised.value.fix and f"https://github.com/{REPO}.git" in raised.value.fix
+    assert build_delivery.BUILD_CLONES_ENV in raised.value.fix
+
+
+def _rewrite(clone, key, to, frm=None):
+    _git(clone, "config", f"url.{to}.{key}", frm or f"https://github.com/{REPO}.git")
+
+
+@pytest.mark.parametrize("key", ["insteadOf", "pushInsteadOf"])
+def test_a_rewrite_that_points_a_correct_clone_at_another_repository_is_refused(
+    clone, run_skill_calls, monkeypatch, key
+):
+    """Correctly configured, but git would really contact a different repository."""
+    # Drop the fixture's own (local-transport) rewrite so only the hostile rule applies.
+    route_origin_to(clone, "/nonexistent/none.git")
+    _git(clone, "config", "--remove-section", "url./nonexistent/none.git")
+    _rewrite(clone, key, "https://github.com/other/repo.git")
+    spy = _Spy(monkeypatch)
+
+    result = _spawn(_task_snapshot())
+
+    assert result.ok is False
+    assert "effective origin" in result.error and "Before retrying" in result.error
+    assert spy.mutating() == [] and spy.tokens == [] and run_skill_calls == []
+    assert not (clone.parent / "ateles-worktrees").exists()
+
+
+def test_a_rewrite_to_a_local_path_is_refused_in_production(clone, monkeypatch):
+    """The test allowance is empty in production: no local transport is ever accepted."""
+    monkeypatch.setattr(build_delivery, "TEST_ONLY_LOCAL_TRANSPORTS", frozenset())
+    with pytest.raises(build_delivery.BuildWorktreeError, match="effective origin"):
+        asyncio.run(build_delivery.verify_clone_identity(clone, REPO))
+
+
+def test_the_test_allowance_is_exact_not_a_prefix(clone, monkeypatch):
+    bare = Path(_git(clone, "config", "--get-regexp", r"^url\..*\.insteadof$").split()[0][4:].rsplit(".insteadof", 1)[0])
+    monkeypatch.setattr(build_delivery, "TEST_ONLY_LOCAL_TRANSPORTS", frozenset({str(bare.parent)}))
+    with pytest.raises(build_delivery.BuildWorktreeError, match="effective origin"):
+        asyncio.run(build_delivery.verify_clone_identity(clone, REPO))
+
+
+def test_the_allowance_is_not_settable_from_the_environment(clone, monkeypatch):
+    monkeypatch.setattr(build_delivery, "TEST_ONLY_LOCAL_TRANSPORTS", frozenset())
+    for name in ("ATELES_TEST_ALLOW_LOCAL_REMOTE", "TEST_ONLY_LOCAL_TRANSPORTS", "ATELES_BUILD_ALLOW_LOCAL"):
+        monkeypatch.setenv(name, str(clone))
+    with pytest.raises(build_delivery.BuildWorktreeError):
+        asyncio.run(build_delivery.verify_clone_identity(clone, REPO))
+
+
+# ── the operator hears "not started", and what to fix ────────────────────────
+
+
+def _handoff_message(exc: Exception | None, *, url: str | None):
+    from test_swarm_dispatch import (
+        SwarmDispatcher,
+        _StubNotifier,
+        _config,
+        _empty_spec_state,
+        _issue_trigger,
+    )
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+
+    async def _open(self, trigger, state):
+        if exc:
+            raise exc
+        return url
+
+    SwarmDispatcher._open_implementation_pr, saved = _open, SwarmDispatcher._open_implementation_pr
+    try:
+        asyncio.run(
+            d._hand_off_to_build(
+                _issue_trigger(), _empty_spec_state(), completed=["pm", "eng"],
+                spec_action="Open the issue and approve the build.", spec_ready_key="k",
+            )
+        )
+    finally:
+        SwarmDispatcher._open_implementation_pr = saved
+    return notifier.sent
+
+
+def test_a_build_that_never_started_is_not_reported_as_a_spec_problem():
+    cause = build_delivery.BuildWorktreeError(
+        "no local clone of o/r", fix="clone https://github.com/o/r.git to ~/repos/r"
+    )
+    (msg,) = _handoff_message(build_delivery.BuildNotStarted("o/r", 100, cause), url=None)
+
+    assert "NOT started" in msg and "no local clone of o/r" in msg
+    assert "Before retrying: clone https://github.com/o/r.git to ~/repos/r" in msg
+    assert "spec may be incomplete" not in msg and "approve the build" not in msg
+
+
+def test_a_build_that_ran_without_a_pr_still_says_so():
+    (msg,) = _handoff_message(None, url=None)
+    assert "opened NO PR" in msg and "spec may be incomplete" in msg
+    assert "NOT started" not in msg
+
+
+def test_a_build_that_opened_a_pr_says_so():
+    (msg,) = _handoff_message(None, url="https://github.com/o/r/pull/9")
+    assert "implementation PR opened" in msg

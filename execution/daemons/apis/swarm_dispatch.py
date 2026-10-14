@@ -6057,28 +6057,13 @@ class SwarmDispatcher:
             "the build manually once gates are green."
         )
         if self.config.auto_build and gates_green:
-            pr_url = await self._open_implementation_pr(trigger, state)
-            if pr_url:
-                self.notifier.clear_dedupe(spec_ready_key)
-                self.notifier.send(
-                    f"Issue {ref}: additive spec assembled ("
-                    f"{', '.join(completed) or 'none'}); "
-                    f"auto-build ON — implementation PR opened ({pr_url}); the "
-                    "PR gate pipeline now owns it (merge stays operator-gated).",
-                    priority=Priority.INFO,
-                    handler=DAEMON_NAME,
-                )
-            else:
-                self.notifier.send(
-                    f"Issue {ref}: additive spec assembled ("
-                    f"{', '.join(completed) or 'none'}); "
-                    "auto-build ON, but the Cicada build handoff opened NO PR "
-                    "(spec may be incomplete or the build produced nothing). "
-                    f"{spec_action}",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                    dedupe_key=spec_ready_key,
-                )
+            await self._hand_off_to_build(
+                trigger,
+                state,
+                completed=completed,
+                spec_action=spec_action,
+                spec_ready_key=spec_ready_key,
+            )
         else:
             reason = (
                 "auto-build OFF"
@@ -6091,6 +6076,58 @@ class SwarmDispatcher:
                 f"{'✓' if lanius.ok else '✗'}. "
                 f"Spec is ready and awaiting `build` approval ({reason}). "
                 f"{spec_action} No PR opened; nothing auto-merged.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=spec_ready_key,
+            )
+
+    async def _hand_off_to_build(
+        self,
+        trigger: SwarmTrigger,
+        state: SpecState,
+        *,
+        completed: list[str],
+        spec_action: str,
+        spec_ready_key: str,
+    ) -> None:
+        """Run the auto-build handoff and tell the operator what actually happened.
+
+        Three outcomes, three messages: a PR opened; the build ran and produced no
+        PR (the spec may be at fault); and the build was never started (a
+        prerequisite is missing, which no amount of spec work or re-approval will
+        fix). Conflating the last two sends the operator after the wrong thing.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        done = ", ".join(completed) or "none"
+        try:
+            pr_url = await self._open_implementation_pr(trigger, state)
+        except build_delivery.BuildNotStarted as exc:
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ({done}); auto-build ON, but "
+                f"{exc.operator_text()} The spec and the gates are not in question.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"build-not-started:{ref}",
+            )
+            return
+        if pr_url:
+            self.notifier.clear_dedupe(spec_ready_key)
+            self.notifier.clear_dedupe(f"build-not-started:{ref}")
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ("
+                f"{done}); "
+                f"auto-build ON — implementation PR opened ({pr_url}); the "
+                "PR gate pipeline now owns it (merge stays operator-gated).",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+        else:
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ("
+                f"{done}); "
+                "auto-build ON, but the Cicada build handoff opened NO PR "
+                "(spec may be incomplete or the build produced nothing). "
+                f"{spec_action}",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
                 dedupe_key=spec_ready_key,
@@ -6583,6 +6620,11 @@ class SwarmDispatcher:
         issue (`Closes #<n>`) so the existing ``_handle_pr`` gate pipeline takes
         over.  This method NEVER merges anything.
 
+        Raises ``build_delivery.BuildNotStarted`` when the build could not be
+        launched at all (no worktree could be provisioned): distinct from a build
+        that ran, so the caller can name the prerequisite instead of suggesting
+        the spec is at fault.
+
         Returns the opened PR URL when a PR was ACTUALLY opened, else None.
         A successful dispatch (exit 0) is NOT sufficient: on #1882 Cicada
         returned ok in ~30s with no PR (it had a narration-only Engineering
@@ -6606,7 +6648,10 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] Cicada build handoff for "
                 f"{trigger.repository}#{trigger.number} not started: {exc}"
             )
-            return None
+            # Not "no PR": nothing ran. The caller tells the operator so.
+            raise build_delivery.BuildNotStarted(
+                trigger.repository, trigger.number, exc
+            ) from exc
         # Registered for the whole run so a task the build files to track its own
         # work is recognised as this build, not dispatched as a second one.
         with build_delivery.claim_build(
