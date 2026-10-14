@@ -6611,10 +6611,12 @@ class SwarmDispatcher:
         # work is recognised as this build, not dispatched as a second one.
         with build_delivery.claim_build(
             trigger.repository, trigger.number, "swarm-build-handoff"
-        ):
+        ) as claim:
             result = await run_skill(
                 "cicada",
-                self._cicada_build_prompt(trigger, state, worktree=worktree),
+                self._cicada_build_prompt(
+                    trigger, state, worktree=worktree, claim=claim
+                ),
                 github_token=_token_for_agent_on_repo("cicada", trigger.repository),
                 include_github_contract=True,
                 notifier=self.notifier,
@@ -11865,6 +11867,7 @@ class SwarmDispatcher:
         t: SwarmTrigger,
         state: SpecState,
         worktree: "build_delivery.BuildWorktree | None" = None,
+        claim: "build_delivery.BuildClaim | None" = None,
     ) -> str:
         """Auto-build handoff prompt: Cicada opens an implementation PR.
 
@@ -11876,6 +11879,8 @@ class SwarmDispatcher:
         spec_md = assemble_spec_markdown(state.sections or {})
         if worktree:
             wt_block = f"{build_delivery.worktree_instructions(worktree)}\n\n"
+            if claim:
+                wt_block += f"{build_delivery.tracking_instructions(claim)}\n\n"
             step_one = (
                 "  1. Build on the worktree branch above, which is already off "
                 "fresh origin/main — never off a feature branch.\n"

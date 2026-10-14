@@ -792,8 +792,10 @@ async def _spawn_harness_skill(
     # (ateles#590). Without this, a task-routed build wrote correct code and
     # then failed with "sandbox denied network access" (ateles#1448).
     delivery: dict[str, object] = {}
-    claim = contextlib.nullcontext()
-    repository = build_delivery.task_repository(snapshot)
+    # The ONE repository resolver the dispatcher already has: the explicit field,
+    # never a reference found in the task's prose.
+    repository = _dispatch_repo_from_snapshot(snapshot)
+    key = build_delivery.issue_key(snapshot, repository)
     if build_delivery.is_delivery_dispatch(skill, action_class):
         if not repository:
             log.warning(
@@ -801,7 +803,6 @@ async def _spawn_harness_skill(
                 "names no repository — running without worktree or network"
             )
         else:
-            key = build_delivery.issue_key(snapshot)
             try:
                 worktree = await build_delivery.prepare_build_worktree(
                     repository, f"task-{entity_id[-8:]}"
@@ -810,16 +811,24 @@ async def _spawn_harness_skill(
                 msg = f"delivery worktree could not be provisioned: {exc}"
                 log.error(f"[{DAEMON_NAME}] {skill} task {entity_id} not started — {msg}")
                 return SkillResult(skill, False, None, "", "", error=msg)
-            prompt = f"{prompt}\n\n{build_delivery.worktree_instructions(worktree)}"
             delivery = {
                 "cwd": worktree.path,
                 "include_github_contract": True,
+                # Resolved only now: the clone's identity has been verified.
                 "github_token": _token_for_agent_on_repo(skill, repository),
             }
-            if key:
-                claim = build_delivery.claim_build(*key, f"task:{entity_id}")
 
-    with claim:
+    with contextlib.ExitStack() as stack:
+        if delivery and key:
+            claim = stack.enter_context(
+                build_delivery.claim_build(*key, f"task:{entity_id}")
+            )
+            prompt = (
+                f"{prompt}\n\n{build_delivery.worktree_instructions(worktree)}"
+                f"\n\n{build_delivery.tracking_instructions(claim)}"
+            )
+        elif delivery:
+            prompt = f"{prompt}\n\n{build_delivery.worktree_instructions(worktree)}"
         result = await run_skill(
             skill,
             prompt,
@@ -868,6 +877,40 @@ def _scoring_summary(
     if note:
         return f" Producer scoring was not applied: {note}."
     return ""
+
+
+def _deferred_retry(entity_id: str, snapshot: dict, notifier: Notifier):
+    """The retry that re-dispatches a task deferred behind an in-flight build.
+
+    Re-reads the task first: the build it waited on may have finished it, and a
+    finished task is not dispatchable. A task that cannot be read is NOT
+    dispatched on a stale copy — the operator is told, since this retry is the
+    only thing that will ever look at it again.
+    """
+
+    async def _retry() -> None:
+        fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+        if fresh is None:
+            log.warning(
+                f"[{DAEMON_NAME}] deferred task {entity_id!r} could not be re-read "
+                "after its build ended — not dispatching on a stale copy"
+            )
+            notifier.send(
+                f"Deferred task {entity_id} could not be re-read after the build "
+                "it waited on ended; it was not dispatched.",
+                priority=Priority.WARN,
+                handler=DAEMON_NAME,
+            )
+            return
+        await dispatch_task(
+            entity_id,
+            {**snapshot, **fresh},
+            trigger="build_released",
+            notifier=notifier,
+            snapshot_hydrated=True,
+        )
+
+    return _retry
 
 
 async def dispatch_task(
@@ -1089,22 +1132,36 @@ async def dispatch_task(
                 notifier.send(report, priority=Priority.BLOCKER, handler=DAEMON_NAME)
         return
 
-    # ── A task filed by an in-flight build is that build, not new work ───────
-    # A builder tracks its own work as a task, and the task-created event then
-    # reaches this dispatcher while the builder is still running. Dispatching it
-    # starts a second builder on the same issue: on ateles#1448 that second run
-    # raced the first, produced a competing implementation, and had to stand down
-    # (and, with no network, could not deliver anyway). The in-flight builder
-    # owns the task and reports back on it; leave the task exactly as it is.
+    # ── A task about an issue that is being built right now ──────────────────
+    # A builder tracks its own work as a task, and that task's `created` event
+    # reaches this dispatcher while the builder is still running: dispatching it
+    # starts a second builder on the same issue (ateles#1448). But `task.created`
+    # is delivered once per entity per process, so a task that is merely skipped
+    # is never examined again. Hence two different outcomes:
+    #   * a task carrying the running build's own run marker IS that build —
+    #     leave it exactly as it is (the builder reports back on it);
+    #   * any other task about the issue is independent work — defer it and
+    #     re-dispatch it when the build's claim is released, however it ends.
     # An operator-approved release (`gate_override`) is the operator's explicit
     # decision and is not second-guessed here.
     if not gate_override and skill in build_delivery.BUILDER_SKILLS:
-        holder = build_delivery.inflight_build_for_task(snapshot)
-        if holder:
+        run_id = build_delivery.tracking_run_id(snapshot)
+        if run_id:
             log.info(
-                f"[{DAEMON_NAME}] task {entity_id!r} is about an issue that "
-                f"{holder!r} is already building — not dispatching a duplicate "
-                f"{skill} (trigger={trigger})"
+                f"[{DAEMON_NAME}] task {entity_id!r} is the tracking task of the "
+                f"in-flight build {run_id} — not dispatching a duplicate {skill} "
+                f"(trigger={trigger})"
+            )
+            return
+        key = build_delivery.issue_key(snapshot, _dispatch_repo_from_snapshot(snapshot))
+        holder = build_delivery.active_build(*key) if key else None
+        if holder and build_delivery.defer_until_released(
+            key, _deferred_retry(entity_id, snapshot, notifier)
+        ):
+            log.info(
+                f"[{DAEMON_NAME}] task {entity_id!r} is about {key[0]}#{key[1]}, "
+                f"which {holder.holder!r} is building — deferring it until that "
+                f"build ends (trigger={trigger})"
             )
             return
 

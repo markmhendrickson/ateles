@@ -28,9 +28,11 @@ delivery-bearing Cicada dispatch needs, so no path can forget one:
   3. (derived by ``skill_runner`` from ``include_github_contract=True``) network
      for THIS dispatch only — never ``danger-full-access``.
 
-It also keeps a small in-process registry of builds in flight, so that a task an
-in-flight build files to track its own work is recognised as that build and not
-dispatched a second time.
+It also keeps a small in-process registry of builds in flight. A task the build
+files to track its own work carries the build's run marker and is recognised as
+that build; any other task about the same issue is deferred until the build's
+claim is released, then dispatched. And it refuses to provision from a clone that
+is not the requested repository, before anything is fetched, granted or signed.
 
 Nothing here widens a sandbox. A dispatch that does not deliver (a read-only or
 local-edit task) gets none of this.
@@ -48,7 +50,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Awaitable, Callable, Iterator, Mapping
 
 log = logging.getLogger("apis.build_delivery")
 
@@ -80,6 +82,12 @@ def is_delivery_dispatch(skill: str | None, action_class: str | None) -> bool:
 
 
 # ── Which issue does a task belong to? ───────────────────────────────────────
+#
+# The REPOSITORY is never decided here. The caller passes the one the dispatcher
+# already resolved (`apis._dispatch_repo_from_snapshot`: the explicit `repo` /
+# `dispatch_repo` / `github_repo` / `repository` field, first present). A
+# reference in prose never supplies or overrides it: a worktree and a token follow
+# the repository, so a sentence in a task body must not be able to steer either.
 
 _REPO_ISSUE_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
 _ISSUE_URL_RE = re.compile(
@@ -95,80 +103,163 @@ def _as_issue_number(value: object) -> int | None:
     return number if number > 0 else None
 
 
-def issue_key(snapshot: Mapping[str, object]) -> tuple[str, int] | None:
+def issue_key(
+    snapshot: Mapping[str, object], repository: str | None
+) -> tuple[str, int] | None:
     """The (repository, issue number) a task is about, or None when unknown.
 
-    Structured fields win (`repository` + `issue_number`). A task that carries
-    neither is read for ONE unambiguous `owner/name#N` reference in its title or
-    description; two different references are ambiguous and give None, because
-    matching the wrong issue would suppress a legitimate dispatch.
+    ``repository`` is the dispatcher's resolved repository; without one there is
+    no key. The number is the structured `issue_number` field, else ONE
+    unambiguous reference in the task's text that names THAT repository (a
+    reference to another repository is not this issue; two different numbers are
+    ambiguous).
     """
-    repo = str(snapshot.get("repository") or "").strip().lower()
+    repo = (repository or "").strip().lower()
+    if not repo:
+        return None
     number = _as_issue_number(snapshot.get("issue_number"))
-    if repo and "/" in repo and number:
+    if number:
         return repo, number
-
     text = " ".join(
-        str(snapshot.get(field) or "")
-        for field in ("title", "description", "body")
+        str(snapshot.get(field) or "") for field in ("title", "description", "body")
     )
     refs = {
-        (m.group(1).lower(), int(m.group(2))) for m in _REPO_ISSUE_RE.finditer(text)
-    } | {(m.group(1).lower(), int(m.group(2))) for m in _ISSUE_URL_RE.finditer(text)}
-    return next(iter(refs)) if len(refs) == 1 else None
-
-
-def task_repository(snapshot: Mapping[str, object]) -> str:
-    """The repository slug a task targets, '' when it names none."""
-    key = issue_key(snapshot)
-    if key:
-        return key[0]
-    repo = str(snapshot.get("repository") or "").strip()
-    return repo if "/" in repo else ""
+        int(m.group(2))
+        for rx in (_REPO_ISSUE_RE, _ISSUE_URL_RE)
+        for m in rx.finditer(text)
+        if m.group(1).lower() == repo
+    }
+    return (repo, next(iter(refs))) if len(refs) == 1 else None
 
 
 # ── In-flight builds ─────────────────────────────────────────────────────────
+#
+# A build registers the issue it is building for as long as it runs. Two things
+# follow from that, and they are different:
+#
+#   * a task that is PROVABLY the build's own tracking task (it carries the
+#     build's run marker, see `tracking_instructions`) is that build, and is
+#     never dispatched;
+#   * any OTHER task about the same issue is independent work. It is DEFERRED —
+#     re-dispatched when the build's claim is released, however it ends — and
+#     never dropped. `task.created` is delivered once per entity per process, so
+#     a task that is only skipped is never looked at again.
 
-_inflight: dict[tuple[str, int], str] = {}
+RUN_MARKER_PREFIX = "build-run:"
+_RUN_MARKER_RE = re.compile(r"\bbuild-run:\s*([0-9a-f]{16})\b")
+
+
+@dataclass(frozen=True)
+class BuildClaim:
+    repository: str
+    number: int
+    holder: str
+    run_id: str
+
+
+Retry = Callable[[], Awaitable[None]]
+
+_inflight: dict[tuple[str, int], BuildClaim] = {}
+_runs: dict[str, tuple[str, int]] = {}
+_deferred: dict[tuple[str, int], list[Retry]] = {}
 _inflight_lock = threading.Lock()
+_background: set[asyncio.Task] = set()
+
+
+async def _drain(retries: list[Retry]) -> None:
+    # One at a time: each retry may start a build, and the next one's guard must
+    # see whatever that build claimed.
+    for retry in retries:
+        try:
+            await retry()
+        except Exception:  # noqa: BLE001 — one bad retry must not strand the rest
+            log.exception("[apis] deferred task retry failed")
 
 
 @contextlib.contextmanager
-def claim_build(repository: str, number: int, holder: str) -> Iterator[None]:
+def claim_build(repository: str, number: int, holder: str) -> Iterator[BuildClaim]:
     """Record that a build of repository#number is running, for its duration.
 
-    The claim is released on every exit path. Re-claiming a key that is already
-    held (two builders for one issue) keeps the FIRST holder, and only that
-    holder's exit clears it.
+    Released on EVERY exit path, success or failure; releasing is what re-runs
+    the tasks deferred behind it. A second claim on a key already held keeps the
+    FIRST holder as the owner, and only the owner's exit releases the key.
     """
     key = (repository.strip().lower(), int(number))
+    claim = BuildClaim(key[0], key[1], holder, secrets.token_hex(8))
     with _inflight_lock:
         owned = key not in _inflight
         if owned:
-            _inflight[key] = holder
+            _inflight[key] = claim
+        _runs[claim.run_id] = key
     try:
-        yield
+        yield claim
     finally:
-        if owned:
-            with _inflight_lock:
+        retries: list[Retry] = []
+        with _inflight_lock:
+            _runs.pop(claim.run_id, None)
+            if owned:
                 _inflight.pop(key, None)
+                retries = _deferred.pop(key, [])
+        if retries:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                log.error(
+                    "[apis] build of %s#%s released outside an event loop — %d "
+                    "deferred task(s) NOT retried",
+                    key[0],
+                    key[1],
+                    len(retries),
+                )
+            else:
+                task = loop.create_task(_drain(retries))
+                _background.add(task)
+                task.add_done_callback(_background.discard)
 
 
-def active_build(repository: str, number: int) -> str | None:
-    """The holder of the in-flight build of repository#number, else None."""
+def active_build(repository: str, number: int) -> BuildClaim | None:
+    """The in-flight build of repository#number, else None."""
     with _inflight_lock:
         return _inflight.get((repository.strip().lower(), int(number)))
 
 
-def inflight_build_for_task(snapshot: Mapping[str, object]) -> str | None:
-    """The in-flight build a task would duplicate, or None.
+def defer_until_released(key: tuple[str, int], retry: Retry) -> bool:
+    """Queue ``retry`` to run when the build of ``key`` is released.
 
-    A task is a duplicate when it is about an issue some builder is already
-    building right now: that builder files the task to track its own work, and
-    dispatching it would start a second builder on the same issue.
+    Returns False when no build holds the key any more (it was released since the
+    caller looked), in which case nothing was queued and the caller should
+    proceed instead.
     """
-    key = issue_key(snapshot)
-    return active_build(*key) if key else None
+    with _inflight_lock:
+        if key not in _inflight:
+            return False
+        _deferred.setdefault(key, []).append(retry)
+        return True
+
+
+def tracking_instructions(claim: BuildClaim) -> str:
+    """The prompt block that lets a build mark the task it files for itself."""
+    return (
+        "TRACKING TASK: if you file a Neotoma task to track THIS build, put the "
+        f"line `{RUN_MARKER_PREFIX} {claim.run_id}` in its description, exactly "
+        "once. Put it on no other task: a task carrying it is recognised as this "
+        "run's own and is not dispatched again, and any other task about the "
+        "issue is held until this run ends."
+    )
+
+
+def tracking_run_id(snapshot: Mapping[str, object]) -> str | None:
+    """The run marker a task carries, if it is a registered build's own task."""
+    ids = {
+        m.group(1)
+        for field in ("description", "body", "notes")
+        for m in _RUN_MARKER_RE.finditer(str(snapshot.get(field) or ""))
+    }
+    if len(ids) != 1:
+        return None
+    run_id = next(iter(ids))
+    with _inflight_lock:
+        return run_id if run_id in _runs else None
 
 
 # ── The worktree ─────────────────────────────────────────────────────────────
@@ -187,20 +278,95 @@ class BuildWorktree:
     base_fresh: bool  # False when `git fetch` failed and the local ref was used
 
 
+_REPO_NAME_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.][A-Za-z0-9._-]{0,99}",
+    re.ASCII,
+)
+
+
+def validate_repository(repository: object) -> str:
+    """The repository, when it is a strict ``owner/name``; else BuildWorktreeError.
+
+    One slash and nothing that could steer a path or a command: no whitespace,
+    separators, ``..``, encodings or non-ASCII, and no ``.git`` suffix (the clone
+    check compares names exactly). The check is exact rather than a clean-up:
+    a name that needs normalising is refused, not rewritten.
+    """
+    if (
+        not isinstance(repository, str)
+        or not _REPO_NAME_RE.fullmatch(repository)
+        or ".." in repository
+        or repository.endswith(".git")
+        or repository.rsplit("/", 1)[-1] in {".", ".."}
+    ):
+        raise BuildWorktreeError(
+            f"{str(repository)[:80]!r} is not a strict owner/repo name"
+        )
+    return repository
+
+
 def clone_for(repository: str) -> Path | None:
-    """The local clone to branch worktrees from, or None when there is none."""
-    repository = repository.strip()
-    configured = os.environ.get(BUILD_CLONES_ENV, "")
-    for pair in configured.split(","):
+    """The local clone to branch worktrees from, or None when there is none.
+
+    ``repository`` must already be validated (`validate_repository`), which is
+    what makes ``~/repos/<name>`` safe to build.
+    """
+    wanted = repository.lower()
+    for pair in os.environ.get(BUILD_CLONES_ENV, "").split(","):
         name, sep, raw = pair.partition("=")
-        if sep and name.strip().lower() == repository.lower() and raw.strip():
+        if sep and name.strip().lower() == wanted and raw.strip():
             candidate = Path(raw.strip()).expanduser()
             return candidate if (candidate / ".git").exists() else None
-    name = repository.rsplit("/", 1)[-1]
-    if not name:
-        return None
-    candidate = Path("~/repos").expanduser() / name
+    candidate = Path("~/repos").expanduser() / repository.rsplit("/", 1)[-1]
     return candidate if (candidate / ".git").exists() else None
+
+
+_SCP_REMOTE_RE = re.compile(
+    r"(?:[^@/\s:]+@)?(?P<host>[^:/\s]+):(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)(?:\.git)?/?"
+)
+_URL_REMOTE_RE = re.compile(
+    r"(?:https?|ssh|git)://(?:[^@/\s]+@)?(?P<host>[^:/\s]+)(?::\d+)?"
+    r"/(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)(?:\.git)?/?",
+    re.IGNORECASE,
+)
+
+
+def normalise_remote(url: str) -> str | None:
+    """``host/owner/name``, lowercased, for an https, ssh or scp-style remote.
+
+    None for anything else (a local path, an unparsable URL), which therefore
+    never matches a repository.
+    """
+    url = url.strip()
+    match = _URL_REMOTE_RE.fullmatch(url) or (
+        None if "://" in url else _SCP_REMOTE_RE.fullmatch(url)
+    )
+    if not match:
+        return None
+    return "/".join(match.group(g) for g in ("host", "owner", "name")).lower()
+
+
+async def verify_clone_identity(clone: Path, repository: str) -> None:
+    """Refuse a clone whose origin is not exactly ``github.com/<repository>``.
+
+    Reads the CONFIGURED remote URLs (fetch and push), not their `insteadOf`
+    expansion, so it answers "which repository does this clone say it is". Every
+    configured URL must match, and there must be at least one. Runs before any
+    fetch, worktree, network grant or token: a clone of a different repository
+    would otherwise receive that repository's delivery grants.
+    """
+    want = f"github.com/{repository}".lower()
+    for key in ("remote.origin.url", "remote.origin.pushurl"):
+        rc, out, _ = await _git(["config", "--get-all", key], clone)
+        urls = [line for line in out.splitlines() if line.strip()]
+        if key == "remote.origin.url" and (rc != 0 or not urls):
+            raise BuildWorktreeError(f"{clone} has no origin remote")
+        for url in urls:
+            if normalise_remote(url) != want:
+                raise BuildWorktreeError(
+                    f"the clone at {clone} has an origin that is not "
+                    f"{repository} — refusing to build {repository} from it"
+                )
 
 
 async def _git(args: list[str], cwd: Path, timeout: int = _GIT_TIMEOUT_S):
@@ -236,12 +402,15 @@ async def prepare_build_worktree(repository: str, label: str) -> BuildWorktree:
     worktree. Raises BuildWorktreeError, with the reason, when it cannot — the
     caller decides what a missing worktree means for its dispatch.
     """
+    validate_repository(repository)
     clone = clone_for(repository)
     if clone is None:
         raise BuildWorktreeError(
             f"no local clone of {repository} to branch a worktree from "
             f"(looked in ${BUILD_CLONES_ENV} and ~/repos/<name>)"
         )
+    # Before the fetch, the worktree, or anything the caller grants afterwards.
+    await verify_clone_identity(clone, repository)
 
     rc, _, err = await _git(["fetch", "origin", "main"], clone)
     fresh = rc == 0

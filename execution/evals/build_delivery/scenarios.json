@@ -1,0 +1,193 @@
+{
+  "_comment": "Public-safe synthetic scenarios for a delivery-bearing Cicada build (ateles#1448 canary). Each drives the REAL launch code and the REAL run_skill to a stub codex that does a real git commit and push to a local bare remote and a stub gh pr create. Assertions are on effects in that world, not on arguments.",
+  "scenarios": [
+    {
+      "id": "handoff_delivers_from_its_worktree",
+      "why": "the swarm build handoff gives its child a worktree cwd, the two git roots and scoped network; the commit reaches the remote branch and the PR is on record",
+      "path": "handoff",
+      "expect": {
+        "launches": 1,
+        "child_in_worktree": true,
+        "network": true,
+        "add_dirs": 2,
+        "sandbox": "workspace-write",
+        "token_scoped": true,
+        "commit_on_remote": true,
+        "prs": 1,
+        "result_ok": true,
+        "result_names_recorded_pr": true,
+        "claim_released": true
+      }
+    },
+    {
+      "id": "task_delivers_from_its_worktree",
+      "why": "a task-routed Cicada cleared to deliver gets the same grants and delivers: commit on the remote branch, PR on record",
+      "path": "task",
+      "expect": {
+        "launches": 1,
+        "child_in_worktree": true,
+        "network": true,
+        "add_dirs": 2,
+        "sandbox": "workspace-write",
+        "token_scoped": true,
+        "commit_on_remote": true,
+        "prs": 1,
+        "result_ok": true,
+        "claim_released": true
+      }
+    },
+    {
+      "id": "task_with_an_explicit_repo_field_delivers",
+      "why": "the dispatcher's one resolver reads `repo`, and an explicit field beats a different repository named in prose",
+      "path": "task",
+      "task": {
+        "description": "Implement the spec. Follow the pattern in other/reference#9, then open a PR."
+      },
+      "expect": {
+        "launches": 1,
+        "child_in_worktree": true,
+        "commit_on_remote": true,
+        "prs": 1,
+        "result_ok": true
+      }
+    },
+    {
+      "id": "handoff_launches_no_child_when_the_clone_is_the_wrong_repository",
+      "why": "a clone whose origin is another repository is refused before any fetch, worktree, grant or token: no child, no worktree, nothing on the remote",
+      "path": "handoff",
+      "fault": "origin_mismatch",
+      "expect": {
+        "launches": 0,
+        "worktree_dirs": 0,
+        "commit_on_remote": false,
+        "prs": 0,
+        "result_ok": false,
+        "claim_released": true
+      }
+    },
+    {
+      "id": "task_launches_no_child_when_the_clone_is_the_wrong_repository",
+      "why": "the same refusal on the task path, reported to the caller by reason",
+      "path": "task",
+      "fault": "origin_mismatch",
+      "expect": {
+        "launches": 0,
+        "worktree_dirs": 0,
+        "commit_on_remote": false,
+        "prs": 0,
+        "result_ok": false,
+        "result_error_contains": "origin that is not"
+      }
+    },
+    {
+      "id": "handoff_launches_no_child_when_there_is_no_clone",
+      "why": "no local clone, no worktree, so no child is launched",
+      "path": "handoff",
+      "fault": "no_clone",
+      "expect": {
+        "launches": 0,
+        "worktree_dirs": 0,
+        "prs": 0,
+        "result_ok": false
+      }
+    },
+    {
+      "id": "task_launches_no_child_when_there_is_no_clone",
+      "why": "no local clone, no worktree, so no child is launched; the reason is returned",
+      "path": "task",
+      "fault": "no_clone",
+      "expect": {
+        "launches": 0,
+        "worktree_dirs": 0,
+        "prs": 0,
+        "result_ok": false,
+        "result_error_contains": "no local clone"
+      }
+    },
+    {
+      "id": "non_delivery_task_runs_unchanged",
+      "why": "a local-edit task gets no worktree, no git roots and no network: the sandbox is widened for a dispatch that delivers and for nothing else",
+      "path": "task",
+      "task": {"action_type": "local_edit"},
+      "expect": {
+        "launches": 1,
+        "child_in_daemon_cwd": true,
+        "network": false,
+        "add_dirs": 0,
+        "sandbox": "workspace-write",
+        "worktree_dirs": 0,
+        "commit_on_remote": false,
+        "prs": 0
+      }
+    },
+    {
+      "id": "tracking_task_mid_build_adds_no_launch_and_no_status_write",
+      "why": "the task the build files for itself carries the run marker the child was given; it is not dispatched, and nothing is launched or written for it",
+      "path": "mid_build",
+      "child": {"hold": true},
+      "events": [{"marker": true}],
+      "expect": {
+        "run_id_in_prompt": true,
+        "mid_launches": 1,
+        "mid_status_writes": 0,
+        "mid_spawns": 0,
+        "final_spawns": [],
+        "claim_released": true
+      }
+    },
+    {
+      "id": "independent_task_mid_build_is_deferred_then_run",
+      "why": "a task about the same issue that is NOT the build's own waits, and is re-dispatched once when the build's claim is released; redelivery of its event changes nothing",
+      "path": "mid_build",
+      "child": {"hold": true},
+      "events": [{"deliveries": 3}],
+      "expect": {
+        "mid_launches": 1,
+        "mid_status_writes": 0,
+        "mid_spawns": 0,
+        "final_spawns": [["ent_eval_mid_0000", "build_released"]],
+        "claim_released": true
+      }
+    },
+    {
+      "id": "control_task_for_a_different_issue_is_not_held",
+      "why": "control: a task about another issue is dispatched immediately",
+      "path": "mid_build",
+      "child": {"hold": true},
+      "events": [{"task": {"issue_number": 1449, "description": "Implement the spec in eval-owner/eval-repo#1449."}}],
+      "expect": {
+        "mid_launches": 1,
+        "mid_spawns": 1,
+        "final_spawns": [["ent_eval_mid_0000", "created"]],
+        "claim_released": true
+      }
+    },
+    {
+      "id": "control_gate_override_is_not_held",
+      "why": "control: an operator-approved release is dispatched even while a build runs",
+      "path": "mid_build",
+      "child": {"hold": true},
+      "events": [{"override": true}],
+      "expect": {
+        "mid_launches": 1,
+        "mid_spawns": 1,
+        "final_spawns": [["ent_eval_mid_0000", "approved"]],
+        "claim_released": true
+      }
+    },
+    {
+      "id": "claim_is_released_and_deferred_task_runs_after_a_failed_build",
+      "why": "control: the build crashes; its claim is still released and the deferred task still runs",
+      "path": "mid_build",
+      "child": {"hold": true, "crash": true},
+      "events": [{}],
+      "expect": {
+        "mid_launches": 1,
+        "mid_spawns": 0,
+        "result_ok": false,
+        "final_spawns": [["ent_eval_mid_0000", "build_released"]],
+        "claim_released": true
+      }
+    }
+  ]
+}
