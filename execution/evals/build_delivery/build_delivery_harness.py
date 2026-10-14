@@ -58,7 +58,8 @@ from lib.daemon_runtime.sse_client import NeotomaEvent  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
 MUTATIONS = (
-    "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep"
+    "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep",
+    "no_continuation", "no_readback", "no_worktree_check",
 )
 
 REPO = "eval-owner/eval-repo"
@@ -223,7 +224,9 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
 class World:
     """A bare 'origin', a clone that says it is the real repository, and the stubs."""
 
-    def __init__(self, root: Path, *, origin: str = "match", clone: bool = True):
+    def __init__(
+        self, root: Path, *, origin: str = "match", clone: bool = True, fault: str = ""
+    ):
         self.root = root
         self.bare = root / "origin.git"
         self.clone = root / "repos" / "eval-repo"
@@ -262,6 +265,8 @@ class World:
             _git(self.clone, "remote", "set-url", "origin", url)
             # Only the transport is local: the clone still says it is REPO.
             _git(self.clone, "config", f"url.{self.bare}.insteadOf", url)
+        if fault in ("worktree_remote_1", "worktree_remote_2"):
+            self._scope_hostile_configuration(fault)
         self.codex = self.bin / "codex"
         self.gh = self.bin / "gh"
         self.codex.write_text(
@@ -279,6 +284,21 @@ class World:
         self.codex.chmod(0o755)
         self.gh.chmod(0o755)
         self.configure_child()
+
+    def _scope_hostile_configuration(self, fault: str) -> None:
+        """Configuration that applies only inside a worktree made from the clone."""
+        include = self.root / "worktree-scoped.gitconfig"
+        include.write_text(
+            '[url "https://github.com/someone-else/other-repo.git"]\n'
+            f"\tpushInsteadOf = https://github.com/{REPO}.git\n"
+        )
+        common = Path(
+            _git(self.clone, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        ).resolve()
+        condition = (
+            f"gitdir:{common}/worktrees/" if fault == "worktree_remote_1" else "onbranch:cicada/**"
+        )
+        _git(self.clone, "config", f"includeIf.{condition}.path", str(include))
 
     def configure_child(self, **cfg) -> None:
         cfg.setdefault("held_file", str(self.held_file))
@@ -333,20 +353,32 @@ class _TaskStore:
         self.rows: dict[str, dict] = {}
         self.obs = obs
         self.unreadable: set[str] = set()
+        # field -> [mode, remaining]: a write that SUCCEEDS but is not persisted as
+        # sent ("omit": dropped, "mismatch": stored with a different value).
+        self.lossy: dict[str, list] = {}
 
     def put(self, entity_id: str, snapshot: dict) -> None:
         self.rows[entity_id] = dict(snapshot)
 
+    def _persist(self, entity_id: str, field: str, value) -> None:
+        row = self.rows.setdefault(entity_id, {})
+        loss = self.lossy.get(field)
+        if loss and loss[1] > 0:
+            loss[1] -= 1
+            if loss[0] == "mismatch":
+                row[field] = "altered-" + str(value)[:8]
+            return
+        row[field] = value
+
     def field(self, entity_id, field, value, **kw) -> bool:
-        self.rows.setdefault(entity_id, {})[field] = value
+        self._persist(entity_id, field, value)
         return True
 
     def status(self, entity_id, status, **kw) -> bool:
         value = getattr(status, "value", status)
-        row = self.rows.setdefault(entity_id, {})
-        row["status"] = value
+        self._persist(entity_id, "status", value)
         if kw.get("reason") is not None:
-            row["blocked_reason"] = kw["reason"]
+            self._persist(entity_id, "blocked_reason", kw["reason"])
         self.obs["statuses"].append((entity_id, value))
         return True
 
@@ -440,6 +472,7 @@ def run_scenario(scenario: dict, tmp_path: Path, *, mutation: str = "none") -> d
         tmp_path,
         origin=(scenario.get("fault") == "origin_mismatch" and "other") or "match",
         clone=scenario.get("fault") != "no_clone",
+        fault=scenario.get("fault", ""),
     )
     world.configure_child(**(scenario.get("child") or {}))
     obs: dict = {"world": world, "statuses": [], "spawns": [], "mid": {}, "notifications": []}
@@ -515,6 +548,19 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
             return {}
 
         mp.setattr(apis, "start_deferred_recovery", _hook_only, raising=False)
+    if mutation == "no_continuation":
+        mp.setattr(apis, "_continue_later", lambda *a, **k: None, raising=False)
+    if mutation == "no_readback":
+        mp.setattr(apis, "_deferral_persisted", lambda *a, **k: [], raising=False)
+    if mutation == "no_worktree_check":
+        real_verify = build_delivery.verify_clone_identity
+
+        async def _source_only(path, repository, *, what="clone"):
+            if what == "worktree":
+                return None
+            return await real_verify(path, repository, what=what)
+
+        mp.setattr(build_delivery, "verify_clone_identity", _source_only)
     if mutation == "no_git_roots":
         mp.setattr(skill_runner, "_git_roots_for_sandbox", lambda cwd: [])
 
@@ -536,6 +582,18 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     mp.setattr(apis, "set_task_field", store.field, raising=False)
     mp.setattr(apis, "query_all_entities", store.query)
     mp.setattr(apis, "fetch_task_snapshot", store.read)
+    obs["token_requests"] = []
+    real_token = apis._token_for_agent_on_repo
+
+    def _token(*args):
+        obs["token_requests"].append(args)
+        return real_token(*args)
+
+    mp.setattr(apis, "_token_for_agent_on_repo", _token)
+    mp.setattr(swarm_dispatch, "_token_for_agent_on_repo", _token)
+    mp.setattr(apis, "_RECOVERY_PASS_DELAY_S", 0.001, raising=False)
+    mp.setattr(apis, "_RECOVERY_LIST_RETRY_DELAY_S", 0.001, raising=False)
+    mp.setattr(apis, "_surfaced", set(), raising=False)
     mp.setattr(apis, "_recovering", set(), raising=False)
     mp.setattr(apis, "_unrecorded_deferrals", {}, raising=False)
     mp.setattr(apis, "_recovery_notifier", None, raising=False)
@@ -547,7 +605,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
         return None
 
     mp.setattr(apis, "hydrate_snapshot", _no_hydrate)
-    if scenario["path"] in ("mid_build", "restart"):
+    if scenario["path"] in ("mid_build", "restart", "sweep_scale"):
         # What gets dispatched for the OTHER tasks is not the subject; the child
         # the build itself launched still goes through the real run_skill.
         mp.setattr(apis, "_spawn_harness_skill", _recording_spawn(obs))
@@ -592,11 +650,77 @@ def _wipe_process_state() -> None:
     build_delivery._runs.clear()
     apis._created_seen.clear()
     apis._recovering.clear()
+    apis._surfaced.clear()
     apis._unrecorded_deferrals.clear()
     apis._recovery_notifier = None
     for task in list(apis._background_dispatch_tasks):
         task.cancel()
     apis._background_dispatch_tasks.clear()
+
+
+def _marked_row(**over) -> dict:
+    row = _task_snapshot(action_type=over.pop("action_type", "local_edit"), **over)
+    row.update(
+        status="pending",
+        disposition=build_delivery.DEFERRED_DISPOSITION,
+        blocked_reason="Deferred: swarm-build-handoff is building",
+    )
+    return row
+
+
+async def _drive_scale(scenario: dict, world: World, obs: dict, notifier) -> None:
+    """More marked tasks than one pass examines, broken records sorted FIRST.
+
+    Nothing is delivered afterwards: no creation event, no unrelated build release,
+    no restart. The single startup sweep (and the continuation it schedules) must
+    reach every one of them, then repeated sweeps must change nothing.
+    """
+    scale = scenario["scale"]
+    store = obs["store"]
+    context = f"deferred-behind:{REPO.lower()}#{ISSUE}:0123456789abcdef"
+    bad: dict[str, str] = {}
+    for i in range(scale.get("unreadable", 0)):
+        eid = f"ent_a_unreadable_{i:03d}"
+        store.put(eid, {**_marked_row(), "dispatch_context": context})
+        store.unreadable.add(eid)
+        bad[eid] = "unreadable"
+    for i in range(scale.get("garbled", 0)):
+        eid = f"ent_b_garbled_{i:03d}"
+        store.put(eid, {**_marked_row(), "dispatch_context": "garbled"})
+        bad[eid] = "garbled"
+    for i in range(scale.get("missing_context", 0)):
+        eid = f"ent_c_missing_{i:03d}"
+        store.put(eid, _marked_row())
+        bad[eid] = "missing"
+    valid = []
+    for i in range(scale["valid_local"]):
+        eid = f"ent_d_valid_local_{i:03d}"
+        store.put(eid, {**_marked_row(), "dispatch_context": context})
+        valid.append(eid)
+    for i in range(scale.get("valid_pr", 0)):
+        eid = f"ent_e_valid_pr_{i:03d}"
+        store.put(eid, {**_marked_row(action_type="open_or_merge_pr"), "dispatch_context": context})
+        valid.append(eid)
+    for eid in store.rows:
+        # Unrelated pending backlog: never read for dispatch.
+        pass
+    for i in range(scale.get("backlog", 0)):
+        store.put(f"ent_f_backlog_{i:03d}", {**_task_snapshot(action_type="local_edit"), "status": "pending"})
+    obs["scale"] = {"valid": valid, "bad": bad}
+
+    obs["notifier"] = notifier
+    await apis.start_deferred_recovery(notifier)
+    await _settle()
+    obs["after_first_sweep"] = {
+        "spawns": list(obs["spawns"]),
+        "sent": list(notifier.sent),
+        "statuses": list(obs["statuses"]),
+    }
+    for _ in range(scale.get("repeat_sweeps", 2)):
+        await apis.recover_deferred_tasks(notifier)
+        await _settle()
+    build_delivery._release_hook and build_delivery._release_hook((REPO.lower(), ISSUE))
+    await _settle()
 
 
 async def _drive_restart(scenario: dict, world: World, obs: dict, notifier) -> None:
@@ -606,6 +730,8 @@ async def _drive_restart(scenario: dict, world: World, obs: dict, notifier) -> N
     the task is what was written on it.
     """
     store = obs["store"]
+    obs["notifier_before"] = notifier
+    store.lossy = {k: list(v) for k, v in (scenario.get("store_faults") or {}).items()}
     apis.install_build_release_hook(notifier)
     claim_cm = build_delivery.claim_build(REPO, ISSUE, "swarm-build-handoff")
     claim_cm.__enter__()
@@ -710,6 +836,10 @@ async def _drive(scenario: dict, world: World, obs: dict) -> None:
         await _drive_restart(scenario, world, obs, notifier)
         return
 
+    if path == "sweep_scale":
+        await _drive_scale(scenario, world, obs, notifier)
+        return
+
     raise AssertionError(f"unknown path {path!r}")
 
 
@@ -738,6 +868,38 @@ def _result_ok(result) -> bool | None:
     if isinstance(result, str):
         return True  # the handoff returns the PR URL
     return bool(getattr(result, "ok", False))
+
+
+def _check_scale(exp: dict, obs: dict, bad: list[str]) -> None:
+    info = obs["scale"]
+    valid, broken = info["valid"], info["bad"]
+    statuses = obs["statuses"]
+    spawned = [s["task"] for s in obs["spawns"]]
+    for entity_id in valid:
+        if ("routed" not in [st for eid, st in statuses if eid == entity_id]):
+            bad.append(f"{entity_id} never reached the gates")
+    if len(spawned) != len(set(spawned)):
+        bad.append("a task was dispatched twice")
+    if exp.get("spawned") is not None and len(spawned) != exp["spawned"]:
+        bad.append(f"expected {exp['spawned']} dispatches, got {len(spawned)}")
+    first = obs["after_first_sweep"]
+    if len(first["spawns"]) != len(spawned):
+        bad.append("repeated sweeps dispatched more tasks")
+    if len(first["statuses"]) != len(statuses):
+        bad.append("repeated sweeps wrote more status changes")
+    sent = obs["notifier"].sent
+    for entity_id in broken:
+        count = sum(entity_id in m for m in sent)
+        if count != 1:
+            bad.append(f"{entity_id} announced {count} times, expected exactly once")
+    if len(first["sent"]) != len(sent):
+        bad.append("repeated sweeps announced more")
+    never = [eid for eid in broken if any(eid == s for s in spawned)]
+    if never:
+        bad.append(f"a broken record was dispatched: {never}")
+    backlog = [t for t in spawned if t.startswith("ent_f_backlog")]
+    if backlog:
+        bad.append("the unrelated backlog was dispatched")
 
 
 def mid_row(obs: dict, entity_id: str) -> dict | None:
@@ -857,6 +1019,23 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for needle in exp["notification_contains"]:
             if needle not in sent:
                 bad.append(f"no notification says {needle!r}; got: {sent[:300]!r}")
+
+    if "not_marked_before_restart" in exp:
+        for entity_id in exp["not_marked_before_restart"]:
+            want(
+                f"{entity_id} is not acknowledged as deferred",
+                _marked((obs.get("before_restart") or {}).get(entity_id)),
+                False,
+            )
+    if "warning_before_restart_contains" in exp:
+        sent = "\n".join(getattr(obs.get("notifier_before"), "sent", []))
+        for needle in exp["warning_before_restart_contains"]:
+            if needle not in sent:
+                bad.append(f"the operator was not warned {needle!r}; got: {sent[:300]!r}")
+    if "token_requests" in exp:
+        want("token resolutions", len(obs.get("token_requests", [])), exp["token_requests"])
+    if "scale" in exp:
+        _check_scale(exp["scale"], obs, bad)
 
     mid = obs.get("mid") or {}
     if "mid_launches" in exp:

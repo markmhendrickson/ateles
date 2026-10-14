@@ -63,6 +63,15 @@ def test_the_eval_covers_every_required_behaviour():
         "restart_does_not_run_a_deferred_task_the_build_completed",
         "restart_duplicate_delivery_does_not_double_dispatch",
         "restart_surfaces_a_deferred_task_it_cannot_re_read",
+        # recovery is live and complete, and a deferral is proven by read-back
+        "restart_sweep_reaches_every_marked_task_past_broken_records",
+        "restart_recovers_a_deferral_whose_first_write_dropped_a_field",
+        "deferral_that_never_persists_is_warned_not_acknowledged",
+        # the worktree itself is verified, on both paths
+        "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
+        "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
+        "task_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
+        "task_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
     }
     assert required <= set(IDS)
 
@@ -132,3 +141,33 @@ def test_the_durable_record_is_what_the_mid_build_scenario_checks(tmp_path):
     scenario = BY_ID["independent_task_mid_build_is_deferred_then_run"]
     obs = harness.run_scenario(scenario, tmp_path, mutation="no_durable_record")
     assert any("marked deferred on the task" in p for p in harness.check(scenario, obs))
+
+
+def test_the_scale_scenario_goes_red_without_a_real_continuation(tmp_path):
+    scenario = BY_ID["restart_sweep_reaches_every_marked_task_past_broken_records"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="no_continuation")
+    problems = harness.check(scenario, obs)
+    # One sweep alone no longer finishes the job: later sweeps had to do it.
+    assert any("repeated sweeps" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "scenario_id",
+    [
+        "restart_recovers_a_deferral_whose_first_write_dropped_a_field",
+        "deferral_that_never_persists_is_warned_not_acknowledged",
+    ],
+)
+def test_the_read_back_scenarios_go_red_without_the_read_back(scenario_id, tmp_path):
+    scenario = BY_ID[scenario_id]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="no_readback")
+    assert harness.check(scenario, obs), "an unverified acknowledgement went unnoticed"
+
+
+@pytest.mark.parametrize("path", ["handoff", "task"])
+@pytest.mark.parametrize("case", [1, 2])
+def test_the_worktree_scenarios_go_red_when_only_the_source_is_checked(path, case, tmp_path):
+    scenario = BY_ID[f"{path}_launches_no_child_when_the_worktree_remote_is_wrong_case_{case}"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="no_worktree_check")
+    assert harness.check(scenario, obs)
+    assert obs["token_requests"], "the token was resolved for the unchecked worktree"

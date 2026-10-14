@@ -381,6 +381,175 @@
           "re-dispatch it by hand"
         ]
       }
+    },
+    {
+      "id": "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
+      "why": "the worktree made from a verified clone is verified on its own before it is returned: no child, no token resolved, nothing left behind, and the operator is told the prerequisite",
+      "path": "handoff",
+      "fault": "worktree_remote_1",
+      "expect": {
+        "launches": 0,
+        "worktree_dirs": 0,
+        "commit_on_remote": false,
+        "prs": 0,
+        "result_ok": false,
+        "token_requests": 0,
+        "operator_text_contains": [
+          "NOT started",
+          "worktree",
+          "verify the worktree's effective remote configuration",
+          "Before retrying"
+        ],
+        "operator_text_excludes": [
+          "spec may be incomplete",
+          "approve the build",
+          "opened NO PR"
+        ],
+        "claim_released": true
+      }
+    },
+    {
+      "id": "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
+      "why": "the worktree made from a verified clone is verified on its own before it is returned: no child, no token resolved, nothing left behind, and the operator is told the prerequisite",
+      "path": "handoff",
+      "fault": "worktree_remote_2",
+      "expect": {
+        "launches": 0,
+        "worktree_dirs": 0,
+        "commit_on_remote": false,
+        "prs": 0,
+        "result_ok": false,
+        "token_requests": 0,
+        "operator_text_contains": [
+          "NOT started",
+          "worktree",
+          "verify the worktree's effective remote configuration",
+          "Before retrying"
+        ],
+        "operator_text_excludes": [
+          "spec may be incomplete",
+          "approve the build",
+          "opened NO PR"
+        ],
+        "claim_released": true
+      }
+    },
+    {
+      "id": "task_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
+      "why": "the worktree made from a verified clone is verified on its own before it is returned: no child, no token resolved, nothing left behind, and the operator is told the prerequisite",
+      "path": "task",
+      "fault": "worktree_remote_1",
+      "expect": {
+        "launches": 0,
+        "worktree_dirs": 0,
+        "commit_on_remote": false,
+        "prs": 0,
+        "result_ok": false,
+        "token_requests": 0,
+        "operator_text_contains": [
+          "build not started",
+          "worktree",
+          "verify the worktree's effective remote configuration",
+          "Before retrying"
+        ],
+        "claim_released": true
+      }
+    },
+    {
+      "id": "task_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
+      "why": "the worktree made from a verified clone is verified on its own before it is returned: no child, no token resolved, nothing left behind, and the operator is told the prerequisite",
+      "path": "task",
+      "fault": "worktree_remote_2",
+      "expect": {
+        "launches": 0,
+        "worktree_dirs": 0,
+        "commit_on_remote": false,
+        "prs": 0,
+        "result_ok": false,
+        "token_requests": 0,
+        "operator_text_contains": [
+          "build not started",
+          "worktree",
+          "verify the worktree's effective remote configuration",
+          "Before retrying"
+        ],
+        "claim_released": true
+      }
+    },
+    {
+      "id": "restart_recovers_a_deferral_whose_first_write_dropped_a_field",
+      "why": "a deferral write that succeeded but did not persist a field is caught by reading the task back and rewritten; the task is then recoverable across a restart",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "store_faults": {
+        "dispatch_context": [
+          "omit",
+          1
+        ]
+      },
+      "expect": {
+        "marked_before_restart": [
+          "ent_eval_rst_0000"
+        ],
+        "final_spawns": [
+          [
+            "ent_eval_rst_0000",
+            "build_released"
+          ]
+        ],
+        "restart_statuses": {
+          "ent_eval_rst_0000": [
+            "routed",
+            "executing"
+          ]
+        }
+      }
+    },
+    {
+      "id": "deferral_that_never_persists_is_warned_not_acknowledged",
+      "why": "a deferral whose fields never persist is not acknowledged: the operator is warned with the task and the next action, and after a restart nothing pretends it was recorded",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "store_faults": {
+        "disposition": [
+          "mismatch",
+          99
+        ]
+      },
+      "expect": {
+        "not_marked_before_restart": [
+          "ent_eval_rst_0000"
+        ],
+        "final_spawns": [],
+        "warning_before_restart_contains": [
+          "ent_eval_rst_0000",
+          "could not record",
+          "re-dispatch the task by hand"
+        ]
+      }
+    },
+    {
+      "id": "restart_sweep_reaches_every_marked_task_past_broken_records",
+      "why": "more than 50 deferred tasks, local-edit ones included, with unreadable and malformed records sorted BEFORE the valid ones: every valid task reaches the gates from one startup sweep and its continuation, with no creation event, unrelated release or restart; broken records are announced once each; repeated sweeps change nothing",
+      "path": "sweep_scale",
+      "scale": {
+        "valid_local": 52,
+        "valid_pr": 6,
+        "unreadable": 3,
+        "garbled": 3,
+        "missing_context": 3,
+        "backlog": 4,
+        "repeat_sweeps": 2
+      },
+      "expect": {
+        "scale": {
+          "spawned": 52
+        }
+      }
     }
   ]
 }

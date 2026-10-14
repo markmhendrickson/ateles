@@ -106,6 +106,34 @@ def test_set_status_remediation(monkeypatch):
     assert fields == {"status", "remediation_id"}
 
 
+def test_a_failed_companion_write_is_a_failed_status_write(monkeypatch):
+    """The status lands but its reason does not: not reported as complete."""
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    def post(url, headers=None, json=None, timeout=None):
+        if json["field"] == "blocked_reason":
+            raise RuntimeError("write rejected")
+        return _Resp()
+
+    monkeypatch.setattr(tl.httpx, "post", post)
+    assert tl.set_task_status("ent_t", TaskStatus.PENDING, handler="apis", reason="why") is False
+    assert tl.set_task_status("ent_t", TaskStatus.PENDING, handler="apis") is True
+
+
+def test_set_task_field_writes_one_field_and_reports_failure(monkeypatch):
+    calls = _capture(monkeypatch)
+    assert tl.set_task_field("ent_t", "disposition", "x", handler="apis", key_suffix="k")
+    (call,) = calls
+    assert call["json"]["field"] == "disposition" and call["json"]["value"] == "x"
+    assert call["json"]["idempotency_key"] == "taskfield-apis-ent_t-disposition-k"
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "")
+    assert tl.set_task_field("ent_t", "disposition", "x", handler="apis") is False
+
+
 def test_set_status_fail_open_without_token(monkeypatch):
     monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "")
     # No token → returns False, never raises.

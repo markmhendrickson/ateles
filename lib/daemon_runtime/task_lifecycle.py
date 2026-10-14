@@ -306,7 +306,9 @@ def set_task_status(
 ) -> bool:
     """Write a task's lifecycle status (plus optional companions) to Neotoma.
 
-    Best-effort and fail-open: returns True only if the status write succeeded.
+    Best-effort and fail-open: returns True only if the status write AND every
+    companion write that was supplied succeeded. A True is an HTTP-level success,
+    not proof the value persisted: a caller that must rely on it reads it back.
     Logs (but does not refuse) a transition the graph considers illegal, so an
     unexpected status value is still recorded rather than dropped.
 
@@ -332,21 +334,24 @@ def set_task_status(
         task_entity_id, "status", value,
         idempotency_key=f"taskstatus-{handler}-{task_entity_id}-{value}{suffix}",
     )
+    # A companion write that fails is a failed write: this returns True only if
+    # EVERY write that was asked for succeeded, so a caller is never told the
+    # lifecycle record is complete when its reason, result or link is missing.
     if reason is not None:
-        _correct(
+        ok = _correct(
             task_entity_id, "blocked_reason", reason,
             idempotency_key=f"taskreason-{handler}-{task_entity_id}-{value}{suffix}",
-        )
+        ) and ok
     if result is not None:
-        _correct(
+        ok = _correct(
             task_entity_id, "result", result,
             idempotency_key=f"taskresult-{handler}-{task_entity_id}-{value}{suffix}",
-        )
+        ) and ok
     if remediation_id is not None:
-        _correct(
+        ok = _correct(
             task_entity_id, "remediation_id", remediation_id,
             idempotency_key=f"taskremediation-{handler}-{task_entity_id}{suffix}",
-        )
+        ) and ok
     return ok
 
 

@@ -453,16 +453,24 @@ TEST_ONLY_LOCAL_TRANSPORTS: frozenset[str] = frozenset()
 _GIT_FAILED = -1  # `_git` could not run git at all (spawn error, timeout)
 
 
-def _identity_fix(clone: Path, repository: str) -> str:
+def _identity_fix(path: Path, repository: str, what: str = "clone") -> str:
+    if what == "worktree":
+        return (
+            "verify the worktree's effective remote configuration (for example "
+            "`git config --show-origin --get-all remote.origin.url` and `git "
+            f"remote get-url --push --all origin` from inside it), or point "
+            f"${BUILD_CLONES_ENV} ({repository}=<path>) at a clone of {repository} "
+            "whose worktrees resolve to it"
+        )
     return (
-        f"set the origin of {clone} to https://github.com/{repository}.git and "
+        f"set the origin of {path} to https://github.com/{repository}.git and "
         "remove any url.*.insteadOf or pushInsteadOf rewrite of it, or point "
         f"${BUILD_CLONES_ENV} ({repository}=<path>) at a clone of {repository}"
     )
 
 
 async def _remote_urls(
-    clone: Path, repository: str, args: list[str], *, may_be_unset: bool
+    path: Path, repository: str, args: list[str], *, may_be_unset: bool, what: str = "clone"
 ) -> list[str]:
     """The URLs a git query returns; ANY git error refuses.
 
@@ -471,47 +479,55 @@ async def _remote_urls(
     spawn, a timeout, any other status, or a failure that printed something is a
     refusal, never an absent value.
     """
-    rc, out, err = await _git(args, clone)
+    rc, out, err = await _git(args, path)
     urls = [line.strip() for line in out.splitlines() if line.strip()]
     if rc == 0:
         return urls
     if may_be_unset and rc == 1 and not out.strip() and not err.strip():
         return []
     raise BuildWorktreeError(
-        f"could not read the remote URLs of the clone at {clone} "
+        f"could not read the remote URLs of the {what} at {path} "
         f"(git {' '.join(args[:3])}: rc={rc}, {err.strip()[:120] or 'no detail'})",
-        fix=_identity_fix(clone, repository),
+        fix=_identity_fix(path, repository, what),
     )
 
 
-async def verify_clone_identity(clone: Path, repository: str) -> None:
-    """Refuse a clone unless every URL git will use for origin is the repository.
+async def verify_clone_identity(
+    clone: Path, repository: str, *, what: str = "clone"
+) -> None:
+    """Refuse a checkout unless every URL git will use for origin is the repository.
+
+    ``what`` is "clone" for the source clone and "worktree" for the worktree made
+    from it: git configuration can depend on where it is read from, so the
+    answer for the source says nothing about a checkout made from it, and BOTH are
+    verified (the worktree before it is returned, before any token or grant).
 
     Two views must BOTH resolve to exactly ``github.com/<repository>``: the
-    CONFIGURED fetch and push URLs (what the clone says it is) and the EFFECTIVE
-    ones from ``git remote get-url [--push] --all origin`` (what git will really
-    contact, after `insteadOf` / `pushInsteadOf` rewrites). A rewrite rule can
-    point a correctly configured clone at another repository, so configuration
-    alone proves nothing. Any git error refuses. Runs before any fetch, worktree,
-    network grant or token.
+    CONFIGURED fetch and push URLs (what the checkout says it is) and the
+    EFFECTIVE ones from ``git remote get-url [--push] --all origin`` (what git
+    will really contact, after `insteadOf` / `pushInsteadOf` rewrites). Any git
+    error refuses. Runs before any fetch, worktree, network grant or token for
+    the clone, and before the worktree is returned for the worktree.
     """
     want = f"github.com/{repository}".lower()
-    fix = _identity_fix(clone, repository)
+    fix = _identity_fix(clone, repository, what)
 
-    def refuse(what: str):
+    def refuse(detail: str):
         return BuildWorktreeError(
-            f"the clone at {clone} has {what} that is not {repository} — "
+            f"the {what} at {clone} has {detail} that is not {repository} — "
             f"refusing to build {repository} from it",
             fix=fix,
         )
 
     configured = await _remote_urls(
-        clone, repository, ["config", "--get-all", "remote.origin.url"], may_be_unset=True
+        clone, repository, ["config", "--get-all", "remote.origin.url"],
+        may_be_unset=True, what=what,
     )
     if not configured:
-        raise BuildWorktreeError(f"the clone at {clone} has no origin remote", fix=fix)
+        raise BuildWorktreeError(f"the {what} at {clone} has no origin remote", fix=fix)
     pushurls = await _remote_urls(
-        clone, repository, ["config", "--get-all", "remote.origin.pushurl"], may_be_unset=True
+        clone, repository, ["config", "--get-all", "remote.origin.pushurl"],
+        may_be_unset=True, what=what,
     )
     for url in [*configured, *pushurls]:
         if normalise_remote(url) != want:
@@ -521,10 +537,12 @@ async def verify_clone_identity(clone: Path, repository: str) -> None:
         ["remote", "get-url", "--all", "origin"],
         ["remote", "get-url", "--push", "--all", "origin"],
     ):
-        effective = await _remote_urls(clone, repository, args, may_be_unset=False)
+        effective = await _remote_urls(
+            clone, repository, args, may_be_unset=False, what=what
+        )
         if not effective:
             raise BuildWorktreeError(
-                f"git reports no URL for origin in the clone at {clone}", fix=fix
+                f"git reports no URL for origin in the {what} at {clone}", fix=fix
             )
         for url in effective:
             if normalise_remote(url) != want and url not in TEST_ONLY_LOCAL_TRANSPORTS:
@@ -553,6 +571,13 @@ async def _git(args: list[str], cwd: Path, timeout: int = _GIT_TIMEOUT_S):
         )
     except Exception as exc:  # noqa: BLE001 — reported by the caller
         return _GIT_FAILED, "", f"{type(exc).__name__}: {exc}"
+
+
+async def _discard_worktree(clone: Path, path: Path, branch: str) -> bool:
+    """Remove a worktree that was refused, and its branch. True if both went."""
+    rc, _, _ = await _git(["worktree", "remove", "--force", str(path)], clone)
+    rc2, _, _ = await _git(["branch", "-D", branch], clone)
+    return rc == 0 and rc2 == 0 and not path.exists()
 
 
 def _slug(label: str) -> str:
@@ -615,6 +640,22 @@ async def prepare_build_worktree(repository: str, label: str) -> BuildWorktree:
     )
     if rc != 0:
         raise BuildWorktreeError(f"git worktree add failed: {err.strip()[:300]}")
+
+    # Verified FROM the worktree, before it is returned and so before any caller
+    # resolves a token or launches in it. A refused worktree holds only a checkout
+    # of origin/main (nothing has run in it), so it is removed with its branch;
+    # if removal fails its path is named and nothing is ever launched in it.
+    try:
+        await verify_clone_identity(path, repository, what="worktree")
+    except BuildWorktreeError as exc:
+        removed = await _discard_worktree(clone, path, branch)
+        log.error(
+            "[apis] build worktree for %s refused (%s); %s",
+            repository,
+            exc.reason,
+            "removed" if removed else f"could not be removed — left at {path}, unused",
+        )
+        raise
 
     log.info(
         "[apis] build worktree prepared: %s on %s (base %s%s)",

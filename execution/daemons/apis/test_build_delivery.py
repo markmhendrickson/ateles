@@ -76,7 +76,10 @@ def route_origin_to(work: Path, target: Path | str) -> None:
     for line in rc.stdout.splitlines():
         section = line.split()[0].rsplit(".insteadof", 1)[0]
         _git(work, "config", "--remove-section", section)
-    _git(work, "config", f"url.{target}.insteadOf", f"https://github.com/{REPO}.git")
+    # The transport rule matches a SHORTER prefix (no ".git") than a rewrite of
+    # the full URL, so a more specific rule elsewhere still takes precedence.
+    base = str(target)[: -len(".git")]
+    _git(work, "config", f"url.{base}.insteadOf", f"https://github.com/{REPO}")
 
 
 @pytest.fixture
@@ -316,27 +319,44 @@ class _TaskStore:
         self.fail_writes = False
         self.fail_reads: set[str] = set()
         self.fail_query = False
+        self.fail_query_times = 0
+        self.queries = 0
+        # field -> [mode, remaining]: a write that SUCCEEDS but is not persisted
+        # as sent ("omit": dropped, "mismatch": stored with another value).
+        self.lossy: dict[str, list] = {}
+        self.key_suffixes: list[str] = []
 
     def put(self, entity_id: str, snapshot: dict) -> None:
         self.rows[entity_id] = dict(snapshot)
 
+    def _persist(self, entity_id, field, value) -> None:
+        row = self.rows.setdefault(entity_id, {})
+        loss = self.lossy.get(field)
+        if loss and loss[1] > 0:
+            loss[1] -= 1
+            if loss[0] == "mismatch":
+                row[field] = "garbled-" + str(value)[:8]
+            return
+        row[field] = value
+
     def field(self, entity_id, field, value, **kw) -> bool:
         if self.fail_writes:
             return False
-        self.rows.setdefault(entity_id, {})[field] = value
+        self.key_suffixes.append(kw.get("key_suffix", ""))
+        self._persist(entity_id, field, value)
         return True
 
     def status(self, entity_id, status, **kw) -> bool:
         if self.fail_writes:
             return False
-        row = self.rows.setdefault(entity_id, {})
-        row["status"] = getattr(status, "value", status)
+        self._persist(entity_id, "status", getattr(status, "value", status))
         if kw.get("reason") is not None:
-            row["blocked_reason"] = kw["reason"]
+            self._persist(entity_id, "blocked_reason", kw["reason"])
         return True
 
     def query(self, entity_type, *, snapshot_filters, limit=None, **kw):
-        if self.fail_query:
+        self.queries += 1
+        if self.fail_query or self.queries <= self.fail_query_times:
             return None
         out = []
         for eid, row in self.rows.items():
@@ -355,7 +375,10 @@ def dispatch_env(monkeypatch, tmp_path):
     monkeypatch.setattr(apis, "_unroutable", UnroutableLedger(path=tmp_path / "l.json"))
     monkeypatch.setattr(apis, "_created_seen", {})
     monkeypatch.setattr(apis, "_recovering", set())
+    monkeypatch.setattr(apis, "_surfaced", set())
     monkeypatch.setattr(apis, "_unrecorded_deferrals", {})
+    monkeypatch.setattr(apis, "_RECOVERY_PASS_DELAY_S", 0.001)
+    monkeypatch.setattr(apis, "_RECOVERY_LIST_RETRY_DELAY_S", 0.001)
     monkeypatch.setattr(apis, "READINESS_GATE", False)
     monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
     store = _TaskStore()
@@ -558,14 +581,23 @@ def test_a_deferred_task_that_cannot_be_re_read_is_surfaced_not_run(dispatch_env
     assert any("ent_followup_00001" in m and "re-dispatch it by hand" in m for m in notifier.sent)
 
 
-def test_a_failed_task_query_is_surfaced_not_silent(dispatch_env):
+def test_a_failed_task_query_is_surfaced_once_and_retried(dispatch_env):
     _, spawns, store = dispatch_env
     store.fail_query = True
     _, notifier = _during_build(
         dispatch_env, lambda c: _created("ent_followup_00001", _local())
     )
     assert spawns == []
-    assert any("could not list the tasks deferred" in m for m in notifier.sent)
+    listing = [m for m in notifier.sent if "could not list the tasks deferred" in m]
+    assert len(listing) == 1, "one notice, however many retries"
+    assert store.queries == 1 + apis._RECOVERY_LIST_RETRIES, "retried a bounded number of times"
+
+
+def test_a_query_that_recovers_on_retry_still_dispatches(dispatch_env):
+    _, spawns, store = dispatch_env
+    store.fail_query_times = 1
+    _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
+    assert spawns == [("cicada", "ent_followup_00001", "build_released")]
 
 
 def test_a_deferral_that_cannot_be_recorded_is_reported_and_still_retried_in_process(
@@ -1222,7 +1254,7 @@ def test_a_rewrite_that_points_a_correct_clone_at_another_repository_is_refused(
     """Correctly configured, but git would really contact a different repository."""
     # Drop the fixture's own (local-transport) rewrite so only the hostile rule applies.
     route_origin_to(clone, "/nonexistent/none.git")
-    _git(clone, "config", "--remove-section", "url./nonexistent/none.git")
+    _git(clone, "config", "--remove-section", "url./nonexistent/none")
     _rewrite(clone, key, "https://github.com/other/repo.git")
     spy = _Spy(monkeypatch)
 
@@ -1309,3 +1341,298 @@ def test_a_build_that_ran_without_a_pr_still_says_so():
 def test_a_build_that_opened_a_pr_says_so():
     (msg,) = _handoff_message(None, url="https://github.com/o/r/pull/9")
     assert "implementation PR opened" in msg
+
+
+# ── the worktree's own remote configuration is verified too ──────────────────
+
+
+def _scoped_rewrite(clone: Path, condition: str, key: str, target: str) -> None:
+    include = clone.parent / f"scoped-{abs(hash((condition, key)))}.gitconfig"
+    include.write_text(f'[url "{target}"]\n\t{key} = https://github.com/{REPO}.git\n')
+    _git(clone, "config", f"includeIf.{condition}.path", str(include))
+
+
+def _scope_by_directory(clone: Path) -> str:
+    common = Path(_git(clone, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    return f"gitdir:{common}/worktrees/"
+
+
+SCOPES = {
+    "directory": lambda clone: _scope_by_directory(clone),
+    "branch": lambda clone: "onbranch:cicada/**",
+}
+
+
+@pytest.mark.parametrize("scope", sorted(SCOPES))
+@pytest.mark.parametrize("key", ["insteadOf", "pushInsteadOf"])
+def test_the_new_worktrees_remote_configuration_is_verified(
+    clone, run_skill_calls, monkeypatch, scope, key
+):
+    """The source clone passes; the worktree made from it is checked on its own."""
+    _scoped_rewrite(clone, SCOPES[scope](clone), key, "https://github.com/other/repo.git")
+    # The source clone alone is clean.
+    asyncio.run(build_delivery.verify_clone_identity(clone, REPO))
+    spy = _Spy(monkeypatch)
+
+    result = _spawn(_task_snapshot())
+
+    assert result.ok is False
+    assert "worktree" in result.error and "Before retrying" in result.error
+    assert "verify the worktree's effective remote configuration" in result.error
+    assert spy.tokens == [] and run_skill_calls == []
+
+
+@pytest.mark.parametrize("scope", sorted(SCOPES))
+def test_a_refused_worktree_is_removed_with_its_branch(clone, monkeypatch, scope):
+    _scoped_rewrite(clone, SCOPES[scope](clone), "pushInsteadOf", "https://github.com/other/repo.git")
+
+    with pytest.raises(build_delivery.BuildWorktreeError, match="worktree"):
+        asyncio.run(build_delivery.prepare_build_worktree(REPO, "task-x"))
+
+    parent = clone.parent / "ateles-worktrees"
+    assert not parent.exists() or list(parent.iterdir()) == []
+    assert _git(clone, "worktree", "list").count("\n") == 0
+    assert _git(clone, "branch", "--list", "cicada/*") == ""
+
+
+@pytest.mark.parametrize("scope", sorted(SCOPES))
+def test_the_handoff_refuses_a_worktree_with_scoped_configuration(clone, monkeypatch, scope):
+    from test_swarm_dispatch import (
+        SwarmDispatcher,
+        _StubNotifier,
+        _config,
+        _empty_spec_state,
+        _issue_trigger,
+    )
+
+    trig = _issue_trigger()
+    trig.repository = REPO
+    _scoped_rewrite(clone, SCOPES[scope](clone), "pushInsteadOf", "https://github.com/other/repo.git")
+    ran: list = []
+
+    async def _fake_run_skill(skill, prompt, **kw):
+        ran.append(skill)
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr("swarm_dispatch.run_skill", _fake_run_skill)
+    spy = _Spy(monkeypatch)
+    monkeypatch.setattr(
+        "swarm_dispatch._token_for_agent_on_repo", lambda *a: spy.tokens.append(a) or "t"
+    )
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(
+        d._hand_off_to_build(
+            trig, _empty_spec_state(), completed=["pm"], spec_action="x", spec_ready_key="k"
+        )
+    )
+
+    (msg,) = notifier.sent
+    assert "NOT started" in msg and "worktree" in msg
+    assert "verify the worktree's effective remote configuration" in msg
+    assert "spec may be incomplete" not in msg
+    assert ran == [] and spy.tokens == []
+
+
+def test_a_linked_worktree_source_with_its_own_configuration_is_verified(clone, monkeypatch, tmp_path):
+    """A source that is itself a linked worktree may carry per-worktree configuration."""
+    source = tmp_path / "linked-source"
+    _git(clone, "worktree", "add", "-q", "--detach", str(source))
+    _git(clone, "config", "extensions.worktreeConfig", "true")
+    _git(source, "config", "--worktree", "url.https://github.com/other/repo.git.pushInsteadOf",
+         f"https://github.com/{REPO}.git")
+    monkeypatch.setenv(build_delivery.BUILD_CLONES_ENV, f"{REPO}={source}")
+
+    with pytest.raises(build_delivery.BuildWorktreeError, match="effective origin"):
+        asyncio.run(build_delivery.prepare_build_worktree(REPO, "task-x"))
+
+
+# ── the sweep examines every marked task ─────────────────────────────────────
+
+
+def _mark(store, entity_id, *, context="ok", **over):
+    row = _task_snapshot(action_type=over.pop("action_type", "local_edit"), **over)
+    row.update(status="pending", disposition=build_delivery.DEFERRED_DISPOSITION)
+    if context == "ok":
+        row["dispatch_context"] = f"deferred-behind:{REPO.lower()}#1448:{'0123456789abcdef'}"
+    elif context is not None:
+        row["dispatch_context"] = context
+    row["blocked_reason"] = "Deferred: swarm-build-handoff is building"
+    store.put(entity_id, row)
+
+
+def _sweep(store_env, notifier=None, times=1):
+    n = notifier or _RecNotifier()
+
+    async def _go():
+        for _ in range(times):
+            await apis.recover_deferred_tasks(n)
+            await _settle()
+
+    asyncio.run(_go())
+    return n
+
+
+def test_the_sweep_reaches_every_marked_task_past_one_batch(dispatch_env, monkeypatch):
+    _, spawns, store = dispatch_env
+    monkeypatch.setattr(apis, "_RECOVERY_BATCH", 3)
+    for i in range(10):
+        _mark(store, f"ent_valid_{i:04d}")
+
+    _sweep(dispatch_env)  # ONE trigger: no second event, release or restart
+
+    assert sorted(e for _, e, _ in spawns) == [f"ent_valid_{i:04d}" for i in range(10)]
+
+
+def test_broken_records_before_valid_ones_do_not_hide_them(dispatch_env, monkeypatch):
+    _, spawns, store = dispatch_env
+    monkeypatch.setattr(apis, "_RECOVERY_BATCH", 2)
+    _mark(store, "ent_a_unreadable_01")
+    _mark(store, "ent_a_unreadable_02")
+    _mark(store, "ent_b_garbled_0001", context="garbled")
+    _mark(store, "ent_b_missing_0001", context=None)
+    for i in range(6):
+        _mark(store, f"ent_c_valid_{i:04d}")
+    store.fail_reads |= {"ent_a_unreadable_01", "ent_a_unreadable_02"}
+
+    n = _sweep(dispatch_env)
+
+    assert sorted(e for _, e, _ in spawns) == [f"ent_c_valid_{i:04d}" for i in range(6)]
+    for bad in ("ent_a_unreadable_01", "ent_a_unreadable_02", "ent_b_garbled_0001", "ent_b_missing_0001"):
+        assert sum(bad in m for m in n.sent) == 1, f"{bad} should be reported exactly once"
+
+
+def test_repeated_sweeps_make_progress_and_never_double_dispatch(dispatch_env, monkeypatch):
+    _, spawns, store = dispatch_env
+    monkeypatch.setattr(apis, "_RECOVERY_BATCH", 2)
+    _mark(store, "ent_a_unreadable_01")
+    _mark(store, "ent_b_garbled_0001", context="garbled")
+    for i in range(5):
+        _mark(store, f"ent_c_valid_{i:04d}")
+    store.fail_reads.add("ent_a_unreadable_01")
+
+    n = _sweep(dispatch_env, times=4)
+
+    dispatched = [e for _, e, _ in spawns]
+    assert sorted(dispatched) == [f"ent_c_valid_{i:04d}" for i in range(5)]
+    assert len(dispatched) == len(set(dispatched)), "a task was dispatched twice"
+    assert sum("ent_a_unreadable_01" in m for m in n.sent) == 1, "re-announced on a later sweep"
+
+
+def test_an_empty_sweep_is_quiet(dispatch_env):
+    _, spawns, _ = dispatch_env
+    n = _sweep(dispatch_env)
+    assert spawns == [] and n.sent == []
+
+
+def test_no_overflow_notice_promises_a_continuation_that_does_not_exist(dispatch_env, monkeypatch):
+    _, _, store = dispatch_env
+    monkeypatch.setattr(apis, "_RECOVERY_BATCH", 2)
+    for i in range(9):
+        _mark(store, f"ent_valid_{i:04d}")
+    n = _sweep(dispatch_env)
+    assert not any("follow at the next" in m or "tasks are deferred behind builds" in m for m in n.sent)
+
+
+def test_a_local_edit_task_is_recovered_without_any_build_release(dispatch_env, monkeypatch):
+    """No delivery claim, so no release event: only the continuation can reach it."""
+    _, spawns, store = dispatch_env
+    monkeypatch.setattr(apis, "_RECOVERY_BATCH", 1)
+    for i in range(4):
+        _mark(store, f"ent_local_{i:04d}", action_type="local_edit")
+    _sweep(dispatch_env)
+    assert len(spawns) == 4
+
+
+def test_deferred_dispatches_run_at_most_the_stated_concurrency(dispatch_env, monkeypatch):
+    _, _, store = dispatch_env
+    running = peak = 0
+
+    async def _slow_spawn(skill, entity_id, snapshot, trigger, *a, **kw):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return _SpawnResult()
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _slow_spawn)
+    monkeypatch.setattr(apis, "_RECOVERY_CONCURRENCY", 2)
+    monkeypatch.setattr(apis, "_recovery_slots", __import__("weakref").WeakKeyDictionary())
+    for i in range(8):
+        _mark(store, f"ent_valid_{i:04d}")
+    _sweep(dispatch_env)
+    assert 0 < peak <= 2
+
+
+# ── a deferral is acknowledged only after it is read back ────────────────────
+
+
+def _defer_with(dispatch_env, *, lossy=None, events=None, **kw):
+    _, _, store = dispatch_env
+    store.lossy = {k: list(v) for k, v in (lossy or {}).items()}
+    return _during_build(
+        dispatch_env, lambda c: _created("ent_followup_00001", _local()), **kw
+    )
+
+
+@pytest.mark.parametrize(
+    "field,mode",
+    [
+        ("disposition", "omit"),
+        ("dispatch_context", "omit"),
+        ("blocked_reason", "omit"),
+        ("disposition", "mismatch"),
+        ("dispatch_context", "mismatch"),
+        ("blocked_reason", "mismatch"),
+        ("status", "mismatch"),
+    ],
+)
+def test_a_write_that_lost_a_field_once_is_rewritten_and_then_acknowledged(
+    dispatch_env, field, mode
+):
+    _, spawns, store = dispatch_env
+    out, notifier = _defer_with(dispatch_env, lossy={field: [mode, 1]})
+
+    assert not any("could not record" in m for m in notifier.sent)
+    row = out["rows_mid_build"]["ent_followup_00001"]
+    assert row["disposition"] == build_delivery.DEFERRED_DISPOSITION and row["status"] == "pending"
+    # The retry used its own idempotency keys, or a server would call it a repeat.
+    assert len(set(store.key_suffixes)) > 1
+    assert spawns == [("cicada", "ent_followup_00001", "build_released")]
+
+
+@pytest.mark.parametrize(
+    "field,mode",
+    [(f, m) for f in ("disposition", "dispatch_context", "blocked_reason") for m in ("omit", "mismatch")]
+)
+def test_a_write_that_never_persists_is_reported_not_acknowledged(dispatch_env, field, mode):
+    _, spawns, store = dispatch_env
+    out, notifier = _defer_with(dispatch_env, lossy={field: [mode, 99]})
+
+    (msg,) = [m for m in notifier.sent if "could not record" in m]
+    assert "ent_followup_00001" in msg and field in msg and "re-dispatch the task by hand" in msg
+    assert out["spawns_mid_build"] == []
+    # The in-process fallback still runs it when the build ends.
+    assert spawns == [("cicada", "ent_followup_00001", "build_released")]
+
+
+def test_an_unrecorded_deferral_does_not_survive_a_restart_and_the_operator_was_told(dispatch_env):
+    _, spawns, store = dispatch_env
+    out, notifier = _defer_with(
+        dispatch_env, lossy={"dispatch_context": ["omit", 99]}, release=False
+    )
+    assert any("re-dispatch the task by hand" in m for m in notifier.sent)
+    # A new process finds nothing marked to recover (the record never held).
+    apis._unrecorded_deferrals.clear()
+    spawns.clear()
+    asyncio.run(apis.recover_deferred_tasks(_RecNotifier()))
+    assert spawns == []
+
+
+def test_a_deferral_that_reads_back_as_nothing_is_not_acknowledged(dispatch_env, monkeypatch):
+    _, _, store = dispatch_env
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: None)
+    _, notifier = _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
+    assert any("could not record" in m and "read-back" in m for m in notifier.sent)
