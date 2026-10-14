@@ -3352,6 +3352,18 @@ async def main() -> None:
                 exc_info=True,
             )
 
+    # 7d. Fly runner limits (ateles#1456). With any class opted onto Fly,
+    #     validate its cost, capacity and time settings once at boot and log
+    #     the result. An invalid one disables Fly (every launch refuses, and
+    #     admission checks again); this makes it visible before the first run.
+    try:
+        import fly_runner
+
+        if fly_runner.runner_classes():
+            fly_runner.log_limit_check()
+    except Exception as exc:  # never let a config check kill startup
+        log.error(f"[{DAEMON_NAME}] Fly limit check failed: {exc}", exc_info=True)
+
     # 8. Deferred-review resume sweep: a PR review throttled by a usage limit
     #    posts a `review-deferred-until:<ISO>` marker instead of a verdict. The
     #    reset is often hours out, so unlike the one-shot pipeline resume this

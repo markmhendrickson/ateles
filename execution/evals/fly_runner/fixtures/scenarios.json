@@ -124,7 +124,8 @@
       "id": "forced_fly_budget_deferral",
       "description": "The monthly Fly budget cannot cover one more maximum-length run: the dispatch is deferred with cooled_until, and the minted token is revoked.",
       "settings": {
-        "APIS_FLY_MONTHLY_BUDGET_USD": "0.0001"
+        "APIS_FLY_MONTHLY_BUDGET_USD": "0.01",
+        "APIS_FLY_RATE_PER_HOUR_USD": "100"
       },
       "identity": "key",
       "github_app": "configured",
@@ -1179,6 +1180,68 @@
         "reason_contains": "outcome is unknown",
         "local_cli_ran": false,
         "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "non_finite_budget_setting_disables_fly",
+      "description": "APIS_FLY_MONTHLY_BUDGET_USD is set to NaN. That is not a budget: Fly is disabled, the dispatch is refused with a message naming the setting and no retry time, nothing is minted or sent to Fly, and nothing runs locally.",
+      "settings": {
+        "APIS_FLY_MONTHLY_BUDGET_USD": "NaN"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "APIS_FLY_MONTHLY_BUDGET_USD",
+        "cooled_until": false,
+        "fly_requests": 0,
+        "minted": 0,
+        "local_cli_ran": false
+      }
+    },
+    {
+      "id": "negative_daily_cap_refuses_an_opted_in_class_without_local_fallback",
+      "description": "The class is opted onto Fly and local fallback is on, but APIS_FLY_MAX_MACHINES_PER_DAY is negative. Fly is disabled: the dispatch is refused naming the setting, and it is not quietly run on this machine instead.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "APIS_FLY_MAX_MACHINES_PER_DAY": "-5"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "APIS_FLY_MAX_MACHINES_PER_DAY",
+        "fly_requests": 0,
+        "minted": 0,
+        "local_cli_ran": false
       }
     }
   ]

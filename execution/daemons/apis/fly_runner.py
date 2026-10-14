@@ -42,6 +42,7 @@ import copy
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -83,6 +84,19 @@ DEFAULT_RATE_PER_HOUR_USD = 13.90 / (30 * 24)
 DEFAULT_STORAGE_GB_MONTH_USD = 0.15
 DEFAULT_LOGIN_VOLUME_GB = 1.0
 DEFAULT_ROOTFS_GB = 2.0
+# The documented defaults of the cost and capacity settings, used ONLY when
+# the setting is unset (absent from the environment). Each is bound-checked
+# like a supplied value (see LIMITS).
+DEFAULT_MONTHLY_BUDGET_USD = 20.0
+DEFAULT_MAX_MACHINES_PER_DAY = 50
+DEFAULT_MAX_CONCURRENT = 3
+DEFAULT_QUEUE_MAX_WAIT_SECONDS = 1800
+# The longest dispatch timeout a Fly job may carry.
+MAX_JOB_TIMEOUT_SECONDS = 6 * 3600
+# The largest number any accounting record may hold (dollars, timestamps,
+# seconds): far above every real value, far below float overflow.
+MAX_RECORD_NUMBER = 1e12
+MAX_RECORD_COUNT = 10**9
 
 
 class FlyIneligible(Exception):
@@ -96,6 +110,16 @@ class FlyRefusal(Exception):
     def __init__(self, reason: str, cooled_until: str):
         super().__init__(reason)
         self.cooled_until = cooled_until
+
+
+class FlyConfigInvalid(FlyRefusal):
+    """A cost, capacity or time setting is unset (where required),
+    unparseable, non-finite or out of range: Fly is disabled until it is
+    fixed. Never defaulted, never clamped; no retry time (waiting does not
+    fix it). The message names the setting, never its value."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason, "")
 
 
 class FlyLaunchError(Exception):
@@ -153,6 +177,7 @@ POSITIVE_INT = "process id (integer above 1)"
 BOOLEAN = "boolean"
 MONTH = "month marker (YYYY-MM)"
 DAY = "day marker (YYYY-MM-DD)"
+NULLABLE_NUMBER = "number or null"
 
 REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     # GET /machines/{id}: everything a decision reads.
@@ -182,12 +207,12 @@ REQUIRED_FIELDS: dict[str, dict[str, str]] = {
 }  # fmt: skip
 
 # Optional fields: may be absent, but when present must have this type.
-OPTIONAL_FIELDS: dict[str, dict[str, type | tuple]] = {
+OPTIONAL_FIELDS: dict[str, dict[str, type | tuple | str]] = {
     "machine_config": {"files": list, "env": dict, "metadata": dict},
     "config_metadata": {"ateles_run_id": str},
     "config_env": {"ATELES_RUN_ID": str},
     "ledger_entry": {"machine_id": str, "lease_nonce": str, "unconfirmed": bool,
-                     "lease_expires": (int, float, type(None))},
+                     "lease_expires": NULLABLE_NUMBER},
     # Every other kind declares that it has no optional fields.
     "machine": {}, "list_entry": {}, "lease_view": {}, "lease_grant": {}, "ledger": {},
     "owner_record": {}, "result_record": {},
@@ -202,8 +227,28 @@ class FlyInvalid(FlyApiError):
         self.kind = kind
 
 
-_MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
-_DAY_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])")
+# Canonical markers only: ASCII digits, a real calendar month or day, and
+# exactly the text that date formats back to.
+_MONTH_RE = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])", re.ASCII)
+_DAY_RE = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])", re.ASCII)
+
+
+def _calendar_marker(value: Any, pattern: "re.Pattern[str]", fmt: str) -> bool:
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        return False
+    try:
+        parsed = datetime.strptime(value, fmt)
+    except ValueError:
+        return False  # e.g. February 31
+    return parsed.strftime(fmt) == value
+
+
+def _finite_number(value: Any, low: float, high: float) -> bool:
+    """A real int or float with low <= value <= high. Written so that NaN
+    fails (every comparison with NaN is false); infinities fail the bound."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return low <= value <= high
 
 
 def _type_ok(value: Any, expected: str) -> bool:
@@ -214,19 +259,21 @@ def _type_ok(value: Any, expected: str) -> bool:
     if expected == OBJECT:
         return isinstance(value, dict)
     if expected == NUMBER:
-        return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+        return _finite_number(value, 0, MAX_RECORD_NUMBER)
+    if expected == NULLABLE_NUMBER:
+        return value is None or _finite_number(value, 0, MAX_RECORD_NUMBER)
     if expected == INTEGER:
         return isinstance(value, int) and not isinstance(value, bool)
     if expected == COUNT:
-        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        return isinstance(value, int) and _finite_number(value, 0, MAX_RECORD_COUNT)
     if expected == POSITIVE_INT:
         return isinstance(value, int) and not isinstance(value, bool) and value > 1
     if expected == BOOLEAN:
         return isinstance(value, bool)
     if expected == MONTH:
-        return isinstance(value, str) and bool(_MONTH_RE.fullmatch(value))
+        return _calendar_marker(value, _MONTH_RE, "%Y-%m")
     if expected == DAY:
-        return isinstance(value, str) and bool(_DAY_RE.fullmatch(value))
+        return _calendar_marker(value, _DAY_RE, "%Y-%m-%d")
     raise ValueError(expected)
 
 
@@ -240,10 +287,17 @@ def validate(kind: str, data: Any) -> dict:
         if not _type_ok(data[name], expected):
             raise FlyInvalid(kind, f"{name} is not a {expected}")
     for name, expected in OPTIONAL_FIELDS[kind].items():
-        if name in data and not isinstance(data[name], expected):
+        if name not in data:
+            continue
+        ok = (_type_ok(data[name], expected) if isinstance(expected, str)
+              else isinstance(data[name], expected))  # fmt: skip
+        if not ok:
             raise FlyInvalid(kind, f"{name} has the wrong type")
     if kind in ("machine", "list_entry"):
         _validate_config(kind, data["config"])
+    if kind == "ledger_entry" and not data["deadline"] >= data["started_at"]:
+        # A window that ends before it starts would charge nothing.
+        raise FlyInvalid(kind, "deadline is before started_at")
     return data
 
 
@@ -263,18 +317,72 @@ def _render_wall(ts: float) -> str:
     return datetime.fromtimestamp(ts).astimezone().isoformat(timespec="minutes")
 
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
+@dataclass(frozen=True)
+class Limit:
+    """One setting that controls money, capacity or time.
+
+    ``low`` and ``high`` are finite inclusive bounds in the setting's own
+    unit, and ``low`` is above zero: a zero, negative, non-finite or
+    out-of-range value disables Fly. ``default`` is the documented value for
+    an UNSET setting, or None when the setting is required. ``scale`` turns
+    the setting's unit into the config field's (the hourly rate is kept per
+    second)."""
+
+    env: str
+    attr: str
+    kind: type
+    low: float
+    high: float
+    default: float | None
+    scale: float = 1.0
 
 
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
+LIMITS: tuple[Limit, ...] = (
+    Limit("APIS_FLY_MONTHLY_BUDGET_USD", "budget_usd", float, 0.01, 1000.0,
+          DEFAULT_MONTHLY_BUDGET_USD),
+    Limit("APIS_FLY_MAX_MACHINES_PER_DAY", "max_per_day", int, 1, 1000,
+          DEFAULT_MAX_MACHINES_PER_DAY),
+    Limit("APIS_FLY_MAX_CONCURRENT", "max_concurrent", int, 1, 50, DEFAULT_MAX_CONCURRENT),
+    Limit("APIS_FLY_QUEUE_MAX_WAIT_SECONDS", "queue_max_wait_seconds", int, 1, 86400,
+          DEFAULT_QUEUE_MAX_WAIT_SECONDS),
+    Limit("APIS_FLY_RATE_PER_HOUR_USD", "rate_per_second_usd", float, 0.0001, 100.0,
+          DEFAULT_RATE_PER_HOUR_USD, scale=3600),
+    Limit("APIS_FLY_STORAGE_GB_MONTH_USD", "storage_gb_month_usd", float, 0.001, 10.0,
+          DEFAULT_STORAGE_GB_MONTH_USD),
+)  # fmt: skip
+# Fields with no setting of their own, checked the same way on every config
+# (including one constructed directly).
+FIXED_LIMITS: tuple[Limit, ...] = (
+    Limit("login_volume_gb", "login_volume_gb", float, 0.1, 500.0, DEFAULT_LOGIN_VOLUME_GB),
+    Limit("rootfs_gb", "rootfs_gb", float, 0.1, 500.0, DEFAULT_ROOTFS_GB),
+)
+
+_SETTING_PATTERN = {int: re.compile(r"[0-9]{1,12}", re.ASCII),
+                    float: re.compile(r"[0-9]{1,12}(\.[0-9]{1,12})?", re.ASCII)}  # fmt: skip
+
+
+def _limit_range(limit: Limit) -> str:
+    return f"{limit.kind.__name__} from {limit.low:g} to {limit.high:g}"
+
+
+def parse_setting(limit: Limit, env: Any) -> float:
+    """The setting's value in the config field's unit, or raise
+    ``FlyConfigInvalid`` naming it. Unset uses the documented default only
+    when one is declared; a supplied value must be a plain ASCII decimal
+    (no sign, exponent, NaN or infinity) within the bounds. Never clamped."""
+    if limit.env not in env:
+        if limit.default is None:
+            raise FlyConfigInvalid(f"{limit.env} is required and unset")
+        value = limit.default
+    else:
+        text = str(env[limit.env]).strip()
+        if not _SETTING_PATTERN[limit.kind].fullmatch(text):
+            raise FlyConfigInvalid(
+                f"{limit.env} is not a plain decimal {_limit_range(limit)}")
+        value = limit.kind(text)
+    if not _finite_number(value, limit.low, limit.high):
+        raise FlyConfigInvalid(f"{limit.env} is outside {_limit_range(limit)}")
+    return value if limit.scale == 1 else value / limit.scale
 
 
 def _csv(raw: str) -> list[str]:
@@ -323,12 +431,12 @@ class FlyConfig:
     image: str
     region: str
     api_base: str = FLY_API_BASE_DEFAULT
-    budget_usd: float = 20.0
-    max_per_day: int = 50
-    max_concurrent: int = 3
+    budget_usd: float = DEFAULT_MONTHLY_BUDGET_USD
+    max_per_day: int = DEFAULT_MAX_MACHINES_PER_DAY
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT
     ledger_path: Path = Path.home() / ".config" / "ateles" / "fly-runner-ledger.json"
     login_machines: dict[str, str] = field(default_factory=dict)
-    queue_max_wait_seconds: int = 1800
+    queue_max_wait_seconds: int = DEFAULT_QUEUE_MAX_WAIT_SECONDS
     local_fallback: bool = True
     github_app_prefix: str = "ATELES_REVIEWER_APP"
     extra_probe_env_names: tuple[str, ...] = ()
@@ -337,10 +445,22 @@ class FlyConfig:
     login_volume_gb: float = DEFAULT_LOGIN_VOLUME_GB
     rootfs_gb: float = DEFAULT_ROOTFS_GB
     cursor_login_dirs: tuple[str, ...] = (".cursor", ".config/cursor")
+    # Problems found while loading the limit settings (names, never values).
+    setting_problems: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "FlyConfig":
         env = os.environ
+        limits: dict[str, float] = {}
+        problems: list[str] = []
+        for limit in LIMITS:
+            try:
+                limits[limit.attr] = parse_setting(limit, env)
+            except FlyConfigInvalid as exc:
+                problems.append(str(exc))
+                # Never a default: a NaN fails every limit check, and
+                # admission refuses on ``problems`` before any check runs.
+                limits[limit.attr] = math.nan
         login = {}
         if env.get("APIS_FLY_CODEX_MACHINE_ID", "").strip():
             login["codex"] = env["APIS_FLY_CODEX_MACHINE_ID"].strip()
@@ -353,24 +473,15 @@ class FlyConfig:
             image=env.get("APIS_FLY_IMAGE", "").strip(),
             region=env.get("APIS_FLY_REGION", "").strip(),
             api_base=(env.get("APIS_FLY_API_BASE", "").strip() or FLY_API_BASE_DEFAULT).rstrip("/"),
-            budget_usd=_env_float("APIS_FLY_MONTHLY_BUDGET_USD", 20.0),
-            max_per_day=_env_int("APIS_FLY_MAX_MACHINES_PER_DAY", 50),
-            max_concurrent=_env_int("APIS_FLY_MAX_CONCURRENT", 3),
+            **limits,
+            setting_problems=tuple(problems),
             ledger_path=Path(ledger).expanduser() if ledger else cls.ledger_path,
             login_machines=login,
-            queue_max_wait_seconds=_env_int("APIS_FLY_QUEUE_MAX_WAIT_SECONDS", 1800),
             local_fallback=env.get("APIS_FLY_LOCAL_FALLBACK", "1").strip() != "0",
             github_app_prefix=(
                 env.get("APIS_FLY_GITHUB_APP_PREFIX", "").strip() or "ATELES_REVIEWER_APP"
             ),
             extra_probe_env_names=tuple(_csv(env.get("APIS_FLY_PROBE_ENV_NAMES", ""))),
-            rate_per_second_usd=_env_float(
-                "APIS_FLY_RATE_PER_HOUR_USD", DEFAULT_RATE_PER_HOUR_USD
-            )
-            / 3600,
-            storage_gb_month_usd=_env_float(
-                "APIS_FLY_STORAGE_GB_MONTH_USD", DEFAULT_STORAGE_GB_MONTH_USD
-            ),
             cursor_login_dirs=tuple(
                 _csv(env.get("APIS_FLY_CURSOR_LOGIN_DIRS", "")) or (".cursor", ".config/cursor")
             ),
@@ -388,6 +499,30 @@ class FlyConfig:
             if not value:
                 out.append(name)
         return out
+
+    def limit_problems(self) -> list[str]:
+        """Every limit that is not a valid finite value within its bounds:
+        the problems found when loading, plus a check of the fields
+        themselves (a config may be constructed directly)."""
+        out = list(self.setting_problems)
+        for limit in (*LIMITS, *FIXED_LIMITS):
+            if any(p.startswith(limit.env + " ") for p in out):
+                continue
+            value = getattr(self, limit.attr)
+            if limit.kind is int and (isinstance(value, bool) or not isinstance(value, int)):
+                out.append(f"{limit.env} is not an int")
+            elif not _finite_number(value, limit.low / limit.scale, limit.high / limit.scale):
+                out.append(f"{limit.env} is outside {_limit_range(limit)}")
+        return out
+
+    def require_valid_limits(self) -> None:
+        """Refuse every Fly launch while any limit is invalid."""
+        problems = self.limit_problems()
+        if problems:
+            raise FlyConfigInvalid(
+                "Fly is disabled: " + "; ".join(problems)
+                + ". Fix the setting; no Fly launches until then."
+            )
 
     def monthly_storage_usd(self) -> float:
         """Volume plus stopped-rootfs storage of the long-lived login machines."""
@@ -421,7 +556,7 @@ def _reserved_cost(entry: dict, config: FlyConfig) -> float:
     """An in-flight entry's reserved maximum cost. An entry whose cost cannot
     be read reserves the whole default window, never nothing."""
     value = entry.get("max_cost_usd") if isinstance(entry, dict) else None
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+    if _type_ok(value, NUMBER):  # finite, bounded, not negative
         return float(value)
     return (DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS) * config.rate_per_second_usd
 
@@ -575,19 +710,33 @@ class FlyLedger:
                        if isinstance(e, dict) and isinstance(e.get("owner"), str)}
             for oid in [o for o in owners if o not in holding and o != self.owner["id"]]:
                 del owners[oid]
+        try:
+            # A non-finite number is never written: the file stays valid JSON
+            # and the loader would refuse it anyway.
+            text = json.dumps(data, sort_keys=True, indent=1, allow_nan=False)
+        except ValueError:
+            raise FlyLedgerError(f"Fly ledger {self.path.name}: refusing to write a "
+                                 "non-finite number") from None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, sort_keys=True, indent=1))
+            fh.write(text)
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
 
     def _roll(self, data: dict, now: float) -> None:
-        """Start a new period only on a genuine rollover: a VALID marker that
-        differs from the current period (or no ledger at all, ``None``). The
-        loader has already refused any marker that is absent or malformed."""
+        """Start a new period only on a genuine rollover: a VALID marker
+        EARLIER than the current period (or no ledger at all, ``None``). The
+        loader has already refused any marker that is absent or malformed;
+        a marker later than the current period is refused too (canonical
+        markers order as text), never read as a new period."""
         month, day = _month_key(now), _day_key(now)
+        for marker, current in ((data["month"], month), (data["day"], day)):
+            if marker is not None and not marker <= current:
+                raise FlyLedgerError(
+                    f"Fly ledger {self.path.name}: its period marker is later than "
+                    "the current period")
         if data["month"] is None or (_type_ok(data["month"], MONTH) and data["month"] != month):
             data["month"] = month
             data["spend_usd"] = 0.0
@@ -598,7 +747,7 @@ class FlyLedger:
     def snapshot(self, now: float | None = None) -> dict:
         with self._locked():
             data = self._load()
-            self._roll(data, now or time.time())
+            self._roll(data, self._clock() if now is None else now)
             return copy.deepcopy(data)
 
     def reserve(self, config: FlyConfig, *, run_id: str, owner: str, max_run_seconds: int,
@@ -615,17 +764,21 @@ class FlyLedger:
         its cap (until the next UTC day), or when the concurrency limit is
         reached (until the earliest held deadline).
         """
-        now = time.time() if now is None else now
+        now = self._clock() if now is None else now
+        config.require_valid_limits()  # also for a directly constructed config
+        if not _finite_number(max_run_seconds, 1, MAX_JOB_TIMEOUT_SECONDS
+                              + APIS_DEADLINE_GRACE_SECONDS):  # fmt: skip
+            raise FlyConfigInvalid("the job's maximum run time is outside its bounds")
         with self._locked():
             try:
                 data = self._load()
+                self._roll(data, now)
             except FlyLedgerError as exc:
                 # No retry time: this does not clear by waiting.
                 raise FlyRefusal(
                     f"{exc}. The Fly ledger needs operator repair; no Fly launches "
                     "until it is fixed (spend and caps are unknown).", "",
                 ) from None
-            self._roll(data, now)
             worst = max_run_seconds * config.rate_per_second_usd
             outstanding = sum(
                 _reserved_cost(entry, config) for entry in data["in_flight"].values()
@@ -635,23 +788,23 @@ class FlyLedger:
                 + config.monthly_storage_usd()
                 + outstanding
             )
-            if committed + worst > config.budget_usd:
+            if not (worst > 0 and committed + worst <= config.budget_usd):
                 raise FlyRefusal(
                     f"Fly monthly budget: ${committed:.4f} spent, stored or reserved "
                     f"in flight plus ${worst:.4f} for this run's maximum length would "
                     f"exceed APIS_FLY_MONTHLY_BUDGET_USD=${config.budget_usd:.2f}",
                     _render_wall(_next_month_start(now)),
                 )
-            if int(data["launches_today"]) >= config.max_per_day:
+            if not int(data["launches_today"]) < config.max_per_day:
                 raise FlyRefusal(
                     f"Fly daily machine cap reached (APIS_FLY_MAX_MACHINES_PER_DAY="
                     f"{config.max_per_day})",
                     _render_wall(_next_day_start(now)),
                 )
             in_flight = data["in_flight"]
-            if len(in_flight) >= config.max_concurrent:
+            if not len(in_flight) < config.max_concurrent:
                 deadlines = [v["deadline"] for v in in_flight.values() if isinstance(v, dict)
-                             and isinstance(v.get("deadline"), (int, float))]  # fmt: skip
+                             and _type_ok(v.get("deadline"), NUMBER)]  # fmt: skip
                 earliest = min(deadlines) if deadlines else now + 60  # a retry hint only
                 raise FlyRefusal(
                     f"Fly concurrency cap reached (APIS_FLY_MAX_CONCURRENT="
@@ -750,14 +903,18 @@ class FlyLedger:
         is absent, so a second settlement charges nothing. Callers settle
         only after termination is confirmed. Returns the dollars charged.
         """
-        now = time.time() if now is None else now
+        now = self._clock() if now is None else now
         with self._locked():
             data = self._load()
             self._roll(data, now)
-            entry = data["in_flight"].pop(run_id, None)
-            if entry is None:
+            if run_id not in data["in_flight"]:
                 return 0.0
-            cost = _charged_seconds(entry, now) * config.rate_per_second_usd
+            cost = _charged_seconds(data["in_flight"][run_id], now) * config.rate_per_second_usd
+            if not _finite_number(cost, 0, MAX_RECORD_NUMBER):
+                # Keep the reservation (and its full reserved cost) rather
+                # than charge an unreadable amount.
+                raise FlyLedgerError(f"Fly charge for {run_id} is not a finite amount")
+            del data["in_flight"][run_id]
             data["spend_usd"] = float(data["spend_usd"]) + cost
             self._save(data)
             return cost
@@ -1163,6 +1320,12 @@ def build_job(
     missing = config.missing()
     if missing:
         raise FlyIneligible("Fly runner not configured: " + ", ".join(missing) + " unset")
+    # Configured but with an invalid limit: Fly is disabled, and this is a
+    # refusal (no local fallback), not an ineligibility.
+    config.require_valid_limits()
+    if not _finite_number(timeout, 1, MAX_JOB_TIMEOUT_SECONDS):
+        raise FlyConfigInvalid(
+            f"the dispatch timeout is outside 1 to {MAX_JOB_TIMEOUT_SECONDS} seconds")
     if provider not in RUNNER_BINARIES:
         raise FlyIneligible(f"provider {provider!r} has no Fly runner")
     for flag, why in (
@@ -1506,6 +1669,8 @@ class FlyExecutor:
         ``(returncode, stdout, stderr)``; ``job.remote_state`` then says
         whether the machine was confirmed terminated.
         """
+        # Before any credential, ledger write or machine call.
+        self.config.require_valid_limits()
         tokens = _TokenOwner(self._revoke)
         launch = _LaunchState()
         self._active.add(job.run_id)
@@ -2139,8 +2304,9 @@ class FlyExecutor:
                 created = _parse_ts(machine["created_at"]) if "created_at" in machine else None
                 key = self.ledger.record_untracked(
                     machine_id=mid, run_id=run_id, owner=self.instance_id, config=self.config,
-                    # An unreadable creation time is charged the whole window.
-                    started_at=created if created is not None else now - cap,
+                    # An unreadable creation time, or one later than now (which
+                    # would charge nothing), is charged the whole window.
+                    started_at=created if created is not None and created <= now else now - cap,
                     max_run_seconds=cap,
                 )  # fmt: skip
                 if await self._settle_locked(key):  # admission is held
@@ -2237,7 +2403,12 @@ def _charged_seconds(entry: dict, now: float) -> float:
         entry = validate("ledger_entry", entry)
     except FlyInvalid:
         return float(DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS)
-    return max(0.0, min(now, entry["deadline"]) - entry["started_at"])
+    window = entry["deadline"] - entry["started_at"]  # not negative: validated
+    if not now >= entry["started_at"]:
+        # The clock reads earlier than the start: the elapsed time is
+        # unknown, so the whole reserved window is charged, never nothing.
+        return float(window)
+    return min(now, entry["deadline"]) - entry["started_at"]
 
 
 def _parse_ts(raw: Any) -> float | None:
@@ -2256,5 +2427,23 @@ def get_executor() -> FlyExecutor:
     """The process-wide executor, built from the environment on first use."""
     global _EXECUTOR
     if _EXECUTOR is None:
-        _EXECUTOR = FlyExecutor(FlyConfig.from_env())
+        config = FlyConfig.from_env()
+        log_limit_check(config)
+        _EXECUTOR = FlyExecutor(config)
     return _EXECUTOR
+
+
+def log_limit_check(config: FlyConfig | None = None) -> list[str]:
+    """Validate the cost, capacity and time settings once and log the result
+    (at startup). Returns the problems; every launch refuses while any
+    remain, so this is a report, not the guard."""
+    config = config if config is not None else FlyConfig.from_env()
+    problems = config.limit_problems()
+    if problems:
+        log.error("[fly] Fly is disabled until fixed: " + "; ".join(problems))
+    else:
+        log.info(
+            f"[fly] limits ok: budget ${config.budget_usd:.2f}/month, "
+            f"{config.max_per_day} machines/day, {config.max_concurrent} concurrent"
+        )
+    return problems

@@ -591,6 +591,8 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append(f"{trace.in_flight_after} ledger slots still held")
     if e.get("cooled_until") and not env.get("cooled_until"):
         problems.append("no cooled_until on a deferred dispatch")
+    if e.get("cooled_until") is False and env.get("cooled_until"):
+        problems.append("a retry time on a refusal that waiting does not fix")
     if "output_truncated" in e:
         flagged = bool(env.get("output_truncated"))
         marked = str(env.get("stdout", "")).startswith("[fly runner: output truncated")

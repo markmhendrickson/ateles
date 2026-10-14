@@ -120,14 +120,6 @@ ALLOWLIST: dict[str, str] = {
         'only an explicit 404: the documented absence of a lease',
     "execution/daemons/apis/fly_runner.py:_csv:raw or ''":
         'an unset list setting is an empty list',
-    "execution/daemons/apis/fly_runner.py:_env_float:os.environ.get(name, '')":
-        'an unset numeric setting is empty, then defaulted below',
-    "execution/daemons/apis/fly_runner.py:_env_float:os.environ.get(name, '') or default":
-        'an unset numeric setting takes its documented default',
-    "execution/daemons/apis/fly_runner.py:_env_int:os.environ.get(name, '')":
-        'an unset numeric setting is empty, then defaulted below',
-    "execution/daemons/apis/fly_runner.py:_env_int:os.environ.get(name, '') or default":
-        'an unset numeric setting takes its documented default',
     "execution/daemons/apis/fly_runner.py:_github_request:raw or b'{}'":
         "an empty GitHub body (revoke's 204); a mint without a token is refused",
     'execution/daemons/apis/fly_runner.py:_owner_heartbeat:return None':

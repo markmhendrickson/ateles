@@ -65,6 +65,8 @@ def test_scenario_set_covers_the_required_behaviours():
         "exhausted_ledger_without_month_marker_is_refused",
         "exhausted_ledger_without_day_marker_is_refused",
         "incomplete_result_record_is_an_unknown_outcome",
+        "non_finite_budget_setting_disables_fly",
+        "negative_daily_cap_refuses_an_opted_in_class_without_local_fallback",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 

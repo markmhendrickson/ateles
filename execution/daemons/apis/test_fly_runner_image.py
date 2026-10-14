@@ -457,3 +457,19 @@ def test_encoded_copies_of_a_secret_are_redacted():
         assert secret not in record[field]
         for enc in encodings:
             assert enc not in record[field], (field, enc)
+
+
+@pytest.mark.parametrize("value", [0, -30, 30.0, True, "30", None, 10**9, "NaN"], ids=repr)
+def test_a_job_timeout_that_is_not_a_bounded_integer_is_refused(tmp_path, value):
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},
+               spec={"timeout_seconds": value})  # fmt: skip
+    with pytest.raises(run_job.JobError, match="timeout_seconds"):
+        run_job.load_job(job_dir)
+
+
+def test_the_runner_and_executor_agree_on_the_longest_job_timeout():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import fly_runner
+
+    assert run_job.MAX_JOB_TIMEOUT_SECONDS == fly_runner.MAX_JOB_TIMEOUT_SECONDS

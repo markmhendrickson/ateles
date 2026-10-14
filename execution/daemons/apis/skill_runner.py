@@ -3091,6 +3091,9 @@ async def _run_skill_once(
     _fly_note = ""
     _fly_forced = runner == "fly"
     _fly_reason = ""
+    # Fly is configured but a cost, capacity or time limit is invalid: a
+    # refusal, never a local fallback (ateles#1456).
+    _fly_disabled = False
     if fly_runner.wants_fly(runner, action_class):
         try:
             _fly_job = fly_runner.build_job(
@@ -3111,10 +3114,13 @@ async def _run_skill_once(
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
+        except fly_runner.FlyConfigInvalid as exc:
+            _fly_reason = str(exc)
+            _fly_disabled = True
 
     def _fly_refusal_or_fallback(reason: str) -> SkillResult | None:
         """A refusal to return, or None to run locally (logged and counted)."""
-        fallback_ok = not _fly_forced and (
+        fallback_ok = not _fly_forced and not _fly_disabled and (
             reason.startswith("not eligible")
             or fly_runner.get_executor().config.local_fallback
         )

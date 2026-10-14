@@ -78,7 +78,15 @@ def stall_seconds(env=None) -> int:
     env = os.environ if env is None else env
     base = int(env.get("APIS_DISPATCH_TIMEOUT", "1800")) + 600
     if (env.get("APIS_FLY_RUNNER_CLASSES") or "").strip():
-        base += int(env.get("APIS_FLY_QUEUE_MAX_WAIT_SECONDS", "1800") or 1800) + 120
+        # The same strict parser the executor uses. An invalid setting
+        # disables Fly (every launch refused), so nothing queues: no wait.
+        from fly_runner import APIS_DEADLINE_GRACE_SECONDS, LIMITS, FlyConfigInvalid, parse_setting
+
+        queue = next(lim for lim in LIMITS if lim.attr == "queue_max_wait_seconds")
+        try:
+            base += int(parse_setting(queue, env)) + APIS_DEADLINE_GRACE_SECONDS
+        except FlyConfigInvalid:
+            pass
     return max(base, int(env.get("APIS_STALL_SECONDS", "3600")))
 
 

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import base64
 import json
 import logging
+import math
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -297,6 +298,11 @@ class Clock:
         return self.now
 
 
+# Valid limits that one maximum-length run cannot fit: the smallest budget
+# and the highest hourly rate the settings allow.
+EXHAUSTING = {"budget_usd": 0.01, "rate_per_second_usd": 100.0 / 3600}
+
+
 def make_executor(fake: FakeFly, *, record=None, clock=None, mint=None, **overrides):
     config = fly_runner.FlyConfig.from_env()
     for key, value in overrides.items():
@@ -334,7 +340,7 @@ def _job(provider="claude", **kw):
         role="lanius",
         cmd=["/opt/homebrew/bin/claude", "--print", "--mcp-config", "/tmp/apis_mcp_x.json"],
         stdin=b"the task",
-        timeout=60,
+        timeout=kw.pop("timeout", 60),
         repository="owner/repo",
         github_requested=True,
         mcp_config_path="/tmp/apis_mcp_x.json",
@@ -596,7 +602,7 @@ def test_claude_without_setup_token_is_ineligible(fly_env, monkeypatch):
 
 
 def test_budget_refusal_carries_cooled_until_next_month(fly_env):
-    executor, _, revoked = make_executor(FakeFly(), budget_usd=0.0001)
+    executor, _, revoked = make_executor(FakeFly(), **EXHAUSTING)
     with pytest.raises(fly_runner.FlyRefusal) as exc:
         asyncio.run(executor.run(_job()))
     assert "budget" in str(exc.value)
@@ -731,7 +737,7 @@ def test_codex_login_machine_is_updated_started_and_scrubbed(fly_env, monkeypatc
 
 def test_login_queue_wait_limit_returns_cooled_until(fly_env, monkeypatch):
     monkeypatch.setenv("APIS_FLY_CURSOR_MACHINE_ID", "m-cursor")
-    executor, _, _ = make_executor(FakeFly(), queue_max_wait_seconds=0.01)
+    executor, _, _ = make_executor(FakeFly(), queue_max_wait_seconds=1)
     job = fly_runner.build_job(
         provider="cursor", role="lanius", cmd=["/x/cursor-agent", "--print", "p"], stdin=b"",
         timeout=60, repository="owner/repo", github_requested=False, mcp_config_path=None,
@@ -848,7 +854,7 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
 
 def test_seam_cap_refusal_returns_cooled_until(fly_env, seam, monkeypatch):
     spawned, fake_exec = seam
-    executor, _, _ = make_executor(FakeFly(), budget_usd=0.0)
+    executor, _, _ = make_executor(FakeFly(), **EXHAUSTING)
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
@@ -1425,7 +1431,7 @@ def test_token_is_revoked_when_the_job_never_completes(fly_env, monkeypatch, fai
         fake = FakeFly()
         fake.create_mode = {"launch_error": "refused", "uncertain": "lost"}.get(failure, "ok")
         executor, _, revoked = make_executor(
-            fake, **({"budget_usd": 0.0} if failure == "refusal" else {})
+            fake, **(EXHAUSTING if failure == "refusal" else {})
         )
         job = _job()
         expected = {
@@ -3066,3 +3072,263 @@ def test_a_negative_ledger_counter_is_refused_not_trusted(fly_env, tmp_path, fie
         fly_runner.FlyLedger(path).reserve(config, run_id="r", owner="t", max_run_seconds=60,
                                            now=1_800_000_000)  # fmt: skip
     assert json.loads(path.read_text()) == data
+
+
+
+# ── Cost, capacity and time limits: one strict loader (round 11) ─────────────
+
+_LIMIT_ENVS = [lim.env for lim in fly_runner.LIMITS]
+
+
+def _above(limit):
+    return str(int(limit.high) * 10 + 1)
+
+
+_BAD_SETTING_VALUES = {
+    "empty": lambda lim: "",
+    "blank": lambda lim: "   ",
+    "text": lambda lim: "twenty",
+    "negative": lambda lim: "-5",
+    "zero": lambda lim: "0",
+    "nan": lambda lim: "NaN",
+    "nan-spaced": lambda lim: " nan ",
+    "infinity": lambda lim: "inf",
+    "infinity-word": lambda lim: "Infinity",
+    "exponent": lambda lim: "1e3",
+    "underscore": lambda lim: "1_0",
+    "non-ascii-digits": lambda lim: "\uff12\uff10",
+    "above-upper-bound": _above,
+}
+
+
+@pytest.mark.parametrize("bad", sorted(_BAD_SETTING_VALUES))
+@pytest.mark.parametrize("name", _LIMIT_ENVS)
+def test_an_invalid_limit_setting_refuses_every_launch(fly_env, monkeypatch, name, bad):
+    limit = next(lim for lim in fly_runner.LIMITS if lim.env == name)
+    job = _job()  # built while the settings were valid
+    monkeypatch.setenv(name, _BAD_SETTING_VALUES[bad](limit))
+    fake = FakeFly()
+    executor, minted, _ = make_executor(fake)
+    assert any(p.startswith(name + " ") for p in executor.config.limit_problems())
+    with pytest.raises(fly_runner.FlyConfigInvalid, match=name) as exc:
+        _job()  # build_job refuses: Fly is disabled
+    assert exc.value.cooled_until == ""  # waiting does not fix it
+    with pytest.raises(fly_runner.FlyConfigInvalid, match=name):
+        asyncio.run(executor.run(job))  # and so does admission
+    assert fake.requests == [] and minted == []
+    assert not executor.ledger.path.exists()  # nothing reserved or written
+
+
+@pytest.mark.parametrize("name", _LIMIT_ENVS)
+def test_an_unset_limit_uses_its_documented_default(fly_env, monkeypatch, name):
+    monkeypatch.delenv(name, raising=False)
+    limit = next(lim for lim in fly_runner.LIMITS if lim.env == name)
+    config = fly_runner.FlyConfig.from_env()
+    assert config.limit_problems() == []
+    assert getattr(config, limit.attr) == pytest.approx(limit.default / limit.scale)
+    assert limit.low <= limit.default <= limit.high  # the default is bound-checked
+
+
+def test_every_limit_is_finite_bounded_above_zero_and_has_a_default_or_is_required():
+    for limit in (*fly_runner.LIMITS, *fly_runner.FIXED_LIMITS):
+        assert 0 < limit.low < limit.high < float("inf"), limit
+        assert limit.default is None or limit.low <= limit.default <= limit.high, limit
+
+
+def test_valid_limit_settings_are_admitted(fly_env, monkeypatch):
+    for name, value in {"APIS_FLY_MONTHLY_BUDGET_USD": "25", "APIS_FLY_MAX_MACHINES_PER_DAY": "40",
+                        "APIS_FLY_MAX_CONCURRENT": "2", "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": "600",
+                        "APIS_FLY_RATE_PER_HOUR_USD": "0.05",
+                        "APIS_FLY_STORAGE_GB_MONTH_USD": " 0.2 "}.items():  # fmt: skip
+        monkeypatch.setenv(name, value)
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake, record={"stdout": "ok"})
+    assert executor.config.limit_problems() == []
+    assert executor.config.budget_usd == 25.0 and executor.config.max_per_day == 40
+    assert executor.config.rate_per_second_usd == pytest.approx(0.05 / 3600)
+    rc, out, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0 and b"ok" in out and fake.requests
+
+
+_BAD_FIELD_VALUES = [math.nan, math.inf, -math.inf, -1, 0, 10**9, True, "20", None]
+
+
+@pytest.mark.parametrize("value", _BAD_FIELD_VALUES, ids=repr)
+@pytest.mark.parametrize("limit", [*fly_runner.LIMITS, *fly_runner.FIXED_LIMITS],
+                         ids=lambda lim: lim.attr)  # fmt: skip
+def test_a_directly_constructed_config_with_an_invalid_limit_refuses(fly_env, tmp_path,
+                                                                     limit, value):  # fmt: skip
+    job = _job()
+    fake = FakeFly()
+    executor, minted, _ = make_executor(fake, **{limit.attr: value})
+    with pytest.raises(fly_runner.FlyConfigInvalid, match=limit.env):
+        asyncio.run(executor.run(job))
+    with pytest.raises(fly_runner.FlyConfigInvalid, match=limit.env):
+        fly_runner.FlyLedger(tmp_path / "l.json").reserve(
+            executor.config, run_id="r", owner="t", max_run_seconds=60, now=1_800_000_000)
+    assert fake.requests == [] and minted == [] and not (tmp_path / "l.json").exists()
+
+
+@pytest.mark.parametrize("attr", ["budget_usd", "rate_per_second_usd", "storage_gb_month_usd",
+                                  "max_per_day", "max_concurrent"])  # fmt: skip
+def test_cap_comparisons_refuse_on_nan_even_without_the_settings_check(fly_env, tmp_path,
+                                                                       monkeypatch, attr):  # fmt: skip
+    """Defence in depth: every cap comparison is written so NaN fails it."""
+    monkeypatch.setattr(fly_runner.FlyConfig, "require_valid_limits", lambda self: None)
+    config = fly_runner.FlyConfig.from_env()
+    config.login_machines = {"codex": "mc"}  # storage counts
+    setattr(config, attr, math.nan)
+    with pytest.raises(fly_runner.FlyRefusal):
+        fly_runner.FlyLedger(tmp_path / "l.json").reserve(
+            config, run_id="r", owner="t", max_run_seconds=60, now=1_800_000_000)
+    assert not (tmp_path / "l.json").exists()
+
+
+@pytest.mark.parametrize("timeout", [0, -60, math.nan, math.inf, 10**9, True, "60"], ids=repr)
+def test_a_dispatch_timeout_out_of_bounds_is_refused(fly_env, timeout):
+    with pytest.raises(fly_runner.FlyConfigInvalid, match="timeout"):
+        _job(timeout=timeout)
+
+
+def test_an_invalid_limit_is_a_refusal_never_a_local_fallback(fly_env, seam, monkeypatch):
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_MONTHLY_BUDGET_USD", "NaN")
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake)
+    assert executor.config.local_fallback  # fallback is on, and still not used
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        opted = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                      github_token="t-local", include_github_contract=True)  # fmt: skip
+        forced = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+    for result in (opted, forced):
+        assert not result.ok and "APIS_FLY_MONTHLY_BUDGET_USD" in result.error
+    assert spawned == [] and fake.requests == []
+
+
+def test_the_startup_check_logs_an_invalid_limit(fly_env, monkeypatch, caplog):
+    monkeypatch.setenv("APIS_FLY_MAX_CONCURRENT", "-1")
+    with caplog.at_level("ERROR", logger="apis.fly_runner"):
+        problems = fly_runner.log_limit_check()
+    assert problems and "APIS_FLY_MAX_CONCURRENT" in caplog.text
+
+
+def test_the_watchdog_never_crashes_on_an_invalid_queue_wait():
+    from task_watchdog import stall_seconds
+
+    base = {"APIS_DISPATCH_TIMEOUT": "1800", "APIS_STALL_SECONDS": "60",
+            "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"}  # fmt: skip
+    valid = stall_seconds({**base, "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": "900"})
+    for bad in ("NaN", "-5", "abc", "1e9", ""):
+        assert stall_seconds({**base, "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": bad}) == valid - 900 - 120
+
+
+# ── Ledger values arriving from disk ─────────────────────────────────────────
+
+
+def _ledger_now(clock_now=1_800_000_000):
+    when = datetime.fromtimestamp(clock_now, tz=timezone.utc)
+    return when.strftime("%Y-%m"), when.strftime("%Y-%m-%d")
+
+
+@pytest.mark.parametrize("marker,value", [
+    ("month", "\uff12\uff10\uff12\uff17-01"),
+    ("month", "\u0662\u0660\u0662\u0667-01"),
+    ("day", "2027-02-31"),                         # not a calendar day
+    ("day", "2027-01-15 "),                        # trailing space
+    ("month", "2099-01"),                          # a later period than now
+    ("day", "2099-01-01"),
+], ids=["non-ascii-1", "non-ascii-2", "feb-31", "trailing-space", "future-month", "future-day"])
+def test_a_non_canonical_or_future_period_marker_is_refused_not_reset(fly_env, tmp_path,
+                                                                       marker, value):  # fmt: skip
+    config = fly_runner.FlyConfig.from_env()
+    month, day = _ledger_now()
+    data = {"month": month, "day": day, "spend_usd": 100.0, "launches_today": 0,
+            "local_fallbacks": 0, "in_flight": {}, "owners": {}, marker: value}  # fmt: skip
+    path = tmp_path / "l.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair"):
+        fly_runner.FlyLedger(path).reserve(config, run_id="r", owner="t", max_run_seconds=60,
+                                           now=1_800_000_000)  # fmt: skip
+    assert json.loads(path.read_text()) == data
+
+
+@pytest.mark.parametrize("raw", ["NaN", "Infinity", "-Infinity", "1e400", "1" + "0" * 400],
+                         ids=["nan", "inf", "-inf", "float-overflow", "huge-int"])
+def test_a_non_finite_or_huge_ledger_number_is_refused(fly_env, tmp_path, raw):
+    config = fly_runner.FlyConfig.from_env()
+    month, day = _ledger_now()
+    text = ('{"month": "%s", "day": "%s", "spend_usd": %s, "launches_today": 0, '
+            '"local_fallbacks": 0, "in_flight": {}, "owners": {}}') % (month, day, raw)
+    path = tmp_path / "l.json"
+    path.write_text(text)
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair"):
+        fly_runner.FlyLedger(path).reserve(config, run_id="r", owner="t", max_run_seconds=60,
+                                           now=1_800_000_000)  # fmt: skip
+    assert path.read_text() == text
+
+
+def test_a_reservation_whose_window_ends_before_it_starts_is_charged_in_full():
+    entry = {"run_id": "r", "owner": "o", "started_at": 1000.0, "deadline": 10.0,
+             "max_cost_usd": 0.0, "login": False}  # fmt: skip
+    charged = fly_runner._charged_seconds(entry, 5000.0)
+    assert charged == fly_runner.DISPATCH_TIMEOUT_DEFAULT + fly_runner.APIS_DEADLINE_GRACE_SECONDS
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -1.0, True, "soon"], ids=repr)
+def test_a_reservation_with_an_unreadable_lease_expiry_is_invalid(value):
+    entry = {"run_id": "r", "owner": "o", "started_at": 1.0, "deadline": 2.0,
+             "max_cost_usd": 0.1, "login": True, "lease_expires": value}  # fmt: skip
+    with pytest.raises(fly_runner.FlyInvalid):
+        fly_runner.validate("ledger_entry", entry)
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -5.0, 10**400], ids=repr)
+@pytest.mark.parametrize("kind", ["lease_grant", "lease_view"])
+def test_a_machines_api_time_that_is_not_finite_is_invalid(kind, value):
+    data = {"nonce": "n", "description": "d", "expires_at": value}
+    with pytest.raises(fly_runner.FlyInvalid):
+        fly_runner.validate(kind, {k: data[k] for k in fly_runner.REQUIRED_FIELDS[kind]})
+
+
+def test_a_charge_that_is_not_finite_keeps_the_reservation(fly_env, tmp_path):
+    config = fly_runner.FlyConfig.from_env()
+    ledger = fly_runner.FlyLedger(tmp_path / "l.json")
+    ledger.reserve(config, run_id="r", owner="t", max_run_seconds=60, now=1_800_000_000)
+    before = (tmp_path / "l.json").read_text()
+    config.rate_per_second_usd = math.nan
+    with pytest.raises(fly_runner.FlyLedgerError):
+        ledger.settle("r", config=config, now=1_800_000_030)
+    assert (tmp_path / "l.json").read_text() == before  # still reserved, nothing charged
+
+
+def test_the_ledger_never_writes_a_non_finite_number(tmp_path):
+    ledger = fly_runner.FlyLedger(tmp_path / "l.json")
+    data = ledger._load()
+    ledger._roll(data, 1_800_000_000)
+    data["spend_usd"] = math.nan
+    with pytest.raises(fly_runner.FlyLedgerError, match="non-finite"):
+        ledger._save(data)
+    assert not (tmp_path / "l.json").exists()
+
+
+def test_an_untracked_machine_created_in_the_future_is_charged_the_whole_window(fly_env):
+    """A creation time later than now would charge nothing: it is unreadable."""
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    fake.machines["m-ghost"] = {"id": "m-ghost", "state": "started",
+                                "created_at": "2099-01-01T00:00:00Z"}  # fmt: skip
+    assert "untracked-m-ghost" in asyncio.run(executor.reap())
+    window = fly_runner.DISPATCH_TIMEOUT_DEFAULT + fly_runner.APIS_DEADLINE_GRACE_SECONDS
+    spend = executor.ledger.snapshot(clock.now)["spend_usd"]
+    assert spend == pytest.approx(window * executor.config.rate_per_second_usd)
+
+
+def test_a_clock_that_reads_before_the_start_charges_the_whole_window():
+    entry = {"run_id": "r", "owner": "o", "started_at": 1000.0, "deadline": 1300.0,
+             "max_cost_usd": 0.1, "login": False}  # fmt: skip
+    assert fly_runner._charged_seconds(entry, 900.0) == 300.0
+    assert fly_runner._charged_seconds(entry, 1100.0) == 100.0
+    assert fly_runner._charged_seconds(entry, math.nan) == 300.0

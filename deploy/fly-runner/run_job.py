@@ -70,6 +70,8 @@ MIN_SCRUB_LENGTH = 8
 MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
 
 # Exit codes the runner itself produces (never the CLI's own).
+# The longest timeout a job may carry (fly_runner.MAX_JOB_TIMEOUT_SECONDS).
+MAX_JOB_TIMEOUT_SECONDS = 6 * 3600
 EXIT_TIMEOUT = 124
 EXIT_PROBE_FAILED = 97
 EXIT_JOB_INVALID = 96
@@ -175,12 +177,13 @@ def load_job(job_dir: Path) -> Job:
         raise JobError("the role's AAuth key was named but not shipped")
     if not token_name and not jwk_name:
         raise JobError("the role's own Neotoma identity (token or AAuth key) is missing")
-    try:
-        timeout_seconds = int(spec["timeout_seconds"])
-    except (KeyError, TypeError, ValueError):
-        raise JobError("timeout_seconds missing or not an integer") from None
-    if timeout_seconds <= 0:
-        raise JobError("timeout_seconds must be positive")
+    if "timeout_seconds" not in spec:
+        raise JobError("timeout_seconds is missing")
+    timeout_seconds = spec["timeout_seconds"]
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int):
+        raise JobError("timeout_seconds is not an integer")
+    if not 1 <= timeout_seconds <= MAX_JOB_TIMEOUT_SECONDS:
+        raise JobError(f"timeout_seconds is outside 1 to {MAX_JOB_TIMEOUT_SECONDS}")
     base_url = str(spec.get("neotoma_base_url") or "").rstrip("/")
     if not base_url.startswith("https://"):
         raise JobError("neotoma_base_url must be an https URL")
