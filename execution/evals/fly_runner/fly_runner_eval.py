@@ -104,6 +104,10 @@ class FakeFly:
         self.corrupt_after_scrub = ""  # "absent"|"null": the config read after a clean-up
         self.scrubbed: dict[str, bool] = {}
         self.lease_view_override = None
+        # After a config update the login machine reports "created" for this
+        # many reads before "stopped" again; or never settles at all.
+        self.settle_reads = 0
+        self.never_settles = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -170,6 +174,19 @@ class FakeFly:
             request.headers.get("fly-machine-lease-nonce", "") != held["nonce"]
         ):
             return httpx.Response(409, json={"error": "machine is leased; nonce required"})
+        settling = mid in self.machines and "_settle" in self.machines[mid]
+        if request.method == "GET" and parts[3:] == ["wait"] and settling:
+            if self.never_settles:
+                return httpx.Response(408, json={"error": "deadline exceeded"})
+            self.machines[mid]["state"] = "stopped"
+            del self.machines[mid]["_settle"]
+            return httpx.Response(200, json={"ok": True})
+        if request.method == "GET" and len(parts) == 3 and settling and not self.never_settles:
+            if self.machines[mid]["_settle"] <= 0:
+                self.machines[mid]["state"] = "stopped"
+                del self.machines[mid]["_settle"]
+            else:
+                self.machines[mid]["_settle"] -= 1
         if request.method == "GET" and parts[3:] == ["wait"]:
             if self.machines.get(mid, {}).get("login"):
                 # The runner exits when its one job is done; the machine stops.
@@ -202,6 +219,9 @@ class FakeFly:
                 machine["config"] = body["config"]
                 if current:
                     machine["instance_id"] = f"{current}+"
+            if self.settle_reads or self.never_settles:
+                machine["state"] = "created"  # transitional, right after the update
+                machine["_settle"] = self.settle_reads
             return httpx.Response(200, json={"id": mid, "instance_id": machine.get("instance_id")
                                              or f"i-{mid}"})  # fmt: skip
         if request.method == "POST" and parts[3:] == ["start"]:
@@ -253,6 +273,7 @@ class Trace:
     login_state: str = ""
     login_lock_held: bool = False
     login_config_run_id: str = ""
+    login_job_files_after: bool = False
     login_stop_requests: int = 0
     login_mutations: int = 0
     ledger_after: object = None
@@ -367,6 +388,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     fake.corrupt_after_scrub = scenario["fly"].get("corrupt_after_scrub", "")
     fake.release_fails = bool(scenario["fly"].get("release_fails"))
     fake.lease_view_override = scenario["fly"].get("lease_view_override")
+    fake.settle_reads = int(scenario["fly"].get("settle_reads", 0))
+    fake.never_settles = bool(scenario["fly"].get("never_settles"))
+    monkeypatch.setattr(fly_runner, "LOGIN_SETTLE_POLL_SECONDS", 0.0, raising=False)
     if scenario["fly"].get("lost_error"):
         fake.lost_error = scenario["fly"]["lost_error"]
         fake.start_lost = True
@@ -563,6 +587,8 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         envelopes=envelopes,
         exit_codes=exit_codes,
         starts=list(fake.starts),
+        login_job_files_after=fly_runner._has_job_config(
+            fake.machines["m-codex-login"].get("config") or {}),
         everything_sent=sent,
         ledger_after=_ledger_file_json(executor.ledger.path),
         ledger_text_after=(executor.ledger.path.read_text()
@@ -707,6 +733,11 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
                 problems.append("the second dispatch's result is not its own")
         if "starts" in second and len(trace.starts) != second["starts"]:
             problems.append(f"{len(trace.starts)} machine starts, expected {second['starts']}")
+    if "login_job_files_after" in e and trace.login_job_files_after != e["login_job_files_after"]:
+        problems.append("the login machine's stored config still holds job files"
+                        if trace.login_job_files_after else "expected job files on the machine")
+    if "login_starts" in e and len(trace.starts) != e["login_starts"]:
+        problems.append(f"{len(trace.starts)} login machine starts, expected {e['login_starts']}")
     if "login_config_run_id" in e and trace.login_config_run_id != e["login_config_run_id"]:
         problems.append(f"login machine config belongs to {trace.login_config_run_id!r}, "
                         f"expected {e['login_config_run_id']!r}")  # fmt: skip
