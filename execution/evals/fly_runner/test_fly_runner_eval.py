@@ -41,7 +41,11 @@ def test_scenario_set_covers_the_required_behaviours():
         "login_start_response_lost",
         "expired_reservation_reaped_listed",
         "expired_reservation_reaped_absent",
-        "unconfirmed_delete_keeps_capacity_reserved",
+        "tracked_unconfirmed_delete_keeps_capacity_reserved",
+        "opted_in_lost_create_unconfirmed_no_local_replay",
+        "opted_in_lost_create_terminated_no_local_replay",
+        "opted_in_create_refused_falls_back_locally",
+        "untracked_unconfirmed_delete_keeps_capacity_reserved",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -83,7 +87,7 @@ def test_judge_goes_red_when_recovery_drops_cost_or_capacity(tmp_path, monkeypat
     settled = _by_id("expired_reservation_reaped_listed")
     trace = runner.run_scenario(settled, tmp_path / "a", monkeypatch)
     assert runner.judge(settled, dataclasses.replace(trace, spend_usd=0.0))
-    kept = _by_id("unconfirmed_delete_keeps_capacity_reserved")
+    kept = _by_id("tracked_unconfirmed_delete_keeps_capacity_reserved")
     trace = runner.run_scenario(kept, tmp_path / "b", monkeypatch)
     assert runner.judge(kept, dataclasses.replace(trace, seed_entries_left=[]))
 
@@ -93,3 +97,13 @@ def test_judge_goes_red_when_truncation_is_silent(tmp_path, monkeypatch):
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
     silent = dataclasses.replace(trace, envelope={**trace.envelope, "output_truncated": False})
     assert runner.judge(scenario, silent)
+
+
+def test_judge_goes_red_on_a_local_replay_of_an_uncertain_launch(tmp_path, monkeypatch):
+    scenario = _by_id("opted_in_lost_create_unconfirmed_no_local_replay")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    replayed = dataclasses.replace(
+        trace, local_cli_ran=True, exit_code=0,
+        envelope={"ok": True, "stdout": "LOCAL GATE_INHERITANCE: clear"},
+    )  # fmt: skip
+    assert len(runner.judge(scenario, replayed)) >= 3

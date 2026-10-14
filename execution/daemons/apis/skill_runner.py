@@ -1411,6 +1411,14 @@ class SkillResult:
     # Fly runner keeps the last 256 KB). The stdout then starts with a marker
     # line saying so; a caller that needs the complete output must check this.
     output_truncated: bool = False
+    # Fly executor (ateles#1456): the remote run id, the state its machine was
+    # left in ("terminated" or "unconfirmed"; an unconfirmed machine keeps its
+    # reservation for the reaper), and whether the run's outcome is unknown
+    # (an uncertain launch, a lost wait, or a missing result record). An
+    # unknown outcome is never a success and is never replayed locally.
+    remote_outcome_unknown: bool = False
+    remote_run_id: str = ""
+    remote_machine_state: str = ""
 
 
 class _LocalSpawnError(Exception):
@@ -3179,11 +3187,56 @@ async def _run_skill_once(
                     _fly_job = None
                     _start_ns = time.monotonic_ns()
                     returncode, stdout, stderr = await _run_local()
+                except fly_runner.FlyUncertainLaunch as exc:
+                    # The remote run may have happened. Never replayed here,
+                    # whatever the fallback setting: report it, unresolved.
+                    state = _fly_job.remote_state or "unconfirmed"
+                    msg = (
+                        f"fly runner: remote run {_fly_job.run_id} (machine "
+                        f"{_fly_job.machine_id or 'unknown'}) has an UNKNOWN outcome after an "
+                        f"uncertain launch ({exc}); machine {state}"
+                        + (
+                            "; its reservation is kept for the reaper"
+                            if state == "unconfirmed" else ""
+                        )
+                        + ". Not retried locally: check what the run did before "
+                        "dispatching it again."
+                    )
+                    log.error(f"[apis] {skill} dispatch outcome unknown — {msg}")
+                    try:
+                        await asyncio.to_thread(
+                            _write_harness_event,
+                            task_entity_id=task_entity_id,
+                            agent_session_id=agent_session_id,
+                            role=_role,
+                            agent_sub=agent_def.aauth_sub,
+                            event_type="subprocess",
+                            tool_name=f"{provider}:{skill}",
+                            success="false",
+                            output_summary=(
+                                f"fly_outcome=unknown fly_run={_fly_job.run_id} "
+                                f"fly_machine={_fly_job.machine_id or 'unknown'} "
+                                f"fly_machine_state={state}"
+                            ),
+                            resolved_tier=resolved_tier,
+                        )
+                    except Exception as write_exc:  # noqa: BLE001
+                        log.debug(f"[apis] uncertain-launch harness_event failed: {write_exc}")
+                    return SkillResult(
+                        skill, False, None, "", "", error=msg, provider=provider,
+                        remote_outcome_unknown=True, remote_run_id=_fly_job.run_id,
+                        remote_machine_state=state,
+                    )  # fmt: skip
                 finally:
                     if _fly_job is not None and _fly_job.machine_id:
                         _fly_note = (
                             f" fly_machine={_fly_job.machine_id} fly_run={_fly_job.run_id}"
                             + (" stdout_truncated=true" if _fly_job.stdout_truncated else "")
+                            + (" fly_outcome=unknown" if _fly_job.outcome_unknown else "")
+                            + (
+                                f" fly_machine_state={_fly_job.remote_state}"
+                                if _fly_job.remote_state else ""
+                            )
                         )
             else:
                 returncode, stdout, stderr = await _run_local()
@@ -3379,6 +3432,9 @@ async def _run_skill_once(
             ),
             usage=_usage,
             output_truncated=bool(_fly_job is not None and _fly_job.stdout_truncated),
+            remote_outcome_unknown=bool(_fly_job is not None and _fly_job.outcome_unknown),
+            remote_run_id=_fly_job.run_id if _fly_job is not None else "",
+            remote_machine_state=_fly_job.remote_state if _fly_job is not None else "",
         )
 
         # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────

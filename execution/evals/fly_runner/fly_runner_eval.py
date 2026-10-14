@@ -59,9 +59,12 @@ def load_scenarios() -> list[dict]:
 
 
 class FakeFly:
-    def __init__(self, wait_mode: str, *, start_lost: bool = False):
+    def __init__(self, wait_mode: str, *, start_lost: bool = False, create: str = "ok"):
         self.wait_mode = wait_mode
         self.start_lost = start_lost
+        # "ok" | "lost" (created, response 500) | "refused" (422, nothing created)
+        self.create = create
+        self.sticky_all = False
         self.requests: list[httpx.Request] = []
         self.machines: dict[str, dict] = {}
         self.created: list[str] = []
@@ -72,9 +75,16 @@ class FakeFly:
         self.requests.append(request)
         rest = request.url.path.split("/apps/eval-runner-app", 1)[1]
         if request.method == "POST" and rest == "/machines":
+            if self.create == "refused":
+                return httpx.Response(422, json={"error": "eval: invalid machine config"})
             mid = f"m{len(self.created) + 1}"
             self.created.append(mid)
-            self.machines[mid] = {"id": mid, "state": "started"}
+            self.machines[mid] = {"id": mid, "state": "started",
+                                  "config": json.loads(request.content)["config"]}  # fmt: skip
+            if self.sticky_all:
+                self.sticky.add(mid)
+            if self.create == "lost":
+                return httpx.Response(500, json={"error": "eval: create response lost"})
             return httpx.Response(201, json={"id": mid, "instance_id": f"i-{mid}"})
         if request.method == "GET" and rest == "/machines":
             return httpx.Response(200, json=list(self.machines.values()))
@@ -237,7 +247,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     harness_router.reset_state()
 
     # ── The Fly edge ─────────────────────────────────────────────────────────
-    fake = FakeFly(scenario["fly"]["wait"], start_lost=scenario["fly"].get("start") == "lost")
+    fake = FakeFly(scenario["fly"]["wait"], start_lost=scenario["fly"].get("start") == "lost",
+                   create=scenario["fly"].get("create", "ok"))  # fmt: skip
+    fake.sticky_all = bool(scenario["fly"].get("delete_ineffective"))
     fake.machines["m-codex-login"] = {"id": "m-codex-login", "state": "stopped", "login": True,
                                       "config": {"mounts": []}}  # fmt: skip
     config = fly_runner.FlyConfig.from_env()
@@ -276,16 +288,22 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     for seed in scenario.get("seed", []):
         mid = seed["machine"]
         started = clock.now - seed["age"]
-        executor.ledger.reserve(config, run_id=f"seed-{mid}", max_run_seconds=seed["window"],
-                                now=started)  # fmt: skip
-        executor.ledger.bind(f"seed-{mid}", mid, login=False)
+        executor.ledger.reserve(config, run_id=f"seed-{mid}", owner=executor.instance_id,
+                                max_run_seconds=seed["window"], now=started)  # fmt: skip
+        executor.ledger.set_machine(f"seed-{mid}", mid)
         seeded_cost += min(seed["age"], seed["window"]) * config.rate_per_second_usd
-        seed_keys.append(mid)
+        seed_keys.append(f"seed-{mid}")
         if seed["state"] in ("listed", "sticky"):
             fake.machines[mid] = {"id": mid, "state": "started"}
         if seed["state"] == "sticky":
             fake.sticky.add(mid)
-    # The reaper runs on a launch only when one is due; seeded scenarios are.
+    # Machines running that no reservation accounts for (a lost ledger).
+    for ghost in scenario.get("untracked", []):
+        fake.machines[ghost["machine"]] = {"id": ghost["machine"], "state": "started"}
+        if ghost.get("delete_ineffective"):
+            fake.sticky.add(ghost["machine"])
+        seed_keys.append(f"untracked-{ghost['machine']}")
+    # The reaper runs on a launch only when one is due; recovery scenarios are.
     executor._last_reap = float("-inf") if seed_keys else float("inf")
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     fly_runner._LOGIN_LOCKS.clear()
@@ -375,6 +393,15 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
             problems.append("an unconfirmed seeded machine's reservation was released")
         if trace.spend_usd > 0:
             problems.append("an unconfirmed seeded machine was charged as if settled")
+    if "remote_outcome_unknown" in e:
+        if bool(env.get("remote_outcome_unknown")) != e["remote_outcome_unknown"]:
+            problems.append(f"remote_outcome_unknown={env.get('remote_outcome_unknown')}, "
+                            f"expected {e['remote_outcome_unknown']}")  # fmt: skip
+        if e["remote_outcome_unknown"] and not env.get("remote_run_id"):
+            problems.append("an unknown remote outcome does not name its run")
+    if "remote_machine_state" in e and env.get("remote_machine_state") != e["remote_machine_state"]:
+        problems.append(f"remote machine state {env.get('remote_machine_state')!r}, "
+                        f"expected {e['remote_machine_state']!r}")  # fmt: skip
     if "login_state" in e and trace.login_state != e["login_state"]:
         problems.append(f"login machine is {trace.login_state}, expected {e['login_state']}")
     if e.get("login_lock_free") and trace.login_lock_held:

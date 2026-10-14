@@ -255,24 +255,40 @@ def _reserved_cost(entry: dict, config: FlyConfig) -> float:
         return max(0.0, span) * config.rate_per_second_usd
 
 
+class FlyLedgerError(Exception):
+    """The ledger file exists but cannot be read: accounting is unknown."""
+
+
 class FlyLedger:
-    """A local JSON ledger, like the tier ledger. One Apis process writes it;
-    a lock serialises this process's threads and coroutines."""
+    """A local JSON ledger, like the tier ledger.
+
+    One reservation per run, keyed by run id and written BEFORE any Fly call.
+    Each carries its owner (the Apis process instance that made it), the
+    machine once known, its window and its reserved maximum cost. A
+    reservation counts against the concurrency cap and the budget until it is
+    settled (termination confirmed, runtime charged once) or released
+    (provably nothing ran). A lock serialises this process's threads.
+
+    An existing ledger that cannot be parsed fails CLOSED: admission refuses,
+    because resetting it would forget spend and running machines.
+    """
 
     def __init__(self, path: Path):
         self.path = Path(path)
         self._lock = threading.Lock()
 
     def _load(self) -> dict:
+        if not self.path.exists():
+            return {"month": "", "spend_usd": 0.0, "day": "", "launches_today": 0,
+                    "local_fallbacks": 0, "in_flight": {}}  # fmt: skip
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                data.setdefault("in_flight", {})
-                return data
         except (OSError, ValueError):
-            pass
-        return {"month": "", "spend_usd": 0.0, "day": "", "launches_today": 0,
-                "local_fallbacks": 0, "in_flight": {}}  # fmt: skip
+            raise FlyLedgerError(f"Fly ledger {self.path.name} is unreadable") from None
+        if not isinstance(data, dict) or not isinstance(data.get("in_flight", {}), dict):
+            raise FlyLedgerError(f"Fly ledger {self.path.name} has an unexpected shape")
+        data.setdefault("in_flight", {})
+        return data
 
     def _save(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,23 +310,27 @@ class FlyLedger:
             self._roll(data, now or time.time())
             return copy.deepcopy(data)
 
-    def reserve(self, config: FlyConfig, *, run_id: str, max_run_seconds: int,
+    def reserve(self, config: FlyConfig, *, run_id: str, owner: str, max_run_seconds: int,
+                login: bool = False, machine_id: str = "",
                 now: float | None = None) -> None:  # fmt: skip
-        """Refuse, or reserve one launch slot for *run_id*.
+        """Refuse, or reserve one launch slot for *run_id*, owned by *owner*.
 
         Admission is atomic under the ledger lock and counts, against the
         budget, the month's completed spend, the login machines' storage,
-        the maximum-length cost of EVERY reservation still in flight
-        (including machines whose termination is unconfirmed), and the
-        incoming job's own maximum-length cost. Refuses when that total
-        would exceed the budget (until the next calendar month), when the
-        day's launch count is at its cap (until the next UTC day), or when
-        the concurrency limit is reached (until the earliest in-flight
-        deadline).
+        the maximum-length cost of EVERY reservation still held (including
+        unconfirmed and untracked machines), and the incoming job's own
+        maximum-length cost. Refuses when that total would exceed the budget
+        (until the next calendar month), when the day's launch count is at
+        its cap (until the next UTC day), or when the concurrency limit is
+        reached (until the earliest held deadline).
         """
         now = time.time() if now is None else now
         with self._lock:
-            data = self._load()
+            try:
+                data = self._load()
+            except FlyLedgerError as exc:
+                raise FlyRefusal(f"{exc}; refusing Fly launches until it is repaired",
+                                 _render_wall(now + 3600)) from None  # fmt: skip
             self._roll(data, now)
             worst = max_run_seconds * config.rate_per_second_usd
             outstanding = sum(
@@ -343,63 +363,81 @@ class FlyLedger:
                     _render_wall(max(earliest, now + 60)),
                 )
             data["launches_today"] = int(data.get("launches_today") or 0) + 1
-            in_flight[f"pending:{run_id}"] = {
-                "run_id": run_id, "started_at": now, "deadline": now + max_run_seconds,
-                "max_cost_usd": worst,
+            in_flight[run_id] = {
+                "run_id": run_id, "owner": owner, "machine_id": machine_id, "login": login,
+                "started_at": now, "deadline": now + max_run_seconds, "max_cost_usd": worst,
             }  # fmt: skip
             self._save(data)
 
-    def mark_unconfirmed(self, key: str, *, reason: str) -> None:
-        """Keep *key*'s slot and reservation, flagged for the reaper: the
+    def record_untracked(self, *, machine_id: str, run_id: str, owner: str, config: FlyConfig,
+                         started_at: float, max_run_seconds: int) -> str:  # fmt: skip
+        """Own a machine found running that no reservation accounts for. It is
+        recorded unconfirmed with a full reserved cost, so it counts against
+        concurrency and budget until its termination is confirmed. Bypasses
+        the caps: it records a fact, it is not an admission."""
+        key = run_id or f"untracked-{machine_id}"
+        with self._lock:
+            data = self._load()
+            data["in_flight"].setdefault(key, {
+                "run_id": key, "owner": owner, "machine_id": machine_id, "login": False,
+                "started_at": started_at, "deadline": started_at + max_run_seconds,
+                "max_cost_usd": max_run_seconds * config.rate_per_second_usd,
+                "unconfirmed": True, "untracked": True,
+            })  # fmt: skip
+            self._save(data)
+        return key
+
+    def set_machine(self, run_id: str, machine_id: str) -> None:
+        with self._lock:
+            data = self._load()
+            entry = data["in_flight"].get(run_id)
+            if entry is not None:
+                entry["machine_id"] = machine_id
+                self._save(data)
+
+    def mark_unconfirmed(self, run_id: str, *, reason: str) -> None:
+        """Keep *run_id*'s slot and reservation, flagged for the reaper: its
         machine's termination could not be confirmed, so it is still owned."""
         with self._lock:
             data = self._load()
-            entry = data["in_flight"].get(key) or {"run_id": "", "started_at": time.time()}
+            entry = data["in_flight"].get(run_id)
+            if entry is None:
+                return
             entry["unconfirmed"] = True
             entry["unconfirmed_reason"] = reason[:200]
-            data["in_flight"][key] = entry
             self._save(data)
 
-    def entry(self, key: str) -> dict | None:
+    def entry(self, run_id: str) -> dict | None:
         with self._lock:
-            return copy.deepcopy(self._load()["in_flight"].get(key))
+            return copy.deepcopy(self._load()["in_flight"].get(run_id))
 
-    def bind(self, run_id: str, machine_id: str, *, login: bool) -> None:
+    def find_by_machine(self, machine_id: str) -> dict[str, dict]:
         with self._lock:
-            data = self._load()
-            entry = data["in_flight"].pop(f"pending:{run_id}", None) or {"run_id": run_id}
-            entry["login"] = login
-            data["in_flight"][machine_id] = entry
-            self._save(data)
+            return {
+                rid: copy.deepcopy(e) for rid, e in self._load()["in_flight"].items()
+                if e.get("machine_id") == machine_id
+            }  # fmt: skip
 
-    def release(self, key: str, *, seconds: float = 0.0, config: FlyConfig | None = None,
-                now: float | None = None) -> None:  # fmt: skip
-        """Drop an in-flight entry and charge its machine-seconds."""
-        now = time.time() if now is None else now
+    def release(self, run_id: str) -> None:
+        """Drop a reservation that provably never ran anything (no charge)."""
         with self._lock:
             data = self._load()
-            self._roll(data, now)
-            data["in_flight"].pop(key, None)
-            if config is not None and seconds > 0:
-                data["spend_usd"] = float(data.get("spend_usd") or 0.0) + (
-                    seconds * config.rate_per_second_usd
-                )
-            self._save(data)
+            if data["in_flight"].pop(run_id, None) is not None:
+                self._save(data)
 
-    def settle(self, key: str, *, config: FlyConfig, now: float | None = None) -> float:
-        """Release *key* and charge its incurred runtime, EXACTLY ONCE.
+    def settle(self, run_id: str, *, config: FlyConfig, now: float | None = None) -> float:
+        """Release *run_id* and charge its incurred runtime, EXACTLY ONCE.
 
         The charge is the entry's elapsed time capped at its reserved window,
         read from the entry itself under the lock. An entry already settled
-        (by the collector or by the reaper) is absent, so a second settlement
-        charges nothing. Callers settle only after termination is confirmed.
-        Returns the dollars charged.
+        is absent, so a second settlement charges nothing. Callers settle
+        only after termination is confirmed. Returns the dollars charged.
         """
         now = time.time() if now is None else now
         with self._lock:
             data = self._load()
             self._roll(data, now)
-            entry = data["in_flight"].pop(key, None)
+            entry = data["in_flight"].pop(run_id, None)
             if entry is None:
                 return 0.0
             cost = _charged_seconds(entry, now) * config.rate_per_second_usd
@@ -407,20 +445,12 @@ class FlyLedger:
             self._save(data)
             return cost
 
-    def charge(self, seconds: float, *, config: FlyConfig, now: float | None = None) -> None:
-        """Charge runtime that has no ledger entry (a stray the ledger lost)."""
-        now = time.time() if now is None else now
-        with self._lock:
-            data = self._load()
-            self._roll(data, now)
-            data["spend_usd"] = float(data.get("spend_usd") or 0.0) + max(0.0, seconds) * (
-                config.rate_per_second_usd
-            )
-            self._save(data)
-
     def count_local_fallback(self) -> int:
         with self._lock:
-            data = self._load()
+            try:
+                data = self._load()
+            except FlyLedgerError:
+                return -1
             data["local_fallbacks"] = int(data.get("local_fallbacks") or 0) + 1
             self._save(data)
             return data["local_fallbacks"]
@@ -429,9 +459,20 @@ class FlyLedger:
 # ── Machines API client ─────────────────────────────────────────────────────
 
 
+def _invalid(what: str) -> "FlyApiError":
+    # Status 0: not an HTTP rejection. Never treated as proof of anything.
+    return FlyApiError(0, f"invalid Machines API response: {what}")
+
+
 class FlyMachinesClient:
     """Thin async client for ``/v1/apps/<app>/machines``. Never logs headers;
-    error messages carry the HTTP status and Fly's own error text only."""
+    error messages carry the HTTP status and Fly's own error text only.
+
+    Responses are validated per endpoint. A malformed or unexpected body
+    raises ``FlyApiError`` rather than reading as "nothing there": only an
+    explicit 404 means a machine is absent, and only a well-formed list is a
+    machine listing. Callers treat any error as "state unknown".
+    """
 
     def __init__(self, config: FlyConfig, *, transport: httpx.AsyncBaseTransport | None = None):
         self.config = config
@@ -446,72 +487,96 @@ class FlyMachinesClient:
         )
 
     async def _call(self, method: str, path: str, *, params=None, body=None,
-                    ok: tuple[int, ...] = (200, 201, 202, 204)) -> Any:  # fmt: skip
+                    parse: bool = True) -> Any:  # fmt: skip
         async with self._client() as client:
             resp = await client.request(method, path, params=params, json=body)
-        if resp.status_code not in ok:
+        if not 200 <= resp.status_code < 300:
             try:
                 message = str(resp.json().get("error") or resp.text)
-            except ValueError:
+            except (ValueError, AttributeError):
                 message = resp.text
             raise FlyApiError(resp.status_code, message)
-        if not resp.content:
-            return {}
+        if not parse:
+            return None
         try:
             return resp.json()
         except ValueError:
-            return {}
+            raise _invalid(f"{method} {path.split('?')[0]} returned malformed JSON") from None
+
+    @staticmethod
+    def _machine(data: Any, *, expect_id: str = "") -> dict:
+        if not isinstance(data, dict):
+            raise _invalid("machine is not an object")
+        mid = data.get("id")
+        if not isinstance(mid, str) or not mid:
+            raise _invalid("machine has no id")
+        if expect_id and mid != expect_id:
+            raise _invalid("machine id does not match the request")
+        if "state" in data and not isinstance(data["state"], str):
+            raise _invalid("machine state is not a string")
+        return data
 
     async def create(self, body: dict) -> dict:
-        return await self._call("POST", "/machines", body=body)
+        return self._machine(await self._call("POST", "/machines", body=body))
 
     async def get(self, machine_id: str) -> dict | None:
+        """The machine, or None ONLY for an explicit 404."""
         try:
-            return await self._call("GET", f"/machines/{machine_id}")
+            data = await self._call("GET", f"/machines/{machine_id}")
         except FlyApiError as exc:
             if exc.status == 404:
                 return None
             raise
+        machine = self._machine(data, expect_id=machine_id)
+        if not isinstance(machine.get("state"), str):
+            raise _invalid("machine has no state")
+        return machine
 
     async def update(self, machine_id: str, body: dict) -> dict:
-        return await self._call("POST", f"/machines/{machine_id}", body=body)
+        data = await self._call("POST", f"/machines/{machine_id}", body=body)
+        if not isinstance(data, dict):
+            raise _invalid("update result is not an object")
+        return data
 
     async def start(self, machine_id: str) -> None:
-        await self._call("POST", f"/machines/{machine_id}/start")
+        await self._call("POST", f"/machines/{machine_id}/start", parse=False)
 
     async def stop(self, machine_id: str) -> None:
         try:
-            await self._call("POST", f"/machines/{machine_id}/stop")
+            await self._call("POST", f"/machines/{machine_id}/stop", parse=False)
         except FlyApiError as exc:
             if exc.status != 404:
                 raise
 
     async def destroy(self, machine_id: str) -> None:
         try:
-            await self._call("DELETE", f"/machines/{machine_id}", params={"force": "true"})
+            await self._call("DELETE", f"/machines/{machine_id}", params={"force": "true"},
+                             parse=False)  # fmt: skip
         except FlyApiError as exc:
             if exc.status != 404:
                 raise
 
     async def list(self) -> list[dict]:
         data = await self._call("GET", "/machines")
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            raise _invalid("machine listing is not a list")
+        return [self._machine(m) for m in data]
 
     async def wait(self, machine_id: str, *, state: str, instance_id: str = "",
                    timeout_s: int = 60) -> str:  # fmt: skip
-        """One wait call. Returns ``"reached"``, ``"gone"`` or ``"timeout"``."""
+        """One wait call. Returns ``"reached"``, ``"gone"`` or ``"timeout"``.
+        Callers never treat this as confirmation; they read the state back."""
         params: dict[str, Any] = {"state": state, "timeout": max(1, min(60, timeout_s))}
         if instance_id:
             params["instance_id"] = instance_id
         try:
-            await self._call("GET", f"/machines/{machine_id}/wait", params=params)
+            await self._call("GET", f"/machines/{machine_id}/wait", params=params, parse=False)
             return "reached"
         except FlyApiError as exc:
             if exc.status == 404:
                 return "gone"
             if exc.status == 408:
                 return "timeout"
-            # Anything else: read the machine's own state rather than guess.
             machine = await self.get(machine_id)
             if machine is None or machine.get("state") == "destroyed":
                 return "gone"
@@ -647,6 +712,11 @@ class FlyJob:
     # runner kept only the tail of an oversized stdout.
     machine_id: str = ""
     stdout_truncated: bool = False
+    # "terminated" or "unconfirmed" once the executor tried to settle a
+    # machine for this job; and whether the job's outcome is unknown (a
+    # lost wait or a missing result record).
+    remote_state: str = ""
+    outcome_unknown: bool = False
 
     @property
     def login(self) -> bool:
@@ -859,6 +929,67 @@ TRUNCATION_MARKER = (
     "[fly runner: output truncated; only the last {cap} bytes of stdout were kept, "
     "the beginning of the output is missing (run {run_id})]"
 )
+# How long past its deadline a reservation of THIS process must be before the
+# reaper may treat it as abandoned (a live run settles its own well before).
+REAP_GRACE_SECONDS = 300
+
+
+class FlyUncertainLaunch(Exception):
+    """A create or start request was sent and its outcome is unknown: the
+    job may have run. Never retried locally. ``job.remote_state`` says whether
+    the machine was then confirmed terminated."""
+
+
+def _definitely_not_executed(exc: BaseException) -> bool:
+    """True only when a create/start request provably did not take effect:
+    the connection was never made, or Fly rejected the request outright (a
+    4xx other than a timeout or conflict). Everything else is uncertain."""
+    if isinstance(exc, httpx.ConnectError):
+        return True
+    if isinstance(exc, FlyApiError):
+        return 400 <= exc.status < 500 and exc.status not in (408, 409)
+    return False
+
+
+class _TokenOwner:
+    """Owns every token minted for one job, across cancellation.
+
+    The minting thread registers its token itself, so a cancelled dispatch
+    cannot lose it. While the job is live, tokens are collected for ``run()``
+    to revoke; once ``run()`` has closed the owner, a late token is revoked
+    immediately in the thread that minted it.
+    """
+
+    def __init__(self, revoke: Callable[[str], None]):
+        self._revoke = revoke
+        self._lock = threading.Lock()
+        self._tokens: list[str] = []
+        self._closed = False
+
+    def add(self, token: str) -> None:
+        with self._lock:
+            if not self._closed:
+                self._tokens.append(token)
+                return
+        try:
+            self._revoke(token)
+        except Exception as exc:  # noqa: BLE001 — best-effort; the token expires anyway
+            log.warning(f"[fly] late GitHub job token revocation failed: {type(exc).__name__}")
+
+    def close(self) -> list[str]:
+        with self._lock:
+            self._closed = True
+            out, self._tokens = self._tokens, []
+            return out
+
+
+@dataclass
+class _LaunchState:
+    reserved: bool = False
+    requested: bool = False  # a create/start was sent; its effect is not disproven
+    config_written: bool = False  # a login machine's stored config holds job files
+    machine_id: str = ""
+    lock: asyncio.Lock | None = None
 
 
 @dataclass
@@ -868,24 +999,31 @@ class FlyHandle:
     instance_id: str
     started: float
     deadline: float
-    lock: asyncio.Lock | None = None
 
 
 class FlyExecutor:
     """Runs one job on Fly. ``run()`` is the only entry point a dispatcher
     uses, and it owns the job's whole lifetime.
 
-    Two invariants hold on every path, including exceptions and cancellation:
+    Ownership model:
 
-    * **Token:** every GitHub installation token minted for the job is
-      revoked in ``run()``'s ``finally``, the one place revocation happens,
-      even when the launch fails or a cap refuses the job after the mint.
-    * **Machine:** a ledger slot (with its reserved cost) and a login lock are
-      given up only through ``_settle()``, which confirms the machine is
-      terminated first and charges incurred runtime exactly once. When it
-      cannot confirm termination, the slot stays reserved and is marked
-      ``unconfirmed``; the reaper and the next login launch retry the same
-      ``_settle()``.
+    * Every reservation is written, keyed by run id and owned by this
+      process instance (``instance_id``), BEFORE any Fly call, under the
+      admission lock that the reaper also holds. A live ``run()`` lists its
+      run id in ``_active``; nothing else in this process touches it.
+    * The reaper acts only on reservations no live run holds: one from a
+      previous Apis process, one marked unconfirmed, or one past its deadline
+      plus ``REAP_GRACE_SECONDS``. A machine running that no reservation
+      accounts for is first recorded as an owned, unconfirmed reservation, so
+      it counts against capacity until its termination is confirmed.
+    * Every release goes through ``_settle()``: confirm termination by
+      reading state back, then charge runtime once and release; otherwise
+      keep the reservation, marked unconfirmed.
+    * Every minted GitHub token is owned by a ``_TokenOwner`` and revoked,
+      including one whose mint completes after the dispatch was cancelled.
+    * A launch whose outcome is uncertain raises ``FlyUncertainLaunch`` and is
+      never replayed locally; only a launch that provably did not run raises
+      ``FlyLaunchError``.
     """
 
     def __init__(
@@ -907,6 +1045,16 @@ class FlyExecutor:
         self._read_result = read_result
         self._clock = clock
         self._last_reap = 0.0
+        self.instance_id = f"apis-{uuid.uuid4().hex[:16]}"
+        self._active: set[str] = set()
+        self._admission: asyncio.Lock | None = None
+        self._admission_loop: Any = None
+
+    def _admission_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._admission is None or self._admission_loop is not loop:
+            self._admission, self._admission_loop = asyncio.Lock(), loop
+        return self._admission
 
     # ── The job lifetime ─────────────────────────────────────────────────────
 
@@ -914,36 +1062,44 @@ class FlyExecutor:
         """Launch, wait, collect and settle one job.
 
         Raises ``FlyIneligible`` / ``FlyRefusal`` / ``FlyLaunchError`` when no
-        job ran (the caller may run it locally), and ``asyncio.TimeoutError``
-        at the Apis deadline. Otherwise returns ``(returncode, stdout,
-        stderr)``.
+        job ran (the caller may run it locally), ``FlyUncertainLaunch`` when
+        it may have run (the caller must not replay it), and
+        ``asyncio.TimeoutError`` at the Apis deadline. Otherwise returns
+        ``(returncode, stdout, stderr)``; ``job.remote_state`` then says
+        whether the machine was confirmed terminated.
         """
-        minted: list[str] = []
+        tokens = _TokenOwner(self._revoke)
+        launch = _LaunchState()
+        self._active.add(job.run_id)
         try:
-            handle = await self._launch(job, minted)
-            return await self._collect(handle)
+            try:
+                handle = await self._launch(job, tokens, launch)
+                return await self._collect(handle)
+            finally:
+                try:
+                    if launch.reserved and launch.requested:
+                        confirmed = await self._settle(job.run_id)
+                        job.remote_state = "terminated" if confirmed else "unconfirmed"
+                    elif launch.reserved:
+                        self.ledger.release(job.run_id)
+                        if launch.config_written:
+                            await self._scrub_login_machine(launch.machine_id)
+                finally:
+                    self._active.discard(job.run_id)
+                    if launch.lock is not None and launch.lock.locked():
+                        launch.lock.release()
         finally:
-            for token in minted:
+            for token in tokens.close():
                 await self._revoke_shielded(token)
-            minted.clear()
             job.secrets.clear()
 
-    async def _mint_owned(self, job: FlyJob, minted: list[str]) -> str:
-        """Mint the job's token so that it is recorded for revocation even if
-        this coroutine is cancelled while the mint is in flight."""
-        fut = asyncio.ensure_future(
-            asyncio.to_thread(self._mint, job.repository, self.config.github_app_prefix)
-        )
-        try:
-            token = await asyncio.shield(fut)
-        except asyncio.CancelledError:
-            try:
-                minted.append(await asyncio.wait_for(asyncio.shield(fut), timeout=30))
-            except BaseException:  # noqa: BLE001 — the mint failed or is stuck
-                pass
-            raise
-        minted.append(token)
-        return token
+    async def _mint_owned(self, job: FlyJob, tokens: _TokenOwner) -> str:
+        def mint_and_register() -> str:
+            token = self._mint(job.repository, self.config.github_app_prefix)
+            tokens.add(token)  # registered by the minting thread itself
+            return token
+
+        return await asyncio.to_thread(mint_and_register)
 
     async def _revoke_shielded(self, token: str) -> None:
         """Revoke one token; a cancellation does not stop the revocation."""
@@ -957,10 +1113,21 @@ class FlyExecutor:
         except Exception as exc:  # noqa: BLE001 — best-effort; the token expires anyway
             log.warning(f"[fly] GitHub job token revocation failed: {type(exc).__name__}")
 
-    async def _launch(self, job: FlyJob, minted: list[str]) -> FlyHandle:
+    async def _request(self, launch: _LaunchState, coro) -> Any:
+        """Send a create/start. Its failure is a definite launch failure only
+        when the request provably did not take effect; otherwise uncertain."""
+        launch.requested = True
+        try:
+            return await coro
+        except (FlyApiError, httpx.HTTPError) as exc:
+            if _definitely_not_executed(exc):
+                launch.requested = False
+                raise FlyLaunchError(str(exc) or type(exc).__name__) from None
+            raise FlyUncertainLaunch(str(exc) or type(exc).__name__) from None
+
+    async def _launch(self, job: FlyJob, tokens: _TokenOwner, launch: _LaunchState) -> FlyHandle:
         await self.maybe_reap()
         max_run = job.timeout + APIS_DEADLINE_GRACE_SECONDS
-        lock: asyncio.Lock | None = None
         if job.login:
             lock = _login_lock(job.provider)
             try:
@@ -973,67 +1140,49 @@ class FlyExecutor:
                     f"{self.config.queue_max_wait_seconds}s",
                     _render_wall(self._clock() + 300),
                 ) from None
-        key = f"pending:{job.run_id}"
-        reserved = False
-        touched = False  # a create or start request was sent and may have taken effect
-        machine_id = ""
-        launched = False
-        try:
-            if job.needs_github:
-                token = await self._mint_owned(job, minted)
-                job.secrets["GITHUB_TOKEN"] = token
-                job.secrets["GH_TOKEN"] = token
-                for name in ("GITHUB_TOKEN", "GH_TOKEN"):
-                    if name not in job.child_credential_names:
-                        job.child_credential_names.append(name)
-            self.ledger.reserve(self.config, run_id=job.run_id, max_run_seconds=max_run,
+            launch.lock = lock
+        if job.needs_github:
+            token = await self._mint_owned(job, tokens)
+            job.secrets["GITHUB_TOKEN"] = token
+            job.secrets["GH_TOKEN"] = token
+            for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+                if name not in job.child_credential_names:
+                    job.child_credential_names.append(name)
+        async with self._admission_lock():
+            login_id = self.config.login_machines.get(job.provider, "") if job.login else ""
+            self.ledger.reserve(self.config, run_id=job.run_id, owner=self.instance_id,
+                                max_run_seconds=max_run, login=job.login, machine_id=login_id,
                                 now=self._clock())  # fmt: skip
-            reserved = True
+            launch.reserved = True
+            launch.machine_id = login_id
             started = self._clock()
             deadline = started + max_run
-            if job.login:
-                machine_id = self.config.login_machines[job.provider]
-                await self._reconcile_login(machine_id)
-                # Own the machine in the ledger BEFORE asking it to start, so
-                # an uncertain start is reconciled rather than forgotten.
-                self.ledger.bind(job.run_id, machine_id, login=True)
-                key = machine_id
-                touched = True
-                instance_id = await self._start_login_machine(machine_id, job, deadline)
-            else:
-                touched = True
-                created = await self.client.create(per_job_machine_body(job, self.config, deadline))
-                machine_id = str(created.get("id") or "")
-                instance_id = str(created.get("instance_id") or "")
-                if not machine_id:
-                    raise FlyApiError(0, "create returned no machine id")
-                self.ledger.bind(job.run_id, machine_id, login=False)
-                key = machine_id
-            job.machine_id = machine_id
-            log.info(
-                f"[fly] run={job.run_id} role={job.role} provider={job.provider} "
-                f"machine={machine_id} launched"
-            )
-            launched = True
-            return FlyHandle(job, machine_id, instance_id, started, deadline, lock)
-        except (FlyApiError, httpx.HTTPError) as exc:
-            raise FlyLaunchError(str(exc) or type(exc).__name__) from None
-        finally:
-            if not launched:
-                try:
-                    if reserved and touched:
-                        # The create or start may have taken effect: settle it
-                        # like any finished job (confirm termination, charge,
-                        # release), or keep it owned and marked unconfirmed.
-                        await self._settle(key, machine_id=machine_id, login=job.login,
-                                           run_id=job.run_id)  # fmt: skip
-                    elif reserved:
-                        self.ledger.release(key)  # nothing was asked of Fly
-                finally:
-                    if lock is not None and lock.locked():
-                        lock.release()
+            try:
+                if job.login:
+                    await self._reconcile_login(login_id, job.run_id)
+                    launch.config_written = True
+                    await self._write_login_config(login_id, job, deadline)
+                    await self._request(launch, self.client.start(login_id))
+                    machine_id, instance_id = login_id, ""
+                else:
+                    created = await self._request(
+                        launch, self.client.create(per_job_machine_body(job, self.config, deadline))
+                    )
+                    machine_id = created["id"]
+                    instance_id = str(created.get("instance_id") or "")
+                    self.ledger.set_machine(job.run_id, machine_id)
+                    launch.machine_id = machine_id
+            except (FlyApiError, httpx.HTTPError) as exc:
+                # Before any create/start was sent: provably nothing ran.
+                raise FlyLaunchError(str(exc) or type(exc).__name__) from None
+        job.machine_id = machine_id
+        log.info(
+            f"[fly] run={job.run_id} role={job.role} provider={job.provider} "
+            f"machine={machine_id} launched"
+        )
+        return FlyHandle(job, machine_id, instance_id, started, deadline)
 
-    async def _start_login_machine(self, machine_id: str, job: FlyJob, deadline: float) -> str:
+    async def _write_login_config(self, machine_id: str, job: FlyJob, deadline: float) -> None:
         machine = await self.client.get(machine_id)
         if machine is None:
             raise FlyApiError(404, f"{job.provider} login machine not found")
@@ -1043,9 +1192,7 @@ class FlyExecutor:
         cfg["restart"] = {"policy": "no"}
         cfg["env"] = machine_env(job, deadline)
         cfg["files"] = job_files(job, self.config)
-        updated = await self.client.update(machine_id, {"config": cfg, "skip_launch": True})
-        await self.client.start(machine_id)
-        return str((updated or {}).get("instance_id") or "")
+        await self.client.update(machine_id, {"config": cfg, "skip_launch": True})
 
     async def _scrub_login_machine(self, machine_id: str) -> None:
         """Remove the job's files from the stopped login machine's stored
@@ -1062,40 +1209,26 @@ class FlyExecutor:
             log.warning(f"[fly] could not clear job files from login machine: {type(exc).__name__}")
 
     async def _collect(self, handle: FlyHandle) -> tuple[int, bytes, bytes]:
-        """Wait for the machine, read the result record, then settle.
-
-        A wait error is a failed result (the failover loop expects a result,
-        not an exception). Settlement in ``finally`` covers every exit path,
-        including the deadline and cancellation.
-        """
+        """Wait for the machine and read the result record. Settlement is
+        ``run()``'s. A wait error is a failed result with an unknown outcome."""
         job = handle.job
         try:
-            try:
-                outcome = await self._wait_until_done(handle)
-            except (httpx.HTTPError, FlyApiError) as exc:
-                log.error(f"[fly] run={job.run_id} lost the wait on {handle.machine_id}: {exc}")
-                return 1, b"", (
-                    f"fly runner: error while waiting on machine {handle.machine_id} "
-                    f"({type(exc).__name__}); the run's outcome is unknown"
-                ).encode()
-            if outcome == "deadline":
-                log.error(
-                    f"[fly] run={job.run_id} machine={handle.machine_id} passed its deadline"
-                )
-                raise asyncio.TimeoutError()
-            record = await self._read_result(job.run_id)
-            if not record:
-                return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
-            return self._result_from_record(job, record)
-        finally:
-            try:
-                await self._settle(handle.machine_id, machine_id=handle.machine_id,
-                                   login=job.login, run_id=job.run_id)  # fmt: skip
-            finally:
-                # An unconfirmed login machine stays owned through its ledger
-                # entry; the next launch reconciles it before reuse.
-                if handle.lock is not None and handle.lock.locked():
-                    handle.lock.release()
+            outcome = await self._wait_until_done(handle)
+        except (httpx.HTTPError, FlyApiError) as exc:
+            log.error(f"[fly] run={job.run_id} lost the wait on {handle.machine_id}: {exc}")
+            job.outcome_unknown = True
+            return 1, b"", (
+                f"fly runner: error while waiting on machine {handle.machine_id} "
+                f"({type(exc).__name__}); the run's outcome is unknown"
+            ).encode()
+        if outcome == "deadline":
+            log.error(f"[fly] run={job.run_id} machine={handle.machine_id} passed its deadline")
+            raise asyncio.TimeoutError()
+        record = await self._read_result(job.run_id)
+        if not record:
+            job.outcome_unknown = True
+            return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
+        return self._result_from_record(job, record)
 
     def _result_from_record(self, job: FlyJob, record: dict) -> tuple[int, bytes, bytes]:
         if record.get("probe_ok") is False:
@@ -1120,78 +1253,83 @@ class FlyExecutor:
 
     # ── Settlement: the one release path ─────────────────────────────────────
 
-    async def _settle(self, key: str, *, machine_id: str, login: bool, run_id: str) -> bool:
-        """Confirm termination, then charge incurred runtime once and release.
-
-        ``machine_id`` empty means an uncertain per-job create: the machine,
-        if any, is found by its run id. When termination cannot be confirmed
-        the entry is kept, with its reserved cost, and marked ``unconfirmed``.
-        """
+    async def _settle(self, run_id: str) -> bool:
+        """Confirm the reservation's machine is terminated, then charge its
+        runtime once and release it. When the machine is unknown (an
+        uncertain create), it is found by run id. When termination cannot be
+        confirmed, the reservation is kept, marked unconfirmed."""
+        entry = self.ledger.entry(run_id)
+        if entry is None:
+            return True  # already settled
+        machine_id = str(entry.get("machine_id") or "")
+        login = bool(entry.get("login"))
         if machine_id:
             confirmed = await self._terminate(machine_id, login=login)
         else:
             confirmed = await self._terminate_by_run_id(run_id)
         if confirmed:
-            self.ledger.settle(key, config=self.config, now=self._clock())
+            self.ledger.settle(run_id, config=self.config, now=self._clock())
             if login and machine_id:
                 await self._scrub_login_machine(machine_id)
         else:
-            self.ledger.mark_unconfirmed(key, reason="termination not confirmed")
+            self.ledger.mark_unconfirmed(run_id, reason="termination not confirmed")
             log.error(
                 f"[fly] run={run_id} machine={machine_id or '(unknown)'}: termination not "
-                "confirmed; slot and reserved cost kept, marked for the reaper"
+                "confirmed; reservation kept, marked for the reaper"
             )
         return confirmed
 
     async def _terminate_by_run_id(self, run_id: str) -> bool:
+        """Terminate every machine carrying *run_id*. True only when a valid
+        listing was read and each such machine was confirmed terminated."""
         try:
             machines = await self.client.list()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — unknown state keeps the reservation
             log.warning(f"[fly] could not list machines to find run {run_id}: {exc}")
             return False
         found = [
-            str(m.get("id") or "") for m in machines
-            if run_id and _machine_run_id(m) == run_id and m.get("state") != "destroyed"
+            m["id"] for m in machines
+            if _machine_run_id(m) == run_id and m.get("state") != "destroyed"
         ]  # fmt: skip
-        results = [await self._terminate(mid, login=False) for mid in found if mid]
+        results = [await self._terminate(mid, login=False) for mid in found]
         return all(results)
 
     async def _terminate(self, machine_id: str, *, login: bool) -> bool:
         """Stop a login machine, or destroy a per-job one, and CONFIRM it by
-        reading its state back. An acknowledged delete is not confirmation.
-        Returns False (never raises an ordinary error) when unconfirmed."""
+        reading its state back (validated; only an explicit 404 is absence).
+        An acknowledged delete is not confirmation. Never raises an ordinary
+        error: anything unexpected returns False."""
         try:
             machine = await self.client.get(machine_id)
-            if machine is None or machine.get("state") == "destroyed":
+            if machine is None or machine["state"] == "destroyed":
                 return True
             if login:
-                if machine.get("state") == "stopped":
+                if machine["state"] == "stopped":
                     return True
                 await self.client.stop(machine_id)
                 await self.client.wait(machine_id, state="stopped", timeout_s=30)
                 after = await self.client.get(machine_id)
-                return after is None or after.get("state") in ("stopped", "destroyed")
+                return after is None or after["state"] in ("stopped", "destroyed")
             try:
                 await self.client.stop(machine_id)
             except Exception as exc:  # noqa: BLE001 — destroy is forced regardless
                 log.warning(f"[fly] stop before destroy failed: {type(exc).__name__}")
             await self.client.destroy(machine_id)
             after = await self.client.get(machine_id)
-            return after is None or after.get("state") == "destroyed"
+            return after is None or after["state"] == "destroyed"
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[fly] could not confirm machine {machine_id} terminated: {exc}")
             return False
 
-    async def _reconcile_login(self, machine_id: str) -> None:
-        """Before a login machine takes a new job, settle any ledger entry it
-        still has (a previous job never confirmed stopped). Refuse the launch
-        if that cannot be confirmed."""
-        prior = self.ledger.entry(machine_id)
-        if prior is None:
-            return
-        if not await self._settle(machine_id, machine_id=machine_id, login=True,
-                                  run_id=str(prior.get("run_id") or "")):  # fmt: skip
-            raise FlyApiError(409, "login machine from a previous job is not confirmed stopped")
+    async def _reconcile_login(self, machine_id: str, own_run_id: str) -> None:
+        """Before a login machine takes a new job, settle every other
+        reservation on it that no live run holds. Refuse the launch (nothing
+        has been sent yet) if any cannot be confirmed stopped."""
+        for run_id in self.ledger.find_by_machine(machine_id):
+            if run_id == own_run_id or run_id in self._active:
+                continue
+            if not await self._settle(run_id):
+                raise FlyApiError(409, "login machine from a previous job is not confirmed stopped")
 
     async def _wait_until_done(self, handle: FlyHandle) -> str:
         while True:
@@ -1217,51 +1355,58 @@ class FlyExecutor:
             log.warning(f"[fly] reaper failed: {exc}")
             return []
 
-    async def reap(self) -> list[str]:
-        """Settle what no collector will.
+    def _reapable(self, run_id: str, entry: dict, now: float) -> bool:
+        if run_id in self._active:
+            return False  # a live run in this process owns it
+        if entry.get("owner") != self.instance_id:
+            return True  # left by a previous Apis process
+        if entry.get("unconfirmed"):
+            return True  # its run ended without confirming termination
+        return now > float(entry.get("deadline") or 0) + REAP_GRACE_SECONDS
 
-        Every ledger entry that is marked unconfirmed or is past its deadline
-        goes through ``_settle()``, the same confirm-then-charge-then-release
-        path a collector uses, whether its machine is still listed or already
-        gone. Then listed per-job machines the ledger does not know at all are
-        destroyed, confirmed and charged their age. Login machines held by a
-        running job are skipped.
+    async def reap(self) -> list[str]:
+        """Settle reservations no live run holds, and own untracked machines.
+
+        Holds the admission lock throughout, so no launch can reserve or
+        create while it decides, and it re-reads the ledger after every
+        await before acting. Login machines held by a running job are
+        skipped.
         """
-        now = self._clock()
-        login_provider = {mid: prov for prov, mid in self.config.login_machines.items()}
         settled: list[str] = []
-        for key, entry in self.ledger.snapshot(now)["in_flight"].items():
-            overdue = now > float(entry.get("deadline") or 0)
-            if not (entry.get("unconfirmed") or overdue):
-                continue
-            run_id = str(entry.get("run_id") or "")
-            if key.startswith("pending:"):
-                ok = await self._settle(key, machine_id="", login=False, run_id=run_id)
-            else:
-                login = bool(entry.get("login")) or key in login_provider
-                if login and _login_lock(login_provider.get(key, "")).locked():
-                    continue  # a job holds that machine now; its launch reconciles first
-                ok = await self._settle(key, machine_id=key, login=login, run_id=run_id)
-            if ok:
-                settled.append(key)
-        remaining = self.ledger.snapshot(now)["in_flight"]
-        known_runs = {str(v.get("run_id") or "") for v in remaining.values()} - {""}
-        strays: list[str] = []
-        for machine in await self.client.list():
-            mid = str(machine.get("id") or "")
-            if (not mid or mid in login_provider or mid in remaining or mid in settled
-                    or machine.get("state") == "destroyed"
-                    or _machine_run_id(machine) in known_runs):  # fmt: skip
-                continue
-            if await self._terminate(mid, login=False):
+        async with self._admission_lock():
+            now = self._clock()
+            for run_id in list(self.ledger.snapshot(now)["in_flight"]):
+                entry = self.ledger.entry(run_id)  # fresh: settlements may have run
+                if entry is None or not self._reapable(run_id, entry, now):
+                    continue
+                if entry.get("login"):
+                    provider = next((p for p, m in self.config.login_machines.items()
+                                     if m == entry.get("machine_id")), "")  # fmt: skip
+                    if provider and _login_lock(provider).locked():
+                        continue  # a job holds that machine; its launch reconciles first
+                if await self._settle(run_id):
+                    settled.append(run_id)
+            machines = await self.client.list()
+            current = self.ledger.snapshot(now)["in_flight"]  # after the await
+            tracked_machines = {str(e.get("machine_id") or "") for e in current.values()}
+            login_ids = set(self.config.login_machines.values())
+            for machine in machines:
+                mid = machine["id"]
+                run_id = _machine_run_id(machine)
+                if (mid in login_ids or mid in tracked_machines or machine.get("state") == "destroyed"
+                        or (run_id and (run_id in current or run_id in self._active))):  # fmt: skip
+                    continue
                 created = _parse_ts(machine.get("created_at"))
-                cap = DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS
-                age = min(cap, max(0.0, now - created)) if created is not None else cap
-                self.ledger.charge(age, config=self.config, now=now)
-                strays.append(mid)
-        if settled or strays:
-            log.warning(f"[fly] reaper settled {settled} and destroyed strays {strays}")
-        return settled + strays
+                key = self.ledger.record_untracked(
+                    machine_id=mid, run_id=run_id, owner=self.instance_id, config=self.config,
+                    started_at=created if created is not None else now,
+                    max_run_seconds=DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS,
+                )  # fmt: skip
+                if await self._settle(key):
+                    settled.append(key)
+        if settled:
+            log.warning(f"[fly] reaper settled {settled}")
+        return settled
 
 
 def _machine_run_id(machine: dict) -> str:

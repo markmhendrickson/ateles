@@ -241,7 +241,7 @@
     },
     {
       "id": "login_start_response_lost",
-      "description": "A Codex login machine starts but the start response is lost: the launch fails, and the machine is stopped and confirmed before its slot and lock are released; the token is revoked.",
+      "description": "A Codex login machine starts but the start response is lost: the outcome is unknown, so the dispatch fails without any local replay and names the remote run; the machine is stopped and confirmed before its slot and lock are released; the token is revoked.",
       "provider": "codex",
       "settings": {},
       "identity": "key",
@@ -261,12 +261,14 @@
       "expect": {
         "exit": 1,
         "ok": false,
-        "reason_contains": "Fly launch failed",
+        "reason_contains": "UNKNOWN outcome",
         "local_cli_ran": false,
         "login_state": "stopped",
         "login_lock_free": true,
         "revoked_all_minted": true,
-        "in_flight_after": 0
+        "in_flight_after": 0,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "terminated"
       }
     },
     {
@@ -346,7 +348,7 @@
       }
     },
     {
-      "id": "unconfirmed_delete_keeps_capacity_reserved",
+      "id": "tracked_unconfirmed_delete_keeps_capacity_reserved",
       "description": "The reaper's delete is acknowledged but the machine keeps running: its reservation is kept (marked unconfirmed, not charged as settled), so with one concurrent slot the new dispatch is deferred with cooled_until.",
       "settings": {
         "APIS_FLY_MAX_CONCURRENT": "1"
@@ -359,6 +361,149 @@
           "state": "sticky",
           "age": 5000,
           "window": 1920
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "concurrency",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "seed_settled": false,
+        "machines_created": 0,
+        "in_flight_at_least": 1,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "opted_in_lost_create_unconfirmed_no_local_replay",
+      "description": "Opted-in class, local fallback on (the default): the create response is lost and the machine survives every termination attempt. The task must not run locally; the result is a failure that names the remote run as unknown and unconfirmed, and its reservation is kept for the reaper.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "lost",
+        "delete_ineffective": true
+      },
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "Not retried locally",
+        "local_cli_ran": false,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "opted_in_lost_create_terminated_no_local_replay",
+      "description": "Opted-in class, local fallback on: the create response is lost, and the machine is then found and confirmed destroyed. It may already have done work, so the task still must not run locally.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "lost"
+      },
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "Not retried locally",
+        "local_cli_ran": false,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "terminated",
+        "in_flight_after": 0,
+        "machine_gone": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "opted_in_create_refused_falls_back_locally",
+      "description": "Positive control: Fly rejects the create outright (nothing was created), so the opted-in class falls back to the local executor, logged and counted, and succeeds.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "refused"
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "machines_created": 0,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "untracked_unconfirmed_delete_keeps_capacity_reserved",
+      "description": "A machine is running that no reservation accounts for, and it survives the reaper's stop and delete. The reaper owns it as an unconfirmed reservation, so with one concurrent slot the new dispatch is deferred with cooled_until and no new machine is created.",
+      "settings": {
+        "APIS_FLY_MAX_CONCURRENT": "1"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "untracked": [
+        {
+          "machine": "m-ghost",
+          "delete_ineffective": true
         }
       ],
       "fly": {

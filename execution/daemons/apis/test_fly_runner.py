@@ -39,19 +39,39 @@ FORBIDDEN_VALUES = (FLY_TOKEN, SHARED_BEARER, SHARED_PAT, DAEMON_GH, CANARY)
 
 
 class FakeFly:
-    """A stateful stand-in for the Machines API."""
+    """A stateful stand-in for the Machines API, with failure knobs."""
 
     def __init__(self):
         self.requests: list[httpx.Request] = []
         self.machines: dict[str, dict] = {}
         self.wait_status = 200
         self.create_status = 201
-        self.listed: list[dict] = []
         self.next_id = 0
+        # "ok" | "lost" (machine created, response 500) | "refused" (422, nothing
+        # created) | "connect" (connection never made, nothing created)
+        self.create_mode = "ok"
         self.start_lost = False  # the start takes effect, the response is a 500
-        self.create_lost = False  # the create takes effect, the response is a 500
         self.stop_effective = True  # a stop request actually stops the machine
-        self.sticky_delete = False  # a delete is acknowledged but nothing happens
+        self.sticky: set[str] = set()  # delete acknowledged, machine keeps running
+        self.sticky_all = False
+        # Malformed answers: {"list": "malformed"|"object"|"null", "get": "null"|"other-id"}
+        self.bad: dict[str, str] = {}
+
+    @property
+    def create_lost(self) -> bool:
+        return self.create_mode == "lost"
+
+    @create_lost.setter
+    def create_lost(self, value: bool) -> None:
+        self.create_mode = "lost" if value else "ok"
+
+    @property
+    def sticky_delete(self) -> bool:
+        return self.sticky_all
+
+    @sticky_delete.setter
+    def sticky_delete(self, value: bool) -> None:
+        self.sticky_all = value
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -60,16 +80,27 @@ class FakeFly:
         assert path.startswith("/v1/apps/runner-app/"), path
         rest = path[len("/v1/apps/runner-app"):]
         if method == "POST" and rest == "/machines":
+            if self.create_mode == "connect":
+                raise httpx.ConnectError("injected: connection refused")
+            if self.create_mode == "refused":
+                return httpx.Response(422, json={"error": "invalid config"})
             if self.create_status >= 400:
                 return httpx.Response(self.create_status, json={"error": "no capacity"})
             self.next_id += 1
             mid = f"m{self.next_id}"
             self.machines[mid] = {"id": mid, "state": "started", **json.loads(request.content)}
-            if self.create_lost:
+            if self.create_mode == "lost":
                 return httpx.Response(500, json={"error": "response lost"})
             return httpx.Response(201, json={"id": mid, "instance_id": f"i{self.next_id}"})
         if method == "GET" and rest == "/machines":
-            return httpx.Response(200, json=self.listed or list(self.machines.values()))
+            mode = self.bad.get("list")
+            if mode == "malformed":
+                return httpx.Response(200, content=b"{not json")
+            if mode == "object":
+                return httpx.Response(200, json={})
+            if mode == "null":
+                return httpx.Response(200, json=None)
+            return httpx.Response(200, json=list(self.machines.values()))
         parts = rest.split("/")  # ['', 'machines', id, ...]
         mid = parts[2]
         if method == "GET" and len(parts) == 4 and parts[3] == "wait":
@@ -83,12 +114,18 @@ class FakeFly:
                 self.machines[mid]["state"] = "stopped"  # run_job exited
             return httpx.Response(200, json={"ok": True})
         if method == "GET" and len(parts) == 3:
+            if self.bad.get("get") == "null":
+                return httpx.Response(200, json=None)
+            if self.bad.get("get") == "other-id" and mid in self.machines:
+                return httpx.Response(200, json={**self.machines[mid], "id": "someone-else"})
             if mid not in self.machines:
                 return httpx.Response(404, json={"error": "not found"})
             return httpx.Response(200, json=self.machines[mid])
         if method == "POST" and len(parts) == 3:  # update
             body = json.loads(request.content)
-            self.machines.setdefault(mid, {"id": mid, "login": True})["config"] = body["config"]
+            self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})[
+                "config"
+            ] = body["config"]
             return httpx.Response(200, json={"id": mid, "instance_id": "i-login"})
         if method == "POST" and parts[3:] == ["start"]:
             if mid in self.machines:
@@ -101,7 +138,7 @@ class FakeFly:
                 self.machines[mid]["state"] = "stopped"
             return httpx.Response(200, json={"ok": True})
         if method == "DELETE":
-            if not self.sticky_delete:
+            if not (self.sticky_all or mid in self.sticky):
                 self.machines.pop(mid, None)
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(500, json={"error": f"unhandled {method} {rest}"})
@@ -340,14 +377,17 @@ def test_the_job_token_is_revoked_on_every_exit_path(fly_env, outcome):
     assert executor.ledger.snapshot()["in_flight"] == {}
 
 
-def test_launch_failure_revokes_and_leaves_nothing_in_flight(fly_env):
+@pytest.mark.parametrize("mode", ["refused", "connect"])
+def test_launch_that_provably_never_ran_is_a_plain_launch_failure(fly_env, mode):
     fake = FakeFly()
-    fake.create_status = 503
+    fake.create_mode = mode
     executor, _, revoked = make_executor(fake, record=None)
     with pytest.raises(fly_runner.FlyLaunchError):
         asyncio.run(executor.run(_job()))
+    assert fake.machines == {}
     assert revoked == [MINTED]
     assert executor.ledger.snapshot()["in_flight"] == {}
+    assert executor.ledger.snapshot()["spend_usd"] == 0.0  # nothing ran, nothing charged
 
 
 def test_mint_failure_refuses_fly_and_creates_nothing(fly_env):
@@ -461,9 +501,9 @@ def test_budget_counts_storage_and_one_max_run(fly_env, tmp_path):
     worst = max_run * config.rate_per_second_usd
     config.budget_usd = storage + worst - 0.001
     with pytest.raises(fly_runner.FlyRefusal):
-        ledger.reserve(config, run_id="r", max_run_seconds=max_run)
+        ledger.reserve(config, run_id="r", owner="t", max_run_seconds=max_run)
     config.budget_usd = storage + worst + 0.001
-    ledger.reserve(config, run_id="r", max_run_seconds=max_run)
+    ledger.reserve(config, run_id="r", owner="t", max_run_seconds=max_run)
 
 
 def test_daily_and_concurrency_caps(fly_env, tmp_path):
@@ -471,23 +511,32 @@ def test_daily_and_concurrency_caps(fly_env, tmp_path):
     config.max_per_day = 2
     config.max_concurrent = 10
     ledger = fly_runner.FlyLedger(tmp_path / "l.json")
-    ledger.reserve(config, run_id="a", max_run_seconds=60, now=1_800_000_000)
-    ledger.reserve(config, run_id="b", max_run_seconds=60, now=1_800_000_000)
+    ledger.reserve(config, run_id="a", owner="t", max_run_seconds=60, now=1_800_000_000)
+    ledger.reserve(config, run_id="b", owner="t", max_run_seconds=60, now=1_800_000_000)
     with pytest.raises(fly_runner.FlyRefusal, match="daily"):
-        ledger.reserve(config, run_id="c", max_run_seconds=60, now=1_800_000_000)
+        ledger.reserve(config, run_id="c", owner="t", max_run_seconds=60, now=1_800_000_000)
     # Next UTC day resets the count.
     config.max_concurrent = 2
     with pytest.raises(fly_runner.FlyRefusal, match="concurrency"):
-        ledger.reserve(config, run_id="d", max_run_seconds=60, now=1_800_000_000 + 86400)
+        ledger.reserve(config, run_id="d", owner="t", max_run_seconds=60,
+                       now=1_800_000_000 + 86400)  # fmt: skip
+
+
+def test_an_unreadable_ledger_fails_closed(fly_env, tmp_path):
+    config = fly_runner.FlyConfig.from_env()
+    path = tmp_path / "l.json"
+    path.write_text("{not json")
+    with pytest.raises(fly_runner.FlyRefusal, match="unreadable"):
+        fly_runner.FlyLedger(path).reserve(config, run_id="a", owner="t", max_run_seconds=60)
 
 
 def test_spend_accrues_from_machine_seconds(fly_env, tmp_path):
     config = fly_runner.FlyConfig.from_env()
     ledger = fly_runner.FlyLedger(tmp_path / "l.json")
-    ledger.reserve(config, run_id="a", max_run_seconds=60)
-    ledger.bind("a", "m1", login=False)
-    ledger.release("m1", seconds=3600, config=config)
-    assert ledger.snapshot()["spend_usd"] == pytest.approx(13.90 / 720)
+    ledger.reserve(config, run_id="a", owner="t", max_run_seconds=7200, now=1000.0)
+    ledger.set_machine("a", "m1")
+    ledger.settle("a", config=config, now=1000.0 + 3600)
+    assert ledger.snapshot(4600.0)["spend_usd"] == pytest.approx(13.90 / 720)
 
 
 # ── Reaper ───────────────────────────────────────────────────────────────────
@@ -497,8 +546,11 @@ def test_reaper_destroys_strays_but_not_login_or_in_flight(fly_env):
     fake = FakeFly()
     clock = Clock()
     executor, _, _ = make_executor(fake, clock=clock, login_machines={"codex": "m-login"})
-    executor.ledger.reserve(executor.config, run_id="live", max_run_seconds=600, now=clock.now)
-    executor.ledger.bind("live", "m-live", login=False)
+    executor.ledger.reserve(executor.config, run_id="live", owner=executor.instance_id,
+                            max_run_seconds=600, now=clock.now)  # fmt: skip
+    executor.ledger.set_machine("live", "m-live")
+    executor.ledger.reserve(executor.config, run_id="pending-run", owner=executor.instance_id,
+                            max_run_seconds=600, now=clock.now)  # fmt: skip
     iso = "2027-01-15T08:00:00Z"
     for machine in (
         {"id": "m-stray", "state": "started", "created_at": iso},
@@ -508,13 +560,12 @@ def test_reaper_destroys_strays_but_not_login_or_in_flight(fly_env):
          "config": {"metadata": {"ateles_run_id": "pending-run"}}},
     ):  # fmt: skip
         fake.machines[machine["id"]] = machine
-    executor.ledger.reserve(executor.config, run_id="pending-run", max_run_seconds=600,
-                            now=clock.now)  # fmt: skip
     clock.now = fly_runner._parse_ts(iso) + 10
     reaped = asyncio.run(executor.reap())
-    assert reaped == ["m-stray"]
+    assert reaped == ["untracked-m-stray"]
     deleted = [r.url.path.rsplit("/", 1)[1] for r in fake.calls("DELETE")]
     assert deleted == ["m-stray"]
+    assert set(fake.machines) == {"m-login", "m-live", "m-unbound"}
 
 
 # ── Login machines (Codex, Cursor) ────────────────────────────────────────────
@@ -690,10 +741,10 @@ def test_seam_cap_refusal_returns_cooled_until(fly_env, seam, monkeypatch):
     assert spawned == []
 
 
-def test_seam_launch_failure_falls_back_or_fails(fly_env, seam, monkeypatch):
+def test_seam_definite_launch_failure_falls_back_or_fails(fly_env, seam, monkeypatch):
     spawned, fake_exec = seam
     fake = FakeFly()
-    fake.create_status = 500
+    fake.create_mode = "refused"  # provably nothing was created
     executor, _, _ = make_executor(fake)
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
@@ -703,6 +754,41 @@ def test_seam_launch_failure_falls_back_or_fails(fly_env, seam, monkeypatch):
         forced = _once(runner="fly", repository="owner/repo", include_github_contract=True)
     assert opted.ok and len(spawned) == 1  # logged, counted local fallback
     assert not forced.ok and forced.error.startswith("fly runner refused: Fly launch failed")
+
+
+@pytest.mark.parametrize("terminates", [True, False])
+def test_seam_uncertain_launch_is_never_replayed_locally(fly_env, seam, monkeypatch, terminates):
+    """A lost create response on an opted-in class with local fallback on:
+    zero local executions, a non-success result naming the remote run and
+    its machine state, and (when termination is unconfirmed) the reservation
+    kept for the reaper."""
+    spawned, fake_exec = seam
+    events = []
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: events.append(kw))
+    fake = FakeFly()
+    fake.create_mode = "lost"
+    fake.sticky_all = not terminates
+    executor, _, revoked = make_executor(fake)
+    assert executor.config.local_fallback is True
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local", include_github_contract=True)  # fmt: skip
+    assert spawned == []
+    assert not result.ok and result.remote_outcome_unknown
+    assert result.remote_run_id and "UNKNOWN outcome" in result.error
+    assert "Not retried locally" in result.error
+    state = "terminated" if terminates else "unconfirmed"
+    assert result.remote_machine_state == state
+    assert any("fly_outcome=unknown" in e.get("output_summary", "")
+               and f"fly_machine_state={state}" in e.get("output_summary", "")
+               for e in events)  # fmt: skip
+    held = executor.ledger.snapshot()["in_flight"]
+    assert (held == {}) is terminates
+    if not terminates:
+        assert held[result.remote_run_id]["unconfirmed"] is True
+    assert revoked == [MINTED]
 
 
 # ── dispatch_role --runner ────────────────────────────────────────────────────
@@ -737,7 +823,7 @@ def test_dispatch_role_runner_flag_reaches_run_skill(monkeypatch, tmp_path):
     assert rc != 0
 
 
-# ── Lifecycle ownership on every exit path (review rounds 1 and 2) ───────────
+# ── Lifecycle ownership on every exit path ───────────────────────────────────
 
 
 def _disconnect(*a, **k):
@@ -766,15 +852,26 @@ def _codex_fake(monkeypatch) -> FakeFly:
     return fake
 
 
+class RealWait:
+    """Restore the client's real wait after a test replaced it."""
+
+    def __init__(self, executor):
+        self._real = fly_runner.FlyMachinesClient.wait.__get__(executor.client)
+
+    async def __call__(self, *a, **k):
+        return await self._real(*a, **k)
+
+
 def test_wait_disconnect_destroys_per_job_machine_before_release(fly_env):
     fake = FakeFly()
     executor, _, revoked = make_executor(fake, record={"exit_code": 0, "stdout": "x"})
     executor.client.wait = _async(_disconnect)
-    rc, out, err = asyncio.run(executor.run(_job()))
+    job = _job()
+    rc, out, err = asyncio.run(executor.run(job))
     assert rc == 1 and b"error while waiting" in err  # a failed result, not a raise
+    assert job.outcome_unknown is True and job.remote_state == "terminated"
     assert fake.calls("POST", "/stop") and fake.calls("DELETE")
     assert fake.machines == {}
-    # Released only because destruction was confirmed (GET -> 404).
     assert executor.ledger.snapshot()["in_flight"] == {}
     assert revoked == [MINTED]
 
@@ -783,25 +880,20 @@ def test_unconfirmed_termination_keeps_the_slot_for_the_reaper(fly_env):
     fake = FakeFly()
     clock = Clock()
     executor, _, revoked = make_executor(fake, record=None, clock=clock)
-    real_destroy = executor.client.destroy
-
-    async def failing_destroy(mid):
-        raise fly_runner.FlyApiError(500, "injected destroy failure")
-
     executor.client.wait = _async(_disconnect)
-    executor.client.destroy = failing_destroy
-    asyncio.run(executor.run(_job()))
-    (mid,) = fake.machines
-    entry = executor.ledger.entry(mid)
+    fake.sticky_all = True
+    job = _job()
+    asyncio.run(executor.run(job))
+    assert job.remote_state == "unconfirmed"
+    entry = executor.ledger.entry(job.run_id)
     assert entry is not None and entry["unconfirmed"] is True
-    assert revoked == [MINTED]  # the token is revoked regardless
+    assert revoked == [MINTED]
     assert executor.ledger.snapshot(clock.now)["spend_usd"] == 0.0  # not settled yet
 
-    # The reaper, once the API answers, destroys it, confirms, charges, releases.
-    executor.client.destroy = real_destroy
+    fake.sticky_all = False
     clock.now += 30
-    assert mid in asyncio.run(executor.reap())
-    assert executor.ledger.entry(mid) is None
+    assert job.run_id in asyncio.run(executor.reap())
+    assert executor.ledger.entry(job.run_id) is None
     assert executor.ledger.snapshot(clock.now)["spend_usd"] == pytest.approx(
         30 * executor.config.rate_per_second_usd
     )
@@ -836,90 +928,109 @@ def test_login_machine_disconnect_stops_and_unconfirmed_blocks_reuse(fly_env, mo
     fake.stop_effective = False  # the stop is never confirmed
     executor, _, revoked = make_executor(fake, record=None)
     executor.client.wait = _async(_disconnect)
-    asyncio.run(executor.run(_codex_job()))
-    assert fake.calls("POST", "/stop")  # a stop was attempted
-    entry = executor.ledger.entry("m-codex")
+    first = _codex_job()
+    asyncio.run(executor.run(first))
+    assert fake.calls("POST", "/stop")
+    entry = executor.ledger.entry(first.run_id)
     assert entry is not None and entry["unconfirmed"] is True
     assert not fly_runner._login_lock("codex").locked()
-    assert revoked == [MINTED]
 
-    # The next job may not start on it while the stop is unconfirmed.
+    # The next job may not start on it while the stop is unconfirmed; nothing
+    # was sent for it, so that is a plain (definite) launch failure.
     starts_before = len(fake.calls("POST", "/start"))
     with pytest.raises(fly_runner.FlyLaunchError, match="not confirmed stopped"):
         asyncio.run(executor.run(_codex_job()))
     assert len(fake.calls("POST", "/start")) == starts_before
-    assert revoked == [MINTED, MINTED]  # the refused job's token too
+    assert revoked == [MINTED, MINTED]
 
     # Once the machine stops, the next launch settles the old entry and runs.
     fake.stop_effective = True
-    executor.client.wait = FakeFlyWaitOk(executor)
+    executor.client.wait = RealWait(executor)
     executor._read_result = _async(lambda run_id: {"run_id": run_id, "exit_code": 0})
     assert asyncio.run(executor.run(_codex_job()))[0] == 0
     assert executor.ledger.snapshot()["in_flight"] == {}
 
 
-class FakeFlyWaitOk:
-    """Restore the client's real wait after a test replaced it."""
-
-    def __init__(self, executor):
-        self._real = fly_runner.FlyMachinesClient.wait.__get__(executor.client)
-
-    async def __call__(self, *a, **k):
-        return await self._real(*a, **k)
-
-
 @pytest.mark.parametrize("stop_effective", [True, False])
-def test_login_start_response_lost_keeps_ownership_until_stopped(
-    fly_env, monkeypatch, stop_effective
-):
+def test_login_start_response_lost_is_uncertain_and_owned(fly_env, monkeypatch, stop_effective):
     fake = _codex_fake(monkeypatch)
     fake.start_lost = True  # the machine starts; the response says 500
     fake.stop_effective = stop_effective
     executor, _, revoked = make_executor(fake, record=None)
-    with pytest.raises(fly_runner.FlyLaunchError):
-        asyncio.run(executor.run(_codex_job()))
-    assert fake.calls("POST", "/stop")  # the uncertain start is reconciled
+    job = _codex_job()
+    with pytest.raises(fly_runner.FlyUncertainLaunch):
+        asyncio.run(executor.run(job))
+    assert fake.calls("POST", "/stop")
     assert revoked == [MINTED]
     assert not fly_runner._login_lock("codex").locked()
-    entry = executor.ledger.entry("m-codex")
+    entry = executor.ledger.entry(job.run_id)
     if stop_effective:
+        assert job.remote_state == "terminated"
         assert fake.machines["m-codex"]["state"] == "stopped"
-        assert entry is None  # settled only after the stop was confirmed
-        assert fake.machines["m-codex"]["config"]["files"] == []  # job files cleared
+        assert entry is None
+        assert fake.machines["m-codex"]["config"]["files"] == []
     else:
+        assert job.remote_state == "unconfirmed"
         assert fake.machines["m-codex"]["state"] == "started"
         assert entry is not None and entry["unconfirmed"] is True
         fake.start_lost = False
         with pytest.raises(fly_runner.FlyLaunchError, match="not confirmed stopped"):
-            asyncio.run(executor.run(_codex_job()))  # no reuse while unconfirmed
+            asyncio.run(executor.run(_codex_job()))
 
 
-def test_create_response_lost_destroys_the_machine_found_by_run_id(fly_env):
+def test_create_response_lost_is_uncertain_and_the_machine_is_found_by_run_id(fly_env):
     fake = FakeFly()
-    fake.create_lost = True  # the machine exists; the response says 500
+    fake.create_mode = "lost"
     executor, _, revoked = make_executor(fake, record=None)
-    with pytest.raises(fly_runner.FlyLaunchError):
-        asyncio.run(executor.run(_job()))
-    assert fake.calls("DELETE")
-    assert fake.machines == {}
+    job = _job()
+    with pytest.raises(fly_runner.FlyUncertainLaunch):
+        asyncio.run(executor.run(job))
+    assert job.remote_state == "terminated"
+    assert fake.calls("DELETE") and fake.machines == {}
     assert executor.ledger.snapshot()["in_flight"] == {}
     assert revoked == [MINTED]
 
 
-def test_create_response_lost_and_unlisted_keeps_the_pending_slot(fly_env):
+@pytest.mark.parametrize("bad", [{"list": "malformed"}, {"list": "object"}, {"list": "null"}])
+def test_an_invalid_listing_never_confirms_termination(fly_env, bad):
     fake = FakeFly()
-    fake.create_lost = True
+    fake.create_mode = "lost"
+    fake.bad = bad
+    executor, _, _ = make_executor(fake, record=None)
+    job = _job()
+    with pytest.raises(fly_runner.FlyUncertainLaunch):
+        asyncio.run(executor.run(job))
+    assert job.remote_state == "unconfirmed"
+    assert executor.ledger.entry(job.run_id)["unconfirmed"] is True
+    assert fake.machines  # still there, still owned
+
+
+@pytest.mark.parametrize("bad", [{"get": "null"}, {"get": "other-id"}])
+def test_an_invalid_machine_read_never_confirms_termination(fly_env, bad):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake, record=None)
+    executor.client.wait = _async(_disconnect)
+    fake.sticky_all = True
+    fake.bad = bad
+    job = _job()
+    asyncio.run(executor.run(job))
+    assert job.remote_state == "unconfirmed"
+    assert executor.ledger.entry(job.run_id)["unconfirmed"] is True
+
+
+def test_create_response_lost_and_unlisted_keeps_the_slot(fly_env):
+    fake = FakeFly()
+    fake.create_mode = "lost"
     executor, _, _ = make_executor(fake, record=None)
 
     async def no_list():
         raise httpx.ConnectError("injected list failure")
 
     executor.client.list = no_list
-    with pytest.raises(fly_runner.FlyLaunchError):
-        asyncio.run(executor.run(_job()))
-    (key,) = executor.ledger.snapshot()["in_flight"]
-    assert key.startswith("pending:")
-    assert executor.ledger.entry(key)["unconfirmed"] is True
+    job = _job()
+    with pytest.raises(fly_runner.FlyUncertainLaunch):
+        asyncio.run(executor.run(job))
+    assert executor.ledger.entry(job.run_id)["unconfirmed"] is True
 
 
 def test_cancellation_during_login_start_settles_the_machine(fly_env, monkeypatch):
@@ -948,93 +1059,214 @@ def test_cancellation_during_login_start_settles_the_machine(fly_env, monkeypatc
     assert revoked == [MINTED]
 
 
-# ── Recovery: one settlement path, cost charged exactly once ─────────────────
+# ── Recovery: explicit ownership, one settlement path ────────────────────────
 
 
-def _seed_bound(executor, clock, machine_id="m-old", run_id="old-run", max_run=600):
-    executor.ledger.reserve(executor.config, run_id=run_id, max_run_seconds=max_run,
-                            now=clock.now)  # fmt: skip
-    executor.ledger.bind(run_id, machine_id, login=False)
+def _seed(executor, clock, *, run_id="old-run", machine_id="m-old", max_run=600, owner=None,
+          started=None):  # fmt: skip
+    executor.ledger.reserve(executor.config, run_id=run_id,
+                            owner=owner or executor.instance_id, max_run_seconds=max_run,
+                            now=clock.now if started is None else started)  # fmt: skip
+    executor.ledger.set_machine(run_id, machine_id)
 
 
 @pytest.mark.parametrize("listed", [True, False])
 def test_reaper_settles_an_overdue_reservation_and_charges_it(fly_env, listed):
-    """A dispatcher restart: the collector is gone and the reservation is
-    overdue. Whether its machine is still listed or already gone, the reaper
-    confirms termination, charges the capped runtime once, and releases."""
     fake = FakeFly()
     clock = Clock()
     executor, _, _ = make_executor(fake, clock=clock)
-    _seed_bound(executor, clock)
+    _seed(executor, clock)
     if listed:
         fake.machines["m-old"] = {"id": "m-old", "state": "started"}
-    clock.now += 5000  # well past the 600 s window
-    assert "m-old" in asyncio.run(executor.reap())
+    clock.now += 600 + fly_runner.REAP_GRACE_SECONDS + 1
+    assert "old-run" in asyncio.run(executor.reap())
     assert fake.machines == {}
     snap = executor.ledger.snapshot(clock.now)
     assert snap["in_flight"] == {}
     assert snap["spend_usd"] == pytest.approx(600 * executor.config.rate_per_second_usd)
-    # Exactly once: reaping again charges nothing more.
-    asyncio.run(executor.reap())
+    asyncio.run(executor.reap())  # exactly once
     assert executor.ledger.snapshot(clock.now)["spend_usd"] == pytest.approx(snap["spend_usd"])
+
+
+def test_reaper_waits_out_the_grace_period_for_this_process(fly_env):
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    _seed(executor, clock)
+    fake.machines["m-old"] = {"id": "m-old", "state": "started"}
+    clock.now += 600 + fly_runner.REAP_GRACE_SECONDS - 1  # overdue, inside the grace
+    assert asyncio.run(executor.reap()) == []
+    assert "m-old" in fake.machines
+
+
+def test_reaper_settles_a_previous_process_reservation_at_once(fly_env):
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    _seed(executor, clock, owner="apis-previous-process")
+    fake.machines["m-old"] = {"id": "m-old", "state": "started"}
+    assert "old-run" in asyncio.run(executor.reap())  # not overdue, but its owner is gone
+    assert fake.machines == {}
+
+
+def test_reaper_never_touches_a_live_run_even_past_its_deadline(fly_env):
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock, record={"exit_code": 0, "stdout": "ok"})
+    job = _job()
+
+    async def go():
+        in_wait = asyncio.Event()
+        release = asyncio.Event()
+        real = RealWait(executor)
+
+        async def gated_wait(machine_id, **k):
+            in_wait.set()
+            await release.wait()
+            return await real(machine_id, **k)
+
+        executor.client.wait = gated_wait
+        task = asyncio.create_task(executor.run(job))
+        await in_wait.wait()
+        clock.now += 100_000  # far past deadline + grace
+        reaped = await executor.reap()
+        assert reaped == [] and job.machine_id in fake.machines
+        clock.now -= 100_000
+        release.set()
+        return await task
+
+    assert asyncio.run(go())[0] == 0
+
+
+def test_reaper_racing_a_concurrent_launch_does_not_touch_its_machine(fly_env):
+    """The arch probe: a launch reserves and creates while the reaper runs.
+    The reaper must neither destroy the new machine nor charge it."""
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock, record={"exit_code": 0, "stdout": "ok"})
+    job = _job()
+
+    async def go():
+        creating = asyncio.Event()
+        finish_create = asyncio.Event()
+        in_wait = asyncio.Event()
+        release = asyncio.Event()
+        real_create = executor.client.create
+        real_wait = RealWait(executor)
+
+        async def slow_create(body):
+            creating.set()
+            await finish_create.wait()
+            return await real_create(body)
+
+        async def gated_wait(machine_id, **k):
+            in_wait.set()
+            await release.wait()
+            return await real_wait(machine_id, **k)
+
+        executor.client.create = slow_create
+        executor.client.wait = gated_wait
+        run_task = asyncio.create_task(executor.run(job))
+        await creating.wait()  # reserved, create in flight
+        reap_task = asyncio.create_task(executor.reap())
+        await asyncio.sleep(0.01)
+        assert not reap_task.done()  # admission is held by the launch
+        finish_create.set()
+        await in_wait.wait()
+        reaped = await reap_task
+        assert reaped == []
+        assert job.machine_id in fake.machines
+        assert executor.ledger.entry(job.run_id) is not None
+        assert not fake.calls("DELETE")
+        release.set()
+        return await run_task
+
+    assert asyncio.run(go())[0] == 0
+    assert executor.ledger.snapshot()["in_flight"] == {}
 
 
 def test_reaper_keeps_the_slot_when_a_delete_ack_is_not_confirmed(fly_env):
     fake = FakeFly()
-    fake.sticky_delete = True  # delete acknowledged, machine still started
+    fake.sticky_all = True
     clock = Clock()
     executor, _, _ = make_executor(fake, clock=clock, max_concurrent=1)
-    _seed_bound(executor, clock)
+    _seed(executor, clock)
     fake.machines["m-old"] = {"id": "m-old", "state": "started"}
-    clock.now += 5000
+    clock.now += 600 + fly_runner.REAP_GRACE_SECONDS + 1
     assert asyncio.run(executor.reap()) == []
-    entry = executor.ledger.entry("m-old")
+    entry = executor.ledger.entry("old-run")
     assert entry is not None and entry["unconfirmed"] is True
     assert executor.ledger.snapshot(clock.now)["spend_usd"] == 0.0
-    # Its slot still counts: the next job is refused on concurrency.
     with pytest.raises(fly_runner.FlyRefusal, match="concurrency"):
-        executor.ledger.reserve(executor.config, run_id="next", max_run_seconds=60,
+        executor.ledger.reserve(executor.config, run_id="next", owner="t", max_run_seconds=60,
                                 now=clock.now)  # fmt: skip
-    # Once the delete takes effect, the reaper settles and admission reopens.
-    fake.sticky_delete = False
-    assert "m-old" in asyncio.run(executor.reap())
-    executor.ledger.reserve(executor.config, run_id="next", max_run_seconds=60, now=clock.now)
+    fake.sticky_all = False
+    assert "old-run" in asyncio.run(executor.reap())
+    executor.ledger.reserve(executor.config, run_id="next", owner="t", max_run_seconds=60,
+                            now=clock.now)  # fmt: skip
+
+
+def test_an_untracked_machine_that_will_not_die_holds_capacity(fly_env):
+    """The qa probe: an empty ledger, one running machine nobody accounts for
+    that survives stop and delete, and max_concurrent=1. The reaper must own
+    it (unconfirmed, counted) so the next job is refused, then settle it once
+    it is confirmed gone."""
+    fake = FakeFly()
+    fake.sticky_all = True
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock, max_concurrent=1)
+    fake.machines["m-ghost"] = {"id": "m-ghost", "state": "started",
+                                "created_at": "2027-01-15T07:59:00Z"}  # fmt: skip
+    assert asyncio.run(executor.reap()) == []
+    held = executor.ledger.snapshot(clock.now)["in_flight"]
+    assert held["untracked-m-ghost"]["unconfirmed"] is True
+    with pytest.raises(fly_runner.FlyRefusal, match="concurrency"):
+        executor.ledger.reserve(executor.config, run_id="next", owner="t", max_run_seconds=60,
+                                now=clock.now)  # fmt: skip
+    fake.sticky_all = False
+    assert "untracked-m-ghost" in asyncio.run(executor.reap())
+    snap = executor.ledger.snapshot(clock.now)
+    assert snap["in_flight"] == {}
+    assert snap["spend_usd"] == pytest.approx(60 * executor.config.rate_per_second_usd)
 
 
 def test_reaped_spend_counts_toward_admission(fly_env):
     fake = FakeFly()
     clock = Clock()
     executor, _, _ = make_executor(fake, clock=clock)
-    _seed_bound(executor, clock, max_run=1920)
+    _seed(executor, clock, max_run=1920)
     one = 1920 * executor.config.rate_per_second_usd
     data = executor.ledger._load()
     executor.ledger._roll(data, clock.now)
     data["spend_usd"] = 20.0 - one - one / 2
     executor.ledger._save(data)
-    clock.now += 5000
+    clock.now += 1920 + fly_runner.REAP_GRACE_SECONDS + 1
     asyncio.run(executor.reap())
     with pytest.raises(fly_runner.FlyRefusal, match="budget"):
-        executor.ledger.reserve(executor.config, run_id="n", max_run_seconds=1920,
+        executor.ledger.reserve(executor.config, run_id="n", owner="t", max_run_seconds=1920,
                                 now=clock.now)  # fmt: skip
 
 
 def test_settle_is_idempotent(fly_env, tmp_path):
     config = fly_runner.FlyConfig.from_env()
     ledger = fly_runner.FlyLedger(tmp_path / "l.json")
-    ledger.reserve(config, run_id="a", max_run_seconds=100, now=1000.0)
-    ledger.bind("a", "m1", login=False)
-    first = ledger.settle("m1", config=config, now=1050.0)
-    second = ledger.settle("m1", config=config, now=1050.0)
+    ledger.reserve(config, run_id="a", owner="t", max_run_seconds=100, now=1000.0)
+    first = ledger.settle("a", config=config, now=1050.0)
+    second = ledger.settle("a", config=config, now=1050.0)
     assert first == pytest.approx(50 * config.rate_per_second_usd) and second == 0.0
 
 
 # ── Token lifecycle ──────────────────────────────────────────────────────────
 
 
-def test_token_minted_during_cancellation_is_still_revoked(fly_env):
+@pytest.mark.parametrize("cancels", [1, 2])
+def test_token_minted_after_cancellation_is_still_revoked(fly_env, cancels):
+    """The mint completes only after the dispatch was cancelled (once or
+    repeatedly) and after run() finished: the minting thread revokes it."""
     import threading
 
     release = threading.Event()
+    done = threading.Event()
     fake = FakeFly()
 
     def slow_mint(repo, prefix):
@@ -1042,40 +1274,58 @@ def test_token_minted_during_cancellation_is_still_revoked(fly_env):
         return MINTED
 
     executor, _, revoked = make_executor(fake, mint=slow_mint)
+    real_revoke = executor._revoke
+
+    def revoke_and_flag(token):
+        real_revoke(token)
+        done.set()
+
+    executor._revoke = revoke_and_flag
 
     async def go():
         task = asyncio.create_task(executor.run(_job()))
         await asyncio.sleep(0.05)  # the mint is in flight in its thread
-        task.cancel()
-        threading.Timer(0.1, release.set).start()
+        for _ in range(cancels):
+            task.cancel()
+            await asyncio.sleep(0)
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    asyncio.run(go())
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(go())
+        assert revoked == []  # run() is over; the mint has not returned yet
+        release.set()
+        assert done.wait(5)
+    finally:
+        loop.close()
     assert revoked == [MINTED]
-    assert fake.requests == []  # nothing launched
+    assert fake.requests == []
 
 
-@pytest.mark.parametrize("failure", ["refusal", "launch_error", "reconcile_refused"])
-def test_token_is_revoked_when_the_job_never_starts(fly_env, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["refusal", "launch_error", "reconcile_refused", "uncertain"])
+def test_token_is_revoked_when_the_job_never_completes(fly_env, monkeypatch, failure):
     if failure == "reconcile_refused":
         fake = _codex_fake(monkeypatch)
         fake.stop_effective = False
         fake.machines["m-codex"]["state"] = "started"
         executor, _, revoked = make_executor(fake)
-        executor.ledger.reserve(executor.config, run_id="old", max_run_seconds=60)
-        executor.ledger.bind("old", "m-codex", login=True)
+        executor.ledger.reserve(executor.config, run_id="old", owner="apis-other",
+                                max_run_seconds=60, login=True, machine_id="m-codex")  # fmt: skip
         job = _codex_job()
         expected = fly_runner.FlyLaunchError
     else:
         fake = FakeFly()
-        if failure == "launch_error":
-            fake.create_status = 503
+        fake.create_mode = {"launch_error": "refused", "uncertain": "lost"}.get(failure, "ok")
         executor, _, revoked = make_executor(
             fake, **({"budget_usd": 0.0} if failure == "refusal" else {})
         )
         job = _job()
-        expected = fly_runner.FlyRefusal if failure == "refusal" else fly_runner.FlyLaunchError
+        expected = {
+            "refusal": fly_runner.FlyRefusal,
+            "launch_error": fly_runner.FlyLaunchError,
+            "uncertain": fly_runner.FlyUncertainLaunch,
+        }[failure]
     with pytest.raises(expected):
         asyncio.run(executor.run(job))
     assert revoked == [MINTED]
@@ -1132,31 +1382,24 @@ def test_seam_surfaces_truncation_on_the_result_and_harness_event(fly_env, seam,
 
 
 def test_budget_counts_every_in_flight_reservation(fly_env, tmp_path):
-    """The reviewer's probe: $19.98 spent, three concurrent 1,920 s runs at the
-    default rate and concurrency. Without counting outstanding reservations
-    all three were admitted ($20.0109 committed against $20)."""
+    """The round-1 probe: $19.98 spent, three concurrent 1,920 s runs at the
+    default rate and concurrency. Only one may be admitted."""
     config = fly_runner.FlyConfig.from_env()
     assert config.max_concurrent == 3 and config.budget_usd == 20.0
     ledger = fly_runner.FlyLedger(tmp_path / "ledger.json")
     now = 1_800_000_000.0
-    ledger.snapshot(now)  # roll month keys
     data = ledger._load()
     ledger._roll(data, now)
     data["spend_usd"] = 19.98
     ledger._save(data)
     max_run = 1920
-    one = max_run * config.rate_per_second_usd
     admitted = 0
     for i in range(3):
         try:
-            ledger.reserve(config, run_id=f"r{i}", max_run_seconds=max_run, now=now)
+            ledger.reserve(config, run_id=f"r{i}", owner="t", max_run_seconds=max_run, now=now)
             admitted += 1
         except fly_runner.FlyRefusal as exc:
             assert "reserved in flight" in str(exc)
     assert admitted == 1
-    committed = 19.98 + admitted * one
-    assert committed <= config.budget_usd
-    # Completing the admitted run releases its reservation and charges actuals.
-    ledger.bind("r0", "m0", login=False)
-    ledger.release("m0", seconds=60, config=config, now=now)
-    ledger.reserve(config, run_id="r3", max_run_seconds=max_run, now=now)
+    ledger.settle("r0", config=config, now=now + 60)
+    ledger.reserve(config, run_id="r3", owner="t", max_run_seconds=max_run, now=now + 60)
