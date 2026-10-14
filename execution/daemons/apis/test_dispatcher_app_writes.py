@@ -562,3 +562,45 @@ async def test_startup_warm_up_mints_every_repository_and_is_bounded(monkeypatch
 async def test_warm_up_is_a_no_op_without_the_app(monkeypatch):
     _unconfigure_app(monkeypatch)
     assert await _dispatcher().warm_github_app_token([REPO]) is False
+
+
+# ── the guard and the headers resolve the SAME credential ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_instance_token_only_is_skipped_with_a_warning_never_sent_bare(
+    monkeypatch, no_pat, caplog
+):
+    _unconfigure_app(monkeypatch)
+    seen = _recorder(monkeypatch, lambda request: httpx.Response(201, json={}))
+    d = _dispatcher()
+    d.config.github_token = "instance-token-fixture"
+    state = sd.SpecState(repo=REPO, issue_number=11, title="t", sections={"problem": "p"})
+    with caplog.at_level(logging.WARNING):
+        await d._post_checkpoint_verdict_comment(_trigger(), "verdict text")
+        await d._mirror_spec_to_issue(_trigger(), state)
+    assert seen == [], "a write was sent although the headers carry no credential"
+    text = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "verdict comment skipped" in text and "spec mirror skipped" in text
+    assert "instance-token-fixture" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("app", ["healthy", "fails", "unconfigured"])
+@pytest.mark.parametrize("pat", [True, False])
+async def test_guard_and_headers_agree_in_every_combination(monkeypatch, app, pat):
+    if not pat:
+        monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+    if app == "unconfigured":
+        _unconfigure_app(monkeypatch)
+    elif app == "fails":
+        def _boom(repo):
+            raise sd._github_app_token.AppTokenError("HTTP 500")
+        _configure_app(monkeypatch, mint=_boom)
+    else:
+        _configure_app(monkeypatch)
+    d = _dispatcher()
+    d.config.github_token = "instance-token-fixture"
+    guard = await d._require_github_write_credential(REPO, "x")
+    sent = "Authorization" in d._github_headers(REPO)
+    assert guard == sent, "the guard passed for a credential the headers do not send"

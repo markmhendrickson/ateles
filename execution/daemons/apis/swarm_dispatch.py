@@ -3783,6 +3783,18 @@ def _log_github_403_body(resp, what: str) -> None:
     log.warning(f"[{DAEMON_NAME}] {what} answered 403: {body}")
 
 
+def _resolve_github_write_token(repo: str, app_token: str | None) -> str:
+    """THE credential a repo-scoped dispatcher write carries: the App
+    installation token when there is one, else the per-repo agent PAT
+    (`_token_for_repo`), else "". The one function both `_github_headers` (what
+    is sent) and the write guards (whether to send at all) go through, so a
+    guard can never pass for a credential the headers then drop and send the
+    request bare. The instance-level `config.github_token` is not part of it:
+    `_github_headers` has never sent it for a repo-scoped call.
+    """
+    return app_token or _token_for_repo(repo) or ""
+
+
 def _app_bot_login_blocking() -> str:
     """The login the App's installation token acts as (``<slug>[bot]``), casefolded."""
     return _github_app_token.bot_login(_REVIEWER_APP_ENV_PREFIX).casefold()
@@ -12608,14 +12620,12 @@ class SwarmDispatcher:
 
     async def _github_write_token(self, repo: str) -> str:
         """The token a dispatcher write to *repo* will carry: the App
-        installation's (awaited off the event loop), else the PAT, else the
-        instance token. "" when the dispatcher has no usable write credential.
+        installation's (awaited off the event loop), else the per-repo PAT.
+        "" when the dispatcher has no usable write credential. The same
+        `_resolve_github_write_token` that `_github_headers` applies, so a guard
+        built on this never passes for a credential the headers then drop.
         """
-        return (
-            await _ensure_app_write_token(repo)
-            or _token_for_repo(repo)
-            or self.config.github_token
-        )
+        return _resolve_github_write_token(repo, await _ensure_app_write_token(repo))
 
     def _log_write_skipped(self, what: str, repo: str, detail: str = "") -> None:
         log.warning(
@@ -12690,11 +12700,14 @@ class SwarmDispatcher:
         PAT cannot write to a repository another account owns, so the PAT is the
         fallback only when the App is unconfigured or minting fails (logged at
         WARNING). The per-repo PAT is `_token_for_repo`; the instance-level
-        `config.github_token` is used when no repo is given.
+        `config.github_token` is used only when no repo is given, and is NOT a
+        fallback for a repo-scoped write (the guards share
+        `_resolve_github_write_token`, so they agree).
         """
-        token = _app_write_token_for_sync(repo) if repo else None
-        if not token:
-            token = _token_for_repo(repo) if repo else self.config.github_token
+        if repo:
+            token = _resolve_github_write_token(repo, _app_write_token_for_sync(repo))
+        else:
+            token = self.config.github_token
         headers = {"Accept": "application/vnd.github+json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"

@@ -37,7 +37,7 @@ for _p in (str(REPO_ROOT), str(APIS_DIR)):
 
 import swarm_dispatch as sd  # noqa: E402
 
-MUTATIONS = ("none", "pat_first")
+MUTATIONS = ("none", "pat_first", "guard_accepts_instance_token")
 REPO = "owner/repo"
 APP_TOKEN = "eval-app-installation-token"
 PAT = "eval-agent-pat"
@@ -115,6 +115,12 @@ async def _run(scenario: dict, mutation: str, mp: pytest.MonkeyPatch) -> dict:
         mp.setattr(sd, "_app_write_token_for_sync", lambda repo: None)
         mp.setattr(sd, "_ensure_app_write_token", _no_app)
 
+    if mutation == "guard_accepts_instance_token":  # the round-2 defect
+        async def _guard_passes(self, repo):
+            return self.config.github_token
+
+        mp.setattr(sd.SwarmDispatcher, "_github_write_token", _guard_passes)
+
     observed: list[list[str]] = []
     respond = scenario.get("respond") or {}
     comments = [
@@ -157,6 +163,8 @@ async def _run(scenario: dict, mutation: str, mp: pytest.MonkeyPatch) -> dict:
 
     tick_task = asyncio.create_task(ticker())
     d = sd.SwarmDispatcher(notifier=_Notifier())
+    if scenario.get("instance_token"):
+        d.config.github_token = "eval-instance-token"
     trigger = sd.SwarmTrigger(
         kind="issue_opened", repository=REPO, number=11, title="t", body="",
         author="someone", html_url="https://github.com/owner/repo/issues/11",
@@ -210,9 +218,12 @@ def check(scenario: dict, obs: dict) -> list[str]:
             problems.append(f"unexpected WARNING containing {needle!r}")
     if obs["loop_ticks"] < expect.get("loop_ticks_min", 0):
         problems.append(f"event loop stalled: {obs['loop_ticks']} ticks")
+    # Every scenario: a write is authenticated or skipped, never sent bare.
+    if any(r[2] != "app" and r[2] != "pat" for r in obs["requests"]):
+        problems.append(f"a request was sent without a known credential: {obs['requests']}")
     # Every scenario: no credential value in any log line.
     blob = "\n".join(obs["all_logs"])
-    for secret in (APP_TOKEN, PAT, "expired-fixture"):
+    for secret in (APP_TOKEN, PAT, "expired-fixture", "eval-instance-token"):
         if secret in blob:
             problems.append("a credential value appeared in a log line")
     if not obs["mint_threads_off_loop"]:

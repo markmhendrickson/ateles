@@ -44,6 +44,7 @@ def test_the_eval_covers_every_required_behaviour():
         "no_credential_skips_visibly",
         "a_bot_authored_gate_notice_is_not_reposted",
         "a_403_logs_the_response_body_and_no_credential",
+        "instance_token_only_is_never_sent_bare",
     }
     assert required <= set(IDS)
 
@@ -66,3 +67,9 @@ def test_checks_go_red_if_a_credential_leaks_into_a_log():
     obs = harness.run_scenario(scenario)
     obs["all_logs"].append(f"auth header was Bearer {harness.APP_TOKEN}")
     assert harness.check(scenario, obs)
+
+
+def test_checks_go_red_if_the_guard_accepts_a_credential_the_headers_drop():
+    scenario = next(s for s in SCENARIOS if s["id"] == "instance_token_only_is_never_sent_bare")
+    obs = harness.run_scenario(scenario, mutation="guard_accepts_instance_token")
+    assert harness.check(scenario, obs), "a bare write would go unnoticed"
