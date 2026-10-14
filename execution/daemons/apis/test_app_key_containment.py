@@ -1,7 +1,7 @@
 """GitHub App private keys never reach a dispatched agent's process.
 
 A key lets whoever holds it mint a token for that App. With one App per swarm
-identity (`lib/github_app_token.py`) the host carries eight keys, and an agent
+identity (`lib/github_app_token.py`) the host carries nine keys (seven lens Apps, the PR-opener App and the swarm App), and an agent
 process is steered by untrusted pull-request content, so a key in its
 environment would let one injected agent act as any identity. The daemon mints
 tokens; an agent is handed only the token it needs.

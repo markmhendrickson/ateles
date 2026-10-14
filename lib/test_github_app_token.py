@@ -456,6 +456,26 @@ def test_status_says_which_half_is_missing_and_what_it_means(monkeypatch, capsys
     assert "ATELES_REVIEWER_APP_*" in out and "ATELES_APP_REVIEWER_<LENS>_*" in out
 
 
+def test_status_names_a_malformed_roster_entry_and_exits_non_zero(monkeypatch, capsys):
+    monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "pm;qa")
+    assert gat.main(["status"]) == 1
+    out = capsys.readouterr().out
+    assert "ATELES_EXPECTED_LENS_APPS: MALFORMED" in out
+    assert "'pm;qa'" in out and "not a lens name" in out
+    # every lens is expected until it is fixed, so each shows as such
+    rows = {line.split()[0]: line for line in out.splitlines() if line.strip()}
+    for lens in gat.KNOWN_REVIEWER_LENSES:
+        assert "EXPECTED BUT NOT DECLARED" in rows[f"reviewer_{lens}"], lens
+
+
+def test_status_says_what_the_roster_is_when_it_is_sound_or_unset(monkeypatch, capsys):
+    assert gat.main(["status"]) == 0
+    assert "ATELES_EXPECTED_LENS_APPS: unset" in capsys.readouterr().out
+    monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "qa, PM")
+    assert gat.main(["status"]) == 0
+    assert "ATELES_EXPECTED_LENS_APPS: pm, qa" in capsys.readouterr().out
+
+
 def test_status_never_prints_a_value(monkeypatch, capsys):
     monkeypatch.setenv("ATELES_APP_REVIEWER_QA_ID", "424242")
     monkeypatch.setenv("ATELES_APP_REVIEWER_QA_PRIVATE_KEY", "SENTINEL-KEY-MATERIAL")

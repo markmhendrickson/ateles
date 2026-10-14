@@ -37,24 +37,31 @@ maps to an env prefix by one rule, ``ATELES_APP_<IDENTITY>``:
                                                   posts that lens's verdict
 
 Each uses the same ``_ID`` / ``_PRIVATE_KEY`` / ``_PRIVATE_KEY_PATH`` /
-``_INSTALLATION_ID`` variables as the default App. The PR opener must never be
-the approving identity: an App cannot approve a pull request it opened.
-``identity_declared`` is true as soon as ANY of an identity's variables is set,
-so a half-configured App reads as "declared but unusable" rather than being
-mistaken for "absent" (the readers fail closed on a declared-but-unusable one).
+``_INSTALLATION_ID`` variables as the default App. The PR-opener App must never
+be the approving identity: an App cannot approve a pull request it opened.
+
+Three words are used in one sense throughout. *Declared*: any of an identity's
+variables is set (``identity_declared``). *Configured*: it has an App id and a
+readable private key (``identity_configured``). *Unusable*: declared or
+expected but not configured, or configured but its bot login cannot be read or
+is another identity's. A half-configured App reads as declared and unusable
+rather than being mistaken for absent, and the readers fail closed on it.
 
 Two names that look alike and are not: the swarm App (the default, the one
 every lens without an App of its own still approves as) is
 ``ATELES_REVIEWER_APP_*``; the per-identity Apps are ``ATELES_APP_REVIEWER_<LENS>_*``
-and ``ATELES_APP_PR_OPENER_*``. A transposition is not an error, it is a
-different (and undeclared) name, so ``status`` lists both.
+and ``ATELES_APP_PR_OPENER_*``. A transposed name is a different, undeclared
+name, so ``status`` lists both.
 
 ``ATELES_EXPECTED_LENS_APPS`` (optional) names the lenses that must have an App
 on THIS host. A process that is missing a lens's variables while the setting
 names that lens is not allowed to fall back to the shared identity: its
 verdicts are unread, its approval is refused and its agent gets no token, each
 loudly. Set it wherever the per-lens variables are set (the daemons and any
-session that runs the approval tool), from the same snapshot.
+session that runs the approval tool), from the same snapshot. An entry that is
+not a lens name is refused, never dropped: every lens is then treated as
+expected, so nothing is read, approved or minted for a lens without an App here,
+and ``status`` names the entry and exits non-zero.
 
 The private-key variables are never handed to a child process: ``exec`` removes
 every App key variable from the child's environment (it needs only the minted
@@ -68,10 +75,12 @@ CLI (never prints a token):
     python3 lib/github_app_token.py exec [--repo owner/name] [--identity NAME | --prefix P] [--env NAME ...] -- CMD ...
         Run CMD with GH_TOKEN and GITHUB_TOKEN (plus any --env names) set to a
         fresh installation token. The token exists only in CMD's environment.
-        Open a pull request as the PR opener with:
+        Open a pull request as the PR-opener App with:
           exec --identity pr_opener --repo owner/name -- gh pr create ...
     python3 lib/github_app_token.py status
-        Which per-identity Apps are configured on this host (no network).
+        Which per-identity Apps are configured on this host (no network), and
+        what ATELES_EXPECTED_LENS_APPS says. Exits 1 when that setting has an
+        entry that is not a lens name.
 """
 
 from __future__ import annotations
@@ -271,19 +280,63 @@ def declared_reviewer_lenses() -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def _expected_roster_entries() -> tuple[list[str], list[str]]:
+    """(valid lens keys, rejected entries) from `ATELES_EXPECTED_LENS_APPS`."""
+    raw = os.environ.get(ENV_EXPECTED_LENS_APPS) or ""
+    valid: list[str] = []
+    rejected: list[str] = []
+    for part in re.split(r"[,\s]+", raw):
+        if not part:
+            continue
+        if _LENS_KEY_RE.fullmatch(part.lower()):
+            valid.append(part.lower())
+        else:
+            rejected.append(part)
+    return valid, rejected
+
+
+def malformed_expected_lens_entries() -> tuple[str, ...]:
+    """What to print for each `ATELES_EXPECTED_LENS_APPS` entry that is not a lens key.
+
+    The entry itself when it is short and made only of letters, digits and
+    ``_-;:|*./`` (a typo of a lens name); otherwise only its length, so a value
+    pasted into the wrong setting is never echoed.
+    """
+    shown: list[str] = []
+    for entry in _expected_roster_entries()[1]:
+        if len(entry) <= 32 and re.fullmatch(r"[A-Za-z0-9_\-;:|*./]+", entry):
+            shown.append(repr(entry))
+        else:
+            shown.append(f"an entry of {len(entry)} characters")
+    return tuple(shown)
+
+
+def expected_roster_problem() -> str:
+    """One sentence naming a malformed `ATELES_EXPECTED_LENS_APPS`, or "" when it is sound."""
+    bad = malformed_expected_lens_entries()
+    if not bad:
+        return ""
+    return (
+        f"{ENV_EXPECTED_LENS_APPS} has {'an entry' if len(bad) == 1 else 'entries'} "
+        f"that {'is' if len(bad) == 1 else 'are'} not a lens name ({', '.join(bad)}); "
+        "every lens is treated as expected to have an App until it is fixed"
+    )
+
+
 def expected_reviewer_lenses() -> tuple[str, ...]:
     """Lenses `ATELES_EXPECTED_LENS_APPS` says must have an App on this host.
 
-    Comma- or space-separated lens keys. A name that is not a plain lens key is
-    dropped (a malformed entry can only expect fewer Apps, never more).
+    Comma- or space-separated lens keys. The roster is a list of lenses that
+    are REQUIRED to have an App, so a malformed entry is the unsafe direction
+    to drop: a typo would silently remove that lens's protection. It fails
+    closed instead: if any entry is not a lens key, every known lens is
+    expected, which refuses verdict reads, approvals and agent tokens for each
+    lens that has no App here, and `expected_roster_problem` names the entry.
     """
-    raw = os.environ.get(ENV_EXPECTED_LENS_APPS) or ""
-    found = {
-        part.lower()
-        for part in re.split(r"[,\s]+", raw)
-        if part and _LENS_KEY_RE.fullmatch(part.lower())
-    }
-    return tuple(sorted(found))
+    valid, rejected = _expected_roster_entries()
+    if rejected:
+        return tuple(sorted(set(KNOWN_REVIEWER_LENSES) | set(valid)))
+    return tuple(sorted(set(valid)))
 
 
 def missing_expected_lens_apps() -> tuple[str, ...]:
@@ -575,9 +628,17 @@ def _cli_status() -> int:
         (reviewer_identity(lens), reviewer_prefix(lens), lens in expected) for lens in lenses
     ]
     print("Per-identity GitHub Apps on this host (offline; variable names only):")
-    print("  not configured        that role keeps using the shared accounts / the swarm App")
+    print("  not configured        that role keeps its current identity")
     print("  declared but unusable fails closed: the lens's verdicts are unread, approval is refused")
     print("  expected but not declared  ATELES_EXPECTED_LENS_APPS names it; fails closed the same way")
+    roster_problem = expected_roster_problem()
+    valid_entries, _ = _expected_roster_entries()
+    if roster_problem:
+        print(f"{ENV_EXPECTED_LENS_APPS}: MALFORMED. {roster_problem}")
+    elif valid_entries:
+        print(f"{ENV_EXPECTED_LENS_APPS}: {', '.join(sorted(set(valid_entries)))}")
+    else:
+        print(f"{ENV_EXPECTED_LENS_APPS}: unset (no lens is required to have an App here)")
     for identity, prefix, is_expected in rows:
         print(f"{identity:<18} {prefix:<32} {_status_state(prefix, expected=is_expected)}")
     print()
@@ -589,7 +650,7 @@ def _cli_status() -> int:
         f"{'swarm App':<18} {DEFAULT_APP_ENV_PREFIX:<32} "
         f"{_status_state(DEFAULT_APP_ENV_PREFIX)}"
     )
-    return 0
+    return 1 if roster_problem else 0
 
 
 def main(argv: list[str] | None = None) -> int:

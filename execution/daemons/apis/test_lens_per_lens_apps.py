@@ -505,7 +505,7 @@ class TestAnUnreadableOpenerIsNeverAdmitted:
         monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: ({SWARM_APP}, False))
         res = lens_authors.resolve()
         body = _MARKER_TEXT["pm"] + "\n" + PAVO
-        assert any("PR opener App" in f for f in res.failed)
+        assert any("PR-opener App" in f for f in res.failed)
         assert not _admitted(res.authors, _row(OPENER_APP, body))  # refused
         assert _admitted(res.authors, _row(SWARM, body))  # an ordinary account stays
         assert _admitted(res.authors, _row(SWARM_APP, body))  # the swarm App stays
@@ -572,9 +572,48 @@ class TestAProcessMissingItsLensAppVariablesRefusesLoudly:
         monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_agent_pat")
         assert sd._token_for_agent_on_repo("pavo", "o/r") == "ghp_agent_pat"
 
-    def test_a_malformed_entry_expects_nothing(self, monkeypatch):
+    def test_a_malformed_entry_expects_every_lens_and_is_named(self, monkeypatch):
+        # The roster lists lenses that are REQUIRED to have an App, so a typo must
+        # not drop that lens's protection: it fails closed, loudly.
         monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "*, ../x, PM!")
-        assert gat.expected_reviewer_lenses() == ()
+        assert gat.expected_reviewer_lenses() == tuple(sorted(gat.KNOWN_REVIEWER_LENSES))
+        problem = gat.expected_roster_problem()
+        assert "not a lens name" in problem
+        for entry in ("'*'", "'../x'"):
+            assert entry in problem
+        assert "an entry of 3 characters" in problem  # `PM!` has a character outside the safe set
+
+    @pytest.mark.parametrize("value", ["pm;qa", "pm|qa", "pm,qa;", "content-lens", "pm qa*"])
+    def test_a_typo_in_one_entry_does_not_switch_the_guard_off(self, monkeypatch, logins, value):
+        monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, value)
+        res = lens_authors.resolve()
+        assert any("not a lens name" in f for f in res.failed), res.failed
+        assert not res.complete
+        # the shared account cannot speak for pm, which the typo may have meant
+        assert not _admitted(res.authors, _row(SWARM, _MARKER_TEXT["pm"] + "\n" + PAVO))
+
+    def test_a_malformed_entry_gives_every_lens_agent_no_token_and_says_why(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "pm;qa")
+        monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_agent_pat")
+        monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_shared")
+        with caplog.at_level("ERROR"):
+            assert sd._token_for_agent_on_repo("pavo", "o/r") == ""
+            assert sd._token_for_agent_on_repo("phoenicurus", "o/r") == ""
+        assert "not a lens name" in caplog.text
+        assert "ghp_agent_pat" not in caplog.text and "ghp_shared" not in caplog.text
+
+    def test_control_a_sound_roster_reports_no_problem(self, monkeypatch):
+        monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "pm, qa  ARCH")
+        assert gat.expected_roster_problem() == ""
+        assert gat.expected_reviewer_lenses() == ("arch", "pm", "qa")
+
+    def test_a_pasted_secret_is_never_echoed_as_a_bad_entry(self, monkeypatch):
+        monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "pm, -----BEGIN-PRIVATE-KEY-----abcdefghijklmnopqrstuvwxyz0123456789")
+        problem = gat.expected_roster_problem()
+        assert "abcdefghijklmnopqrstuvwxyz" not in problem
+        assert "characters" in problem
 
 
 class TestHalfConfiguredAppsNeverFallThroughToAnotherCredential:

@@ -53,10 +53,10 @@ alone and never by the opening marker alone:
     of it) is judged exactly like the verdict it retired: `leading_lens` looks
     past the banner, so an original and its retired form get the same answer for
     every author.
-  - A lens whose App is declared but whose login cannot be read admits nobody
-    for that lens (fail closed on the field that carries the safety meaning).
-    So does a lens whose bot login is also another identity's (the PR opener,
-    another lens, the swarm App): two identities that resolve to one login are
+  - A lens whose App is unusable (declared but incomplete, or its login cannot
+    be read) admits nobody for that lens (fail closed on the field that carries
+    the safety meaning). So does a lens whose bot login is also another
+    identity's (the PR-opener App, another lens, the swarm App): two identities that resolve to one login are
     not two identities, and the collision is reported in `failed`.
   - The PR-opener App is never an author of any lens-shaped comment. If it is
     declared but its login cannot be read, no bot other than the swarm App is
@@ -181,7 +181,7 @@ class LensAppScope:
     `lens_logins` maps a lens to its App's bot login; "" means the lens's App
     is declared (or expected) but its login could not be used, so nobody speaks
     for the lens. `other_app_logins` are Apps that are never a lens-shaped
-    author (the PR opener). The shared swarm identities are in neither.
+    author (the PR-opener App). The shared swarm identities are in neither.
 
     `opener_unreadable` is set when the PR-opener App is declared but its login
     cannot be read: the opener then cannot be told apart from any other bot, so
@@ -370,6 +370,11 @@ def _per_identity_apps(
     # identity name -> login ("" = declared/expected but unusable)
     logins: dict[str, str] = {}
     failed: list[str] = []
+    roster_problem = _github_app_token.expected_roster_problem()
+    if roster_problem:
+        # Every lens is in scope below (see `expected_reviewer_lenses`), so each
+        # lens without an App here reads as unusable; say why, once, up front.
+        failed.append(roster_problem)
     for lens in _github_app_token.reviewer_lenses_in_scope():
         identity = _github_app_token.reviewer_identity(lens)
         login = ""
@@ -387,12 +392,12 @@ def _per_identity_apps(
     opener_login = ""
     if opener_declared:
         opener_login = (
-            _identity_login(opener, "PR opener App")
+            _identity_login(opener, "PR-opener App")
             if _github_app_token.identity_configured(opener)
             else ""
         )
         if not opener_login:
-            failed.append("the PR opener App's bot login")
+            failed.append("the PR-opener App's bot login")
         logins[opener] = opener_login
 
     claims: dict[str, list[str]] = {}

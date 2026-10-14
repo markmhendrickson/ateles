@@ -2370,11 +2370,13 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
             # The roster (ATELES_EXPECTED_LENS_APPS) says this lens has an App on
             # this host, but THIS process has none of its variables. Falling back
             # to a shared token would post as the wrong identity, so refuse.
+            roster_problem = _github_app_token.expected_roster_problem()
             log.error(
                 f"[{DAEMON_NAME}] the {lens_key} lens is expected to have an App "
                 f"({_github_app_token.reviewer_prefix(lens_key)}_*) but this process "
                 f"has none of its variables; the {agent} agent has no GitHub "
                 "credential this turn"
+                + (f" ({roster_problem})" if roster_problem else "")
             )
             return ""
     if identity and _github_app_token.identity_declared(identity):

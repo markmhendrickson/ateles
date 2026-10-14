@@ -1655,6 +1655,12 @@ def plan_approvals(lens_outcomes: list[LensOutcome]) -> ApprovalPlan:
     operator has asked for that lens to approve as itself, and approving in its
     place would put the wrong identity on the record.
     """
+    roster_problem = _github_app_token.expected_roster_problem()
+    if roster_problem:
+        raise RuntimeError(
+            f"{roster_problem} — refusing to approve until it is fixed, because "
+            "the setting cannot say which lens must approve as its own App"
+        )
     per_lens: list[LensOutcome] = []
     shared: list[LensOutcome] = []
     expected = set(_github_app_token.expected_reviewer_lenses())
@@ -1680,6 +1686,16 @@ def plan_approvals(lens_outcomes: list[LensOutcome]) -> ApprovalPlan:
                 "in its place as the swarm App"
             )
     return ApprovalPlan(tuple(per_lens), tuple(shared))
+
+
+def _unusable_own_apps(plan: ApprovalPlan, authors: frozenset[str]) -> list[str]:
+    """Lenses of *plan* approving as their own App whose login the reader could
+    not use (unreadable, or one login claimed by two identities)."""
+    scope = getattr(authors, "scope", None)
+    if scope is None:
+        return []
+    by_lens = scope.by_lens
+    return [o.lens for o in plan.per_lens if not by_lens.get(o.lens)]
 
 
 def _check_approver_identities(
@@ -2159,6 +2175,20 @@ async def run(
         except RuntimeError as exc:
             print(f"approvers: UNUSABLE — {exc}")
             print("fix: python3 lib/github_app_token.py status")
+            return 1
+        # A lens App that is configured but whose login cannot be read, or is
+        # shared with another identity, passes `plan_approvals` (it only asks
+        # whether an id and a key exist) but is read as unusable above: say so
+        # rather than list it as an approver.
+        unusable_apps = _unusable_own_apps(plan, authors)
+        if unusable_apps:
+            for lens in unusable_apps:
+                print(
+                    f"approvers: UNUSABLE — the {lens} lens's App is configured but its "
+                    "login cannot be read or is shared with another identity; run: "
+                    f"python3 lib/github_app_token.py check --identity reviewer_{lens} "
+                    f"--repo {repo}"
+                )
             return 1
         print(f"approvers: {plan.describe()}")
 
