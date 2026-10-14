@@ -26,13 +26,34 @@ Identity note: an installation token acts as ``<app-slug>[bot]``. ``GET /user``
 is not available to it (403), so code that discovers "who am I" from
 ``/user`` must use ``bot_login()`` instead.
 
+Per-identity Apps (operator ruling 2026-10-14): besides the default App above,
+each swarm identity can have an App of its own, so the host's record of who
+opened or approved a pull request matches who did the work. An identity name
+maps to an env prefix by one rule, ``ATELES_APP_<IDENTITY>``:
+
+    pr_opener      -> ATELES_APP_PR_OPENER      opens pull requests
+    reviewer_<lens>-> ATELES_APP_REVIEWER_<LENS> (pm, arch, qa, ux, security,
+                                                  content, legal) approves and
+                                                  posts that lens's verdict
+
+Each uses the same ``_ID`` / ``_PRIVATE_KEY`` / ``_PRIVATE_KEY_PATH`` /
+``_INSTALLATION_ID`` variables as the default App. The PR opener must never be
+the approving identity: an App cannot approve a pull request it opened.
+``identity_declared`` is true as soon as ANY of an identity's variables is set,
+so a half-configured App reads as "declared but unusable" rather than being
+mistaken for "absent" (the readers fail closed on a declared-but-unusable one).
+
 CLI (never prints a token):
 
-    python3 lib/github_app_token.py check [--repo owner/name]
+    python3 lib/github_app_token.py check [--repo owner/name] [--identity NAME | --prefix P]
         App slug, bot login, installation, permissions, repositories, expiry.
-    python3 lib/github_app_token.py exec [--repo owner/name] [--env NAME ...] -- CMD ...
+    python3 lib/github_app_token.py exec [--repo owner/name] [--identity NAME | --prefix P] [--env NAME ...] -- CMD ...
         Run CMD with GH_TOKEN and GITHUB_TOKEN (plus any --env names) set to a
         fresh installation token. The token exists only in CMD's environment.
+        Open a pull request as the PR opener with:
+          exec --identity pr_opener --repo owner/name -- gh pr create ...
+    python3 lib/github_app_token.py status
+        Which per-identity Apps are configured on this host (no network).
 """
 
 from __future__ import annotations
@@ -41,6 +62,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import threading
 import time
 import urllib.error
@@ -49,6 +71,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 DEFAULT_APP_ENV_PREFIX = "ATELES_REVIEWER_APP"
+# Per-identity Apps: ``<APP_IDENTITY_ENV_PREFIX>_<IDENTITY>`` (see module doc).
+APP_IDENTITY_ENV_PREFIX = "ATELES_APP"
+PR_OPENER_IDENTITY = "pr_opener"
+REVIEWER_IDENTITY_PREFIX = "reviewer_"
+# Review roles that may have an App of their own. Used only for `status` and
+# docs; discovery of configured reviewers scans the environment, not this list.
+KNOWN_REVIEWER_LENSES = ("pm", "arch", "qa", "ux", "security", "content", "legal")
+_APP_VAR_SUFFIXES = ("_INSTALLATION_ID", "_PRIVATE_KEY_PATH", "_PRIVATE_KEY", "_ID")
+_LENS_KEY_RE = re.compile(r"^[a-z0-9]+$")
 GITHUB_API = "https://api.github.com"
 USER_AGENT = "ateles-github-app-token/1.0"
 # Re-mint this long before expiry, so a token handed to a child process that
@@ -154,6 +185,74 @@ def mint_app_jwt(prefix: str = DEFAULT_APP_ENV_PREFIX) -> str:
         raise AppTokenError(
             f"could not sign the App JWT with {prefix}'s key ({exc.__class__.__name__})"
         ) from None
+
+
+# ── per-identity Apps ───────────────────────────────────────────────────────
+
+
+def identity_env_prefix(identity: str) -> str:
+    """``pr_opener`` -> ``ATELES_APP_PR_OPENER``; the one name-to-prefix rule."""
+    slug = re.sub(r"[^a-z0-9]+", "_", str(identity or "").strip().lower()).strip("_")
+    if not slug:
+        raise AppTokenError("an App identity name is required")
+    return f"{APP_IDENTITY_ENV_PREFIX}_{slug.upper()}"
+
+
+def reviewer_identity(lens: str) -> str:
+    return f"{REVIEWER_IDENTITY_PREFIX}{str(lens or '').strip().lower()}"
+
+
+def reviewer_prefix(lens: str) -> str:
+    return identity_env_prefix(reviewer_identity(lens))
+
+
+def pr_opener_prefix() -> str:
+    return identity_env_prefix(PR_OPENER_IDENTITY)
+
+
+def _any_app_var_set(prefix: str) -> bool:
+    return any(
+        (os.environ.get(f"{prefix}{suffix}") or "").strip() for suffix in _APP_VAR_SUFFIXES
+    )
+
+
+def identity_declared(identity: str) -> bool:
+    """True when ANY of the identity's App variables is set (usable or not)."""
+    return _any_app_var_set(identity_env_prefix(identity))
+
+
+def identity_configured(identity: str) -> bool:
+    """True when the identity has both an App id and a readable private key."""
+    return app_configured(identity_env_prefix(identity))
+
+
+def declared_reviewer_lenses() -> tuple[str, ...]:
+    """Lenses whose per-lens App has at least one variable set, sorted.
+
+    Discovered from the environment, so a lens added to the panel needs no
+    change here. A name that is not a plain lens key is ignored.
+    """
+    head = f"{APP_IDENTITY_ENV_PREFIX}_REVIEWER_"
+    found: set[str] = set()
+    for name, value in os.environ.items():
+        if not name.startswith(head) or not (value or "").strip():
+            continue
+        rest = name[len(head):]
+        for suffix in _APP_VAR_SUFFIXES:
+            if rest.endswith(suffix):
+                lens = rest[: -len(suffix)].lower()
+                if _LENS_KEY_RE.fullmatch(lens):
+                    found.add(lens)
+                break
+    return tuple(sorted(found))
+
+
+def identity_token(identity: str, repo: str | None = None) -> str:
+    return installation_token(repo, prefix=identity_env_prefix(identity))
+
+
+def identity_bot_login(identity: str) -> str:
+    return bot_login(identity_env_prefix(identity))
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
@@ -364,6 +463,22 @@ def _cli_check(repo: str | None, prefix: str) -> int:
     return 0
 
 
+def _cli_status() -> int:
+    """Which per-identity Apps this host has configured. Offline; no tokens."""
+    rows = [(PR_OPENER_IDENTITY, pr_opener_prefix())]
+    lenses = sorted(set(KNOWN_REVIEWER_LENSES) | set(declared_reviewer_lenses()))
+    rows += [(reviewer_identity(lens), reviewer_prefix(lens)) for lens in lenses]
+    for identity, prefix in rows:
+        if app_configured(prefix):
+            state = "configured"
+        elif _any_app_var_set(prefix):
+            state = "DECLARED BUT UNUSABLE (need _ID and a readable private key)"
+        else:
+            state = "not configured"
+        print(f"{identity:<18} {prefix:<32} {state}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import sys
@@ -375,15 +490,28 @@ def main(argv: list[str] | None = None) -> int:
         argv, cmd_tail = argv[:split], argv[split + 1 :]
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("action", choices=("check", "exec"))
+    parser.add_argument("action", choices=("check", "exec", "status"))
     parser.add_argument("--repo", default=None, help="owner/name (resolves the installation)")
-    parser.add_argument("--prefix", default=DEFAULT_APP_ENV_PREFIX, help="App env prefix")
+    parser.add_argument("--prefix", default=None, help="App env prefix (default: the swarm App)")
+    parser.add_argument(
+        "--identity",
+        default=None,
+        help="per-identity App name (pr_opener, reviewer_<lens>); mutually exclusive with --prefix",
+    )
     parser.add_argument(
         "--env", action="append", default=[], help="extra env var name to receive the token"
     )
     args = parser.parse_args(argv)
+    if args.identity and args.prefix:
+        parser.error("--identity and --prefix are mutually exclusive")
 
     try:
+        if args.action == "status":
+            return _cli_status()
+        if args.identity:
+            args.prefix = identity_env_prefix(args.identity)
+        elif not args.prefix:
+            args.prefix = DEFAULT_APP_ENV_PREFIX
         if args.action == "check":
             return _cli_check(args.repo, args.prefix)
         if not cmd_tail:

@@ -36,6 +36,17 @@ means no comment is read as a verdict. `resolve` also reports which sources
 failed, so a caller on a path where a missed identity would clear something
 (auto-merge) can hold instead of proceeding on a partial set.
 
+Per-lens Apps (operator ruling 2026-10-14): a lens may have an App of its own
+(`lib.github_app_token`, identity `reviewer_<lens>`). Once a lens HAS one, its
+verdict (`review:<lens>`) is read only from that App's bot login: neither the
+shared identities above nor another lens's App can speak for it. A per-lens
+App is admitted ONLY for its own lens: it is never a general swarm identity,
+so it cannot author another lens's verdict, the aggregation comment or a
+dispatcher notice. A lens whose App is declared but whose login cannot be
+read admits nobody for that lens (fail closed on the field that carries the
+safety meaning). A lens with no App of its own is read exactly as before. The
+PR-opener App is never an author of any lens-shaped comment.
+
 The same author rule covers every other swarm-written marker comment the
 dispatcher reads back as state (the aggregation comment, a review deferral,
 and the notice markers it uses to avoid posting twice): see
@@ -93,6 +104,83 @@ _VERDICT_SHAPED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# `review:<lens>` as a marker (head marker, superseded marker or legacy bare
+# line). `-superseded` is a suffix of the marker, not part of the lens name.
+_LENS_MARKER_RE = re.compile(
+    r"review:(?P<lens>[a-z0-9_]+?)(?:-superseded)?(?![a-z0-9_-])", re.IGNORECASE
+)
+_LEADING_LENS_MARKER_RE = re.compile(
+    r"\A\s*(?:<!--\s*)?review:(?P<lens>[a-z0-9_]+?)(?:-superseded)?(?![a-z0-9_-])",
+    re.IGNORECASE,
+)
+
+
+def claimed_lenses(body: object) -> frozenset[str]:
+    """Every lens named by a `review:<lens>` marker anywhere in the body."""
+    return frozenset(
+        m.group("lens").lower() for m in _LENS_MARKER_RE.finditer(str(body or ""))
+    )
+
+
+def leading_lens(body: object) -> str:
+    """The lens named by the body's FIRST marker (the head marker), or ""."""
+    match = _LEADING_LENS_MARKER_RE.match(str(body or ""))
+    return match.group("lens").lower() if match else ""
+
+
+@dataclass(frozen=True)
+class LensAppScope:
+    """Which App speaks for which lens.
+
+    `lens_logins` maps a lens to its App's bot login; "" means the lens's App
+    is declared but its login could not be read, so nobody speaks for the lens.
+    `other_app_logins` are Apps that are never a lens-shaped author (the PR
+    opener). The shared swarm identities are in neither.
+    """
+
+    lens_logins: tuple[tuple[str, str], ...] = ()
+    other_app_logins: frozenset[str] = frozenset()
+
+    @property
+    def by_lens(self) -> dict[str, str]:
+        return dict(self.lens_logins)
+
+    def admits(self, author: str, body: object) -> bool:
+        """May *author* (a casefolded login already in the admitted set) have
+        written this lens-shaped *body*?"""
+        by_lens = self.by_lens
+        owned = {login: lens for lens, login in by_lens.items() if login}
+        if author in owned:
+            # A lens App speaks only for its own lens, and only in a comment
+            # that names no other lens: a reader that finds a marker by
+            # substring must not find another lens's marker in this comment.
+            lens = owned[author]
+            return leading_lens(body) == lens and claimed_lenses(body) == {lens}
+        if author in self.other_app_logins:
+            return False
+        # A shared swarm identity: its leading marker must not claim a lens
+        # that has an App of its own (that lens is read from that App only).
+        lead = leading_lens(body)
+        return not (lead and lead in by_lens)
+
+
+class ScopedAuthors(frozenset):
+    """The admitted identities, carrying which App speaks for which lens.
+
+    Behaves as a `frozenset` of logins everywhere. `is_swarm_comment` (and so
+    `scope_lens_comments` / `ignored_lens_comments`) also applies `scope`. Do
+    not rebuild one with set operators: those return a plain `frozenset` and
+    drop `scope`; pass the object through unchanged.
+    """
+
+    scope: LensAppScope
+
+    def __new__(cls, members: Iterable[str] = (), scope: LensAppScope | None = None):
+        obj = super().__new__(cls, members)
+        obj.scope = scope or LensAppScope()
+        return obj
+
+
 # A successful lookup is stable; a failed one is retried soon, so a transient
 # rate limit does not leave the swarm unable to read its own comments.
 _LIVE_LOGIN_TTL_S = 600.0
@@ -133,6 +221,44 @@ def _app_bot_logins() -> tuple[set[str], bool]:
     if login and _LOGIN_RE.fullmatch(login):
         return {login}, False
     return set(), True
+
+
+def _per_identity_apps() -> tuple[LensAppScope, set[str], list[str]]:
+    """(scope, readable lens-App logins, failed sources) for the per-identity Apps."""
+    lens_logins: list[tuple[str, str]] = []
+    members: set[str] = set()
+    failed: list[str] = []
+    for lens in _github_app_token.declared_reviewer_lenses():
+        identity = _github_app_token.reviewer_identity(lens)
+        login = ""
+        try:
+            if _github_app_token.identity_configured(identity):
+                login = _norm(_github_app_token.identity_bot_login(identity))
+        except Exception as exc:  # noqa: BLE001 — an unreadable App admits nobody
+            log.warning(
+                "lens authors: the %s lens App's login is unreadable (%s)",
+                lens,
+                exc.__class__.__name__,
+            )
+        if login and _LOGIN_RE.fullmatch(login):
+            members.add(login)
+        else:
+            login = ""
+            failed.append(f"the {lens} lens App's bot login")
+        lens_logins.append((lens, login))
+    others: set[str] = set()
+    opener = _github_app_token.PR_OPENER_IDENTITY
+    if _github_app_token.identity_declared(opener):
+        try:
+            login = _norm(_github_app_token.identity_bot_login(opener))
+            if login and _LOGIN_RE.fullmatch(login):
+                others.add(login)
+        except Exception as exc:  # noqa: BLE001 — only ever narrows what is admitted
+            log.warning(
+                "lens authors: the PR opener App's login is unreadable (%s)",
+                exc.__class__.__name__,
+            )
+    return LensAppScope(tuple(sorted(lens_logins)), frozenset(others)), members, failed
 
 
 def _login_for_token(token: str) -> str:
@@ -233,7 +359,15 @@ def resolve(
             out.add(login)
         else:
             failed.append(f"the account behind {name}")
-    return Resolution(frozenset(out), tuple(failed))
+    scope, lens_members, app_failed = _per_identity_apps()
+    failed.extend(app_failed)
+    if not scope.lens_logins and not scope.other_app_logins:
+        return Resolution(frozenset(out), tuple(failed))
+    # Per-lens Apps are members (so "is anything configured" still reads true)
+    # but are admitted only for their own lens (`LensAppScope.admits`). The PR
+    # opener is a member only if the setting named it, and is then refused for
+    # every lens-shaped comment by the scope.
+    return Resolution(ScopedAuthors(out | lens_members, scope), tuple(failed))
 
 
 def resolve_authors(
@@ -254,9 +388,16 @@ def comment_author(comment: dict) -> str:
 
 
 def is_swarm_comment(comment: dict, authors: frozenset[str] | set[str]) -> bool:
-    """True only when the comment's readable author is in `authors`."""
+    """True only when the comment's readable author is in `authors` and, where
+    per-lens Apps are configured, the author may speak for the lens the
+    comment claims (`LensAppScope.admits`)."""
     author = comment_author(comment)
-    return bool(author) and author in authors
+    if not author or author not in authors:
+        return False
+    scope = getattr(authors, "scope", None)
+    if scope is None:
+        return True
+    return scope.admits(author, comment.get("body"))
 
 
 def claimed_marker(body: object) -> str:

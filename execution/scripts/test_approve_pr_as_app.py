@@ -2858,3 +2858,296 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
         assert out.count("review:arch by stranger-") == 5
         assert "(+3 more)" in out
         assert code == 0
+
+
+# ── Per-lens Apps (operator ruling 2026-10-14) ──────────────────────────────
+#
+# Each review role approves as its own GitHub App, so the host's record of who
+# approved matches who reviewed. Every GitHub and token call is faked; the
+# credentials are placeholders that are never used to sign anything.
+
+
+def _lens_app_login(lens: str) -> str:
+    return f"ateles-reviewer-{lens}[bot]"
+
+
+class _PerLensClient(_FakeClient):
+    """Remembers which App's token posted each review and reads it back as that
+    App's bot login, the way GitHub's own read-back would."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._review_logins: dict[int, str] = {}
+        self.review_head = HEAD
+
+    async def post(self, url, json=None, headers=None):
+        assert url.endswith(f"/pulls/{PR}/reviews")
+        self.posted.append({"json": json, "headers": headers})
+        review_id = 1000 + len(self.posted)
+        token = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
+        self._review_logins[review_id] = _LOGIN_FOR_TOKEN.get(token, "unknown[bot]")
+        return _FakeResponse({"id": review_id, "state": "APPROVED"})
+
+    async def get(self, url, headers=None, params=None):
+        if "/reviews/" in url:
+            review_id = int(url.rsplit("/", 1)[1])
+            return _FakeResponse(
+                {
+                    "id": review_id,
+                    "state": "APPROVED",
+                    "commit_id": self.review_head,
+                    "user": {"login": self._review_logins[review_id], "type": "Bot"},
+                }
+            )
+        return await super().get(url, headers=headers, params=params)
+
+
+_LOGIN_FOR_TOKEN: dict[str, str] = {}
+
+
+def _install_lens_apps(monkeypatch, lenses: list[str], *, unusable: list[str] = (), no_token=()):
+    """Give each lens in *lenses* an App: configured env, a distinct token, a
+    distinct bot login. *unusable* lenses are declared with no key; *no_token*
+    lenses are configured but cannot mint."""
+    _LOGIN_FOR_TOKEN.clear()
+    from lib import github_app_token as gat
+
+    for lens in [*lenses, *no_token]:
+        prefix = gat.reviewer_prefix(lens)
+        monkeypatch.setenv(f"{prefix}_ID", "1")
+        monkeypatch.setenv(f"{prefix}_PRIVATE_KEY", "placeholder-not-a-key")
+        _LOGIN_FOR_TOKEN[f"tok-{lens}"] = _lens_app_login(lens)
+    for lens in unusable:
+        monkeypatch.setenv(f"{gat.reviewer_prefix(lens)}_ID", "1")
+
+    def fake_token(repo=None, *, prefix=gat.DEFAULT_APP_ENV_PREFIX):
+        for lens in [*lenses, *no_token]:
+            if prefix == gat.reviewer_prefix(lens):
+                if lens in no_token:
+                    raise gat.AppTokenError("HTTP 401")
+                return f"tok-{lens}"
+        # The default App (read-only calls) is not faked: callers fall back.
+        raise gat.AppTokenError(f"no fake token for {prefix}")
+
+    def fake_login(prefix=gat.DEFAULT_APP_ENV_PREFIX):
+        for lens in lenses:
+            if prefix == gat.reviewer_prefix(lens):
+                return _lens_app_login(lens)
+        raise gat.AppTokenError("no login")
+
+    monkeypatch.setattr(gat, "installation_token", fake_token)
+    monkeypatch.setattr(gat, "bot_login", fake_login)
+    monkeypatch.setattr(
+        gat, "identity_bot_login", lambda identity: fake_login(gat.identity_env_prefix(identity))
+    )
+
+
+def _own_app_comments(lenses: list[str], *, apps_for: list[str]) -> list[dict]:
+    """A clearing verdict per lens, written by that lens's App when it has one
+    and by the shared swarm account otherwise."""
+    return [
+        _comment(
+            i,
+            _lens_comment_body(lens, target.LENS_AGENTS[lens]),
+            author=_lens_app_login(lens) if lens in apps_for else SWARM_LOGIN,
+        )
+        for i, lens in enumerate(lenses)
+    ]
+
+
+def _bodies(client) -> dict[str, str]:
+    return {
+        p["headers"]["Authorization"].removeprefix("Bearer "): p["json"]["body"]
+        for p in client.posted
+    }
+
+
+@pytest.mark.asyncio
+class TestPerLensApprovals:
+    async def test_each_lens_approves_as_its_own_app(self, monkeypatch, capsys):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=ALL_FOUR), check_runs=_green_checks()
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        bodies = _bodies(client)
+        assert sorted(bodies) == sorted(f"tok-{lens}" for lens in ALL_FOUR)
+        for lens in ALL_FOUR:
+            body = bodies[f"tok-{lens}"]
+            assert f"**{lens}**" in body
+            for other in set(ALL_FOUR) - {lens}:
+                assert f"**{other}**" not in body  # a review speaks for one lens only
+        assert all(p["json"]["event"] == "APPROVE" and p["json"]["commit_id"] == HEAD for p in client.posted)
+        out = capsys.readouterr().out
+        for lens in ALL_FOUR:
+            assert f"APPROVED as {_lens_app_login(lens)}" in out
+
+    async def test_with_no_per_lens_apps_it_is_todays_single_review_and_says_so(
+        self, monkeypatch, capsys
+    ):
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        assert len(client.posted) == 1
+        out = capsys.readouterr().out
+        assert "none configured" in out and "single swarm App" in out
+        assert "APPROVED as the App" in out
+
+    async def test_a_partial_rollout_approves_each_configured_lens_itself_and_the_rest_together(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, ["pm", "arch"])
+        # The shared App still approves the lenses that have no App yet.
+        _LOGIN_FOR_TOKEN["shared-app-token"] = "ateles-agents[bot]"
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=["pm", "arch"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        bodies = _bodies(client)
+        assert sorted(bodies) == ["shared-app-token", "tok-arch", "tok-pm"]
+        assert "**qa**" in bodies["shared-app-token"] and "**security**" in bodies["shared-app-token"]
+        assert "**pm**" not in bodies["shared-app-token"]
+        assert "have no App of their own" in capsys.readouterr().out
+
+    async def test_a_declared_but_unusable_lens_app_refuses_and_submits_nothing(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ["arch", "qa", "security"], unusable=["pm"])
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=["arch", "qa", "security"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)  # the shared App must not stand in for pm
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+    async def test_a_lens_app_that_cannot_mint_submits_nothing_for_any_lens(self, monkeypatch, capsys):
+        _install_lens_apps(monkeypatch, ["pm", "arch", "qa"], no_token=["security"])
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=ALL_FOUR), check_runs=_green_checks()
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.posted == []  # minted first, so the others never landed
+        assert "security" in capsys.readouterr().out
+
+    async def test_a_readback_by_a_different_app_than_the_lens_refuses(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+
+        class _WrongAuthor(_PerLensClient):
+            async def post(self, url, json=None, headers=None):
+                resp = await super().post(url, json=json, headers=headers)
+                self._review_logins[1000 + len(self.posted)] = "someone-else[bot]"
+                return resp
+
+        client = _WrongAuthor(
+            comments=_own_app_comments(ALL_FOUR, apps_for=ALL_FOUR), check_runs=_green_checks()
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+
+    async def test_a_failure_after_some_landed_names_the_approvals_that_did(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, ["pm", "qa"])
+
+        class _SecondFails(_PerLensClient):
+            async def post(self, url, json=None, headers=None):
+                if len(self.posted) == 1:
+                    return _FakeResponse({"message": "boom"}, status_code=500, text="boom")
+                return await super().post(url, json=json, headers=headers)
+
+        client = _SecondFails(
+            comments=_own_app_comments(["pm", "qa"], apps_for=["pm", "qa"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        assert "approvals already landed: 1001" in capsys.readouterr().out
+
+    async def test_dry_run_reports_the_approvers_and_submits_nothing(self, monkeypatch, capsys):
+        _install_lens_apps(monkeypatch, ["pm"])
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=["pm"]), check_runs=_green_checks()
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=False)
+
+        assert code == 0
+        assert client.posted == []
+        assert "approvers: mixed (own App: pm)" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+class TestLensVerdictsAreReadOnlyFromTheLensOwnApp:
+    async def test_a_verdict_from_the_shared_account_does_not_clear_a_lens_with_its_own_app(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        # pm's verdict was written by the shared account, not pm's App.
+        comments = _own_app_comments(ALL_FOUR, apps_for=["arch", "qa", "security"])
+        client = _PerLensClient(comments=comments, check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.posted == []
+        assert "read only from that App" in capsys.readouterr().out
+
+    async def test_one_lens_apps_comment_cannot_stand_in_for_another_lens(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        # arch's verdict was written by pm's App.
+        comments = _own_app_comments(ALL_FOUR, apps_for=ALL_FOUR)
+        comments[ALL_FOUR.index("arch")]["user"] = {"login": _lens_app_login("pm")}
+        client = _PerLensClient(comments=comments, check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+    async def test_a_blocking_verdict_from_the_wrong_account_still_holds_approval(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        comments = _own_app_comments(ALL_FOUR, apps_for=ALL_FOUR)
+        comments.append(
+            _comment(
+                90,
+                _lens_comment_body("arch", "waxwing", verdict="REQUEST_CHANGES"),
+                author=SWARM_LOGIN,
+            )
+        )
+        client = _PerLensClient(comments=comments, check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1  # an objection can only delay, never vanish
+        assert client.posted == []

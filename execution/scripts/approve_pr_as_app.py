@@ -136,6 +136,13 @@ Env:
     ATELES_REVIEWER_APP_ID                reviewer App id (required for --apply)
     ATELES_REVIEWER_APP_PRIVATE_KEY(_PATH) reviewer App private key (required for --apply)
     ATELES_REVIEWER_APP_INSTALLATION_ID   optional; resolved via API if unset
+    ATELES_APP_REVIEWER_<LENS>_ID/_PRIVATE_KEY(_PATH)/_INSTALLATION_ID
+                                          per-lens Apps (operator ruling 2026-10-14):
+                                          a lens with one approves as that App. With
+                                          none configured the single swarm App above
+                                          approves, as before (the output says which).
+                                          A lens whose App is declared but unusable
+                                          refuses the approval; it never falls back.
     ATELES_APPROVE_PANEL_REQUIRED_ONLY    set to "1" to opt OUT of the bootstrap-
                                            mode --panel all default (use the
                                            diff-derived floor alone); --panel on
@@ -151,6 +158,7 @@ import asyncio
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1025,6 +1033,14 @@ def _print_ignored(ignored: list[dict], authors: frozenset[str]) -> None:
             f"  If one of these accounts is the swarm's, add it to "
             f"{lens_authors.ENV_AUTHORS} and re-run."
         )
+        scope = getattr(authors, "scope", None)
+        own_app_lenses = sorted(scope.by_lens) if scope is not None else []
+        if own_app_lenses:
+            print(
+                "  A lens that has an App of its own is read only from that App "
+                f"(configured for: {', '.join(own_app_lenses)}); a verdict for one of "
+                "them posted by any other account is ignored, whatever the setting says."
+            )
 
 
 def _contexts_from_required_status_checks(payload: object) -> set[str] | None:
@@ -1375,8 +1391,17 @@ async def submit_app_approval(
     head_sha: str,
     lens_outcomes: list[LensOutcome],
     check_outcomes: list[CheckOutcome] | None = None,
+    token: str | None = None,
+    expected_login: str | None = None,
+    approver_label: str = "the swarm App",
+    cleared_phrase: str = "every required review lens cleared",
 ) -> dict:
     """Mint an App installation token and submit a formal APPROVE review.
+
+    With no *token* this is the single swarm App (`ATELES_REVIEWER_APP_*`).
+    `submit_approvals` passes a *token* minted for a lens's own App, the
+    *expected_login* that App acts as (the read-back must show exactly that
+    author) and an *approver_label* for the review body.
 
     Mirrors `swarm_dispatch._emit_formal_review`'s binding-review contract
     (round-1 Falco finding on PR #1266: this function previously trusted a
@@ -1402,14 +1427,15 @@ async def submit_app_approval(
     Raises on any failure; the caller treats a raised exception as
     "submitted nothing" per the --apply contract.
     """
-    app_id = (os.environ.get("ATELES_REVIEWER_APP_ID") or "").strip()
-    if not app_id or not _reviewer_app_private_key_pem():
-        raise RuntimeError(
-            "ATELES_REVIEWER_APP_ID and ATELES_REVIEWER_APP_PRIVATE_KEY"
-            "(_PATH) must both be set to approve as the App"
-        )
+    if token is None:
+        app_id = (os.environ.get("ATELES_REVIEWER_APP_ID") or "").strip()
+        if not app_id or not _reviewer_app_private_key_pem():
+            raise RuntimeError(
+                "ATELES_REVIEWER_APP_ID and ATELES_REVIEWER_APP_PRIVATE_KEY"
+                "(_PATH) must both be set to approve as the App"
+            )
 
-    token = await _mint_reviewer_app_installation_token(repo, client)
+        token = await _mint_reviewer_app_installation_token(repo, client)
     if not token:
         raise RuntimeError(
             "could not mint a reviewer App installation token — verify the "
@@ -1448,14 +1474,14 @@ async def submit_app_approval(
         raise RuntimeError("could not resolve PR author from the pre-submit re-fetch — refusing")
 
     body_lines = [
-        "Approved by the swarm App — every required review lens cleared the "
+        f"Approved by {approver_label} — {cleared_phrase} the "
         f"PR's current head `{head_sha}`.",
         "",
     ]
     carried_outcomes = [o for o in lens_outcomes if o.carried_from]
     if carried_outcomes:
         body_lines[0] = (
-            "Approved by the swarm App — every required review lens cleared, "
+            f"Approved by {approver_label} — {cleared_phrase}, "
             f"{len(lens_outcomes) - len(carried_outcomes)} on the PR's current head "
             f"`{head_sha}` and {len(carried_outcomes)} carried forward from an "
             "earlier head (listed below)."
@@ -1531,6 +1557,7 @@ async def submit_app_approval(
         and bool(actual_login)
         and actual_login.casefold() != pr_author.casefold()
         and user_type.casefold() == "bot"
+        and (expected_login is None or actual_login.casefold() == expected_login.casefold())
     )
     if not readback_ok:
         raise RuntimeError(
@@ -1541,6 +1568,156 @@ async def submit_app_approval(
         )
 
     return readback
+
+
+@dataclass(frozen=True)
+class ApprovalPlan:
+    """Who submits which approval: each lens with an App of its own approves as
+    that App; the rest go in one review from the single swarm App."""
+
+    per_lens: tuple[LensOutcome, ...]
+    shared: tuple[LensOutcome, ...]
+
+    @property
+    def mode(self) -> str:
+        if not self.per_lens:
+            return "single-app"
+        return "per-lens" if not self.shared else "mixed"
+
+
+def plan_approvals(lens_outcomes: list[LensOutcome]) -> ApprovalPlan:
+    """Split the cleared lenses by whether each has its own App.
+
+    A lens whose App is DECLARED but not usable (an id with no readable key)
+    is a refusal, never a fallback to the shared App: the operator has asked
+    for that lens to approve as itself, and approving in its place would put
+    the wrong identity on the record.
+    """
+    per_lens: list[LensOutcome] = []
+    shared: list[LensOutcome] = []
+    for outcome in lens_outcomes:
+        identity = _github_app_token.reviewer_identity(outcome.lens)
+        if not _github_app_token.identity_declared(identity):
+            shared.append(outcome)
+        elif _github_app_token.identity_configured(identity):
+            per_lens.append(outcome)
+        else:
+            raise RuntimeError(
+                f"the {outcome.lens} lens's App is declared "
+                f"({_github_app_token.reviewer_prefix(outcome.lens)}_*) but is not usable "
+                "(it needs an App id and a readable private key) — refusing to approve "
+                "in its place as the shared App"
+            )
+    return ApprovalPlan(tuple(per_lens), tuple(shared))
+
+
+async def submit_approvals(
+    client: httpx.AsyncClient,
+    *,
+    repo: str,
+    pr: int,
+    head_sha: str,
+    lens_outcomes: list[LensOutcome],
+    check_outcomes: list[CheckOutcome] | None = None,
+) -> list[dict]:
+    """Submit the APPROVE review(s), each as the App that matches who reviewed.
+
+    Operator ruling 2026-10-14: each review role approves as its own GitHub
+    App, so the host's record of who approved matches who reviewed. A lens
+    with a configured App (`ATELES_APP_REVIEWER_<LENS>_*`) approves as it. If
+    NO lens has one, this is today's single review from the swarm App, and
+    says so. If only some do, those lenses approve as themselves and the
+    remaining lenses are named in one review from the swarm App (transitional;
+    printed as such). Every credential is minted BEFORE the first review is
+    submitted, so a missing or broken App submits nothing.
+
+    A review that lands cannot be retracted: if a later one fails, the error
+    names the approvals that already landed.
+    """
+    plan = plan_approvals(lens_outcomes)
+    if plan.mode == "single-app":
+        print(
+            "per-lens Apps: none configured — approving in one review as the "
+            "single swarm App (today's behaviour)"
+        )
+        return [
+            await submit_app_approval(
+                client,
+                repo=repo,
+                pr=pr,
+                head_sha=head_sha,
+                lens_outcomes=lens_outcomes,
+                check_outcomes=check_outcomes,
+            )
+        ]
+
+    # Mint everything first: nothing is submitted unless every approver is usable.
+    minted: list[tuple[LensOutcome, str, str]] = []
+    for outcome in plan.per_lens:
+        prefix = _github_app_token.reviewer_prefix(outcome.lens)
+        try:
+            token = await asyncio.to_thread(
+                _github_app_token.installation_token, repo, prefix=prefix
+            )
+            login = await asyncio.to_thread(_github_app_token.bot_login, prefix)
+        except _github_app_token.AppTokenError as exc:
+            raise RuntimeError(
+                f"could not mint the {outcome.lens} lens's App token ({exc}) — "
+                "submitting nothing"
+            ) from None
+        minted.append((outcome, token, login))
+    if plan.shared:
+        shared_token = await _mint_reviewer_app_installation_token(repo, client)
+        if not shared_token:
+            raise RuntimeError(
+                "could not mint the shared swarm App token for the lenses with no "
+                f"App of their own ({', '.join(o.lens for o in plan.shared)}) — "
+                "submitting nothing"
+            )
+
+    print(
+        f"per-lens Apps: {plan.mode} — "
+        + ", ".join(f"{o.lens} as {login}" for o, _, login in minted)
+        + (
+            f"; {', '.join(o.lens for o in plan.shared)} have no App of their own "
+            "yet and are approved together by the shared swarm App"
+            if plan.shared
+            else ""
+        )
+    )
+
+    landed: list[dict] = []
+    try:
+        for outcome, token, login in minted:
+            landed.append(
+                await submit_app_approval(
+                    client,
+                    repo=repo,
+                    pr=pr,
+                    head_sha=head_sha,
+                    lens_outcomes=[outcome],
+                    check_outcomes=check_outcomes,
+                    token=token,
+                    expected_login=login,
+                    approver_label=f"the {outcome.lens} lens's own App ({login})",
+                    cleared_phrase="the lens below cleared",
+                )
+            )
+        if plan.shared:
+            landed.append(
+                await submit_app_approval(
+                    client,
+                    repo=repo,
+                    pr=pr,
+                    head_sha=head_sha,
+                    lens_outcomes=list(plan.shared),
+                    check_outcomes=check_outcomes,
+                )
+            )
+    except Exception as exc:
+        done = ", ".join(str(r.get("id")) for r in landed) or "none"
+        raise RuntimeError(f"{exc} (approvals already landed: {done})") from exc
+    return landed
 
 
 def _print_derived_lenses(
@@ -1828,6 +2005,16 @@ async def run(
 
         if not apply:
             print()
+            try:
+                plan = plan_approvals(lens_outcomes)
+                print(
+                    f"approvers: {plan.mode}"
+                    + (f" (own App: {', '.join(o.lens for o in plan.per_lens)})" if plan.per_lens else "")
+                    + (f" (shared swarm App: {', '.join(o.lens for o in plan.shared)})" if plan.shared else "")
+                )
+            except RuntimeError as exc:
+                print(f"approvers: UNUSABLE — {exc}")
+                return 1
             print("dry run — no review submitted. Pass --apply to submit if the gate is clear.")
             return 0 if overall_pass else 1
 
@@ -1837,7 +2024,7 @@ async def run(
             return 1
 
         try:
-            review = await submit_app_approval(
+            reviews = await submit_approvals(
                 client,
                 repo=repo,
                 pr=pr,
@@ -1851,7 +2038,10 @@ async def run(
             return 1
 
         print()
-        print(f"APPROVED as the App — review id={review.get('id')} state={review.get('state')}")
+        single = len(reviews) == 1 and plan_approvals(lens_outcomes).mode == "single-app"
+        for review in reviews:
+            who = "the App" if single else (review.get("user") or {}).get("login") or "an App"
+            print(f"APPROVED as {who} — review id={review.get('id')} state={review.get('state')}")
         return 0
 
 

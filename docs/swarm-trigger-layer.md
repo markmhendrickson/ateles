@@ -303,6 +303,18 @@ resolved by `execution/daemons/apis/lens_authors.py`, never typed into code:
   agent's own `<AGENT>_AGENT_PAT`. A login is never guessed from an agent's
   name; a token that does not resolve admits nobody.
 
+Per-identity Apps (operator ruling 2026-10-14). A lens can have a GitHub App
+of its own (`ATELES_APP_REVIEWER_<LENS>_*`, see `lib/github_app_token.py`), and
+pull requests open from a separate PR-opener App (`ATELES_APP_PR_OPENER_*`).
+Once a lens has an App, its `review:<lens>` comment is read only from that
+App's bot login: the accounts above can no longer speak for it, and its App
+speaks for no other lens, the aggregation or a notice. A lens App that is
+declared but cannot be resolved admits nobody for that lens. The PR opener is
+never an author of any of these comments. `approve_pr_as_app.py` submits each
+configured lens's APPROVE as that lens's App, and falls back to one review
+from the swarm App only for lenses with no App of their own (its output says
+which mode it used).
+
 It fails closed. With an empty set no lens verdict, aggregation or notice
 marker is read: reviews do not clear, the approval tool refuses, and
 auto-merge holds. Auto-merge also holds while any identity source is

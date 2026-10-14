@@ -2341,8 +2341,13 @@ def is_provisioned(agent: str) -> bool:
 
 
 def _token_for_agent_on_repo(agent: str, repo: str) -> str:
-    """Three-tier GitHub token resolution for a specific agent + repo.
+    """Four-tier GitHub token resolution for a specific agent + repo.
 
+    Tier 0 — the agent's own GitHub App (operator ruling 2026-10-14): the
+              PR-opener App for the builder, ``reviewer_<lens>``'s App for a
+              review lens, whenever that App is declared in the environment
+              (``lib/github_app_token.py``). A declared App that cannot mint
+              answers ``""``; it never falls through to another identity.
     Tier 1 — ``<AGENT>_AGENT_PAT`` (e.g. ``PAVO_AGENT_PAT``): the agent's own
               account.  Present only when the machine account has been created
               and the PAT stored.
@@ -2358,11 +2363,43 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
         agent: lowercase agent genus name (e.g. "pavo").
         repo:  full repo slug (e.g. "markmhendrickson/ateles").
     """
+    identity = _app_identity_for_agent(agent)
+    if identity and _github_app_token.identity_declared(identity):
+        # Tier 0 (operator ruling 2026-10-14): the agent's own GitHub App. A
+        # declared App that cannot mint answers "" — never a silent fall back
+        # to another identity, which would put the wrong author on the record
+        # (a lens verdict from the shared account is not read for a lens that
+        # has an App of its own, see `lens_authors`).
+        try:
+            return _github_app_token.identity_token(identity, repo)
+        except _github_app_token.AppTokenError as exc:
+            log.error(
+                f"[{DAEMON_NAME}] the {identity} App is declared but cannot mint a "
+                f"token ({exc}); the {agent} agent has no GitHub credential this turn"
+            )
+            return ""
     agent_pat = os.environ.get(f"{agent.upper()}_AGENT_PAT", "")
     if agent_pat:
         return agent_pat
     # Tier 2 → 3 already implemented by _token_for_repo.
     return _token_for_repo(repo)
+
+
+# Agents that open pull requests act as the PR-opener App (when configured).
+# The opener must differ from every approving App: an App cannot approve a PR
+# it opened, and each reviewer approves as its own App.
+_PR_OPENER_AGENTS = frozenset({"cicada"})
+
+
+def _app_identity_for_agent(agent: str) -> str:
+    """The per-identity App an agent acts as, or "" when it has none by role."""
+    name = (agent or "").strip().lower()
+    if name in _PR_OPENER_AGENTS:
+        return _github_app_token.PR_OPENER_IDENTITY
+    for lens in LENSES:
+        if lens.agent == name:
+            return _github_app_token.reviewer_identity(lens.lens)
+    return ""
 
 
 def lens_comment_authors_resolution() -> lens_authors.Resolution:
