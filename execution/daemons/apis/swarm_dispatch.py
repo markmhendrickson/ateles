@@ -98,6 +98,7 @@ from review_panel import (
     select_expectation_agents,
     select_panel,
 )
+import build_delivery
 import model_tiering
 import lens_authors
 import review_carry
@@ -6590,14 +6591,36 @@ class SwarmDispatcher:
         referencing this issue — so the caller can notify honestly instead of a
         false "PR gate pipeline now owns it".
         """
-        result = await run_skill(
-            "cicada",
-            self._cicada_build_prompt(trigger, state),
-            github_token=_token_for_agent_on_repo("cicada", trigger.repository),
-            include_github_contract=True,
-            notifier=self.notifier,
-            action_class=model_tiering.ACTION_BUILD,
-        )
+        # A build that is meant to open a PR gets everything delivery needs, from
+        # one place (build_delivery): a dedicated worktree as the child's cwd —
+        # from which skill_runner derives the git-root grants on Codex — plus
+        # network via include_github_contract. The worktree is provisioned
+        # BEFORE the dispatch so a missing clone fails here, in seconds and by
+        # name, rather than after a build that cannot deliver.
+        try:
+            worktree = await build_delivery.prepare_build_worktree(
+                trigger.repository, f"issue-{trigger.number}"
+            )
+        except build_delivery.BuildWorktreeError as exc:
+            log.error(
+                f"[{DAEMON_NAME}] Cicada build handoff for "
+                f"{trigger.repository}#{trigger.number} not started: {exc}"
+            )
+            return None
+        # Registered for the whole run so a task the build files to track its own
+        # work is recognised as this build, not dispatched as a second one.
+        with build_delivery.claim_build(
+            trigger.repository, trigger.number, "swarm-build-handoff"
+        ):
+            result = await run_skill(
+                "cicada",
+                self._cicada_build_prompt(trigger, state, worktree=worktree),
+                github_token=_token_for_agent_on_repo("cicada", trigger.repository),
+                include_github_contract=True,
+                notifier=self.notifier,
+                action_class=model_tiering.ACTION_BUILD,
+                cwd=worktree.path,
+            )
         if not result.ok:
             log.error(
                 f"[{DAEMON_NAME}] Cicada build handoff failed for "
@@ -11838,7 +11861,11 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _cicada_build_prompt(t: SwarmTrigger, state: SpecState) -> str:
+    def _cicada_build_prompt(
+        t: SwarmTrigger,
+        state: SpecState,
+        worktree: "build_delivery.BuildWorktree | None" = None,
+    ) -> str:
         """Auto-build handoff prompt: Cicada opens an implementation PR.
 
         Only used when ``ATELES_SWARM_AUTO_BUILD`` is ON.  Cicada branches off
@@ -11847,6 +11874,18 @@ class SwarmDispatcher:
         takes over.  NEVER merges — the merge boundary stays operator-gated.
         """
         spec_md = assemble_spec_markdown(state.sections or {})
+        if worktree:
+            wt_block = f"{build_delivery.worktree_instructions(worktree)}\n\n"
+            step_one = (
+                "  1. Build on the worktree branch above, which is already off "
+                "fresh origin/main — never off a feature branch.\n"
+            )
+        else:
+            wt_block = ""
+            step_one = (
+                "  1. Branch off FRESH origin/main (fetch first) in an isolated "
+                "git worktree — never off a feature branch.\n"
+            )
         return (
             "Invoke the cicada agent per your appended system prompt.\n\n"
             f"The Ateles swarm has assembled a full additive specification for "
@@ -11873,9 +11912,9 @@ class SwarmDispatcher:
             "a checkpoint instead of opening a PR only if you cannot produce a "
             "working implementation at all — never merely because the spec "
             "contains the word 'blocking'.\n\n"
+            f"{wt_block}"
             "BUILD PROTOCOL:\n"
-            "  1. Branch off FRESH origin/main (fetch first) in an isolated git "
-            "worktree — never off a feature branch.\n"
+            f"{step_one}"
             "  2. Implement the spec, following the Engineering section's plan "
             "and honoring the QA/Security/Legal requirements as "
             "definition-of-done.\n"

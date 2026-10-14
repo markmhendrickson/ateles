@@ -102,3 +102,32 @@ def _isolate_lens_comment_identities(monkeypatch):
     monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
     monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: "")
     lens_authors.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_build_worktrees(monkeypatch, tmp_path):
+    """Never let a test add a real worktree to the operator's real clones.
+
+    A delivery-bearing Cicada dispatch provisions a linked worktree off the
+    repository's local clone (`build_delivery.prepare_build_worktree`). The
+    clone for a fixture slug like `owner/repo` does not exist, and for a real
+    slug like `markmhendrickson/neotoma` it does — so an unisolated test would
+    either fail on the host's layout or write `git worktree` metadata into the
+    operator's checkout. Every test gets a fake; `test_build_delivery.py`
+    exercises the real function, kept as `prepare_build_worktree.real`,
+    against a throwaway repository.
+    """
+    import build_delivery
+
+    async def _fake_prepare(repository, label):
+        return build_delivery.BuildWorktree(
+            path=str(tmp_path / "build-worktree"),
+            branch=f"cicada/{label}-test",
+            base_sha="0" * 40,
+            clone=str(tmp_path / "clone"),
+            base_fresh=True,
+        )
+
+    _fake_prepare.real = build_delivery.prepare_build_worktree
+    monkeypatch.setattr(build_delivery, "prepare_build_worktree", _fake_prepare)
+    monkeypatch.setattr(build_delivery, "_inflight", {})

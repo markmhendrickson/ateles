@@ -104,6 +104,7 @@ GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import functools
 import hashlib
@@ -526,10 +527,11 @@ from routing import (  # noqa: E402
 
 import github_gateway  # noqa: E402
 
+import build_delivery  # noqa: E402
 import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
-from skill_runner import _redact_secrets, run_skill  # noqa: E402
-from swarm_dispatch import SwarmDispatcher  # noqa: E402
+from skill_runner import SkillResult, _redact_secrets, run_skill  # noqa: E402
+from swarm_dispatch import SwarmDispatcher, _token_for_agent_on_repo  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
 from unroutable_ledger import shared_ledger  # noqa: E402
 
@@ -772,22 +774,62 @@ async def _spawn_harness_skill(
             f"edge to their planning parent."
         )
 
-    result = await run_skill(
-        skill,
-        prompt,
-        role=role or skill,
-        task_entity_id=entity_id,
-        agent_session_id=run_agent_session_id or "",
-        notifier=notifier,
-        # The task's action class, by the same inference the execution gate
-        # uses (explicit `action_type` wins, else the per-agent default). A
-        # class the live action_policy does not map resolves to `top`, so a
-        # task with no recognizable class never silently runs cheap.
-        action_class=(
-            _infer_action_type(skill, snapshot)
-            or model_tiering.ACTION_TASK_DISPATCH_FALLBACK
-        ),
+    # The task's action class, by the same inference the execution gate uses
+    # (explicit `action_type` wins, else the per-agent default). A class the
+    # live action_policy does not map resolves to `top`, so a task with no
+    # recognizable class never silently runs cheap.
+    action_class = (
+        _infer_action_type(skill, snapshot)
+        or model_tiering.ACTION_TASK_DISPATCH_FALLBACK
     )
+
+    # A builder task cleared to deliver (the `open_or_merge_pr` class — the one
+    # the gate holds for the operator) gets what delivery needs, exactly as the
+    # swarm build handoff does: a dedicated worktree as cwd (git-root grants on
+    # Codex are derived from it) and a scoped network grant. A task of any other
+    # class, or one that names no repository, runs as before with neither — the
+    # sandbox is widened for a dispatch that delivers and for nothing else
+    # (ateles#590). Without this, a task-routed build wrote correct code and
+    # then failed with "sandbox denied network access" (ateles#1448).
+    delivery: dict[str, object] = {}
+    claim = contextlib.nullcontext()
+    repository = build_delivery.task_repository(snapshot)
+    if build_delivery.is_delivery_dispatch(skill, action_class):
+        if not repository:
+            log.warning(
+                f"[{DAEMON_NAME}] {skill} task {entity_id} is a delivery task but "
+                "names no repository — running without worktree or network"
+            )
+        else:
+            key = build_delivery.issue_key(snapshot)
+            try:
+                worktree = await build_delivery.prepare_build_worktree(
+                    repository, f"task-{entity_id[-8:]}"
+                )
+            except build_delivery.BuildWorktreeError as exc:
+                msg = f"delivery worktree could not be provisioned: {exc}"
+                log.error(f"[{DAEMON_NAME}] {skill} task {entity_id} not started — {msg}")
+                return SkillResult(skill, False, None, "", "", error=msg)
+            prompt = f"{prompt}\n\n{build_delivery.worktree_instructions(worktree)}"
+            delivery = {
+                "cwd": worktree.path,
+                "include_github_contract": True,
+                "github_token": _token_for_agent_on_repo(skill, repository),
+            }
+            if key:
+                claim = build_delivery.claim_build(*key, f"task:{entity_id}")
+
+    with claim:
+        result = await run_skill(
+            skill,
+            prompt,
+            role=role or skill,
+            task_entity_id=entity_id,
+            agent_session_id=run_agent_session_id or "",
+            notifier=notifier,
+            action_class=action_class,
+            **delivery,
+        )
     return result
 
 
@@ -1046,6 +1088,25 @@ async def dispatch_task(
             if report:
                 notifier.send(report, priority=Priority.BLOCKER, handler=DAEMON_NAME)
         return
+
+    # ── A task filed by an in-flight build is that build, not new work ───────
+    # A builder tracks its own work as a task, and the task-created event then
+    # reaches this dispatcher while the builder is still running. Dispatching it
+    # starts a second builder on the same issue: on ateles#1448 that second run
+    # raced the first, produced a competing implementation, and had to stand down
+    # (and, with no network, could not deliver anyway). The in-flight builder
+    # owns the task and reports back on it; leave the task exactly as it is.
+    # An operator-approved release (`gate_override`) is the operator's explicit
+    # decision and is not second-guessed here.
+    if not gate_override and skill in build_delivery.BUILDER_SKILLS:
+        holder = build_delivery.inflight_build_for_task(snapshot)
+        if holder:
+            log.info(
+                f"[{DAEMON_NAME}] task {entity_id!r} is about an issue that "
+                f"{holder!r} is already building — not dispatching a duplicate "
+                f"{skill} (trigger={trigger})"
+            )
+            return
 
     job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
 
