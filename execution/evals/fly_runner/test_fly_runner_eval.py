@@ -51,6 +51,8 @@ def test_scenario_set_covers_the_required_behaviours():
         "unknown_outcome_never_fails_over",
         "timeout_unconfirmed_keeps_recovery_metadata",
         "recorded_success_unconfirmed_cleanup_is_visible",
+        "login_back_to_back_dispatchers_keep_their_own_payload",
+        "login_cleanup_unverified_blocks_readmission",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -124,3 +126,10 @@ def test_judge_goes_red_when_a_live_owner_is_reaped_or_a_dispatch_fails_over(tmp
     trace = runner.run_scenario(once, tmp_path / "b", monkeypatch)
     failed_over = {**trace.envelope, "attempted_providers": ["claude", "codex"]}
     assert runner.judge(once, dataclasses.replace(trace, envelope=failed_over))
+
+
+def test_judge_goes_red_when_a_login_handoff_loses_a_payload(tmp_path, monkeypatch):
+    scenario = _by_id("login_back_to_back_dispatchers_keep_their_own_payload")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    erased = dataclasses.replace(trace, starts=[trace.starts[0], ""])
+    assert runner.judge(scenario, erased)

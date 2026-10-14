@@ -101,9 +101,17 @@ class FlyLaunchError(Exception):
     """The Fly API refused or failed to start the machine."""
 
 
+_OPAQUE_RUN = __import__("re").compile(r"[A-Za-z0-9+/=_\-]{40,}")
+
+
 class FlyApiError(Exception):
+    """A Machines API failure. Its text reaches results, logs and operator
+    notices, so any long opaque run (which could be an echoed, encoded job
+    file) is redacted, and the message is capped."""
+
     def __init__(self, status: int, message: str):
-        super().__init__(f"Fly API HTTP {status}: {message[:200]}")
+        safe = _OPAQUE_RUN.sub("[redacted]", str(message))[:200]
+        super().__init__(f"Fly API HTTP {status}: {safe}")
         self.status = status
 
 
@@ -129,9 +137,25 @@ def _csv(raw: str) -> list[str]:
     return [part.strip() for part in (raw or "").split(",") if part.strip()]
 
 
+# Dispatch classes whose every caller has been checked to treat an unknown
+# remote outcome as terminal (no retry, no re-dispatch, no failover). Only
+# these can be opted in through APIS_FLY_RUNNER_CLASSES; adding one means
+# checking every retry lane that can re-dispatch it.
+FLY_VETTED_CLASSES: frozenset[str] = frozenset({"carry_forward_check"})
+
+
 def runner_classes() -> frozenset[str]:
-    """The dispatch classes (``action_class`` values) opted onto Fly."""
-    return frozenset(_csv(os.environ.get("APIS_FLY_RUNNER_CLASSES", "")))
+    """The dispatch classes (``action_class`` values) opted onto Fly: those
+    listed in ``APIS_FLY_RUNNER_CLASSES`` that are also vetted. An unvetted
+    class is ignored, with a warning."""
+    listed = frozenset(_csv(os.environ.get("APIS_FLY_RUNNER_CLASSES", "")))
+    unvetted = listed - FLY_VETTED_CLASSES
+    if unvetted:
+        log.warning(
+            "[fly] ignoring unvetted classes in APIS_FLY_RUNNER_CLASSES: "
+            f"{sorted(unvetted)}; vetted: {sorted(FLY_VETTED_CLASSES)}"
+        )
+    return listed & FLY_VETTED_CLASSES
 
 
 def wants_fly(runner: str | None, action_class: str | None) -> bool:
@@ -1240,9 +1264,7 @@ class FlyExecutor:
                         confirmed = await self._settle(job.run_id)
                         job.remote_state = "terminated" if confirmed else "unconfirmed"
                     elif launch.reserved:
-                        self.ledger.release(job.run_id)
-                        if launch.config_written:
-                            await self._scrub_login_machine(launch.machine_id)
+                        await self._release_unstarted(job.run_id, launch)
                 finally:
                     self._active.discard(job.run_id)
                     beat.cancel()
@@ -1352,21 +1374,59 @@ class FlyExecutor:
         cfg["restart"] = {"policy": "no"}
         cfg["env"] = machine_env(job, deadline)
         cfg["files"] = job_files(job, self.config)
+        cfg["metadata"] = {**dict(cfg.get("metadata") or {}), "ateles_run_id": job.run_id}
         await self.client.update(machine_id, {"config": cfg, "skip_launch": True})
 
-    async def _scrub_login_machine(self, machine_id: str) -> None:
-        """Remove the job's files from the stopped login machine's stored
-        config, so no credential outlives the job in Fly's config store."""
+    async def _scrub_login_machine(self, machine_id: str, run_id: str) -> bool:
+        """Remove THIS run's files from a stopped login machine's stored
+        config, then read it back. True only when the config verifiably no
+        longer carries this run's job.
+
+        Compare-and-set: the config is changed only while it still carries
+        this run's id. A config that already belongs to another run is never
+        touched (and, holding no trace of this run, counts as clean). A
+        config with job files but no run marker cannot be attributed, so it
+        is left alone and the result is False. Callers hold the admission lock
+        and still own the reservation, so no other dispatcher can be writing
+        this machine meanwhile."""
         try:
             machine = await self.client.get(machine_id)
             if machine is None:
-                return
+                return True
             cfg = copy.deepcopy(machine.get("config") or {})
-            cfg["files"] = []
-            cfg["env"] = {}
-            await self.client.update(machine_id, {"config": cfg, "skip_launch": True})
-        except Exception as exc:  # noqa: BLE001
+            owner = _config_run_id(cfg)
+            if owner and owner != run_id:
+                return True
+            if not owner and (cfg.get("files") or cfg.get("env")):
+                log.warning(f"[fly] login machine {machine_id} holds an unattributed job config")
+                return False
+            if owner == run_id:
+                cfg["files"] = []
+                cfg["env"] = {}
+                metadata = dict(cfg.get("metadata") or {})
+                metadata.pop("ateles_run_id", None)
+                cfg["metadata"] = metadata
+                await self.client.update(machine_id, {"config": cfg, "skip_launch": True})
+            after = await self.client.get(machine_id)
+            if after is None:
+                return True
+            after_cfg = after.get("config") or {}
+            return _config_run_id(after_cfg) != run_id and not after_cfg.get("files")
+        except Exception as exc:  # noqa: BLE001 — unknown state keeps the reservation
             log.warning(f"[fly] could not clear job files from login machine: {type(exc).__name__}")
+            return False
+
+    async def _release_unstarted(self, run_id: str, launch: "_LaunchState") -> None:
+        """A launch that provably started nothing. If a login machine's config
+        was written, clear it (verified) BEFORE releasing, under the admission
+        lock; if that cannot be verified, keep the reservation unconfirmed so
+        no other dispatcher can take the machine while it holds this job."""
+        async with self._admission():
+            if launch.config_written and launch.machine_id:
+                if not await self._scrub_login_machine(launch.machine_id, run_id):
+                    self.ledger.mark_unconfirmed(run_id, reason="job config not cleared")
+                    return
+            self.ledger.release(run_id)
 
     async def _collect(self, handle: FlyHandle) -> tuple[int, bytes, bytes]:
         """Wait for the machine and read the result record. Settlement is
@@ -1415,10 +1475,24 @@ class FlyExecutor:
     # ── Settlement: the one release path ─────────────────────────────────────
 
     async def _settle(self, run_id: str) -> bool:
-        """Confirm the reservation's machine is terminated, then charge its
-        runtime once and release it. When the machine is unknown (an
-        uncertain create), it is found by run id. When termination cannot be
-        confirmed, the reservation is kept, marked unconfirmed."""
+        """``_settle_locked`` under the admission lock (the lock a run's own
+        completion, its launch failure, the reaper and login reconciliation
+        all share)."""
+        async with self._admission():
+            return await self._settle_locked(run_id)
+
+    async def _settle_locked(self, run_id: str) -> bool:
+        """The one release path, in a strict order, with the admission lock
+        held and the reservation still owned throughout:
+
+        1. stop (login) or destroy (per-job) the machine and confirm it;
+        2. for a login machine, clear this run's job config (compare-and-set)
+           and verify the clear by reading it back;
+        3. only then charge runtime once and release the reservation.
+
+        If any step fails the reservation is kept, marked unconfirmed. When
+        the machine is unknown (an uncertain create) it is found by run id.
+        """
         entry = self.ledger.entry(run_id)
         if entry is None:
             return True  # already settled
@@ -1428,10 +1502,10 @@ class FlyExecutor:
             confirmed = await self._terminate(machine_id, login=login)
         else:
             confirmed = await self._terminate_by_run_id(run_id)
+        if confirmed and login and machine_id:
+            confirmed = await self._scrub_login_machine(machine_id, run_id)
         if confirmed:
             self.ledger.settle(run_id, config=self.config, now=self._clock())
-            if login and machine_id:
-                await self._scrub_login_machine(machine_id)
         else:
             self.ledger.mark_unconfirmed(run_id, reason="termination not confirmed")
             log.error(
@@ -1509,7 +1583,7 @@ class FlyExecutor:
                     "login machine is busy with another dispatcher's run",
                     _render_wall(now + 300),
                 )
-            if not await self._settle(run_id):
+            if not await self._settle_locked(run_id):  # admission is held
                 raise FlyApiError(409, "login machine from a previous job is not confirmed stopped")
 
     async def _wait_until_done(self, handle: FlyHandle) -> str:
@@ -1582,7 +1656,7 @@ class FlyExecutor:
                                      if m == entry.get("machine_id")), "")  # fmt: skip
                     if provider and _login_lock(provider).locked():
                         continue  # a job holds that machine; its launch reconciles first
-                if await self._settle(run_id):
+                if await self._settle_locked(run_id):  # admission is held
                     settled.append(run_id)
             machines = await self.client.list()
             current = self.ledger.snapshot(now)["in_flight"]  # after the await
@@ -1600,7 +1674,7 @@ class FlyExecutor:
                     started_at=created if created is not None else now,
                     max_run_seconds=DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS,
                 )  # fmt: skip
-                if await self._settle(key):
+                if await self._settle_locked(key):  # admission is held
                     settled.append(key)
         if settled:
             log.warning(f"[fly] reaper settled {settled}")
@@ -1609,6 +1683,14 @@ class FlyExecutor:
 
 def _machine_run_id(machine: dict) -> str:
     return str(((machine.get("config") or {}).get("metadata") or {}).get("ateles_run_id") or "")
+
+
+def _config_run_id(config: dict) -> str:
+    """The run a machine config belongs to: its metadata marker, or the
+    non-secret run id in its environment."""
+    metadata = config.get("metadata") or {}
+    machine_vars = config.get("env") or {}  # the machine's config, not ours
+    return str(metadata.get("ateles_run_id") or machine_vars.get("ATELES_RUN_ID") or "")
 
 
 DISPATCH_TIMEOUT_DEFAULT = 1800

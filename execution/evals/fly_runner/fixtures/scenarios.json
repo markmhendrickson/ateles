@@ -700,6 +700,80 @@
         "local_cli_ran": false,
         "revoked_all_minted": true
       }
+    },
+    {
+      "id": "login_back_to_back_dispatchers_keep_their_own_payload",
+      "description": "Two dispatches use the same Codex login machine back to back. Each starts with its OWN job config, each result belongs to its own run, and the first run's cleanup never touches the second's job.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "dispatches": 2,
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "result for {run_id}\n"
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_has_own_run_id": true,
+        "starts_with_own_config": true,
+        "local_cli_ran": false,
+        "in_flight_after": 0,
+        "second": {
+          "exit": 0,
+          "ok": true,
+          "stdout_has_own_run_id": true,
+          "starts": 2
+        }
+      }
+    },
+    {
+      "id": "login_cleanup_unverified_blocks_readmission",
+      "description": "The first run's job config cannot be verifiably cleared from the login machine. Its reservation is kept (machine unconfirmed), so the next dispatch cannot take the machine: it is refused before anything is started, and the first job's config is never handed to another run.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "dispatches": 2,
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "result for {run_id}\n"
+        },
+        "scrub_ignored": true
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "second": {
+          "exit": 1,
+          "ok": false,
+          "reason_contains": "not confirmed stopped",
+          "starts": 1
+        }
+      }
     }
   ]
 }

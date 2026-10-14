@@ -69,10 +69,20 @@ NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 # How long a task may sit ROUTED/EXECUTING before the watchdog treats it as
 # stalled. Must exceed APIS_DISPATCH_TIMEOUT (default 1800s) so a legitimately
 # long-running agent is not re-dispatched out from under itself.
-STALL_SECONDS = max(
-    int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800")) + 600,
-    int(os.environ.get("APIS_STALL_SECONDS", "3600")),
-)
+def stall_seconds(env=None) -> int:
+    """How long an in-flight task may sit before the watchdog re-dispatches
+    it. It must outlast one whole dispatch. With the Fly executor enabled
+    that includes a login-machine queue wait (APIS_FLY_QUEUE_MAX_WAIT_SECONDS,
+    not counted against the dispatch timeout) and the Apis deadline grace,
+    or the watchdog would re-dispatch a run that is still in flight."""
+    env = os.environ if env is None else env
+    base = int(env.get("APIS_DISPATCH_TIMEOUT", "1800")) + 600
+    if (env.get("APIS_FLY_RUNNER_CLASSES") or "").strip():
+        base += int(env.get("APIS_FLY_QUEUE_MAX_WAIT_SECONDS", "1800") or 1800) + 120
+    return max(base, int(env.get("APIS_STALL_SECONDS", "3600")))
+
+
+STALL_SECONDS = stall_seconds()
 # Watchdog sweep cadence.
 SWEEP_INTERVAL_SECONDS = max(60, int(os.environ.get("APIS_WATCHDOG_INTERVAL_SECONDS", "300")))
 # Max tasks pulled per sweep (client-side filtered). Pagination is a follow-up.

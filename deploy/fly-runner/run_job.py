@@ -430,20 +430,57 @@ def _scrub_values(secrets: dict[str, str]) -> dict[str, str]:
     return values
 
 
+def _variants(value: str) -> set[str]:
+    """The secret as written, plus the common encodings a tool might print
+    it in (base64, URL-safe base64, percent-encoding, JSON escaping)."""
+    import base64
+    import urllib.parse
+
+    raw = value.encode("utf-8")
+    out = {
+        value,
+        base64.b64encode(raw).decode(),
+        base64.b64encode(raw).decode().rstrip("="),
+        base64.urlsafe_b64encode(raw).decode(),
+        base64.urlsafe_b64encode(raw).decode().rstrip("="),
+        urllib.parse.quote(value, safe=""),
+        json.dumps(value)[1:-1],
+    }
+    return {v for v in out if len(v) >= MIN_SCRUB_LENGTH}
+
+
 def scrub(text: str, secrets: dict[str, str]) -> str:
-    """Replace every exact copy of a job secret with a named marker."""
-    for name, value in sorted(_scrub_values(secrets).items(), key=lambda kv: -len(kv[1])):
-        if value and len(value) >= MIN_SCRUB_LENGTH:
-            text = text.replace(value, f"[redacted:{name}]")
+    """Replace every copy of a job secret (and its common encodings) with a
+    named marker."""
+    pairs = [
+        (name, variant)
+        for name, value in _scrub_values(secrets).items()
+        if value and len(value) >= MIN_SCRUB_LENGTH
+        for variant in _variants(value)
+    ]
+    for name, variant in sorted(pairs, key=lambda kv: -len(kv[1])):
+        text = text.replace(variant, f"[redacted:{name}]")
     return text
 
 
-def cap_stdout(data: bytes) -> tuple[str, bool]:
-    """Keep the LAST ``STDOUT_CAP_BYTES``: a dispatch's verdict line is its
-    final line, so the tail is the part a caller parses."""
-    if len(data) <= STDOUT_CAP_BYTES:
-        return data.decode("utf-8", errors="replace"), False
-    return data[-STDOUT_CAP_BYTES:].decode("utf-8", errors="replace"), True
+def sanitize_and_cap(data: bytes, cap: int, secrets: dict[str, str]) -> tuple[str, bool]:
+    """Sanitize the WHOLE output first, then keep its last *cap* bytes.
+
+    The order matters: capping first could cut a secret in two at the
+    boundary and leave an unrecognisable fragment of it. The tail is kept
+    because a dispatch's verdict line is its final line; the cut is moved to
+    a character boundary, and at worst splits a redaction marker.
+    """
+    text = scrub(data.decode("utf-8", errors="replace"), secrets)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= cap:
+        return text, False
+    return encoded[-cap:].decode("utf-8", errors="ignore"), True
+
+
+def cap_stdout(data: bytes, secrets: dict[str, str] | None = None) -> tuple[str, bool]:
+    """``sanitize_and_cap`` at the stdout cap."""
+    return sanitize_and_cap(data, STDOUT_CAP_BYTES, secrets or {})
 
 
 def build_record(
@@ -457,8 +494,9 @@ def build_record(
     timed_out: bool,
     refused: str = "",
 ) -> dict:
-    out_text, truncated = cap_stdout(stdout)
-    err_text = stderr[-STDERR_TAIL_BYTES:].decode("utf-8", errors="replace")
+    # Sanitize job output before recording it, and only then cap it.
+    out_text, truncated = sanitize_and_cap(stdout, STDOUT_CAP_BYTES, job.secrets)
+    err_text, _ = sanitize_and_cap(stderr, STDERR_TAIL_BYTES, job.secrets)
     return {
         "entity_type": RESULT_ENTITY_TYPE,
         "run_id": job.run_id,
@@ -467,12 +505,12 @@ def build_record(
         "repository": job.repository,
         "machine_id": job.machine_id,
         "exit_code": exit_code,
-        "stdout": scrub(out_text, job.secrets),
+        "stdout": out_text,
         "stdout_truncated": truncated,
-        "stderr_tail": scrub(err_text, job.secrets),
+        "stderr_tail": err_text,
         "wall_ms": wall_ms,
         "timed_out": timed_out,
-        "refused": refused,
+        "refused": scrub(refused, job.secrets),
         "probe_ok": bool(probe.get("ok")),
         "probe_report": json.dumps(probe, sort_keys=True),
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

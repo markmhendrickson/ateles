@@ -1727,3 +1727,259 @@ def test_a_recorded_result_with_unconfirmed_cleanup_keeps_its_remote_fields(
     assert result.ok  # the task's result is known
     assert result.remote_outcome_unknown is False
     assert result.remote_run_id and result.remote_machine_state == "unconfirmed"
+
+
+# ── Login-machine release order (round 5) ────────────────────────────────────
+
+
+def _second_executor(fake, executor, *, owner_id="apis-second-dispatcher", record=None):
+    """Another dispatcher on the same ledger file and the same machines, as a
+    separate process would have it: its own instance, ledger handle and
+    in-process locks."""
+    import time as _time
+
+    config = executor.config
+    revoked: list[str] = []
+
+    async def _read(run_id):
+        return {"run_id": run_id, **(record or {"exit_code": 0, "stdout": f"B {run_id}"})}
+
+    other = fly_runner.FlyExecutor(
+        config,
+        client=fly_runner.FlyMachinesClient(config, transport=httpx.MockTransport(fake.handler)),
+        ledger=fly_runner.FlyLedger(executor.ledger.path,
+                                    owner=fly_runner.this_process_owner(owner_id),
+                                    clock=_time.time),  # fmt: skip
+        mint=lambda repo, prefix: MINTED,
+        revoke=revoked.append,
+        read_result=_read,
+        clock=_time.time,
+    )
+    other._last_reap = float("inf")
+    return other
+
+
+def test_old_cleanup_cannot_erase_the_next_dispatchers_login_job(fly_env, monkeypatch):
+    """The reviewers' interleaving: A's cleanup is paused at its read while B
+    tries to take the same login machine. B must not get in until A has
+    stopped, scrubbed, verified and released; B's job config survives and B
+    completes with its own result."""
+    import time as _time
+
+    fake = _codex_fake(monkeypatch)
+    # Separate processes do not share the in-process login lock.
+    monkeypatch.setattr(fly_runner, "_login_lock", lambda provider: asyncio.Lock())
+    a, _, _ = make_executor(fake, clock=_time.time,
+                            record={"exit_code": 0, "stdout": "A done"})  # fmt: skip
+    b = _second_executor(fake, a)
+    starts: list[str] = []
+    real = fake.handler
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/start"):
+            cfg = fake.machines["m-codex"].get("config") or {}
+            starts.append(fly_runner._config_run_id(cfg))
+        return real(request)
+
+    a.client = fly_runner.FlyMachinesClient(a.config, transport=httpx.MockTransport(handler))
+    b.client = fly_runner.FlyMachinesClient(b.config, transport=httpx.MockTransport(handler))
+    job_a, job_b = _codex_job(), _codex_job()
+
+    async def go():
+        paused = asyncio.Event()
+        resume = asyncio.Event()
+        real_get = a.client.get
+        calls = {"n": 0}
+
+        async def get_paused_in_cleanup(machine_id):
+            # A's reads during settlement: pause the scrub's read.
+            if job_a.run_id in a._active and fake.machines["m-codex"]["state"] == "stopped":
+                calls["n"] += 1
+                if calls["n"] == 2:  # terminate's read, then the scrub's read
+                    paused.set()
+                    await resume.wait()
+            return await real_get(machine_id)
+
+        a.client.get = get_paused_in_cleanup
+        task_a = asyncio.create_task(a.run(job_a))
+        await paused.wait()
+        task_b = asyncio.create_task(b.run(job_b))
+        await asyncio.sleep(0.3)
+        assert b.ledger.entry(job_b.run_id) is None  # B is held at admission
+        resume.set()
+        return await task_a, await task_b
+
+    (rc_a, out_a, _), (rc_b, out_b, _) = asyncio.run(go())
+    assert rc_a == 0 and rc_b == 0
+    assert out_b.decode() == f"B {job_b.run_id}"  # B's result is its own run's
+    assert starts == [job_a.run_id, job_b.run_id]  # each started with its own job
+    assert fake.machines["m-codex"]["config"]["files"] == []  # B cleaned its own up
+    assert a.ledger.snapshot()["in_flight"] == {}
+
+
+_RESERVER = r"""
+import fcntl, json, sys, time
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
+import fly_runner
+from pathlib import Path
+ledger_path, machine = Path(sys.argv[3]), sys.argv[4]
+config = fly_runner.FlyConfig(app="x", api_token="", image="", region="", max_concurrent=10)
+owner = fly_runner.this_process_owner("apis-process-b")
+ledger = fly_runner.FlyLedger(ledger_path, owner=owner)
+lock = ledger_path.with_name(ledger_path.name + ".admission.lock")
+seen_a = False
+print("ready", flush=True)
+deadline = time.time() + 30
+while time.time() < deadline:
+    if ledger.find_by_machine(machine):
+        seen_a = True  # observed without the admission lock
+    with open(lock, "a+") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            time.sleep(0.005)
+            continue
+        try:
+            held = ledger.find_by_machine(machine)
+            if held:
+                seen_a = True
+            elif seen_a:
+                ledger.reserve(config, run_id="b-run", owner=owner["id"], max_run_seconds=60,
+                               login=True, machine_id=machine)
+                print(json.dumps({"reserved_at": time.time()}), flush=True)
+                break
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    time.sleep(0.005)
+"""
+
+
+def test_a_second_process_reserving_the_instant_a_releases_finds_cleanup_done(
+    fly_env, tmp_path, monkeypatch
+):
+    """Process B polls the shared ledger and reserves the login machine the
+    moment A's reservation disappears. Every one of A's cleanup calls must
+    already have happened by then."""
+    import subprocess as sp
+    import time as _time
+
+    fake = _codex_fake(monkeypatch)
+    a, _, _ = make_executor(fake, clock=_time.time, record={"exit_code": 0, "stdout": "A"})
+    cleanup_times: list[float] = []
+    real = fake.handler
+
+    def handler(request):
+        is_scrub = (
+            request.method == "POST" and request.url.path.endswith("/machines/m-codex")
+            and json.loads(request.content)["config"].get("files") == []
+        )
+        if is_scrub:
+            _time.sleep(0.2)  # widen the window an early release would open
+        response = real(request)
+        if is_scrub or (request.method == "GET" and cleanup_times):
+            cleanup_times.append(_time.time())
+        return response
+
+    a.client = fly_runner.FlyMachinesClient(a.config, transport=httpx.MockTransport(handler))
+    script = tmp_path / "reserver.py"
+    script.write_text(_RESERVER)
+    proc = sp.Popen([sys.executable, str(script), str(_REPO_ROOT), str(_DAEMON_DIR),
+                     str(a.ledger.path), "m-codex"], stdout=sp.PIPE, stderr=sp.PIPE,
+                    text=True)  # fmt: skip
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        assert asyncio.run(a.run(_codex_job()))[0] == 0
+        line = proc.stdout.readline().strip()
+    finally:
+        proc.kill()
+        _, b_err = proc.communicate()
+    assert line, f"process B never reserved the machine: {b_err[-800:]}"
+    reserved_at = json.loads(line)["reserved_at"]
+    assert cleanup_times and max(cleanup_times) < reserved_at
+
+
+def test_cleanup_never_touches_a_config_that_belongs_to_another_run(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    executor.ledger.reserve(executor.config, run_id="old-run", owner=executor.instance_id,
+                            max_run_seconds=60, login=True, machine_id="m-codex",
+                            now=clock.now)  # fmt: skip
+    executor.ledger.mark_unconfirmed("old-run", reason="test")
+    newer = {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+             "env": {"ATELES_RUN_ID": "newer-run"},
+             "metadata": {"ateles_run_id": "newer-run"}}  # fmt: skip
+    fake.machines["m-codex"]["config"] = newer
+    assert asyncio.run(executor._settle("old-run")) is True
+    assert fake.machines["m-codex"]["config"] == newer  # untouched
+    assert not [r for r in fake.requests if r.method == "POST"
+                and r.url.path.endswith("/machines/m-codex")]  # fmt: skip
+
+
+def test_an_unverified_scrub_keeps_the_login_reservation(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    real = fake.handler
+
+    def scrub_ignored(request):
+        if request.method == "POST" and request.url.path.endswith("/machines/m-codex"):
+            if json.loads(request.content)["config"].get("files") == []:
+                return httpx.Response(200, json={"id": "m-codex", "state": "stopped"})
+        return real(request)
+
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(scrub_ignored)
+    )
+    job = _codex_job()
+    rc, _, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and job.remote_state == "unconfirmed"
+    assert executor.ledger.entry(job.run_id)["unconfirmed"] is True
+    assert fake.machines["m-codex"]["config"]["files"]  # still there, still owned
+    with pytest.raises(fly_runner.FlyLaunchError, match="not confirmed stopped"):
+        asyncio.run(executor.run(_codex_job()))
+
+
+def test_a_definite_start_failure_scrubs_before_it_releases(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    order: list[str] = []
+    real = fake.handler
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/start"):
+            return httpx.Response(422, json={"error": "rejected"})
+        if request.method == "POST" and request.url.path.endswith("/machines/m-codex"):
+            if json.loads(request.content)["config"].get("files") == []:
+                order.append("scrub")
+        return real(request)
+
+    executor, _, _ = make_executor(fake)
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    real_release = executor.ledger.release
+
+    def release(run_id):
+        order.append("release")
+        real_release(run_id)
+
+    executor.ledger.release = release
+    with pytest.raises(fly_runner.FlyLaunchError):
+        asyncio.run(executor.run(_codex_job()))
+    assert order == ["scrub", "release"]
+    assert fake.machines["m-codex"]["config"]["files"] == []
+
+
+def test_only_vetted_classes_can_be_opted_in(monkeypatch):
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check,build")
+    assert fly_runner.runner_classes() == frozenset({"carry_forward_check"})
+    assert fly_runner.wants_fly(None, "build") is False
+    assert fly_runner.wants_fly(None, "carry_forward_check") is True
+
+
+def test_api_error_text_never_carries_an_encoded_blob():
+    import base64
+
+    blob = base64.b64encode(b"a job file that must never be echoed into a log line").decode()
+    err = fly_runner.FlyApiError(400, f"invalid config: files[0].raw_value={blob}")
+    assert blob not in str(err) and "[redacted]" in str(err)
+    assert err.status == 400

@@ -65,6 +65,8 @@ class FakeFly:
         self.wait_mode = wait_mode
         self.start_lost = start_lost
         self.lost_error = "eval: response lost"
+        self.scrub_ignored = False  # a config clear is acknowledged but not applied
+        self.starts: list[str] = []  # the run id each start found in the config
         # "ok" | "lost" (created, response 500) | "refused" (422, nothing created)
         self.create = create
         self.sticky_all = False
@@ -95,8 +97,9 @@ class FakeFly:
         mid = parts[2]
         if request.method == "GET" and parts[3:] == ["wait"]:
             if self.machines.get(mid, {}).get("login"):
-                state = self.machines[mid]["state"]
-                return httpx.Response(200 if state == "stopped" else 408, json={"state": state})
+                # The runner exits when its one job is done; the machine stops.
+                self.machines[mid]["state"] = "stopped"
+                return httpx.Response(200, json={"state": "stopped"})
             if self.wait_mode == "disconnect":
                 raise httpx.ConnectError("eval: connection dropped while waiting")
             if self.wait_mode == "timeout":
@@ -110,12 +113,16 @@ class FakeFly:
             return httpx.Response(404, json={"error": "not found"})
         if request.method == "POST" and len(parts) == 3:  # update a login machine
             body = json.loads(request.content)
-            self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})[
-                "config"
-            ] = body["config"]
+            clearing = body["config"].get("files") == []
+            if not (clearing and self.scrub_ignored):
+                self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})[
+                    "config"
+                ] = body["config"]
             return httpx.Response(200, json={"id": mid, "instance_id": f"i-{mid}"})
         if request.method == "POST" and parts[3:] == ["start"]:
             self.machines[mid]["state"] = "started"
+            cfg = self.machines[mid].get("config") or {}
+            self.starts.append(str((cfg.get("env") or {}).get("ATELES_RUN_ID") or ""))
             if self.start_lost:
                 return httpx.Response(500, json={"error": self.lost_error})
             return httpx.Response(200, json={"ok": True})
@@ -160,6 +167,9 @@ class Trace:
     seed_entries_left: list[str] = field(default_factory=list)
     login_state: str = ""
     login_lock_held: bool = False
+    envelopes: list = field(default_factory=list)
+    exit_codes: list = field(default_factory=list)
+    starts: list = field(default_factory=list)
     everything_sent: str = field(repr=False, default="")
 
 
@@ -255,6 +265,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     fake = FakeFly(scenario["fly"]["wait"], start_lost=scenario["fly"].get("start") == "lost",
                    create=scenario["fly"].get("create", "ok"))  # fmt: skip
     fake.sticky_all = bool(scenario["fly"].get("delete_ineffective"))
+    fake.scrub_ignored = bool(scenario["fly"].get("scrub_ignored"))
     if scenario["fly"].get("lost_error"):
         fake.lost_error = scenario["fly"]["lost_error"]
         fake.start_lost = True
@@ -270,7 +281,10 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
 
     async def read_result(run_id):
         record = scenario["fly"]["record"]
-        return None if record is None else {"run_id": run_id, **record}
+        if record is None:
+            return None
+        return {"run_id": run_id, **record,
+                "stdout": str(record.get("stdout", "")).replace("{run_id}", run_id)}  # fmt: skip
 
     clock = AdvancingClock()
     client = fly_runner.FlyMachinesClient(config, transport=httpx.MockTransport(fake.handler))
@@ -343,21 +357,27 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     out, err = io.StringIO(), io.StringIO()
     provider = scenario.get("provider", "claude")
     provider_args = [] if provider == "router" else ["--provider", provider]
+    envelopes: list[dict] = []
+    exit_codes: list[int] = []
     try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            exit_code = dispatch_role.main(
-                ["--role", ROLE, "--task", "Check the PR's gate inheritance.",
-                 *provider_args, "--json", *scenario["args"]]
-            )  # fmt: skip
+        for _ in range(int(scenario.get("dispatches", 1))):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                exit_codes.append(dispatch_role.main(
+                    ["--role", ROLE, "--task", "Check the PR's gate inheritance.",
+                     *provider_args, "--json", *scenario["args"]]
+                ))  # fmt: skip
+            try:
+                envelopes.append(json.loads(out.getvalue()))
+            except ValueError:
+                envelopes.append({})
     finally:
         for proc in others:
             proc.kill()
             proc.wait()
+    exit_code = exit_codes[0]
     stdout_text = out.getvalue()
-    try:
-        envelope = json.loads(stdout_text)
-    except ValueError:
-        envelope = {}
+    envelope = envelopes[0]
     sent = "\n".join(_decoded(r) for r in fake.requests)
     return Trace(
         exit_code=exit_code,
@@ -376,6 +396,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         seed_entries_left=[k for k in seed_keys if executor.ledger.entry(k) is not None],
         login_state=str(fake.machines.get("m-codex-login", {}).get("state", "")),
         login_lock_held=fly_runner._login_lock("codex").locked(),
+        envelopes=envelopes,
+        exit_codes=exit_codes,
+        starts=list(fake.starts),
         everything_sent=sent,
     )
 
@@ -449,6 +472,34 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         env["remote_run_id"] not in str(env.get("error", ""))
     ):
         problems.append("the error does not name the remote run")
+    if e.get("stdout_has_own_run_id") and (
+        not env.get("remote_run_id") or env["remote_run_id"] not in str(env.get("stdout", ""))
+    ):
+        problems.append("the result does not belong to its own run")
+    if e.get("starts_with_own_config"):
+        own = [str(x.get("remote_run_id") or "") for x in trace.envelopes]
+        if trace.starts != [r for r in own if r] or len(trace.starts) != len(own):
+            problems.append(f"starts found configs {trace.starts}, runs were {own}")
+    second = e.get("second")
+    if second is not None:
+        if len(trace.envelopes) < 2:
+            problems.append("the second dispatch did not run")
+        else:
+            env2, rc2 = trace.envelopes[1], trace.exit_codes[1]
+            if rc2 != second["exit"] or bool(env2.get("ok")) != second["ok"]:
+                problems.append(f"second dispatch exit={rc2} ok={env2.get('ok')}, "
+                                f"expected {second['exit']}/{second['ok']}")  # fmt: skip
+            want = second.get("reason_contains")
+            got = f"{env2.get('reason', '')} {env2.get('error', '')} {env2.get('stderr', '')}"
+            if want and want not in got:
+                problems.append(f"second dispatch reason lacks {want!r}: {got[:200]!r}")
+            if second.get("stdout_has_own_run_id") and (
+                not env2.get("remote_run_id")
+                or env2["remote_run_id"] not in str(env2.get("stdout", ""))
+            ):
+                problems.append("the second dispatch's result is not its own")
+        if "starts" in second and len(trace.starts) != second["starts"]:
+            problems.append(f"{len(trace.starts)} machine starts, expected {second['starts']}")
     if e.get("seed_kept") and not trace.seed_entries_left:
         problems.append("another dispatcher's live reservation was released")
     for mid in e.get("machines_kept", []):

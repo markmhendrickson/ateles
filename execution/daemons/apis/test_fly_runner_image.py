@@ -400,3 +400,60 @@ class TestRunJob:
         text, truncated = run_job.cap_stdout(data)
         assert truncated and text.endswith("VERDICT")
         assert len(text.encode()) == run_job.STDOUT_CAP_BYTES
+
+
+# ── Sanitize job output before recording it (round 5) ────────────────────────
+
+
+def _job_with_secret(secret: str):
+    return run_job.Job(
+        run_id="r", role="lanius", provider="claude", repository="o/r", timeout_seconds=5,
+        argv=["claude"], stdin=None, secrets={"GITHUB_TOKEN": secret},
+        child_credential_names=("GITHUB_TOKEN",), neotoma_token_name="",
+        neotoma_jwk_name="", neotoma_base_url="https://neotoma.example.test",
+    )  # fmt: skip
+
+
+def _fragments(secret: str, length: int = 8) -> list[str]:
+    return [secret[i:i + length] for i in range(len(secret) - length + 1)]
+
+
+@pytest.mark.parametrize("stream,cap", [("stdout", run_job.STDOUT_CAP_BYTES),
+                                        ("stderr", run_job.STDERR_TAIL_BYTES)])  # fmt: skip
+def test_a_secret_straddling_the_cap_leaves_no_fragment(stream, cap):
+    planted = "fixture-planted-value-0123456789abcdef"
+    secret = planted
+    job = _job_with_secret(secret)
+    # The cap falls inside the secret: its tail half lands in the kept part.
+    data = b"x" * 100 + secret.encode() + b"y" * (cap - len(secret) // 2)
+    record = run_job.build_record(
+        job, exit_code=0, stdout=data if stream == "stdout" else b"",
+        stderr=data if stream == "stderr" else b"", wall_ms=1, probe={"ok": True},
+        timed_out=False,
+    )  # fmt: skip
+    kept = record["stdout" if stream == "stdout" else "stderr_tail"]
+    assert not any(f in kept for f in _fragments(secret)), "a fragment of the secret survived"
+
+
+def test_encoded_copies_of_a_secret_are_redacted():
+    import base64
+    import urllib.parse
+
+    planted = "fixture/planted+value=0123456789"
+    secret = planted
+    job = _job_with_secret(secret)
+    encodings = [
+        base64.b64encode(secret.encode()).decode(),
+        base64.urlsafe_b64encode(secret.encode()).decode().rstrip("="),
+        urllib.parse.quote(secret, safe=""),
+        json.dumps(secret)[1:-1],
+    ]
+    out = ("\n".join(encodings) + "\n" + secret).encode()
+    record = run_job.build_record(
+        job, exit_code=0, stdout=out, stderr=out, wall_ms=1, probe={"ok": True},
+        timed_out=False, refused=f"probe saw {secret}",
+    )  # fmt: skip
+    for field in ("stdout", "stderr_tail", "refused"):
+        assert secret not in record[field]
+        for enc in encodings:
+            assert enc not in record[field], (field, enc)

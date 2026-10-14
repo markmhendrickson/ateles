@@ -1968,6 +1968,32 @@ async def dispatch_task(
                 key_suffix=trigger,
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+        elif getattr(result, "remote_outcome_unknown", False):
+            # ateles#1456: the remote run may have done its work. BLOCKED, not
+            # FAILED: the watchdog retries FAILED tasks and leaves BLOCKED ones
+            # to the operator, who must reconcile its effects first.
+            reason = (
+                f"remote run {result.remote_run_id} has an UNKNOWN outcome (machine "
+                f"{result.remote_machine_state or 'unconfirmed'}); reconcile what it did "
+                "before re-dispatching — not retried automatically"
+            )
+            _run_stage("assistant", f"{skill}: {reason}", stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            set_task_status(
+                entity_id,
+                TaskStatus.BLOCKED,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value,
+                reason=reason,
+                key_suffix=trigger,
+            )
+            notifier.send(
+                f"{skill} on {entity_id}: {reason}",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            job.failed(f"task {entity_id} → {skill} outcome unknown: {result.remote_run_id}")
         else:
             reason = result.error or f"rc={result.returncode}"
             _run_stage(
