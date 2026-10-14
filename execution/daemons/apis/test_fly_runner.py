@@ -56,7 +56,7 @@ def _present(machine: dict) -> dict:
     """A machine as the Machines API answers for it: always with a version
     and a config object (the double fills them in) unless a test marks the
     machine ``_raw`` to serve an incomplete answer on purpose."""
-    out = {k: v for k, v in machine.items() if k != "_raw"}
+    out = {k: v for k, v in machine.items() if k not in ("_raw", "_settle")}
     if not machine.get("_raw"):
         out.setdefault("instance_id", "v0")
         out.setdefault("config", {})
@@ -101,6 +101,14 @@ class FakeFly:
         self.corrupt: dict | None = None
         self.lease_view_override = None  # a raw GET /lease answer, e.g. {"data": {}}
         self.release_fails = False
+        # After a config update a login machine reports "created" for this many
+        # reads before it is "stopped" again, as Fly does for a moment.
+        self.settle_reads = 0
+        self.never_settles = False  # it stays "created"; the wait times out
+        self.wait_settles = True  # the wait endpoint returns once it settled
+        # A nonce sent for a machine that holds no lease (an expired one) is
+        # refused, the strict reading of Fly's lease rules.
+        self.reject_stale_nonce = False
         # Malformed answers: {"list": "malformed"|"object"|"null", "get": "null"|"other-id"}
         self.bad: dict[str, str] = {}
 
@@ -206,6 +214,23 @@ class FakeFly:
             request.headers.get("fly-machine-lease-nonce", "") != held["nonce"]
         ):
             return httpx.Response(409, json={"error": "machine is leased; nonce required"})
+        if (self.reject_stale_nonce and not held and method in ("POST", "DELETE")
+                and request.headers.get("fly-machine-lease-nonce", "")):  # fmt: skip
+            return httpx.Response(409, json={"error": "lease nonce is not current"})
+        settling = mid in self.machines and "_settle" in self.machines[mid]
+        if method == "GET" and len(parts) == 4 and parts[3] == "wait" and settling:
+            if self.never_settles or not self.wait_settles:
+                return httpx.Response(408, json={"error": "deadline exceeded"})
+            self.machines[mid]["state"] = "stopped"
+            del self.machines[mid]["_settle"]
+            return httpx.Response(200, json={"ok": True})
+        if method == "GET" and len(parts) == 3 and settling and not self.never_settles:
+            machine = self.machines[mid]
+            if machine["_settle"] <= 0:
+                machine["state"] = "stopped"
+                del machine["_settle"]
+            else:
+                machine["_settle"] -= 1
         if method == "GET" and len(parts) == 4 and parts[3] == "wait":
             if not self.stop_effective and self.machines.get(mid, {}).get("state") == "started":
                 return httpx.Response(408, json={"error": "still running"})  # never stops
@@ -236,6 +261,9 @@ class FakeFly:
                 return httpx.Response(412, json={"error": "machine version changed"})
             machine["config"] = body["config"]
             self.stored.append(fly_runner._config_run_id(body["config"]))
+            if machine.get("login") and (self.settle_reads or self.never_settles):
+                machine["state"] = "created"  # transitional, right after the update
+                machine["_settle"] = self.settle_reads
             if current:
                 machine["instance_id"] = f"{current}+"
             return httpx.Response(200, json={"id": mid, "instance_id": machine.get("instance_id")
@@ -3739,3 +3767,128 @@ def test_the_reaper_stops_only_machines_this_process_launched_while_invalid(fly_
     assert {r.url.path.rsplit("/", 1)[-1] for r in new} == {job.machine_id}
     assert job.machine_id not in fake.machines and "m-other" in fake.machines
     assert executor.ledger.path.read_bytes() == b"{}"
+
+
+
+# ── Login machines settle after a config update (live pilot finding) ───────
+
+
+@pytest.fixture
+def fast_settle(monkeypatch):
+    monkeypatch.setattr(fly_runner, "LOGIN_SETTLE_POLL_SECONDS", 0.0, raising=False)
+
+
+@pytest.mark.parametrize("wait_settles", [True, False], ids=["wait", "poll"])
+def test_a_login_claim_waits_for_the_machine_to_settle_after_its_update(
+        fly_env, monkeypatch, fast_settle, wait_settles):  # fmt: skip
+    fake = _codex_fake(monkeypatch)
+    fake.settle_reads = 2  # "created" for two reads after every update
+    fake.wait_settles = wait_settles
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    job = _codex_job()
+    rc, out, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and b"ok" in out
+    assert len(fake.calls("POST", "/start")) == 1
+    settles = [r for r in fake.calls("GET", "/wait") if r.url.params.get("state") == "stopped"
+               and r.url.params.get("instance_id")]  # fmt: skip
+    assert settles  # waited on the new version, not read once and refused
+    cfg = fake.machines["m-codex"]["config"]
+    assert not fly_runner._has_job_config(cfg)  # the clear after the run settled too
+    assert executor.ledger.snapshot()["in_flight"] == {}
+
+
+def test_a_login_machine_that_never_settles_fails_closed_and_keeps_no_job_files(
+        fly_env, monkeypatch, fast_settle):  # fmt: skip
+    fake = _codex_fake(monkeypatch)
+    fake.never_settles = True
+    executor, _, revoked = make_executor(fake, record=None)
+    job = _codex_job()
+    with pytest.raises(fly_runner.FlyLaunchError, match="did not settle"):
+        asyncio.run(executor.run(job))
+    assert not fake.calls("POST", "/start")  # nothing ran
+    cfg = fake.machines["m-codex"]["config"]  # the stored config, as the fake holds it
+    assert cfg["files"] == [] and cfg["env"] == {}
+    assert not fly_runner._config_run_id(cfg)
+    assert executor.ledger.entry(job.run_id) is None  # cleared, so released
+    assert "m-codex" not in fake.leases and revoked == [MINTED]
+
+
+def test_a_running_login_machine_is_never_rewritten_and_the_reason_is_logged(
+        fly_env, monkeypatch, fast_settle, caplog):  # fmt: skip
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake, record=None)
+    fake.machines["m-codex"].update({"state": "started", "config": {
+        "files": [{"guest_path": "/run/job/job.json", "raw_value": "e30="}],
+        "env": {"ATELES_RUN_ID": "fly-r"}, "metadata": {"ateles_run_id": "fly-r"}}})
+    with caplog.at_level("WARNING", logger="apis.fly_runner"):
+        ok = asyncio.run(executor._scrub_login_machine("m-codex", "fly-r"))
+    assert ok is False and not fake.calls("POST", "/machines/m-codex")
+    assert "this run's job files were not cleared" in caplog.text
+
+
+def _seed_abandoned_login_run(executor, fake, clock, *, files: bool) -> str:
+    """The live pilot's leftover: an unconfirmed reservation for the login
+    machine, owned by a dispatcher that has exited, whose lease expired."""
+    run_id = "fly-abandoned-login"
+    dead = {**fly_runner.this_process_owner("apis-exited-dispatcher"), "pid": _dead_pid(),
+            "heartbeat": clock.now - 10_000}  # fmt: skip
+    rate = executor.config.rate_per_second_usd
+    data = executor.ledger._load()
+    data["in_flight"][run_id] = {
+        "run_id": run_id, "owner": dead["id"], "machine_id": "m-codex", "login": True,
+        "started_at": clock.now - 5_000, "deadline": clock.now - 3_080,
+        "max_cost_usd": 1_920 * rate, "unconfirmed": True,
+        "unconfirmed_reason": "job config not cleared",
+        "lease_nonce": "expired-lease-nonce-secret", "lease_expires": clock.now - 2_700,
+    }  # fmt: skip
+    data["owners"][dead["id"]] = dead
+    executor.ledger._save(_admitted(data))
+    fake.leases.pop("m-codex", None)  # the run's lease has expired
+    if files:
+        fake.machines["m-codex"]["config"] = {
+            "files": [{"guest_path": "/run/job/job.json", "raw_value": "e30="}],
+            "env": {"ATELES_RUN_ID": run_id}, "metadata": {"ateles_run_id": run_id},
+        }  # fmt: skip
+    return run_id
+
+
+@pytest.mark.parametrize("files", [True, False], ids=["job-files-left", "already-clear"])
+def test_an_abandoned_login_reservation_heals_without_operator_action(
+        fly_env, monkeypatch, fast_settle, files):  # fmt: skip
+    fake = _codex_fake(monkeypatch)
+    fake.reject_stale_nonce = True  # an expired lease's nonce is refused
+    fake.settle_reads = 1
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock, record=None)
+    run_id = _seed_abandoned_login_run(executor, fake, clock, files=files)
+    assert run_id in asyncio.run(executor.reap())
+    assert not fly_runner._has_job_config(fake.machines["m-codex"]["config"])
+    assert executor.ledger.entry(run_id) is None  # settled
+    assert "m-codex" not in fake.leases  # any cleanup lease was released
+
+
+def test_an_abandoned_login_reservation_heals_on_the_next_launch(fly_env, monkeypatch,
+                                                                 fast_settle):  # fmt: skip
+    fake = _codex_fake(monkeypatch)
+    fake.reject_stale_nonce = True
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock,
+                                   record={"exit_code": 0, "stdout": "ok"})  # fmt: skip
+    run_id = _seed_abandoned_login_run(executor, fake, clock, files=True)
+    rc, _, _ = asyncio.run(executor.run(_codex_job()))
+    assert rc == 0 and executor.ledger.snapshot(clock.now)["in_flight"] == {}
+    assert run_id not in executor.ledger.snapshot(clock.now)["in_flight"]
+
+
+def test_a_login_machine_leased_by_another_dispatcher_is_left_alone(fly_env, monkeypatch,
+                                                                    fast_settle):  # fmt: skip
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock, record=None)
+    run_id = _seed_abandoned_login_run(executor, fake, clock, files=True)
+    fake.leases["m-codex"] = {"nonce": "theirs", "description": "another dispatcher",
+                              "expires_at": 4_000_000_000}  # fmt: skip
+    before = copy.deepcopy(fake.machines["m-codex"]["config"])
+    assert run_id not in asyncio.run(executor.reap())
+    assert fake.machines["m-codex"]["config"] == before
+    assert executor.ledger.entry(run_id)["unconfirmed"] is True

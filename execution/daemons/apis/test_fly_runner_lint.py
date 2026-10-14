@@ -32,6 +32,8 @@ FILES = (
 _EMPTY_CALLS = {"dict", "list", "tuple", "set", "str", "frozenset"}
 
 ALLOWLIST: dict[str, str] = {
+    'execution/daemons/apis/fly_runner.py:FlyExecutor._lease_for_cleanup:return None':
+        'None is "no usable lease": the machine is left alone and the reservation kept',
     "deploy/fly-runner/run_job.py:run_cli:exc.stderr or b''":
         'a bounded collection that timed out carries None when no output arrived; reported as a timeout',
     "deploy/fly-runner/run_job.py:run_cli:exc.stdout or b''":

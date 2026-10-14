@@ -74,6 +74,8 @@ def test_scenario_set_covers_the_required_behaviours():
         "runner_entrypoint_exits_by_deadline_when_cleanup_stalls",
         "runner_entrypoint_exits_promptly_when_the_run_raises",
         "runner_entrypoint_exits_promptly_when_the_run_asks_to_exit",
+        "login_claim_waits_for_the_machine_to_settle",
+        "login_machine_that_never_settles_fails_closed_without_job_files",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -202,3 +204,10 @@ def test_judge_goes_red_when_the_entrypoint_exits_late_or_skips_cleanup(tmp_path
     late = dataclasses.replace(trace, exit_code=None, exit_after_condition=30.0,
                                cleanup_reached=False, descendant_gone_after=False)  # fmt: skip
     assert len(runner.judge(scenario, late)) >= 3
+
+
+def test_judge_goes_red_when_job_files_are_left_on_a_login_machine(tmp_path, monkeypatch):
+    scenario = _by_id("login_machine_that_never_settles_fails_closed_without_job_files")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    left = dataclasses.replace(trace, login_job_files_after=True, starts=["fly-x"])
+    assert len(runner.judge(scenario, left)) >= 2

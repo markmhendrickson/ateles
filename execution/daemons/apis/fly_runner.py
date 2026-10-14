@@ -1894,6 +1894,8 @@ class FlyExecutor:
                     # Cheap pre-check: an incomplete or busy machine is refused
                     # before even a lease is asked for.
                     pre = await self._read_login_machine(login_id, job)
+                    if pre is not None:
+                        pre = await self._settle_login_machine(pre)
                     if pre is None:
                         raise FlyApiError(404, f"{job.provider} login machine not found")
                     self._refuse_unless_free(pre, job)
@@ -1988,6 +1990,32 @@ class FlyExecutor:
             return True
         return lease["description"] != _lease_description(run_id)
 
+    async def _settle_login_machine(self, machine: dict) -> dict | None:
+        """*machine* (a validated read) once it is no longer in a transitional
+        state after a config update: one bounded wait on Fly's wait endpoint
+        for ``stopped`` (with the new version's instance id), then a few
+        short reads. Returns the last validated read (None when the machine
+        is gone); if it is STILL transitional at the bound, the caller fails
+        closed on that state."""
+        if machine["state"] not in LOGIN_SETTLING_STATES:
+            return machine
+        machine_id = machine["id"]
+        try:
+            await self.client.wait(machine_id, state="stopped",
+                                   instance_id=machine["instance_id"],
+                                   timeout_s=LOGIN_SETTLE_WAIT_SECONDS)  # fmt: skip
+        except Exception as exc:  # noqa: BLE001 — the reads below decide
+            log.warning(f"[fly] waiting for {machine_id} to settle failed: {type(exc).__name__}")
+        for attempt in range(LOGIN_SETTLE_POLLS + 1):
+            machine = await self.client.get(machine_id)
+            if machine is None or machine["state"] not in LOGIN_SETTLING_STATES:
+                return machine
+            if attempt < LOGIN_SETTLE_POLLS:
+                await asyncio.sleep(LOGIN_SETTLE_POLL_SECONDS)
+        log.warning(f"[fly] login machine {machine_id} is still {machine['state']} after the "
+                    "settle bound")  # fmt: skip
+        return machine
+
     async def _write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
                                   launch: "_LaunchState", nonce: str) -> None:  # fmt: skip
         """Install this run's job on a login machine, compare-and-set against
@@ -2004,6 +2032,8 @@ class FlyExecutor:
         it is this run's, the launch fails closed before any start.
         """
         machine = await self._read_login_machine(machine_id, job)  # re-read under the lease
+        if machine is not None:
+            machine = await self._settle_login_machine(machine)
         if machine is None:
             raise FlyApiError(404, f"{job.provider} login machine not found")
         self._refuse_unless_free(machine, job)
@@ -2030,9 +2060,15 @@ class FlyExecutor:
                     _render_wall(self._clock() + 300),
                 ) from None
             raise
+        # Read back once the update has settled (a transitional state right
+        # after the write is not a refusal); one that never settles fails
+        # closed before any start.
         after = await self.client.get(machine_id)
-        if (after is None or after["state"] != "stopped"
-                or _config_run_id(after["config"]) != job.run_id):  # fmt: skip
+        if after is not None:
+            after = await self._settle_login_machine(after)
+        if after is None or after["state"] in LOGIN_SETTLING_STATES:
+            raise FlyApiError(409, "login machine did not settle to stopped after the write")
+        if after["state"] != "stopped" or _config_run_id(after["config"]) != job.run_id:
             raise FlyApiError(409, "login machine config is not this run's after the write")
 
     async def _scrub_login_machine(self, machine_id: str, run_id: str, nonce: str = "") -> bool:
@@ -2052,6 +2088,8 @@ class FlyExecutor:
         # means the machine is gone.
         try:
             machine = await self.client.get(machine_id)
+            if machine is not None:
+                machine = await self._settle_login_machine(machine)
             if machine is None:
                 return True
             cfg = copy.deepcopy(machine["config"])
@@ -2062,8 +2100,11 @@ class FlyExecutor:
                 log.warning(f"[fly] login machine {machine_id} holds an unattributed job config")
                 return False
             if owner == run_id:
-                if machine["state"] != "stopped":
-                    return False  # never rewrite a running machine
+                if machine["state"] not in LOGIN_NOT_RUNNING_STATES:
+                    # Never rewrite a machine that may be running.
+                    log.warning(f"[fly] login machine {machine_id} is {machine['state']}; "
+                                "this run's job files were not cleared")  # fmt: skip
+                    return False
                 cfg["files"] = []
                 cfg["env"] = {}
                 if "metadata" in cfg:
@@ -2073,10 +2114,16 @@ class FlyExecutor:
                               "current_version": machine["instance_id"]}  # fmt: skip
                 await self.client.update(machine_id, body, nonce=nonce)
             after = await self.client.get(machine_id)
+            if after is not None:
+                after = await self._settle_login_machine(after)
             if after is None:
                 return True
             # Cleared means: a validated, present config carrying no job at all.
-            return not _has_job_config(after["config"])
+            if _has_job_config(after["config"]):
+                log.warning(f"[fly] login machine {machine_id} still holds job files after "
+                            "the clear")  # fmt: skip
+                return False
+            return True
         except Exception as exc:  # noqa: BLE001 — unknown state keeps the reservation
             log.warning(f"[fly] could not clear job files from login machine: {type(exc).__name__}")
             return False
@@ -2260,7 +2307,17 @@ class FlyExecutor:
             if verdict == "gone":
                 confirmed = True
             elif verdict == "ours":
-                confirmed = await self._terminate(machine_id, login=login, nonce=nonce)
+                confirmed = True
+                if login and run_id not in self._active:
+                    # Recovery of a run no live run() holds (the reaper, or
+                    # a later launch reconciling the machine): its lease may
+                    # have expired with the dispatcher that took it. Modify
+                    # the machine only under a lease this run holds NOW.
+                    held = await self._lease_for_cleanup(machine_id, run_id, nonce)
+                    confirmed = held is not None
+                    nonce = held if held is not None else nonce
+                if confirmed:
+                    confirmed = await self._terminate(machine_id, login=login, nonce=nonce)
                 if confirmed and login:
                     confirmed = await self._scrub_login_machine(machine_id, run_id, nonce)
             elif verdict == "idle":
@@ -2292,6 +2349,33 @@ class FlyExecutor:
             )
         return confirmed
 
+    async def _lease_for_cleanup(self, machine_id: str, run_id: str, nonce: str) -> str | None:
+        """The nonce under which this run may clear its login machine: its
+        own lease while it still holds it; if NO lease is held at all (the
+        run's lease expired, e.g. after the dispatcher that took it died), a
+        fresh short lease taken for this run. None when another dispatcher
+        holds the lease, or the lease state cannot be read: the machine is
+        then left alone and the reservation kept."""
+        try:
+            lease = await self.client.get_lease(machine_id)
+        except Exception as exc:  # noqa: BLE001 — unknown: not ours to modify
+            log.warning(f"[fly] lease read on {machine_id} failed: {type(exc).__name__}")
+            return None
+        if lease is not None:
+            if lease["description"] == _lease_description(run_id) and nonce:
+                return nonce
+            log.warning(f"[fly] run={run_id}: login machine {machine_id} is leased by another "
+                        "dispatcher; left untouched")  # fmt: skip
+            return None
+        try:
+            fresh, expires = await self.client.acquire_lease(
+                machine_id, ttl=LOGIN_CLEANUP_LEASE_TTL, description=_lease_description(run_id))
+        except Exception as exc:  # noqa: BLE001 — someone else may have taken it
+            log.warning(f"[fly] cleanup lease on {machine_id} not taken: {type(exc).__name__}")
+            return None
+        self.ledger.set_lease(run_id, fresh, expires)  # kept with the reservation
+        return fresh
+
     async def _ownership(self, machine_id: str, run_id: str, *, login: bool) -> str:
         """Whose is this machine RIGHT NOW, read from its current config?
 
@@ -2318,7 +2402,7 @@ class FlyExecutor:
             return "ours"
         if _has_job_config(cfg):
             return "other"  # a job config nobody can attribute
-        return "idle" if machine["state"] == "stopped" else "other"
+        return "idle" if machine["state"] in LOGIN_NOT_RUNNING_STATES else "other"
 
     async def _terminate_by_run_id(self, run_id: str) -> bool:
         """Terminate every machine carrying *run_id*. True only when a valid
@@ -2360,7 +2444,7 @@ class FlyExecutor:
             if machine is None or machine["state"] == "destroyed":
                 return True
             if login:
-                if machine["state"] == "stopped":
+                if machine["state"] in LOGIN_NOT_RUNNING_STATES:
                     return True
                 await self.client.stop(machine_id, nonce=nonce)
                 await self.client.wait(machine_id, state="stopped", timeout_s=30)
@@ -2530,6 +2614,21 @@ def _owner_heartbeat(record: dict | None) -> float | None:
 
 
 LEASE_SAFETY_SECONDS = 60
+# Right after a config update Fly reports a login machine in a transitional
+# state for a moment before it is back to "stopped". These are "not settled
+# yet", never a refusal on their own.
+LOGIN_SETTLING_STATES = frozenset({"created", "updating", "replacing"})
+# States in which a login machine runs nothing: its stored config may be
+# rewritten, and it counts as stopped for settlement.
+LOGIN_NOT_RUNNING_STATES = frozenset({"stopped", "created"})
+# The bound on waiting for a login machine to settle after an update: one
+# wait call (server side), then a few short reads.
+LOGIN_SETTLE_WAIT_SECONDS = 20
+LOGIN_SETTLE_POLLS = 5
+LOGIN_SETTLE_POLL_SECONDS = 1.0
+# A short lease taken only to clear a stopped login machine whose run's own
+# lease has expired (recovery of an unconfirmed reservation).
+LOGIN_CLEANUP_LEASE_TTL = 120
 
 
 def _lease_description(run_id: str) -> str:
