@@ -55,6 +55,11 @@ class FakeFly:
         self.sticky: set[str] = set()  # delete acknowledged, machine keeps running
         self.sticky_all = False
         self.stored: list[str] = []  # the run id of every config actually stored
+        self.leases: dict[str, dict] = {}
+        self.lease_log: list[tuple[str, str]] = []
+        self.lease_mode = "ok"  # "ok" | "error" | "no_nonce"
+        self.enforce_version = True  # Fly documents the field, not its mismatch status
+        self.release_fails = False
         # Malformed answers: {"list": "malformed"|"object"|"null", "get": "null"|"other-id"}
         self.bad: dict[str, str] = {}
 
@@ -104,6 +109,49 @@ class FakeFly:
             return httpx.Response(200, json=list(self.machines.values()))
         parts = rest.split("/")  # ['', 'machines', id, ...]
         mid = parts[2]
+        # ── Leases, as Fly documents them: an exclusive lock on modifying a
+        # machine; later calls carry the nonce header; an update without it
+        # on a leased machine fails. This double also refuses start, stop
+        # and delete without it (the docs are silent; the code never relies
+        # on either answer).
+        if len(parts) == 4 and parts[3] == "lease":
+            held = self.leases.get(mid)
+            given = request.headers.get("fly-machine-lease-nonce", "")
+            if method == "POST":
+                if self.lease_mode == "error":
+                    return httpx.Response(500, json={"error": "lease service unavailable"})
+                if self.lease_mode == "no_nonce":
+                    return httpx.Response(200, json={"status": "success", "data": {}})
+                if held and given != held["nonce"]:
+                    return httpx.Response(409, json={"error": "machine already leased"})
+                body = json.loads(request.content or b"{}")
+                nonce = held["nonce"] if held else f"nonce-{len(self.lease_log)}-{mid}-secret"
+                self.leases[mid] = {"nonce": nonce, "description": body.get("description", ""),
+                                    "expires_at": 4_000_000_000}  # fmt: skip
+                self.lease_log.append(("acquire", mid))
+                return httpx.Response(200, json={"status": "success", "data": {
+                    "nonce": nonce, "expires_at": 4_000_000_000,
+                    "description": body.get("description", "")}})  # fmt: skip
+            if method == "GET":
+                if not held:
+                    return httpx.Response(404, json={"error": "no lease"})
+                return httpx.Response(200, json={"status": "success", "data": {
+                    "description": held["description"], "expires_at": held["expires_at"]}})
+            if method == "DELETE":
+                if self.release_fails:
+                    return httpx.Response(500, json={"error": "release failed"})
+                if not held:
+                    return httpx.Response(404, json={"error": "no lease"})
+                if given != held["nonce"]:
+                    return httpx.Response(409, json={"error": "wrong nonce"})
+                del self.leases[mid]
+                self.lease_log.append(("release", mid))
+                return httpx.Response(200, json={"ok": True})
+        held = self.leases.get(mid)
+        if held and method in ("POST", "DELETE") and (
+            request.headers.get("fly-machine-lease-nonce", "") != held["nonce"]
+        ):
+            return httpx.Response(409, json={"error": "machine is leased; nonce required"})
         if method == "GET" and len(parts) == 4 and parts[3] == "wait":
             if not self.stop_effective and self.machines.get(mid, {}).get("state") == "started":
                 return httpx.Response(408, json={"error": "still running"})  # never stops
@@ -126,7 +174,8 @@ class FakeFly:
             body = json.loads(request.content)
             machine = self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})
             current = machine.get("instance_id")
-            if "current_version" in body and current and body["current_version"] != current:
+            if (self.enforce_version and "current_version" in body and current
+                    and body["current_version"] != current):  # fmt: skip
                 return httpx.Response(412, json={"error": "machine version changed"})
             machine["config"] = body["config"]
             self.stored.append(fly_runner._config_run_id(body["config"]))
@@ -582,7 +631,7 @@ def test_codex_login_machine_is_updated_started_and_scrubbed(fly_env, monkeypatc
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     fake = FakeFly()
     fake.machines["m-codex"] = {
-        "id": "m-codex", "state": "stopped", "login": True,
+        "id": "m-codex", "state": "stopped", "login": True, "instance_id": "v1",
         "config": {"image": "old", "mounts": [{"volume": "vol_x", "path": "/data"}]},
     }  # fmt: skip
     executor, _, revoked = make_executor(fake, record={"exit_code": 0, "stdout": "done"})
@@ -616,7 +665,9 @@ def test_codex_login_machine_is_updated_started_and_scrubbed(fly_env, monkeypatc
     assert spec["codex_home"] == "/data/codex"
     assert scrub["config"]["files"] == [] and scrub["config"]["env"] == {}
     assert fake.calls("POST", "/start")
-    assert not fake.calls("DELETE")
+    assert not [r for r in fake.calls("DELETE") if not r.url.path.endswith("/lease")]
+    assert fake.lease_log == [("acquire", "m-codex"), ("release", "m-codex")]
+    assert fake.leases == {}
     assert revoked == [MINTED]
     assert not fly_runner._login_lock("codex").locked()
 
@@ -855,7 +906,7 @@ def _codex_fake(monkeypatch) -> FakeFly:
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     fake = FakeFly()
     fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
-                                "config": {"mounts": []}}  # fmt: skip
+                                "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
     return fake
 
 
@@ -1047,7 +1098,7 @@ def test_cancellation_during_login_start_settles_the_machine(fly_env, monkeypatc
     async def go():
         entered = asyncio.Event()
 
-        async def hanging_start(machine_id):
+        async def hanging_start(machine_id, **kw):
             fake.machines[machine_id]["state"] = "started"
             entered.set()
             await asyncio.Event().wait()
@@ -1658,7 +1709,7 @@ def test_unknown_outcome_never_fails_over_to_another_provider(fly_env, seam, mon
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     fake = FakeFly()
     fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
-                                "config": {"mounts": []}}  # fmt: skip
+                                "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
     real = fake.handler
 
     def handler(request):
@@ -2237,7 +2288,9 @@ def test_a_clean_stopped_machine_is_admitted_with_a_version_precondition(fly_env
     executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
     job = _codex_job()
     assert asyncio.run(executor.run(job))[0] == 0
-    first_update = json.loads(_mutations(fake)[0].content)
+    first_update = json.loads(next(
+        r for r in _mutations(fake) if r.url.path.endswith("/machines/m-codex")
+    ).content)
     assert first_update["current_version"] == "v-before-write"
     assert fly_runner._config_run_id(first_update["config"]) == job.run_id
 
@@ -2348,6 +2401,9 @@ def test_two_processes_without_a_shared_ledger_only_one_wins_the_machine(fly_env
     fake = FakeFly()
     fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
                                 "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
+    # The LEASE alone must decide the race: the double ignores current_version
+    # here, since Fly does not document what a mismatch returns.
+    fake.enforce_version = False
     shared = _SharedFly(fake, slow_login_wait=1.0)
     script = tmp_path / "contender.py"
     script.write_text(_CONTENDER)
@@ -2375,9 +2431,225 @@ def test_two_processes_without_a_shared_ledger_only_one_wins_the_machine(fly_env
         shared.close()
     outcomes = sorted(r["outcome"] for r in results.values())
     assert outcomes == ["ran", "refused"], results
+    assert sum(1 for kind, _ in fake.lease_log if kind == "acquire") == 1  # one lease holder
+    assert fake.leases == {}
     loser = next(n for n, r in results.items() if r["outcome"] == "refused")
     winner = next(n for n, r in results.items() if r["outcome"] == "ran")
     assert loser not in fake.stored  # the loser's job config was never stored
     assert winner in fake.stored
     starts = [r for r in fake.requests if r.method == "POST" and r.url.path.endswith("/start")]
     assert len(starts) == 1
+
+
+# ── Leases and mandatory versions (round 8) ──────────────────────────────────
+
+
+def _machine_writes(fake, machine="m-codex"):
+    """update, start, stop and delete calls on the machine (lease calls apart)."""
+    return [r for r in fake.requests if r.method in ("POST", "DELETE")
+            and f"/machines/{machine}" in r.url.path
+            and not r.url.path.endswith("/lease")]  # fmt: skip
+
+
+@pytest.mark.parametrize("damage", ["no_version", "empty_version", "no_config", "null_config"])
+def test_an_incompletely_known_login_machine_is_refused_with_no_writes(
+    fly_env, monkeypatch, damage
+):
+    fake = _codex_fake(monkeypatch)
+    machine = fake.machines["m-codex"]
+    if damage == "no_version":
+        machine.pop("instance_id")
+    elif damage == "empty_version":
+        machine["instance_id"] = ""
+    elif damage == "no_config":
+        machine.pop("config")
+    else:
+        machine["config"] = None
+    executor, _, revoked = make_executor(fake)
+    with pytest.raises(fly_runner.FlyRefusal, match="missing") as exc:
+        asyncio.run(executor.run(_codex_job()))
+    assert exc.value.cooled_until
+    assert _machine_writes(fake) == [] and fake.lease_log == []
+    assert executor.ledger.snapshot()["in_flight"] == {}
+    assert revoked == [MINTED]
+
+
+def test_a_lease_held_elsewhere_means_busy_with_no_writes(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    fake.leases["m-codex"] = {"nonce": "someone-elses-nonce", "description": "other",
+                              "expires_at": 4_000_000_000}  # fmt: skip
+    executor, _, _ = make_executor(fake)
+    with pytest.raises(fly_runner.FlyRefusal, match="lease is held by another") as exc:
+        asyncio.run(executor.run(_codex_job()))
+    assert exc.value.cooled_until
+    assert _machine_writes(fake) == []
+    assert fake.leases["m-codex"]["nonce"] == "someone-elses-nonce"  # untouched
+
+
+@pytest.mark.parametrize("mode", ["error", "no_nonce"])
+def test_an_unexpected_lease_answer_is_refused(fly_env, monkeypatch, mode):
+    fake = _codex_fake(monkeypatch)
+    fake.lease_mode = mode
+    executor, _, _ = make_executor(fake)
+    with pytest.raises(fly_runner.FlyRefusal, match="lease could not be taken"):
+        asyncio.run(executor.run(_codex_job()))
+    assert _machine_writes(fake) == []
+
+
+def test_the_nonce_is_sent_on_every_mutating_call(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    real_wait = executor.client.wait
+
+    async def wait_leaves_running(machine_id, **k):
+        if k.get("timeout_s") == 30:
+            return await real_wait(machine_id, **k)
+        return "reached"  # the job finished, but the machine still reads started
+
+    executor.client.wait = wait_leaves_running
+    asyncio.run(executor.run(_codex_job()))
+    writes = _machine_writes(fake)
+    kinds = {r.url.path.rsplit("/", 1)[1] for r in writes}
+    assert {"m-codex", "start", "stop"} <= kinds  # update, start, stop all happened
+    acquire = [r for r in fake.requests if r.method == "POST" and r.url.path.endswith("/lease")]
+    assert len(acquire) == 1
+    for request in writes + [r for r in fake.requests if r.method == "DELETE"
+                             and r.url.path.endswith("/lease")]:  # fmt: skip
+        assert request.headers.get("fly-machine-lease-nonce"), request.url.path
+    assert fake.leases == {}
+
+
+def test_an_update_without_the_nonce_on_a_leased_machine_is_rejected(fly_env, monkeypatch):
+    """The double behaves as Fly documents."""
+    fake = _codex_fake(monkeypatch)
+    config = fly_runner.FlyConfig.from_env()
+    client = fly_runner.FlyMachinesClient(config, transport=httpx.MockTransport(fake.handler))
+    nonce, _ = asyncio.run(client.acquire_lease("m-codex", ttl=60, description="t"))
+    with pytest.raises(fly_runner.FlyApiError) as exc:
+        asyncio.run(client.update("m-codex", {"config": {}, "skip_launch": True}))
+    assert exc.value.status == 409
+    asyncio.run(client.update("m-codex", {"config": {}, "skip_launch": True}, nonce=nonce))
+
+
+def test_the_nonce_never_appears_in_logs_results_events_or_json(
+    fly_env, seam, monkeypatch, caplog
+):
+    spawned, fake_exec = seam
+    events = []
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: events.append(kw))
+    fake = _codex_fake(monkeypatch)
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", "/usr/bin/codex-test")
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "fine"})
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    caplog.set_level(logging.DEBUG)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = asyncio.run(skill_runner._run_skill_once(
+            "lanius", "check", provider="codex", role="lanius", runner="fly",
+            repository="owner/repo", include_github_contract=True,
+        ))  # fmt: skip
+    nonces = set(fly_runner._LEASE_NONCES)
+    assert nonces, "no lease was taken"
+    surfaces = [caplog.text, json.dumps(events, default=str), result.stdout, result.stderr,
+                result.error, json.dumps(fly_runner.redact_nonces(str(result)))]  # fmt: skip
+    for request in fake.requests:  # the job files sent to the machine
+        surfaces.extend(_decoded_files(request))
+    for nonce in nonces:
+        for text in surfaces:
+            assert nonce not in text
+    assert fly_runner.redact_nonces(f"x {next(iter(nonces))} y") == "x [lease-nonce] y"
+
+
+@pytest.mark.parametrize("path", ["success", "failure", "timeout", "cancellation"])
+def test_the_lease_is_released_on_every_exit_path(fly_env, monkeypatch, path):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    record = {"exit_code": 0 if path == "success" else 1, "stdout": "x"}
+    executor, _, _ = make_executor(fake, clock=clock, record=record)
+    job = _codex_job()
+
+    async def go():
+        if path == "timeout":
+            real_wait = executor.client.wait
+
+            async def slow(machine_id, **k):
+                if k.get("timeout_s") == 30:
+                    return await real_wait(machine_id, **k)
+                clock.now += 600
+                return "timeout"
+
+            executor.client.wait = slow
+            with pytest.raises(asyncio.TimeoutError):
+                await executor.run(job)
+        elif path == "cancellation":
+            started = asyncio.Event()
+
+            async def hang(machine_id, **k):
+                if k.get("timeout_s") == 30:
+                    return "reached"
+                started.set()
+                await asyncio.Event().wait()
+
+            executor.client.wait = hang
+            task = asyncio.create_task(executor.run(job))
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            await executor.run(job)
+
+    asyncio.run(go())
+    assert fake.leases == {}, path
+    assert ("release", "m-codex") in fake.lease_log
+    assert executor.ledger.snapshot(clock.now)["in_flight"] == {}
+
+
+def test_a_lease_whose_release_fails_keeps_the_reservation(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    fake.release_fails = True
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    job = _codex_job()
+    asyncio.run(executor.run(job))
+    assert job.remote_state == "unconfirmed"
+    entry = executor.ledger.entry(job.run_id)
+    assert entry is not None and entry["unconfirmed"] is True
+    assert entry["lease_nonce"]  # kept, so a later settlement can release it
+    fake.release_fails = False
+    assert job.run_id in asyncio.run(executor.reap())
+    assert fake.leases == {} and executor.ledger.entry(job.run_id) is None
+
+
+def test_the_run_deadline_never_outlives_the_lease(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    real = fake.handler
+
+    def short_lease(request):
+        response = real(request)
+        if request.method == "POST" and request.url.path.endswith("/lease"):
+            data = json.loads(response.content)
+            data["data"]["expires_at"] = clock.now + 100  # shorter than the run
+            return httpx.Response(200, json=data)
+        return response
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(short_lease)
+    )
+    seen = {}
+    real_wait = executor.client.wait
+
+    async def wait(machine_id, **k):
+        if k.get("timeout_s") == 30:
+            return await real_wait(machine_id, **k)
+        seen.setdefault("first_budget", k.get("timeout_s"))
+        clock.now += 50
+        return "timeout"
+
+    executor.client.wait = wait
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(executor.run(_codex_job()))
+    # Deadline = lease expiry - LEASE_SAFETY_SECONDS = 40 s from start.
+    assert seen["first_budget"] <= 100 - fly_runner.LEASE_SAFETY_SECONDS
+    assert fake.leases == {}  # stopped, cleaned and released at that deadline

@@ -103,16 +103,34 @@ class FlyLaunchError(Exception):
 
 _OPAQUE_RUN = __import__("re").compile(r"[A-Za-z0-9+/=_\-]{40,}")
 
+# Every Machines API lease nonce this process has held. A nonce is a secret
+# (it authorises changes to a leased machine): it is never logged, recorded,
+# put in a harness_event or a result, and any text that could carry one is
+# passed through ``redact_nonces`` first.
+_LEASE_NONCES: set[str] = set()
+LEASE_NONCE_HEADER = "fly-machine-lease-nonce"
+
+
+def redact_nonces(text: str) -> str:
+    for nonce in list(_LEASE_NONCES):
+        if nonce:
+            text = text.replace(nonce, "[lease-nonce]")
+    return text
+
 
 class FlyApiError(Exception):
     """A Machines API failure. Its text reaches results, logs and operator
     notices, so any long opaque run (which could be an echoed, encoded job
-    file) is redacted, and the message is capped."""
+    file) and any lease nonce is redacted, and the message is capped."""
 
     def __init__(self, status: int, message: str):
-        safe = _OPAQUE_RUN.sub("[redacted]", str(message))[:200]
+        safe = redact_nonces(_OPAQUE_RUN.sub("[redacted]", str(message)))[:200]
         super().__init__(f"Fly API HTTP {status}: {safe}")
         self.status = status
+
+
+class FlyLeaseBusy(FlyApiError):
+    """Another holder has the machine's lease."""
 
 
 def _render_wall(ts: float) -> str:
@@ -416,7 +434,10 @@ class FlyLedger:
                 del owners[oid]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, sort_keys=True, indent=1), encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, sort_keys=True, indent=1))
+        os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
 
     def _roll(self, data: dict, now: float) -> None:
@@ -509,6 +530,26 @@ class FlyLedger:
             })  # fmt: skip
             self._save(data)
         return key
+
+    def set_lease(self, run_id: str, nonce: str, expires_at: float | None) -> None:
+        """Keep the lease nonce WITH the reservation, so a later settlement or
+        reaper from the same owner can release it. The ledger file is private
+        to the operator (mode 0600)."""
+        with self._locked():
+            data = self._load()
+            entry = data["in_flight"].get(run_id)
+            if entry is not None:
+                entry["lease_nonce"] = nonce
+                entry["lease_expires"] = expires_at
+                self._save(data)
+
+    def clear_lease(self, run_id: str) -> None:
+        with self._locked():
+            data = self._load()
+            entry = data["in_flight"].get(run_id)
+            if entry is not None and entry.pop("lease_nonce", None) is not None:
+                entry.pop("lease_expires", None)
+                self._save(data)
 
     def set_machine(self, run_id: str, machine_id: str) -> None:
         with self._locked():
@@ -610,9 +651,10 @@ class FlyMachinesClient:
         )
 
     async def _call(self, method: str, path: str, *, params=None, body=None,
-                    parse: bool = True) -> Any:  # fmt: skip
+                    parse: bool = True, nonce: str = "") -> Any:  # fmt: skip
+        headers = {LEASE_NONCE_HEADER: nonce} if nonce else None
         async with self._client() as client:
-            resp = await client.request(method, path, params=params, json=body)
+            resp = await client.request(method, path, params=params, json=body, headers=headers)
         if not 200 <= resp.status_code < 300:
             try:
                 message = str(resp.json().get("error") or resp.text)
@@ -670,20 +712,65 @@ class FlyMachinesClient:
             raise _invalid("machine has no state")
         return machine
 
-    async def update(self, machine_id: str, body: dict) -> dict:
+    async def update(self, machine_id: str, body: dict, *, nonce: str = "") -> dict:
         """Update a machine's config; the answer must be THAT machine."""
-        data = await self._call("POST", f"/machines/{machine_id}", body=body)
+        data = await self._call("POST", f"/machines/{machine_id}", body=body, nonce=nonce)
         return self._machine(data, expect_id=machine_id, require_state=False)
 
-    async def start(self, machine_id: str) -> None:
-        await self._call("POST", f"/machines/{machine_id}/start", parse=False)
+    async def start(self, machine_id: str, *, nonce: str = "") -> None:
+        await self._call("POST", f"/machines/{machine_id}/start", parse=False, nonce=nonce)
 
-    async def stop(self, machine_id: str) -> None:
+    async def stop(self, machine_id: str, *, nonce: str = "") -> None:
         try:
-            await self._call("POST", f"/machines/{machine_id}/stop", parse=False)
+            await self._call("POST", f"/machines/{machine_id}/stop", parse=False, nonce=nonce)
         except FlyApiError as exc:
             if exc.status != 404:
                 raise
+
+    async def acquire_lease(self, machine_id: str, *, ttl: int,
+                            description: str) -> tuple[str, float | None]:  # fmt: skip
+        """Take the machine's lease. Returns ``(nonce, expires_at)``.
+
+        Documented: a lease is "an exclusive lock on modifying a Machine",
+        taken with a ``ttl``; later calls send the nonce header. NOT
+        documented: the status of a conflict. Only a 2xx carrying a nonce is
+        success; a 409 is ``FlyLeaseBusy``; anything else raises."""
+        try:
+            data = await self._call(
+                "POST", f"/machines/{machine_id}/lease",
+                body={"ttl": int(ttl), "description": description},
+            )  # fmt: skip
+        except FlyApiError as exc:
+            if exc.status == 409:
+                raise FlyLeaseBusy(409, "machine is leased by another holder") from None
+            raise
+        payload = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            raise _invalid("lease answer has no data object")
+        nonce = payload.get("nonce")
+        if not isinstance(nonce, str) or not nonce:
+            raise _invalid("lease answer has no nonce")
+        _LEASE_NONCES.add(nonce)
+        expires = payload.get("expires_at")
+        if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+            expires = None
+        return nonce, (float(expires) if expires is not None else None)
+
+    async def release_lease(self, machine_id: str, nonce: str) -> None:
+        await self._call("DELETE", f"/machines/{machine_id}/lease", parse=False, nonce=nonce)
+
+    async def get_lease(self, machine_id: str) -> dict | None:
+        """The current lease's public fields, or None ONLY for an explicit 404."""
+        try:
+            data = await self._call("GET", f"/machines/{machine_id}/lease")
+        except FlyApiError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        payload = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            raise _invalid("lease view has no data object")
+        return payload
 
     async def destroy(self, machine_id: str) -> None:
         try:
@@ -1155,6 +1242,7 @@ class _LaunchState:
     config_written: bool = False  # a login machine's stored config holds job files
     machine_id: str = ""
     lock: asyncio.Lock | None = None
+    lease_nonce: str = field(default="", repr=False)  # a secret: never logged
 
 
 @dataclass
@@ -1366,8 +1454,22 @@ class FlyExecutor:
             try:
                 if job.login:
                     await self._reconcile_login(login_id, job.run_id)
-                    await self._write_login_config(login_id, job, deadline, launch)
-                    await self._request(launch, self.client.start(login_id), job)
+                    # Cheap pre-check: an incomplete or busy machine is refused
+                    # before even a lease is asked for.
+                    pre = await self.client.get(login_id)
+                    if pre is None:
+                        raise FlyApiError(404, f"{job.provider} login machine not found")
+                    self._refuse_unless_free(pre, job)
+                    nonce, expires = await self._acquire_lease(login_id, job, deadline)
+                    launch.lease_nonce = nonce
+                    self.ledger.set_lease(job.run_id, nonce, expires)
+                    if expires is not None:
+                        # A run must never outlive its lease: its deadline is
+                        # cut short of the lease's expiry, and at the deadline
+                        # the machine is stopped and the run settled.
+                        deadline = min(deadline, expires - LEASE_SAFETY_SECONDS)
+                    await self._write_login_config(login_id, job, deadline, launch, nonce)
+                    await self._request(launch, self.client.start(login_id, nonce=nonce), job)
                     machine_id, instance_id = login_id, ""
                 else:
                     created = await self._request(
@@ -1388,8 +1490,48 @@ class FlyExecutor:
         )
         return FlyHandle(job, machine_id, instance_id, started, deadline)
 
+    def _refuse_unless_free(self, machine: dict, job: FlyJob) -> None:
+        refusal = _login_admission_refusal(machine, job.run_id)
+        if refusal:
+            raise FlyRefusal(
+                f"{job.provider} login machine is not free ({refusal}); nothing was changed",
+                _render_wall(self._clock() + 300),
+            )
+
+    async def _acquire_lease(self, machine_id: str, job: FlyJob,
+                             deadline: float) -> tuple[str, float | None]:  # fmt: skip
+        """The login machine's lease, the ownership token for this run. Busy,
+        or any answer that is not a clean grant, is a retry-later refusal."""
+        ttl = max(60, int(deadline - self._clock()) + REAP_GRACE_SECONDS)
+        try:
+            return await self.client.acquire_lease(
+                machine_id, ttl=ttl, description=_lease_description(job.run_id)
+            )
+        except FlyLeaseBusy:
+            reason = "its lease is held by another dispatcher"
+        except (FlyApiError, httpx.HTTPError) as exc:
+            reason = f"its lease could not be taken ({type(exc).__name__})"
+        raise FlyRefusal(
+            f"{job.provider} login machine is not free ({reason}); nothing was changed",
+            _render_wall(self._clock() + 300),
+        )
+
+    async def _release_lease(self, machine_id: str, nonce: str, run_id: str) -> bool:
+        """Release this run's lease; True when it is verifiably no longer
+        held by this run (released, expired, or now someone else's)."""
+        try:
+            await self.client.release_lease(machine_id, nonce)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[fly] lease release on {machine_id} failed: {type(exc).__name__}")
+        try:
+            lease = await self.client.get_lease(machine_id)
+        except Exception:  # noqa: BLE001 — unknown: the run keeps its reservation
+            return False
+        return lease is None or lease.get("description") != _lease_description(run_id)
+
     async def _write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
-                                  launch: "_LaunchState") -> None:  # fmt: skip
+                                  launch: "_LaunchState", nonce: str) -> None:  # fmt: skip
         """Install this run's job on a login machine, compare-and-set against
         the machine's LIVE state (the ledger is not the source of truth for
         what a machine is running: it can be lost, unshared, or on another
@@ -1403,28 +1545,24 @@ class FlyExecutor:
         precondition, and the stored config is read back afterwards: unless
         it is this run's, the launch fails closed before any start.
         """
-        machine = await self.client.get(machine_id)
+        machine = await self.client.get(machine_id)  # re-read under the lease
         if machine is None:
             raise FlyApiError(404, f"{job.provider} login machine not found")
-        refusal = _login_admission_refusal(machine, job.run_id)
-        if refusal:
-            raise FlyRefusal(
-                f"{job.provider} login machine is not free ({refusal}); nothing was changed",
-                _render_wall(self._clock() + 300),
-            )
-        cfg = copy.deepcopy(machine.get("config") or {})
+        self._refuse_unless_free(machine, job)
+        cfg = copy.deepcopy(machine["config"])
         cfg["image"] = self.config.image
         cfg["auto_destroy"] = False
         cfg["restart"] = {"policy": "no"}
         cfg["env"] = machine_env(job, deadline)
         cfg["files"] = job_files(job, self.config)
         cfg["metadata"] = {**dict(cfg.get("metadata") or {}), "ateles_run_id": job.run_id}
-        body: dict = {"config": cfg, "skip_launch": True}
-        if isinstance(machine.get("instance_id"), str) and machine["instance_id"]:
-            body["current_version"] = machine["instance_id"]
+        # The version precondition is mandatory: _refuse_unless_free has
+        # already refused a machine whose answer carried no usable version.
+        body: dict = {"config": cfg, "skip_launch": True,
+                      "current_version": machine["instance_id"]}  # fmt: skip
         launch.config_written = True  # from here the stored config may hold this job
         try:
-            await self.client.update(machine_id, body)
+            await self.client.update(machine_id, body, nonce=nonce)
         except FlyApiError as exc:
             if exc.status in (409, 412):
                 # The machine changed between the check and the write.
@@ -1438,7 +1576,7 @@ class FlyExecutor:
                 or _config_run_id(after.get("config") or {}) != job.run_id):  # fmt: skip
             raise FlyApiError(409, "login machine config is not this run's after the write")
 
-    async def _scrub_login_machine(self, machine_id: str, run_id: str) -> bool:
+    async def _scrub_login_machine(self, machine_id: str, run_id: str, nonce: str = "") -> bool:
         """Remove THIS run's files from a stopped login machine's stored
         config, then read it back. True only when the config verifiably no
         longer carries this run's job.
@@ -1462,17 +1600,16 @@ class FlyExecutor:
                 log.warning(f"[fly] login machine {machine_id} holds an unattributed job config")
                 return False
             if owner == run_id:
-                if machine["state"] != "stopped":
-                    return False  # never rewrite the config of a running machine
+                if machine["state"] != "stopped" or _login_machine_problem(machine):
+                    return False  # never rewrite a running or incompletely known machine
                 cfg["files"] = []
                 cfg["env"] = {}
                 metadata = dict(cfg.get("metadata") or {})
                 metadata.pop("ateles_run_id", None)
                 cfg["metadata"] = metadata
-                body: dict = {"config": cfg, "skip_launch": True}
-                if isinstance(machine.get("instance_id"), str) and machine["instance_id"]:
-                    body["current_version"] = machine["instance_id"]
-                await self.client.update(machine_id, body)
+                body: dict = {"config": cfg, "skip_launch": True,
+                              "current_version": machine["instance_id"]}  # fmt: skip
+                await self.client.update(machine_id, body, nonce=nonce)
             after = await self.client.get(machine_id)
             if after is None:
                 return True
@@ -1489,8 +1626,13 @@ class FlyExecutor:
         no other dispatcher can take the machine while it holds this job."""
         async with self._admission():
             if launch.config_written and launch.machine_id:
-                if not await self._scrub_login_machine(launch.machine_id, run_id):
+                if not await self._scrub_login_machine(launch.machine_id, run_id,
+                                                       launch.lease_nonce):  # fmt: skip
                     self.ledger.mark_unconfirmed(run_id, reason="job config not cleared")
+                    return
+            if launch.lease_nonce and launch.machine_id:
+                if not await self._release_lease(launch.machine_id, launch.lease_nonce, run_id):
+                    self.ledger.mark_unconfirmed(run_id, reason="lease not released")
                     return
             self.ledger.release(run_id)
 
@@ -1540,8 +1682,8 @@ class FlyExecutor:
                 raise FlyResultUnreadable(f"result record field {name} is not text")
         if record.get("probe_ok") is False:
             log.error(f"[fly] run={job.run_id} credential probe failed: {record.get('refused')}")
-        stdout = str(record.get("stdout") or "")
-        stderr = str(record.get("stderr_tail") or "")
+        stdout = redact_nonces(str(record.get("stdout") or ""))
+        stderr = redact_nonces(str(record.get("stderr_tail") or ""))
         if record.get("stdout_truncated"):
             # Never silent: the caller's stdout says so on its first line (a
             # verdict parsed from the LAST line is unaffected), stderr says
@@ -1580,14 +1722,15 @@ class FlyExecutor:
             return True  # already settled
         machine_id = str(entry.get("machine_id") or "")
         login = bool(entry.get("login"))
+        nonce = str(entry.get("lease_nonce") or "")
         if machine_id:
             verdict = await self._ownership(machine_id, run_id, login=login)
             if verdict == "gone":
                 confirmed = True
             elif verdict == "ours":
-                confirmed = await self._terminate(machine_id, login=login)
+                confirmed = await self._terminate(machine_id, login=login, nonce=nonce)
                 if confirmed and login:
-                    confirmed = await self._scrub_login_machine(machine_id, run_id)
+                    confirmed = await self._scrub_login_machine(machine_id, run_id, nonce)
             elif verdict == "idle":
                 confirmed = True  # a stopped login machine holding no job at all
             else:
@@ -1601,6 +1744,12 @@ class FlyExecutor:
                 )
         else:
             confirmed = await self._terminate_by_run_id(run_id)
+        if confirmed and login and machine_id and nonce:
+            # After the confirmed stop and clean-up, before the reservation
+            # goes: the lease. A failed release keeps the reservation.
+            confirmed = await self._release_lease(machine_id, nonce, run_id)
+            if confirmed:
+                self.ledger.clear_lease(run_id)
         if confirmed:
             self.ledger.settle(run_id, config=self.config, now=self._clock())
         else:
@@ -1627,6 +1776,8 @@ class FlyExecutor:
             return "other"
         if machine is None or machine["state"] == "destroyed":
             return "gone"
+        if login and _login_machine_problem(machine):
+            return "other"  # incompletely known: not ours to touch
         cfg = machine.get("config") or {}
         owner = _config_run_id(cfg)
         if owner == run_id:
@@ -1669,7 +1820,7 @@ class FlyExecutor:
             for m in after
         )
 
-    async def _terminate(self, machine_id: str, *, login: bool) -> bool:
+    async def _terminate(self, machine_id: str, *, login: bool, nonce: str = "") -> bool:
         """Stop a login machine, or destroy a per-job one, and CONFIRM it by
         reading its state back (validated; only an explicit 404 is absence).
         An acknowledged delete is not confirmation. Never raises an ordinary
@@ -1681,7 +1832,7 @@ class FlyExecutor:
             if login:
                 if machine["state"] == "stopped":
                     return True
-                await self.client.stop(machine_id)
+                await self.client.stop(machine_id, nonce=nonce)
                 await self.client.wait(machine_id, state="stopped", timeout_s=30)
                 after = await self.client.get(machine_id)
                 return after is None or after["state"] in ("stopped", "destroyed")
@@ -1817,11 +1968,37 @@ def _machine_run_id(machine: dict) -> str:
     return str(((machine.get("config") or {}).get("metadata") or {}).get("ateles_run_id") or "")
 
 
+LEASE_SAFETY_SECONDS = 60
+
+
+def _lease_description(run_id: str) -> str:
+    return f"ateles-fly-runner {run_id}"
+
+
+def _login_machine_problem(machine: dict) -> str:
+    """What is missing for a login machine's state to be trusted, or "".
+    Absence is never availability: the config must be an object that is
+    present, and the version a non-empty string."""
+    if not isinstance(machine.get("config"), dict):
+        return "its configuration is missing"
+    version = machine.get("instance_id")
+    if not isinstance(version, str) or not version:
+        return "its version is missing"
+    state = machine.get("state")
+    if not isinstance(state, str) or not state:
+        return "its state is missing"
+    return ""
+
+
 def _login_admission_refusal(machine: dict, run_id: str) -> str:
     """Why a login machine's live state forbids installing *run_id*'s job,
-    or "" when it is free: stopped, with no job config or only this run's."""
+    or "" when it is free: completely known, stopped, with no job config or
+    only this run's."""
+    problem = _login_machine_problem(machine)
+    if problem:
+        return problem
     state = machine.get("state")
-    cfg = machine.get("config") or {}
+    cfg = machine["config"]
     owner = _config_run_id(cfg)
     if state != "stopped":
         return f"it is {state}"

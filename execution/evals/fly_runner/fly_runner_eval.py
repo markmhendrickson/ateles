@@ -75,6 +75,10 @@ class FakeFly:
         self.created: list[str] = []
         self.deleted: list[str] = []
         self.sticky: set[str] = set()  # delete acknowledged, machine keeps running
+        self.leases: dict[str, dict] = {}
+        self.lease_log: list[tuple[str, str]] = []
+        self.lease_mode = "ok"
+        self.release_fails = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -95,6 +99,50 @@ class FakeFly:
             return httpx.Response(200, json=list(self.machines.values()))
         parts = rest.split("/")
         mid = parts[2]
+        method = request.method
+        # ── Leases, as Fly documents them: an exclusive lock on modifying a
+        # machine; later calls carry the nonce header; an update without it
+        # on a leased machine fails. This double also refuses start, stop
+        # and delete without it (the docs are silent; the code never relies
+        # on either answer).
+        if len(parts) == 4 and parts[3] == "lease":
+            held = self.leases.get(mid)
+            given = request.headers.get("fly-machine-lease-nonce", "")
+            if method == "POST":
+                if self.lease_mode == "error":
+                    return httpx.Response(500, json={"error": "lease service unavailable"})
+                if self.lease_mode == "no_nonce":
+                    return httpx.Response(200, json={"status": "success", "data": {}})
+                if held and given != held["nonce"]:
+                    return httpx.Response(409, json={"error": "machine already leased"})
+                body = json.loads(request.content or b"{}")
+                nonce = held["nonce"] if held else f"nonce-{len(self.lease_log)}-{mid}-secret"
+                self.leases[mid] = {"nonce": nonce, "description": body.get("description", ""),
+                                    "expires_at": 4_000_000_000}  # fmt: skip
+                self.lease_log.append(("acquire", mid))
+                return httpx.Response(200, json={"status": "success", "data": {
+                    "nonce": nonce, "expires_at": 4_000_000_000,
+                    "description": body.get("description", "")}})  # fmt: skip
+            if method == "GET":
+                if not held:
+                    return httpx.Response(404, json={"error": "no lease"})
+                return httpx.Response(200, json={"status": "success", "data": {
+                    "description": held["description"], "expires_at": held["expires_at"]}})
+            if method == "DELETE":
+                if self.release_fails:
+                    return httpx.Response(500, json={"error": "release failed"})
+                if not held:
+                    return httpx.Response(404, json={"error": "no lease"})
+                if given != held["nonce"]:
+                    return httpx.Response(409, json={"error": "wrong nonce"})
+                del self.leases[mid]
+                self.lease_log.append(("release", mid))
+                return httpx.Response(200, json={"ok": True})
+        held = self.leases.get(mid)
+        if held and method in ("POST", "DELETE") and (
+            request.headers.get("fly-machine-lease-nonce", "") != held["nonce"]
+        ):
+            return httpx.Response(409, json={"error": "machine is leased; nonce required"})
         if request.method == "GET" and parts[3:] == ["wait"]:
             if self.machines.get(mid, {}).get("login"):
                 # The runner exits when its one job is done; the machine stops.
@@ -113,12 +161,17 @@ class FakeFly:
             return httpx.Response(404, json={"error": "not found"})
         if request.method == "POST" and len(parts) == 3:  # update a login machine
             body = json.loads(request.content)
+            machine = self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})
+            current = machine.get("instance_id")
+            if "current_version" in body and current and body["current_version"] != current:
+                return httpx.Response(412, json={"error": "machine version changed"})
             clearing = body["config"].get("files") == []
             if not (clearing and self.scrub_ignored):
-                self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})[
-                    "config"
-                ] = body["config"]
-            return httpx.Response(200, json={"id": mid, "instance_id": f"i-{mid}"})
+                machine["config"] = body["config"]
+                if current:
+                    machine["instance_id"] = f"{current}+"
+            return httpx.Response(200, json={"id": mid, "instance_id": machine.get("instance_id")
+                                             or f"i-{mid}"})  # fmt: skip
         if request.method == "POST" and parts[3:] == ["start"]:
             self.machines[mid]["state"] = "started"
             cfg = self.machines[mid].get("config") or {}
@@ -170,6 +223,8 @@ class Trace:
     login_config_run_id: str = ""
     login_stop_requests: int = 0
     login_mutations: int = 0
+    login_lease_holder: str = ""
+    lease_released: bool = False
     envelopes: list = field(default_factory=list)
     exit_codes: list = field(default_factory=list)
     starts: list = field(default_factory=list)
@@ -273,7 +328,16 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         fake.lost_error = scenario["fly"]["lost_error"]
         fake.start_lost = True
     fake.machines["m-codex-login"] = {"id": "m-codex-login", "state": "stopped", "login": True,
-                                      "config": {"mounts": []}}  # fmt: skip
+                                      "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
+    foreign_lease = scenario["fly"].get("login_lease")
+    if foreign_lease:
+        fake.leases["m-codex-login"] = {"nonce": "foreign-holder-nonce",
+                                        "description": foreign_lease, "expires_at": 4_000_000_000}
+    if "login_version" in scenario["fly"]:
+        if scenario["fly"]["login_version"] is None:
+            fake.machines["m-codex-login"].pop("instance_id")
+        else:
+            fake.machines["m-codex-login"]["instance_id"] = scenario["fly"]["login_version"]
     busy = scenario["fly"].get("login_machine")
     if busy:
         # The machine's own live state, with NO ledger entry behind it.
@@ -428,7 +492,10 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         login_stop_requests=sum(1 for r in fake.requests if r.method == "POST"
                                 and r.url.path.endswith("/m-codex-login/stop")),
         login_mutations=sum(1 for r in fake.requests if r.method in ("POST", "DELETE")
-                            and "/machines/m-codex-login" in r.url.path),
+                            and "/machines/m-codex-login" in r.url.path
+                            and not r.url.path.endswith("/lease")),
+        login_lease_holder=str((fake.leases.get("m-codex-login") or {}).get("description", "")),
+        lease_released=("release", "m-codex-login") in fake.lease_log,
         envelopes=envelopes,
         exit_codes=exit_codes,
         starts=list(fake.starts),
@@ -536,6 +603,11 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
     if "login_config_run_id" in e and trace.login_config_run_id != e["login_config_run_id"]:
         problems.append(f"login machine config belongs to {trace.login_config_run_id!r}, "
                         f"expected {e['login_config_run_id']!r}")  # fmt: skip
+    if "login_lease_holder" in e and trace.login_lease_holder != e["login_lease_holder"]:
+        problems.append(f"login lease held by {trace.login_lease_holder!r}, "
+                        f"expected {e['login_lease_holder']!r}")  # fmt: skip
+    if e.get("lease_released") and not trace.lease_released:
+        problems.append("the run's lease was never released")
     if "login_mutations" in e and trace.login_mutations != e["login_mutations"]:
         problems.append(f"{trace.login_mutations} write(s) to the login machine")
     if "login_stop_requests" in e and trace.login_stop_requests != e["login_stop_requests"]:

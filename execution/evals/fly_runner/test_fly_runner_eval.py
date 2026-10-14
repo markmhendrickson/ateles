@@ -57,6 +57,8 @@ def test_scenario_set_covers_the_required_behaviours():
         "malformed_result_read_keeps_outcome_unknown",
         "login_machine_stopped_with_foreign_job_and_no_ledger_entry_is_refused",
         "login_machine_started_with_foreign_job_and_no_ledger_entry_is_refused",
+        "login_machine_leased_elsewhere_is_refused",
+        "login_machine_without_version_is_refused",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -152,3 +154,10 @@ def test_judge_goes_red_when_admission_overwrites_a_foreign_job(tmp_path, monkey
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
     overwritten = dataclasses.replace(trace, login_mutations=2, login_config_run_id="mine")
     assert len(runner.judge(scenario, overwritten)) >= 2
+
+
+def test_judge_goes_red_when_a_foreign_lease_is_overridden(tmp_path, monkeypatch):
+    scenario = _by_id("login_machine_leased_elsewhere_is_refused")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    taken = dataclasses.replace(trace, login_lease_holder="ateles-fly-runner x", login_mutations=2)
+    assert len(runner.judge(scenario, taken)) >= 2
