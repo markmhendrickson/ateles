@@ -425,6 +425,9 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     mp.setenv("APIS_TIER_LEDGER_FILE", str(root / "tier-ledger.jsonl"))
     mp.setenv("NEOTOMA_BASE_URL", "http://eval.invalid")
     mp.setattr(skill_runner, "CODEX_BIN", str(world.codex))
+    # The SKILL.md it loads is this checkout's, not whatever ~/repos/ateles holds
+    # on the machine running the eval.
+    mp.setattr(skill_runner, "ATELES_REPO", REPO_ROOT)
     mp.setattr(skill_runner, "DISPATCH_FAILURE_LOG_DIR", root / "dispatch-failures")
     mp.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
     mp.setattr(model_tiering, "configured_action_policy", lambda: {})
@@ -619,8 +622,8 @@ def check(scenario: dict, obs: dict) -> list[str]:
             common = str((world.clone / ".git").resolve())
             want(
                 "git roots are the worktree's gitdir and the common dir",
-                sorted(child["add_dirs"])
-                == sorted([common, str(Path(common, "worktrees", Path(child["cwd"]).name).resolve())]),
+                sorted(child.get("add_dirs", []))
+                == sorted([common, str(Path(common, "worktrees", Path(child.get("cwd", "")).name).resolve())]),
                 True,
             )
     if "sandbox" in exp:

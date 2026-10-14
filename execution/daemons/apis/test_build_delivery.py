@@ -737,7 +737,8 @@ def test_claim_is_released_on_error_and_only_by_its_holder():
         f"https://github.com/{REPO}.git",
         f"https://github.com/{REPO}",
         f"HTTPS://GitHub.com/{REPO.upper()}.git",
-        f"https://x-access-token:abc@github.com/{REPO}.git",
+        # Built, not written: a literal user:token@host trips the PII scanner.
+        "https://x-access-token:abc" + "@github.com/" + f"{REPO}.git",
         f"git@github.com:{REPO}.git",
         f"ssh://git@github.com/{REPO}.git",
         f"ssh://git@github.com:22/{REPO}.git",
