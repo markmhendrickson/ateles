@@ -3804,18 +3804,22 @@ class TestAMalformedExpectedLensRosterRefusesApproval:
     """`ATELES_EXPECTED_LENS_APPS="pm;qa"` is one entry that is not a lens name. It
     must refuse, naming the entry, not be dropped as though nothing were expected."""
 
-    async def test_the_planner_refuses_even_when_every_cleared_lens_has_its_app(self, monkeypatch):
+    @pytest.mark.parametrize("value, shown", [("pm;qa", "'pm;qa'"), ("secuirty", "did you mean 'security'?")])
+    async def test_the_planner_refuses_even_when_every_cleared_lens_has_its_app(
+        self, monkeypatch, value, shown
+    ):
         _install_lens_apps(monkeypatch, ALL_FOUR)
-        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", "pm;qa")
-        with pytest.raises(RuntimeError, match="not a lens name") as err:
+        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", value)
+        with pytest.raises(RuntimeError, match="not a known lens name") as err:
             target.plan_approvals([_lo(lens) for lens in ALL_FOUR])
-        assert "'pm;qa'" in str(err.value)
+        assert shown in str(err.value)
 
-    async def test_run_refuses_and_submits_nothing(self, monkeypatch, capsys):
+    @pytest.mark.parametrize("value, shown", [("pm;qa", "'pm;qa'"), ("secuirty", "'secuirty'")])
+    async def test_run_refuses_and_submits_nothing(self, monkeypatch, capsys, value, shown):
         # Every cleared lens has its own App and its own verdict, so only the
         # roster stands in the way. Without the refusal this run approves.
         _install_lens_apps(monkeypatch, ALL_FOUR)
-        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", "pm;qa")
+        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", value)
         client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
         _install_client(monkeypatch, client)
 
@@ -3825,7 +3829,7 @@ class TestAMalformedExpectedLensRosterRefusesApproval:
         assert code == 1
         assert client.posted == [], client.posted
         assert "approvers: UNUSABLE" in out
-        assert "'pm;qa'" in out and "not a lens name" in out
+        assert shown in out and "not a known lens name" in out
 
     async def test_control_the_same_run_with_a_sound_roster_approves(self, monkeypatch):
         _install_lens_apps(monkeypatch, ALL_FOUR)

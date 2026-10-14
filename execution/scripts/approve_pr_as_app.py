@@ -1655,7 +1655,7 @@ def plan_approvals(lens_outcomes: list[LensOutcome]) -> ApprovalPlan:
     operator has asked for that lens to approve as itself, and approving in its
     place would put the wrong identity on the record.
     """
-    roster_problem = _github_app_token.expected_roster_problem()
+    roster_problem = _github_app_token.expected_roster_summary()
     if roster_problem:
         raise RuntimeError(
             f"{roster_problem} — refusing to approve until it is fixed, because "

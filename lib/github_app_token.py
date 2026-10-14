@@ -56,12 +56,13 @@ name, so ``status`` lists both.
 ``ATELES_EXPECTED_LENS_APPS`` (optional) names the lenses that must have an App
 on THIS host. A process that is missing a lens's variables while the setting
 names that lens is not allowed to fall back to the shared identity: its
-verdicts are unread, its approval is refused and its agent gets no token, each
+verdicts are unread, its approval is refused, and its agent gets no token, each
 loudly. Set it wherever the per-lens variables are set (the daemons and any
 session that runs the approval tool), from the same snapshot. An entry that is
-not a lens name is refused, never dropped: every lens is then treated as
-expected, so nothing is read, approved or minted for a lens without an App here,
-and ``status`` names the entry and exits non-zero.
+not a known lens name (a stray character or a misspelling) is refused, never
+dropped: every lens is then treated as expected, so nothing is read, approved,
+or minted for a lens without an App here, and ``status`` names the entry and
+exits non-zero.
 
 The private-key variables are never handed to a child process: ``exec`` removes
 every App key variable from the child's environment (it needs only the minted
@@ -85,6 +86,7 @@ CLI (never prints a token):
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -281,57 +283,80 @@ def declared_reviewer_lenses() -> tuple[str, ...]:
 
 
 def _expected_roster_entries() -> tuple[list[str], list[str]]:
-    """(valid lens keys, rejected entries) from `ATELES_EXPECTED_LENS_APPS`."""
+    """(valid lens keys, rejected entries) from `ATELES_EXPECTED_LENS_APPS`.
+
+    An entry is valid only when it is a lens key AND names a lens this code
+    knows (`KNOWN_REVIEWER_LENSES`) or one that has App variables here. A
+    misspelled name of a real lens is the same mistake as a stray semicolon: it
+    would drop that lens's protection, so it is rejected.
+    """
     raw = os.environ.get(ENV_EXPECTED_LENS_APPS) or ""
+    known = set(KNOWN_REVIEWER_LENSES) | set(declared_reviewer_lenses())
     valid: list[str] = []
     rejected: list[str] = []
     for part in re.split(r"[,\s]+", raw):
         if not part:
             continue
-        if _LENS_KEY_RE.fullmatch(part.lower()):
+        if _LENS_KEY_RE.fullmatch(part.lower()) and part.lower() in known:
             valid.append(part.lower())
         else:
             rejected.append(part)
     return valid, rejected
 
 
-def malformed_expected_lens_entries() -> tuple[str, ...]:
-    """What to print for each `ATELES_EXPECTED_LENS_APPS` entry that is not a lens key.
+def _describe_rejected_entry(entry: str) -> str:
+    """How one rejected entry is shown: never a value that might be a secret.
 
-    The entry itself when it is short and made only of letters, digits and
-    ``_-;:|*./`` (a typo of a lens name); otherwise only its length, so a value
-    pasted into the wrong setting is never echoed.
+    Shown as written only when it is short, made of letters, digits and
+    ``_-;:|*./``, and either contains a separator character (a typo such as
+    ``pm;qa``) or is close to a known lens name (then with the suggestion).
+    Anything else is described by its length, so a value pasted into the wrong
+    setting is not echoed.
     """
-    shown: list[str] = []
-    for entry in _expected_roster_entries()[1]:
-        if len(entry) <= 32 and re.fullmatch(r"[A-Za-z0-9_\-;:|*./]+", entry):
-            shown.append(repr(entry))
-        else:
-            shown.append(f"an entry of {len(entry)} characters")
-    return tuple(shown)
+    if len(entry) <= 32 and re.fullmatch(r"[A-Za-z0-9_\-;:|*./]+", entry):
+        if _LENS_KEY_RE.fullmatch(entry.lower()):
+            close = difflib.get_close_matches(entry.lower(), KNOWN_REVIEWER_LENSES, n=1, cutoff=0.7)
+            if close:
+                return f"{entry!r}, did you mean {close[0]!r}?"
+        elif re.search(r"[;:|*./\-]", entry):
+            return repr(entry)
+    return f"an entry of {len(entry)} characters"
 
 
-def expected_roster_problem() -> str:
-    """One sentence naming a malformed `ATELES_EXPECTED_LENS_APPS`, or "" when it is sound."""
+def malformed_expected_lens_entries() -> tuple[str, ...]:
+    """What to print for each `ATELES_EXPECTED_LENS_APPS` entry that is not a known lens."""
+    return tuple(_describe_rejected_entry(e) for e in _expected_roster_entries()[1])
+
+
+def expected_roster_summary() -> str:
+    """What is wrong with `ATELES_EXPECTED_LENS_APPS`, or "" when it is sound."""
     bad = malformed_expected_lens_entries()
     if not bad:
         return ""
     return (
         f"{ENV_EXPECTED_LENS_APPS} has {'an entry' if len(bad) == 1 else 'entries'} "
-        f"that {'is' if len(bad) == 1 else 'are'} not a lens name ({', '.join(bad)}); "
-        "every lens is treated as expected to have an App until it is fixed"
+        f"that {'is' if len(bad) == 1 else 'are'} not a known lens name ({'; '.join(bad)})"
     )
+
+
+def expected_roster_problem() -> str:
+    """`expected_roster_summary` plus what the process does about it, or "" when sound."""
+    summary = expected_roster_summary()
+    if not summary:
+        return ""
+    return f"{summary}; every lens is treated as expected to have an App until it is fixed"
 
 
 def expected_reviewer_lenses() -> tuple[str, ...]:
     """Lenses `ATELES_EXPECTED_LENS_APPS` says must have an App on this host.
 
-    Comma- or space-separated lens keys. The roster is a list of lenses that
+    Comma- or space-separated lens names. The roster is a list of lenses that
     are REQUIRED to have an App, so a malformed entry is the unsafe direction
     to drop: a typo would silently remove that lens's protection. It fails
-    closed instead: if any entry is not a lens key, every known lens is
-    expected, which refuses verdict reads, approvals and agent tokens for each
-    lens that has no App here, and `expected_roster_problem` names the entry.
+    closed instead: if any entry is not a known lens name (a stray character or
+    a misspelling), every known lens is expected, which refuses verdict reads,
+    approvals, and agent tokens for each lens that has no App here, and
+    `expected_roster_problem` names the entry.
     """
     valid, rejected = _expected_roster_entries()
     if rejected:

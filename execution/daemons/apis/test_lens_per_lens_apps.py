@@ -578,16 +578,18 @@ class TestAProcessMissingItsLensAppVariablesRefusesLoudly:
         monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "*, ../x, PM!")
         assert gat.expected_reviewer_lenses() == tuple(sorted(gat.KNOWN_REVIEWER_LENSES))
         problem = gat.expected_roster_problem()
-        assert "not a lens name" in problem
+        assert "not a known lens name" in problem
         for entry in ("'*'", "'../x'"):
             assert entry in problem
         assert "an entry of 3 characters" in problem  # `PM!` has a character outside the safe set
 
-    @pytest.mark.parametrize("value", ["pm;qa", "pm|qa", "pm,qa;", "content-lens", "pm qa*"])
+    @pytest.mark.parametrize(
+        "value", ["pm;qa", "pm|qa", "pm,qa;", "content-lens", "pm qa*", "secuirty", "pm, secuirty"]
+    )
     def test_a_typo_in_one_entry_does_not_switch_the_guard_off(self, monkeypatch, logins, value):
         monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, value)
         res = lens_authors.resolve()
-        assert any("not a lens name" in f for f in res.failed), res.failed
+        assert any("not a known lens name" in f for f in res.failed), res.failed
         assert not res.complete
         # the shared account cannot speak for pm, which the typo may have meant
         assert not _admitted(res.authors, _row(SWARM, _MARKER_TEXT["pm"] + "\n" + PAVO))
@@ -601,13 +603,31 @@ class TestAProcessMissingItsLensAppVariablesRefusesLoudly:
         with caplog.at_level("ERROR"):
             assert sd._token_for_agent_on_repo("pavo", "o/r") == ""
             assert sd._token_for_agent_on_repo("phoenicurus", "o/r") == ""
-        assert "not a lens name" in caplog.text
+        assert "not a known lens name" in caplog.text
         assert "ghp_agent_pat" not in caplog.text and "ghp_shared" not in caplog.text
 
     def test_control_a_sound_roster_reports_no_problem(self, monkeypatch):
         monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "pm, qa  ARCH")
         assert gat.expected_roster_problem() == ""
         assert gat.expected_reviewer_lenses() == ("arch", "pm", "qa")
+
+    def test_a_misspelled_lens_name_is_refused_with_a_suggestion(self, monkeypatch):
+        monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "secuirty")
+        assert gat.expected_reviewer_lenses() == tuple(sorted(gat.KNOWN_REVIEWER_LENSES))
+        assert "'secuirty', did you mean 'security'?" in gat.expected_roster_problem()
+
+    def test_a_lens_that_has_app_variables_here_is_a_valid_entry_even_if_unknown(self, monkeypatch):
+        # A panel lens added later needs no change to a setting that names it.
+        monkeypatch.setenv("ATELES_APP_REVIEWER_BILLING_ID", "1")
+        monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "billing, pm")
+        assert gat.expected_roster_problem() == ""
+        assert gat.expected_reviewer_lenses() == ("billing", "pm")
+
+    def test_a_lens_shaped_value_far_from_any_lens_is_reported_by_length_only(self, monkeypatch):
+        monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "pm, hunter2supersecretvalue")
+        problem = gat.expected_roster_problem()
+        assert "hunter2supersecretvalue" not in problem
+        assert "an entry of 23 characters" in problem
 
     def test_a_pasted_secret_is_never_echoed_as_a_bad_entry(self, monkeypatch):
         monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "pm, -----BEGIN-PRIVATE-KEY-----abcdefghijklmnopqrstuvwxyz0123456789")

@@ -354,9 +354,10 @@ body**, never by the author alone and never by the opening marker alone:
   lists the lenses that must have an App on this host. A process that is missing
   one of those lenses' variables does not fall back to the shared identity: that
   lens's verdicts are unread, the approval tool refuses and its agent gets no
-  token, each with a message that says so. An entry that is not a lens name (a
-  stray semicolon, a hyphen) is refused, never dropped: every lens is treated as
-  expected until it is fixed, and `status` names the entry and exits non-zero.
+  token, each with a message that says so. An entry that is not a known lens name
+  (a stray semicolon, a hyphen, a misspelling) is refused, never dropped: every
+  lens is treated as expected until it is fixed, and `status` names the entry
+  and exits non-zero.
 - The dispatcher removes every App private key variable from the environment of
   the agent processes it dispatches, and `exec` removes them from the command it
   runs; only the minted token is passed on. Other daemons start agent CLIs from
@@ -390,9 +391,9 @@ reviewer_<lens> --repo <owner/name>`. Open a pull request as the PR-opener App:
    accounts.
 
 **Set together.** A lens's App id, private key, and installation id arrive in
-one snapshot, never separately. An id with no key is declared and unusable: that lens's verdicts are unread and the approval tool refuses
-outright, so a half-set rollout blocks merges until the variables are complete
-or removed. Never set an id before its key is present on the host.
+one snapshot, never separately. An id with no key is declared and unusable:
+that lens's verdicts are unread and the approval tool refuses outright, so a
+half-set rollout blocks merges until the variables are complete or removed. Never set an id before its key is present on the host.
 
 **What changes for open pull requests.** From the moment a lens has an App, only
 that App's verdicts count for that lens. A verdict an earlier run posted as a

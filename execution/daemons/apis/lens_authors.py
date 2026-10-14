@@ -47,7 +47,7 @@ alone and never by the opening marker alone:
     comment that names such a lens ANYWHERE in its body is refused.
   - A lens App speaks for its own lens only. Every swarm marker anywhere in its
     comment (`_VERDICT_SHAPED_RE`) must be `review:<its lens>` or that marker's
-    `-superseded` form. The aggregation, a deferral and the dispatcher's notice
+    `-superseded` form. The aggregation, a deferral, and the dispatcher's notice
     markers are never a lens App's to write, nor is another lens's marker.
   - A retired verdict (`compose_superseded_verdict` puts a `>` banner line ahead
     of it) is judged exactly like the verdict it retired: `leading_lens` looks
@@ -56,8 +56,9 @@ alone and never by the opening marker alone:
   - A lens whose App is unusable (declared but incomplete, or its login cannot
     be read) admits nobody for that lens (fail closed on the field that carries
     the safety meaning). So does a lens whose bot login is also another
-    identity's (the PR-opener App, another lens, the swarm App): two identities that resolve to one login are
-    not two identities, and the collision is reported in `failed`.
+    identity's (the PR-opener App, another lens, the swarm App): two identities
+    that resolve to one login are not two identities, and the collision is
+    reported in `failed`.
   - The PR-opener App is never an author of any lens-shaped comment. If it is
     declared but its login cannot be read, no bot other than the swarm App is
     admitted for a lens-shaped comment while that lasts, so the opener cannot
@@ -370,7 +371,7 @@ def _per_identity_apps(
     # identity name -> login ("" = declared/expected but unusable)
     logins: dict[str, str] = {}
     failed: list[str] = []
-    roster_problem = _github_app_token.expected_roster_problem()
+    roster_problem = _github_app_token.expected_roster_summary()
     if roster_problem:
         # Every lens is in scope below (see `expected_reviewer_lenses`), so each
         # lens without an App here reads as unusable; say why, once, up front.

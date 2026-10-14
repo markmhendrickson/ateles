@@ -461,11 +461,25 @@ def test_status_names_a_malformed_roster_entry_and_exits_non_zero(monkeypatch, c
     assert gat.main(["status"]) == 1
     out = capsys.readouterr().out
     assert "ATELES_EXPECTED_LENS_APPS: MALFORMED" in out
-    assert "'pm;qa'" in out and "not a lens name" in out
+    assert "'pm;qa'" in out and "not a known lens name" in out
     # every lens is expected until it is fixed, so each shows as such
     rows = {line.split()[0]: line for line in out.splitlines() if line.strip()}
     for lens in gat.KNOWN_REVIEWER_LENSES:
         assert "EXPECTED BUT NOT DECLARED" in rows[f"reviewer_{lens}"], lens
+
+
+def test_status_names_a_misspelled_lens_and_never_echoes_a_far_off_value(monkeypatch, capsys):
+    monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "secuirty")
+    assert gat.main(["status"]) == 1
+    out = capsys.readouterr().out
+    assert "did you mean 'security'?" in out
+    monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "hunter2supersecretvalue")
+    assert gat.main(["status"]) == 1
+    out = capsys.readouterr().out
+    assert "hunter2supersecretvalue" not in out
+    assert "an entry of 23 characters" in out
+    # the identity table must not echo it either
+    assert "hunter2" not in out
 
 
 def test_status_says_what_the_roster_is_when_it_is_sound_or_unset(monkeypatch, capsys):
