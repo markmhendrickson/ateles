@@ -1317,6 +1317,76 @@
         "local_cli_ran": false,
         "revoked_all_minted": true
       }
+    },
+    {
+      "id": "runner_entrypoint_exits_by_deadline_with_full_output",
+      "kind": "entrypoint",
+      "mode": "saturated-output",
+      "budget_seconds": 3,
+      "description": "The real runner entrypoint, as a subprocess, with stdout and stderr full and unread and the record write stalled. At its deadline it cleans up what the job started and exits 98, within the cleanup tolerance.",
+      "expect": {
+        "exit": 98,
+        "within_seconds": 5.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_by_deadline_while_output_is_held",
+      "kind": "entrypoint",
+      "mode": "output-held",
+      "budget_seconds": 3,
+      "description": "The same, with the main thread inside a stdout write that cannot complete. The deadline exit takes no output lock, so it still exits 98 in time.",
+      "expect": {
+        "exit": 98,
+        "within_seconds": 5.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_by_deadline_when_cleanup_stalls",
+      "kind": "entrypoint",
+      "mode": "stalled-cleanup",
+      "budget_seconds": 3,
+      "description": "At the deadline the cleanup does its work and then never returns. The exit does not wait for it beyond the cleanup tolerance.",
+      "expect": {
+        "exit": 98,
+        "within_seconds": 5.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_promptly_when_the_run_raises",
+      "kind": "entrypoint",
+      "mode": "exceptional-exit",
+      "budget_seconds": 3,
+      "description": "The run raises part way while another thread waits forever. The entrypoint does not leave its exit to interpreter shutdown: it cleans up and exits 99 promptly.",
+      "expect": {
+        "exit": 99,
+        "after_condition_within": 2.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_promptly_when_the_run_asks_to_exit",
+      "kind": "entrypoint",
+      "mode": "system-exit",
+      "budget_seconds": 3,
+      "description": "The run asks to exit part way while another thread waits forever. The entrypoint still cleans up and exits 99 promptly.",
+      "expect": {
+        "exit": 99,
+        "after_condition_within": 2.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
     }
   ]
 }

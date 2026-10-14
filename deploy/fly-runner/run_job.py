@@ -44,6 +44,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 _HERE = Path(__file__).resolve().parent
 for _candidate in (_HERE, _HERE.parent, _HERE.parent.parent):
@@ -81,6 +82,8 @@ MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
 MAX_JOB_TIMEOUT_SECONDS = 6 * 3600
 EXIT_TIMEOUT = 124
 EXIT_DEADLINE = 98
+# The entrypoint raised, or was asked to exit, before finishing normally.
+EXIT_ABORTED = 99
 EXIT_PROBE_FAILED = 97
 EXIT_JOB_INVALID = 96
 EXIT_RECORD_FAILED = 95
@@ -99,6 +102,8 @@ REFUSAL_BOUND_SECONDS = 120.0
 # At the hard deadline, the longest the cleanup may take before the process
 # exits anyway: the exit happens by the deadline plus this tolerance.
 HARD_EXIT_CLEANUP_SECONDS = 1.0
+# The longest the entrypoint waits to flush its own output before exiting.
+FINAL_FLUSH_SECONDS = 1.0
 _DEADLINE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(Z|[+-][0-9]{2}:[0-9]{2})",
                           re.ASCII)  # fmt: skip
 
@@ -438,7 +443,12 @@ def parse_deadline(raw: str | None, now: float) -> float:
 
 
 # What the job started, for the cleanup at a timeout or at the deadline.
-_JOB_PROCESSES: dict[str, int | None] = {"pgid": None, "uid": None}
+_JOB_PROCESSES: dict[str, Any] = {"pgid": None, "uid": None, "proc": None}
+# True only inside the machine's own entrypoint process (``entrypoint``):
+# there, every descendant of this process is the job's, and the job's group
+# id cannot belong to anything else. A caller of ``main`` (a test, a tool)
+# has other children of its own, so it never sweeps beyond the job's tree.
+_SCOPE = {"entrypoint": False}
 
 
 def become_subreaper() -> bool:
@@ -478,10 +488,11 @@ def _proc_table() -> dict[int, tuple[int, int]]:
     return table
 
 
-def job_processes(me: int, child_uid: int | None) -> set[int]:
-    """Every process the job started: all descendants of this process
-    (orphans are re-parented here, see ``become_subreaper``) and, when the
-    CLI runs as its own unprivileged user, every process of that user."""
+def job_processes(me: int, child_uid: int | None, root: int | None = None) -> set[int]:
+    """Every process the job started: all descendants of the CLI (*root*)
+    and, in the entrypoint, all descendants of this process (orphans are
+    re-parented here, see ``become_subreaper``); and, when the CLI runs as
+    its own unprivileged user, every process of that user."""
     table = _proc_table()
     children: dict[int, list[int]] = {}
     for pid, (ppid, _uid) in table.items():
@@ -489,7 +500,10 @@ def job_processes(me: int, child_uid: int | None) -> set[int]:
             children[ppid] = []
         children[ppid].append(pid)
     found: set[int] = set()
-    stack = list(children[me]) if me in children else []
+    roots = ([me] if _SCOPE["entrypoint"] else []) + ([root] if root is not None else [])
+    stack = [c for r in roots for c in (children[r] if r in children else [])]
+    if root is not None and root in table:
+        stack.append(root)
     while stack:
         pid = stack.pop()
         if pid not in found:
@@ -502,9 +516,12 @@ def job_processes(me: int, child_uid: int | None) -> set[int]:
 
 
 def _kill_job_group() -> None:
-    """SIGKILL the job's own process group: one signal, never blocks."""
-    pgid = _JOB_PROCESSES["pgid"]
-    if pgid is not None:
+    """SIGKILL the job's own process group: one signal, never blocks. Outside
+    the entrypoint only while the CLI itself is still running, so a stale
+    group id is never signalled."""
+    pgid, proc = _JOB_PROCESSES["pgid"], _JOB_PROCESSES["proc"]
+    running = proc is not None and proc.returncode is None
+    if pgid is not None and (_SCOPE["entrypoint"] or running):
         try:
             os.killpg(pgid, signal.SIGKILL)
         except OSError:
@@ -515,10 +532,14 @@ def kill_job_processes(rounds: int = 5) -> None:
     """SIGKILL everything the job started: its process group, then every
     descendant and every process of the child user, repeated so that a
     process forked meanwhile is caught too."""
-    uid = _JOB_PROCESSES["uid"]
+    uid, proc = _JOB_PROCESSES["uid"], _JOB_PROCESSES["proc"]
+    # The CLI's own tree, only while its pid is still the CLI (or in the
+    # entrypoint, where nothing else runs).
+    running = proc is not None and proc.returncode is None
+    root = _JOB_PROCESSES["pgid"] if (_SCOPE["entrypoint"] or running) else None
     _kill_job_group()
     for _ in range(rounds):
-        pids = job_processes(os.getpid(), uid)
+        pids = job_processes(os.getpid(), uid, root)
         if not pids:
             return
         for pid in pids:
@@ -542,27 +563,40 @@ def _note_nonblocking(message: bytes) -> None:
         pass
 
 
+def _bounded_thread(target, seconds: float) -> None:
+    """Run *target* on a daemon thread and wait for it at most *seconds*."""
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(seconds)
+
+
+def stop_and_exit(code: int, note: bytes, *, hard_exit=os._exit, kill=None) -> None:
+    """Kill everything the job started and exit with *code*, by a bounded
+    time, whatever any other thread is doing.
+
+    Nothing that can block sits before the exit: the diagnostic is one
+    non-blocking write, the job's process group is signalled directly, the
+    full cleanup (which reads /proc) runs on its own thread for at most
+    ``HARD_EXIT_CLEANUP_SECONDS``, and the exit happens then whether or not
+    it finished. No print, logging, stdio buffer or shared lock."""
+    try:
+        _note_nonblocking(note)
+        _kill_job_group()
+        _bounded_thread(kill if kill is not None else kill_job_processes,
+                        HARD_EXIT_CLEANUP_SECONDS)  # fmt: skip
+    except BaseException:  # noqa: BLE001 — the exit below must always run
+        pass
+    finally:
+        hard_exit(code)
+
+
 def arm_hard_deadline(deadline: float, *, clock=time.time, hard_exit=os._exit,
                       kill=None) -> threading.Timer:  # fmt: skip
-    """At *deadline*, kill everything the job started and exit this process,
-    whatever any other thread is waiting on, so the machine stops.
-
-    Nothing that can block sits before the exit: the job's process group is
-    signalled directly, the full cleanup (which reads /proc) runs on its own
-    thread for at most ``HARD_EXIT_CLEANUP_SECONDS``, and the exit happens
-    then whether or not it finished. No print, logging or shared lock."""
+    """At *deadline*, kill everything the job started and exit this process
+    (``stop_and_exit``), so the machine stops."""
     def fire() -> None:
-        try:
-            _note_nonblocking(b"fly-runner: hard deadline reached; stopping the job\n")
-            _kill_job_group()
-            cleanup = threading.Thread(
-                target=kill if kill is not None else kill_job_processes, daemon=True)
-            cleanup.start()
-            cleanup.join(HARD_EXIT_CLEANUP_SECONDS)
-        except BaseException:  # noqa: BLE001 — the exit below must always run
-            pass
-        finally:
-            hard_exit(EXIT_DEADLINE)
+        stop_and_exit(EXIT_DEADLINE, b"fly-runner: hard deadline reached; stopping the job\n",
+                      hard_exit=hard_exit, kill=kill)  # fmt: skip
 
     timer = threading.Timer(max(0.0, deadline - clock()), fire)
     timer.daemon = True
@@ -602,6 +636,7 @@ def run_cli(
     except OSError as exc:
         return 127, b"", f"runner: could not start {argv[0]}: {exc}".encode(), False
     _JOB_PROCESSES["pgid"] = proc.pid
+    _JOB_PROCESSES["proc"] = proc
     _JOB_PROCESSES["uid"] = ident[0] if ident is not None else None
     try:
         out, err = proc.communicate(input=stdin or b"", timeout=timeout)
@@ -837,9 +872,16 @@ def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli
         deadline, deadline_problem = now + REFUSAL_BOUND_SECONDS, str(exc)
     timer = arm_hard_deadline(deadline, hard_exit=hard_exit)
     try:
-        return _main(job_dir, writer, runner, started, deadline, deadline_problem)
-    finally:
-        timer.cancel()
+        rc = _main(job_dir, writer, runner, started, deadline, deadline_problem)
+    except BaseException:
+        # Raised, or asked to exit, part way: never leave the exit to normal
+        # interpreter shutdown. The deadline timer stays armed until then.
+        stop_and_exit(EXIT_ABORTED, b"fly-runner: the run stopped unexpectedly; stopping the job\n",
+                      hard_exit=hard_exit)  # fmt: skip
+        raise  # only reached when hard_exit returns (a test's stand-in)
+    # A normal return: the record is written (or the refusal recorded).
+    timer.cancel()
+    return rc
 
 
 def _main(job_dir: Path, writer, runner, started: float, deadline: float,
@@ -923,13 +965,43 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
         job.secrets.clear()
 
 
-def entrypoint(job_dir: Path, **kwargs) -> int:
-    """The machine's entrypoint process: it becomes the reaper of everything
-    the job starts (so all of it can be found and killed), then runs the job.
-    Only the real entrypoint process does this, never a caller of ``main``."""
-    become_subreaper()
-    return main(job_dir, **kwargs)
+def _flush_bounded(seconds: float) -> None:
+    """Flush this process's own output for at most *seconds* (a full pipe
+    nobody reads must not hold up the exit)."""
+    def flush() -> None:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except BaseException:  # noqa: BLE001 — best effort only
+                pass
+
+    try:
+        _bounded_thread(flush, seconds)
+    except BaseException:  # noqa: BLE001 — best effort only
+        pass
+
+
+def entrypoint(job_dir: Path, *, hard_exit=os._exit, **kwargs) -> None:
+    """The machine's entrypoint process. It becomes the reaper of everything
+    the job starts (so all of it can be found and killed), runs the job, and
+    then ALWAYS ends with an explicit, bounded exit: anything left of the
+    job is killed, its own output is flushed for a bounded time, and the
+    process exits. No path out of it relies on normal interpreter shutdown
+    (which would wait for other threads, buffers and exit handlers). Only
+    the real entrypoint process does this, never a caller of ``main``."""
+    code = EXIT_ABORTED
+    try:
+        _SCOPE["entrypoint"] = True
+        become_subreaper()
+        code = main(job_dir, hard_exit=hard_exit, **kwargs)
+    except BaseException:  # noqa: BLE001 — every path ends in the exit below
+        code = EXIT_ABORTED
+    finally:
+        try:
+            _flush_bounded(FINAL_FLUSH_SECONDS)
+        finally:
+            stop_and_exit(code, b"", hard_exit=hard_exit)
 
 
 if __name__ == "__main__":
-    raise SystemExit(entrypoint(Path(os.environ.get("ATELES_RUNNER_JOB_DIR") or DEFAULT_JOB_DIR)))
+    entrypoint(Path(os.environ.get("ATELES_RUNNER_JOB_DIR") or DEFAULT_JOB_DIR))

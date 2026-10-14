@@ -291,6 +291,12 @@ def _decoded(request: httpx.Request) -> str:
 
 
 def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
+    if scenario.get("kind") == "entrypoint":
+        # The in-machine half: the real run_job entrypoint, as a subprocess.
+        import entrypoint_probe
+
+        return entrypoint_probe.run_entrypoint(
+            scenario["mode"], tmp_path / "entrypoint", budget=float(scenario["budget_seconds"]))
     # ── Isolation: nothing reaches the operator's real state or the network ──
     for name in ("APIS_FLY_RUNNER_CLASSES", "LANIUS_NEOTOMA_TOKEN",
                  "ATELES_REVIEWER_APP_ID", "ATELES_REVIEWER_APP_PRIVATE_KEY",
@@ -574,8 +580,36 @@ def _ledger_file_json(path: Path) -> object:
         return None
 
 
+def judge_entrypoint(scenario: dict, trace) -> list[str]:
+    """Every way a real entrypoint run departs from its expectations."""
+    e = scenario["expect"]
+    problems: list[str] = []
+    if trace.exit_code != e["exit"]:
+        problems.append(f"exit {trace.exit_code} != {e['exit']}")
+    if not trace.condition_reached:
+        problems.append("the condition under test was never reached")
+    if "within_seconds" in e and not trace.elapsed <= e["within_seconds"]:
+        problems.append(f"exited after {trace.elapsed:.2f}s, not within {e['within_seconds']}s")
+    if "after_condition_within" in e and not (
+            trace.exit_after_condition is not None
+            and trace.exit_after_condition <= e["after_condition_within"]):  # fmt: skip
+        problems.append(
+            f"exited {trace.exit_after_condition}s after the condition, not within "
+            f"{e['after_condition_within']}s")
+    if e.get("cleanup_reached") and not trace.cleanup_reached:
+        problems.append("the job's processes were never cleaned up")
+    if e.get("descendant_checked"):
+        if trace.descendant_alive_before is not True:
+            problems.append("the left-behind process was not running before the exit")
+        if trace.descendant_gone_after is False:
+            problems.append("the left-behind process survived the exit")
+    return problems
+
+
 def judge(scenario: dict, trace: Trace) -> list[str]:
     """Every way *trace* departs from the scenario's expectations."""
+    if scenario.get("kind") == "entrypoint":
+        return judge_entrypoint(scenario, trace)
     e = scenario["expect"]
     problems: list[str] = []
     env = trace.envelope

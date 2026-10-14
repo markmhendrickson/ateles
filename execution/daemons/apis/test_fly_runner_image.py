@@ -590,7 +590,9 @@ def test_the_entrypoint_exits_by_its_deadline(tmp_path, mode):
     driver.write_text(_DRIVER)
     record = tmp_path / "record.json"
     budget = 4.0
-    child_vars = {"PATH": os.environ["PATH"], run_job.DEADLINE_ENV: _deadline_in(budget)}
+    (tmp_path / "tmp").mkdir()
+    child_vars = {"PATH": os.environ["PATH"], "TMPDIR": str(tmp_path / "tmp"),
+                  run_job.DEADLINE_ENV: _deadline_in(budget)}  # fmt: skip
     started = time.monotonic()
     entry = subprocess.Popen(
         [sys.executable, str(driver), str(_RUNNER_DIR / "run_job.py"), str(job_dir), str(record), mode],
@@ -655,7 +657,9 @@ def test_the_deadline_exit_never_waits_on_output(tmp_path, mode):
     driver.write_text(_DRIVER)
     record = tmp_path / "record.json"
     budget = 3.0
-    child_vars = {"PATH": os.environ["PATH"], run_job.DEADLINE_ENV: _deadline_in(budget)}
+    (tmp_path / "tmp").mkdir()
+    child_vars = {"PATH": os.environ["PATH"], "TMPDIR": str(tmp_path / "tmp"),
+                  run_job.DEADLINE_ENV: _deadline_in(budget)}  # fmt: skip
     started = time.monotonic()
     entry = subprocess.Popen(
         [sys.executable, str(driver), str(_RUNNER_DIR / "run_job.py"), str(job_dir), str(record),
@@ -708,3 +712,40 @@ def test_a_cleanup_that_never_finishes_does_not_delay_the_exit():
     finally:
         release.set()
         timer.cancel()
+
+
+
+def _probe():
+    evals = _REPO_ROOT / "execution" / "evals" / "fly_runner"
+    if str(evals) not in sys.path:
+        sys.path.insert(0, str(evals))
+    import entrypoint_probe
+
+    return entrypoint_probe
+
+
+@pytest.mark.parametrize("mode", ["exceptional-exit", "system-exit"])
+def test_the_entrypoint_never_leaves_its_exit_to_interpreter_shutdown(tmp_path, mode):
+    """A real entrypoint whose run raises (or asks to exit) part way while a
+    non-daemon thread waits forever: it cleans up what the job started and
+    exits 99 within the cleanup tolerance, instead of waiting on shutdown."""
+    trace = _probe().run_entrypoint(mode, tmp_path / "entry", budget=3.0)
+    assert trace.condition_reached, trace
+    assert trace.exit_code == run_job.EXIT_ABORTED, trace
+    assert trace.exit_after_condition <= run_job.HARD_EXIT_CLEANUP_SECONDS + 1.5, trace
+    assert trace.cleanup_reached, trace
+    assert trace.descendant_alive_before is True, trace
+    if sys.platform.startswith("linux"):
+        assert trace.descendant_gone_after is True, trace
+
+
+def test_a_normal_entrypoint_return_also_ends_in_an_explicit_exit(monkeypatch):
+    """In-process, with every process-wide effect stubbed: the entrypoint's
+    last step is the explicit exit, with the run's own code."""
+    codes, cleaned = [], []
+    monkeypatch.setattr(run_job, "become_subreaper", lambda: False)
+    monkeypatch.setattr(run_job, "_kill_job_group", lambda: cleaned.append("group"))
+    monkeypatch.setattr(run_job, "kill_job_processes", lambda: cleaned.append("all"))
+    run_job.entrypoint(Path("/nonexistent-job-dir"), hard_exit=codes.append,
+                       writer=lambda *a: True)  # fmt: skip
+    assert codes == [run_job.EXIT_JOB_INVALID] and cleaned == ["group", "all"]

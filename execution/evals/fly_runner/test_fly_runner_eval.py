@@ -69,6 +69,11 @@ def test_scenario_set_covers_the_required_behaviours():
         "negative_daily_cap_refuses_an_opted_in_class_without_local_fallback",
         "held_reservation_with_unreadable_cost_refuses_admission",
         "machine_is_destroyed_while_the_ledger_is_unusable",
+        "runner_entrypoint_exits_by_deadline_with_full_output",
+        "runner_entrypoint_exits_by_deadline_while_output_is_held",
+        "runner_entrypoint_exits_by_deadline_when_cleanup_stalls",
+        "runner_entrypoint_exits_promptly_when_the_run_raises",
+        "runner_entrypoint_exits_promptly_when_the_run_asks_to_exit",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -189,3 +194,11 @@ def test_judge_goes_red_when_a_damaged_ledger_is_reset(tmp_path, monkeypatch):
     reset = dataclasses.replace(trace, ledger_after={"spend_usd": 0.0}, exit_code=0,
                                 envelope={**trace.envelope, "ok": True})  # fmt: skip
     assert len(runner.judge(scenario, reset)) >= 2
+
+
+def test_judge_goes_red_when_the_entrypoint_exits_late_or_skips_cleanup(tmp_path, monkeypatch):
+    scenario = _by_id("runner_entrypoint_exits_promptly_when_the_run_raises")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    late = dataclasses.replace(trace, exit_code=None, exit_after_condition=30.0,
+                               cleanup_reached=False, descendant_gone_after=False)  # fmt: skip
+    assert len(runner.judge(scenario, late)) >= 3
