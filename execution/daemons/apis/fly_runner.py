@@ -965,7 +965,18 @@ class FlyExecutor:
         job = handle.job
         terminated = False
         try:
-            outcome = await self._wait_until_done(handle)
+            try:
+                outcome = await self._wait_until_done(handle)
+            except (httpx.HTTPError, FlyApiError) as exc:
+                # A dropped connection or API error while waiting is a FAILED
+                # dispatch, not an exception for the caller: the failover loop
+                # expects a result. The machine is terminated (or kept owned
+                # and marked) in the finally below before anything is released.
+                log.error(f"[fly] run={job.run_id} lost the wait on {handle.machine_id}: {exc}")
+                return 1, b"", (
+                    f"fly runner: error while waiting on machine {handle.machine_id} "
+                    f"({type(exc).__name__}); the run's outcome is unknown"
+                ).encode()
             if outcome == "deadline":
                 log.error(
                     f"[fly] run={job.run_id} machine={handle.machine_id} passed its deadline"

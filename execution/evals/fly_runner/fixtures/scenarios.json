@@ -1,0 +1,75 @@
+{
+  "description": "Agent-facing Fly runner scenarios (ateles#1456). Each one drives the real dispatch_role CLI and skill_runner dispatch path; only the Fly Machines API (an httpx mock transport), the GitHub App mint and revoke, and the Neotoma result read are stand-ins. All credentials are synthetic. local_cli_ran is observed from a stand-in local CLI that leaves a marker when it runs.",
+  "scenarios": [
+    {
+      "id": "opted_out_class_stays_local",
+      "description": "APIS_FLY_RUNNER_CLASSES unset: a carry_forward_check dispatch runs on this machine exactly as before and never touches Fly.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {"wait": "ok", "record": {"exit_code": 0, "stdout": "FLY GATE_INHERITANCE: clear\n"}},
+      "args": ["--action-class", "carry_forward_check", "--model", "eval-model"],
+      "expect": {"exit": 0, "ok": true, "stdout_contains": "LOCAL GATE_INHERITANCE: clear", "local_cli_ran": true, "fly_requests": 0, "minted": 0}
+    },
+    {
+      "id": "opted_in_class_runs_on_fly",
+      "description": "The class is opted in and the role has its own AAuth key: the run goes to a per-job machine with a minted, revoked App token, and the machine's recorded result comes back as the dispatch result.",
+      "settings": {"APIS_FLY_RUNNER_CLASSES": "carry_forward_check"},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {"wait": "ok", "record": {"exit_code": 0, "stdout": "FLY GATE_INHERITANCE: clear\n"}},
+      "args": ["--action-class", "carry_forward_check", "--model", "eval-model", "--github-delivery", "--github-token-env", "EVAL_LOCAL_SCOPED_GH", "--repository", "owner/repo"],
+      "expect": {"exit": 0, "ok": true, "stdout_contains": "FLY GATE_INHERITANCE: clear", "local_cli_ran": false, "machines_created": 1, "minted": 1, "revoked_all_minted": true, "in_flight_after": 0, "machine_gone": true}
+    },
+    {
+      "id": "forced_fly_ineligible_role_refused",
+      "description": "--runner fly for a role with no Neotoma identity of its own: refused with the reason; nothing runs locally or on Fly.",
+      "settings": {},
+      "identity": "none",
+      "github_app": "configured",
+      "fly": {"wait": "ok", "record": null},
+      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
+      "expect": {"exit": 1, "ok": false, "reason_contains": "no Neotoma identity of its own", "local_cli_ran": false, "fly_requests": 0, "minted": 0}
+    },
+    {
+      "id": "forced_fly_without_app_refused_not_pat",
+      "description": "--runner fly when the GitHub App is not configured: refused rather than falling back to the shared PAT, which appears nowhere.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "unconfigured",
+      "fly": {"wait": "ok", "record": null},
+      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
+      "expect": {"exit": 1, "ok": false, "reason_contains": "never falls back to a PAT", "local_cli_ran": false, "fly_requests": 0, "pat_absent": true}
+    },
+    {
+      "id": "forced_fly_budget_deferral",
+      "description": "The monthly Fly budget cannot cover one more maximum-length run: the dispatch is deferred with cooled_until, and the minted token is revoked.",
+      "settings": {"APIS_FLY_MONTHLY_BUDGET_USD": "0.0001"},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {"wait": "ok", "record": null},
+      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
+      "expect": {"exit": 1, "ok": false, "reason_contains": "budget", "cooled_until": true, "local_cli_ran": false, "machines_created": 0, "revoked_all_minted": true}
+    },
+    {
+      "id": "forced_fly_disconnect_cleans_up",
+      "description": "The connection drops while waiting on the machine: the machine is destroyed and confirmed gone before its slot is released, and the token is revoked.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {"wait": "disconnect", "record": null},
+      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
+      "expect": {"exit": 1, "ok": false, "reason_contains": "error while waiting on machine", "local_cli_ran": false, "machines_created": 1, "machine_gone": true, "revoked_all_minted": true, "in_flight_after": 0}
+    },
+    {
+      "id": "forced_fly_timeout_cleans_up",
+      "description": "The machine outlives the Apis deadline: it is stopped and force-deleted, the dispatch reports a timeout, and the token is revoked.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {"wait": "timeout", "record": null},
+      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo", "--timeout", "5"],
+      "expect": {"exit": 1, "ok": false, "reason_contains": "timed out", "local_cli_ran": false, "machines_created": 1, "machine_gone": true, "revoked_all_minted": true, "in_flight_after": 0}
+    }
+  ]
+}

@@ -728,10 +728,10 @@ def test_wait_disconnect_destroys_per_job_machine_before_release(fly_env):
         handle = await executor.launch(_job())
         assert executor.ledger.entry(handle.machine_id) is not None
         executor.client.wait = _async(_disconnect)
-        await executor.collect(handle)
+        return await executor.collect(handle)
 
-    with pytest.raises(httpx.ConnectError):
-        asyncio.run(go())
+    rc, out, err = asyncio.run(go())
+    assert rc == 1 and b"error while waiting" in err  # a failed result, not a raise
     assert fake.calls("POST", "/stop") and fake.calls("DELETE")
     # Released only because destruction was confirmed (GET -> 404).
     assert executor.ledger.snapshot()["in_flight"] == {}
