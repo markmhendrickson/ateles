@@ -67,6 +67,7 @@ def test_scenario_set_covers_the_required_behaviours():
         "incomplete_result_record_is_an_unknown_outcome",
         "non_finite_budget_setting_disables_fly",
         "negative_daily_cap_refuses_an_opted_in_class_without_local_fallback",
+        "held_reservation_with_unreadable_cost_refuses_admission",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 

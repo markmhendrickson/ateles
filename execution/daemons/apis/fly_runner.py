@@ -212,7 +212,8 @@ OPTIONAL_FIELDS: dict[str, dict[str, type | tuple | str]] = {
     "config_metadata": {"ateles_run_id": str},
     "config_env": {"ATELES_RUN_ID": str},
     "ledger_entry": {"machine_id": str, "lease_nonce": str, "unconfirmed": bool,
-                     "lease_expires": NULLABLE_NUMBER},
+                     "lease_expires": NULLABLE_NUMBER, "untracked": bool,
+                     "unconfirmed_reason": str},
     # Every other kind declares that it has no optional fields.
     "machine": {}, "list_entry": {}, "lease_view": {}, "lease_grant": {}, "ledger": {},
     "owner_record": {}, "result_record": {},
@@ -552,15 +553,6 @@ def _next_day_start(ts: float) -> float:
     return (datetime(d.year, d.month, d.day, tzinfo=timezone.utc) + timedelta(days=1)).timestamp()
 
 
-def _reserved_cost(entry: dict, config: FlyConfig) -> float:
-    """An in-flight entry's reserved maximum cost. An entry whose cost cannot
-    be read reserves the whole default window, never nothing."""
-    value = entry.get("max_cost_usd") if isinstance(entry, dict) else None
-    if _type_ok(value, NUMBER):  # finite, bounded, not negative
-        return float(value)
-    return (DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS) * config.rate_per_second_usd
-
-
 def process_start_token(pid: int) -> str | None:
     """When *pid* started, as an opaque token; None when it is not running.
 
@@ -633,6 +625,69 @@ class FlyLedgerError(Exception):
     """The ledger file exists but cannot be read: accounting is unknown."""
 
 
+def _new_entry(entry: dict) -> dict:
+    """A reservation about to be written must pass the same validator every
+    read applies, or nothing is written."""
+    try:
+        return validate("ledger_entry", entry)
+    except FlyInvalid as exc:
+        raise FlyLedgerError(f"refusing to write a reservation: {exc}") from None
+
+
+@dataclass(frozen=True)
+class LedgerSnapshot:
+    """The ledger as ONE call of the validator read it, under the lock.
+
+    Every field is validated (period markers, counters, every reservation,
+    every owner record) and the period is rolled. Decisions read these
+    fields only, never the raw file; writes start from ``document()``.
+    """
+
+    month: str
+    day: str
+    spend_usd: float
+    launches_today: int
+    local_fallbacks: int
+    entries: dict[str, dict]
+    owners: dict[str, dict]
+
+    def outstanding_usd(self) -> float:
+        """The reserved maximum cost of every reservation still held,
+        recomputed from the validated reservations each time."""
+        return sum(float(e["max_cost_usd"]) for e in self.entries.values())
+
+    def check_totals(self, config: FlyConfig, name: str) -> None:
+        """Admission's consistency checks: each stored total must agree with
+        what the validated reservations say, or the ledger is INVALID."""
+        rate = config.rate_per_second_usd
+        for key, e in self.entries.items():
+            # A reservation's stored cost must cover its whole window at the
+            # current rate (a lower cost would under-reserve the budget).
+            needed = (e["deadline"] - e["started_at"]) * rate
+            if not e["max_cost_usd"] >= needed * (1 - 1e-9):
+                raise FlyLedgerError(
+                    f"Fly ledger {name}: reservation {key}'s reserved cost does not cover "
+                    "its window at the current rate")
+        admitted_today = sum(
+            1 for e in self.entries.values()
+            if not ("untracked" in e and e["untracked"]) and _day_key(e["started_at"]) == self.day
+        )  # fmt: skip
+        if not self.launches_today >= admitted_today:
+            raise FlyLedgerError(
+                f"Fly ledger {name}: the day's launch count is below the reservations "
+                "admitted today")
+        if not _finite_number(self.outstanding_usd(), 0, MAX_RECORD_NUMBER):
+            raise FlyLedgerError(f"Fly ledger {name}: the reserved total is not a finite amount")
+
+    def document(self) -> dict:
+        """A fresh document built from the validated fields, for writing."""
+        return {
+            "month": self.month, "day": self.day, "spend_usd": self.spend_usd,
+            "launches_today": self.launches_today, "local_fallbacks": self.local_fallbacks,
+            "in_flight": copy.deepcopy(self.entries), "owners": copy.deepcopy(self.owners),
+        }  # fmt: skip
+
+
 class FlyLedger:
     """A local JSON ledger, like the tier ledger.
 
@@ -674,27 +729,81 @@ class FlyLedger:
             return
         with self._locked():
             try:
-                data = self._load()
+                snap = self._snapshot(self._clock())
             except FlyLedgerError:
                 return
-            self._save(data)
+            self._save(snap.document())
 
-    def _load(self) -> dict:
+    # ── the one validator ────────────────────────────────────────────────
+
+    def _read_document(self) -> dict | None:
+        """The raw file, parsed but NOT validated; None when there is no
+        ledger yet. Only ``_snapshot`` reads it."""
         if not self.path.exists():
-            # The only "new period" without a marker: no ledger at all yet.
-            return {"month": None, "spend_usd": 0.0, "day": None, "launches_today": 0,
-                    "local_fallbacks": 0, "in_flight": {}, "owners": {}}  # fmt: skip
+            return None
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raise FlyLedgerError(f"Fly ledger {self.path.name} is unreadable") from None
-        try:
-            # Every period marker and counter must be present and well formed:
-            # an unknown period is never a new one, and is never reset.
-            validate("ledger", data)
-        except FlyInvalid as exc:
-            raise FlyLedgerError(f"Fly ledger {self.path.name}: {exc}") from None
-        return data
+
+    def _snapshot(self, now: float, config: FlyConfig | None = None, *,
+                  admission: bool = False) -> LedgerSnapshot:  # fmt: skip
+        """THE validated ledger, or ``FlyLedgerError`` (INVALID).
+
+        Every number any decision reads comes from this object, produced in
+        one call, under the lock, immediately before that decision. It
+        validates every top-level field, every reservation and every owner
+        record with the same validators, and rolls the period. With
+        ``admission`` it also recomputes the derived totals from the
+        validated reservations and refuses on any mismatch with what is
+        stored beside them. The caller must hold ``_locked()``.
+        """
+        name = self.path.name
+        raw = self._read_document()
+        if raw is None:
+            # The only "new period" without a marker: no ledger at all yet.
+            raw = {"month": None, "spend_usd": 0.0, "day": None, "launches_today": 0,
+                   "local_fallbacks": 0, "in_flight": {}, "owners": {}}  # fmt: skip
+        else:
+            try:
+                validate("ledger", raw)
+            except FlyInvalid as exc:
+                raise FlyLedgerError(f"Fly ledger {name}: {exc}") from None
+        entries: dict[str, dict] = {}
+        for key, entry in raw["in_flight"].items():
+            try:
+                entry = validate("ledger_entry", entry)
+            except FlyInvalid as exc:
+                raise FlyLedgerError(f"Fly ledger {name}: reservation {key}: {exc}") from None
+            if entry["run_id"] != key:
+                raise FlyLedgerError(f"Fly ledger {name}: reservation {key} names another run")
+            entries[key] = copy.deepcopy(entry)
+        owners: dict[str, dict] = {}
+        for key, record in raw["owners"].items():
+            try:
+                record = validate("owner_record", record)
+            except FlyInvalid as exc:
+                raise FlyLedgerError(f"Fly ledger {name}: owner {key}: {exc}") from None
+            if record["id"] != key:
+                raise FlyLedgerError(f"Fly ledger {name}: owner {key} names another owner")
+            owners[key] = copy.deepcopy(record)
+        period = {"month": raw["month"], "day": raw["day"], "spend_usd": raw["spend_usd"],
+                  "launches_today": raw["launches_today"]}  # fmt: skip
+        self._roll(period, now)  # refuses a later period; resets only on a rollover
+        snap = LedgerSnapshot(
+            month=period["month"], day=period["day"], spend_usd=float(period["spend_usd"]),
+            launches_today=period["launches_today"], local_fallbacks=raw["local_fallbacks"],
+            entries=entries, owners=owners,
+        )
+        if admission:
+            if config is None:
+                raise FlyLedgerError("admission needs the configuration it is checked against")
+            snap.check_totals(config, name)
+        return snap
+
+    def _load(self) -> dict:
+        """The validated ledger as a document (for writing back)."""
+        return self._snapshot(self._clock()).document()
 
     def _save(self, data: dict) -> None:
         if data["month"] is None or data["day"] is None:
@@ -702,10 +811,9 @@ class FlyLedger:
             # write, so a saved ledger always carries valid ones.
             self._roll(data, self._clock())
         if self.owner is not None:
-            owners = data["owners"]  # present: the loader validated it
+            owners = data["owners"]
             owners[self.owner["id"]] = {**self.owner, "heartbeat": self._clock()}
-            # Keep the map small: drop owners that hold nothing any more. An
-            # unreadable reservation's owner is simply not counted as holding.
+            # Keep the map small: drop owners that hold nothing any more.
             holding = {e["owner"] for e in data["in_flight"].values()
                        if isinstance(e, dict) and isinstance(e.get("owner"), str)}
             for oid in [o for o in owners if o not in holding and o != self.owner["id"]]:
@@ -727,10 +835,9 @@ class FlyLedger:
 
     def _roll(self, data: dict, now: float) -> None:
         """Start a new period only on a genuine rollover: a VALID marker
-        EARLIER than the current period (or no ledger at all, ``None``). The
-        loader has already refused any marker that is absent or malformed;
-        a marker later than the current period is refused too (canonical
-        markers order as text), never read as a new period."""
+        EARLIER than the current period (or no ledger at all, ``None``). A
+        marker later than the current period is refused (canonical markers
+        order as text), never read as a new period."""
         month, day = _month_key(now), _day_key(now)
         for marker, current in ((data["month"], month), (data["day"], day)):
             if marker is not None and not marker <= current:
@@ -745,24 +852,27 @@ class FlyLedger:
             data["launches_today"] = 0
 
     def snapshot(self, now: float | None = None) -> dict:
+        """A copy of the validated ledger (raises ``FlyLedgerError``)."""
         with self._locked():
-            data = self._load()
-            self._roll(data, self._clock() if now is None else now)
-            return copy.deepcopy(data)
+            return self._snapshot(self._clock() if now is None else now).document()
+
+    # ── decisions: each reads ONE snapshot taken under the lock ──────────
 
     def reserve(self, config: FlyConfig, *, run_id: str, owner: str, max_run_seconds: int,
                 login: bool = False, machine_id: str = "",
                 now: float | None = None) -> None:  # fmt: skip
         """Refuse, or reserve one launch slot for *run_id*, owned by *owner*.
 
-        Admission is atomic under the ledger lock and counts, against the
-        budget, the month's completed spend, the login machines' storage,
-        the maximum-length cost of EVERY reservation still held (including
-        unconfirmed and untracked machines), and the incoming job's own
-        maximum-length cost. Refuses when that total would exceed the budget
-        (until the next calendar month), when the day's launch count is at
-        its cap (until the next UTC day), or when the concurrency limit is
-        reached (until the earliest held deadline).
+        Admission is atomic under the ledger lock and decided ONLY from one
+        validated snapshot: against the budget it counts the month's
+        completed spend, the login machines' storage, the reserved maximum
+        cost of EVERY reservation still held (including unconfirmed and
+        untracked machines), and the incoming job's own maximum-length cost.
+        Refuses when that total would exceed the budget (until the next
+        calendar month), when the day's launch count is at its cap (until
+        the next UTC day), or when the concurrency limit is reached (until
+        the earliest held deadline). An invalid or inconsistent ledger
+        refuses every launch until it is repaired.
         """
         now = self._clock() if now is None else now
         config.require_valid_limits()  # also for a directly constructed config
@@ -771,23 +881,17 @@ class FlyLedger:
             raise FlyConfigInvalid("the job's maximum run time is outside its bounds")
         with self._locked():
             try:
-                data = self._load()
-                self._roll(data, now)
+                snap = self._snapshot(now, config, admission=True)
             except FlyLedgerError as exc:
                 # No retry time: this does not clear by waiting.
                 raise FlyRefusal(
                     f"{exc}. The Fly ledger needs operator repair; no Fly launches "
                     "until it is fixed (spend and caps are unknown).", "",
                 ) from None
+            if run_id in snap.entries:
+                raise FlyRefusal(f"Fly run {run_id} already holds a reservation", "")
             worst = max_run_seconds * config.rate_per_second_usd
-            outstanding = sum(
-                _reserved_cost(entry, config) for entry in data["in_flight"].values()
-            )
-            committed = (
-                float(data["spend_usd"])  # present and numeric after _load/_roll
-                + config.monthly_storage_usd()
-                + outstanding
-            )
+            committed = snap.spend_usd + config.monthly_storage_usd() + snap.outstanding_usd()
             if not (worst > 0 and committed + worst <= config.budget_usd):
                 raise FlyRefusal(
                     f"Fly monthly budget: ${committed:.4f} spent, stored or reserved "
@@ -795,28 +899,26 @@ class FlyLedger:
                     f"exceed APIS_FLY_MONTHLY_BUDGET_USD=${config.budget_usd:.2f}",
                     _render_wall(_next_month_start(now)),
                 )
-            if not int(data["launches_today"]) < config.max_per_day:
+            if not snap.launches_today < config.max_per_day:
                 raise FlyRefusal(
                     f"Fly daily machine cap reached (APIS_FLY_MAX_MACHINES_PER_DAY="
                     f"{config.max_per_day})",
                     _render_wall(_next_day_start(now)),
                 )
-            in_flight = data["in_flight"]
-            if not len(in_flight) < config.max_concurrent:
-                deadlines = [v["deadline"] for v in in_flight.values() if isinstance(v, dict)
-                             and _type_ok(v.get("deadline"), NUMBER)]  # fmt: skip
+            if not len(snap.entries) < config.max_concurrent:
+                deadlines = [e["deadline"] for e in snap.entries.values()]
                 earliest = min(deadlines) if deadlines else now + 60  # a retry hint only
                 raise FlyRefusal(
                     f"Fly concurrency cap reached (APIS_FLY_MAX_CONCURRENT="
                     f"{config.max_concurrent})",
                     _render_wall(max(earliest, now + 60)),
                 )
-            data["launches_today"] = int(data["launches_today"]) + 1
-            in_flight[run_id] = {
-                "run_id": run_id, "owner": owner, "machine_id": machine_id, "login": login,
-                "started_at": now, "deadline": now + max_run_seconds, "max_cost_usd": worst,
-            }  # fmt: skip
-            self._save(data)
+            doc = snap.document()
+            doc["launches_today"] = snap.launches_today + 1
+            doc["in_flight"][run_id] = _new_entry(
+                {"run_id": run_id, "owner": owner, "machine_id": machine_id, "login": login,
+                 "started_at": now, "deadline": now + max_run_seconds, "max_cost_usd": worst})
+            self._save(doc)
 
     def record_untracked(self, *, machine_id: str, run_id: str, owner: str, config: FlyConfig,
                          started_at: float, max_run_seconds: int) -> str:  # fmt: skip
@@ -826,109 +928,122 @@ class FlyLedger:
         the caps: it records a fact, it is not an admission."""
         key = run_id or f"untracked-{machine_id}"
         with self._locked():
-            data = self._load()
-            if key not in data["in_flight"]:
-                data["in_flight"][key] = {
-                    "run_id": key, "owner": owner, "machine_id": machine_id, "login": False,
-                    "started_at": started_at, "deadline": started_at + max_run_seconds,
-                    "max_cost_usd": max_run_seconds * config.rate_per_second_usd,
-                    "unconfirmed": True, "untracked": True,
-                }  # fmt: skip
-            self._save(data)
+            snap = self._snapshot(self._clock())
+            if key not in snap.entries:
+                doc = snap.document()
+                doc["in_flight"][key] = _new_entry(
+                    {"run_id": key, "owner": owner, "machine_id": machine_id, "login": False,
+                     "started_at": started_at, "deadline": started_at + max_run_seconds,
+                     "max_cost_usd": max_run_seconds * config.rate_per_second_usd,
+                     "unconfirmed": True, "untracked": True})  # fmt: skip
+                self._save(doc)
         return key
+
+    def _update_entry(self, run_id: str, change: Callable[[dict], bool]) -> None:
+        """Apply *change* to *run_id*'s reservation in a fresh snapshot and
+        write it back if *change* says it changed something."""
+        with self._locked():
+            doc = self._snapshot(self._clock()).document()
+            if run_id in doc["in_flight"] and change(doc["in_flight"][run_id]):
+                _new_entry(doc["in_flight"][run_id])  # still a valid reservation
+                self._save(doc)
 
     def set_lease(self, run_id: str, nonce: str, expires_at: float | None) -> None:
         """Keep the lease nonce WITH the reservation, so a later settlement or
         reaper from the same owner can release it. The ledger file is private
         to the operator (mode 0600)."""
-        with self._locked():
-            data = self._load()
-            entry = data["in_flight"].get(run_id)
-            if entry is not None:
-                entry["lease_nonce"] = nonce
-                entry["lease_expires"] = expires_at
-                self._save(data)
+        def change(entry: dict) -> bool:
+            entry["lease_nonce"] = nonce
+            entry["lease_expires"] = expires_at
+            return True
+
+        self._update_entry(run_id, change)
 
     def clear_lease(self, run_id: str) -> None:
-        with self._locked():
-            data = self._load()
-            entry = data["in_flight"].get(run_id)
-            if entry is not None and entry.pop("lease_nonce", None) is not None:
-                entry.pop("lease_expires", None)
-                self._save(data)
+        def change(entry: dict) -> bool:
+            if "lease_nonce" not in entry:
+                return False
+            del entry["lease_nonce"]
+            if "lease_expires" in entry:
+                del entry["lease_expires"]
+            return True
+
+        self._update_entry(run_id, change)
 
     def set_machine(self, run_id: str, machine_id: str) -> None:
-        with self._locked():
-            data = self._load()
-            entry = data["in_flight"].get(run_id)
-            if entry is not None:
-                entry["machine_id"] = machine_id
-                self._save(data)
+        def change(entry: dict) -> bool:
+            entry["machine_id"] = machine_id
+            return True
+
+        self._update_entry(run_id, change)
 
     def mark_unconfirmed(self, run_id: str, *, reason: str) -> None:
         """Keep *run_id*'s slot and reservation, flagged for the reaper: its
         machine's termination could not be confirmed, so it is still owned."""
-        with self._locked():
-            data = self._load()
-            entry = data["in_flight"].get(run_id)
-            if entry is None:
-                return
+        def change(entry: dict) -> bool:
             entry["unconfirmed"] = True
             entry["unconfirmed_reason"] = reason[:200]
-            self._save(data)
+            return True
+
+        self._update_entry(run_id, change)
 
     def entry(self, run_id: str) -> dict | None:
+        """A validated copy of *run_id*'s reservation, or None if absent."""
         with self._locked():
-            return copy.deepcopy(self._load()["in_flight"].get(run_id))
+            entries = self._snapshot(self._clock()).entries
+            return copy.deepcopy(entries[run_id]) if run_id in entries else None
 
     def find_by_machine(self, machine_id: str) -> dict[str, dict]:
         with self._locked():
-            return {
-                rid: copy.deepcopy(e) for rid, e in self._load()["in_flight"].items()
-                if e.get("machine_id") == machine_id
-            }  # fmt: skip
+            entries = self._snapshot(self._clock()).entries
+            return {rid: copy.deepcopy(e) for rid, e in entries.items()
+                    if "machine_id" in e and e["machine_id"] == machine_id}  # fmt: skip
 
     def release(self, run_id: str) -> None:
         """Drop a reservation that provably never ran anything (no charge)."""
         with self._locked():
-            data = self._load()
-            if data["in_flight"].pop(run_id, None) is not None:
-                self._save(data)
+            snap = self._snapshot(self._clock())
+            if run_id in snap.entries:
+                doc = snap.document()
+                del doc["in_flight"][run_id]
+                self._save(doc)
 
     def settle(self, run_id: str, *, config: FlyConfig, now: float | None = None) -> float:
         """Release *run_id* and charge its incurred runtime, EXACTLY ONCE.
 
         The charge is the entry's elapsed time capped at its reserved window,
-        read from the entry itself under the lock. An entry already settled
-        is absent, so a second settlement charges nothing. Callers settle
-        only after termination is confirmed. Returns the dollars charged.
+        read from the validated snapshot under the lock. An entry already
+        settled is absent, so a second settlement charges nothing. Callers
+        settle only after termination is confirmed. An invalid ledger, or a
+        charge that is not a finite amount, raises ``FlyLedgerError`` and
+        keeps the reservation. Returns the dollars charged.
         """
         now = self._clock() if now is None else now
         with self._locked():
-            data = self._load()
-            self._roll(data, now)
-            if run_id not in data["in_flight"]:
+            snap = self._snapshot(now)
+            if run_id not in snap.entries:
                 return 0.0
-            cost = _charged_seconds(data["in_flight"][run_id], now) * config.rate_per_second_usd
+            cost = _charged_seconds(snap.entries[run_id], now) * config.rate_per_second_usd
             if not _finite_number(cost, 0, MAX_RECORD_NUMBER):
                 # Keep the reservation (and its full reserved cost) rather
                 # than charge an unreadable amount.
                 raise FlyLedgerError(f"Fly charge for {run_id} is not a finite amount")
-            del data["in_flight"][run_id]
-            data["spend_usd"] = float(data["spend_usd"]) + cost
-            self._save(data)
+            doc = snap.document()
+            del doc["in_flight"][run_id]
+            doc["spend_usd"] = snap.spend_usd + cost
+            self._save(doc)
             return cost
 
     def count_local_fallback(self) -> int:
         with self._locked():
             try:
-                data = self._load()
+                snap = self._snapshot(self._clock())
             except FlyLedgerError:
                 return -1
-            data["local_fallbacks"] = int(data["local_fallbacks"]) + 1
-            self._save(data)
-            return data["local_fallbacks"]
-
+            doc = snap.document()
+            doc["local_fallbacks"] = snap.local_fallbacks + 1
+            self._save(doc)
+            return doc["local_fallbacks"]
 
 # ── Machines API client ─────────────────────────────────────────────────────
 
@@ -2038,6 +2153,15 @@ class FlyExecutor:
             return await self._settle_locked(run_id)
 
     async def _settle_locked(self, run_id: str) -> bool:
+        """``_settle_steps``; an unusable ledger keeps the reservation as it
+        is (nothing is charged or released) and reports it unconfirmed."""
+        try:
+            return await self._settle_steps(run_id)
+        except FlyLedgerError as exc:
+            log.error(f"[fly] run={run_id}: ledger unusable ({exc}); reservation kept")
+            return False
+
+    async def _settle_steps(self, run_id: str) -> bool:
         """The one release path, in a strict order, with the admission lock
         held and the reservation still owned throughout:
 
@@ -2289,10 +2413,9 @@ class FlyExecutor:
                     settled.append(run_id)
             machines = await self.client.list()
             current = self.ledger.snapshot(now)["in_flight"]  # after the await
-            # Any reservation naming a machine claims it, readable or not: an
-            # unreadable reservation's machine is never treated as a stray.
-            tracked_machines = {e["machine_id"] for e in current.values()
-                                if isinstance(e, dict) and isinstance(e.get("machine_id"), str)}
+            # Every reservation naming a machine claims it (the snapshot is
+            # validated as a whole, so every reservation is readable here).
+            tracked_machines = {e["machine_id"] for e in current.values() if "machine_id" in e}
             login_ids = set(self.config.login_machines.values())
             for machine in machines:
                 mid = machine["id"]

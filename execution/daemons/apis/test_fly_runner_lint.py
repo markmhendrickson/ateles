@@ -106,7 +106,7 @@ ALLOWLIST: dict[str, str] = {
         'unset is reported by FlyConfig.missing() and refuses Fly',
     "execution/daemons/apis/fly_runner.py:FlyExecutor._launch:created.get('instance_id') or ''":
         "the create answer's version only scopes the wait; absent means wait without it",
-    "execution/daemons/apis/fly_runner.py:FlyExecutor._settle_locked:machine_id or '(unknown)'":
+    "execution/daemons/apis/fly_runner.py:FlyExecutor._settle_steps:machine_id or '(unknown)'":
         'log text only',
     'execution/daemons/apis/fly_runner.py:FlyExecutor.maybe_reap:return []':
         'a failed reaper settles nothing: every reservation stays held',

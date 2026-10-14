@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import base64
+import copy
 import json
 import logging
 import math
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -301,6 +303,17 @@ class Clock:
 # Valid limits that one maximum-length run cannot fit: the smallest budget
 # and the highest hourly rate the settings allow.
 EXHAUSTING = {"budget_usd": 0.01, "rate_per_second_usd": 100.0 / 3600}
+
+
+def _admitted(data: dict) -> dict:
+    """Seeded reservations as admission would have counted them: the day's
+    launch count covers every reservation started that day."""
+    n = sum(1 for e in data["in_flight"].values()
+            if isinstance(e, dict) and not e.get("untracked")
+            and isinstance(e.get("started_at"), (int, float))
+            and fly_runner._day_key(e["started_at"]) == data["day"])  # fmt: skip
+    data["launches_today"] = max(data["launches_today"], n)
+    return data
 
 
 def make_executor(fake: FakeFly, *, record=None, clock=None, mint=None, **overrides):
@@ -651,7 +664,7 @@ def test_an_unreadable_ledger_fails_closed(fly_env, tmp_path):
 
 def test_spend_accrues_from_machine_seconds(fly_env, tmp_path):
     config = fly_runner.FlyConfig.from_env()
-    ledger = fly_runner.FlyLedger(tmp_path / "l.json")
+    ledger = fly_runner.FlyLedger(tmp_path / "l.json", clock=lambda: 1000.0)
     ledger.reserve(config, run_id="a", owner="t", max_run_seconds=7200, now=1000.0)
     ledger.set_machine("a", "m1")
     ledger.settle("a", config=config, now=1000.0 + 3600)
@@ -1350,7 +1363,7 @@ def test_reaped_spend_counts_toward_admission(fly_env):
     data = executor.ledger._load()
     executor.ledger._roll(data, clock.now)
     data["spend_usd"] = 20.0 - one - one / 2
-    executor.ledger._save(data)
+    executor.ledger._save(_admitted(data))
     clock.now += 1920 + fly_runner.REAP_GRACE_SECONDS + 1
     asyncio.run(executor.reap())
     with pytest.raises(fly_runner.FlyRefusal, match="budget"):
@@ -1542,7 +1555,7 @@ def _seed_foreign(executor, clock, *, owner: dict, run_id="their-run", machine_i
     data.setdefault("owners", {})[owner["id"]] = {
         **owner, "heartbeat": clock.now if heartbeat is None else heartbeat,
     }
-    executor.ledger._save(data)
+    executor.ledger._save(_admitted(data))
 
 
 def _live_owner(oid="apis-live-cli"):
@@ -1581,7 +1594,7 @@ def test_another_owner_is_reaped_only_when_provably_dead_or_stale(fly_env, case,
         if case.endswith("fresh"):
             data = executor.ledger._load()
             data["owners"][owner["id"]]["heartbeat"] = clock.now
-            executor.ledger._save(data)
+            executor.ledger._save(_admitted(data))
     result = asyncio.run(executor.reap())
     assert ("their-run" in result) is reaped
     assert ("m-theirs" in fake.machines) is (not reaped)
@@ -1671,7 +1684,7 @@ def test_login_machine_held_by_a_live_dispatcher_elsewhere_is_busy(fly_env, monk
                   machine_id="m-codex")  # fmt: skip
     data = executor.ledger._load()
     data["in_flight"]["their-codex-run"]["login"] = True
-    executor.ledger._save(data)
+    executor.ledger._save(_admitted(data))
     fake.machines["m-codex"]["state"] = "started"
     with pytest.raises(fly_runner.FlyRefusal, match="busy") as exc:
         asyncio.run(executor.run(_codex_job()))
@@ -2163,7 +2176,7 @@ def test_settling_an_abandoned_login_reservation_never_stops_another_live_run(
             "login": True, "started_at": now, "deadline": now + 600, "max_cost_usd": 0.01,
         }  # fmt: skip
         data.setdefault("owners", {})[dead["id"]] = {**dead, "heartbeat": now}
-        executor.ledger._save(data)
+        executor.ledger._save(_admitted(data))
         reaped = asyncio.run(executor.reap())
         assert reaped == []
         assert fake.machines["m-codex"]["state"] == "started"
@@ -2875,11 +2888,17 @@ def test_an_unreadable_reservation_is_never_reaped(fly_env, field, mode):
     executor.ledger._roll(data, clock.now)
     data["in_flight"]["r-bad"] = entry
     data["owners"][dead["id"]] = dead
-    executor.ledger._save(data)
+    executor.ledger._save(_admitted(data))
     fake.machines["m-old"] = {"id": "m-old", "state": "started"}
-    assert "r-bad" not in asyncio.run(executor.reap())
+    # One unreadable reservation makes the whole ledger INVALID: the reaper
+    # does no accounting at all, and admission refuses until it is repaired.
+    with pytest.raises(fly_runner.FlyLedgerError, match="r-bad"):
+        asyncio.run(executor.reap())
     assert "m-old" in fake.machines and not fake.calls("DELETE")
-    assert "r-bad" in executor.ledger.snapshot(clock.now)["in_flight"]
+    assert "r-bad" in json.loads(executor.ledger.path.read_text())["in_flight"]
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair"):
+        executor.ledger.reserve(executor.config, run_id="next", owner="t", max_run_seconds=60,
+                                now=clock.now)  # fmt: skip
 
 
 def test_the_reaper_finishes_once_complete_answers_return(fly_env, monkeypatch):
@@ -3029,10 +3048,12 @@ def test_an_incomplete_owner_record_never_proves_death(fly_env, field, mode):
         "max_cost_usd": 0.01,
     }  # fmt: skip
     data["owners"]["apis-dead-owner"] = record
-    executor.ledger._save(data)
+    executor.ledger._save(_admitted(data))
     fake.machines["m-theirs"] = {"id": "m-theirs", "state": "started"}
-    assert "their-run" not in asyncio.run(executor.reap())
+    with pytest.raises(fly_runner.FlyLedgerError, match="apis-dead-owner"):
+        asyncio.run(executor.reap())  # an unreadable owner record: no accounting
     assert "m-theirs" in fake.machines
+    assert "their-run" in json.loads(executor.ledger.path.read_text())["in_flight"]
 
 
 @pytest.mark.parametrize("pid", [0, -1, 1, True, 12.5, "4242"])
@@ -3309,7 +3330,7 @@ def test_the_ledger_never_writes_a_non_finite_number(tmp_path):
     ledger._roll(data, 1_800_000_000)
     data["spend_usd"] = math.nan
     with pytest.raises(fly_runner.FlyLedgerError, match="non-finite"):
-        ledger._save(data)
+        ledger._save(_admitted(data))
     assert not (tmp_path / "l.json").exists()
 
 
@@ -3332,3 +3353,272 @@ def test_a_clock_that_reads_before_the_start_charges_the_whole_window():
     assert fly_runner._charged_seconds(entry, 900.0) == 300.0
     assert fly_runner._charged_seconds(entry, 1100.0) == 100.0
     assert fly_runner._charged_seconds(entry, math.nan) == 300.0
+
+
+
+# ── Admission reads ONE validated snapshot (round 12) ────────────────────────
+
+_NOW = 1_800_000_000  # 2027-01-15 UTC
+
+
+def _valid_ledger(config, now=_NOW):
+    """A ledger admission accepts: two held reservations, owners, counters."""
+    month, day = _ledger_now(now)
+    rate = config.rate_per_second_usd
+    entries = {
+        rid: {"run_id": rid, "owner": "o1", "machine_id": f"m-{rid}", "login": False,
+              "started_at": now - 100.0, "deadline": now - 100.0 + window,
+              "max_cost_usd": window * rate}
+        for rid, window in (("r1", 600.0), ("r2", 1920.0))
+    }  # fmt: skip
+    owner = {"id": "o1", "pid": 4242, "host": "h", "start": "s", "heartbeat": float(now)}
+    return {"month": month, "day": day, "spend_usd": 1.0, "launches_today": 2,
+            "local_fallbacks": 0, "in_flight": entries, "owners": {"o1": owner}}  # fmt: skip
+
+
+@pytest.mark.parametrize("cost", [-1, 10**13, "unknown", None, 0.0, 1e-9], ids=repr)
+def test_admission_refuses_a_held_reservation_whose_cost_it_cannot_trust(fly_env, tmp_path,
+                                                                         cost):  # fmt: skip
+    """The same untrustworthy reservation refuses admission; a correct one is
+    counted in full (control). An unreadable one also stops recovery from
+    settling or releasing anything; one that is readable but too low for
+    its window (e.g. after a rate rise) still lets recovery free capacity,
+    and only admission waits."""
+    config = fly_runner.FlyConfig.from_env()
+    config.budget_usd = 0.1
+    rate = config.rate_per_second_usd
+    data = _valid_ledger(config)
+    data["spend_usd"] = 0.0
+    long = data["in_flight"]["r2"]
+    long["deadline"] = long["started_at"] + 21_720
+    long["max_cost_usd"] = 21_720 * rate
+    path = tmp_path / "l.json"
+    ledger = fly_runner.FlyLedger(path, clock=lambda: _NOW)
+    # Control: the correct cost is counted and the run does not fit.
+    path.write_text(json.dumps(data))
+    with pytest.raises(fly_runner.FlyRefusal, match="budget"):
+        ledger.reserve(config, run_id="new", owner="t", max_run_seconds=1920, now=_NOW)
+    # The same state with a cost that cannot be trusted: refused as invalid.
+    long["max_cost_usd"] = cost
+    path.write_text(json.dumps(data))
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair"):
+        ledger.reserve(config, run_id="new", owner="t", max_run_seconds=1920, now=_NOW)
+    assert json.loads(path.read_text()) == data
+    if not isinstance(cost, float):
+        # Recovery on the same state: nothing is settled or released.
+        with pytest.raises(fly_runner.FlyLedgerError):
+            ledger.settle("r1", config=config, now=_NOW)
+        with pytest.raises(fly_runner.FlyLedgerError):
+            ledger.release("r1")
+        assert json.loads(path.read_text()) == data
+    else:
+        ledger.release("r1")  # frees capacity; the low reservation stays held
+        assert set(json.loads(path.read_text())["in_flight"]) == {"r2"}
+
+
+def test_a_valid_ledger_admits_within_its_caps(fly_env, tmp_path):
+    config = fly_runner.FlyConfig.from_env()
+    path = tmp_path / "l.json"
+    path.write_text(json.dumps(_valid_ledger(config)))
+    ledger = fly_runner.FlyLedger(path, clock=lambda: _NOW)
+    ledger.reserve(config, run_id="new", owner="t", max_run_seconds=600, now=_NOW)
+    after = json.loads(path.read_text())
+    assert set(after["in_flight"]) == {"r1", "r2", "new"} and after["launches_today"] == 3
+
+
+@pytest.mark.parametrize("change", ["launch-count-below-today", "cost-below-window",
+                                    "key-names-another-run", "owner-key-mismatch"])  # fmt: skip
+def test_a_stored_total_that_disagrees_with_the_reservations_refuses(fly_env, tmp_path, change):
+    config = fly_runner.FlyConfig.from_env()
+    data = _valid_ledger(config)
+    if change == "launch-count-below-today":
+        data["launches_today"] = 1
+    elif change == "cost-below-window":
+        data["in_flight"]["r1"]["max_cost_usd"] *= 0.5
+    elif change == "key-names-another-run":
+        data["in_flight"]["r1"]["run_id"] = "r9"
+    else:
+        data["owners"]["o1"]["id"] = "o9"
+    path = tmp_path / "l.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair"):
+        fly_runner.FlyLedger(path, clock=lambda: _NOW).reserve(
+            config, run_id="new", owner="t", max_run_seconds=600, now=_NOW)
+    assert json.loads(path.read_text()) == data
+
+
+def test_a_run_id_already_reserved_is_never_overwritten(fly_env, tmp_path):
+    config = fly_runner.FlyConfig.from_env()
+    path = tmp_path / "l.json"
+    path.write_text(json.dumps(_valid_ledger(config)))
+    with pytest.raises(fly_runner.FlyRefusal, match="already holds"):
+        fly_runner.FlyLedger(path, clock=lambda: _NOW).reserve(
+            config, run_id="r1", owner="t", max_run_seconds=600, now=_NOW)
+
+
+def test_a_settlement_on_an_unusable_ledger_keeps_the_result_and_the_reservation(fly_env):
+    """A completed run whose ledger became unusable: its result still comes
+    back, its machine state says unconfirmed, and nothing is released."""
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake, record={"stdout": "done"})
+    real = executor.ledger.settle
+
+    def broken(*a, **k):
+        raise fly_runner.FlyLedgerError("unusable")
+
+    executor.ledger.settle = broken
+    job = _job()
+    rc, out, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and b"done" in out and job.remote_state == "unconfirmed"
+    assert job.run_id in executor.ledger.snapshot()["in_flight"]
+    executor.ledger.settle = real
+
+
+# Property: reserve admits ONLY from a fully valid ledger, and then exactly
+# when the caps allow; every other generated ledger is refused unchanged.
+
+_CORRUPTIONS = {
+    "absent": None, "null": None, "text": "x", "list": [], "object": {}, "true": True,
+    "negative": -1, "negative-float": -0.5, "zero": 0, "huge": 1e13, "huge-int": 10**400,
+    "nan": math.nan, "inf": math.inf, "bad-month": "2027-13", "bad-day": "2027-02-30",
+    "future-month": "2099-01", "future-day": "2099-01-01", "past-month": "2026-12",
+    "past-day": "2027-01-14", "renamed": "other",
+}
+_LEDGER_FIELDS = ["month", "day", "spend_usd", "launches_today", "local_fallbacks",
+                  "in_flight", "owners"]  # fmt: skip
+_ENTRY_FIELDS = ["run_id", "owner", "started_at", "deadline", "max_cost_usd", "login",
+                 "machine_id", "lease_expires", "unconfirmed", "untracked"]  # fmt: skip
+_OWNER_FIELDS = ["id", "pid", "host", "start", "heartbeat"]
+
+
+def _apply(target: dict, field: str, mode: str) -> None:
+    if mode == "absent":
+        target.pop(field, None)
+    elif mode == "renamed":
+        target[field] = "other"
+    else:
+        target[field] = copy.deepcopy(_CORRUPTIONS[mode])
+
+
+def _num(x, low=0, high=1e12):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and low <= x <= high
+
+
+def _marker(x, fmt, current):
+    if not isinstance(x, str) or not re.fullmatch(r"[0-9-]+", x, re.ASCII):
+        return False
+    try:
+        ok = datetime.strptime(x, fmt).strftime(fmt) == x
+    except ValueError:
+        return False
+    return ok and x <= current
+
+
+def _oracle(doc, config, max_run, now=_NOW):
+    """An independent reading of the ledger: (valid, admitted-if-valid)."""
+    month, day = _ledger_now(now)
+    if not isinstance(doc, dict):
+        return False, False
+    try:
+        if not (_marker(doc["month"], "%Y-%m", month) and _marker(doc["day"], "%Y-%m-%d", day)):
+            return False, False
+        spend, launches, falls = doc["spend_usd"], doc["launches_today"], doc["local_fallbacks"]
+        entries, owners = doc["in_flight"], doc["owners"]
+    except KeyError:
+        return False, False
+    if not (_num(spend) and isinstance(launches, int) and _num(launches, 0, 10**9)
+            and isinstance(falls, int) and _num(falls, 0, 10**9)
+            and isinstance(entries, dict) and isinstance(owners, dict)):  # fmt: skip
+        return False, False
+    rate = config.rate_per_second_usd
+    for key, e in entries.items():
+        if not isinstance(e, dict):
+            return False, False
+        need = {"run_id", "owner", "started_at", "deadline", "max_cost_usd", "login"}
+        if not need <= set(e) or any(e[k] is None for k in need):
+            return False, False
+        if not (e["run_id"] == key and isinstance(e["owner"], str) and e["owner"]
+                and _num(e["started_at"]) and _num(e["deadline"]) and _num(e["max_cost_usd"])
+                and isinstance(e["login"], bool) and e["deadline"] >= e["started_at"]):  # fmt: skip
+            return False, False
+        for name, ok in (("machine_id", lambda v: isinstance(v, str)),
+                         ("unconfirmed", lambda v: isinstance(v, bool)),
+                         ("untracked", lambda v: isinstance(v, bool)),
+                         ("lease_expires", lambda v: v is None or _num(v))):  # fmt: skip
+            if name in e and not ok(e[name]):
+                return False, False
+        if not e["max_cost_usd"] >= (e["deadline"] - e["started_at"]) * rate * (1 - 1e-9):
+            return False, False
+    for key, o in owners.items():
+        if not (isinstance(o, dict) and set(_OWNER_FIELDS) <= set(o)
+                and o["id"] == key and isinstance(o["host"], str) and o["host"]
+                and isinstance(o["start"], str) and _num(o["heartbeat"])
+                and isinstance(o["pid"], int) and not isinstance(o["pid"], bool)
+                and o["pid"] > 1):  # fmt: skip
+            return False, False
+    spend = 0.0 if doc["month"] < month else float(spend)
+    launches = 0 if doc["day"] < day else launches
+    today = sum(1 for e in entries.values()
+                if not e.get("untracked") and fly_runner._day_key(e["started_at"]) == day)
+    if not launches >= today:
+        return False, False
+    committed = spend + config.monthly_storage_usd() + sum(e["max_cost_usd"] for e in entries.values())
+    admitted = (committed + max_run * rate <= config.budget_usd
+                and launches < config.max_per_day and len(entries) < config.max_concurrent)  # fmt: skip
+    return True, admitted
+
+
+def test_reserve_never_admits_from_an_unvalidated_ledger(fly_env, tmp_path):
+    import random
+
+    config = fly_runner.FlyConfig.from_env()
+    config.max_concurrent = 5
+    rng = random.Random(1456)
+    outcomes = {"admitted": 0, "refused-invalid": 0, "refused-cap": 0}
+    for case in range(600):
+        doc = _valid_ledger(config)
+        if case % 4 == 0:
+            doc["spend_usd"] = 19.99  # valid ledgers that are over budget
+        elif case % 4 == 1:
+            doc["launches_today"] = config.max_per_day  # valid, at the daily cap
+        applied = []
+        for _ in range(rng.randint(0, 3)):
+            mode = rng.choice(sorted(_CORRUPTIONS))
+            where = rng.choice(["ledger", "entry", "owner"])
+            if where == "ledger":
+                field = rng.choice(_LEDGER_FIELDS)
+                _apply(doc, field, mode)
+            elif where == "entry" and isinstance(doc.get("in_flight"), dict) and doc["in_flight"]:
+                key = rng.choice(sorted(doc["in_flight"]))
+                field = rng.choice(_ENTRY_FIELDS)
+                if isinstance(doc["in_flight"][key], dict):
+                    _apply(doc["in_flight"][key], field, mode)
+            elif where == "owner" and isinstance(doc.get("owners"), dict) and doc["owners"]:
+                field = rng.choice(_OWNER_FIELDS)
+                if isinstance(doc["owners"]["o1"], dict):
+                    _apply(doc["owners"]["o1"], field, mode)
+            else:
+                continue
+            applied.append((where, field, mode))
+        path = tmp_path / f"l{case}.json"
+        text = json.dumps(doc)  # NaN and Infinity are written as JSON allows
+        path.write_text(text)
+        valid, expected = _oracle(json.loads(text), config, 600)
+        ledger = fly_runner.FlyLedger(path, clock=lambda: _NOW)
+        try:
+            ledger.reserve(config, run_id="new", owner="t", max_run_seconds=600, now=_NOW)
+            admitted = True
+        except fly_runner.FlyRefusal as exc:
+            admitted = False
+            reason = str(exc)
+        assert admitted == (valid and expected), (case, applied, admitted, valid, expected)
+        if admitted:
+            outcomes["admitted"] += 1
+            after = json.loads(path.read_text())
+            assert _oracle(after, config, 0)[0], (case, applied)
+            assert after["in_flight"]["new"]["max_cost_usd"] == 600 * config.rate_per_second_usd
+        else:
+            outcomes["refused-invalid" if "needs operator repair" in reason else "refused-cap"] += 1
+            assert path.read_text() == text, (case, applied)  # never rewritten
+    # Every outcome is exercised, many times.
+    assert min(outcomes.values()) >= 20, outcomes

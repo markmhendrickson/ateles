@@ -1243,6 +1243,52 @@
         "minted": 0,
         "local_cli_ran": false
       }
+    },
+    {
+      "id": "held_reservation_with_unreadable_cost_refuses_admission",
+      "description": "Another dispatcher holds a long reservation whose reserved cost cannot be read. Admission cannot establish the budget, so the launch is refused with a repair message: nothing is sent to Fly, nothing runs locally, and the ledger is left exactly as it was.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "ledger_raw": {
+        "month": "2030-03",
+        "day": "2030-03-17",
+        "spend_usd": 0.0,
+        "launches_today": 1,
+        "local_fallbacks": 0,
+        "in_flight": {
+          "held-1": {
+            "run_id": "held-1",
+            "owner": "apis-other",
+            "machine_id": "m-held",
+            "login": false,
+            "started_at": 1899999900.0,
+            "deadline": 1900021620.0,
+            "max_cost_usd": "unknown"
+          }
+        },
+        "owners": {}
+      },
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "needs operator repair",
+        "fly_requests": 0,
+        "local_cli_ran": false,
+        "ledger_untouched": true,
+        "revoked_all_minted": true
+      }
     }
   ]
 }

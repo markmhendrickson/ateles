@@ -464,7 +464,8 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
             "started_at": clock.now, "deadline": clock.now + 1920,
             "max_cost_usd": 1920 * config.rate_per_second_usd,
         }  # fmt: skip
-        data.setdefault("owners", {})[owner["id"]] = owner
+        data["owners"][owner["id"]] = owner
+        data["launches_today"] += 1  # as that dispatcher's admission counted it
         executor.ledger._save(data)
         if other.get("job_on_machine"):
             # This dispatcher's job is the one running on the machine now.
