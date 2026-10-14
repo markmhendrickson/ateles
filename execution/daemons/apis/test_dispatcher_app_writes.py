@@ -42,6 +42,9 @@ class _Notifier:
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
+    # conftest gives every test a fallback credential; these tests exercise the
+    # real resolver, including "no credential at all".
+    monkeypatch.setattr(sd, "_resolve_github_write_token", sd._REAL_RESOLVE_GITHUB_WRITE_TOKEN)
     sd._clear_app_write_token_cache()
     monkeypatch.setenv("ATELES_AGENT_PAT", PAT)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -604,3 +607,68 @@ async def test_guard_and_headers_agree_in_every_combination(monkeypatch, app, pa
     guard = await d._require_github_write_credential(REPO, "x")
     sent = "Authorization" in d._github_headers(REPO)
     assert guard == sent, "the guard passed for a credential the headers do not send"
+
+
+# ── every GitHub write goes through the credential guard ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_marker_with_no_credential_sends_nothing_and_warns(monkeypatch, no_pat, caplog):
+    _unconfigure_app(monkeypatch)
+    seen = _recorder(monkeypatch, lambda request: httpx.Response(201, json={}))
+    with caplog.at_level(logging.WARNING):
+        await _dispatcher()._mark_pipeline_inflight(_trigger())
+    assert seen == [], "the in-flight marker was sent without a usable credential"
+    text = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "in-flight pipeline marker skipped" in text
+    assert "no usable GitHub write credential" in text
+
+
+@pytest.mark.asyncio
+async def test_other_marker_and_merge_writes_also_skip_without_a_credential(
+    monkeypatch, no_pat, caplog
+):
+    _unconfigure_app(monkeypatch)
+    seen = _recorder(monkeypatch, lambda request: httpx.Response(200, json=[]))
+    d = _dispatcher()
+    with caplog.at_level(logging.WARNING):
+        await d._clear_pipeline_inflight(_trigger())
+        await d._record_fix_round(_trigger(), 1)
+        merged, detail = await d._merge_pr(REPO, 5)
+        assert await d._claim_escalation(_trigger(), "kind") is True  # fail-open
+        assert await d._clear_closed_issue_markers([REPO]) == 0
+        assert await d._supersede_stale_verdicts(REPO, 5, "a" * 40) == {
+            "comments": 0, "reviews": 0, "failures": 0
+        }
+    assert seen == []
+    assert merged is False and "merge held" in detail
+
+
+def test_every_github_write_in_the_dispatcher_goes_through_the_guard():
+    """Structural guard against a new write that bypasses the credential guard:
+    every POST/PATCH/PUT/DELETE issued on an httpx client in swarm_dispatch.py
+    sits in a function that calls the guard. The exceptions are the App
+    token mint itself (authenticated with a JWT) and the two Neotoma helpers."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(sd.__file__)).read_text())
+    allowed = {"_mint_reviewer_app_installation_token", "_store_entities", "_neotoma_post"}
+    unguarded: list[str] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        src = ast.get_source_segment(Path(sd.__file__).read_text(), fn) or ""
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"post", "patch", "put", "delete", "request"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "client"
+            ):
+                if fn.name not in allowed and not (
+                    "_require_github_write_credential" in src or "_github_write_token" in src
+                ):
+                    unguarded.append(f"{fn.name}:{node.lineno}")
+    assert unguarded == [], f"GitHub writes without the credential guard: {unguarded}"

@@ -45,6 +45,7 @@ def test_the_eval_covers_every_required_behaviour():
         "a_bot_authored_gate_notice_is_not_reposted",
         "a_403_logs_the_response_body_and_no_credential",
         "instance_token_only_is_never_sent_bare",
+        "marker_with_no_credential_sends_nothing",
     }
     assert required <= set(IDS)
 

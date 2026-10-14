@@ -4398,8 +4398,12 @@ class SwarmDispatcher:
         marker = self._PIPELINE_INFLIGHT_MARKER.format(
             started_at=datetime.now(timezone.utc).isoformat(), stage=stage
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "in-flight pipeline marker",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return
         try:
-            await _ensure_app_write_token(trigger.repository)
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     f"https://api.github.com/repos/{trigger.repository}/issues/"
@@ -4421,6 +4425,10 @@ class SwarmDispatcher:
     async def _clear_pipeline_inflight(self, trigger: SwarmTrigger) -> None:
         """Delete any in-flight markers on this issue. Best-effort."""
         ref = f"{trigger.repository}#{trigger.number}"
+        if not await self._require_github_write_credential(
+            trigger.repository, "in-flight marker clear", detail=ref
+        ):
+            return
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.get(
@@ -4594,6 +4602,10 @@ class SwarmDispatcher:
         await self._await_github_app_ready(repositories)
         cleared = 0
         for repository in repositories:
+            if not await self._require_github_write_credential(
+                repository, "stale-marker sweep"
+            ):
+                continue
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.get(
@@ -6946,6 +6958,10 @@ class SwarmDispatcher:
             )
         if expected_head and not expected:
             return False, "invalid expected PR head; merge held"
+        if not await self._require_github_write_credential(
+            repo, "merge", detail=f"{repo}#{pr_number}"
+        ):
+            return False, "no usable GitHub write credential; merge held"
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 headers = self._github_headers(repo)
@@ -8407,6 +8423,11 @@ class SwarmDispatcher:
             f"https://api.github.com/repos/{trigger.repository}/issues/"
             f"{trigger.number}/comments"
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "fix-round marker",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -8447,6 +8468,11 @@ class SwarmDispatcher:
             f"https://api.github.com/repos/{trigger.repository}/issues/"
             f"{trigger.number}/comments"
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "escalation marker",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return True  # fail-open: the operator is still notified
         headers = self._github_headers(trigger.repository)
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -10263,7 +10289,10 @@ class SwarmDispatcher:
         counts = {"comments": 0, "reviews": 0, "failures": 0}
         if not head:
             return counts
-        await _ensure_app_write_token(repository)
+        if not await self._require_github_write_credential(
+            repository, "stale verdict supersession", detail=f"{repository}#{pr_number}"
+        ):
+            return counts
         headers = self._github_headers(repository)
         failure_marker = self._SUPERSEDE_FAILURE_MARKER.format(sha=head)
         repeated_failure = False
@@ -12908,6 +12937,11 @@ class SwarmDispatcher:
             "an earlier head and the fix since then touched none of their "
             f"areas:\n{rows}"
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "carry note",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -13105,6 +13139,11 @@ class SwarmDispatcher:
             f"https://api.github.com/repos/{trigger.repository}/issues/"
             f"{trigger.number}/comments"
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "combined-pass comments",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return posted
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 for lens, res in accepted.items():

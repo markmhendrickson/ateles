@@ -244,6 +244,23 @@
           "no usable GitHub write credential"
         ]
       }
+    },
+    {
+      "id": "marker_with_no_credential_sends_nothing",
+      "why": "the durable in-flight marker goes through the same write guard as every other dispatcher write: with no usable credential it is skipped with a WARNING and nothing is sent, not even unauthenticated",
+      "app": "unconfigured",
+      "pat": false,
+      "cache": "cold",
+      "actions": [
+        "mark_inflight"
+      ],
+      "expect": {
+        "requests": [],
+        "warnings_contain": [
+          "in-flight pipeline marker skipped",
+          "no usable GitHub write credential"
+        ]
+      }
     }
   ]
 }
