@@ -102,7 +102,9 @@ def make_reading(*, metric_id: str, artifact: str, start: datetime, end: datetim
         window_end=window_end,
         sourced_at=iso(sourced_at),
         coverage_ratio=float(coverage_ratio),
-        coverage_note=coverage_note or None,
+        # Always written, "" when nothing is missing: an absent field is not written, so a clean rerun
+        # would leave an earlier run's note (e.g. from --allow-stale) on the stored reading.
+        coverage_note=coverage_note or "",
         probe_ok=probe_ok,
         collector=collector,
         status="ok" if coverage_ratio >= 0.9 else "partial",
