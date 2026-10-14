@@ -58,6 +58,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from lib import github_app_token as _github_app_token  # noqa: E402
 from lib.credential_scrub import (  # noqa: E402
     AGENT_CHILD_MARKER_ENV,
     is_generation_credential,
@@ -2071,6 +2072,8 @@ def _subscription_only_env(
 
     * The harness metered keys (``_METERED_CREDENTIALS``) are stripped unless
       ``APIS_ALLOW_METERED_HARNESS=1`` explicitly allows them.
+    * GitHub App private keys (`github_app_token.is_app_key_variable`) are
+      ALWAYS stripped, by pattern, in both branches.
     * Media-generation vendor credentials are ALWAYS stripped, by name and by
       prefix (``lib.credential_scrub``), and the override above
       never releases them. They belong to the host-side capability client only
@@ -2135,6 +2138,13 @@ def _subscription_only_env(
         # Even under the explicit override, prefer Max-plan OAuth for Claude.
         child.pop("ANTHROPIC_API_KEY", None)
     for key in [k for k in child if is_generation_credential(k)]:
+        child.pop(key, None)
+    # GitHub App private keys, ALWAYS, in every branch: a key lets its holder
+    # mint a token for that App, so a prompt-steered agent holding one could act
+    # as any identity. The daemon mints; the agent gets only the token it is
+    # handed (`github_token`), never a key. Names are matched by pattern, so an
+    # App added tomorrow is covered without anyone naming it here.
+    for key in [k for k in child if _github_app_token.is_app_key_variable(k)]:
         child.pop(key, None)
     child[AGENT_CHILD_MARKER_ENV] = "1"
     return child

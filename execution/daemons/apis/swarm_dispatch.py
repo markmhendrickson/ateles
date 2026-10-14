@@ -2364,6 +2364,19 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
         repo:  full repo slug (e.g. "markmhendrickson/ateles").
     """
     identity = _app_identity_for_agent(agent)
+    if identity and identity.startswith(_github_app_token.REVIEWER_IDENTITY_PREFIX):
+        lens_key = identity[len(_github_app_token.REVIEWER_IDENTITY_PREFIX):]
+        if lens_key in _github_app_token.missing_expected_lens_apps():
+            # The roster (ATELES_EXPECTED_LENS_APPS) says this lens has an App on
+            # this host, but THIS process has none of its variables. Falling back
+            # to a shared token would post as the wrong identity, so refuse.
+            log.error(
+                f"[{DAEMON_NAME}] the {lens_key} lens is expected to have an App "
+                f"({_github_app_token.reviewer_prefix(lens_key)}_*) but this process "
+                f"has none of its variables; the {agent} agent has no GitHub "
+                "credential this turn"
+            )
+            return ""
     if identity and _github_app_token.identity_declared(identity):
         # Tier 0 (operator ruling 2026-10-14): the agent's own GitHub App. A
         # declared App that cannot mint answers "" — never a silent fall back
@@ -13728,6 +13741,18 @@ class SwarmDispatcher:
                 for lens in lenses_missing_comments(
                     bodies, list(captured), head_sha=head_sha
                 ):
+                    if _github_app_token.lens_has_own_app(lens):
+                        # A comment posted with the dispatcher's shared token is
+                        # never read as this lens's verdict (the lens is read only
+                        # from its own App), so reposting it every cycle would be
+                        # noise that clears nothing. The lens stays visibly pending
+                        # until its own App posts.
+                        log.warning(
+                            f"[{DAEMON_NAME}] {lens} has an App of its own: no "
+                            f"fallback review comment posted on {t.repository}"
+                            f"#{t.number}; the lens stays pending until its App posts"
+                        )
+                        continue
                     body = compose_fallback_comment(
                         lens, agents.get(lens, "unknown panelist"), captured[lens],
                         head_sha,

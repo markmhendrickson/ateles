@@ -43,6 +43,24 @@ the approving identity: an App cannot approve a pull request it opened.
 so a half-configured App reads as "declared but unusable" rather than being
 mistaken for "absent" (the readers fail closed on a declared-but-unusable one).
 
+Two names that look alike and are not: the swarm App (the default, the one
+every lens without an App of its own still approves as) is
+``ATELES_REVIEWER_APP_*``; the per-identity Apps are ``ATELES_APP_REVIEWER_<LENS>_*``
+and ``ATELES_APP_PR_OPENER_*``. A transposition is not an error, it is a
+different (and undeclared) name, so ``status`` lists both.
+
+``ATELES_EXPECTED_LENS_APPS`` (optional) names the lenses that must have an App
+on THIS host. A process that is missing a lens's variables while the setting
+names that lens is not allowed to fall back to the shared identity: its
+verdicts are unread, its approval is refused and its agent gets no token, each
+loudly. Set it wherever the per-lens variables are set (the daemons and any
+session that runs the approval tool), from the same snapshot.
+
+The private-key variables are never handed to a child process: ``exec`` removes
+every App key variable from the child's environment (it needs only the minted
+token), and the dispatcher does the same for agent processes
+(``is_app_key_variable``).
+
 CLI (never prints a token):
 
     python3 lib/github_app_token.py check [--repo owner/name] [--identity NAME | --prefix P]
@@ -75,11 +93,17 @@ DEFAULT_APP_ENV_PREFIX = "ATELES_REVIEWER_APP"
 APP_IDENTITY_ENV_PREFIX = "ATELES_APP"
 PR_OPENER_IDENTITY = "pr_opener"
 REVIEWER_IDENTITY_PREFIX = "reviewer_"
-# Review roles that may have an App of their own. Used only for `status` and
-# docs; discovery of configured reviewers scans the environment, not this list.
+# Review roles that may have an App of their own. Used only to list a row for
+# each in `status`; discovery of configured reviewers scans the environment, not
+# this list. A test holds it equal to `review_panel.LENSES`.
 KNOWN_REVIEWER_LENSES = ("pm", "arch", "qa", "ux", "security", "content", "legal")
+# Optional roster: lenses that must have an App on this host (see module doc).
+ENV_EXPECTED_LENS_APPS = "ATELES_EXPECTED_LENS_APPS"
 _APP_VAR_SUFFIXES = ("_INSTALLATION_ID", "_PRIVATE_KEY_PATH", "_PRIVATE_KEY", "_ID")
-_LENS_KEY_RE = re.compile(r"^[a-z0-9]+$")
+# A lens key: lowercase words joined by single underscores. `identity_env_prefix`
+# turns every non-alphanumeric run into one underscore, so this is the shape
+# for which the env name and the lens name round-trip (a hyphen would not).
+_LENS_KEY_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 GITHUB_API = "https://api.github.com"
 USER_AGENT = "ateles-github-app-token/1.0"
 # Re-mint this long before expiry, so a token handed to a child process that
@@ -227,7 +251,7 @@ def identity_configured(identity: str) -> bool:
 
 
 def declared_reviewer_lenses() -> tuple[str, ...]:
-    """Lenses whose per-lens App has at least one variable set, sorted.
+    """Lenses whose own App has at least one variable set, sorted.
 
     Discovered from the environment, so a lens added to the panel needs no
     change here. A name that is not a plain lens key is ignored.
@@ -245,6 +269,65 @@ def declared_reviewer_lenses() -> tuple[str, ...]:
                     found.add(lens)
                 break
     return tuple(sorted(found))
+
+
+def expected_reviewer_lenses() -> tuple[str, ...]:
+    """Lenses `ATELES_EXPECTED_LENS_APPS` says must have an App on this host.
+
+    Comma- or space-separated lens keys. A name that is not a plain lens key is
+    dropped (a malformed entry can only expect fewer Apps, never more).
+    """
+    raw = os.environ.get(ENV_EXPECTED_LENS_APPS) or ""
+    found = {
+        part.lower()
+        for part in re.split(r"[,\s]+", raw)
+        if part and _LENS_KEY_RE.fullmatch(part.lower())
+    }
+    return tuple(sorted(found))
+
+
+def missing_expected_lens_apps() -> tuple[str, ...]:
+    """Expected lenses with no App variable at all in THIS process.
+
+    The process is missing what the roster says it must have: it must not fall
+    back to the shared identity for these lenses.
+    """
+    return tuple(
+        lens
+        for lens in expected_reviewer_lenses()
+        if not identity_declared(reviewer_identity(lens))
+    )
+
+
+def reviewer_lenses_in_scope() -> tuple[str, ...]:
+    """Every lens that has, or is expected to have, an App of its own."""
+    return tuple(sorted(set(declared_reviewer_lenses()) | set(expected_reviewer_lenses())))
+
+
+def lens_has_own_app(lens: str) -> bool:
+    """True when *lens* has an App declared here or is expected to have one."""
+    return str(lens or "").strip().lower() in reviewer_lenses_in_scope()
+
+
+def is_app_key_variable(name: str) -> bool:
+    """True for an App PRIVATE KEY variable (inline or path), of any App.
+
+    The default App's ``ATELES_REVIEWER_APP_PRIVATE_KEY(_PATH)`` and every
+    per-identity ``ATELES_APP_<IDENTITY>_PRIVATE_KEY(_PATH)``. These let their
+    holder mint a token for an App, so no dispatched agent may hold one: the
+    daemon mints, and an agent needs only the token it is handed.
+    """
+    upper = str(name or "").upper()
+    if not upper.endswith(("_PRIVATE_KEY", "_PRIVATE_KEY_PATH")):
+        return False
+    return upper.startswith(f"{APP_IDENTITY_ENV_PREFIX}_") or upper.startswith(
+        f"{DEFAULT_APP_ENV_PREFIX}_"
+    )
+
+
+def without_app_keys(variables: dict[str, str]) -> dict[str, str]:
+    """A copy of a child-process variable map with every App key removed."""
+    return {k: v for k, v in variables.items() if not is_app_key_variable(k)}
 
 
 def identity_token(identity: str, repo: str | None = None) -> str:
@@ -463,19 +546,49 @@ def _cli_check(repo: str | None, prefix: str) -> int:
     return 0
 
 
+def _unusable_reason(prefix: str) -> str:
+    """Which half of a declared-but-unusable App is missing (names only)."""
+    missing = []
+    if not app_id(prefix):
+        missing.append(f"{prefix}_ID")
+    if not app_private_key_pem(prefix):
+        missing.append(f"{prefix}_PRIVATE_KEY or {prefix}_PRIVATE_KEY_PATH (readable)")
+    return ", ".join(missing)
+
+
+def _status_state(prefix: str, *, expected: bool = False) -> str:
+    if app_configured(prefix):
+        return "configured (id and key present; not tested, run: check --identity NAME)"
+    if _any_app_var_set(prefix):
+        return f"DECLARED BUT UNUSABLE, missing: {_unusable_reason(prefix)}"
+    if expected:
+        return "EXPECTED BUT NOT DECLARED in this process (see ATELES_EXPECTED_LENS_APPS)"
+    return "not configured"
+
+
 def _cli_status() -> int:
-    """Which per-identity Apps this host has configured. Offline; no tokens."""
-    rows = [(PR_OPENER_IDENTITY, pr_opener_prefix())]
-    lenses = sorted(set(KNOWN_REVIEWER_LENSES) | set(declared_reviewer_lenses()))
-    rows += [(reviewer_identity(lens), reviewer_prefix(lens)) for lens in lenses]
-    for identity, prefix in rows:
-        if app_configured(prefix):
-            state = "configured"
-        elif _any_app_var_set(prefix):
-            state = "DECLARED BUT UNUSABLE (need _ID and a readable private key)"
-        else:
-            state = "not configured"
-        print(f"{identity:<18} {prefix:<32} {state}")
+    """Which Apps this host has configured. Offline; prints names, never values."""
+    expected = set(expected_reviewer_lenses())
+    lenses = sorted(set(KNOWN_REVIEWER_LENSES) | set(declared_reviewer_lenses()) | expected)
+    rows = [(PR_OPENER_IDENTITY, pr_opener_prefix(), False)]
+    rows += [
+        (reviewer_identity(lens), reviewer_prefix(lens), lens in expected) for lens in lenses
+    ]
+    print("Per-identity GitHub Apps on this host (offline; variable names only):")
+    print("  not configured        that role keeps using the shared accounts / the swarm App")
+    print("  declared but unusable fails closed: the lens's verdicts are unread, approval is refused")
+    print("  expected but not declared  ATELES_EXPECTED_LENS_APPS names it; fails closed the same way")
+    for identity, prefix, is_expected in rows:
+        print(f"{identity:<18} {prefix:<32} {_status_state(prefix, expected=is_expected)}")
+    print()
+    print(
+        "The swarm App (the default; approves for every lens without an App of its own) "
+        "is ATELES_REVIEWER_APP_*, a different name from ATELES_APP_REVIEWER_<LENS>_*:"
+    )
+    print(
+        f"{'swarm App':<18} {DEFAULT_APP_ENV_PREFIX:<32} "
+        f"{_status_state(DEFAULT_APP_ENV_PREFIX)}"
+    )
     return 0
 
 
@@ -504,6 +617,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.identity and args.prefix:
         parser.error("--identity and --prefix are mutually exclusive")
+    if args.action == "status" and (args.identity or args.prefix or args.repo or args.env):
+        parser.error("status lists every App; it takes no --identity, --prefix, --repo or --env")
 
     try:
         if args.action == "status":
@@ -516,8 +631,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cli_check(args.repo, args.prefix)
         if not cmd_tail:
             parser.error("exec needs a command after --")
+        # The command gets the minted token and no App key: it can act as this
+        # one App for the token's lifetime, and cannot mint a token for another.
         env = {
-            **os.environ,
+            **without_app_keys(dict(os.environ)),
             **token_env(args.repo, prefix=args.prefix, extra_names=tuple(args.env)),
         }
     except AppTokenError as exc:

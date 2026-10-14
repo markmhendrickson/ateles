@@ -345,8 +345,127 @@ def test_cli_status_reports_each_identity_without_network(monkeypatch, keypair, 
     _configure_identity(monkeypatch, keypair, "reviewer_pm")
     monkeypatch.setenv("ATELES_APP_REVIEWER_ARCH_ID", "1")  # id, no key
     assert gat.main(["status"]) == 0
-    rows = {line.split()[0]: line for line in capsys.readouterr().out.splitlines()}
-    assert rows["reviewer_pm"].endswith("configured")
+    rows = {line.split()[0]: line for line in capsys.readouterr().out.splitlines() if line.strip()}
+    assert "configured (id and key present" in rows["reviewer_pm"]
     assert "DECLARED BUT UNUSABLE" in rows["reviewer_arch"]
     assert rows["pr_opener"].endswith("not configured")
     assert "reviewer_content" in rows
+
+
+# ── lens-key shape, expected roster, key containment, status ────────────────
+
+
+def test_a_lens_with_an_underscore_is_discovered_like_any_other(monkeypatch):
+    # `identity_env_prefix` writes `reviewer_foo_bar` as ...REVIEWER_FOO_BAR, so
+    # the reader must discover the same lens from those variables, or an App the
+    # approver uses would be one the reader never scopes.
+    monkeypatch.setenv("ATELES_APP_REVIEWER_FOO_BAR_ID", "1")
+    monkeypatch.setenv("ATELES_APP_REVIEWER_FOO_BAR_PRIVATE_KEY_PATH", "/nowhere.pem")
+    assert gat.declared_reviewer_lenses() == ("foo_bar",)
+    assert gat.reviewer_prefix("foo_bar") == "ATELES_APP_REVIEWER_FOO_BAR"
+
+
+@pytest.mark.parametrize("name", ["ATELES_APP_REVIEWER__ID", "ATELES_APP_REVIEWER_X__Y_ID", "ATELES_APP_REVIEWER_ID"])
+def test_a_malformed_lens_name_is_not_a_lens(monkeypatch, name):
+    monkeypatch.setenv(name, "1")
+    assert gat.declared_reviewer_lenses() == ()
+
+
+def test_the_expected_roster_names_lenses_missing_their_variables(monkeypatch):
+    monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "pm, ARCH security")
+    assert gat.expected_reviewer_lenses() == ("arch", "pm", "security")
+    monkeypatch.setenv("ATELES_APP_REVIEWER_PM_ID", "1")  # declared (even unusable)
+    assert gat.missing_expected_lens_apps() == ("arch", "security")
+    assert gat.reviewer_lenses_in_scope() == ("arch", "pm", "security")
+    assert gat.lens_has_own_app("pm") and gat.lens_has_own_app("ARCH")
+    assert not gat.lens_has_own_app("qa")
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("ATELES_REVIEWER_APP_PRIVATE_KEY", True),
+        ("ATELES_REVIEWER_APP_PRIVATE_KEY_PATH", True),
+        ("ATELES_APP_PR_OPENER_PRIVATE_KEY", True),
+        ("ATELES_APP_REVIEWER_SECURITY_PRIVATE_KEY_PATH", True),
+        ("ATELES_APP_SOME_FUTURE_ROLE_PRIVATE_KEY", True),  # an App nobody named yet
+        ("ateles_app_reviewer_pm_private_key", True),  # case is not a hiding place
+        ("ATELES_APP_REVIEWER_PM_ID", False),
+        ("ATELES_APP_REVIEWER_PM_INSTALLATION_ID", False),
+        ("ATELES_REVIEWER_APP_ID", False),
+        ("OTHER_PRIVATE_KEY", False),
+        ("PATH", False),
+    ],
+)
+def test_which_variables_are_app_private_keys(name, expected):
+    assert gat.is_app_key_variable(name) is expected
+
+
+def test_without_app_keys_drops_only_the_keys():
+    kept = gat.without_app_keys(
+        {
+            "ATELES_APP_PR_OPENER_PRIVATE_KEY": "k",
+            "ATELES_APP_PR_OPENER_ID": "1",
+            "ATELES_REVIEWER_APP_PRIVATE_KEY_PATH": "/x",
+            "HOME": "/h",
+        }
+    )
+    assert kept == {"ATELES_APP_PR_OPENER_ID": "1", "HOME": "/h"}
+
+
+def test_exec_hands_the_command_a_token_and_no_app_key(monkeypatch, keypair, capsys):
+    # A command run as one App must not be able to mint a token for another.
+    _configure_identity(monkeypatch, keypair, "pr_opener")
+    monkeypatch.setenv("ATELES_APP_PR_OPENER_INSTALLATION_ID", "555")
+    monkeypatch.setenv("ATELES_APP_REVIEWER_PM_ID", "1")
+    monkeypatch.setenv("ATELES_APP_REVIEWER_PM_PRIVATE_KEY", "pm-key-value")
+    monkeypatch.setenv("ATELES_APP_REVIEWER_SECURITY_PRIVATE_KEY_PATH", "/keys/security.pem")
+    monkeypatch.setenv("ATELES_REVIEWER_APP_PRIVATE_KEY", "swarm-key-value")
+    monkeypatch.setattr(gat, "_request", FakeGitHub())
+    seen = {}
+    monkeypatch.setattr(gat.os, "execvpe", lambda f, a, e: seen.update(env=e))
+    gat.main(["exec", "--identity", "pr_opener", "--", "true"])
+    env = seen["env"]
+    assert env["GH_TOKEN"].startswith("ghs_fake_")  # control: the token is there
+    assert not [name for name in env if gat.is_app_key_variable(name)]
+    assert "pm-key-value" not in env.values() and "swarm-key-value" not in env.values()
+    assert env["ATELES_APP_REVIEWER_PM_ID"] == "1"  # ids are not secrets and stay
+
+
+def test_an_unconfigured_identitys_bot_login_never_borrows_the_default_app(configured):
+    # The DEFAULT App is fully configured and would answer; the lens must not
+    # silently take its login.
+    with pytest.raises(gat.AppTokenError, match="ATELES_APP_REVIEWER_PM_ID"):
+        gat.identity_bot_login("reviewer_pm")
+
+
+def test_status_says_which_half_is_missing_and_what_it_means(monkeypatch, capsys):
+    monkeypatch.setenv("ATELES_APP_REVIEWER_QA_ID", "1")  # id, no key
+    monkeypatch.setenv("ATELES_APP_REVIEWER_SECURITY_INSTALLATION_ID", "9")  # neither
+    monkeypatch.setenv(gat.ENV_EXPECTED_LENS_APPS, "ux")
+    assert gat.main(["status"]) == 0
+    out = capsys.readouterr().out
+    rows = {line.split()[0]: line for line in out.splitlines() if line.strip()}
+    assert "missing: ATELES_APP_REVIEWER_QA_PRIVATE_KEY or ATELES_APP_REVIEWER_QA_PRIVATE_KEY_PATH" in rows["reviewer_qa"]
+    assert "ATELES_APP_REVIEWER_SECURITY_ID" in rows["reviewer_security"]
+    assert "ATELES_APP_REVIEWER_SECURITY_PRIVATE_KEY" in rows["reviewer_security"]
+    assert "EXPECTED BUT NOT DECLARED" in rows["reviewer_ux"]
+    assert "fails closed" in out  # the legend
+    # the default App is shown, with the name that is easy to transpose
+    assert rows["swarm"].split()[2] == gat.DEFAULT_APP_ENV_PREFIX
+    assert "ATELES_REVIEWER_APP_*" in out and "ATELES_APP_REVIEWER_<LENS>_*" in out
+
+
+def test_status_never_prints_a_value(monkeypatch, capsys):
+    monkeypatch.setenv("ATELES_APP_REVIEWER_QA_ID", "424242")
+    monkeypatch.setenv("ATELES_APP_REVIEWER_QA_PRIVATE_KEY", "SENTINEL-KEY-MATERIAL")
+    gat.main(["status"])
+    out = capsys.readouterr().out
+    assert "SENTINEL-KEY-MATERIAL" not in out and "424242" not in out
+
+
+@pytest.mark.parametrize("flag", [["--identity", "pr_opener"], ["--prefix", "X"], ["--repo", "o/r"]])
+def test_status_refuses_a_flag_it_would_silently_ignore(flag, capsys):
+    with pytest.raises(SystemExit):
+        gat.main(["status", *flag])
+    assert "status lists every App" in capsys.readouterr().err

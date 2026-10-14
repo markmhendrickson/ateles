@@ -275,13 +275,16 @@ identity**: every swarm comment opens with the attribution header above.
 This follows the architecture decision that agent identity lives in AAuth
 (`sub` per role) and Neotoma provenance, while GitHub accounts are a
 per-repo actor concern — one machine account per repo, not per agent.
-Per-agent GitHub identities (separate accounts or a GitHub App per agent)
-are deferred to Layer-3 graduation (`ateles-agents/<genus>`), where an
-agent gains an independent lifecycle that justifies the account, PAT
-rotation, and collaborator-management overhead. If stronger visual
-separation is wanted before then, a single GitHub App ("Ateles Swarm")
-posting with the same in-body attribution gives the `[bot]` badge without
-multiplying accounts.
+Two roles are the exception, by operator ruling 2026-10-14: the PR opener
+(the builder) and each review lens can act as a GitHub App of their own, so
+the host's own record of who opened and who approved a pull request matches
+who did the work; see "Per-identity GitHub Apps" below. Every other agent
+keeps the shared per-repo identity, and separate per-agent accounts remain
+deferred to Layer-3 graduation (`ateles-agents/<genus>`), where an agent
+gains an independent lifecycle that justifies the account, PAT rotation, and
+collaborator-management overhead. The swarm App ("Ateles Swarm",
+`ATELES_REVIEWER_APP_*`) is the one the approval tool still approves as for
+any lens that has no App of its own.
 
 Note: the machine accounts need **classic** repo-scope PATs — fine-grained
 PATs 403 on public repos they collaborate on but do not own.
@@ -303,18 +306,6 @@ resolved by `execution/daemons/apis/lens_authors.py`, never typed into code:
   agent's own `<AGENT>_AGENT_PAT`. A login is never guessed from an agent's
   name; a token that does not resolve admits nobody.
 
-Per-identity Apps (operator ruling 2026-10-14). A lens can have a GitHub App
-of its own (`ATELES_APP_REVIEWER_<LENS>_*`, see `lib/github_app_token.py`), and
-pull requests open from a separate PR-opener App (`ATELES_APP_PR_OPENER_*`).
-Once a lens has an App, its `review:<lens>` comment is read only from that
-App's bot login: the accounts above can no longer speak for it, and its App
-speaks for no other lens, the aggregation or a notice. A lens App that is
-declared but cannot be resolved admits nobody for that lens. The PR opener is
-never an author of any of these comments. `approve_pr_as_app.py` submits each
-configured lens's APPROVE as that lens's App, and falls back to one review
-from the swarm App only for lenses with no App of their own (its output says
-which mode it used).
-
 It fails closed. With an empty set no lens verdict, aggregation or notice
 marker is read: reviews do not clear, the approval tool refuses, and
 auto-merge holds. Auto-merge also holds while any identity source is
@@ -322,4 +313,93 @@ unresolved, and when a lens comment from a non-admitted account objects at the
 current head (such a comment can only delay, never clear). Apis logs an ERROR
 at startup when the set is empty; the approval tool names the setting and each
 ignored comment in its output.
+
+### Per-identity GitHub Apps (operator ruling 2026-10-14)
+
+Each review lens (`ATELES_APP_REVIEWER_<LENS>_*`) and the PR opener
+(`ATELES_APP_PR_OPENER_*`) can be a GitHub App of its own; see
+`lib/github_app_token.py`. The swarm App (`ATELES_REVIEWER_APP_*`, a different
+name from the lens Apps, easy to transpose) stays the approver for every lens
+that has none. Parent task: `ent_29dc4d17e9a655a771498b02`.
+
+Which comment counts as which lens is decided by the author **and the whole
+body**, never by the author alone and never by the opening marker alone:
+
+- Once a lens has an App, its `review:<lens>` verdict is read only from that
+  App's bot login. A shared account can no longer speak for it, and a
+  shared-account comment that names that lens anywhere in its body is not read.
+- A lens App speaks for its own lens only. Every swarm marker in its comment
+  must be that lens's own head marker or its retired form; the aggregation, a
+  deferral, a notice marker or another lens's marker anywhere in the comment
+  means the comment is not read. A retired verdict is judged like the verdict
+  it retired.
+- A lens App that is declared but cannot be resolved admits nobody for that
+  lens. So does one whose login is also another identity's (the PR opener,
+  another lens, the swarm App): the collision is reported and nobody is
+  admitted for the lenses involved.
+- The PR opener is never an author of any of these comments, and never an
+  approver: the approval tool refuses any approval authored by its login, or by
+  the PR's author, or by two approvers that resolve to one login, before it
+  submits anything.
+- `ATELES_EXPECTED_LENS_APPS` (optional, comma- or space-separated lens names)
+  lists the lenses that must have an App on this host. A process that is missing
+  one of those lenses' variables does not fall back to the shared identity: that
+  lens's verdicts are unread, the approval tool refuses and its agent gets no
+  token, each with a message that says so.
+- The private keys are never handed to a dispatched agent or to a command run
+  through `exec`; only the minted token is.
+
+`approve_pr_as_app.py` submits each configured lens's APPROVE as that lens's App
+and approves the remaining lenses together as the swarm App (its output says
+which mode ran). A declared App that is unusable refuses the whole approval; it
+never falls back.
+
+Check a host (offline, names only): `python3 lib/github_app_token.py status`.
+Check one App against GitHub: `python3 lib/github_app_token.py check --identity
+reviewer_<lens> --repo <owner/name>`. Open a pull request as the PR opener:
+`python3 lib/github_app_token.py exec --identity pr_opener --repo <owner/name>
+-- gh pr create ...`.
+
+**Cut-over order.** Do these in order, one lens at a time if wanted:
+
+1. Create and install the App (private, no webhook), and put its id, private key
+   and installation id in the secrets manifest.
+2. Publish the snapshot so the daemons and the sessions that run the approval
+   tool read the same values: the dispatcher and the approval tool must agree on
+   who counts, so every process needs the same per-lens variables. Restart the
+   touched daemons.
+3. Run `status` on each host, then `check --identity ...` for the new App.
+4. Re-run that lens on every open pull request that still needs it (below).
+5. Optionally set `ATELES_EXPECTED_LENS_APPS` from the same snapshot, so a
+   process that lacks the variables fails loudly instead of reading the shared
+   accounts.
+
+**Set together.** A lens's App id, private key and installation id arrive in
+one snapshot, never separately. An id with no key reads as declared but
+unusable: that lens's verdicts are unread and the approval tool refuses
+outright, so a half-set rollout blocks merges until the variables are complete
+or removed. Never set an id before its key is present on the host.
+
+**What changes for open pull requests.** From the moment a lens has an App, only
+that App's verdicts count for that lens. A verdict an earlier run posted as a
+shared account no longer clears that lens, so every open pull request needs that
+lens run again once the lens gets its App. A verdict the operator's session posts
+by hand (a bootstrap panel) must be posted as the lens App, for example
+`python3 lib/github_app_token.py exec --identity reviewer_<lens> --repo
+<owner/name> -- gh pr comment ...`.
+
+**Rollback.** For one lens: unset that lens's `ATELES_APP_REVIEWER_<LENS>_*`
+variables (and its entry in `ATELES_EXPECTED_LENS_APPS`) on every host and
+restart the touched daemons; the lens is read from the shared accounts again and
+its App-posted verdicts stop counting, so that lens runs again. Unsetting every
+per-identity variable restores today's behaviour exactly.
+
+**Before a lens App is declared on a host that runs the dispatcher pipeline.**
+The dispatcher posts a captured review as a fallback comment with the shared
+token. That comment is never read as a lens's verdict once the lens has an App,
+so the dispatcher no longer posts it for such a lens, and the lens stays
+pending until its own App posts. Retiring an old verdict in place still uses the
+shared token; prove that edit against a lens App's comment before declaring the
+first lens App on a host that runs the dispatcher. Both are tracked (see the
+parent task).
 
