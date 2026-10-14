@@ -19,13 +19,15 @@ consumed by three existing mechanisms, none new:
   3. the issue spec's design-basis section is checked mechanically by
      ``check_design_basis()`` before the pm and arch gates judge it.
 
-Everything here is keyed off the files actually on disk. A document listed in
+Reading-list loading is keyed off the files actually on disk. A document listed in
 ``conformance.md`` that is not yet written is reported as such, never invented;
 a ``docs/foundation/`` directory with no ``conformance.md`` fires nothing. So
 the wiring is complete before the prose exists, and each document lands into a
 slot that already fires — the point of building the binding first.
 
-Pure functions; the only I/O is reading markdown under ``foundation_root()``.
+Citation evaluation consumes prepared repository-snapshot evidence and never
+uses the local reading list as evidence of presence. Reading-list I/O stays
+under ``foundation_root()``; citation evaluation and rendering are pure.
 """
 
 from __future__ import annotations
@@ -368,75 +370,111 @@ def foundation_contract(root: Path | None = None) -> str:
 
 
 @dataclass(frozen=True)
-class DesignBasisCheck:
-    """Mechanical pre-check of a design-basis statement.
+class DesignSnapshot:
+    repository: str
+    sha: str | None = None
+    snapshot_kind: str = "unresolved"
+    failure: str = ""
 
-    ``ok`` is what the pm and arch gates start from, never what they end with:
-    a citation to an existing document is a claim the gate then reads the
-    document to test. The check exists so that a MISSING or FALSE basis is
-    visible before judgement, not so that a present one passes.
-    """
+    @property
+    def context(self) -> str:
+        label = {"pr_head": "reviewed PR head", "issue_baseline": "issue baseline"}.get(
+            self.snapshot_kind, "unresolved snapshot"
+        )
+        return f"{self.repository or 'repository unavailable'} @ {self.sha or 'SHA unavailable'} ({label})"
+
+
+@dataclass(frozen=True)
+class CitationOutcome:
+    citation: str
+    path: str
+    status: str  # present | absent | uncheckable
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class DesignBasisCheck:
+    """Path evidence, never a design-conformance verdict."""
 
     ok: bool
     citations: tuple[str, ...]
     missing: tuple[str, ...]
     summary: str
+    status: str
+    repository: str
+    sha: str | None
+    snapshot_kind: str
+    outcomes: tuple[CitationOutcome, ...] = ()
+    failure_details: tuple[str, ...] = ()
 
 
-def check_design_basis(text: str | None, root: Path | None = None) -> DesignBasisCheck:
-    root = root or foundation_root()
+def check_design_basis(
+    text: str | None,
+    *,
+    snapshot: DesignSnapshot | None = None,
+    outcomes: tuple[CitationOutcome, ...] = (),
+) -> DesignBasisCheck:
+    """Evaluate explicit evidence. No disk, environment or network fallback."""
+    snapshot = snapshot or DesignSnapshot("")
     body = (text or "").strip()
-    if not body:
-        return DesignBasisCheck(False, (), (), "MISSING — no design basis stated")
     citations = tuple(dict.fromkeys(FOUNDATION_CITATION_RE.findall(body)))
-    if citations:
-        missing = tuple(c for c in citations if _read(root, c.split("#", 1)[0]) is None)
-        if missing:
-            return DesignBasisCheck(
-                False,
-                citations,
-                missing,
-                "INVALID — cites a document not on this checkout: "
-                + ", ".join(f"`{m}`" for m in missing),
-            )
-        return DesignBasisCheck(
-            True,
-            citations,
-            (),
-            "cites " + ", ".join(f"`{c}`" for c in citations) + " (present)",
+    checked: tuple[CitationOutcome, ...] = ()
+    failures: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    if not body:
+        status, summary = "MISSING", "MISSING — no design basis stated"
+    elif citations:
+        by_citation = {o.citation: o for o in outcomes}
+        checked = tuple(
+            by_citation.get(c, CitationOutcome(
+                c, c.split("#", 1)[0], "uncheckable",
+                snapshot.failure or "Snapshot evidence unavailable; retry the repository snapshot lookup.",
+            )) for c in citations
         )
-    if NO_DESIGN_APPLIES in body.lower():
-        return DesignBasisCheck(True, (), (), "declares that no design applies")
+        missing = tuple(o.path for o in checked if o.status == "absent")
+        missing = tuple(dict.fromkeys(missing))
+        failures = tuple(dict.fromkeys(o.detail for o in checked if o.status not in ("present", "absent")))
+        if any(o.status not in ("present", "absent") for o in checked):
+            status = "CANNOT_CHECK"
+            summary = "CANNOT_CHECK — unresolved citation verification"
+        elif missing:
+            status = "INVALID"
+            summary = "INVALID — cited path absent at selected snapshot: " + ", ".join(f"`{m}`" for m in missing)
+        else:
+            status = "PRESENT"
+            summary = "cites " + ", ".join(f"`{c}` (present)" for c in citations)
+    elif NO_DESIGN_APPLIES in body.lower():
+        status, summary = "NO_DESIGN_APPLIES", "declares that no design applies"
+    else:
+        status = "INVALID"
+        summary = "INVALID — neither a `docs/foundation/` citation nor the statement " + f"`{NO_DESIGN_APPLIES}`"
     return DesignBasisCheck(
-        False,
-        (),
-        (),
-        "INVALID — neither a `docs/foundation/` citation nor the statement "
-        f"`{NO_DESIGN_APPLIES}`",
+        status in ("PRESENT", "NO_DESIGN_APPLIES"), citations, missing, summary,
+        status, snapshot.repository, snapshot.sha, snapshot.snapshot_kind, checked, failures,
     )
 
 
 def design_basis_block(
-    text: str | None, *, where: str, root: Path | None = None
+    text: str | None, *, where: str, check: DesignBasisCheck | None = None
 ) -> str:
-    """Prompt text reporting the mechanical check to a pm or arch gate.
-
-    ``where`` names what was checked ("the issue's Design basis section",
-    "the PR body"). The gate's job — reading the cited document and judging
-    whether the change conforms — is stated, not done, here.
-    """
-    check = check_design_basis(text, root)
-    lines = [
-        f"## Design basis — mechanical check of {where}",
-        "",
-        f"Result: {check.summary}.",
-        "",
-    ]
-    if check.ok and check.citations:
+    """Render prepared evidence identically for issue and PR lenses."""
+    check = check or check_design_basis(text)
+    context = DesignSnapshot(check.repository, check.sha, check.snapshot_kind).context
+    lines = [f"## Design basis — mechanical check of {where}", "",
+             f"Result: {check.summary}.", f"Checked snapshot: {context}.", ""]
+    for outcome in check.outcomes:
+        lines.append(f"- `{outcome.citation}`: {outcome.status} — {context}. {outcome.detail}")
+    if check.status == "CANNOT_CHECK":
+        lines.append(
+            "Unresolved verification prerequisite: `[BLOCKING] design-basis-verification`. "
+            "This is not evidence of a missing document and cannot clear verification. "
+            + " ".join(check.failure_details)
+        )
+    elif check.ok and check.citations:
         lines.append(
             "A present citation is a claim, not conformance: read the cited "
-            "section and judge whether the change conforms to it. A change "
-            "that contradicts the cited document is `[BLOCKING]`."
+            "section at the checked snapshot and judge whether the change conforms to it. "
+            "A change that contradicts the cited document is `[BLOCKING]`."
         )
     elif check.ok:
         lines.append(
@@ -447,8 +485,7 @@ def design_basis_block(
     else:
         lines.append(
             "A missing or invalid design basis is a `[BLOCKING] design-basis` "
-            "finding: the change cannot be reviewed against a design it does "
-            "not name. Say what it must cite, or that it should state "
-            f"`{NO_DESIGN_APPLIES}` with a reason."
+            "finding. Correct the citation or add the document at the checked ref; "
+            "otherwise state " + f"`{NO_DESIGN_APPLIES}` with a reason."
         )
     return "\n".join(lines) + "\n"

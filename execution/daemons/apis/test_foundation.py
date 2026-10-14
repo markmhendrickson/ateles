@@ -317,47 +317,33 @@ class TestFoundationContract:
 
 class TestCheckDesignBasis:
     def test_missing(self, root: Path) -> None:
-        c = check_design_basis("")
-        assert not c.ok and c.summary.startswith("MISSING")
+        assert check_design_basis("").status == "MISSING"
         assert not check_design_basis(None).ok
 
-    def test_citation_to_present_doc_is_ok(self, root: Path) -> None:
-        c = check_design_basis(
-            "Design basis: docs/foundation/principles.md#what-fires-it"
-        )
-        assert c.ok
-        assert c.citations == ("docs/foundation/principles.md#what-fires-it",)
+    def test_no_local_fallback(self, root: Path) -> None:
+        c = check_design_basis("Design basis: docs/foundation/principles.md#rule")
+        assert not c.ok and c.status == "CANNOT_CHECK"
         assert c.missing == ()
 
-    def test_citation_to_absent_doc_is_invalid(self, root: Path) -> None:
-        c = check_design_basis(
-            "Design basis: docs/foundation/principles.md and "
-            "docs/foundation/failure_posture.md#halt"
-        )
-        assert not c.ok
-        assert c.missing == ("docs/foundation/failure_posture.md#halt",)
-        assert "INVALID" in c.summary
-
-    def test_citation_becomes_valid_when_the_doc_lands(self, root: Path) -> None:
-        text = "Design basis: docs/foundation/work_model.md#claim-and-lease"
-        assert not check_design_basis(text).ok
-        (root / "docs" / "foundation" / "work_model.md").write_text("# W\n")
-        assert check_design_basis(text).ok
+    def test_citation_evidence_is_explicit(self, root: Path) -> None:
+        from foundation import DesignSnapshot, CitationOutcome
+        citation = "docs/foundation/principles.md#rule"
+        path = citation.split("#")[0]
+        snapshot = DesignSnapshot("owner/repo", "a" * 40, "pr_head")
+        for status, expected in (("present", "PRESENT"), ("absent", "INVALID"), ("uncheckable", "CANNOT_CHECK")):
+            c = check_design_basis(citation, snapshot=snapshot, outcomes=(CitationOutcome(citation, path, status, "retry"),))
+            assert c.status == expected
+            assert c.missing == ((path,) if status == "absent" else ())
+            assert c.citations == (citation,)
 
     def test_no_design_applies_is_ok(self, root: Path) -> None:
         c = check_design_basis("Design basis: No design applies — typo fix.")
         assert c.ok and c.citations == ()
 
     def test_neither_is_invalid(self, root: Path) -> None:
-        c = check_design_basis("This follows our usual approach.")
-        assert not c.ok and "INVALID" in c.summary
+        assert check_design_basis("This follows our usual approach.").status == "INVALID"
 
     def test_block_says_what_the_gate_must_do(self, root: Path) -> None:
-        ok = design_basis_block(
-            "docs/foundation/principles.md#what-fires-it", where="the PR body"
-        )
-        assert "mechanical check of the PR body" in ok
-        assert "A present citation is a claim, not conformance" in ok
         missing = design_basis_block("", where="the issue's Design basis section")
         assert "[BLOCKING] design-basis" in missing
         declared = design_basis_block("no design applies — docs typo", where="x")

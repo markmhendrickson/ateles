@@ -70,7 +70,8 @@ from gate_waive import (
     format_waive_comment_multi,
 )
 from github_gateway import SwarmTrigger
-from foundation import design_basis_block, reading_block
+from foundation import DesignBasisCheck, design_basis_block, reading_block
+from design_basis_snapshot import DesignBasisReader
 from issue_spec import (
     DESIGN_BASIS,
     SECTIONS,
@@ -5105,6 +5106,8 @@ class SwarmDispatcher:
                 "verified full PR head SHA"
             )
 
+        basis_check = await self._pr_design_basis_check(trigger, reviewed_head)
+
         # The qa lens authors and runs an eval, so it needs a writable checkout;
         # every other lens is diff-only. Same treatment as the panel loop.
         worktree: str | None = None
@@ -5137,6 +5140,8 @@ class SwarmDispatcher:
                     None,
                     has_worktree=bool(worktree),
                     changed_files=changed_files,
+                    reviewed_head=reviewed_head,
+                    basis_check=basis_check,
                 ),
                 action_class=model_tiering.lens_review_class(lens.lens),
                 escalation_signals=review_signals,
@@ -5813,6 +5818,11 @@ class SwarmDispatcher:
             trigger.repository, trigger.number, trigger.title
         )
 
+        basis_reader = self._design_basis_reader(trigger.repository)
+        await basis_reader.select_issue(
+            trigger.number, trigger.raw.get("associated_pr_number")
+        )
+
         completed: list[str] = []
         # (lens, agent, error_class, observed_state) per failed sign_off.
         failed_sign_offs: list[tuple[str, str, str, str]] = []
@@ -5821,13 +5831,16 @@ class SwarmDispatcher:
         unreadable_verdicts: list[tuple[str, str, str, str]] = []
         for section in sections:
             spec_so_far = assemble_spec_markdown(state.sections or {})
+            stated_basis = (state.sections or {}).get(DESIGN_BASIS.field)
+            basis_check = await basis_reader.check(stated_basis if stated_basis is not None else trigger.body)
             result = await run_skill(
                 section.agent,
                 self._spec_section_prompt(
                     trigger,
                     section,
                     spec_so_far,
-                    design_basis=(state.sections or {}).get(DESIGN_BASIS.field),
+                    design_basis=stated_basis,
+                    basis_check=basis_check,
                 ),
                 github_token=_token_for_agent_on_repo(
                     section.agent, trigger.repository
@@ -7009,6 +7022,8 @@ class SwarmDispatcher:
             )
             return
 
+        basis_check = await self._pr_design_basis_check(trigger, review_head)
+
         # 2. Assemble the review panel (neotoma#1640): pre-registered agents
         #    from the parent issue ∪ diff-surface matches ∪ downstream lenses.
         changed_files = await self._changed_files(trigger)
@@ -7098,6 +7113,7 @@ class SwarmDispatcher:
                 pending_gates=pending_gates,
                 live_gates=live_gates,
                 signals=panel_signals,
+                basis_check=basis_check,
             )
         for lens in panel:
             # Whether this seat's clean verdict is signed for its gate, decided
@@ -7128,6 +7144,7 @@ class SwarmDispatcher:
                         owns_pending_gate=lens.lens in pending_gates,
                         changed_files=changed_files,
                         reviewed_head=review_head,
+                        basis_check=basis_check,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -11632,6 +11649,7 @@ class SwarmDispatcher:
         section: SpecSection,
         spec_so_far: str,
         design_basis: str | None = None,
+        basis_check: DesignBasisCheck | None = None,
     ) -> str:
         """Ordered additive-spec prompt: write/replace ONLY this agent's section.
 
@@ -11639,8 +11657,7 @@ class SwarmDispatcher:
         fenced statement), handed to the arch lens for its mechanical check.
         The pm and arch lenses also receive the foundation reading list's
         kernel inlined (``foundation.reading_block``) — the pm gate states the
-        basis from it, the arch gate checks against it. Both blocks are empty,
-        and the prompt unchanged, on a checkout with no reading list.
+        basis from it, the arch gate checks against it. Citation evidence is independent of the local reading list.
 
         Each agent in the canonical sequence reads the accumulated spec-so-far
         and ADDS or REPLACES exactly its own section, building on prior sections
@@ -11770,38 +11787,26 @@ class SwarmDispatcher:
                 )
             )
 
-        # Foundation binding (docs/foundation/conformance.md): the pm gate
-        # states the design basis from the kernel; the arch gate checks it.
-        # No reading list on this checkout → both blocks empty → prompt
-        # byte-identical to before.
         foundation_block = ""
         if section.lens in ("pm", "arch"):
             readings = reading_block([])
             if readings:
                 foundation_block = f"\n\n{readings}"
-                if section.lens == "pm":
-                    foundation_block += (
-                        "\nDESIGN BASIS (`docs/foundation/conformance.md`, "
-                        "\"Design basis\"): state, from the reading list above, "
-                        "the foundation document and section this issue "
-                        "conforms to — or that no design applies, and why. "
-                        "Return it wrapped EXACTLY between these fences, "
-                        "SEPARATE from your spec section:\n\n"
-                        "<<<DESIGN_BASIS>>>\n"
-                        "Design basis: docs/foundation/<doc>.md#<section> — "
-                        "<one line on what it governs here>\n"
-                        "<<<END_DESIGN_BASIS>>>\n\n"
-                        "or `Design basis: no design applies — <one line why>`. "
-                        "Cite only a document that exists on this checkout "
-                        "(the reading list says which do); a kernel document "
-                        "listed as not yet written states nothing and cannot "
-                        "be cited. An issue that conforms to nothing becomes "
-                        "visible here, at intake, rather than at audit."
-                    )
-                else:
-                    foundation_block += "\n" + design_basis_block(
-                        design_basis, where="the issue's Design basis section"
-                    )
+            foundation_block += "\n" + design_basis_block(
+                design_basis, where="the issue's Design basis section", check=basis_check
+            )
+            if section.lens == "pm":
+                foundation_block += (
+                    "\nDESIGN BASIS: state the foundation document and section this issue "
+                    "conforms to, or that no design applies and why. Read cited sections "
+                    "in the selected repository snapshot; the daemon reading list is not "
+                    "evidence of presence or absence there. Return the basis separately:\n\n"
+                    "<<<DESIGN_BASIS>>>\n"
+                    "Design basis: docs/foundation/<doc>.md#<section> — <what it governs>\n"
+                    "<<<END_DESIGN_BASIS>>>\n\n"
+                    "or `Design basis: no design applies — <one line why>`. "
+                    "An unresolved snapshot lookup must be retried, never treated as absence."
+                )
 
         return (
             f"Invoke the {section.agent} agent per your appended system prompt.\n\n"
@@ -11962,6 +11967,7 @@ class SwarmDispatcher:
         parent: int | None,
         has_worktree: bool,
         changed_files: list[str] | None,
+        basis_check: DesignBasisCheck | None = None,
     ) -> tuple[str, str, str, str, str]:
         """The duties every lens prompt carries, built in one place.
 
@@ -12073,10 +12079,10 @@ class SwarmDispatcher:
             readings = reading_block(list(changed_files or []))
             if readings:
                 foundation_block = f"\n\n{readings}"
-                if lens.lens in ("pm", "arch"):
-                    foundation_block += "\n" + design_basis_block(
-                        t.body, where="the PR body"
-                    )
+            if lens.lens in ("pm", "arch"):
+                foundation_block += "\n" + design_basis_block(
+                    t.body, where="the PR body", check=basis_check
+                )
         return (
             expectation_block,
             blocking_rules,
@@ -12095,6 +12101,7 @@ class SwarmDispatcher:
         owns_pending_gate: bool = False,
         changed_files: list[str] | None = None,
         reviewed_head: str | None = None,
+        basis_check: DesignBasisCheck | None = None,
     ) -> str:
         """Build a lens panelist's prompt.
 
@@ -12109,8 +12116,8 @@ class SwarmDispatcher:
         kernel plus the documents keyed to the paths this PR touches, inlined,
         so a finding can cite the invariant by path; the pm and arch lenses
         also receive the mechanical check of the PR body's design basis.
-        Forward-looking lenses do not review, so they get neither. Empty on a
-        checkout with no reading list.
+        Forward-looking lenses do not review, so they get neither. Citation
+        checks remain visible even without a local reading list.
         """
         (
             expectation_block,
@@ -12119,7 +12126,7 @@ class SwarmDispatcher:
             gate_writeback_block,
             foundation_block,
         ) = SwarmDispatcher._lens_duty_blocks(
-            t, lens, expectation, parent, has_worktree, changed_files
+            t, lens, expectation, parent, has_worktree, changed_files, basis_check
         )
         _panelist_role = f"{lens.lens} lens panelist"
         marker_head = _normalise_full_sha(
@@ -12329,6 +12336,16 @@ class SwarmDispatcher:
             if number is not None and number not in numbers:
                 numbers.append(number)
         return numbers
+
+    def _design_basis_reader(self, repository: str) -> DesignBasisReader:
+        return DesignBasisReader(repository, self._github_headers(repository))
+
+    async def _pr_design_basis_check(
+        self, trigger: SwarmTrigger, reviewed_head: str
+    ) -> DesignBasisCheck:
+        reader = self._design_basis_reader(trigger.repository)
+        reader.select_pr_head(reviewed_head)
+        return await reader.check(trigger.body)
 
     def _github_headers(self, repo: str = "") -> dict[str, str]:
         """Return GitHub API request headers with the per-repo token (#95).
@@ -12568,6 +12585,7 @@ class SwarmDispatcher:
         head: str,
         parent: int | None = None,
         changed_files: list[str] | None = None,
+        basis_check: DesignBasisCheck | None = None,
     ) -> str:
         """One prompt that has the pm, qa and ux lenses review together.
 
@@ -12588,7 +12606,7 @@ class SwarmDispatcher:
                 gate_block,
                 foundation_block,
             ) = self._lens_duty_blocks(
-                t, lens, expectations.get(lens.agent, ""), parent, False, changed_files
+                t, lens, expectations.get(lens.agent, ""), parent, False, changed_files, basis_check
             )
             if readings and readings in foundation_block:
                 # The reading list is the same for every lens: state it once
@@ -12662,6 +12680,7 @@ class SwarmDispatcher:
         pending_gates: set[str],
         live_gates,
         signals,
+        basis_check: DesignBasisCheck | None = None,
     ) -> dict[str, SkillResult]:
         """Review the panel's pm/qa/ux lenses in one mid-tier dispatch.
 
@@ -12683,7 +12702,7 @@ class SwarmDispatcher:
                 first.agent,
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
-                    changed_files,
+                    changed_files, basis_check,
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,

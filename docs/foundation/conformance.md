@@ -342,14 +342,44 @@ design applies.
 Checks, in order:
 
 1. Mechanical (`foundation.check_design_basis`): statement exists; every cited `docs/foundation/` path is
-   on the checkout; or `no design applies`. Missing/invalid → `[BLOCKING] design-basis`. Recovery: replace
-   the PR body line with `Design basis: docs/foundation/<doc>.md#<section>` or
-   `Design basis: no design applies — <reason>`, then re-request review.
+   checked against one immutable snapshot of the repository being reviewed; or `no design applies`.
+   PR review uses the full head SHA selected for the review round, labelled **reviewed PR head**.
+   Issue intake uses a verified explicitly associated PR, or the sole eligible linked open PR;
+   several candidates require an explicit selection. With no associated PR, intake resolves the
+   issue repository's default branch once to a full SHA, labelled **issue baseline**. A failed
+   association lookup is unknown, never evidence that there is no associated PR.
+   Missing/invalid → `[BLOCKING] design-basis`. `INVALID` for a cited path requires complete commit-tree
+   evidence of absence at that snapshot; a contents-endpoint 404 cannot prove absence. Recovery:
+   correct the citation or add the document at that ref, then re-request review.
+   `CANNOT_CHECK` means an unresolved verification prerequisite, not a missing document or a pass:
+   restore repository access, retry the failed snapshot lookup, or explicitly select an associated PR.
+   Every citation outcome names the repository, full SHA (or **SHA unavailable**), and snapshot kind.
+   The daemon checkout and its reading-list availability cannot establish citation presence or absence.
 2. By reading: the step owner opens the cited section and judges whether the change conforms to it. A
    citation is not conformance; a change that contradicts the cited document is blocked citing the
    document by path.
 3. `no design applies` is judged too: if a kernel or keyed document governs the change, the declaration is
    false and blocking.
+
+
+### Snapshot result examples
+
+The following are illustrative inputs, not claims about a live repository. `S` denotes one selected
+full 40-hex commit SHA; emitted results carry its actual value. All ordinary citations refer to the
+reviewed repository. Anchors are preserved for display but only the path is checked.
+
+| Input context | Evidence | Structured result and prompt effect |
+|---|---|---|
+| PR in `example/product`, reviewed head `S`; daemon in `example/orchestrator`; `Design basis: docs/foundation/principles.md#rule` | Regular file present in the complete tree at `S`, absent in the daemon checkout | `status=PRESENT`, `ok=true`, `repository=example/product`, `sha=S`, `snapshot_kind=pr_head`, `missing=[]`; citation outcome `present`. Prompt names **reviewed PR head** and requires reading the section to judge conformance. |
+| Same PR and citation | Complete tree at `S` has no such path | `status=INVALID`, `ok=false`, `missing=[docs/foundation/principles.md]`; outcome `absent`. Prompt names repository and SHA and says to correct the citation or add the document at this ref. |
+| Same PR and citation | Commit or tree cannot be read, or tree is truncated | `status=CANNOT_CHECK`, `ok=false`, `missing=[]`; outcome `uncheckable`. Prompt names repository and SHA, identifies the failed lookup and asks to retry it; this cannot clear verification. |
+| Issue in `example/product`, two linked open PRs and no explicit selection | No unambiguous snapshot | `status=CANNOT_CHECK`, `ok=false`, `sha=null`, `snapshot_kind=unresolved`, `missing=[]`; prompt says **SHA unavailable** and asks for an explicit associated PR selection. |
+| Issue in `example/product`, no associated PR; same citation | Default branch resolves to `S`, complete tree contains the file | `status=PRESENT`, `ok=true`, `sha=S`, `snapshot_kind=issue_baseline`; prompt labels **issue baseline**, not a reviewed PR head. |
+| PR at `S`; `Design basis: no design applies — spelling correction` | No path lookup needed | `status=NO_DESIGN_APPLIES`, `ok=true`, `citations=[]`, `missing=[]`; prompt asks the reviewer to judge whether any design governs the change. |
+
+Per-citation outcomes are `present`, `absent`, or `uncheckable`. Any uncheckable citation makes the
+aggregate `CANNOT_CHECK`, even when another path is proven absent. `missing` contains only proven absent
+paths. An absent statement remains `MISSING`; a malformed statement remains `INVALID`.
 
 ## An issue that conforms to nothing
 

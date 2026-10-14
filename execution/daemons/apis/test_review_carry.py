@@ -561,6 +561,19 @@ class TestCombinedPromptKeepsEachLensDuties:
         assert readings and readings in prompt
         assert prompt.count(readings) == 1  # stated once, not three times
 
+    def test_combined_pm_receives_prepared_unknown_snapshot_without_reading_list(self, monkeypatch):
+        from foundation import DesignSnapshot, check_design_basis
+        from test_gate_sign_off_dispatch import _trigger
+        body = "Design basis: docs/foundation/principles.md"
+        check = check_design_basis(body, snapshot=DesignSnapshot("owner/repo", NEW, "pr_head", "Tree unavailable; retry lookup."))
+        monkeypatch.setattr(sd, "reading_block", lambda paths: "")
+        prompt = _dispatcher()._combined_prompt(
+            _trigger(body=body), [lens_by_name("pm"), lens_by_name("qa")], {}, NEW,
+            basis_check=check,
+        )
+        assert "CANNOT_CHECK" in prompt and NEW in prompt and "reviewed PR head" in prompt
+        assert "retry lookup" in prompt and "not evidence of a missing document" in prompt
+
     def test_the_expectation_checkoff_uses_the_parent_issue(self):
         _, prompt = self._prompt(expectations={"pavo": "- [ ] scope matches"})
         assert "scope matches" in prompt
