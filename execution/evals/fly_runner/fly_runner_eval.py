@@ -20,7 +20,6 @@ local CLI ran, the Fly requests made, and the tokens minted and revoked.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import contextlib
 import io
@@ -256,6 +255,7 @@ class Trace:
     login_config_run_id: str = ""
     login_stop_requests: int = 0
     login_mutations: int = 0
+    ledger_after: object = None
     login_lease_holder: str = ""
     lease_released: bool = False
     envelopes: list = field(default_factory=list)
@@ -393,6 +393,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
 
     async def read_result(run_id):
         record = scenario["fly"]["record"]
+        if "record_raw" in scenario["fly"]:
+            # Exactly what the store holds, however incomplete.
+            return {"run_id": run_id, **scenario["fly"]["record_raw"]}
         if record == "malformed":
             # The REAL reader, against a result store that answers nonsense.
             transport = httpx.MockTransport(lambda request: httpx.Response(200, json=[1]))
@@ -400,8 +403,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
                                                        attempts=1, delay=0)  # fmt: skip
         if record is None:
             return None
-        return {"run_id": run_id, **record,
-                "stdout": str(record.get("stdout", "")).replace("{run_id}", run_id)}  # fmt: skip
+        # Every field, as run_job.build_record writes it.
+        full = {"exit_code": 0, "stdout": "", "stdout_truncated": False, "stderr_tail": "",
+                "wall_ms": 1, "timed_out": False, "refused": "", "probe_ok": True, **record}
+        return {"run_id": run_id, **full,
+                "stdout": str(full["stdout"]).replace("{run_id}", run_id)}  # fmt: skip
 
     clock = AdvancingClock()
     client = fly_runner.FlyMachinesClient(config, transport=httpx.MockTransport(fake.handler))
@@ -478,6 +484,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         seed_keys.append(f"untracked-{ghost['machine']}")
     # The reaper runs on a launch only when one is due; recovery scenarios are.
     executor._last_reap = float("-inf") if seed_keys else float("inf")
+    ledger_raw = scenario.get("ledger_raw")
+    if ledger_raw is not None:
+        # A ledger left on disk as is (e.g. damaged), before the dispatch.
+        executor.ledger.path.parent.mkdir(parents=True, exist_ok=True)
+        executor.ledger.path.write_text(json.dumps(ledger_raw))
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     fly_runner._LOGIN_LOCKS.clear()
 
@@ -507,6 +518,10 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     stdout_text = out.getvalue()
     envelope = envelopes[0]
     sent = "\n".join(_decoded(r) for r in fake.requests)
+    try:
+        ledger_view = executor.ledger.snapshot(clock.now)
+    except fly_runner.FlyLedgerError:
+        ledger_view = None  # a damaged ledger is what the scenario is about
     return Trace(
         exit_code=exit_code,
         envelope=envelope,
@@ -518,10 +533,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         machines_remaining=sorted(m for m, d in fake.machines.items() if not d.get("login")),
         minted=minted,
         revoked=revoked,
-        in_flight_after=len(executor.ledger.snapshot(clock.now)["in_flight"]),
-        spend_usd=float(executor.ledger.snapshot(clock.now)["spend_usd"]),
+        in_flight_after=len(ledger_view["in_flight"]) if ledger_view else -1,
+        spend_usd=float(ledger_view["spend_usd"]) if ledger_view else -1.0,
         seeded_cost_usd=seeded_cost,
-        seed_entries_left=[k for k in seed_keys if executor.ledger.entry(k) is not None],
+        seed_entries_left=[k for k in seed_keys
+                           if ledger_view and k in ledger_view["in_flight"]],
         login_state=str(fake.machines.get("m-codex-login", {}).get("state", "")),
         login_lock_held=fly_runner._login_lock("codex").locked(),
         login_config_run_id=str(((fake.machines.get("m-codex-login", {}).get("config") or {})
@@ -537,6 +553,8 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         exit_codes=exit_codes,
         starts=list(fake.starts),
         everything_sent=sent,
+        ledger_after=(json.loads(executor.ledger.path.read_text())
+                      if executor.ledger.path.exists() else None),
     )
 
 
@@ -645,6 +663,8 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
                         f"expected {e['login_lease_holder']!r}")  # fmt: skip
     if e.get("lease_released") and not trace.lease_released:
         problems.append("the run's lease was never released")
+    if e.get("ledger_untouched") and trace.ledger_after != scenario.get("ledger_raw"):
+        problems.append("the damaged ledger was rewritten (reset) instead of refused")
     if "login_mutations" in e and trace.login_mutations != e["login_mutations"]:
         problems.append(f"{trace.login_mutations} write(s) to the login machine")
     if "login_stop_requests" in e and trace.login_stop_requests != e["login_stop_requests"]:

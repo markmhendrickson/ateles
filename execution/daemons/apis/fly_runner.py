@@ -43,6 +43,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -101,7 +102,7 @@ class FlyLaunchError(Exception):
     """The Fly API refused or failed to start the machine."""
 
 
-_OPAQUE_RUN = __import__("re").compile(r"[A-Za-z0-9+/=_\-]{40,}")
+_OPAQUE_RUN = re.compile(r"[A-Za-z0-9+/=_\-]{40,}")
 
 # Every Machines API lease nonce this process has held. A nonce is a secret
 # (it authorises changes to a leased machine): it is never logged, recorded,
@@ -143,9 +144,15 @@ class FlyLeaseBusy(FlyApiError):
 # are what the tests parametrise over, so a field added here is tested.
 
 NONEMPTY_STR = "non-empty string"
+STRING = "string"
 OBJECT = "object"
 NUMBER = "number"
+INTEGER = "integer"
+COUNT = "count (integer, 0 or more)"
+POSITIVE_INT = "process id (integer above 1)"
 BOOLEAN = "boolean"
+MONTH = "month marker (YYYY-MM)"
+DAY = "day marker (YYYY-MM-DD)"
 
 REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     # GET /machines/{id}: everything a decision reads.
@@ -161,6 +168,17 @@ REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     # A reservation in the ledger.
     "ledger_entry": {"run_id": NONEMPTY_STR, "owner": NONEMPTY_STR, "started_at": NUMBER,
                      "deadline": NUMBER, "max_cost_usd": NUMBER, "login": BOOLEAN},
+    # The ledger itself: the accounting period markers and counters.
+    "ledger": {"month": MONTH, "day": DAY, "spend_usd": NUMBER, "launches_today": COUNT,
+               "local_fallbacks": COUNT, "in_flight": OBJECT, "owners": OBJECT},
+    # An owner's liveness proof in the ledger.
+    "owner_record": {"id": NONEMPTY_STR, "pid": POSITIVE_INT, "host": NONEMPTY_STR,
+                     "start": STRING, "heartbeat": NUMBER},
+    # The runner's result record (run_job.build_record writes every field).
+    "result_record": {"run_id": NONEMPTY_STR, "exit_code": INTEGER, "stdout": STRING,
+                      "stdout_truncated": BOOLEAN, "stderr_tail": STRING,
+                      "wall_ms": COUNT, "timed_out": BOOLEAN, "refused": STRING,
+                      "probe_ok": BOOLEAN},
 }  # fmt: skip
 
 # Optional fields: may be absent, but when present must have this type.
@@ -170,7 +188,9 @@ OPTIONAL_FIELDS: dict[str, dict[str, type | tuple]] = {
     "config_env": {"ATELES_RUN_ID": str},
     "ledger_entry": {"machine_id": str, "lease_nonce": str, "unconfirmed": bool,
                      "lease_expires": (int, float, type(None))},
-    "owner_record": {"pid": int, "host": str, "start": str, "heartbeat": (int, float)},
+    # Every other kind declares that it has no optional fields.
+    "machine": {}, "list_entry": {}, "lease_view": {}, "lease_grant": {}, "ledger": {},
+    "owner_record": {}, "result_record": {},
 }  # fmt: skip
 
 
@@ -182,15 +202,31 @@ class FlyInvalid(FlyApiError):
         self.kind = kind
 
 
+_MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
+_DAY_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])")
+
+
 def _type_ok(value: Any, expected: str) -> bool:
     if expected == NONEMPTY_STR:
         return isinstance(value, str) and bool(value)
+    if expected == STRING:
+        return isinstance(value, str)
     if expected == OBJECT:
         return isinstance(value, dict)
     if expected == NUMBER:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    if expected == INTEGER:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == COUNT:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if expected == POSITIVE_INT:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 1
     if expected == BOOLEAN:
         return isinstance(value, bool)
+    if expected == MONTH:
+        return isinstance(value, str) and bool(_MONTH_RE.fullmatch(value))
+    if expected == DAY:
+        return isinstance(value, str) and bool(_DAY_RE.fullmatch(value))
     raise ValueError(expected)
 
 
@@ -203,7 +239,7 @@ def validate(kind: str, data: Any) -> dict:
             raise FlyInvalid(kind, f"{name} is missing")
         if not _type_ok(data[name], expected):
             raise FlyInvalid(kind, f"{name} is not a {expected}")
-    for name, expected in OPTIONAL_FIELDS.get(kind, {}).items():
+    for name, expected in OPTIONAL_FIELDS[kind].items():
         if name in data and not isinstance(data[name], expected):
             raise FlyInvalid(kind, f"{name} has the wrong type")
     if kind in ("machine", "list_entry"):
@@ -396,14 +432,19 @@ def process_start_token(pid: int) -> str | None:
     "" means running with an unreadable start time. Comparing tokens detects
     a pid that was reused by a different process after its owner died.
     """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        # 0 and negatives address process GROUPS, 1 is init: never an owner.
+        return ""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return None
+        return None  # the one positive answer: no such process
     except PermissionError:
         pass  # exists, owned by someone else
     except OSError:
         return ""
+    # From here the process EXISTS: every failure below is "start unknown"
+    # (""), never "not running".
     stat = Path(f"/proc/{pid}/stat")
     if stat.exists():
         try:
@@ -418,16 +459,19 @@ def process_start_token(pid: int) -> str | None:
         ).stdout.strip()  # fmt: skip
     except (OSError, subprocess.SubprocessError):
         return ""
-    return out or None
+    # An empty answer from ps is not proof the process ended (kill just said
+    # it exists): its start time is unknown.
+    return out if out else ""
 
 
 def this_process_owner(instance_id: str) -> dict:
     """The liveness proof recorded with every reservation this process makes."""
     pid = os.getpid()
+    start = process_start_token(pid)
     return {
         "id": instance_id,
         "pid": pid,
-        "start": process_start_token(pid) or "",
+        "start": start if isinstance(start, str) else "",  # unknown start: ""
         "host": socket.gethostname(),
     }
 
@@ -437,17 +481,17 @@ def owner_provably_dead(record: dict | None) -> bool:
     pid is not running or now belongs to a process that started at another
     time. Anything unknown (another host, no record, unreadable start time)
     is NOT proof of death; staleness rules decide those."""
-    if not record or record.get("host") != socket.gethostname():
-        return False
     try:
-        pid = int(record.get("pid"))
-    except (TypeError, ValueError):
+        record = validate("owner_record", record)
+    except FlyInvalid:
+        return False  # an unreadable record proves nothing
+    if record["host"] != socket.gethostname():
         return False
-    token = process_start_token(pid)
+    token = process_start_token(record["pid"])
     if token is None:
-        return True
-    recorded = str(record.get("start") or "")
-    return bool(token and recorded and token != recorded)
+        return True  # positively: no such process
+    # A different, KNOWN start time on the same pid: the pid was reused.
+    return bool(token) and bool(record["start"]) and token != record["start"]
 
 
 class FlyLedgerError(Exception):
@@ -502,32 +546,33 @@ class FlyLedger:
 
     def _load(self) -> dict:
         if not self.path.exists():
-            return {"month": "", "spend_usd": 0.0, "day": "", "launches_today": 0,
+            # The only "new period" without a marker: no ledger at all yet.
+            return {"month": None, "spend_usd": 0.0, "day": None, "launches_today": 0,
                     "local_fallbacks": 0, "in_flight": {}, "owners": {}}  # fmt: skip
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raise FlyLedgerError(f"Fly ledger {self.path.name} is unreadable") from None
-        if not isinstance(data, dict) or not isinstance(data.get("in_flight"), dict):
-            # An existing ledger without its reservations is not "no
-            # reservations": it fails closed.
-            raise FlyLedgerError(f"Fly ledger {self.path.name} has an unexpected shape")
-        if "owners" not in data:
-            data["owners"] = {}  # older files carry no owner records: liveness unknown
-        if not isinstance(data["owners"], dict):
-            raise FlyLedgerError(f"Fly ledger {self.path.name} has unreadable owner records")
-        for key in ("spend_usd", "launches_today"):
-            if key in data and (isinstance(data[key], bool)
-                                or not isinstance(data[key], (int, float))):  # fmt: skip
-                raise FlyLedgerError(f"Fly ledger {self.path.name} has an unreadable {key}")
+        try:
+            # Every period marker and counter must be present and well formed:
+            # an unknown period is never a new one, and is never reset.
+            validate("ledger", data)
+        except FlyInvalid as exc:
+            raise FlyLedgerError(f"Fly ledger {self.path.name}: {exc}") from None
         return data
 
     def _save(self, data: dict) -> None:
+        if data["month"] is None or data["day"] is None:
+            # A brand-new ledger gets its period markers before its first
+            # write, so a saved ledger always carries valid ones.
+            self._roll(data, self._clock())
         if self.owner is not None:
-            owners = data.setdefault("owners", {})
+            owners = data["owners"]  # present: the loader validated it
             owners[self.owner["id"]] = {**self.owner, "heartbeat": self._clock()}
-            # Keep the map small: drop owners that hold nothing any more.
-            holding = {str(e.get("owner") or "") for e in data["in_flight"].values()}
+            # Keep the map small: drop owners that hold nothing any more. An
+            # unreadable reservation's owner is simply not counted as holding.
+            holding = {e["owner"] for e in data["in_flight"].values()
+                       if isinstance(e, dict) and isinstance(e.get("owner"), str)}
             for oid in [o for o in owners if o not in holding and o != self.owner["id"]]:
                 del owners[oid]
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -539,16 +584,16 @@ class FlyLedger:
         os.replace(tmp, self.path)
 
     def _roll(self, data: dict, now: float) -> None:
-        if data.get("month") != _month_key(now):
-            data["month"] = _month_key(now)
+        """Start a new period only on a genuine rollover: a VALID marker that
+        differs from the current period (or no ledger at all, ``None``). The
+        loader has already refused any marker that is absent or malformed."""
+        month, day = _month_key(now), _day_key(now)
+        if data["month"] is None or (_type_ok(data["month"], MONTH) and data["month"] != month):
+            data["month"] = month
             data["spend_usd"] = 0.0
-        elif "spend_usd" not in data:
-            raise FlyLedgerError("Fly ledger has a month but no spend: refusing to assume zero")
-        if data.get("day") != _day_key(now):
-            data["day"] = _day_key(now)
+        if data["day"] is None or (_type_ok(data["day"], DAY) and data["day"] != day):
+            data["day"] = day
             data["launches_today"] = 0
-        elif "launches_today" not in data:
-            raise FlyLedgerError("Fly ledger has a day but no launch count")
 
     def snapshot(self, now: float | None = None) -> dict:
         with self._locked():
@@ -575,8 +620,11 @@ class FlyLedger:
             try:
                 data = self._load()
             except FlyLedgerError as exc:
-                raise FlyRefusal(f"{exc}; refusing Fly launches until it is repaired",
-                                 _render_wall(now + 3600)) from None  # fmt: skip
+                # No retry time: this does not clear by waiting.
+                raise FlyRefusal(
+                    f"{exc}. The Fly ledger needs operator repair; no Fly launches "
+                    "until it is fixed (spend and caps are unknown).", "",
+                ) from None
             self._roll(data, now)
             worst = max_run_seconds * config.rate_per_second_usd
             outstanding = sum(
@@ -626,12 +674,13 @@ class FlyLedger:
         key = run_id or f"untracked-{machine_id}"
         with self._locked():
             data = self._load()
-            data["in_flight"].setdefault(key, {
-                "run_id": key, "owner": owner, "machine_id": machine_id, "login": False,
-                "started_at": started_at, "deadline": started_at + max_run_seconds,
-                "max_cost_usd": max_run_seconds * config.rate_per_second_usd,
-                "unconfirmed": True, "untracked": True,
-            })  # fmt: skip
+            if key not in data["in_flight"]:
+                data["in_flight"][key] = {
+                    "run_id": key, "owner": owner, "machine_id": machine_id, "login": False,
+                    "started_at": started_at, "deadline": started_at + max_run_seconds,
+                    "max_cost_usd": max_run_seconds * config.rate_per_second_usd,
+                    "unconfirmed": True, "untracked": True,
+                }  # fmt: skip
             self._save(data)
         return key
 
@@ -719,7 +768,7 @@ class FlyLedger:
                 data = self._load()
             except FlyLedgerError:
                 return -1
-            data["local_fallbacks"] = int(data.get("local_fallbacks") or 0) + 1
+            data["local_fallbacks"] = int(data["local_fallbacks"]) + 1
             self._save(data)
             return data["local_fallbacks"]
 
@@ -1540,7 +1589,8 @@ class FlyExecutor:
                 if name not in job.child_credential_names:
                     job.child_credential_names.append(name)
         async with self._admission():
-            login_id = self.config.login_machines.get(job.provider, "") if job.login else ""
+            # build_job refused a login provider with no machine configured.
+            login_id = self.config.login_machines[job.provider] if job.login else ""
             self.ledger.reserve(self.config, run_id=job.run_id, owner=self.instance_id,
                                 max_run_seconds=max_run, login=job.login, machine_id=login_id,
                                 now=self._clock())  # fmt: skip
@@ -1790,19 +1840,18 @@ class FlyExecutor:
     def _result_from_record(self, job: FlyJob, record: dict) -> tuple[int, bytes, bytes]:
         """The CLI's result, from a VALIDATED record. A record that is not
         this run's, or whose fields have the wrong types, is unreadable."""
-        if not isinstance(record, dict) or record.get("run_id") != job.run_id:
+        try:
+            record = validate("result_record", record)
+        except FlyInvalid as exc:
+            raise FlyResultUnreadable(str(exc)) from None
+        if record["run_id"] != job.run_id:
             raise FlyResultUnreadable("result record does not belong to this run")
-        rc = record.get("exit_code")
-        if isinstance(rc, bool) or not isinstance(rc, int):
-            raise FlyResultUnreadable("result record has no integer exit code")
-        for name in ("stdout", "stderr_tail", "refused"):
-            if record.get(name) is not None and not isinstance(record.get(name), str):
-                raise FlyResultUnreadable(f"result record field {name} is not text")
-        if record.get("probe_ok") is False:
-            log.error(f"[fly] run={job.run_id} credential probe failed: {record.get('refused')}")
-        stdout = redact_nonces(str(record.get("stdout") or ""))
-        stderr = redact_nonces(str(record.get("stderr_tail") or ""))
-        if record.get("stdout_truncated"):
+        rc = record["exit_code"]
+        if record["probe_ok"] is False:
+            log.error(f"[fly] run={job.run_id} credential probe failed: {record['refused']}")
+        stdout = redact_nonces(record["stdout"])
+        stderr = redact_nonces(record["stderr_tail"])
+        if record["stdout_truncated"]:
             # Never silent: the caller's stdout says so on its first line (a
             # verdict parsed from the LAST line is unaffected), stderr says
             # so, the job is flagged for the SkillResult and harness_event,
@@ -2108,12 +2157,10 @@ def _machine_run_id(machine: dict) -> str:
 
 def _owner_heartbeat(record: dict | None) -> float | None:
     """A readable owner heartbeat, or None (unknown)."""
-    if not isinstance(record, dict) or "heartbeat" not in record:
+    try:
+        return float(validate("owner_record", record)["heartbeat"])
+    except FlyInvalid:
         return None
-    value = record["heartbeat"]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
 
 
 LEASE_SAFETY_SECONDS = 60

@@ -62,6 +62,9 @@ def test_scenario_set_covers_the_required_behaviours():
         "cleanup_read_back_config_absent_keeps_the_reservation",
         "cleanup_read_back_config_null_keeps_the_reservation",
         "lease_release_unverifiable_keeps_the_reservation",
+        "exhausted_ledger_without_month_marker_is_refused",
+        "exhausted_ledger_without_day_marker_is_refused",
+        "incomplete_result_record_is_an_unknown_outcome",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -174,3 +177,11 @@ def test_judge_goes_red_when_settlement_trusts_an_incomplete_answer(tmp_path, mo
         envelope={**trace.envelope, "remote_machine_state": "terminated"},
     )  # fmt: skip
     assert len(runner.judge(scenario, trusted)) >= 2
+
+
+def test_judge_goes_red_when_a_damaged_ledger_is_reset(tmp_path, monkeypatch):
+    scenario = _by_id("exhausted_ledger_without_month_marker_is_refused")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    reset = dataclasses.replace(trace, ledger_after={"spend_usd": 0.0}, exit_code=0,
+                                envelope={**trace.envelope, "ok": True})  # fmt: skip
+    assert len(runner.judge(scenario, reset)) >= 2

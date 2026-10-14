@@ -8,6 +8,7 @@ Neotoma result read are injected fakes. No test touches the network.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import base64
 import json
 import logging
@@ -36,6 +37,15 @@ MINTED = "ghs_minted_installation_token_0005"
 CLAUDE_OAUTH = "claude-oauth-canary-0006"
 CANARY = "operator-canary-value-0007"
 FORBIDDEN_VALUES = (FLY_TOKEN, SHARED_BEARER, SHARED_PAT, DAEMON_GH, CANARY)
+
+
+def complete_record(run_id: str, **fields) -> dict:
+    """A result record as run_job.build_record writes it: every field."""
+    record = {"run_id": run_id, "exit_code": 0, "stdout": "", "stdout_truncated": False,
+              "stderr_tail": "", "wall_ms": 1, "timed_out": False, "refused": "",
+              "probe_ok": True}  # fmt: skip
+    record.update(fields)
+    return record
 
 
 def _present(machine: dict) -> dict:
@@ -304,7 +314,7 @@ def make_executor(fake: FakeFly, *, record=None, clock=None, mint=None, **overri
     async def _read(run_id):
         if record is None:
             return None
-        return {"run_id": run_id, **record}
+        return complete_record(run_id, **record)
 
     executor = fly_runner.FlyExecutor(
         config,
@@ -694,7 +704,7 @@ def test_codex_login_machine_is_updated_started_and_scrubbed(fly_env, monkeypatc
 
     async def read_and_check(run_id):
         held.append(fly_runner._login_lock("codex").locked())
-        return {"run_id": run_id, "exit_code": 0, "stdout": "done"}
+        return complete_record(run_id, stdout="done")
 
     executor._read_result = read_and_check
     assert asyncio.run(executor.run(job))[0] == 0
@@ -1051,7 +1061,7 @@ def test_login_machine_disconnect_stops_and_unconfirmed_blocks_reuse(fly_env, mo
     # Once the machine stops, the next launch settles the old entry and runs.
     fake.stop_effective = True
     executor.client.wait = RealWait(executor)
-    executor._read_result = _async(lambda run_id: {"run_id": run_id, "exit_code": 0})
+    executor._read_result = _async(lambda run_id: complete_record(run_id))
     assert asyncio.run(executor.run(_codex_job()))[0] == 0
     assert executor.ledger.snapshot()["in_flight"] == {}
 
@@ -1849,7 +1859,8 @@ def _second_executor(fake, executor, *, owner_id="apis-second-dispatcher", recor
     revoked: list[str] = []
 
     async def _read(run_id):
-        return {"run_id": run_id, **(record or {"exit_code": 0, "stdout": f"B {run_id}"})}
+        return complete_record(run_id, **(record if record is not None
+                                          else {"stdout": f"B {run_id}"}))  # fmt: skip
 
     other = fly_runner.FlyExecutor(
         config,
@@ -2424,7 +2435,9 @@ job = fly_runner.FlyJob(run_id=run_id, role="lanius", provider="codex", reposito
                         argv=["codex"], stdin=b"", timeout=60, needs_github=False,
                         neotoma_base_url="https://neotoma.invalid")
 async def read(rid):
-    return {"run_id": rid, "exit_code": 0, "stdout": rid}
+    return {"run_id": rid, "exit_code": 0, "stdout": rid, "stdout_truncated": False,
+            "stderr_tail": "", "wall_ms": 1, "timed_out": False, "refused": "",
+            "probe_ok": True}
 executor = fly_runner.FlyExecutor(config, read_result=read, mint=lambda r, p: "t",
                                   revoke=lambda t: None)
 executor._last_reap = float("inf")
@@ -2724,7 +2737,7 @@ def _settling_run(fake, executor, monkeypatch):
 
     async def read(run_id):
         phase["settling"] = True
-        return {"run_id": run_id, "exit_code": 0, "stdout": "done"}
+        return complete_record(run_id, stdout="done")
 
     executor._read_result = read
     return phase
@@ -2881,7 +2894,8 @@ def test_the_reaper_finishes_once_complete_answers_return(fly_env, monkeypatch):
 
 def test_validator_field_lists_cover_every_decision_field():
     assert set(fly_runner.REQUIRED_FIELDS) == {
-        "machine", "list_entry", "lease_view", "lease_grant", "ledger_entry"}
+        "machine", "list_entry", "lease_view", "lease_grant", "ledger_entry", "ledger",
+        "owner_record", "result_record"}
     assert "config" in fly_runner.REQUIRED_FIELDS["machine"]
     assert "description" in fly_runner.REQUIRED_FIELDS["lease_view"]
     for kind, fields in fly_runner.REQUIRED_FIELDS.items():
@@ -2894,8 +2908,10 @@ def test_validator_field_lists_cover_every_decision_field():
 
 
 def _sample(spec):
-    return {fly_runner.NONEMPTY_STR: "x", fly_runner.OBJECT: {}, fly_runner.NUMBER: 1.0,
-            fly_runner.BOOLEAN: False}[spec]  # fmt: skip
+    return {fly_runner.NONEMPTY_STR: "x", fly_runner.STRING: "x", fly_runner.OBJECT: {},
+            fly_runner.NUMBER: 1.0, fly_runner.INTEGER: 1, fly_runner.COUNT: 1, fly_runner.POSITIVE_INT: 4242,
+            fly_runner.BOOLEAN: False, fly_runner.MONTH: "2026-10",
+            fly_runner.DAY: "2026-10-14"}[spec]  # fmt: skip
 
 
 def test_runner_probe_treats_an_unreadable_path_as_reachable(monkeypatch, tmp_path):
@@ -2919,3 +2935,134 @@ def test_runner_probe_treats_an_unreadable_path_as_reachable(monkeypatch, tmp_pa
     monkeypatch.setattr(pwd, "getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
     with pytest.raises(RuntimeError, match="unprivileged"):
         module.child_identity("agent")
+
+
+# ── Accounting, results and liveness: every field validated (round 10) ───────
+
+
+@pytest.mark.parametrize("field,mode", _field_cases("ledger"))
+def test_an_incomplete_ledger_refuses_every_launch_and_never_resets(fly_env, field, mode):
+    """An exhausted ledger whose period marker or counter is absent, null or
+    the wrong type must not read as a new period: no launch, no reset."""
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    month = datetime.fromtimestamp(clock.now, tz=timezone.utc).strftime("%Y-%m")
+    day = datetime.fromtimestamp(clock.now, tz=timezone.utc).strftime("%Y-%m-%d")
+    exhausted = {"month": month, "day": day, "spend_usd": 19.999, "launches_today": 50,
+                 "local_fallbacks": 0, "in_flight": {}, "owners": {}}  # fmt: skip
+    damaged = _corrupt(exhausted, field, mode)
+    executor.ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    executor.ledger.path.write_text(json.dumps(damaged))
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair") as exc:
+        asyncio.run(executor.run(_job()))
+    assert exc.value.cooled_until == ""  # waiting does not fix it
+    assert fake.requests == []
+    assert json.loads(executor.ledger.path.read_text()) == damaged  # never reset
+
+
+@pytest.mark.parametrize("marker", ["month", "day"])
+@pytest.mark.parametrize("value", ["", "2026-13", "not-a-date", "2026-10-14T00:00"])
+def test_a_malformed_period_marker_is_refused(fly_env, tmp_path, marker, value):
+    config = fly_runner.FlyConfig.from_env()
+    path = tmp_path / "l.json"
+    data = {"month": "2027-01", "day": "2027-01-15", "spend_usd": 19.9, "launches_today": 49,
+            "local_fallbacks": 0, "in_flight": {}, "owners": {}, marker: value}  # fmt: skip
+    path.write_text(json.dumps(data))
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair"):
+        fly_runner.FlyLedger(path).reserve(config, run_id="r", owner="t", max_run_seconds=60,
+                                           now=1_800_000_000)  # fmt: skip
+
+
+def test_a_genuine_rollover_resets_the_period(fly_env, tmp_path):
+    config = fly_runner.FlyConfig.from_env()
+    path = tmp_path / "l.json"
+    path.write_text(json.dumps({"month": "2026-12", "day": "2026-12-31", "spend_usd": 19.99,
+                                "launches_today": 50, "local_fallbacks": 0, "in_flight": {},
+                                "owners": {}}))  # fmt: skip
+    ledger = fly_runner.FlyLedger(path)
+    ledger.reserve(config, run_id="r", owner="t", max_run_seconds=60, now=1_800_000_000)
+    data = json.loads(path.read_text())
+    assert data["month"] == "2027-01" and data["launches_today"] == 1
+    assert data["spend_usd"] == 0.0
+
+
+@pytest.mark.parametrize("field,mode", _field_cases("result_record"))
+def test_an_incomplete_result_record_is_an_unknown_outcome(fly_env, field, mode):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake)
+    record = _corrupt(complete_record("placeholder", stdout="looks fine"), field, mode)
+
+    async def read(run_id):
+        if "run_id" in record and record["run_id"] == "placeholder":
+            return {**record, "run_id": run_id}
+        return record
+
+    executor._read_result = read
+    job = _job()
+    rc, out, err = asyncio.run(executor.run(job))
+    assert rc == 1 and job.outcome_unknown is True
+    assert b"outcome is unknown" in err and b"looks fine" not in out
+
+
+@pytest.mark.parametrize("field,mode", _field_cases("owner_record"))
+def test_an_incomplete_owner_record_never_proves_death(fly_env, field, mode):
+    """A dead owner whose liveness record is incomplete: nothing about it is
+    known, so its reservation is not reclaimed (it stays reserved)."""
+    fake = FakeFly()
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    dead = {**fly_runner.this_process_owner("apis-dead-owner"), "pid": _dead_pid(),
+            "heartbeat": clock.now}  # fmt: skip
+    record = _corrupt(dead, field, mode)
+    data = executor.ledger._load()
+    executor.ledger._roll(data, clock.now)
+    data["in_flight"]["their-run"] = {
+        "run_id": "their-run", "owner": "apis-dead-owner", "machine_id": "m-theirs",
+        "login": False, "started_at": clock.now, "deadline": clock.now + 600,
+        "max_cost_usd": 0.01,
+    }  # fmt: skip
+    data["owners"]["apis-dead-owner"] = record
+    executor.ledger._save(data)
+    fake.machines["m-theirs"] = {"id": "m-theirs", "state": "started"}
+    assert "their-run" not in asyncio.run(executor.reap())
+    assert "m-theirs" in fake.machines
+
+
+@pytest.mark.parametrize("pid", [0, -1, 1, True, 12.5, "4242"])
+def test_a_pid_that_is_not_a_real_process_id_proves_nothing(fly_env, pid):
+    record = {"id": "x", "pid": pid, "host": __import__("socket").gethostname(),
+              "start": "some start", "heartbeat": 1.0}  # fmt: skip
+    assert fly_runner.owner_provably_dead(record) is False
+
+
+def test_a_running_process_is_never_reported_dead_when_its_start_is_unreadable(monkeypatch):
+    import os as _os
+    import subprocess as _sp
+
+    monkeypatch.setattr(fly_runner.Path, "exists", lambda self: False)  # no /proc
+
+    def empty_ps(*a, **k):
+        return _sp.CompletedProcess(a, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(fly_runner.subprocess, "run", empty_ps)
+    assert fly_runner.process_start_token(_os.getpid()) == ""  # alive, start unknown
+    record = {"id": "x", "pid": _os.getpid(), "host": __import__("socket").gethostname(),
+              "start": "recorded", "heartbeat": 1.0}  # fmt: skip
+    assert fly_runner.owner_provably_dead(record) is False
+
+
+@pytest.mark.parametrize("field", ["spend_usd", "launches_today", "local_fallbacks"])
+def test_a_negative_ledger_counter_is_refused_not_trusted(fly_env, tmp_path, field):
+    """A negative spend or launch count would widen the caps: refused."""
+    config = fly_runner.FlyConfig.from_env()
+    path = tmp_path / "l.json"
+    month = datetime.fromtimestamp(1_800_000_000, tz=timezone.utc).strftime("%Y-%m")
+    day = datetime.fromtimestamp(1_800_000_000, tz=timezone.utc).strftime("%Y-%m-%d")
+    data = {"month": month, "day": day, "spend_usd": 19.9, "launches_today": 49,
+            "local_fallbacks": 0, "in_flight": {}, "owners": {}, field: -100}  # fmt: skip
+    path.write_text(json.dumps(data))
+    with pytest.raises(fly_runner.FlyRefusal, match="needs operator repair"):
+        fly_runner.FlyLedger(path).reserve(config, run_id="r", owner="t", max_run_seconds=60,
+                                           now=1_800_000_000)  # fmt: skip
+    assert json.loads(path.read_text()) == data

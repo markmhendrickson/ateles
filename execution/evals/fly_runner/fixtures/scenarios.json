@@ -1081,6 +1081,105 @@
         "stderr_contains": "not confirmed terminated",
         "revoked_all_minted": true
       }
+    },
+    {
+      "id": "exhausted_ledger_without_month_marker_is_refused",
+      "description": "The ledger has used up its budget and its daily launches, but its month marker is missing. That is not a new period: every Fly launch is refused with a message that the ledger needs repair, nothing is sent to Fly, and the ledger is not reset.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "ledger_raw": {
+        "spend_usd": 19.999,
+        "launches_today": 50,
+        "local_fallbacks": 0,
+        "in_flight": {},
+        "owners": {},
+        "day": "2030-03-17"
+      },
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "needs operator repair",
+        "fly_requests": 0,
+        "local_cli_ran": false,
+        "ledger_untouched": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "exhausted_ledger_without_day_marker_is_refused",
+      "description": "The ledger has used up its budget and its daily launches, but its day marker is missing. That is not a new period: every Fly launch is refused with a message that the ledger needs repair, nothing is sent to Fly, and the ledger is not reset.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "ledger_raw": {
+        "spend_usd": 19.999,
+        "launches_today": 50,
+        "local_fallbacks": 0,
+        "in_flight": {},
+        "owners": {},
+        "month": "2030-03"
+      },
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "needs operator repair",
+        "fly_requests": 0,
+        "local_cli_ran": false,
+        "ledger_untouched": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "incomplete_result_record_is_an_unknown_outcome",
+      "description": "The result record the run left has an exit code but no stdout, stderr or flags. An incomplete record is not a result: the dispatch reports an unknown remote outcome, never a success, and does not replay locally.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "record_raw": {
+          "exit_code": 0
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "remote_outcome_unknown": true,
+        "reason_contains": "outcome is unknown",
+        "local_cli_ran": false,
+        "revoked_all_minted": true
+      }
     }
   ]
 }

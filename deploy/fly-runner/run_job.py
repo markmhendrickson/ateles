@@ -365,7 +365,7 @@ def credential_probe(
     }
     path_report = {}
     for raw in dict.fromkeys((*probe_paths_default(), *job.probe_paths)):
-        expanded = Path(raw.replace("~", child_env.get("HOME", "~"), 1)) if raw.startswith("~") else Path(raw)
+        expanded = Path(raw.replace("~", child_env["HOME"], 1)) if raw.startswith("~") else Path(raw)
         root_expanded = Path(os.path.expanduser(raw))
         present = _readable(expanded) or _readable(root_expanded)
         path_report[raw] = "present" if present else "absent"
