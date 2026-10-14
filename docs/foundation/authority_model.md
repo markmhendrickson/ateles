@@ -1388,7 +1388,9 @@ the one type, told apart by `credential_kind` (decision 101,
 `#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal`): its
 AAuth edge ends at the **agent**, and its acts-as edge ends at the **operator**. This rule reads the
 acts-as edge and so counts the operator. Reading the AAuth edge instead would count the agent, which is the
-attack this section exists to prevent — two agents under one operator would then be two interests.
+attack this section exists to prevent — two agents under one operator would then be two interests. The one
+exception is the builder and review pair, which decision 143 reads on the AAuth edge
+(`#structural-checks-are-reads-over-the-checkpoints-principal-edges`).
 
 **Why.** Principle 5 chooses the restrictive branch: counting an agent as its principal yields fewer
 distinct interests, so a quorum is harder to reach and a separation stricter to satisfy, and the failure of
@@ -1426,6 +1428,20 @@ need a process to keep its count true where the edges need none (principle 11).
 
 **What would reopen it.** A structural check whose inputs are not on the checkpoint — one over principals
 who never resolved and were never awaited — which would first have to say what object it was a check on.
+
+**Extended by decision 143 (2026-10-13), to a pair read over the verdict.** The agent that built an artifact
+never signs a review step on it (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). Its
+inputs are not on a checkpoint: they are the verdict's `SIGNED_BY` edge, the batch's `PRODUCES` edges, and the
+actors recorded on the artifact's observations. That is the condition the reopening clause above names, and
+decision 143 meets it once, deliberately, as a default applied by consistency
+(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`), not as a word of the operator's
+ruling: it extends decision 49 from the checkpoint's principal edges to the verdict's signer and the batch's
+artifacts, naming the verdict as the object it checks. What survives of decision 49 is the ground it gives for refusing a second mechanism: the extension adds no vote
+entity, no tally and no held state, and needs no process to keep it true (principle 11). It also departs from
+decision 48 for this pair alone: it reads the agent's own binding, the one that ends at the agent, and not the
+acts-as binding that ends at the operator, so two agents bound to one operator are two distinct signers here
+(`#the-counting-rule-an-agent-counts-as-its-bound-principal`, decision 143). The pair is fixed by the design
+and is not an `action_policy` value.
 
 ### The threshold's home is the `action_policy`, per class
 
@@ -1651,7 +1667,8 @@ as `Permit`. Cedar's rule (zero permits is deny; forbid wins) is the fix. Attenu
 (macaroons) is the invariant delegation carries. RFC 8693's nested `act` claim is the shape of
 `authority_chain`. Clark-Wilson's caveat, that separation of duties fails under collusion, is why an
 operator and the agents they built may count as one interest (Q1). GitHub's prevent-self-review and NIST
-dynamic separation of duty are the smallest structural check. Sources: `ent_08460968e6f49dac21510f4a`.
+dynamic separation of duty are the smallest structural check, and prevent-self-review applies literally to the
+builder and review pair (decision 143). Sources: `ent_08460968e6f49dac21510f4a`.
 
 ## Beyond the sources
 

@@ -270,15 +270,16 @@ _UNSCHEDULED_STATUSES = frozenset({"queued", "pending"})
 # repo's runner list cannot be read (`GET /actions/runners` needs admin, which
 # the read token usually lacks): a job whose runs-on label set EXACTLY equals
 # an entry here is treated as unschedulable. Removing an entry restores
-# enforcement for that check. Provisioning the runner is tracked by the
-# Neotoma task ent_45626c1604fefc32118ffd62; remove the entry when it lands.
-# Labels are compared case-insensitively, as GitHub matches them.
-KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS: frozenset[frozenset[str]] = frozenset(
-    {
-        # .github/workflows/canonical-rule-inventory.yml, job "canonical rule inventory"
-        frozenset({"self-hosted", "macos", "canonical-rule-inventory"}),
-    }
-)
+# enforcement for that check. Labels are compared case-insensitively, as
+# GitHub matches them.
+#
+# Empty since ateles#1333: its one entry was the canonical rule inventory's
+# self-hosted job, and that workflow was removed — complete cross-store
+# measurement is now a private milestone audit run locally
+# (docs/runbooks/rule_inventory_audit.md), so no PR-gating job needs a
+# self-hosted runner. Do not re-add an entry to excuse a new self-hosted PR
+# check; `test_public_rule_sources.py` fails on such a job.
+KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS: frozenset[frozenset[str]] = frozenset()
 
 # GitHub-hosted runner labels never qualify: a job on a hosted runner that sits
 # queued is a GitHub capacity problem, not a missing runner. A qualifying job

@@ -28,6 +28,7 @@ import { TaskList } from "./TaskList";
 import { AgentDirectory } from "./AgentDirectory";
 import { Sessions } from "./Sessions";
 import { Workflows } from "./Workflows";
+import { Console } from "./Console";
 import { Lifecycle } from "./Lifecycle";
 import { Schemas } from "./Schemas";
 import { type NavSection, isNavSection, useRoute } from "./route";
@@ -55,6 +56,7 @@ const REFRESH_MS = 10_000;
  */
 const BACK_LABELS: Record<NavSection, string> = {
   home: "Now",
+  console: "Console",
   tasks: "Tasks",
   agents: "Agents",
   sessions: "Sessions",
@@ -66,6 +68,7 @@ const BACK_LABELS: Record<NavSection, string> = {
 /** The nav tabs, in order, with the label each one shows. */
 const NAV_LABELS: { value: NavSection; label: string }[] = [
   { value: "home", label: "Now" },
+  { value: "console", label: "Console" },
   { value: "tasks", label: "Tasks" },
   { value: "agents", label: "Agents" },
   { value: "sessions", label: "Sessions" },
@@ -359,6 +362,8 @@ export function App() {
                 onOpenEntity={sheet.open}
                 onOpenAgent={openAgentPage}
               />
+            ) : route.section === "console" ? (
+              <Console onOpenEntity={sheet.open} />
             ) : route.section === "workflows" ? (
               <Workflows />
             ) : route.section === "lifecycle" ? (

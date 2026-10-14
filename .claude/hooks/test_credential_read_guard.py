@@ -44,6 +44,12 @@ ENV_EXAMPLE_FILE = NEOTOMA_DIR / ".env.example"
 ENV_EXAMPLE_FILE.write_text(
     "NEOTOMA_BEARER_TOKEN=\nNEOTOMA_BASE_URL=\nANOTHER_SECRET=\n"
 )
+NEOTOMA_OTHER_FILE = NEOTOMA_DIR / "config.json"
+NEOTOMA_OTHER_FILE.write_text('{"synthetic": "not-a-real-value"}\n')
+LAUNCH_AGENTS_DIR = FIXTURE_ROOT / "Library" / "LaunchAgents"
+LAUNCH_AGENTS_DIR.mkdir(parents=True)
+PLIST_FILE = LAUNCH_AGENTS_DIR / "com.example.agent.plist"
+PLIST_FILE.write_text("<plist><dict>synthetic-not-real</dict></plist>\n")
 PLAIN_FILE = FIXTURE_ROOT / "notes.txt"
 PLAIN_FILE.write_text("nothing sensitive here\n")
 PLAIN_ENV_FILE = (
@@ -54,6 +60,8 @@ PLAIN_ENV_FILE.write_text("UNRELATED=1\n")
 ENV = str(ENV_FILE)
 ENV_EXAMPLE = str(ENV_EXAMPLE_FILE)
 PLAIN = str(PLAIN_FILE)
+NEOTOMA_OTHER = str(NEOTOMA_OTHER_FILE)
+PLIST = str(PLIST_FILE)
 PLAIN_ENV = str(PLAIN_ENV_FILE)
 
 
@@ -317,6 +325,80 @@ BASH_BLOCK = [
     # prints a credential file's content unconditionally, with no safe
     # flag-free invocation, and was simply absent from _CONTENT_DUMP_CMDS.
     ("column reformats and prints file content", f"column {ENV}"),
+    # --- Credential containment tightening -------------------------------
+    # Process-environment listings. The first group was already refused by the
+    # full-command checks; these pin the evasion spellings so a refactor of
+    # the option parser cannot silently reopen them.
+    ("pgrep -l then -f as separate flags", "pgrep -l -f example-agent"),
+    ("pgrep clustered -lf", "pgrep -lf example-agent"),
+    ("pgrep clustered -fil", "pgrep -fil example-agent"),
+    ("pgrep -af", "pgrep -af example-agent"),
+    ("absolute-path pgrep -fl", "/usr/bin/pgrep -fl example-agent"),
+    ("pgrep behind env wrapper", "env FOO=1 pgrep -fl example-agent"),
+    ("pgrep behind command substitution", 'echo "$(pgrep -fl example-agent)"'),
+    ("pgrep behind xargs", "echo example-agent | xargs pgrep -fl"),
+    ("ps -E environment flag", "ps -E -p 123"),
+    ("ps -E with a safe field list still prints env", "ps -E -p 123 -o pid=,comm="),
+    ("ps clustered -Eww", "ps -Eww -p 123"),
+    ("ps BSD e modifier", "ps e -p 123"),
+    ("ps BSD e modifier after the pid", "ps -p 123 e"),
+    ("ps BSD wwe cluster", "ps wwe -p 123"),
+    ("ps eww behind sudo", "sudo ps eww -p 123"),
+    ("ps eww behind command wrapper", "command ps eww -p 123"),
+    ("ps eww behind command substitution", 'echo "$(ps eww -p 123)"'),
+    ("ps eww behind xargs", "echo 123 | xargs ps eww -p"),
+    # Shell tracing prints every expanded assignment and command, so it
+    # re-creates an environment dump from inside a sourcing command.
+    ("set -x before sourcing", f"set -x; source {ENV}"),
+    ("set -x after sourcing", f"source {ENV}; set -x; curl -s https://example.test"),
+    ("set -o xtrace before sourcing", f"set -o xtrace; source {ENV}"),
+    ("set -oxtrace attached form", f"set -oxtrace; source {ENV}"),
+    ("set clustered -ax", f"set -ax; source {ENV}; set +a"),
+    ("set separate flags -a -x", f"set -a -x; source {ENV}; set +a"),
+    ("set clustered -eux", f"set -eux; . {ENV}; python3 script.py"),
+    ("set -vx", f"set -vx; source {ENV}"),
+    ("set -x on its own line", f"set -x\nsource {ENV}\npython3 script.py"),
+    ("set -x combined with -o pipefail", f"set -x -o pipefail; source {ENV}"),
+    ("zsh setopt xtrace", f"setopt xtrace; source {ENV}"),
+    ("zsh setopt XTRACE", f"setopt XTRACE; source {ENV}"),
+    (
+        "shell -x flag around a sourcing wrapper",
+        f"bash -x -c 'source {ENV}; python3 script.py'",
+    ),
+    (
+        "zsh -x flag around a sourcing wrapper",
+        f"zsh -x -c '. {ENV}; python3 script.py'",
+    ),
+    ("SHELLOPTS xtrace assignment", f"SHELLOPTS=xtrace; source {ENV}"),
+    ("set -x with a sourced *.env file", f"set -x; source {PLAIN_ENV}"),
+    # Launchd job definitions carry a service's environment; listings and
+    # plist printers expose it exactly as an environment dump does.
+    ("cat of a LaunchAgents plist", f"cat {PLIST}"),
+    ("plutil -p of a LaunchAgents plist", f"plutil -p {PLIST}"),
+    ("plutil convert to stdout", f"plutil -convert xml1 -o - {PLIST}"),
+    (
+        "plutil extract the environment dictionary",
+        f"plutil -extract EnvironmentVariables xml1 -o - {PLIST}",
+    ),
+    ("PlistBuddy print", f"/usr/libexec/PlistBuddy -c Print {PLIST}"),
+    ("defaults read of a plist", f"defaults read {PLIST}"),
+    ("grep content of a plist", f"grep -i token {PLIST}"),
+    (
+        "launchctl list with a job label prints its dictionary",
+        "launchctl list com.example.agent",
+    ),
+    ("launchctl dumpstate", "launchctl dumpstate"),
+    ("launchctl procinfo", "launchctl procinfo 123"),
+    (
+        "launchctl list with a label behind sudo",
+        "sudo launchctl list com.example.agent",
+    ),
+    # Any other file in the credential directory, not only the dotenv files.
+    ("cat of a non-dotenv file in the credential directory", f"cat {NEOTOMA_OTHER}"),
+    (
+        "head of a non-dotenv file in the credential directory",
+        f"head -3 {NEOTOMA_OTHER}",
+    ),
     # `awk ... getline < <path>` reaches the same sink as the tokenizer
     # defect above (the path lives inside the awk program string, corrupted
     # by the same interleaved quote/paren stripping) — already caught by
@@ -427,6 +509,33 @@ BASH_ALLOW = [
     ("unrelated hyphenated printenv command", "my-printenv --version"),
     ("unrelated hyphenated pgrep command", "my-pgrep -fl example-agent"),
     ("unrelated hyphenated ps command", "my-ps aux"),
+    # --- Credential containment tightening: must stay allowed -------------
+    ("set -x without any credential source", "set -x; echo hello"),
+    (
+        "set +x turns tracing off before sourcing",
+        f"set +x; source {ENV}; python3 script.py",
+    ),
+    ("set -e then source then a program", f"set -e; source {ENV}; python3 script.py"),
+    (
+        "set -euo pipefail then source then a program",
+        f"set -euo pipefail; source {ENV}; python3 script.py",
+    ),
+    (
+        "set -o pipefail is not tracing",
+        f"set -o pipefail; source {ENV}; python3 script.py",
+    ),
+    ("commit message naming set -x", 'git commit -m "refuse set -x with source"'),
+    ("echo of set -x text", f"echo 'set -x; source {ENV}'"),
+    ("bash -c without tracing", f"bash -c 'source {ENV}; python3 script.py'"),
+    ("listing a LaunchAgents directory", f"ls -la {LAUNCH_AGENTS_DIR}"),
+    ("launchctl list with no label", "launchctl list"),
+    ("counting matches in a plist", f"grep -c token {PLIST}"),
+    (
+        "reading a template in the credential directory",
+        f"cat {NEOTOMA_DIR}/.env.example",
+    ),
+    ("pgrep exact name still allowed", "pgrep -x example-agent"),
+    ("ps identity fields still allowed", "ps -p 123 -o pid=,comm="),
     ("ssh-keygen is not ssh", "ssh-keygen -t ed25519"),
     ("ssh-add is not ssh", "ssh-add ~/.ssh/id_ed25519"),
     (
@@ -457,6 +566,11 @@ def test_bash_allow(label, cmd):
 READ_BLOCK = [
     ("Read on .env via file_path", {"file_path": ENV}),
     ("Read on .env via path", {"path": ENV}),
+    ("Read on a LaunchAgents plist", {"file_path": PLIST}),
+    (
+        "Read on a non-dotenv file in the credential directory",
+        {"file_path": NEOTOMA_OTHER},
+    ),
 ]
 READ_ALLOW = [
     ("Read on .env.example", {"file_path": ENV_EXAMPLE}),
@@ -487,6 +601,14 @@ GREP_BLOCK = [
         "content mode with context flags",
         {"path": ENV, "output_mode": "content", "pattern": "TOKEN", "-A": 2},
     ),
+    (
+        "content mode on a LaunchAgents plist",
+        {"path": PLIST, "output_mode": "content", "pattern": "TOKEN"},
+    ),
+    (
+        "content mode on a non-dotenv file in the credential directory",
+        {"path": NEOTOMA_OTHER, "output_mode": "content", "pattern": "x"},
+    ),
 ]
 GREP_ALLOW = [
     ("files_with_matches default", {"path": ENV, "pattern": "TOKEN"}),
@@ -495,6 +617,10 @@ GREP_ALLOW = [
         {"path": ENV, "pattern": "TOKEN", "output_mode": "files_with_matches"},
     ),
     ("count mode", {"path": ENV, "pattern": "TOKEN", "output_mode": "count"}),
+    (
+        "count mode on a LaunchAgents plist",
+        {"path": PLIST, "pattern": "TOKEN", "output_mode": "count"},
+    ),
     (
         "content mode on plain file",
         {"path": PLAIN, "output_mode": "content", "pattern": "x"},
@@ -900,3 +1026,867 @@ def test_exact_names_only_and_count_modes_never_emit_fixture_canary():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# Credential-containment hardening: shell verbose tracing, links, stdin
+# redirection into an interpreter, directory-rooted searches. Every credential
+# file here is a FAKE in a temp directory; HOME points at that directory so the
+# home-relative credential directories resolve inside it.
+# ---------------------------------------------------------------------------
+
+HOME_ENV = {"HOME": str(FIXTURE_ROOT)}
+LINK_DIR = FIXTURE_ROOT / "links"
+LINK_DIR.mkdir()
+INNOCUOUS_LINK = LINK_DIR / "notes-link"
+INNOCUOUS_LINK.symlink_to(ENV_FILE)
+TEMPLATE_NAMED_LINK = LINK_DIR / "looks-safe.env.example"
+TEMPLATE_NAMED_LINK.symlink_to(ENV_FILE)
+DIR_LINK = LINK_DIR / "dir-link"
+DIR_LINK.symlink_to(NEOTOMA_DIR)
+PLAIN_LINK = LINK_DIR / "plain-link"
+PLAIN_LINK.symlink_to(PLAIN_FILE)
+EXAMPLE_LINK = LINK_DIR / "example-link"
+EXAMPLE_LINK.symlink_to(ENV_EXAMPLE_FILE)
+OTHER_DIR = FIXTURE_ROOT / "somewhere-else"
+OTHER_DIR.mkdir()
+(OTHER_DIR / "readme.txt").write_text("nothing sensitive\n")
+HOME_DIR = str(FIXTURE_ROOT)
+FAKE_VALUE = "fake_test_token_not_real_0000"
+
+
+def run_home(tool_name, tool_input):
+    return run(tool_name, tool_input, env=HOME_ENV)
+
+
+def run_bash_in(cmd, cwd):
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+    return subprocess.run(
+        [sys.executable, HOOK],
+        input=payload,
+        capture_output=True,
+        text=True,
+        cwd=str(cwd),
+    ).returncode
+
+
+VERBOSE_BLOCK = [
+    ("set -v", f"set -v; source {ENV}"),
+    ("set -o verbose", f"set -o verbose; source {ENV}"),
+    ("set -xv cluster", f"set -xv; source {ENV}"),
+    ("set -ev cluster", f"set -ev; source {ENV}"),
+    ("bash -v -c", f"bash -v -c 'source {ENV}'"),
+    ("bash -o verbose -c", f"bash -o verbose -c 'source {ENV}'"),
+    ("sh -v wrapper", f"sh -v -c '. {ENV}'"),
+    ("setopt verbose", f"setopt verbose; source {ENV}"),
+    ("SHELLOPTS verbose", f"SHELLOPTS=verbose bash -c 'source {ENV}'"),
+    ("verbose on a separate line", f"set -v\nsource {ENV}"),
+]
+VERBOSE_ALLOW = [
+    ("set +v", f"set +v; source {ENV}"),
+    ("set +o verbose", f"set +o verbose; source {ENV}"),
+    ("set -e", f"set -e; source {ENV}"),
+    ("set -o pipefail", f"set -o pipefail; source {ENV}"),
+    ("verbose with no credential source", "set -v; echo hello"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", VERBOSE_BLOCK, ids=[x for x, _ in VERBOSE_BLOCK])
+def test_verbose_tracing_after_credential_source_is_refused(label, cmd):
+    assert run_bash(cmd) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", VERBOSE_ALLOW, ids=[x for x, _ in VERBOSE_ALLOW])
+def test_disabling_or_unrelated_shell_options_stay_allowed(label, cmd):
+    assert run_bash(cmd) == 0, label
+
+
+def test_verbose_tracing_really_prints_sourced_values_so_the_refusal_is_not_cosmetic():
+    # Control: the shell effect the refusal exists to stop, on a fake file.
+    bash_env = {"PATH": "/usr/bin:/bin"}
+    on = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"set -v; source {ENV}"],
+        capture_output=True,
+        text=True,
+        env=bash_env,
+    )
+    assert FAKE_VALUE in on.stderr
+    off = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"set +v; source {ENV}"],
+        capture_output=True,
+        text=True,
+        env=bash_env,
+    )
+    assert FAKE_VALUE not in off.stderr
+
+
+LINK_BASH_BLOCK = [
+    ("cat through an innocuous link", f"cat {INNOCUOUS_LINK}"),
+    ("head through a link", f"head -3 {INNOCUOUS_LINK}"),
+    ("cat through a template-named link", f"cat {TEMPLATE_NAMED_LINK}"),
+    ("cat inside a linked credential directory", f"cat {DIR_LINK}/.env"),
+    ("grep through a link", f"grep TOKEN {INNOCUOUS_LINK}"),
+    ("sourcing then dumping through a link", f"source {INNOCUOUS_LINK}; env"),
+    ("link relative to the working directory", "cat ./notes-link"),
+    ("bare link word relative to the working directory", "cat notes-link"),
+]
+LINK_BASH_ALLOW = [
+    ("cat through a link to a plain file", f"cat {PLAIN_LINK}"),
+    ("cat through a link to a template", f"cat {EXAMPLE_LINK}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", LINK_BASH_BLOCK, ids=[x for x, _ in LINK_BASH_BLOCK])
+def test_link_to_credential_is_refused_in_bash(label, cmd):
+    # Relative cases need the hook process to share the working directory.
+    assert run_bash_in(cmd, LINK_DIR) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", LINK_BASH_ALLOW, ids=[x for x, _ in LINK_BASH_ALLOW])
+def test_link_to_ordinary_file_stays_allowed_in_bash(label, cmd):
+    assert run_bash_in(cmd, LINK_DIR) == 0, label
+
+
+def test_link_to_credential_is_refused_by_read_and_content_grep():
+    assert run("Read", {"file_path": str(INNOCUOUS_LINK)}) == 2
+    assert run("Read", {"file_path": str(TEMPLATE_NAMED_LINK)}) == 2
+    content = {"output_mode": "content", "pattern": "x"}
+    assert run("Grep", {"path": str(INNOCUOUS_LINK), **content}) == 2
+    assert run_home("Grep", {"path": str(DIR_LINK), **content}) == 2
+    # names-only stays allowed, and so do links to ordinary files
+    assert run("Grep", {"path": str(INNOCUOUS_LINK), "pattern": "x"}) == 0
+    assert run("Read", {"file_path": str(PLAIN_LINK)}) == 0
+    assert run("Read", {"file_path": str(EXAMPLE_LINK)}) == 0
+
+
+def test_glob_returns_names_only_so_a_link_is_not_refused():
+    assert run("Glob", {"pattern": "*", "path": str(LINK_DIR)}) == 0
+
+
+def test_creating_a_link_to_a_credential_is_refused():
+    assert run_bash(f"ln -s {ENV} {LINK_DIR}/new-link") == 2
+    assert run_bash(f"ln -s {PLAIN} {LINK_DIR}/new-plain-link") == 0
+
+
+STDIN_PROGRAM = "import sys; print(sys.stdin.read())"
+STDIN_BLOCK = [
+    ("python reads stdin", f"python3 -c '{STDIN_PROGRAM}' < {ENV}"),
+    ("python with no program", f"python3 < {ENV}"),
+    ("python script file", f"python3 helper.py < {ENV}"),
+    ("node reads stdin", f"node -e 'process.stdin.pipe(process.stdout)' < {ENV}"),
+    ("perl loop", f"perl -ne 'print' < {ENV}"),
+    ("ruby loop", f"ruby -e 'puts STDIN.read' < {ENV}"),
+    ("fd-prefixed redirect", f"python3 -c '{STDIN_PROGRAM}' 0< {ENV}"),
+    ("redirect first", f"< {ENV} python3 -c '{STDIN_PROGRAM}'"),
+    ("quoted path", f"python3 -c '{STDIN_PROGRAM}' < \"{ENV}\""),
+    ("compound command", f"{{ python3 helper.py; }} < {ENV}"),
+    ("through a link", f"python3 helper.py < {INNOCUOUS_LINK}"),
+    ("exec opens the file", f"exec 3< {ENV}"),
+    ("jq", f"jq . < {ENV}"),
+    ("home-relative path", "python3 helper.py < ~/.config/neotoma/.env"),
+    ("home variable", "python3 helper.py < $HOME/.config/neotoma/.env"),
+]
+STDIN_ALLOW = [
+    ("redirect from an ordinary file", f"python3 helper.py < {PLAIN}"),
+    ("redirect from a template", f"python3 helper.py < {ENV_EXAMPLE}"),
+    ("interpreter with no redirect", "python3 helper.py"),
+    ("count-only redirect", f"wc -l < {ENV}"),
+    ("heredoc is not a file redirect", "python3 helper.py <<'EOF'\nx = 1\nEOF"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", STDIN_BLOCK, ids=[x for x, _ in STDIN_BLOCK])
+def test_interpreter_fed_a_credential_on_stdin_is_refused(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", STDIN_ALLOW, ids=[x for x, _ in STDIN_ALLOW])
+def test_stdin_redirects_that_are_not_a_credential_read_stay_allowed(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 0, label
+
+
+def test_interpreter_stdin_read_really_prints_the_value_so_the_refusal_is_not_cosmetic():
+    with open(ENV_FILE) as handle:
+        probe = subprocess.run(
+            [sys.executable, "-c", STDIN_PROGRAM],
+            stdin=handle,
+            capture_output=True,
+            text=True,
+        )
+    assert FAKE_VALUE in probe.stdout
+
+
+def test_shell_run_on_a_credential_file_is_refused():
+    assert run_bash(f"bash {ENV}") == 2
+    assert run_bash(f"bash -v {ENV}") == 2
+    assert run_bash("bash helper.sh") == 0
+    assert run_bash(f"bash -c 'source {ENV}; python3 helper.py'") == 0
+
+
+TERRITORY_GREP_BLOCK = [
+    ("the credential directory itself", {"path": str(NEOTOMA_DIR)}),
+    ("a directory inside the credential tree", {"path": str(NEOTOMA_DIR / "sub")}),
+    ("the home directory above it", {"path": HOME_DIR}),
+    ("the filesystem root", {"path": "/"}),
+    ("a link to the credential directory", {"path": str(DIR_LINK)}),
+    ("a launch agents directory", {"path": str(LAUNCH_AGENTS_DIR)}),
+    ("a dotenv glob under a broad path", {"path": str(OTHER_DIR), "glob": "*.env"}),
+    (
+        "a braced glob naming a dotenv",
+        {"path": str(OTHER_DIR), "glob": "{notes.txt,.env}"},
+    ),
+    ("a dotenv variant glob", {"path": str(OTHER_DIR), "glob": "**/.env.local"}),
+]
+TERRITORY_GREP_ALLOW = [
+    (
+        "names only on the credential directory",
+        {"path": str(NEOTOMA_DIR), "output_mode": "files_with_matches"},
+    ),
+    ("count on the home directory", {"path": HOME_DIR, "output_mode": "count"}),
+    ("an unrelated directory", {"path": str(OTHER_DIR)}),
+    (
+        "an unrelated directory with an ordinary glob",
+        {"path": str(OTHER_DIR), "glob": "*.txt"},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "label,ti", TERRITORY_GREP_BLOCK, ids=[x for x, _ in TERRITORY_GREP_BLOCK]
+)
+def test_content_grep_rooted_at_credential_territory_is_refused(label, ti):
+    request = {"output_mode": "content", "pattern": "TOKEN", **ti}
+    assert run_home("Grep", request) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,ti", TERRITORY_GREP_ALLOW, ids=[x for x, _ in TERRITORY_GREP_ALLOW]
+)
+def test_grep_that_cannot_print_credential_text_stays_allowed(label, ti):
+    request = {"pattern": "TOKEN", "output_mode": "content", **ti}
+    assert run_home("Grep", request) == 0, label
+
+
+TERRITORY_BASH_BLOCK = [
+    ("recursive grep of the credential directory", f"grep -r TOKEN {NEOTOMA_DIR}"),
+    ("rg of the credential directory", f"rg TOKEN {NEOTOMA_DIR}"),
+    ("recursive grep of the home directory", f"grep -rn TOKEN {HOME_DIR}"),
+    ("rg through a directory link", f"rg TOKEN {DIR_LINK}"),
+    (
+        "find -exec cat from the home directory",
+        f"find {HOME_DIR} -name '*.env' -exec cat {{}} +",
+    ),
+    (
+        "find -exec cat in the credential directory",
+        f"find {NEOTOMA_DIR} -type f -exec cat {{}} \\;",
+    ),
+]
+TERRITORY_BASH_ALLOW = [
+    ("names-only recursive grep", f"grep -rl TOKEN {NEOTOMA_DIR}"),
+    ("count recursive grep", f"grep -rc TOKEN {HOME_DIR}"),
+    ("recursive grep of an unrelated directory", f"grep -r readme {OTHER_DIR}"),
+    ("find without a reader", f"find {NEOTOMA_DIR} -type f"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd", TERRITORY_BASH_BLOCK, ids=[x for x, _ in TERRITORY_BASH_BLOCK]
+)
+def test_recursive_search_over_credential_territory_is_refused(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,cmd", TERRITORY_BASH_ALLOW, ids=[x for x, _ in TERRITORY_BASH_ALLOW]
+)
+def test_searches_that_cannot_print_credential_text_stay_allowed(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 0, label
+
+
+def test_credential_directories_are_kept_in_step_with_the_path_globs():
+    sys.path.insert(0, str(Path(HOOK).parent))
+    import credential_read_guard as guard
+
+    for directory, sample in guard.CREDENTIAL_DIRECTORIES.items():
+        assert guard.is_credential_path(f"{directory}/{sample}"), directory
+    assert guard.is_credential_path("~/.config/neotoma")
+
+
+# ---------------------------------------------------------------------------
+# Round-two coverage: compact and quoted redirections, shell-quoted source
+# operands, search roots that are not path-shaped, find readers beyond cat.
+# FAKE files only; HOME points at the fixture directory.
+# ---------------------------------------------------------------------------
+
+SPACED_DIR = FIXTURE_ROOT / "a b"
+SPACED_DIR.mkdir()
+SPACED_ENV_FILE = SPACED_DIR / "demo.env"
+SPACED_ENV_FILE.write_text("NEOTOMA_FAKE_SETTING=fake_test_token_not_real_0000\n")
+SPACED_ENV = str(SPACED_ENV_FILE)
+SPACED_ESCAPED = SPACED_ENV.replace(" ", "\\ ")
+
+
+def run_home_in(cmd, cwd):
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+    env = dict(os.environ)
+    env["HOME"] = str(FIXTURE_ROOT)
+    return subprocess.run(
+        [sys.executable, HOOK],
+        input=payload,
+        capture_output=True,
+        text=True,
+        cwd=str(cwd),
+        env=env,
+    ).returncode
+
+
+COMPACT_STDIN_BLOCK = [
+    ("redirect glued to the quoted program", f"python3 -c '{STDIN_PROGRAM}'<{ENV}"),
+    ("quoted operand containing a space", f"python3 -c '{STDIN_PROGRAM}' < '{SPACED_ENV}'"),
+    ("double-quoted operand containing a space", f'python3 -c "{STDIN_PROGRAM}" < "{SPACED_ENV}"'),
+    ("escaped space in the operand", f"python3 helper.py < {SPACED_ESCAPED}"),
+    ("interpreter glued to the redirect", f"python3<{ENV}"),
+    ("operand built from quoted pieces", f"python3 helper.py < {ENV[:-1]}'v'"),
+    ("escaped character in the operand", f"python3 helper.py < {ENV[:-3]}en\\v"),
+    ("inside a shell -c body", f"bash -c 'python3 helper.py < {ENV}'"),
+    ("redirect after a pipe stage", f"echo go | python3 helper.py <{ENV}"),
+]
+COMPACT_STDIN_ALLOW = [
+    ("compact redirect from an ordinary file", f"python3<{PLAIN}"),
+    ("quoted ordinary operand with a space", f"python3 helper.py < '{FIXTURE_ROOT}/a b/other.txt'"),
+    ("interpreter name inside a quoted word only", f"echo 'run python3 later' > {OTHER_DIR}/note.txt"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd", COMPACT_STDIN_BLOCK, ids=[x for x, _ in COMPACT_STDIN_BLOCK]
+)
+def test_compact_and_quoted_stdin_redirects_into_an_interpreter_are_refused(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 2, label
+
+
+@pytest.mark.parametrize(
+    "label,cmd", COMPACT_STDIN_ALLOW, ids=[x for x, _ in COMPACT_STDIN_ALLOW]
+)
+def test_compact_redirects_that_read_ordinary_files_stay_allowed(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 0, label
+
+
+def test_compact_stdin_redirect_really_prints_the_value_so_the_refusal_is_not_cosmetic():
+    probe = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"python3 -c '{STDIN_PROGRAM}'<{ENV}"],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin"},
+    )
+    assert FAKE_VALUE in probe.stdout
+
+
+SOURCE_FORMS = [
+    ("option terminator", f"source -- {ENV}"),
+    ("single-quoted operand with a space", f"source '{SPACED_ENV}'"),
+    ("double-quoted operand with a space", f'source "{SPACED_ENV}"'),
+    ("escaped space", f"source {SPACED_ESCAPED}"),
+    ("quoted piece inside the name", f"source {ENV[:-1]}'v'"),
+    ("escaped character inside the name", f"source {ENV[:-3]}en\\v"),
+    ("dot builtin with terminator", f". -- {ENV}"),
+    ("builtin prefix", f"builtin source {ENV}"),
+]
+
+
+@pytest.mark.parametrize("flag", ["set -x", "set -v", "set -o xtrace", "set -o verbose"])
+@pytest.mark.parametrize("label,source", SOURCE_FORMS, ids=[x for x, _ in SOURCE_FORMS])
+def test_tracing_then_a_shell_decoded_source_operand_is_refused(flag, label, source):
+    assert run_home("Bash", {"command": f"{flag}; {source}"}) == 2, label
+
+
+def test_shell_decoded_source_operand_inside_a_wrapper_is_refused():
+    assert run_bash(f"bash -x -c 'source {SPACED_ESCAPED}'") == 2
+    assert run_bash(f"bash -v -c \"source '{SPACED_ENV}'\"") == 2
+    assert run_bash(f"sh -x -c '. -- {ENV}'") == 2
+
+
+def test_untraced_or_untraced_off_source_of_the_same_forms_stays_allowed():
+    assert run_bash(f"source -- {ENV}") == 0
+    assert run_bash(f"set +x; source -- {ENV}") == 0
+    assert run_bash(f"set +v; source '{SPACED_ENV}'") == 0
+    assert run_bash(f"set -x; source -- {PLAIN}") == 0
+
+
+def test_traced_source_with_terminator_really_prints_the_value():
+    probe = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"set -x; source -- {ENV}"],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert FAKE_VALUE in probe.stderr
+
+
+ROOT_FORMS_BLOCK = [
+    ("bare tilde root", "rg --hidden X ~"),
+    ("tilde with slash", "rg --hidden X ~/"),
+    ("home variable root", "rg --hidden X $HOME"),
+    ("braced home variable root", "rg --hidden X ${HOME}"),
+    ("glob under home", "rg --hidden X ~/*"),
+    ("quoted tilde-less home", f"rg --hidden X '{FIXTURE_ROOT}'"),
+    ("recursive grep tilde", "grep -rn X ~"),
+    ("flag value before the root", "rg -g '*.py' X ~"),
+    ("ag at the home directory", "ag X ~"),
+    ("ack at the home directory", "ack X ~/"),
+    ("pattern flag then root", "rg -e X ~"),
+    ("find tilde root with cat", "find ~ -type f -exec cat {} +"),
+    ("find tilde-slash root with cat", "find ~/ -type f -exec cat {} +"),
+    ("find with sed", "find ~/ -type f -exec sed -n p {} +"),
+    ("find with awk", "find ~/ -type f -exec awk 1 {} +"),
+    ("find with grep", "find ~/ -type f -exec grep X {} +"),
+    ("find with an interpreter", "find ~/ -type f -exec python3 helper.py {} +"),
+    ("find execdir with sed", "find ~ -type f -execdir sed -n p {} +"),
+    ("find with escaped terminator", "find ~ -type f -exec sed -n p {} \\;"),
+    ("find in the credential directory with sed", f"find {NEOTOMA_DIR} -type f -exec sed -n p {{}} +"),
+    ("find in the credential directory with awk", f"find {NEOTOMA_DIR} -type f -exec awk 1 {{}} +"),
+]
+ROOT_FORMS_ALLOW = [
+    ("rg outside credential territory", f"rg X {OTHER_DIR}"),
+    ("names-only rg", "rg -l X ~"),
+    ("count grep", "grep -rc X ~"),
+    ("find with no reader", "find ~ -type f"),
+    ("find printing names", "find ~/ -type f -print"),
+    ("non-recursive grep of an ordinary file", f"grep X {PLAIN}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", ROOT_FORMS_BLOCK, ids=[x for x, _ in ROOT_FORMS_BLOCK])
+def test_search_roots_that_are_not_path_shaped_are_refused(label, cmd):
+    assert run_home_in(cmd, OTHER_DIR) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", ROOT_FORMS_ALLOW, ids=[x for x, _ in ROOT_FORMS_ALLOW])
+def test_searches_that_cannot_print_credential_text_stay_allowed_with_new_roots(label, cmd):
+    assert run_home_in(cmd, OTHER_DIR) == 0, label
+
+
+CWD_FORMS_BLOCK = [
+    ("omitted root from the home directory", "rg --hidden X", FIXTURE_ROOT),
+    ("dot root from the home directory", "rg --hidden X .", FIXTURE_ROOT),
+    ("omitted root after cd tilde", "cd ~; rg --hidden X", OTHER_DIR),
+    ("dot root after cd tilde", "cd ~; rg --hidden X .", OTHER_DIR),
+    ("omitted root after cd to the credential directory", f"cd {NEOTOMA_DIR} && rg X", OTHER_DIR),
+    ("relative root after cd", f"cd {FIXTURE_ROOT} && grep -r X .config", OTHER_DIR),
+    ("cd home variable", "cd $HOME && rg X", OTHER_DIR),
+    ("cd to an unresolvable directory then a relative root", "cd $UNSET_DIR_FOR_TEST && rg X .", OTHER_DIR),
+    ("cd inside a subshell then a search", "(cd ~); cd ~ && rg X", OTHER_DIR),
+    ("find with omitted root after cd", "cd ~ && find -type f -exec cat {} +", OTHER_DIR),
+]
+CWD_FORMS_ALLOW = [
+    ("omitted root in an ordinary directory", "rg X", OTHER_DIR),
+    ("dot root after cd to an ordinary directory", f"cd {OTHER_DIR} && rg X .", FIXTURE_ROOT / "links"),
+    ("names-only after cd tilde", "cd ~ && rg -l X", OTHER_DIR),
+]
+
+
+@pytest.mark.parametrize("label,cmd,cwd", CWD_FORMS_BLOCK, ids=[x[0] for x in CWD_FORMS_BLOCK])
+def test_implicit_roots_and_directory_changes_are_resolved_before_judging(label, cmd, cwd):
+    assert run_home_in(cmd, cwd) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd,cwd", CWD_FORMS_ALLOW, ids=[x[0] for x in CWD_FORMS_ALLOW])
+def test_implicit_roots_in_ordinary_directories_stay_allowed(label, cmd, cwd):
+    assert run_home_in(cmd, cwd) == 0, label
+
+
+def test_the_payload_working_directory_is_used_when_present():
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "rg --hidden X"},
+            "cwd": str(FIXTURE_ROOT),
+        }
+    )
+    env = dict(os.environ)
+    env["HOME"] = str(FIXTURE_ROOT)
+    result = subprocess.run(
+        [sys.executable, HOOK], input=payload, capture_output=True, text=True,
+        cwd=str(OTHER_DIR), env=env,
+    )
+    assert result.returncode == 2
+
+
+def test_find_with_a_sed_callback_really_prints_the_value():
+    probe = subprocess.run(
+        ["find", str(NEOTOMA_DIR), "-type", "f", "-name", ".env", "-exec", "sed", "-n", "p", "{}", "+"],
+        capture_output=True,
+        text=True,
+    )
+    assert FAKE_VALUE in probe.stdout
+
+
+DIRECT_SEARCH_BLOCK = [
+    ("ag on the credential directory", f"ag X {NEOTOMA_DIR}"),
+    ("ack on the credential directory", f"ack X {NEOTOMA_DIR}"),
+    ("ag on a credential file", f"ag X {ENV}"),
+    ("ack on a credential file", f"ack X {NEOTOMA_OTHER}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", DIRECT_SEARCH_BLOCK, ids=[x for x, _ in DIRECT_SEARCH_BLOCK])
+def test_ag_and_ack_are_search_readers_like_grep_and_rg(label, cmd):
+    assert run_home("Bash", {"command": cmd}) == 2, label
+
+
+# ---------------------------------------------------------------------------
+# Relative operands are judged against the directory they are read from.
+#
+# Every direct reader, source, redirect and link check resolves a relative
+# operand against the payload's working directory, the hook process's own,
+# and every literal `cd`/`pushd` target in the command, with `~`, `..` and
+# symbolic links resolved, so a protected file is refused whether it is named
+# absolutely or relative to wherever the shell will be. The hook process runs
+# in an ordinary directory in every case below, so the payload directory or
+# the `cd` is the only way it can know where the operand points.
+# ---------------------------------------------------------------------------
+
+DIR_LINK = FIXTURE_ROOT / "relative-links" / "settings-dir"
+DIR_LINK.parent.mkdir()
+DIR_LINK.symlink_to(NEOTOMA_DIR, target_is_directory=True)
+
+
+def run_in(tool_name, tool_input, process_cwd, payload_cwd=None):
+    payload = {"tool_name": tool_name, "tool_input": tool_input}
+    if payload_cwd is not None:
+        payload["cwd"] = str(payload_cwd)
+    env = dict(os.environ)
+    env["HOME"] = str(FIXTURE_ROOT)
+    return subprocess.run(
+        [sys.executable, HOOK],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        cwd=str(process_cwd),
+        env=env,
+    ).returncode
+
+
+RELATIVE_BASH_BLOCK = [
+    ("cd then a reader", f"cd {NEOTOMA_DIR}; cat config.json"),
+    ("cd and-chain then a reader", f"cd {NEOTOMA_DIR} && head -1 config.json"),
+    ("cd then an interpreter on stdin", f"cd {NEOTOMA_DIR}; python3 < config.json"),
+    ("cd then a compact stdin redirect", f"cd {NEOTOMA_DIR}; python3<config.json"),
+    ("cd then a plist reader", f"cd {LAUNCH_AGENTS_DIR}; plutil -p com.example.agent.plist"),
+    ("cd tilde then a nested relative reader", "cd ~ && cat .config/neotoma/config.json"),
+    ("cd tilde subdirectory then a reader", "cd ~/.config/neotoma && cat config.json"),
+    ("cd through dot-dot then a reader", f"cd {OTHER_DIR}/../.config/neotoma && cat config.json"),
+    ("dot-dot operand after cd", f"cd {OTHER_DIR} && cat ../.config/neotoma/config.json"),
+    ("cd then a bare file name", f"cd {NEOTOMA_DIR}; cat settings"),
+    ("pushd then a reader", f"pushd {NEOTOMA_DIR} >/dev/null; cat config.json"),
+    ("cd through a directory link then a reader", f"cd {DIR_LINK}; cat config.json"),
+    ("cd then source then dump", f"cd {NEOTOMA_DIR}; set -a; source settings; set +a; env"),
+    ("cd then an inline program naming the file", f"cd {NEOTOMA_DIR}; python3 -c \"print(open('config.json').read())\""),
+    ("cd then a piped reader", f"cd {NEOTOMA_DIR}; echo config.json | xargs cat"),
+    ("cd then a read loop", f"cd {NEOTOMA_DIR}; while read l; do echo $l; done < config.json"),
+    ("cd then a link", f"cd {NEOTOMA_DIR}; ln -s config.json {OTHER_DIR}/innocent"),
+    ("cd in a subshell then a reader", f"(cd {NEOTOMA_DIR} && cat config.json)"),
+    ("cd inside sh -c then a reader", f"sh -c 'cd {NEOTOMA_DIR} && cat config.json'"),
+]
+RELATIVE_BASH_ALLOW = [
+    ("cd to an ordinary directory then a reader", f"cd {OTHER_DIR}; cat readme.txt"),
+    ("cd then a template reader", f"cd {NEOTOMA_DIR}; cat .env.example"),
+    ("cd then a names-only listing", f"cd {NEOTOMA_DIR} && ls"),
+    ("cd then a count-only grep", f"cd {NEOTOMA_DIR} && grep -c X config.json"),
+    ("cd to the agents directory then a listing", f"cd {LAUNCH_AGENTS_DIR} && ls -la"),
+    ("dot-dot to an ordinary file", f"cd {OTHER_DIR} && cat ../notes.txt"),
+    ("relative reader with no cd in an ordinary directory", "cat readme.txt"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", RELATIVE_BASH_BLOCK, ids=[x for x, _ in RELATIVE_BASH_BLOCK])
+def test_relative_operands_after_a_directory_change_are_refused(label, cmd):
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 2, label
+
+
+@pytest.mark.parametrize("label,cmd", RELATIVE_BASH_ALLOW, ids=[x for x, _ in RELATIVE_BASH_ALLOW])
+def test_relative_operands_that_do_not_reach_a_credential_stay_allowed(label, cmd):
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 0, label
+
+
+PAYLOAD_CWD_BLOCK = [
+    ("Bash", {"command": "cat config.json"}, NEOTOMA_DIR),
+    ("Bash", {"command": "python3 < config.json"}, NEOTOMA_DIR),
+    ("Bash", {"command": "plutil -p com.example.agent.plist"}, LAUNCH_AGENTS_DIR),
+    ("Bash", {"command": "cat ../.config/neotoma/config.json"}, OTHER_DIR),
+    ("Bash", {"command": "cat config.json"}, DIR_LINK),
+    ("Read", {"file_path": "config.json"}, NEOTOMA_DIR),
+    ("Read", {"file_path": "../.config/neotoma/config.json"}, OTHER_DIR),
+    ("Grep", {"pattern": "X", "path": ".", "output_mode": "content"}, NEOTOMA_DIR),
+    ("Grep", {"pattern": "X", "path": "config.json", "output_mode": "content"}, NEOTOMA_DIR),
+]
+PAYLOAD_CWD_ALLOW = [
+    ("Bash", {"command": "cat readme.txt"}, OTHER_DIR),
+    ("Bash", {"command": "cat .env.example"}, NEOTOMA_DIR),
+    ("Read", {"file_path": "readme.txt"}, OTHER_DIR),
+    ("Grep", {"pattern": "X", "path": "config.json", "output_mode": "count"}, NEOTOMA_DIR),
+]
+
+
+@pytest.mark.parametrize(
+    "tool,tool_input,payload_cwd",
+    PAYLOAD_CWD_BLOCK,
+    ids=[f"{t}-{i}" for i, (t, _, _) in enumerate(PAYLOAD_CWD_BLOCK)],
+)
+def test_relative_operands_are_judged_from_the_payload_directory(tool, tool_input, payload_cwd):
+    # The hook process runs in an ordinary directory, as a project hook does.
+    assert run_in(tool, tool_input, OTHER_DIR, payload_cwd) == 2
+
+
+@pytest.mark.parametrize(
+    "tool,tool_input,payload_cwd",
+    PAYLOAD_CWD_ALLOW,
+    ids=[f"{t}-{i}" for i, (t, _, _) in enumerate(PAYLOAD_CWD_ALLOW)],
+)
+def test_relative_ordinary_operands_from_the_payload_directory_stay_allowed(
+    tool, tool_input, payload_cwd
+):
+    assert run_in(tool, tool_input, OTHER_DIR, payload_cwd) == 0
+
+
+def test_absolute_and_relative_forms_of_the_same_read_get_the_same_decision():
+    absolute = run_in("Bash", {"command": f"cat {NEOTOMA_OTHER}"}, OTHER_DIR)
+    relative = run_in("Bash", {"command": f"cd {NEOTOMA_DIR}; cat config.json"}, OTHER_DIR)
+    assert absolute == relative == 2
+
+
+def test_relative_read_after_cd_really_prints_the_file_so_the_refusal_is_not_cosmetic():
+    probe = subprocess.run(
+        ["sh", "-c", f"cd {NEOTOMA_DIR}; cat config.json"],
+        capture_output=True,
+        text=True,
+        cwd=str(OTHER_DIR),
+    )
+    assert "not-a-real-value" in probe.stdout
+
+
+# ---------------------------------------------------------------------------
+# Operand shapes: every spelling a shell decodes to the same path is judged as
+# that path.
+#
+# For each protected target (a dotenv file, a non-dotenv file in the
+# credential directory, a launchd plist) the same read is written in every
+# operand shape: quoting and escaping inside a path component, concatenated
+# and empty quotes, ANSI-C and locale quoting, option terminators, attached
+# and `=`-joined option values, assignments, redirects, brace alternatives,
+# globs, variables and `~`, pipeline operands, and a quoted command word.
+# Each spelling is first decoded by a real shell (`printf`) to prove it names
+# the protected file, so a refusal is not a guess about shell semantics.
+# ---------------------------------------------------------------------------
+
+
+def _mangle(component: str) -> dict[str, str]:
+    """Shell spellings of *component* that all decode to it."""
+    head, mid, tail = component[:2], component[2:-1], component[-1]
+    ansi = "".join(f"\\x{ord(c):02x}" for c in mid)
+    return {
+        "single-quoted piece": f"{head}'{mid}'{tail}",
+        "double-quoted piece": f'{head}"{mid}"{tail}',
+        "backslash escape": f"{head}\\{mid}{tail}",
+        "empty quotes": f"{head}''{mid}\"\"{tail}",
+        "ansi-c escapes": f"{head}$'{ansi}'{tail}",
+        "locale quoting": f'{head}$"{mid}"{tail}',
+    }
+
+
+_OPERAND_TARGETS = {
+    "dotenv": (ENV, ".env"),
+    "credential-directory file": (NEOTOMA_OTHER, "neotoma"),
+    "launchd plist": (PLIST, "LaunchAgents"),
+}
+
+
+def _operand_spellings(path: str, component: str) -> dict[str, str]:
+    spellings = {
+        name: path.replace(component, mangled, 1) if component != ".env" else path[: -len(component)] + mangled
+        for name, mangled in _mangle(component).items()
+    }
+    spellings["whole word single-quoted"] = f"'{path}'"
+    spellings["whole word ansi-c"] = f"$'{path}'"
+    return spellings
+
+
+def _shell_decodes_to(spelling: str, path: str) -> bool:
+    probe = subprocess.run(
+        ["bash", "-c", f"printf '%s' {spelling}"], capture_output=True, text=True
+    )
+    return probe.stdout == path
+
+
+_SHAPE_TEMPLATES = {
+    "plain reader": "cat {p}",
+    "option terminator": "cat -- {p}",
+    "reader with options": "head -n 1 {p}",
+    "stdin redirect to a reader": "cat < {p}",
+    "nonrecursive search": "grep X {p}",
+    "attached option value": "grep -f{p} /dev/null",
+    "long option value": "grep --file={p} /dev/null",
+    "assignment operand": "dd if={p}",
+    "pipeline operand": "printf '%s\\n' {p} | xargs cat",
+    "quoted command word": "c'a't {p}",
+    "escaped command word": "\\cat {p}",
+    "plist reader": "plutil -p {p}",
+    "read loop": "while read l; do echo $l; done < {p}",
+    "interpreter on stdin": "python3 < {p}",
+    "inside sh -c": "sh -c \"cat {p}\"",
+}
+
+_SHAPE_CASES = [
+    (f"{target} / {spelling_name} / {shape}", template.format(p=spelling), path, spelling)
+    for target, (path, component) in _OPERAND_TARGETS.items()
+    for spelling_name, spelling in _operand_spellings(path, component).items()
+    for shape, template in _SHAPE_TEMPLATES.items()
+    # A double quote inside the double-quoted `sh -c` body would end it early,
+    # so that pairing would not name the target at all.
+    if not (shape == "inside sh -c" and '"' in spelling)
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd,path,spelling", _SHAPE_CASES, ids=[c[0] for c in _SHAPE_CASES]
+)
+def test_every_shell_spelling_of_a_protected_operand_is_refused(label, cmd, path, spelling):
+    assert _shell_decodes_to(spelling, path), f"fixture spelling is wrong: {spelling}"
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 2, label
+
+
+_EXPANSION_CASES = [
+    ("brace alternatives", "cat {root}/.config/{{neotoma,unused}}/config.json"),
+    ("glob in a directory", "cat {root}/.config/neot?ma/config.json"),
+    ("glob in a file name", "cat {root}/.config/neotoma/conf*.json"),
+    ("glob over plists", "cat {root}/Library/LaunchAgents/*.plist"),
+    ("glob over a dotenv", "cat {root}/.config/neotoma/.e[n]v"),
+    ("home variable", "cat $HOME/.config/neotoma/config.json"),
+    ("braced home variable", "cat ${{HOME}}/.config/neotoma/config.json"),
+    ("tilde", "cat ~/.config/neotoma/config.json"),
+    ("at-file reference", "grep X @{root}/.config/neotoma/config.json"),
+    ("path list", "cat x:{root}/.config/neotoma/config.json"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,template", _EXPANSION_CASES, ids=[c[0] for c in _EXPANSION_CASES]
+)
+def test_expanded_operand_forms_are_refused(label, template):
+    cmd = template.format(root=FIXTURE_ROOT)
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 2, label
+
+
+_SHAPE_ALLOW = [
+    ("quoted ordinary file", f"cat {PLAIN[:-3]}'{PLAIN[-3:]}'"),
+    ("ansi-c ordinary file", f"cat $'{PLAIN}'"),
+    ("quoted template", f"cat {ENV_EXAMPLE[:-4]}'{ENV_EXAMPLE[-4:]}'"),
+    ("count-only search of a quoted credential", f"grep -c X {ENV[:-2]}'{ENV[-2:]}'"),
+    ("names-only listing of a quoted credential directory", f"ls {str(NEOTOMA_DIR)[:-3]}'{str(NEOTOMA_DIR)[-3:]}'"),
+    ("glob over ordinary files", f"cat {OTHER_DIR}/*.txt"),
+    ("brace over ordinary files", f"cat {FIXTURE_ROOT}/{{notes.txt,somewhere-else/readme.txt}}"),
+    ("option value that is not a path", "grep --color=auto X readme.txt"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", _SHAPE_ALLOW, ids=[c[0] for c in _SHAPE_ALLOW])
+def test_shell_spellings_of_ordinary_operands_stay_allowed(label, cmd):
+    assert run_in("Bash", {"command": cmd}, OTHER_DIR) == 0, label
+
+
+def test_a_split_quoted_operand_really_reads_the_protected_file():
+    spelling = _operand_spellings(NEOTOMA_OTHER, "neotoma")["single-quoted piece"]
+    probe = subprocess.run(["bash", "-c", f"cat {spelling}"], capture_output=True, text=True)
+    assert "not-a-real-value" in probe.stdout
+
+
+# ---------------------------------------------------------------------------
+# The guard's own output never carries file content or matched values.
+#
+# Two sides: (1) a mode the guard lets through as names/count-only must not
+# be able to print surrounding lines, so grep context options are never a safe
+# mode; (2) the refusal and the log line name a path or a fixed description,
+# never text that could be content or a value.
+# ---------------------------------------------------------------------------
+
+_FIXTURE_CONTENT_MARKERS = (
+    "fake_test_token_not_real_0000",
+    "synthetic_attached_pattern_canary_not_real",
+    "zzz_fake_value",
+    "not-a-real-value",
+    "synthetic-not-real",
+)
+
+CONTEXT_MODE_BLOCK = [
+    ("names-only with after-context", f"grep -o -A 1 '^[A-Z_]*=' {ENV}"),
+    ("names-only with attached before-context", f"grep -o -B1 '^[A-Z_]*=' {ENV}"),
+    ("names-only with context", f"grep -o -C 2 '^[A-Z_]*=' {ENV}"),
+    ("names-only with long context", f"grep -o --context=1 '^[A-Z_]*=' {ENV}"),
+    ("names-only with long after-context", f"grep -o --after-context 1 '^[A-Z_]*=' {ENV}"),
+    ("count with context", f"grep -c -A1 X {ENV}"),
+    ("files with context", f"grep -l -B 2 X {ENV}"),
+    ("ripgrep names-only with context", f"rg -o -C1 '^[A-Za-z_][A-Za-z0-9_]*=' {ENV}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", CONTEXT_MODE_BLOCK, ids=[c[0] for c in CONTEXT_MODE_BLOCK])
+def test_context_options_are_never_a_safe_grep_mode(label, cmd):
+    assert run_bash(cmd) == 2, label
+
+
+def test_context_with_names_only_can_print_values_on_this_platform():
+    probe = subprocess.run(
+        ["grep", "-o", "-A", "1", "^[A-Z_]*=", ENV], capture_output=True, text=True
+    )
+    if FAKE_VALUE not in probe.stdout and "client_secret" not in probe.stdout:
+        pytest.skip("this grep does not print context lines in -o mode")
+    assert run_bash(f"grep -o -A 1 '^[A-Z_]*=' {ENV}") == 2
+
+
+_OUTPUT_PROBES = [
+    *[("Bash", {"command": cmd}) for _, cmd in BASH_BLOCK],
+    *[("Bash", {"command": cmd}) for _, cmd in CONTEXT_MODE_BLOCK],
+    ("Read", {"file_path": ENV}),
+    ("Read", {"file_path": NEOTOMA_OTHER}),
+    ("Read", {"file_path": PLIST}),
+    ("Grep", {"pattern": "X", "path": ENV, "output_mode": "content"}),
+]
+
+
+@pytest.mark.parametrize(
+    "tool,tool_input", _OUTPUT_PROBES, ids=[f"{t}-{i}" for i, (t, _) in enumerate(_OUTPUT_PROBES)]
+)
+def test_a_refusal_never_contains_file_content(tool, tool_input):
+    result = run_result(tool, tool_input)
+    assert result.returncode == 2
+    output = result.stdout + result.stderr
+    for marker in _FIXTURE_CONTENT_MARKERS:
+        assert marker not in output, marker
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        f'cat "{NEOTOMA_DIR}/x synthetic_value_marker_77"',
+        f"cat '{NEOTOMA_DIR}/a=synthetic_value_marker_77'",
+        f'cat "{NEOTOMA_DIR}/$(printf synthetic_value_marker_77)"',
+    ],
+    ids=["space", "assignment", "expansion"],
+)
+def test_a_refusal_names_only_a_path_or_a_fixed_description(cmd):
+    result = run_result("Bash", {"command": cmd})
+    assert result.returncode == 2
+    assert "synthetic_value_marker_77" not in result.stdout + result.stderr
+
+
+def test_safe_modes_the_guard_allows_print_no_content_when_run():
+    for argv in (
+        ["grep", "-c", "^NEOTOMA_BEARER_TOKEN=", ENV],
+        ["grep", "-o", "^[A-Z_]*=", ENV],
+        ["grep", "-l", "TOKEN", ENV],
+    ):
+        cmd = " ".join(argv[:-1]) .replace("^", "'^").replace("=", "='") + f" {ENV}"
+        assert run_bash(cmd) == 0, cmd
+        printed = subprocess.run(argv, capture_output=True, text=True).stdout
+        for marker in _FIXTURE_CONTENT_MARKERS:
+            assert marker not in printed, (argv, marker)

@@ -34,6 +34,10 @@
  *                             eleven count-only queries, no snapshots
  *   GET  /api/entity?id=…     ONE entity of any type, plus its relationships —
  *                             what the in-app detail views read
+ *   GET  /api/console?section=…  one section of the Console overview (charter,
+ *                             missions, strategies, retired, allstrategies,
+ *                             projects); cached
+ *                             briefly and read two at a time — see consoleSpine.ts
  *   GET  /api/scan-freshness  how far the committed static code scan has fallen
  *                             behind the repo's HEAD — the one thing about that
  *                             scan that changes, and the only one worth showing
@@ -54,6 +58,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
+import { SPINE_READ_TIMEOUT_MS, createSpine, isSpineSection } from "./consoleSpine";
 import { dirname, join } from "node:path";
 /**
  * ONE definition of the filtered-total ceiling, shared with the client that
@@ -1765,6 +1770,14 @@ export interface MiddlewareHost {
 }
 
 /**
+ * The Console's section reader. One per process, so its short cache and its
+ * two-read cap are shared by every viewer.
+ */
+const consoleSpine = createSpine({
+  query: (body) => neotomaPost("/entities/query", body, SPINE_READ_TIMEOUT_MS),
+});
+
+/**
  * Register every `/api/*` route on `server`.
  *
  * Called by the Vite plugin below (dev) and by `server/serve.ts` (production).
@@ -2113,6 +2126,29 @@ export function registerApiRoutes(server: MiddlewareHost) {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         res.end(JSON.stringify(scanFreshness(commit)));
+      });
+
+      /**
+       * GET /api/console?section=<charter|missions|strategies|retired|allstrategies|projects>
+       *
+       * ONE SECTION PER REQUEST, so a slow type does not hold the others back
+       * and a failed one names itself. The section is checked against a fixed
+       * list; the query behind each is fixed in consoleSpine.ts, so this cannot
+       * be pointed at an arbitrary filter. READ-ONLY like every route here.
+       */
+      server.use("/api/console", async (req, res) => {
+        const section =
+          new URL(req.url ?? "/", "http://localhost").searchParams.get("section") ?? "";
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Cache-Control", "no-store");
+        if (!isSpineSection(section)) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: "Unknown console section." }));
+          return;
+        }
+        const result = await consoleSpine(section);
+        if (!result.ok) res.statusCode = 502;
+        res.end(JSON.stringify(result));
       });
 
       server.use("/api/agents", async (req, res) => {

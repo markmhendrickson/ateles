@@ -1098,6 +1098,9 @@ class TestLensAgentsRegistry:
 # Operator ruling 2026-09-25: until a self-hosted runner exists for a check, a
 # check that branch protection does NOT require and that no online runner can
 # schedule is reported as "not run (no runner)" instead of failing the gate.
+# The fixtures below are named after the canonical rule inventory, the check
+# that motivated the ruling; that workflow is gone (ateles#1333) and they now
+# stand for any unschedulable self-hosted check.
 # The ruling's fail-closed bounds are each pinned below. The two positive
 # tests (not-run passes) are red on origin/main, where every queued check
 # blocks; the negative tests pin behaviour main already had and that this
@@ -1175,6 +1178,13 @@ class TestUnschedulableNonRequiredCheckIsNotRun:
         assert "not required by branch protection on `main`" in lines[0]
 
     async def test_runner_list_unreadable_and_allowlisted_is_not_run(self, monkeypatch, capsys):
+        # The shipped allowlist is empty since ateles#1333; install a fixture
+        # entry so the allowlisted path itself stays pinned.
+        monkeypatch.setattr(
+            target,
+            "KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS",
+            frozenset({frozenset(lbl.casefold() for lbl in INVENTORY_LABELS)}),
+        )
         client = _inventory_client(runners=None)  # 403, as for a non-admin token
         _install_client(monkeypatch, client)
 
@@ -1286,14 +1296,14 @@ class TestUnschedulableCheckFailClosedBounds:
 
 
 class TestAllowlistContents:
-    def test_allowlist_holds_only_the_inventory_label_set(self):
-        assert target.KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS == frozenset(
-            {frozenset(lbl.casefold() for lbl in INVENTORY_LABELS)}
-        )
+    def test_allowlist_is_empty(self):
+        # ateles#1333 removed the only self-hosted PR check (the canonical rule
+        # inventory), so nothing is excused as unschedulable any more.
+        assert target.KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS == frozenset()
 
-    def test_allowlist_matches_the_workflow_runs_on(self):
-        workflow = (_REPO_ROOT / ".github" / "workflows" / "canonical-rule-inventory.yml").read_text()
-        assert "runs-on: [self-hosted, macOS, canonical-rule-inventory]" in workflow
+    def test_retired_inventory_workflow_is_gone(self):
+        workflows = _REPO_ROOT / ".github" / "workflows"
+        assert not (workflows / "canonical-rule-inventory.yml").exists()
 
 
 @pytest.mark.asyncio
