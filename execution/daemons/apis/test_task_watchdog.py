@@ -159,3 +159,17 @@ def test_query_tasks_unwraps_shapes():
     assert tw._unwrap_snapshot({"snapshot": {"snapshot": {"status": "x"}}}) == {"status": "x"}
     assert tw._unwrap_snapshot({"snapshot": {"status": "y"}}) == {"status": "y"}
     assert tw._unwrap_snapshot({"status": "z"}) == {"status": "z"}
+
+
+def test_stall_outlasts_a_fly_queue_wait_plus_the_run():
+    """ateles#1456: with the Fly executor enabled, a login-machine queue wait
+    is not counted against the dispatch timeout, so the stall threshold must
+    cover it, or a run still in flight would be re-dispatched."""
+    from task_watchdog import stall_seconds
+
+    base = {"APIS_DISPATCH_TIMEOUT": "1800", "APIS_STALL_SECONDS": "3600"}
+    assert stall_seconds(base) == 3600
+    fly = {**base, "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+           "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": "1800"}  # fmt: skip
+    assert stall_seconds(fly) == 1800 + 600 + 1800 + 120
+    assert stall_seconds(fly) > 1800 + 1800 + 120  # queue + run + Apis grace

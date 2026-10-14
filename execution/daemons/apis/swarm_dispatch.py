@@ -2342,8 +2342,13 @@ def is_provisioned(agent: str) -> bool:
 
 
 def _token_for_agent_on_repo(agent: str, repo: str) -> str:
-    """Three-tier GitHub token resolution for a specific agent + repo.
+    """Four-tier GitHub token resolution for a specific agent + repo.
 
+    Tier 0 — the agent's own GitHub App (operator ruling 2026-10-14): the
+              PR-opener App for the builder, ``reviewer_<lens>``'s App for a
+              review lens, whenever that App is declared in the environment
+              (``lib/github_app_token.py``). A declared App that cannot mint
+              answers ``""``; it never falls through to another identity.
     Tier 1 — ``<AGENT>_AGENT_PAT`` (e.g. ``PAVO_AGENT_PAT``): the agent's own
               account.  Present only when the machine account has been created
               and the PAT stored.
@@ -2359,11 +2364,58 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
         agent: lowercase agent genus name (e.g. "pavo").
         repo:  full repo slug (e.g. "markmhendrickson/ateles").
     """
+    identity = _app_identity_for_agent(agent)
+    if identity and identity.startswith(_github_app_token.REVIEWER_IDENTITY_PREFIX):
+        lens_key = identity[len(_github_app_token.REVIEWER_IDENTITY_PREFIX):]
+        if lens_key in _github_app_token.missing_expected_lens_apps():
+            # The roster (ATELES_EXPECTED_LENS_APPS) says this lens has an App on
+            # this host, but THIS process has none of its variables. Falling back
+            # to a shared token would post as the wrong identity, so refuse.
+            roster_problem = _github_app_token.expected_roster_problem()
+            log.error(
+                f"[{DAEMON_NAME}] the {lens_key} lens is expected to have an App "
+                f"({_github_app_token.reviewer_prefix(lens_key)}_*) but this process "
+                f"has none of its variables; the {agent} agent has no GitHub "
+                "credential this turn"
+                + (f" ({roster_problem})" if roster_problem else "")
+            )
+            return ""
+    if identity and _github_app_token.identity_declared(identity):
+        # Tier 0 (operator ruling 2026-10-14): the agent's own GitHub App. A
+        # declared App that cannot mint answers "" — never a silent fall back
+        # to another identity, which would put the wrong author on the record
+        # (a lens verdict from the shared account is not read for a lens that
+        # has an App of its own, see `lens_authors`).
+        try:
+            return _github_app_token.identity_token(identity, repo)
+        except _github_app_token.AppTokenError as exc:
+            log.error(
+                f"[{DAEMON_NAME}] the {identity} App is declared but cannot mint a "
+                f"token ({exc}); the {agent} agent has no GitHub credential this turn"
+            )
+            return ""
     agent_pat = os.environ.get(f"{agent.upper()}_AGENT_PAT", "")
     if agent_pat:
         return agent_pat
     # Tier 2 → 3 already implemented by _token_for_repo.
     return _token_for_repo(repo)
+
+
+# Agents that open pull requests act as the PR-opener App (when configured).
+# The opener must differ from every approving App: an App cannot approve a PR
+# it opened, and each reviewer approves as its own App.
+_PR_OPENER_AGENTS = frozenset({"cicada"})
+
+
+def _app_identity_for_agent(agent: str) -> str:
+    """The per-identity App an agent acts as, or "" when it has none by role."""
+    name = (agent or "").strip().lower()
+    if name in _PR_OPENER_AGENTS:
+        return _github_app_token.PR_OPENER_IDENTITY
+    for lens in LENSES:
+        if lens.agent == name:
+            return _github_app_token.reviewer_identity(lens.lens)
+    return ""
 
 
 def lens_comment_authors_resolution() -> lens_authors.Resolution:
@@ -6921,9 +6973,15 @@ class SwarmDispatcher:
             notifier=self.notifier,
             action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
             escalation_signals=lanius_signals,
+            # Scopes a Fly job's per-job GitHub App token (ateles#1456); unused
+            # on the local executor.
+            repository=trigger.repository,
         )
         verdict = parse_gate_verdict(lanius.stdout)
-        if verdict is None:
+        # A remote run with an unknown outcome is never re-dispatched
+        # (ateles#1456): it fails open into review below, like any other
+        # missing verdict, instead of being retried.
+        if verdict is None and not getattr(lanius, "remote_outcome_unknown", False):
             # PR-87 self-dogfood finding: Lanius sometimes replies without the
             # mandatory verdict line. One sharper retry before failing open.
             # Applies whether the skill run reported ok (verdict line simply
@@ -6949,6 +7007,7 @@ class SwarmDispatcher:
                 include_github_contract=True,
                 notifier=self.notifier,
                 action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
+                repository=trigger.repository,
                 # The retry exists because the first attempt failed to produce
                 # a verdict: that is the "failed prior attempt" signal.
                 escalation_signals=dataclasses.replace(
@@ -13780,6 +13839,18 @@ class SwarmDispatcher:
                 for lens in lenses_missing_comments(
                     bodies, list(captured), head_sha=head_sha
                 ):
+                    if _github_app_token.lens_has_own_app(lens):
+                        # A comment posted with the dispatcher's shared token is
+                        # never read as this lens's verdict (the lens is read only
+                        # from its own App), so reposting it every cycle would be
+                        # noise that clears nothing. The lens stays visibly pending
+                        # until its own App posts.
+                        log.warning(
+                            f"[{DAEMON_NAME}] {lens} has an App of its own: no "
+                            f"fallback review comment posted on {t.repository}"
+                            f"#{t.number}; the lens stays pending until its App posts"
+                        )
+                        continue
                     body = compose_fallback_comment(
                         lens, agents.get(lens, "unknown panelist"), captured[lens],
                         head_sha,

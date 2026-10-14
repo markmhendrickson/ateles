@@ -114,6 +114,7 @@ import stat
 import sys
 import time
 import traceback
+import weakref
 from pathlib import Path
 
 
@@ -895,7 +896,19 @@ def _scoring_summary(
 # historical backlog is never read for dispatch.
 
 _DEFERRED_SWEEP_LIMIT = 50
-_recovery_lock = asyncio.Lock()
+# One lock per event loop: an asyncio.Lock binds to the loop it first contends on,
+# and the daemon has one loop but its tests start many.
+_recovery_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _recovery_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _recovery_locks.get(loop)
+    if lock is None:
+        lock = _recovery_locks[loop] = asyncio.Lock()
+    return lock
 _recovering: set[str] = set()
 # Deferrals whose durable record could not be written: still retried in-process
 # on release, and the operator has been told they will not survive a restart.
@@ -998,7 +1011,7 @@ async def recover_deferred_tasks(notifier: Notifier) -> dict:
     operator is notified with the task and the next action. Never raises.
     """
     counts = {"found": 0, "redispatched": 0, "still_building": 0, "no_longer_deferred": 0, "surfaced": 0}
-    async with _recovery_lock:
+    async with _recovery_lock():
         try:
             rows = await asyncio.to_thread(
                 query_all_entities,
@@ -2309,6 +2322,32 @@ async def dispatch_task(
                 key_suffix=trigger,
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+        elif getattr(result, "remote_outcome_unknown", False):
+            # ateles#1456: the remote run may have done its work. BLOCKED, not
+            # FAILED: the watchdog retries FAILED tasks and leaves BLOCKED ones
+            # to the operator, who must reconcile its effects first.
+            reason = (
+                f"remote run {result.remote_run_id} has an UNKNOWN outcome (machine "
+                f"{result.remote_machine_state or 'unconfirmed'}); reconcile what it did "
+                "before re-dispatching — not retried automatically"
+            )
+            _run_stage("assistant", f"{skill}: {reason}", stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            set_task_status(
+                entity_id,
+                TaskStatus.BLOCKED,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value,
+                reason=reason,
+                key_suffix=trigger,
+            )
+            notifier.send(
+                f"{skill} on {entity_id}: {reason}",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            job.failed(f"task {entity_id} → {skill} outcome unknown: {result.remote_run_id}")
         else:
             reason = result.error or f"rc={result.returncode}"
             _run_stage(
@@ -3681,6 +3720,18 @@ async def main() -> None:
                 f"[{DAEMON_NAME}] lens-comment identity check failed: {exc}",
                 exc_info=True,
             )
+
+    # 7d. Fly runner limits (ateles#1456). With any class opted onto Fly,
+    #     validate its cost, capacity and time settings once at boot and log
+    #     the result. An invalid one disables Fly (every launch refuses, and
+    #     admission checks again); this makes it visible before the first run.
+    try:
+        import fly_runner
+
+        if fly_runner.runner_classes():
+            fly_runner.log_limit_check()
+    except Exception as exc:  # never let a config check kill startup
+        log.error(f"[{DAEMON_NAME}] Fly limit check failed: {exc}", exc_info=True)
 
     # 8. Deferred-review resume sweep: a PR review throttled by a usage limit
     #    posts a `review-deferred-until:<ISO>` marker instead of a verdict. The
