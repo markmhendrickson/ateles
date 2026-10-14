@@ -531,7 +531,7 @@ def writer(base_url, auth, record):
         time.sleep(60)
     record_path.write_text(json.dumps(record))
     return True
-sys.exit(m.main(Path(sys.argv[2]), writer=writer))
+sys.exit(m.entrypoint(Path(sys.argv[2]), writer=writer))
 """
 
 # A CLI that leaves a long-running process behind and exits.
@@ -603,3 +603,18 @@ def test_the_entrypoint_exits_by_its_deadline(tmp_path, mode):
                 os.kill(int(pid_file.read_text()), 9)
             except OSError:
                 pass
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process attribute")
+def test_calling_main_never_changes_the_callers_process(tmp_path):
+    """Only the machine's own entrypoint becomes a reaper of orphans; a
+    process that calls ``main`` (a test, a tool) keeps its normal behaviour."""
+    import ctypes
+
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"})
+    run_job.main(job_dir, writer=lambda *a: True, runner=lambda *a, **k: (0, b"", b"", False))
+    libc = ctypes.CDLL(None, use_errno=True)
+    flag = ctypes.c_int(-1)
+    assert libc.prctl(37, ctypes.byref(flag), 0, 0, 0) == 0  # PR_GET_CHILD_SUBREAPER
+    assert flag.value == 0

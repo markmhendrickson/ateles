@@ -794,7 +794,6 @@ def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli
          environ=None, hard_exit=os._exit) -> int:  # fmt: skip
     started = time.monotonic()
     environ = os.environ if environ is None else environ
-    become_subreaper()
     now = time.time()
     try:
         deadline = parse_deadline(environ[DEADLINE_ENV] if DEADLINE_ENV in environ else None, now)
@@ -890,5 +889,13 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
         job.secrets.clear()
 
 
+def entrypoint(job_dir: Path, **kwargs) -> int:
+    """The machine's entrypoint process: it becomes the reaper of everything
+    the job starts (so all of it can be found and killed), then runs the job.
+    Only the real entrypoint process does this, never a caller of ``main``."""
+    become_subreaper()
+    return main(job_dir, **kwargs)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(Path(os.environ.get("ATELES_RUNNER_JOB_DIR") or DEFAULT_JOB_DIR)))
+    raise SystemExit(entrypoint(Path(os.environ.get("ATELES_RUNNER_JOB_DIR") or DEFAULT_JOB_DIR)))
