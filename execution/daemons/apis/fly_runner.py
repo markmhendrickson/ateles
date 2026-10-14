@@ -243,6 +243,16 @@ def _next_day_start(ts: float) -> float:
     return (datetime(d.year, d.month, d.day, tzinfo=timezone.utc) + timedelta(days=1)).timestamp()
 
 
+def _reserved_cost(entry: dict, config: FlyConfig) -> float:
+    """An in-flight entry's reserved maximum cost (derived from its window for
+    an entry written before costs were stored)."""
+    try:
+        return float(entry["max_cost_usd"])
+    except (KeyError, TypeError, ValueError):
+        span = float(entry.get("deadline") or 0) - float(entry.get("started_at") or 0)
+        return max(0.0, span) * config.rate_per_second_usd
+
+
 class FlyLedger:
     """A local JSON ledger, like the tier ledger. One Apis process writes it;
     a lock serialises this process's threads and coroutines."""
@@ -286,8 +296,12 @@ class FlyLedger:
                 now: float | None = None) -> None:  # fmt: skip
         """Refuse, or reserve one launch slot for *run_id*.
 
-        Refuses when the month's spend plus storage plus ONE maximum-length
-        run would exceed the budget (until the next calendar month), when the
+        Admission is atomic under the ledger lock and counts, against the
+        budget, the month's completed spend, the login machines' storage,
+        the maximum-length cost of EVERY reservation still in flight
+        (including machines whose termination is unconfirmed), and the
+        incoming job's own maximum-length cost. Refuses when that total
+        would exceed the budget (until the next calendar month), when the
         day's launch count is at its cap (until the next UTC day), or when
         the concurrency limit is reached (until the earliest in-flight
         deadline).
@@ -297,12 +311,19 @@ class FlyLedger:
             data = self._load()
             self._roll(data, now)
             worst = max_run_seconds * config.rate_per_second_usd
-            committed = float(data.get("spend_usd") or 0.0) + config.monthly_storage_usd()
+            outstanding = sum(
+                _reserved_cost(entry, config) for entry in data["in_flight"].values()
+            )
+            committed = (
+                float(data.get("spend_usd") or 0.0)
+                + config.monthly_storage_usd()
+                + outstanding
+            )
             if committed + worst > config.budget_usd:
                 raise FlyRefusal(
-                    f"Fly monthly budget: ${committed:.2f} spent or committed plus "
-                    f"${worst:.2f} for one maximum-length run would exceed "
-                    f"APIS_FLY_MONTHLY_BUDGET_USD=${config.budget_usd:.2f}",
+                    f"Fly monthly budget: ${committed:.4f} spent, stored or reserved "
+                    f"in flight plus ${worst:.4f} for this run's maximum length would "
+                    f"exceed APIS_FLY_MONTHLY_BUDGET_USD=${config.budget_usd:.2f}",
                     _render_wall(_next_month_start(now)),
                 )
             if int(data.get("launches_today") or 0) >= config.max_per_day:
@@ -322,8 +343,24 @@ class FlyLedger:
             data["launches_today"] = int(data.get("launches_today") or 0) + 1
             in_flight[f"pending:{run_id}"] = {
                 "run_id": run_id, "started_at": now, "deadline": now + max_run_seconds,
+                "max_cost_usd": worst,
             }  # fmt: skip
             self._save(data)
+
+    def mark_unconfirmed(self, key: str, *, reason: str) -> None:
+        """Keep *key*'s slot and reservation, flagged for the reaper: the
+        machine's termination could not be confirmed, so it is still owned."""
+        with self._lock:
+            data = self._load()
+            entry = data["in_flight"].get(key) or {"run_id": "", "started_at": time.time()}
+            entry["unconfirmed"] = True
+            entry["unconfirmed_reason"] = reason[:200]
+            data["in_flight"][key] = entry
+            self._save(data)
+
+    def entry(self, key: str) -> dict | None:
+        with self._lock:
+            return copy.deepcopy(self._load()["in_flight"].get(key))
 
     def bind(self, run_id: str, machine_id: str, *, login: bool) -> None:
         with self._lock:
@@ -858,6 +895,7 @@ class FlyExecutor:
             deadline = started + max_run
             if job.login:
                 machine_id = self.config.login_machines[job.provider]
+                await self._reconcile_login(machine_id)
                 instance_id = await self._start_login_machine(machine_id, job, deadline)
             else:
                 created = await self.client.create(per_job_machine_body(job, self.config, deadline))
@@ -910,18 +948,31 @@ class FlyExecutor:
             log.warning(f"[fly] could not clear job files from login machine: {type(exc).__name__}")
 
     async def collect(self, handle: FlyHandle) -> tuple[int, bytes, bytes]:
-        """Wait for the machine to finish, read the result record, tear down.
+        """Wait for the machine to finish, confirm it is terminated, read the
+        result record.
 
-        Raises ``asyncio.TimeoutError`` at the Apis deadline after killing the
-        machine. Revokes the job's GitHub token on every exit path.
+        Ownership rule: the ledger slot (and its reserved cost) and the login
+        lock are released only after the machine is CONFIRMED terminated (a
+        per-job machine destroyed, a login machine stopped). That holds on
+        every exit path: normal exit, deadline, a wait that raises (a dropped
+        connection), and cancellation. If termination cannot be confirmed,
+        the slot stays reserved and is marked ``unconfirmed`` for the reaper,
+        and a login machine is reconciled (stopped and confirmed) before its
+        next job may use it. The job's GitHub token is revoked on every path.
+
+        Raises ``asyncio.TimeoutError`` at the Apis deadline.
         """
         job = handle.job
+        terminated = False
         try:
             outcome = await self._wait_until_done(handle)
             if outcome == "deadline":
-                await self._kill(handle)
+                log.error(
+                    f"[fly] run={job.run_id} machine={handle.machine_id} passed its deadline"
+                )
+                terminated = await self._terminate(handle.machine_id, login=job.login)
                 raise asyncio.TimeoutError()
-            await self._teardown(handle)
+            terminated = await self._terminate(handle.machine_id, login=job.login)
             record = await self._read_result(job.run_id)
             if not record:
                 return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
@@ -935,14 +986,69 @@ class FlyExecutor:
             stderr = str(record.get("stderr_tail") or "").encode()
             return rc, stdout, stderr
         finally:
-            elapsed = max(0.0, self._clock() - handle.started)
-            self.ledger.release(handle.machine_id, seconds=elapsed, config=self.config)
-            await self._revoke_quietly(handle.github_token)
-            if job.login:
-                await self._scrub_login_machine(handle.machine_id)
-            if handle.lock is not None and handle.lock.locked():
-                handle.lock.release()
-            job.secrets.clear()
+            try:
+                if not terminated:
+                    terminated = await self._terminate(handle.machine_id, login=job.login)
+                if terminated:
+                    elapsed = max(0.0, self._clock() - handle.started)
+                    self.ledger.release(handle.machine_id, seconds=elapsed, config=self.config)
+                    if job.login:
+                        await self._scrub_login_machine(handle.machine_id)
+                else:
+                    self.ledger.mark_unconfirmed(
+                        handle.machine_id, reason="termination not confirmed after the job"
+                    )
+                    log.error(
+                        f"[fly] run={job.run_id} machine={handle.machine_id}: termination "
+                        "not confirmed; slot kept reserved and marked for the reaper"
+                    )
+                await self._revoke_quietly(handle.github_token)
+            finally:
+                # The in-process lock is always released: an unconfirmed login
+                # machine stays owned through its ledger entry, and the next
+                # launch reconciles it before reuse (``_reconcile_login``).
+                if handle.lock is not None and handle.lock.locked():
+                    handle.lock.release()
+                job.secrets.clear()
+
+    async def _terminate(self, machine_id: str, *, login: bool) -> bool:
+        """Stop a login machine, or destroy a per-job one, and CONFIRM it.
+        Returns False (never raises an ordinary error) when it cannot be
+        confirmed."""
+        try:
+            machine = await self.client.get(machine_id)
+            if machine is None or machine.get("state") == "destroyed":
+                return True
+            if login:
+                if machine.get("state") == "stopped":
+                    return True
+                await self.client.stop(machine_id)
+                result = await self.client.wait(machine_id, state="stopped", timeout_s=30)
+                return result in ("reached", "gone")
+            try:
+                await self.client.stop(machine_id)
+            except Exception as exc:  # noqa: BLE001 — destroy is forced regardless
+                log.warning(f"[fly] stop before destroy failed: {type(exc).__name__}")
+            await self.client.destroy(machine_id)
+            after = await self.client.get(machine_id)
+            return after is None or after.get("state") == "destroyed"
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[fly] could not confirm machine {machine_id} terminated: {exc}")
+            return False
+
+    async def _reconcile_login(self, machine_id: str) -> None:
+        """Before a login machine takes a new job: any ledger entry for it is
+        a previous job whose termination was never confirmed. Stop and
+        confirm it, clear its job files, then release that entry; refuse the
+        launch if it cannot be confirmed."""
+        prior = self.ledger.entry(machine_id)
+        if prior is None:
+            return
+        if not await self._terminate(machine_id, login=True):
+            raise FlyApiError(409, "login machine from a previous job is not confirmed stopped")
+        self.ledger.release(machine_id, seconds=_charged_seconds(prior, self._clock()),
+                            config=self.config)  # fmt: skip
+        await self._scrub_login_machine(machine_id)
 
     async def _wait_until_done(self, handle: FlyHandle) -> str:
         while True:
@@ -955,29 +1061,6 @@ class FlyExecutor:
             )  # fmt: skip
             if result in ("reached", "gone"):
                 return result
-
-    async def _kill(self, handle: FlyHandle) -> None:
-        log.error(f"[fly] run={handle.job.run_id} machine={handle.machine_id} passed its deadline")
-        try:
-            await self.client.stop(handle.machine_id)
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"[fly] stop at deadline failed: {exc}")
-        if not handle.job.login:
-            try:
-                await self.client.destroy(handle.machine_id)
-            except Exception as exc:  # noqa: BLE001
-                log.warning(f"[fly] force-delete at deadline failed: {exc}")
-
-    async def _teardown(self, handle: FlyHandle) -> None:
-        """Confirm a per-job machine is gone; force-delete it if not."""
-        if handle.job.login:
-            return
-        try:
-            machine = await self.client.get(handle.machine_id)
-            if machine is not None and machine.get("state") != "destroyed":
-                await self.client.destroy(handle.machine_id)
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"[fly] teardown check failed: {exc}")
 
     async def maybe_reap(self) -> list[str]:
         if self._clock() - self._last_reap < REAPER_INTERVAL_SECONDS:
@@ -1004,6 +1087,20 @@ class FlyExecutor:
             or 1800 + APIS_DEADLINE_GRACE_SECONDS
         )
         reaped: list[str] = []
+        # First, machines whose termination a previous job could not confirm.
+        login_provider = {mid: prov for prov, mid in self.config.login_machines.items()}
+        for key, entry in in_flight.items():
+            if not entry.get("unconfirmed") or key.startswith("pending:"):
+                continue
+            login = bool(entry.get("login")) or key in login_provider
+            if login and _login_lock(login_provider.get(key, "")).locked():
+                continue  # a job holds that machine now; it reconciles first
+            if await self._terminate(key, login=login):
+                self.ledger.release(key, seconds=_charged_seconds(entry, now), config=self.config)
+                if login:
+                    await self._scrub_login_machine(key)
+                reaped.append(key)
+        in_flight = {k: v for k, v in in_flight.items() if k not in reaped}
         listed = await self.client.list()
         listed_ids = set()
         for machine in listed:
@@ -1030,6 +1127,14 @@ class FlyExecutor:
         if reaped:
             log.warning(f"[fly] reaper destroyed {len(reaped)} stray machine(s): {reaped}")
         return reaped
+
+
+def _charged_seconds(entry: dict, now: float) -> float:
+    """Machine-seconds to charge for an entry released after the fact: its
+    elapsed time, capped at its reserved window."""
+    started = float(entry.get("started_at") or now)
+    deadline = float(entry.get("deadline") or now)
+    return max(0.0, min(now, deadline) - started)
 
 
 def _parse_ts(raw: Any) -> float | None:

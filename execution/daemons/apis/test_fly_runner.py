@@ -711,3 +711,169 @@ def test_dispatch_role_runner_flag_reaches_run_skill(monkeypatch, tmp_path):
     rc = dispatch_role.main(["--role", "lanius", "--task", "t", "--runner", "fly",
                              "--github-delivery"])  # fmt: skip
     assert rc != 0
+
+
+# ── Review round 1: lifecycle ownership on every exit path ───────────────────
+
+
+def _disconnect(*a, **k):
+    raise httpx.ConnectError("injected disconnect")
+
+
+def test_wait_disconnect_destroys_per_job_machine_before_release(fly_env):
+    fake = FakeFly()
+    executor, _, revoked = make_executor(fake, record={"exit_code": 0, "stdout": "x"})
+
+    async def go():
+        handle = await executor.launch(_job())
+        assert executor.ledger.entry(handle.machine_id) is not None
+        executor.client.wait = _async(_disconnect)
+        await executor.collect(handle)
+
+    with pytest.raises(httpx.ConnectError):
+        asyncio.run(go())
+    assert fake.calls("POST", "/stop") and fake.calls("DELETE")
+    # Released only because destruction was confirmed (GET -> 404).
+    assert executor.ledger.snapshot()["in_flight"] == {}
+    assert revoked == [MINTED]
+
+
+def test_unconfirmed_termination_keeps_the_slot_for_the_reaper(fly_env):
+    fake = FakeFly()
+    executor, _, revoked = make_executor(fake, record=None)
+    real_destroy = executor.client.destroy
+
+    async def failing_destroy(mid):
+        raise fly_runner.FlyApiError(500, "injected destroy failure")
+
+    async def go():
+        handle = await executor.launch(_job())
+        executor.client.wait = _async(_disconnect)
+        executor.client.destroy = failing_destroy
+        try:
+            await executor.collect(handle)
+        except httpx.ConnectError:
+            pass
+        return handle
+
+    handle = asyncio.run(go())
+    entry = executor.ledger.entry(handle.machine_id)
+    assert entry is not None and entry["unconfirmed"] is True
+    assert revoked == [MINTED]  # the token is revoked regardless
+    # The slot still counts against concurrency and the budget.
+    snap = executor.ledger.snapshot()
+    assert handle.machine_id in snap["in_flight"]
+
+    # The reaper, once the API answers, destroys it, confirms, and releases.
+    executor.client.destroy = real_destroy
+    reaped = asyncio.run(executor.reap())
+    assert handle.machine_id in reaped
+    assert executor.ledger.entry(handle.machine_id) is None
+
+
+def test_cancellation_still_terminates_before_release(fly_env):
+    fake = FakeFly()
+    executor, _, revoked = make_executor(fake, record=None)
+
+    async def go():
+        handle = await executor.launch(_job())
+        started = asyncio.Event()
+
+        async def hanging_wait(*a, **k):
+            started.set()
+            await asyncio.Event().wait()
+
+        executor.client.wait = hanging_wait
+        task = asyncio.create_task(executor.collect(handle))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert fake.calls("DELETE")
+    assert executor.ledger.snapshot()["in_flight"] == {}
+    assert revoked == [MINTED]
+
+
+def test_login_machine_disconnect_stops_and_unconfirmed_blocks_reuse(fly_env, monkeypatch):
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    fake = FakeFly()
+    fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
+                                "config": {"mounts": []}}  # fmt: skip
+    executor, _, revoked = make_executor(fake, record=None)
+
+    def codex_job():
+        return fly_runner.build_job(
+            provider="codex", role="lanius", cmd=["/x/codex", "exec", "-"], stdin=b"t",
+            timeout=60, repository="owner/repo", github_requested=True, mcp_config_path=None,
+        )  # fmt: skip
+
+    async def first():
+        handle = await executor.launch(codex_job())
+        fake.machines["m-codex"]["state"] = "started"
+        executor.client.wait = _async(_disconnect)  # the stop is never confirmed either
+        try:
+            await executor.collect(handle)
+        except httpx.ConnectError:
+            pass
+
+    asyncio.run(first())
+    assert fake.calls("POST", "/stop")  # a stop was attempted
+    entry = executor.ledger.entry("m-codex")
+    assert entry is not None and entry["unconfirmed"] is True
+    assert not fly_runner._login_lock("codex").locked()
+    assert revoked == [MINTED]
+
+    # The next job may not start on it while the stop is unconfirmed.
+    starts_before = len(fake.calls("POST", "/start"))
+    with pytest.raises(fly_runner.FlyLaunchError, match="not confirmed stopped"):
+        asyncio.run(executor.launch(codex_job()))
+    assert len(fake.calls("POST", "/start")) == starts_before
+
+    # Once the machine is confirmed stopped, the next launch reconciles and runs.
+    fake.machines["m-codex"]["state"] = "stopped"
+    handle = asyncio.run(executor.launch(codex_job()))
+    assert handle.machine_id == "m-codex"
+    assert executor.ledger.entry("m-codex").get("unconfirmed") is None
+
+
+def _async(fn):
+    async def wrapper(*a, **k):
+        return fn(*a, **k)
+
+    return wrapper
+
+
+# ── Review round 1: in-flight reservations count against the budget ──────────
+
+
+def test_budget_counts_every_in_flight_reservation(fly_env, tmp_path):
+    """The reviewer's probe: $19.98 spent, three concurrent 1,920 s runs at the
+    default rate and concurrency. Without counting outstanding reservations
+    all three were admitted ($20.0109 committed against $20)."""
+    config = fly_runner.FlyConfig.from_env()
+    assert config.max_concurrent == 3 and config.budget_usd == 20.0
+    ledger = fly_runner.FlyLedger(tmp_path / "ledger.json")
+    now = 1_800_000_000.0
+    ledger.snapshot(now)  # roll month keys
+    data = ledger._load()
+    ledger._roll(data, now)
+    data["spend_usd"] = 19.98
+    ledger._save(data)
+    max_run = 1920
+    one = max_run * config.rate_per_second_usd
+    admitted = 0
+    for i in range(3):
+        try:
+            ledger.reserve(config, run_id=f"r{i}", max_run_seconds=max_run, now=now)
+            admitted += 1
+        except fly_runner.FlyRefusal as exc:
+            assert "reserved in flight" in str(exc)
+    assert admitted == 1
+    committed = 19.98 + admitted * one
+    assert committed <= config.budget_usd
+    # Completing the admitted run releases its reservation and charges actuals.
+    ledger.bind("r0", "m0", login=False)
+    ledger.release("m0", seconds=60, config=config, now=now)
+    ledger.reserve(config, run_id="r3", max_run_seconds=max_run, now=now)
