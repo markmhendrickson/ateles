@@ -1366,8 +1366,7 @@ class FlyExecutor:
             try:
                 if job.login:
                     await self._reconcile_login(login_id, job.run_id)
-                    launch.config_written = True
-                    await self._write_login_config(login_id, job, deadline)
+                    await self._write_login_config(login_id, job, deadline, launch)
                     await self._request(launch, self.client.start(login_id), job)
                     machine_id, instance_id = login_id, ""
                 else:
@@ -1389,10 +1388,30 @@ class FlyExecutor:
         )
         return FlyHandle(job, machine_id, instance_id, started, deadline)
 
-    async def _write_login_config(self, machine_id: str, job: FlyJob, deadline: float) -> None:
+    async def _write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
+                                  launch: "_LaunchState") -> None:  # fmt: skip
+        """Install this run's job on a login machine, compare-and-set against
+        the machine's LIVE state (the ledger is not the source of truth for
+        what a machine is running: it can be lost, unshared, or on another
+        host).
+
+        Immediately before writing, under the admission lock: the machine
+        must be stopped and carry no job config, or carry only this run's
+        own. Otherwise (another run's id, an unattributable job, running, or
+        unreadable) the launch is refused with a retry time and nothing is
+        written. The update carries the machine version read here as a
+        precondition, and the stored config is read back afterwards: unless
+        it is this run's, the launch fails closed before any start.
+        """
         machine = await self.client.get(machine_id)
         if machine is None:
             raise FlyApiError(404, f"{job.provider} login machine not found")
+        refusal = _login_admission_refusal(machine, job.run_id)
+        if refusal:
+            raise FlyRefusal(
+                f"{job.provider} login machine is not free ({refusal}); nothing was changed",
+                _render_wall(self._clock() + 300),
+            )
         cfg = copy.deepcopy(machine.get("config") or {})
         cfg["image"] = self.config.image
         cfg["auto_destroy"] = False
@@ -1400,7 +1419,24 @@ class FlyExecutor:
         cfg["env"] = machine_env(job, deadline)
         cfg["files"] = job_files(job, self.config)
         cfg["metadata"] = {**dict(cfg.get("metadata") or {}), "ateles_run_id": job.run_id}
-        await self.client.update(machine_id, {"config": cfg, "skip_launch": True})
+        body: dict = {"config": cfg, "skip_launch": True}
+        if isinstance(machine.get("instance_id"), str) and machine["instance_id"]:
+            body["current_version"] = machine["instance_id"]
+        launch.config_written = True  # from here the stored config may hold this job
+        try:
+            await self.client.update(machine_id, body)
+        except FlyApiError as exc:
+            if exc.status in (409, 412):
+                # The machine changed between the check and the write.
+                raise FlyRefusal(
+                    f"{job.provider} login machine changed while being claimed; retry later",
+                    _render_wall(self._clock() + 300),
+                ) from None
+            raise
+        after = await self.client.get(machine_id)
+        if (after is None or after["state"] != "stopped"
+                or _config_run_id(after.get("config") or {}) != job.run_id):  # fmt: skip
+            raise FlyApiError(409, "login machine config is not this run's after the write")
 
     async def _scrub_login_machine(self, machine_id: str, run_id: str) -> bool:
         """Remove THIS run's files from a stopped login machine's stored
@@ -1426,12 +1462,17 @@ class FlyExecutor:
                 log.warning(f"[fly] login machine {machine_id} holds an unattributed job config")
                 return False
             if owner == run_id:
+                if machine["state"] != "stopped":
+                    return False  # never rewrite the config of a running machine
                 cfg["files"] = []
                 cfg["env"] = {}
                 metadata = dict(cfg.get("metadata") or {})
                 metadata.pop("ateles_run_id", None)
                 cfg["metadata"] = metadata
-                await self.client.update(machine_id, {"config": cfg, "skip_launch": True})
+                body: dict = {"config": cfg, "skip_launch": True}
+                if isinstance(machine.get("instance_id"), str) and machine["instance_id"]:
+                    body["current_version"] = machine["instance_id"]
+                await self.client.update(machine_id, body)
             after = await self.client.get(machine_id)
             if after is None:
                 return True
@@ -1774,6 +1815,21 @@ class FlyExecutor:
 
 def _machine_run_id(machine: dict) -> str:
     return str(((machine.get("config") or {}).get("metadata") or {}).get("ateles_run_id") or "")
+
+
+def _login_admission_refusal(machine: dict, run_id: str) -> str:
+    """Why a login machine's live state forbids installing *run_id*'s job,
+    or "" when it is free: stopped, with no job config or only this run's."""
+    state = machine.get("state")
+    cfg = machine.get("config") or {}
+    owner = _config_run_id(cfg)
+    if state != "stopped":
+        return f"it is {state}"
+    if owner and owner != run_id:
+        return "it holds another run's job"
+    if not owner and (cfg.get("files") or cfg.get("env")):
+        return "it holds a job nobody can attribute"
+    return ""
 
 
 def _config_run_id(config: dict) -> str:

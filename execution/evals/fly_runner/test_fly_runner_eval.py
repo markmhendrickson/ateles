@@ -55,6 +55,8 @@ def test_scenario_set_covers_the_required_behaviours():
         "login_cleanup_unverified_blocks_readmission",
         "abandoned_login_reservation_never_stops_a_live_run",
         "malformed_result_read_keeps_outcome_unknown",
+        "login_machine_stopped_with_foreign_job_and_no_ledger_entry_is_refused",
+        "login_machine_started_with_foreign_job_and_no_ledger_entry_is_refused",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -143,3 +145,10 @@ def test_judge_goes_red_when_a_live_login_job_is_stopped(tmp_path, monkeypatch):
     stopped = dataclasses.replace(trace, login_state="stopped", login_stop_requests=1,
                                   login_config_run_id="")  # fmt: skip
     assert len(runner.judge(scenario, stopped)) >= 3
+
+
+def test_judge_goes_red_when_admission_overwrites_a_foreign_job(tmp_path, monkeypatch):
+    scenario = _by_id("login_machine_stopped_with_foreign_job_and_no_ledger_entry_is_refused")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    overwritten = dataclasses.replace(trace, login_mutations=2, login_config_run_id="mine")
+    assert len(runner.judge(scenario, overwritten)) >= 2

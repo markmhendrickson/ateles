@@ -54,6 +54,7 @@ class FakeFly:
         self.stop_effective = True  # a stop request actually stops the machine
         self.sticky: set[str] = set()  # delete acknowledged, machine keeps running
         self.sticky_all = False
+        self.stored: list[str] = []  # the run id of every config actually stored
         # Malformed answers: {"list": "malformed"|"object"|"null", "get": "null"|"other-id"}
         self.bad: dict[str, str] = {}
 
@@ -123,10 +124,16 @@ class FakeFly:
             return httpx.Response(200, json=self.machines[mid])
         if method == "POST" and len(parts) == 3:  # update
             body = json.loads(request.content)
-            self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})[
-                "config"
-            ] = body["config"]
-            return httpx.Response(200, json={"id": mid, "instance_id": "i-login"})
+            machine = self.machines.setdefault(mid, {"id": mid, "login": True, "state": "stopped"})
+            current = machine.get("instance_id")
+            if "current_version" in body and current and body["current_version"] != current:
+                return httpx.Response(412, json={"error": "machine version changed"})
+            machine["config"] = body["config"]
+            self.stored.append(fly_runner._config_run_id(body["config"]))
+            if current:
+                machine["instance_id"] = f"{current}+"
+            return httpx.Response(200, json={"id": mid, "instance_id": machine.get("instance_id")
+                                             or "i-login"})  # fmt: skip
         if method == "POST" and parts[3:] == ["start"]:
             if mid in self.machines:
                 self.machines[mid]["state"] = "started"
@@ -2160,3 +2167,217 @@ def test_run_id_termination_never_destroys_a_login_machine(fly_env, monkeypatch)
     assert "m-codex" in fake.machines
     deleted = [r.url.path.rsplit("/", 1)[1] for r in fake.calls("DELETE")]
     assert "m-codex" not in deleted
+
+
+import time  # noqa: E402
+
+# ── Login admission is compare-and-set on the machine's LIVE state (round 7) ─
+
+
+def _mutations(fake, machine="m-codex"):
+    return [r for r in fake.requests if r.method in ("POST", "DELETE")
+            and f"/machines/{machine}" in r.url.path]  # fmt: skip
+
+
+@pytest.mark.parametrize("state,config,why", [
+    ("stopped", {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+                 "env": {"ATELES_RUN_ID": "someone-else"},
+                 "metadata": {"ateles_run_id": "someone-else"}}, "another run"),
+    ("stopped", {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}]},
+     "nobody can attribute"),
+    ("started", {"mounts": []}, "started"),
+    ("started", {"env": {"ATELES_RUN_ID": "someone-else"},
+                 "metadata": {"ateles_run_id": "someone-else"}}, "started"),
+])  # fmt: skip
+def test_login_admission_refuses_a_busy_machine_with_no_ledger_entry(
+    fly_env, monkeypatch, state, config, why
+):
+    """The ledger knows nothing about the machine (lost, unshared, another
+    host), but the machine itself is busy: refused, nothing written."""
+    fake = _codex_fake(monkeypatch)
+    fake.machines["m-codex"].update({"state": state, "config": dict(config)})
+    executor, _, revoked = make_executor(fake)
+    assert executor.ledger.snapshot()["in_flight"] == {}
+    with pytest.raises(fly_runner.FlyRefusal, match="not free") as exc:
+        asyncio.run(executor.run(_codex_job()))
+    assert why in str(exc.value) and exc.value.cooled_until
+    assert _mutations(fake) == []  # no update, start, stop or delete
+    assert fake.machines["m-codex"]["config"] == config
+    assert fake.machines["m-codex"]["state"] == state
+    assert executor.ledger.snapshot()["in_flight"] == {}
+    assert revoked == [MINTED]
+
+
+def test_a_lost_ledger_with_a_busy_machine_is_refused(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    other = {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+             "env": {"ATELES_RUN_ID": "pre-loss-run"},
+             "metadata": {"ateles_run_id": "pre-loss-run"}}  # fmt: skip
+    fake.machines["m-codex"].update({"state": "started", "config": dict(other)})
+    executor, _, _ = make_executor(fake)
+    executor.ledger.path.unlink(missing_ok=True)  # the ledger is gone
+    with pytest.raises(fly_runner.FlyRefusal):
+        asyncio.run(executor.run(_codex_job()))
+    assert _mutations(fake) == [] and fake.machines["m-codex"]["config"] == other
+
+
+def test_an_unreadable_ledger_writes_nothing_to_the_machine(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake)
+    executor.ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    executor.ledger.path.write_text("{not json")
+    with pytest.raises(fly_runner.FlyRefusal, match="unreadable"):
+        asyncio.run(executor.run(_codex_job()))
+    assert _mutations(fake) == []
+
+
+def test_a_clean_stopped_machine_is_admitted_with_a_version_precondition(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    fake.machines["m-codex"]["instance_id"] = "v-before-write"
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "ok"})
+    job = _codex_job()
+    assert asyncio.run(executor.run(job))[0] == 0
+    first_update = json.loads(_mutations(fake)[0].content)
+    assert first_update["current_version"] == "v-before-write"
+    assert fly_runner._config_run_id(first_update["config"]) == job.run_id
+
+
+def test_admission_fails_closed_when_the_stored_config_is_not_ours(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    real = fake.handler
+
+    def someone_else_wins(request):
+        response = real(request)
+        if (request.method == "POST" and request.url.path.endswith("/machines/m-codex")
+                and json.loads(request.content)["config"].get("files")):  # fmt: skip
+            fake.machines["m-codex"]["config"] = {
+                "env": {"ATELES_RUN_ID": "the-winner"}, "metadata": {"ateles_run_id": "the-winner"},
+                "files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+            }  # fmt: skip
+        return response
+
+    executor, _, _ = make_executor(fake)
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(someone_else_wins)
+    )
+    with pytest.raises(fly_runner.FlyLaunchError, match="not this run's"):
+        asyncio.run(executor.run(_codex_job()))
+    assert not fake.calls("POST", "/start")
+    assert fly_runner._config_run_id(fake.machines["m-codex"]["config"]) == "the-winner"
+
+
+class _SharedFly:
+    """The FakeFly Machines API served over local HTTP, so separate
+    processes act on ONE set of machines."""
+
+    def __init__(self, fake: FakeFly, slow_login_wait: float = 0.0):
+        import http.server
+        import threading
+
+        self.fake = fake
+        lock = threading.Lock()
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _serve(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                request = httpx.Request(self.command, f"http://fly.invalid{self.path}",
+                                        headers=dict(self.headers), content=body)  # fmt: skip
+                if self.command == "GET" and self.path.split("?")[0].endswith("/wait"):
+                    time.sleep(slow_login_wait)  # the winner's job keeps the machine busy
+                with lock:
+                    response = outer.fake.handler(request)
+                payload = response.content
+                self.send_response(response.status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = do_DELETE = _serve
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+
+    def close(self):
+        self.server.shutdown()
+
+
+_CONTENDER = r"""
+import asyncio, json, sys
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
+import fly_runner
+from pathlib import Path
+api_base, ledger_path, run_id = sys.argv[3], Path(sys.argv[4]), sys.argv[5]
+config = fly_runner.FlyConfig(app="runner-app", api_token="t", image="img", region="ams",
+                              api_base=api_base, login_machines={"codex": "m-codex"},
+                              ledger_path=ledger_path)
+job = fly_runner.FlyJob(run_id=run_id, role="lanius", provider="codex", repository="o/r",
+                        argv=["codex"], stdin=b"", timeout=60, needs_github=False,
+                        neotoma_base_url="https://neotoma.invalid")
+async def read(rid):
+    return {"run_id": rid, "exit_code": 0, "stdout": rid}
+executor = fly_runner.FlyExecutor(config, read_result=read, mint=lambda r, p: "t",
+                                  revoke=lambda t: None)
+executor._last_reap = float("inf")
+print("ready", flush=True)
+sys.stdin.readline()
+try:
+    rc, out, err = asyncio.run(executor.run(job))
+    print(json.dumps({"outcome": "ran", "rc": rc}), flush=True)
+except fly_runner.FlyRefusal as exc:
+    print(json.dumps({"outcome": "refused", "why": str(exc)}), flush=True)
+except Exception as exc:
+    print(json.dumps({"outcome": type(exc).__name__, "why": str(exc)}), flush=True)
+"""
+
+
+def test_two_processes_without_a_shared_ledger_only_one_wins_the_machine(fly_env, tmp_path):
+    """Two dispatchers in separate processes, each with its OWN ledger (no
+    shared reservation, no shared lock), race for one login machine. Both
+    pass their ledger checks; the machine's live state lets exactly one in,
+    and the other is refused having written nothing."""
+    import subprocess as sp
+
+    fake = FakeFly()
+    fake.machines["m-codex"] = {"id": "m-codex", "state": "stopped", "login": True,
+                                "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
+    shared = _SharedFly(fake, slow_login_wait=1.0)
+    script = tmp_path / "contender.py"
+    script.write_text(_CONTENDER)
+    procs = []
+    try:
+        for name in ("run-a", "run-b"):
+            procs.append(sp.Popen(
+                [sys.executable, str(script), str(_REPO_ROOT), str(_DAEMON_DIR), shared.base,
+                 str(tmp_path / f"ledger-{name}.json"), name],
+                stdin=sp.PIPE, stdout=sp.PIPE, text=True,
+            ))  # fmt: skip
+        for proc in procs:
+            assert proc.stdout.readline().strip() == "ready"
+        for proc in procs:
+            proc.stdin.write("go\n")
+            proc.stdin.flush()
+        results = {}
+        for name, proc in zip(("run-a", "run-b"), procs):
+            results[name] = json.loads(proc.stdout.readline())
+            proc.wait(20)
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+        shared.close()
+    outcomes = sorted(r["outcome"] for r in results.values())
+    assert outcomes == ["ran", "refused"], results
+    loser = next(n for n, r in results.items() if r["outcome"] == "refused")
+    winner = next(n for n, r in results.items() if r["outcome"] == "ran")
+    assert loser not in fake.stored  # the loser's job config was never stored
+    assert winner in fake.stored
+    starts = [r for r in fake.requests if r.method == "POST" and r.url.path.endswith("/start")]
+    assert len(starts) == 1

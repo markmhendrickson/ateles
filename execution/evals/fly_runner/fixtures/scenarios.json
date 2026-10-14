@@ -848,6 +848,76 @@
         "in_flight_after": 0,
         "revoked_all_minted": true
       }
+    },
+    {
+      "id": "login_machine_stopped_with_foreign_job_and_no_ledger_entry_is_refused",
+      "description": "The ledger knows nothing about the Codex login machine (lost, unshared, or another host), but the machine is stopped with another run's job on it. Admission reads the machine's live state, refuses with a retry time, and sends it no update, start, stop or delete.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "login_machine": {
+          "state": "stopped",
+          "config_run_id": "foreign-run"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "not free",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "login_mutations": 0,
+        "login_config_run_id": "foreign-run",
+        "login_state": "stopped",
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "login_machine_started_with_foreign_job_and_no_ledger_entry_is_refused",
+      "description": "The ledger knows nothing about the Codex login machine (lost, unshared, or another host), but the machine is started with another run's job on it. Admission reads the machine's live state, refuses with a retry time, and sends it no update, start, stop or delete.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "login_machine": {
+          "state": "started",
+          "config_run_id": "foreign-run"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "not free",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "login_mutations": 0,
+        "login_config_run_id": "foreign-run",
+        "login_state": "started",
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
     }
   ]
 }

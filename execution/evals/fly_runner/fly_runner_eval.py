@@ -169,6 +169,7 @@ class Trace:
     login_lock_held: bool = False
     login_config_run_id: str = ""
     login_stop_requests: int = 0
+    login_mutations: int = 0
     envelopes: list = field(default_factory=list)
     exit_codes: list = field(default_factory=list)
     starts: list = field(default_factory=list)
@@ -273,6 +274,14 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         fake.start_lost = True
     fake.machines["m-codex-login"] = {"id": "m-codex-login", "state": "stopped", "login": True,
                                       "config": {"mounts": []}}  # fmt: skip
+    busy = scenario["fly"].get("login_machine")
+    if busy:
+        # The machine's own live state, with NO ledger entry behind it.
+        rid = busy["config_run_id"]
+        fake.machines["m-codex-login"].update({"state": busy["state"], "config": {
+            "files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+            "env": {"ATELES_RUN_ID": rid}, "metadata": {"ateles_run_id": rid},
+        }})  # fmt: skip
     config = fly_runner.FlyConfig.from_env()
     minted: list[str] = []
     revoked: list[str] = []
@@ -418,6 +427,8 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
                                  .get("metadata") or {}).get("ateles_run_id") or ""),
         login_stop_requests=sum(1 for r in fake.requests if r.method == "POST"
                                 and r.url.path.endswith("/m-codex-login/stop")),
+        login_mutations=sum(1 for r in fake.requests if r.method in ("POST", "DELETE")
+                            and "/machines/m-codex-login" in r.url.path),
         envelopes=envelopes,
         exit_codes=exit_codes,
         starts=list(fake.starts),
@@ -525,6 +536,8 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
     if "login_config_run_id" in e and trace.login_config_run_id != e["login_config_run_id"]:
         problems.append(f"login machine config belongs to {trace.login_config_run_id!r}, "
                         f"expected {e['login_config_run_id']!r}")  # fmt: skip
+    if "login_mutations" in e and trace.login_mutations != e["login_mutations"]:
+        problems.append(f"{trace.login_mutations} write(s) to the login machine")
     if "login_stop_requests" in e and trace.login_stop_requests != e["login_stop_requests"]:
         problems.append(f"{trace.login_stop_requests} stop request(s) on the login machine")
     if e.get("seed_kept") and not trace.seed_entries_left:
