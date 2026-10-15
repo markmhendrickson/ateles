@@ -40,6 +40,7 @@ import inspect
 import hashlib
 import json
 import subprocess
+import time
 import logging
 import os
 import weakref
@@ -253,6 +254,47 @@ def new_history_entries(current: list[dict], entries: list[dict]) -> list[dict]:
             continue
         out.append(with_entry_id(entry))
     return out
+
+
+# ── Bounded retry of a transient signed-write failure ────────────────────────
+#
+# A signed write carries an idempotency key, so repeating it is safe: if the first
+# attempt LANDED and only its response was lost, the repeat is answered as a replay
+# of the same observation, never applied twice. The retry is for the failures that
+# say "the server or the path to it was briefly unavailable" and for nothing else:
+#
+#   transport_error / helper_timeout / response_not_json   2 retries
+#   HTTP 5xx                                               2 retries
+#   HTTP 401 (a one-off token hiccup)                      1 retry
+#   every other 4xx, and every other reason code           none
+#
+# Backoff is short (1 s, then 3 s) and the whole write is capped in wall-clock time,
+# so a persistent failure still ends, fail-closed, in bounded time.
+SIGNED_WRITE_BACKOFFS_S = (1.0, 3.0)
+SIGNED_WRITE_TOTAL_CAP_S = 45.0
+_RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout"})
+_monotonic = time.monotonic
+
+
+def _next_backoff(retries_done: int) -> float:
+    """The wait before the next retry; the total cap counts it, so a retry that
+    would finish past the cap is not started."""
+    return SIGNED_WRITE_BACKOFFS_S[min(retries_done, len(SIGNED_WRITE_BACKOFFS_S) - 1)]
+
+
+_retry_sleep = asyncio.sleep
+
+
+def retries_for_reason(code: str) -> int:
+    return len(SIGNED_WRITE_BACKOFFS_S) if code in _RETRYABLE_CODES else 0
+
+
+def retries_for_status(status: int) -> int:
+    if status >= 500:
+        return len(SIGNED_WRITE_BACKOFFS_S)
+    if status == 401:
+        return 1
+    return 0
 
 
 def signed_failure_code(exc: BaseException) -> str:
@@ -1033,25 +1075,64 @@ class IssueGateStore:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     async def _post(self, path: str, payload: dict) -> dict | None:
+        """POST to Neotoma over the bearer path; ``None`` on failure.
+
+        A transient failure (a transport error or timeout, an HTTP 5xx, or one 401)
+        is retried under the same bounded policy as the signed writes, with the SAME
+        payload, so a `correct` repeats with its own idempotency key and a landed
+        write whose response was lost is answered as a replay, not applied twice.
+        Every other failure is final on the first attempt. Fail-open to ``None`` as
+        before: the callers re-read to verify what landed.
+        """
         if not self.token:
             log.warning(
                 "[apis.gate_waive] NEOTOMA_BEARER_TOKEN unset — %s skipped", path
             )
             return None
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{self.base_url}/{path}",
-                    json=payload,
-                    headers=self._headers(),
+        started = _monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            retries_allowed = 0
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(
+                        f"{self.base_url}/{path}",
+                        json=payload,
+                        headers=self._headers(),
+                    )
+                    if resp.status_code >= 400:
+                        reason = http_failure_code(resp.status_code)
+                        retries_allowed = retries_for_status(resp.status_code)
+                        shown = f"HTTP {resp.status_code}"
+                        resp.raise_for_status()
+                    if resp.content:
+                        return resp.json()
+                    return {}
+            except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+                if not retries_allowed and not isinstance(exc, httpx.HTTPStatusError):
+                    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+                        reason, shown = "transport_error", type(exc).__name__
+                        retries_allowed = len(SIGNED_WRITE_BACKOFFS_S)
+                    else:
+                        reason, shown = "unexpected", type(exc).__name__
+                retries_done = attempt - 1
+                over_cap = (
+                _monotonic() - started + _next_backoff(attempt - 1) > SIGNED_WRITE_TOTAL_CAP_S
+            )
+                if retries_done >= retries_allowed or over_cap:
+                    log.error(
+                        "[apis.gate_waive] %s failed: %s reason=%s attempt=%d/%d",
+                        path, shown, reason, attempt, retries_allowed + 1,
+                    )
+                    return None
+                delay = _next_backoff(retries_done)
+                log.warning(
+                    "[apis.gate_waive] %s attempt %d failed (%s) reason=%s — retrying in "
+                    "%.1fs with the same payload",
+                    path, attempt, shown, reason, delay,
                 )
-                resp.raise_for_status()
-                if resp.content:
-                    return resp.json()
-                return {}
-        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
-            log.error("[apis.gate_waive] %s failed: %s", path, exc)
-            return None
+            await _retry_sleep(delay)
 
     async def _observations_page(
         self, entity_id: str, *, limit: int, offset: int
@@ -2067,51 +2148,66 @@ class IssueGateStore:
         would lean entirely on a read-back that happens to also fail.
         """
         repo, issue_number, gate = context
-        try:
-            status, _resp = await self._signed_correct(
-                entity_id,
-                field_name,
-                value,
-                idempotency_key,
-                lens_agent=lens_agent,
-                lens_sub=lens_sub,
+        started = _monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            reason, shown, retries_allowed = "", "", 0
+            try:
+                status, _resp = await self._signed_correct(
+                    entity_id,
+                    field_name,
+                    value,
+                    idempotency_key,
+                    lens_agent=lens_agent,
+                    lens_sub=lens_sub,
+                )
+            except Exception as exc:  # noqa: BLE001 — classify, never crash
+                # The exception's CLASS and a fixed reason code, plus the size of
+                # the serialized FIELD VALUE being written (an integer; the signed
+                # request wraps it in a small envelope, so the body is a little
+                # larger): enough to tell "no key" from a helper fault from an
+                # oversized write, with none of the text that could carry a body, a
+                # header or a path.
+                reason = signed_failure_code(exc)
+                shown = type(exc).__name__
+                retries_allowed = retries_for_reason(reason)
+            else:
+                if 200 <= status < 300:
+                    if attempt > 1:
+                        log.info(
+                            "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: "
+                            "signed write succeeded on attempt %d (same idempotency key)",
+                            repo, issue_number, gate, lens_agent, field_name, attempt,
+                        )
+                    return ""
+                reason = http_failure_code(status)
+                shown = f"HTTP {status}"
+                retries_allowed = retries_for_status(status)
+
+            retries_done = attempt - 1
+            over_cap = (
+                _monotonic() - started + _next_backoff(attempt - 1) > SIGNED_WRITE_TOTAL_CAP_S
             )
-        except Exception as exc:  # noqa: BLE001 — classify, never crash
-            # The exception's CLASS and a fixed reason code, plus the size of the
-            # serialized FIELD VALUE being written (an integer; the signed request
-            # wraps it in a small envelope, so the body is a little larger):
-            # enough to tell "no key" from a helper fault from an oversized write,
-            # with none of the text that could carry a body, a header or a path.
-            log.error(
-                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
-                "(%s) reason=%s value_bytes=%s",
-                repo,
-                issue_number,
-                gate,
-                lens_agent,
-                field_name,
-                SIGN_OFF_SIGNING_FAILED,
-                type(exc).__name__,
-                signed_failure_code(exc),
-                _value_bytes(value),
+            if retries_done >= retries_allowed or over_cap:
+                log.error(
+                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
+                    "(%s) reason=%s value_bytes=%s attempt=%d/%d%s",
+                    repo, issue_number, gate, lens_agent, field_name,
+                    SIGN_OFF_SIGNING_FAILED, shown, reason, _value_bytes(value),
+                    attempt, retries_allowed + 1,
+                    " (time cap reached)" if over_cap and retries_done < retries_allowed else "",
+                )
+                return SIGN_OFF_SIGNING_FAILED
+            delay = _next_backoff(retries_done)
+            log.warning(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: signed write "
+                "attempt %d failed (%s) reason=%s value_bytes=%s — retrying in %.1fs with "
+                "the same idempotency key",
+                repo, issue_number, gate, lens_agent, field_name, attempt, shown, reason,
+                _value_bytes(value), delay,
             )
-            return SIGN_OFF_SIGNING_FAILED
-        if status < 200 or status >= 300:
-            log.error(
-                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
-                "(HTTP %s) reason=%s value_bytes=%s",
-                repo,
-                issue_number,
-                gate,
-                lens_agent,
-                field_name,
-                SIGN_OFF_SIGNING_FAILED,
-                status,
-                http_failure_code(status),
-                _value_bytes(value),
-            )
-            return SIGN_OFF_SIGNING_FAILED
-        return ""
+            await _retry_sleep(delay)
 
     async def _settle_failed_sign_off(
         self,

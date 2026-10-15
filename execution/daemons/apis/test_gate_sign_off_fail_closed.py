@@ -85,6 +85,8 @@ class _Record:
         tier: str = "software",
         thumbprint: str = LENS_TP,
         tier_by_sub: dict[str, str] | None = None,
+        idempotent: bool = False,
+        script: dict[str, list[str]] | None = None,
     ) -> None:
         self.gate_status = dict(gate_status)
         # Neotoma's array reducer for this field UNIONS the arrays of the
@@ -106,6 +108,15 @@ class _Record:
         self.tier = tier
         self.thumbprint = thumbprint
         self.tier_by_sub = dict(tier_by_sub or {})
+        # ``idempotent``: a repeat of a write that carries an idempotency key already
+        # seen is answered as a REPLAY (200, nothing applied again), as Neotoma does.
+        # ``script``: field -> outcomes consumed one per call, then "ok":
+        #   "ok", "transport" (fails before landing), "lost" (lands, response lost),
+        #   "timeout" (helper times out before landing), "http:<status>" (refused).
+        self.idempotent = idempotent
+        self.script = {k: list(v) for k, v in (script or {}).items()}
+        self.seen_keys: set[str] = set()
+        self.calls: list[tuple[str, str]] = []  # (field, idempotency_key), every attempt
 
     @property
     def owner_history(self) -> list[dict]:
@@ -151,6 +162,21 @@ class _Record:
     def apply(self, body: dict, sub: str | None) -> tuple[int, dict]:
         field_name = body["field"]
         value = body["value"]
+        key = str(body.get("idempotency_key") or "")
+        self.calls.append((field_name, key))
+        if self.idempotent and key in self.seen_keys:
+            return 200, {"replayed": True}
+        outcome = (self.script.get(field_name) or ["ok"]).pop(0) if self.script.get(field_name) else "ok"
+        if outcome == "transport":
+            from lib.daemon_runtime.neotoma_signed import SignedRequestError
+
+            raise SignedRequestError("fetch failed", "transport_error")
+        if outcome == "timeout":
+            import subprocess
+
+            raise subprocess.TimeoutExpired(cmd=["node"], timeout=20)
+        if outcome.startswith("http:"):
+            return int(outcome.split(":", 1)[1]), {}
         self.writes.append((field_name, value, sub))
         if field_name in self.fail_fields:
             return 503, {}
@@ -166,6 +192,8 @@ class _Record:
             self._history_obs.append((1000, list(value)))
         else:
             self.current_owner = str(value)
+        if self.idempotent:
+            self.seen_keys.add(key)
         observation_id = f"obs-{len(self.writes)}"
         self.provenance[field_name] = observation_id
         signer = self.attributed_sub or sub
@@ -185,6 +213,10 @@ class _Record:
         )
         if field_name in self.raise_after_landing:
             raise RuntimeError("transport dropped after the server committed")
+        if outcome == "lost":
+            from lib.daemon_runtime.neotoma_signed import SignedRequestError
+
+            raise SignedRequestError("response lost", "transport_error")
         return 200, {}
 
     async def signed_request_async(
