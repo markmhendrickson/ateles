@@ -66,8 +66,11 @@ confirmed only when the branch was read back absent, and otherwise that it is
 unresolved.
 
 Each import attempt copies the agent's bundle to a private file in the job
-directory, replacing any copy a previous attempt left, and removes it when the
-attempt ends. ``remove_work`` removes it with everything else.
+directory, replacing any copy a previous attempt left, and removes it on every
+exit path of the attempt, including a refusal or failure while copying. A
+failed removal never replaces the error already being raised; after an
+otherwise successful import it is ``import_failed``. ``remove_work`` removes
+the copy with everything else.
 """
 
 from __future__ import annotations
@@ -475,22 +478,24 @@ def _open_export(work: Work) -> int:
                          dir_fd=dfd)  # fmt: skip
         except OSError:
             reason = "the bundle is missing or is a link"
-        os.close(dfd)
+        finally:
+            os.close(dfd)
     if reason:
         raise RepoWorkError(IMPORT_REFUSED, reason)
     return fd
 
 
-def _copy_export(work: Work, max_bytes: int) -> Path:
-    """Copy the agent's bundle into the job directory's private copy (root's,
-    mode 0600), replacing any copy an earlier attempt left."""
+def _copy_export(work: Work, max_bytes: int, copy: Path) -> None:
+    """Copy the agent's bundle into *copy*, the job directory's private copy
+    (root's, mode 0600), replacing any copy an earlier attempt left. The
+    caller removes *copy* on every exit path."""
     fd = _open_export(work)
-    copy = work.job / IMPORT_COPY_NAME
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise RepoWorkError(IMPORT_REFUSED, "the bundle is not a regular file")
         _remove(copy)
-        with os.fdopen(os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as out:
+        out_fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(out_fd, "wb") as out:
             total = 0
             while chunk := os.read(fd, 1024 * 1024):
                 total += len(chunk)
@@ -499,7 +504,16 @@ def _copy_export(work: Work, max_bytes: int) -> Path:
                 out.write(chunk)
     finally:
         os.close(fd)
-    return copy
+
+
+def _removed(path: Path) -> bool:
+    """Remove *path*; True when it is gone. Never raises, so a failed removal
+    cannot mask the error that is already propagating."""
+    try:
+        _remove(path)
+    except OSError:
+        return False
+    return not os.path.lexists(path)
 
 
 def _bad_path(path: bytes) -> str:
@@ -576,11 +590,18 @@ def import_agent_work(work: Work, *, branch: str, base: str,
         raise RepoWorkError(IMPORT_REFUSED, "the base is not an object id")
     env = git_env(work.home, allow="file")
     origin = ["-C", str(work.origin)]
-    bundle = _copy_export(work, max_bundle_bytes)
+    copy = work.job / IMPORT_COPY_NAME
+    # The private copy is created inside this try, so it is removed on every
+    # exit path: a refusal or failure while copying, an interrupt, or success.
     try:
-        return _import_copy(origin, env, bundle, branch, base, max_commits, max_blob_bytes)
+        _copy_export(work, max_bundle_bytes, copy)
+        imported = _import_copy(origin, env, copy, branch, base, max_commits, max_blob_bytes)
     finally:
-        _remove(bundle)
+        removed = _removed(copy)
+    if not removed:
+        raise RepoWorkError(IMPORT_FAILED, "the private copy of the bundle could not be removed; "
+                            "nothing may be pushed")  # fmt: skip
+    return imported
 
 
 def _import_copy(origin: list[str], env: dict[str, str], bundle: Path, branch: str, base: str,

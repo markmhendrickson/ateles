@@ -1116,3 +1116,104 @@ def test_a_changed_link_inside_any_named_directory_resolves_by_bytes(odd_world, 
         else:
             with pytest.raises(rd.RepoWorkError, match="link points outside"):
                 _import(work, base)
+
+
+# ── The private copy is removed on every exit path of an import attempt ──────
+
+
+def _exported(world, content="work\n"):
+    agent_commit(world, content=content)
+    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    return world["work"].job / rd.IMPORT_COPY_NAME
+
+
+def test_a_size_refusal_while_copying_leaves_no_private_copy(world):
+    copy = _exported(world, content="z" * 5000)
+    with pytest.raises(rd.RepoWorkError, match="bundle is larger than accepted"):
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"],
+                             max_bundle_bytes=100)
+    assert not os.path.lexists(copy)
+
+
+def test_a_read_failure_mid_copy_leaves_no_private_copy(world, monkeypatch):
+    copy = _exported(world)
+    monkeypatch.setattr(rd, "os", _OsProxy({"read"}, when=lambda *a, **k: copy.exists()))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"])
+    assert exc.value.category == rd.IMPORT_FAILED
+    _assert_chain_free(exc.value)
+    monkeypatch.undo()
+    assert not os.path.lexists(copy)
+
+
+class _FailingWrites:
+    """A copy file whose writes fail after it has been created."""
+
+    def __init__(self, fd, *a, **k):
+        self._fd = fd
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self._fd)
+        return False
+
+    def write(self, data):
+        raise _fs_error()
+
+
+def test_a_write_failure_mid_copy_leaves_no_private_copy(world, monkeypatch):
+    copy = _exported(world)
+    proxy = _OsProxy(set())
+    proxy.fdopen = _FailingWrites
+    monkeypatch.setattr(rd, "os", proxy)
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"])
+    assert exc.value.category == rd.IMPORT_FAILED
+    _assert_chain_free(exc.value)
+    monkeypatch.undo()
+    assert not os.path.lexists(copy)
+
+
+def test_an_interrupt_mid_copy_leaves_no_private_copy(world, monkeypatch):
+    copy = _exported(world)
+    real_read = os.read
+
+    class Interrupting(_OsProxy):
+        def __getattr__(self, name):
+            if name == "read":
+                def read(*a, **k):
+                    if copy.exists():
+                        raise KeyboardInterrupt
+                    return real_read(*a, **k)
+                return read
+            return getattr(os, name)
+
+    monkeypatch.setattr(rd, "os", Interrupting(set()))
+    with pytest.raises(KeyboardInterrupt):
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"])
+    monkeypatch.undo()
+    assert not os.path.lexists(copy)
+
+
+def test_a_failed_removal_after_a_refusal_keeps_the_refusal(world, monkeypatch):
+    _exported(world, content="z" * 5000)
+    monkeypatch.setattr(rd, "os", _OsProxy(
+        {"unlink"}, when=lambda path, *a, **k: str(path).endswith(rd.IMPORT_COPY_NAME)))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"],
+                             max_bundle_bytes=100)
+    assert exc.value.category == rd.IMPORT_REFUSED
+    assert exc.value.reason == "the bundle is larger than accepted"
+    _assert_chain_free(exc.value)
+
+
+def test_a_failed_removal_after_an_import_is_a_fixed_error(world, monkeypatch):
+    _exported(world)
+    monkeypatch.setattr(rd, "os", _OsProxy(
+        {"unlink"}, when=lambda path, *a, **k: str(path).endswith(rd.IMPORT_COPY_NAME)))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"])
+    assert exc.value.category == rd.IMPORT_FAILED and "nothing may be pushed" in str(exc.value)
+    _assert_chain_free(exc.value)
