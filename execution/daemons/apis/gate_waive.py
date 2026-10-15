@@ -1199,9 +1199,14 @@ class IssueGateStore:
 
         now = datetime.now(timezone.utc).isoformat()
         merged_gates = apply_waives(state.gate_status, targeted)
-        merged_history = list(state.owner_history) + waive_history_entries(
-            targeted, now
-        )
+        # ateles#617: Neotoma's array reducer for `owner_history` APPENDS
+        # whatever is sent, server-side. Sending `existing + new` (the old
+        # "merged" shape) makes the server append the existing entries a
+        # second time, doubling the array on every gate transition — 72 of
+        # 136 audited issue entities were affected, one with 6,631 entries
+        # from 16 observations. The fix is to send ONLY the new entries for
+        # this transition; the server does the appending.
+        new_history_entries = waive_history_entries(targeted, now)
         key = f"{repo}#{issue_number}"
 
         await self._post(
@@ -1220,7 +1225,7 @@ class IssueGateStore:
                 "entity_id": state.entity_id,
                 "entity_type": self.ENTITY_TYPE,
                 "field": "owner_history",
-                "value": merged_history,
+                "value": new_history_entries,
                 "idempotency_key": f"gate-waive-history-{key}-{now[:16]}",
             },
         )
@@ -1528,15 +1533,16 @@ class IssueGateStore:
         now = datetime.now(timezone.utc).isoformat()
         merged_gates = dict(state.gate_status)
         merged_gates[gate] = "signed_off"
-        merged_history = list(state.owner_history) + [
-            {
-                "gate": gate,
-                "action": "signed_off",
-                "actor": lens_agent,
-                "reason": f"lens-signed sign-off via AAuth sub {lens_sub}",
-                "timestamp": now,
-            }
-        ]
+        # ateles#617: send ONLY the new entry — Neotoma's array reducer for
+        # `owner_history` appends server-side, so re-sending the existing
+        # entries here would double them (see the note in `_waive_locked`).
+        new_history_entry = {
+            "gate": gate,
+            "action": "signed_off",
+            "actor": lens_agent,
+            "reason": f"lens-signed sign-off via AAuth sub {lens_sub}",
+            "timestamp": now,
+        }
         key = f"{repo}#{issue_number}"
         next_owner = next_owner.strip()
 
@@ -1561,7 +1567,9 @@ class IssueGateStore:
         #    untouched, so the gate cannot read cleared on a sign-off that
         #    never completed.
         history_written = False
-        pre_gate_fields: list[tuple[str, object]] = [("owner_history", merged_history)]
+        pre_gate_fields: list[tuple[str, object]] = [
+            ("owner_history", [new_history_entry])
+        ]
         if next_owner:
             pre_gate_fields.append(("current_owner", next_owner))
         for field_name, value in pre_gate_fields:
@@ -1993,11 +2001,14 @@ class IssueGateStore:
     ) -> None:
         """Append a `sign_off_failed` entry after this call's `signed_off` one.
 
-        Built on the settling re-read's `owner_history` (a fresh read, taken
-        under the per-issue lock). Never written through an unreadable stored
-        value, and not written when the re-read found no entity: there is then
-        no current list to append to, and writing this call's own copy back
-        could drop an entry another writer added.
+        Built on the settling re-read's `owner_history` only to confirm it is
+        readable (a fresh read, taken under the per-issue lock) — never
+        written through an unreadable stored value, and not written when the
+        re-read found no entity, since there is then no confirmed state to
+        append onto. The write itself sends ONLY this call's new entry:
+        Neotoma's array reducer for `owner_history` appends server-side
+        (ateles#617), so re-sending `reread.owner_history` here would double
+        every entry already on the issue, not just this one.
         """
         if not reread.found or reread.owner_history_unreadable:
             log.error(
@@ -2012,8 +2023,7 @@ class IssueGateStore:
         failure = await self._sign_off_write(
             reread.entity_id,
             "owner_history",
-            list(reread.owner_history)
-            + [
+            [
                 {
                     "gate": gate,
                     "action": "sign_off_failed",

@@ -79,13 +79,14 @@ def _state(
     entity_id: str = "ent_1",
     current_owner: str = "",
     field_provenance: dict | None = None,
+    owner_history: list | None = None,
 ) -> IssueGateState:
     return IssueGateState(
         repo="o/r",
         issue_number=795,
         entity_id=entity_id if found else "",
         gate_status=gate_status or {},
-        owner_history=[],
+        owner_history=owner_history if owner_history is not None else [],
         current_owner=current_owner,
         field_provenance=(
             field_provenance
@@ -266,6 +267,127 @@ class TestOnlyDeclaredFieldsWritten:
         assert outcome.ok
         assert set(sent_fields) == {"gate_status", "owner_history"}  # vocab-ok: live Neotoma wire field name
         assert "gate_writeback_outcome" not in sent_fields
+
+
+# ── owner_history sends only the new entry (ateles#617) ─────────────────────
+#
+# Neotoma's array reducer for `owner_history` APPENDS whatever is sent,
+# server-side. Sending `existing + new` doubles the array on every gate
+# transition — the audit found 72 of 136 issue entities affected, one with
+# 6,631 entries from 16 observations. `sign_off` must send ONLY this
+# transition's new entry, never the accumulated history it read.
+
+
+class TestOwnerHistorySendsOnlyNewEntry:
+    @pytest.mark.asyncio
+    async def test_sign_off_sends_single_entry_not_accumulated_array(
+        self, monkeypatch
+    ):
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        monkeypatch.setattr(
+            "gate_waive._ns.agent_identity",
+            lambda agent, sub=None: _identity(agent, sub or f"{agent}@ateles-swarm"),
+        )
+        sent: list[tuple[str, object]] = []
+
+        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+            sent.append((body["field"], body["value"]))
+            return 200, {}
+
+        monkeypatch.setattr("gate_waive._ns.signed_request", _capture)
+        # A pre-existing, non-empty owner_history — as a live issue entity
+        # would already carry after prior gate transitions.
+        existing_history = [
+            {"gate": "pm", "action": "signed_off", "actor": "pavo"},
+            {"gate": "ux", "action": "signed_off", "actor": "accipiter"},
+        ]
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [
+                    _state({"arch": "pending"}, owner_history=existing_history),
+                    _state({"arch": "signed_off"}, owner_history=existing_history),
+                ]
+            ),
+        )
+
+        _mock_attributed_observations(monkeypatch, store, "waxwing@ateles-swarm")
+        outcome = await store.sign_off("o/r", 795, "arch", "waxwing", HEAD)
+
+        assert outcome.ok
+        history_payloads = [v for f, v in sent if f == "owner_history"]
+        assert len(history_payloads) == 1, "owner_history must be written exactly once"
+        payload = history_payloads[0]
+        assert isinstance(payload, list)
+        assert len(payload) == 1, (
+            "owner_history payload must contain ONLY the new entry, never the "
+            f"existing {len(existing_history)}-entry history re-sent alongside "
+            f"it (got {len(payload)} entries) — Neotoma's array reducer "
+            "appends server-side, so re-sending existing entries doubles them"
+        )
+        assert payload[0]["gate"] == "arch"
+        assert payload[0]["action"] == "signed_off"
+        assert payload[0]["actor"] == "waxwing"
+        # None of the pre-existing entries leaked into the sent payload.
+        for existing_entry in existing_history:
+            assert existing_entry not in payload
+
+    @pytest.mark.asyncio
+    async def test_waive_sends_only_new_entries_not_accumulated_array(
+        self, monkeypatch
+    ):
+        """`IssueGateStore.waive` (dispatcher-side `/confirm-gates-clear`,
+        ateles#285) must show the same discipline as `sign_off`: send only
+        the entries this waive sweep adds, never `existing + new`."""
+        store = IssueGateStore("http://x", "daemon-bearer-tok")
+        existing_history = [
+            {"agent": "lanius", "action": "triaged", "at": "2026-07-21T00:00:00Z"},
+            {"agent": "pavo", "gate": "pm", "action": "signed_off"},
+        ]
+
+        posted: list[dict] = []
+
+        async def _capture_post(path, payload):
+            if path == "correct":
+                posted.append(payload)
+            return {}
+
+        monkeypatch.setattr(store, "_post", _capture_post)
+        monkeypatch.setattr(
+            store,
+            "load",
+            _LoadSequence(
+                [
+                    _state(
+                        {"pm": "signed_off", "ux": "pending", "arch": "pending"},
+                        owner_history=existing_history,
+                    ),
+                    _state(
+                        {"pm": "signed_off", "ux": "waived", "arch": "waived"},
+                        owner_history=existing_history,
+                    ),
+                ]
+            ),
+        )
+
+        outcome = await store.waive("o/r", 795, ("pm", "ux", "arch"))
+
+        assert outcome.verified
+        history_writes = [p for p in posted if p["field"] == "owner_history"]
+        assert len(history_writes) == 1, "owner_history must be written exactly once"
+        payload = history_writes[0]["value"]
+        assert isinstance(payload, list)
+        assert len(payload) == 2, (
+            "owner_history payload must contain ONLY the 2 new waive entries "
+            f"(ux, arch), never the existing {len(existing_history)}-entry "
+            f"history re-sent alongside them (got {len(payload)} entries) — "
+            "Neotoma's array reducer appends server-side, so re-sending "
+            "existing entries doubles them"
+        )
+        assert {e["gate"] for e in payload} == {"ux", "arch"}
+        for existing_entry in existing_history:
+            assert existing_entry not in payload
 
 
 # ── current_owner advance (PR #1181, provider-table round) ──────────────────
