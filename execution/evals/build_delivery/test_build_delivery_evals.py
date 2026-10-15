@@ -83,6 +83,8 @@ def test_the_eval_covers_every_required_behaviour():
         "rollback_reports_a_cancelled_status_as_observed_not_as_a_story",
         "rollback_reports_an_unmapped_status_as_unknown",
         "rollback_clear_is_conditional_so_a_hold_landing_after_the_read_survives",
+        "deferral_chain_stops_when_a_write_returns_no_version_and_a_hold_lands_after_write_1",
+        "deferral_chain_stops_when_a_write_returns_no_version_and_a_hold_lands_after_write_2",
         # the worktree itself is verified, on both paths
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
@@ -238,3 +240,11 @@ def test_the_landing_scenario_goes_red_if_the_clear_ignores_the_version(tmp_path
     obs = harness.run_scenario(scenario, tmp_path, mutation="no_expected_version")
     problems = harness.check(scenario, obs)
     assert any("blocked_reason after the rollback" in p or "refused" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_the_no_version_scenarios_go_red_if_a_fresh_version_is_adopted(n, tmp_path):
+    scenario = BY_ID[f"deferral_chain_stops_when_a_write_returns_no_version_and_a_hold_lands_after_write_{n}"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="fresh_version_fallback")
+    problems = harness.check(scenario, obs)
+    assert any("blocked_reason after the rollback" in p or "writes after the hold" in p for p in problems), problems

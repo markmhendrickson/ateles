@@ -997,6 +997,68 @@
         "rollback_writes": 0,
         "store_conflicts_at_least": 1
       }
+    },
+    {
+      "id": "deferral_chain_stops_when_a_write_returns_no_version_and_a_hold_lands_after_write_1",
+      "why": "every committed write returns no version token AND a gate hold lands right after the deferral's write number 1: the chain stops, adopts no replacement version, and writes nothing more, so the hold and its reason survive and the task is reported as waiting at its gate. This is different from the missing-token coverage elsewhere, which only removes the INITIAL read token",
+      "path": "rollback_race",
+      "omit_response_version": true,
+      "race": {
+        "when": "after_write_1",
+        "status": "awaiting_approval",
+        "reason": "Held for approval: high blast radius"
+      },
+      "expect": {
+        "race_row": {
+          "status": "awaiting_approval",
+          "blocked_reason": "Held for approval: high blast radius"
+        },
+        "writes_after_landing": [],
+        "notification_contains": [
+          "status is now awaiting_approval",
+          "waiting at a gate",
+          "Held for approval"
+        ],
+        "notification_excludes": [
+          "dispatched",
+          "no action needed",
+          "NOT held and NOT dispatched"
+        ],
+        "notification_counts": {
+          "could not record a deferral": 1
+        }
+      }
+    },
+    {
+      "id": "deferral_chain_stops_when_a_write_returns_no_version_and_a_hold_lands_after_write_2",
+      "why": "every committed write returns no version token AND a gate hold lands right after the deferral's write number 2: the chain stops, adopts no replacement version, and writes nothing more, so the hold and its reason survive and the task is reported as waiting at its gate. This is different from the missing-token coverage elsewhere, which only removes the INITIAL read token",
+      "path": "rollback_race",
+      "omit_response_version": true,
+      "race": {
+        "when": "after_write_2",
+        "status": "awaiting_approval",
+        "reason": "Held for approval: high blast radius"
+      },
+      "expect": {
+        "race_row": {
+          "status": "awaiting_approval",
+          "blocked_reason": "Held for approval: high blast radius"
+        },
+        "writes_after_landing": [],
+        "notification_contains": [
+          "status is now awaiting_approval",
+          "waiting at a gate",
+          "Held for approval"
+        ],
+        "notification_excludes": [
+          "dispatched",
+          "no action needed",
+          "NOT held and NOT dispatched"
+        ],
+        "notification_counts": {
+          "could not record a deferral": 1
+        }
+      }
     }
   ]
 }

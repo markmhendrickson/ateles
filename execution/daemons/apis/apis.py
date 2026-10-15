@@ -960,9 +960,11 @@ def _write_deferral(entity_id: str, claim: "build_delivery.BuildClaim", attempt:
     marker is never written after a failure.
 
     Returns "ok", "failed" (a write was refused for any reason other than a version
-    conflict, or no version token was available, so nothing could be conditioned) or
-    "conflict" (the task changed since it was read: NOTHING further is written and
-    the caller re-reads; a task that moved on is never stamped with a deferral).
+    conflict, or no version token was available, so nothing could be conditioned),
+    "unversioned" (a write committed but returned no version: the chain STOPS there
+    rather than adopt a version it did not validate) or "conflict" (the task changed
+    since it was read: NOTHING further is written and the caller re-reads; a task
+    that moved on is never stamped with a deferral).
     """
     expected = _expected_deferral(claim)
     # A retry uses its own idempotency keys: a write the server dropped but
@@ -983,10 +985,14 @@ def _write_deferral(entity_id: str, claim: "build_delivery.BuildClaim", attempt:
         if not write.ok:
             return "failed"
         version = write.version
-        if not version:  # committed, but no token to condition the next write on
-            _, version = fetch_task_snapshot_and_version(entity_id)
-            if not version:
-                return "failed"
+        if not version:
+            # Committed, but there is nothing to condition the next write on. Do NOT
+            # fetch a replacement version and carry on: that version belongs to a
+            # state this chain never validated, so a hold that landed in between
+            # would pass the check and be replaced. Stop; the bounded retry re-reads
+            # the task from the beginning and revalidates it (pending, expected
+            # state), and the partial record is left to the reason-last rule.
+            return "unversioned"
     return "ok"
 
 
@@ -1136,6 +1142,11 @@ async def _record_deferral(
                 return []
             if wrote == "conflict":
                 problems = ["the task changed while it was being recorded (version conflict)"]
+            elif wrote == "unversioned":
+                problems = [
+                    "a write committed but returned no version token, so the chain "
+                    "stopped to be re-read"
+                ]
             elif wrote == "failed" and not problems:
                 problems = ["a write was refused or could not be made conditional"]
             log.warning(

@@ -302,7 +302,10 @@ class FieldWrite:
                   read (409 ERR_FIELD_VERSION_CONFLICT): NOTHING was written, and
                   the caller must re-read and decide again, never overwrite.
     ``version``   the entity's fresh version token after a committed write, to
-                  condition the next write of a sequence on.
+                  condition the next write of a sequence on. It may be None for a
+                  committed write; a caller must then STOP the sequence and
+                  re-read from the beginning, never fetch a replacement token and
+                  continue (that token belongs to a state it did not validate).
     """
 
     ok: bool

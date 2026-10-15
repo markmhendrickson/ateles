@@ -61,7 +61,7 @@ MUTATIONS = (
     "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep",
     "no_continuation", "no_readback", "no_worktree_check", "no_revalidation",
     "silent_unrecorded", "reason_not_required", "drop_intact_registration",
-    "skip_pre_clear_read", "no_expected_version",
+    "skip_pre_clear_read", "no_expected_version", "fresh_version_fallback",
 )
 
 REPO = "eval-owner/eval-repo"
@@ -363,6 +363,7 @@ class _TaskStore:
         self.policy: dict[str, object] = {}
         self.fail_next_reads = 0
         self.conflicts = 0  # conditional writes refused for a stale version
+        self.omit_response_version = False  # a committed write returns no version
 
     def put(self, entity_id: str, snapshot: dict) -> None:
         self.rows[entity_id] = dict(snapshot)
@@ -392,7 +393,8 @@ class _TaskStore:
         ok = self._persist(entity_id, field, value)
         if ok and field == "status":
             self.obs["statuses"].append((entity_id, value))
-        return FieldWrite(ok, version=self.version(entity_id) if ok else None)
+        fresh = None if self.omit_response_version else self.version(entity_id)
+        return FieldWrite(ok, version=fresh if ok else None)
 
     def _persist(self, entity_id: str, field: str, value) -> bool:
         row = self.rows.setdefault(entity_id, {})
@@ -708,6 +710,27 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
 
             mp.setattr(apis, "_roll_back_deferral", _roll_flag)
             mp.setattr(apis, "fetch_task_snapshot_and_version", _read_then_land)
+        elif race["when"].startswith("after_write_"):
+            # The task is put at a gate right after the Nth write of the DEFERRAL
+            # record, while every committed write returns no version token.
+            trigger = int(race["when"].rsplit("_", 1)[1])
+            record_writes: list[str] = []
+            landed = {"at": None}
+            obs["writes_after_landing"] = []
+            conditional = apis.set_task_field_if_version
+
+            def _deferral_write(entity_id, field, value, **kw):
+                if landed["at"] is not None:
+                    obs["writes_after_landing"].append(field)
+                result = conditional(entity_id, field, value, **kw)
+                if kw.get("key_suffix", "").startswith("deferred-") and landed["at"] is None:
+                    record_writes.append(field)
+                    if len(record_writes) == trigger:
+                        _move()
+                        landed["at"] = field
+                return result
+
+            mp.setattr(apis, "set_task_field_if_version", _deferral_write)
         elif race["when"] == "before":
             real_roll = apis._roll_back_deferral
 
@@ -731,6 +754,32 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
 
             mp.setattr(apis, "set_task_field_if_version", _field)
             obs["rollback_writes"] = rollback_writes
+    if mutation == "fresh_version_fallback":
+        def _adopting(entity_id, claim, attempt):
+            expected = apis._expected_deferral(claim)
+            suffix = f"deferred-{claim.run_id}" + (f"-retry{attempt}" if attempt else "")
+            snap, version = apis.fetch_task_snapshot_and_version(entity_id)
+            if snap is None or not version:
+                return "failed"
+            if apis.normalize_status(snap.get("status")) not in ("", "pending"):
+                return "conflict"
+            for field in ("disposition", "dispatch_context", "status", "blocked_reason"):
+                write = apis.set_task_field_if_version(
+                    entity_id, field, expected[field],
+                    expected_version=version, handler="apis", key_suffix=suffix,
+                )
+                if write.conflict:
+                    return "conflict"
+                if not write.ok:
+                    return "failed"
+                version = write.version
+                if not version:  # the rejected design: adopt a version never validated
+                    _, version = apis.fetch_task_snapshot_and_version(entity_id)
+                    if not version:
+                        return "failed"
+            return "ok"
+
+        mp.setattr(apis, "_write_deferral", _adopting, raising=False)
     if mutation == "no_expected_version":
         real_conditional = apis.set_task_field_if_version
 
@@ -836,7 +885,8 @@ def _marked_row(**over) -> dict:
 async def _drive_rollback_race(scenario: dict, world: World, obs: dict, notifier) -> None:
     """A deferral that cannot be confirmed is rolled back while the task moves on."""
     store = obs["store"]
-    store.fail_next_reads = 2
+    store.fail_next_reads = 2 if not scenario.get("omit_response_version") else 0
+    store.omit_response_version = bool(scenario.get("omit_response_version"))
     obs["notifier"] = notifier
     apis.install_build_release_hook(notifier)
     cm = build_delivery.claim_build(REPO, ISSUE, "swarm-build-handoff")
@@ -1356,6 +1406,8 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for field, value in exp["race_row"].items():
             want(f"the task's {field} after the rollback", row.get(field), value)
         want("dispatches", obs["spawns"], [])
+    if "writes_after_landing" in exp:
+        want("writes after the hold landed", obs.get("writes_after_landing"), exp["writes_after_landing"])
     if "store_conflicts_at_least" in exp:
         got = obs["store"].conflicts
         if got < exp["store_conflicts_at_least"]:

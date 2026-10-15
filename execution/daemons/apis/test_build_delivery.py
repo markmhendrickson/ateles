@@ -332,6 +332,7 @@ class _TaskStore:
         self.fail_next_reads = 0
         self.fail_next_version_reads = 0
         self.conflicts = 0  # conditional writes refused for a stale version
+        self.omit_response_version = False  # a committed write returns no version
 
     def put(self, entity_id: str, snapshot: dict) -> None:
         self.rows[entity_id] = dict(snapshot)
@@ -364,7 +365,8 @@ class _TaskStore:
             return FieldWrite(False, conflict=True)
         self.key_suffixes.append(kw.get("key_suffix", ""))
         ok = self._persist(entity_id, field, value)
-        return FieldWrite(ok, version=self.version(entity_id) if ok else None)
+        fresh = None if self.omit_response_version else self.version(entity_id)
+        return FieldWrite(ok, version=fresh if ok else None)
 
     def _persist(self, entity_id, field, value) -> bool:
         row = self.rows.setdefault(entity_id, {})
@@ -2361,3 +2363,115 @@ def test_a_value_someone_else_wrote_stops_the_rollback(dispatch_env, monkeypatch
 
     asyncio.run(_go())
     assert store.rows["ent_followup_00001"]["dispatch_context"] == "written-by-someone-else"
+
+
+# ── a write that returns no version stops the chain; it never adopts a fresh one ─
+
+
+def _write_deferral_adopting_a_fresh_version(entity_id, claim, attempt):
+    """The REJECTED design, kept only to prove the tests can fail: when a committed
+    write returns no version, fetch a replacement version and carry on."""
+    expected = apis._expected_deferral(claim)
+    suffix = f"deferred-{claim.run_id}" + (f"-retry{attempt}" if attempt else "")
+    snap, version = apis.fetch_task_snapshot_and_version(entity_id)
+    if snap is None or not version:
+        return "failed"
+    if apis.normalize_status(snap.get("status")) not in ("", "pending"):
+        return "conflict"
+    for field in ("disposition", "dispatch_context", "status", "blocked_reason"):
+        write = apis.set_task_field_if_version(
+            entity_id, field, expected[field],
+            expected_version=version, handler="apis", key_suffix=suffix,
+        )
+        if write.conflict:
+            return "conflict"
+        if not write.ok:
+            return "failed"
+        version = write.version
+        if not version:
+            _, version = apis.fetch_task_snapshot_and_version(entity_id)
+            if not version:
+                return "failed"
+    return "ok"
+
+
+def _hold_lands_after_write(dispatch_env, monkeypatch, status, after, *, adopt_fresh=False):
+    """Every committed write returns no version; a gate hold lands right after the
+    ``after``-th write of the deferral record (1 = disposition, 2 = dispatch_context)."""
+    _, _, store = dispatch_env
+    store.omit_response_version = True
+    n = _RecNotifier()
+    real_field = store.field_if
+    deferral_writes: list[str] = []
+    landed = {"at": None}
+
+    def field(entity_id, f, v, **kw):
+        if landed["at"] is not None:
+            deferral_writes.append(f"AFTER-LANDING:{f}")
+        result = real_field(entity_id, f, v, **kw)
+        if kw.get("key_suffix", "").startswith("deferred-") and landed["at"] is None:
+            deferral_writes.append(f)
+            if len(deferral_writes) == after:
+                store.rows[entity_id].update(status=status, blocked_reason=GATE_REASON)
+                landed["at"] = f
+        return result
+
+    monkeypatch.setattr(apis, "set_task_field_if_version", field)
+    if adopt_fresh:
+        monkeypatch.setattr(apis, "_write_deferral", _write_deferral_adopting_a_fresh_version)
+
+    async def _go():
+        with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff") as claim:
+            store.put("ent_followup_00001", _local())
+            return await apis._record_deferral("ent_followup_00001", _local(), claim, n)
+
+    outcome = asyncio.run(_go())
+    return outcome, n, store, deferral_writes
+
+
+@pytest.mark.parametrize("after", [1, 2])
+@pytest.mark.parametrize("status", ["awaiting_approval", "awaiting_input", "blocked"])
+def test_a_hold_landing_after_a_write_that_returned_no_version_survives(
+    dispatch_env, monkeypatch, status, after
+):
+    outcome, n, store, writes = _hold_lands_after_write(dispatch_env, monkeypatch, status, after)
+
+    row = store.rows["ent_followup_00001"]
+    assert row["status"] == status and row["blocked_reason"] == GATE_REASON, "the hold was replaced"
+    assert outcome is apis.DeferralOutcome.MOVED_TO_GATE
+    assert not [w for w in writes if w.startswith("AFTER-LANDING")], writes
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert f"status is now {status}" in msg and "waiting at a gate" in msg
+    assert "no action needed" not in msg and "Apis did not change it" in msg
+
+
+@pytest.mark.parametrize("after", [1, 2])
+@pytest.mark.parametrize("status", ["awaiting_approval", "awaiting_input", "blocked"])
+def test_the_planted_fresh_version_fallback_replaces_the_hold(dispatch_env, monkeypatch, status, after):
+    """Planted red: with the rejected fallback reinstated the hold IS replaced."""
+    outcome, n, store, writes = _hold_lands_after_write(
+        dispatch_env, monkeypatch, status, after, adopt_fresh=True
+    )
+    row = store.rows["ent_followup_00001"]
+    assert row["status"] == "pending" and row["blocked_reason"] != GATE_REASON, (
+        "the fallback no longer replaces the hold: this check cannot tell the designs apart"
+    )
+    assert [w for w in writes if w.startswith("AFTER-LANDING")]
+
+
+def test_a_write_that_returns_no_version_never_sends_an_unconditional_write(dispatch_env, monkeypatch):
+    _, _, store = dispatch_env
+    store.omit_response_version = True
+    sent: list[dict] = []
+    real = store.field_if
+
+    def spy(e, f, v, **kw):
+        sent.append({"field": f, "expected_version": kw.get("expected_version")})
+        return real(e, f, v, **kw)
+
+    monkeypatch.setattr(apis, "set_task_field_if_version", spy)
+    claim = build_delivery.BuildClaim(REPO.lower(), 1448, "swarm-build-handoff", "0123456789abcdef")
+    store.put("ent_x", _local())
+    assert apis._write_deferral("ent_x", claim, 0) == "unversioned"
+    assert [w["field"] for w in sent] == ["disposition"], "the chain went on without a token"
+    assert all(w["expected_version"] for w in sent)
