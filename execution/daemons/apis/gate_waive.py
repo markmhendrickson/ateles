@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import hashlib
 import json
 import subprocess
 import logging
@@ -202,6 +203,19 @@ def history_entry_identity(entry: dict) -> str:
     )
 
 
+def with_entry_id(entry: dict) -> dict:
+    """*entry* with a stable ``entry_id`` derived from its identity.
+
+    The id is what a keyed array reducer (`merge_array_by_key`, the intended
+    store-side guard) collapses repeats on, so the same event recorded twice is one
+    row there as well as here. It is a hash of the identity, never of a timestamp.
+    """
+    if entry.get("entry_id"):
+        return entry
+    digest = hashlib.sha256(history_entry_identity(entry).encode()).hexdigest()[:16]
+    return {**entry, "entry_id": digest}
+
+
 def new_history_entries(current: list[dict], entries: list[dict]) -> list[dict]:
     """The *entries* the history does not already record (by identity), in order."""
     known = {history_entry_identity(e) for e in current}
@@ -211,7 +225,7 @@ def new_history_entries(current: list[dict], entries: list[dict]) -> list[dict]:
         if key in known:
             continue
         known.add(key)
-        out.append(entry)
+        out.append(with_entry_id(entry))
     return out
 
 

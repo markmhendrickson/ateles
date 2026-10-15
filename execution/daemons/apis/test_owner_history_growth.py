@@ -35,6 +35,7 @@ from gate_waive import (
     new_history_entries,
     parse_owner_history,
     signed_failure_code,
+    with_entry_id,
 )
 from lib.daemon_runtime import neotoma_signed as ns
 from test_gate_sign_off_fail_closed import HEAD, _Record, _wire
@@ -206,7 +207,10 @@ def test_the_timestamp_is_not_part_of_an_entrys_identity():
     c = dict(a, commit="c2")
     assert history_entry_identity(a) == history_entry_identity(b)
     assert history_entry_identity(a) != history_entry_identity(c)
-    assert new_history_entries([a], [b, c, c]) == [c]
+    (only,) = new_history_entries([a], [b, c, c])
+    assert only == {**c, "entry_id": only["entry_id"]} and len(only["entry_id"]) == 16
+    # The id follows the identity, never the timestamp.
+    assert with_entry_id(a)["entry_id"] == with_entry_id(b)["entry_id"] != with_entry_id(c)["entry_id"]
 
 
 # ── the failure reason is a code, never the text ─────────────────────────────
