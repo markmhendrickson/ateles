@@ -80,7 +80,7 @@ import math
 import os
 import tempfile
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -336,13 +336,20 @@ HEADROOM_SOURCE_DEFAULT = "default"
 
 
 def headroom_resolution(
-    *, now_wall: float | None = None
+    *, now_wall: float | None = None, without_mac_readings: Collection[str] = ()
 ) -> dict[str, tuple[float, str]]:
     """Return ``{provider: (headroom, source)}`` for every provider.
 
     This is the single implementation of the precedence; ``configured_headroom``
     is its value-only projection.  ``source`` is one of the
     ``HEADROOM_SOURCE_*`` constants and names the tier that produced the value.
+
+    ``without_mac_readings`` (operator ruling 2026-10-15): for these providers
+    the Mac's own usage readings (the usage snapshot and the provider probe)
+    are left OUT of the evidence before anything is resolved, so they can
+    neither stand as the value nor outvote or expire an operator override.
+    The operator's overrides then resolve exactly as they do for any
+    dispatch.
     """
     moment = time.time() if now_wall is None else now_wall
     overrides, written_at = _override_values()
@@ -370,7 +377,8 @@ def headroom_resolution(
             if undated is None:
                 undated = 1.0
 
-        probe = _probe_evidence(provider, now_wall=moment)
+        mac_readings = provider not in without_mac_readings
+        probe = _probe_evidence(provider, now_wall=moment) if mac_readings else None
         probe_observed = (
             _wall_from_iso(probe.get("observed_at")) if probe is not None else None
         )
@@ -385,7 +393,7 @@ def headroom_resolution(
         if dated is not None and not dated_is_stale:
             result[provider] = (dated, dated_source)
             continue
-        live = live_headroom(provider, now_wall=moment)
+        live = live_headroom(provider, now_wall=moment) if mac_readings else None
         if live is not None:
             observed = _live_observed_at(provider)
             # A reported exhaustion is never outvoted by a hand-set number;
@@ -417,6 +425,26 @@ def headroom_resolution(
         else:
             result[provider] = (undated, HEADROOM_SOURCE_UNDATED_OVERRIDE)
     return result
+
+
+# Headroom sources that are a reading of the MAC's own provider logins. A
+# dispatch that runs on Fly uses separately held logins (operator ruling
+# 2026-10-15), so these say nothing about its capacity.
+MAC_READING_SOURCES = frozenset({HEADROOM_SOURCE_LIVE_USAGE, HEADROOM_SOURCE_LIVE_PROBE})
+
+
+def _headroom_for(fly_bound: Collection[str] = (), *,
+                  now_wall: float | None = None) -> dict[str, float]:  # fmt: skip
+    """``configured_headroom``, except that for a provider in *fly_bound* the
+    Mac's own usage readings are removed from the evidence BEFORE resolution
+    (they describe the Mac's login, not the Fly runner's). Every operator
+    override, manual, dated or undated, zero or not, then wins exactly as it
+    does for a local dispatch; with none, the default applies."""
+    return {
+        provider: value
+        for provider, (value, _source) in headroom_resolution(
+            now_wall=now_wall, without_mac_readings=fly_bound).items()
+    }
 
 
 def configured_headroom(*, now_wall: float | None = None) -> dict[str, float]:
@@ -1116,7 +1144,8 @@ def usage_gate(provider: str, *, now_wall: float | None = None) -> UsageGate | N
 
 
 def usage_gate_refusals_all(
-    available: Mapping[str, str | None], *, now_wall: float | None = None
+    available: Mapping[str, str | None], *, now_wall: float | None = None,
+    fly_bound: Collection[str] = (),
 ) -> dict[str, UsageGate] | None:
     """Each gate refusal when the gate is why no frontier provider can run.
 
@@ -1126,7 +1155,7 @@ def usage_gate_refusals_all(
     reports a stale or paced refusal as what it is, not as generic exhaustion.
     """
     moment = time.time() if now_wall is None else now_wall
-    headroom = configured_headroom(now_wall=moment)
+    headroom = _headroom_for(fly_bound, now_wall=moment)
     minimum = minimum_headroom()
     refusals: dict[str, UsageGate] = {}
     for provider in configured_providers():
@@ -1134,7 +1163,8 @@ def usage_gate_refusals_all(
             continue
         if persisted_cooling(provider, now_wall=moment) is not None:
             continue
-        gate = usage_gate(provider, now_wall=moment)
+        # A dispatch bound for Fly is not gated by the Mac's usage reading.
+        gate = None if provider in fly_bound else usage_gate(provider, now_wall=moment)
         if gate is not None and not gate.allowed:
             refusals[provider] = gate
             continue
@@ -1153,11 +1183,17 @@ def _provider_exclusion_reason(
     minimum: float,
     moment: float,
     moment_wall: float | None = None,
+    fly_bound: Collection[str] = (),
 ) -> str | None:
-    """Return why one supported provider is ineligible, or ``None``."""
+    """Return why one supported provider is ineligible, or ``None``.
+
+    For a provider in *fly_bound* (the dispatch will run on Fly) the Mac's
+    usage gate does not apply: not the weekly ceiling or pace line, and not
+    a missing, stale or failed reading of the Mac's login. Cooling windows
+    (a real rate-limit answer) still apply."""
     if not available.get(provider):
         return "binary unavailable"
-    gate = usage_gate(provider, now_wall=moment_wall)
+    gate = None if provider in fly_bound else usage_gate(provider, now_wall=moment_wall)
     if gate is not None and not gate.allowed:
         return gate.message
     if headroom[provider] <= minimum:
@@ -1176,6 +1212,7 @@ def provider_exclusion_reason(
     *,
     now: float | None = None,
     now_wall: float | None = None,
+    fly_bound: Collection[str] = (),
 ) -> str | None:
     """Explain why a hard-pinned provider cannot run right now."""
     normalized = provider.strip().lower()
@@ -1184,10 +1221,11 @@ def provider_exclusion_reason(
     return _provider_exclusion_reason(
         normalized,
         available,
-        headroom=configured_headroom(now_wall=now_wall),
+        headroom=_headroom_for(fly_bound, now_wall=now_wall),
         minimum=minimum_headroom(),
         moment=time.monotonic() if now is None else now,
         moment_wall=now_wall,
+        fly_bound=fly_bound,
     )
 
 
@@ -1196,14 +1234,17 @@ def usable_provider_names(
     *,
     now: float | None = None,
     now_wall: float | None = None,
+    fly_bound: Collection[str] = (),
+    fly_extra: Collection[str] = (),
 ) -> set[str]:
-    """Return configured providers passing the router's eligibility predicate."""
+    """Return configured providers passing the router's eligibility predicate
+    (plus *fly_extra*, the providers selectable only on Fly)."""
     moment = time.monotonic() if now is None else now
-    headroom = configured_headroom(now_wall=now_wall)
+    headroom = _headroom_for(fly_bound, now_wall=now_wall)
     minimum = minimum_headroom()
     return {
         provider
-        for provider in configured_providers()
+        for provider in _candidate_order(fly_extra)
         if _provider_exclusion_reason(
             provider,
             available,
@@ -1211,9 +1252,17 @@ def usable_provider_names(
             minimum=minimum,
             moment=moment,
             moment_wall=now_wall,
+            fly_bound=fly_bound,
         )
         is None
     }
+
+
+def _candidate_order(fly_extra: Collection[str] = ()) -> list[str]:
+    """The configured providers, then any provider selectable only on Fly
+    (never added to the local list itself)."""
+    order = configured_providers()
+    return [*order, *(p for p in FRONTIER_PROVIDERS if p in fly_extra and p not in order)]
 
 
 def cool_down(provider: str, *, now: float | None = None) -> None:
@@ -1239,6 +1288,8 @@ def provider_candidates(
     now: float | None = None,
     local_first: bool = False,
     now_wall: float | None = None,
+    fly_bound: Collection[str] = (),
+    fly_extra: Collection[str] = (),
 ) -> list[str]:
     """Return providers in attempt order, with a smooth weighted first choice.
 
@@ -1250,14 +1301,19 @@ def provider_candidates(
 
     ``local_first`` (unpinned runs only) puts an eligible ``claude-local``
     ahead of that frontier list, which stays behind it as the fallback.
+
+    ``fly_bound`` / ``fly_extra`` (operator ruling 2026-10-15): the providers
+    whose run will be on Fly are not gated by the Mac's usage reading, and
+    ``fly_extra`` names providers selectable only there (a provider with a
+    configured Fly login machine but disabled for local dispatch).
     """
     moment = time.monotonic() if now is None else now
-    order = configured_providers()
+    order = _candidate_order(fly_extra)
     if preferred is not None:
         normalized = preferred.strip().lower()
         order = [normalized] if normalized in PROVIDERS else []
 
-    headroom = configured_headroom(now_wall=now_wall)
+    headroom = _headroom_for(fly_bound, now_wall=now_wall)
     minimum = minimum_headroom()
 
     eligible = [
@@ -1270,6 +1326,7 @@ def provider_candidates(
             minimum=minimum,
             moment=moment,
             moment_wall=now_wall,
+            fly_bound=fly_bound,
         )
         is None
     ]

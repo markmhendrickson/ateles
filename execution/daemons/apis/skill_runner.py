@@ -73,14 +73,20 @@ import local_provider  # noqa: E402
 import model_tiering  # noqa: E402
 import fly_runner  # noqa: E402
 from harness_router import (  # noqa: E402
+    FRONTIER_PROVIDERS,
+    MAC_READING_SOURCES,
+    configured_providers,
     cool_down,
     cooled_until_all,
     cooling_providers,
+    headroom_resolution,
+    minimum_headroom,
     provider_candidates,
     provider_exclusion_reason,
     record_cooling,
     render_wall,
     usable_provider_names,
+    usage_gate,
     usage_gate_refusals_all,
 )
 from limit_reset import parse_refusal  # noqa: E402
@@ -1677,6 +1683,10 @@ class SkillResult:
     # A configuration the operator must repair before this dispatch can run
     # (not a wait): per provider, naming the setting, never a value.
     configuration_repair: str = ""
+    # A Fly run is not gated by the Mac's usage reading (operator ruling
+    # 2026-10-15). When that reading WOULD have refused this provider
+    # locally, what it said; empty when it would have allowed it.
+    usage_gate_exempted: str = ""
 
 
 class _LocalSpawnError(Exception):
@@ -2477,6 +2487,7 @@ async def _run_skill_once(
     inference_only: bool = False,
     runner: str | None = None,
     repository: str = "",
+    local_fallback_check=None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -3420,6 +3431,16 @@ async def _run_skill_once(
             msg = f"fly runner refused: {reason}"
             log.error(f"[apis] {skill} dispatch refused — {msg}")
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+        if local_fallback_check is not None:
+            # This provider was chosen WITHOUT the Mac's usage gate because
+            # it was bound for Fly. Running locally instead, it gets the
+            # local gate again; an exemption never carries over.
+            local_reason = local_fallback_check(provider)
+            if local_reason:
+                msg = (f"fly runner fell back to the Mac, where {provider} may not run: "
+                       f"{local_reason}")  # fmt: skip
+                log.warning(f"[apis] {skill} not dispatched — {msg}")
+                return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
         count = fly_runner.get_executor().ledger.count_local_fallback()
         log.warning(
             f"[apis] {skill} running locally instead of on Fly ({reason}); "
@@ -3964,6 +3985,57 @@ async def usable_providers_async() -> set[str]:
     return usable_provider_names(binaries)
 
 
+def _fly_routing(runner: str | None, action_class: str | None) -> tuple[frozenset[str], tuple[str, ...]]:
+    """``(fly_bound, fly_extra)`` for one dispatch (operator ruling 2026-10-15).
+
+    ``fly_bound``: the providers whose run will be on Fly, so the Mac's usage
+    gate (weekly ceiling, pace line, and a missing, stale or failed reading of
+    the Mac's own login) does not apply to them. Every frontier provider when
+    the dispatch goes to Fly at all (``fly_runner.wants_fly``); none
+    otherwise. If the Fly path then falls back to the Mac, the local gate is
+    applied again before anything runs (``_local_fallback_refusal``).
+
+    ``fly_extra``: providers selectable ONLY for a Fly-bound dispatch. Claude
+    when it is a Fly login provider with its login machine configured, even
+    though it is not enabled for local dispatch (``APIS_HARNESS_PROVIDERS``).
+    The local candidate list itself is never changed.
+    """
+    if not fly_runner.wants_fly(runner, action_class):
+        return frozenset(), ()
+    extra: tuple[str, ...] = ()
+    if ("claude" not in configured_providers()
+            and "claude" in fly_runner.FlyConfig.from_env().login_machines):  # fmt: skip
+        # Its Fly login machine is configured (APIS_FLY_CLAUDE_MACHINE_ID).
+        extra = ("claude",)
+    return frozenset(FRONTIER_PROVIDERS), extra
+
+
+def _mac_usage_note(provider: str) -> str:
+    """What the Mac's usage reading says against *provider*, for a Fly run
+    that is exempt from it: the gate's refusal and/or a Mac-read headroom at
+    or below the floor. Empty when the reading would have allowed it."""
+    notes = []
+    try:
+        gate = usage_gate(provider)
+        if gate is not None and not gate.allowed:
+            notes.append(f"usage gate {gate.code}: {gate.message}")
+        value, source = headroom_resolution()[provider]
+        if source in MAC_READING_SOURCES and value <= minimum_headroom():
+            notes.append(f"headroom {value:.3f} from {source}")
+    except Exception as exc:  # noqa: BLE001 — a report, never a decision
+        notes.append(f"Mac usage reading unreadable ({type(exc).__name__})")
+    return "; ".join(notes)
+
+
+def _local_fallback_refusal(provider: str, *, pinned: bool) -> str | None:
+    """Why *provider* may NOT run locally after its Fly path fell back: the
+    local gate as any local dispatch sees it, and (unless the caller pinned
+    it) the provider must be enabled for local dispatch."""
+    if not pinned and provider not in configured_providers():
+        return f"{provider} is not enabled for local dispatch (APIS_HARNESS_PROVIDERS)"
+    return provider_exclusion_reason(provider, _provider_binaries())
+
+
 async def run_skill(
     skill: str,
     prompt: str,
@@ -4094,9 +4166,10 @@ async def run_skill(
         precomputed_tier = model_tiering.resolve_tier(
             action_class, signals=escalation_signals
         )
+    fly_bound, fly_extra = _fly_routing(runner, action_class)
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
-        return await _run_skill_once(
+        result = await _run_skill_once(
             skill,
             prompt,
             provider=selected,
@@ -4121,7 +4194,19 @@ async def run_skill(
             inference_only=inference_only,
             runner=runner,
             repository=repository,
+            local_fallback_check=(
+                (lambda name: _local_fallback_refusal(name, pinned=provider is not None))
+                if selected in fly_bound else None
+            ),
         )
+        if selected in fly_bound and result.remote_run_id:
+            # It ran on Fly: say what the Mac's reading would have said.
+            note = _mac_usage_note(selected)
+            if note:
+                result.usage_gate_exempted = note
+                log.info(f"[apis] {skill} ran on Fly; the Mac's usage reading for {selected} "
+                         f"does not apply to it ({note})")  # fmt: skip
+        return result
 
     local_first = (
         provider is None
@@ -4153,6 +4238,7 @@ async def run_skill(
         ),
         binaries=_tier_bound_binaries(
             _provider_binaries(), precomputed_tier, provider,
+            fly_bound=fly_bound, fly_extra=fly_extra,
         ),
         provider=provider,
         role=role,
@@ -4161,6 +4247,8 @@ async def run_skill(
         preferred_provider=preferred_provider,
         owns_pending_gate=deny_correct,
         local_first=local_first,
+        fly_bound=fly_bound,
+        fly_extra=fly_extra,
     )
 
 
@@ -4168,6 +4256,9 @@ def _tier_bound_binaries(
     binaries: dict[str, str | None],
     tier: "model_tiering.ResolvedTier | None",
     pinned_provider: str | None,
+    *,
+    fly_bound: frozenset[str] = frozenset(),
+    fly_extra: tuple[str, ...] = (),
 ) -> dict[str, str | None]:
     """Drop frontier providers with no model bound for ``tier`` before selection.
 
@@ -4197,7 +4288,8 @@ def _tier_bound_binaries(
         if name == local_provider.LOCAL_PROVIDER
         or tier.tier in binding.get(name, {})
     }
-    if not (usable_provider_names(filtered) - {local_provider.LOCAL_PROVIDER}):
+    usable = usable_provider_names(filtered, fly_bound=fly_bound, fly_extra=fly_extra)
+    if not (usable - {local_provider.LOCAL_PROVIDER}):
         return binaries
     return filtered
 
@@ -4313,8 +4405,12 @@ async def _run_provider_attempts(
     notifier=None, retry_safe=False, preferred_provider=None,
     owns_pending_gate: bool = False, local_first: bool = False,
     fallback_models_for=None,
+    fly_bound: frozenset[str] = frozenset(), fly_extra: tuple[str, ...] = (),
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
+
+    ``fly_bound`` / ``fly_extra``: see ``_fly_routing``. Empty for a dispatch
+    that runs on the Mac, which is then gated exactly as before.
 
     ``fallback_models_for`` (local-first runs only): maps the providers a failed
     or unavailable claude-local may fall over to onto the model each is pinned
@@ -4362,7 +4458,8 @@ async def _run_provider_attempts(
         # reading to age out and the gate refuses on it.
         await asyncio.to_thread(_refresh_usage_snapshot, binaries)
     candidates = provider_candidates(
-        binaries, preferred=provider, local_first=local_first and not owns_pending_gate
+        binaries, preferred=provider, local_first=local_first and not owns_pending_gate,
+        fly_bound=fly_bound, fly_extra=fly_extra,
     )
     if preferred_provider in candidates and provider is None:
         # A lens preference reorders the frontier providers; a local-first
@@ -4384,7 +4481,7 @@ async def _run_provider_attempts(
             return SkillResult(
                 skill, False, None, "", "", error=msg, cooled_until=earliest,
             )
-        gated = usage_gate_refusals_all(scope)
+        gated = usage_gate_refusals_all(scope, fly_bound=fly_bound)
         if gated:
             msg, retry_at = _usage_gate_message(gated)
             log.warning(f"[apis] {skill} not dispatched — {msg}")
@@ -4393,7 +4490,7 @@ async def _run_provider_attempts(
             )
         if owns_pending_gate and provider is None:
             reasons = "; ".join(
-                f"{name}={provider_exclusion_reason(name, binaries) or 'not eligible'}"
+                f"{name}={provider_exclusion_reason(name, binaries, fly_bound=fly_bound) or 'not eligible'}"
                 for name in GATE_OWNER_DENY_CAPABLE_PROVIDERS
             )
             msg = (
@@ -4407,7 +4504,7 @@ async def _run_provider_attempts(
             log.error(f"[apis] {skill} dispatch refused — {msg}")
             return SkillResult(skill, False, None, "", "", error=msg)
         if provider is not None:
-            reason = provider_exclusion_reason(provider, binaries)
+            reason = provider_exclusion_reason(provider, binaries, fly_bound=fly_bound)
             msg = (
                 f"subscription-backed harness provider '{provider}' is "
                 f"ineligible: {reason or 'not selected'}"

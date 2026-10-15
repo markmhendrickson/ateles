@@ -1075,6 +1075,10 @@ def main(argv: list[str] | None = None) -> int:
                     "remote_outcome_unknown": bool(result.remote_outcome_unknown),
                     "remote_run_id": result.remote_run_id,
                     "remote_machine_state": result.remote_machine_state,
+                    # What the Mac's usage reading would have said against
+                    # this provider; a Fly run is not gated by it.
+                    **({"usage_gate_exempted": result.usage_gate_exempted}
+                       if getattr(result, "usage_gate_exempted", "") else {}),
                 }
                 if getattr(result, "remote_run_id", "")
                 else {}

@@ -77,6 +77,9 @@ def test_scenario_set_covers_the_required_behaviours():
         "login_claim_waits_for_the_machine_to_settle",
         "login_machine_that_never_settles_fails_closed_without_job_files",
         "large_system_prompt_travels_as_a_file_not_an_argument",
+        "fly_dispatch_is_not_gated_by_the_macs_usage_reading",
+        "the_same_dispatch_bound_for_the_mac_keeps_its_usage_gate",
+        "fly_dispatch_keeps_the_operators_zero_headroom_override",
         "claude_runs_on_its_login_machine_with_the_volume_token",
     } <= ids
     assert len(ids) == len(SCENARIOS)
@@ -222,6 +225,11 @@ def test_judge_goes_red_when_a_large_prompt_is_one_argument(tmp_path, monkeypatc
     assert len(runner.judge(scenario, inline)) >= 2
 
 
+def test_judge_goes_red_when_a_fly_run_hides_the_reading_it_set_aside(tmp_path, monkeypatch):
+    scenario = _by_id("fly_dispatch_is_not_gated_by_the_macs_usage_reading")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    hidden = dataclasses.replace(trace, envelope={**trace.envelope, "usage_gate_exempted": ""})
+    assert runner.judge(scenario, hidden)
 def test_judge_goes_red_when_the_claude_token_leaves_the_mac(tmp_path, monkeypatch):
     scenario = _by_id("claude_runs_on_its_login_machine_with_the_volume_token")
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
