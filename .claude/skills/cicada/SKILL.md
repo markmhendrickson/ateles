@@ -73,7 +73,8 @@ After opening the PR:
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "impl": "signed_off"},
   "current_owner": "vanellus",
-  "owner_history": [*existing_history, {"agent": "cicada", "gate": "impl", "at": "<ISO timestamp>", "action": "signed_off", "pr_number": <pr_number>}]
+  # owner_history: the store UNIONS corrections' arrays and keeps repeats. Send ONLY this new entry, never the history you read (resending it doubles the stored array on every write).
+  "owner_history": [{"agent": "cicada", "gate": "impl", "at": "<ISO timestamp>", "action": "signed_off", "pr_number": <pr_number>}]
 }, observation_source="workflow_state")
 
 # 2. Store a plan_contribution

@@ -133,7 +133,8 @@ When Waxwing completes an architecture review on a GitHub issue, sign off the `a
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "arch": "signed_off"},
   # Only advance current_owner to "cicada" if ux is ALSO signed_off
-  "owner_history": [*existing_history, {"agent": "waxwing", "gate": "arch", "at": "<ISO timestamp>", "action": "signed_off"}]
+  # owner_history: the store UNIONS corrections' arrays and keeps repeats. Send ONLY this new entry, never the history you read (resending it doubles the stored array on every write).
+  "owner_history": [{"agent": "waxwing", "gate": "arch", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
 # 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed
@@ -166,7 +167,8 @@ To **waive** the arch gate (e.g. for a copy fast-path):
 ```python
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "arch": "waived"},
-  "owner_history": [*existing_history, {"agent": "waxwing", "gate": "arch", "at": "<ISO timestamp>", "action": "waived", "reason": "<reason>"}]
+  # owner_history: the store UNIONS corrections' arrays and keeps repeats. Send ONLY this new entry, never the history you read (resending it doubles the stored array on every write).
+  "owner_history": [{"agent": "waxwing", "gate": "arch", "at": "<ISO timestamp>", "action": "waived", "reason": "<reason>"}]
 }, observation_source="workflow_state")
 ```
 

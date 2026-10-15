@@ -42,7 +42,7 @@ When invoked on a **PR opened** event:
 
 **Gate state must be grounded in an artifact.** Report a gate as `signed_off`/`waived` only when the issue entity's live `gate_status` says so, or a sign-off artifact exists (the owning agent's GitHub comment, its merged `## Swarm specification` body section, or its `plan_contribution` entity). If you cannot point to one, report `pending` — never infer a gate state from context, and never attribute a sign-off, a verdict, or a gate condition to another agent without citing where it came from. Gate deliverables land in three places (GitHub comments, the issue body's `## Swarm specification` sections, and Neotoma entities); check all three before concluding a gate has not been exercised.
 
-**Never write gate state with a plain `store()`.** `gate_status`, `current_owner`, and `owner_history` are `last_write` fields, so a routine `store()` at default priority silently clobbers a higher-authority sign-off written earlier (observed on neotoma#2033, 2026-07-29: a re-triage `store()` reset `gate_status.pm` from `signed_off` back to `pending`). Always use `correct()` for gate transitions, and re-read the live field before writing so you merge rather than replace.
+**Never write gate state with a plain `store()`.** `gate_status` and `current_owner` are `last_write` fields (and `owner_history` is a union array, below), so a routine `store()` at default priority silently clobbers a higher-authority sign-off written earlier (observed on neotoma#2033, 2026-07-29: a re-triage `store()` reset `gate_status.pm` from `signed_off` back to `pending`). Always use `correct()` for gate transitions, and re-read the live field before writing so you merge rather than replace. **`owner_history` is the exception to "merge": the store UNIONS every correction's array and keeps repeats, so send ONLY the new entry, never the history you read** (resending it doubled one issue's history on every write, to 1023 entries).
 
 When invoked for **stale sweep**:
 1. `retrieve_entities(entity_type='issue', current_owner=<agent>, status='open')` for each active owner.
@@ -55,7 +55,7 @@ When invoked to **evaluate a waiver request** (`/waive <gate>` in a GitHub comme
 2. Check whether the waiver is consistent with workflow_definition fast_paths.
 3. Post a proposed waiver comment on GitHub explaining the rationale.
 4. Wait for operator to confirm (operator replies `/confirm-waive <gate>` or `/reject-waive <gate>`).
-5. On confirm: `correct()` the issue entity `gate_status.<gate>: waived`, add to owner_history, advance current_owner.
+5. On confirm: `correct()` the issue entity `gate_status.<gate>: waived`, add ONLY the new waiver entry to owner_history (see the rule above), advance current_owner.
 6. Record the waiver as a `workflow_state` observation on the issue entity.
 7. Never apply a waiver silently.
 

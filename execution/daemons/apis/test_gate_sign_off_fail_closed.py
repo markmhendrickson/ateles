@@ -87,10 +87,16 @@ class _Record:
         tier_by_sub: dict[str, str] | None = None,
     ) -> None:
         self.gate_status = dict(gate_status)
-        self.owner_history: list[dict] = []
+        # Neotoma's array reducer for this field UNIONS the arrays of the
+        # observations at the highest priority that carries it, WITHOUT collapsing
+        # repeats. A correction is priority 1000; a plain store() is lower. The
+        # fake models that, so a writer that resends the history it read grows the
+        # stored array the way the real store does.
+        self._history_obs: list[tuple[int, list]] = []
         self.current_owner = ""
         self.provenance: dict[str, str] = {}
         self.observations: list[dict] = []
+        self._history_obs = []
         self.writes: list[tuple[str, object, str | None]] = []
         self.gate_writes_landed = 0
         self.fail_fields = fail_fields
@@ -100,6 +106,26 @@ class _Record:
         self.tier = tier
         self.thumbprint = thumbprint
         self.tier_by_sub = dict(tier_by_sub or {})
+
+    @property
+    def owner_history(self) -> list[dict]:
+        if not self._history_obs:
+            return []
+        top = max(priority for priority, _ in self._history_obs)
+        return [entry for priority, arr in self._history_obs if priority == top for entry in arr]
+
+    @owner_history.setter
+    def owner_history(self, value: list[dict]) -> None:
+        """Seed history as a LOWER-priority write (a triage store())."""
+        self._history_obs = [(100, list(value))] if value else []
+        if value:
+            self.observations.append(
+                {"id": "obs-seed", "created_at": "2020-01-01T00:00:00+00:00",
+                 "source_priority": 100, "fields": {"owner_history": list(value)}}
+            )
+
+    async def history_observations(self, entity_id: str) -> list[dict]:
+        return list(self.observations)
 
     async def load(self, repo: str, issue_number: int) -> IssueGateState:
         return IssueGateState(
@@ -130,7 +156,7 @@ class _Record:
             self.gate_status = parse_gate_status(value)
             self.gate_writes_landed += 1
         elif field_name == "owner_history":
-            self.owner_history = list(value)
+            self._history_obs.append((1000, list(value)))
         else:
             self.current_owner = str(value)
         observation_id = f"obs-{len(self.writes)}"
@@ -141,6 +167,7 @@ class _Record:
             {
                 "id": observation_id,
                 "created_at": LATER,
+                "source_priority": 1000,
                 "fields": {field_name: value},
                 "provenance": {
                     "agent_sub": signer,
@@ -190,6 +217,7 @@ def _wire(monkeypatch, rec: _Record, *, sync: bool = False) -> IssueGateStore:
     )
     monkeypatch.setattr(store, "load", rec.load)
     monkeypatch.setattr(store, "_observations", rec.fetch_observations)
+    monkeypatch.setattr(store, "_history_observations", rec.history_observations)
     return store
 
 

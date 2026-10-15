@@ -1,0 +1,68 @@
+{
+  "_comment": "Public-safe synthetic scenarios for owner_history growth (canary ateles#1448). Each runs the REAL sign-off path against a store that models Neotoma's array reducer (union of the top-priority observations, repeats kept).",
+  "scenarios": [
+    {
+      "id": "repeated_sign_offs_do_not_grow_a_pre_doubled_history",
+      "why": "the canary entity's shape: a 1023-entry history. Three lenses sign off, then each re-signs the same commit twice: the stored array grows by the three distinct events only, and no write carries more than its own entry",
+      "history_seed": {"kind": "doubled", "entries": 1023, "priority": 1000},
+      "steps": [
+        {"gate": "pm"}, {"gate": "ux"}, {"gate": "arch"},
+        {"gate": "pm"}, {"gate": "ux"}, {"gate": "arch"},
+        {"gate": "pm"}, {"gate": "ux"}, {"gate": "arch"}
+      ],
+      "expect": {
+        "all_signed_off": true,
+        "stored_length": 1026,
+        "max_entries_per_write": 1,
+        "history_writes": 3,
+        "gates": {"pm": "signed_off", "ux": "signed_off", "arch": "signed_off"}
+      }
+    },
+    {
+      "id": "the_reader_folds_a_doubled_history_into_its_distinct_entries",
+      "why": "decisions read the history through the dispatcher's reader, which treats exact duplicates as one: 1023 stored entries are two distinct ones",
+      "history_seed": {"kind": "doubled", "entries": 1023, "priority": 1000},
+      "steps": [{"gate": "pm"}],
+      "expect": {"read_back_length": 3, "all_signed_off": true}
+    },
+    {
+      "id": "triage_history_is_carried_up_once_and_never_again",
+      "why": "a history written by a plain store() is lower priority and stops counting once a correction carries the field, so the FIRST correction carries it; the next nine sign-offs add only themselves",
+      "history_seed": {"list": [{"agent": "lanius", "action": "triaged", "at": "2026-10-14T10:00:00Z"}], "priority": 100},
+      "steps": [
+        {"gate": "pm", "head": "1111111111111111111111111111111111111111"},
+        {"gate": "pm", "head": "2222222222222222222222222222222222222222"},
+        {"gate": "pm", "head": "3333333333333333333333333333333333333333"},
+        {"gate": "pm", "head": "4444444444444444444444444444444444444444"},
+        {"gate": "pm", "head": "5555555555555555555555555555555555555555"}
+      ],
+      "expect": {"stored_length": 6, "triaged_entries": 1, "max_entries_per_write": 2, "all_signed_off": true}
+    },
+    {
+      "id": "a_signing_failure_is_logged_as_a_reason_code_and_nothing_else",
+      "why": "when the signed write cannot be made the log names the failure class, a fixed reason code and the payload size, and never the exception text, a header, a body or a path",
+      "signer_fails": "helper_error",
+      "steps": [{"gate": "pm"}],
+      "expect": {
+        "all_signed_off": false,
+        "log_contains": ["reason=helper_error", "payload_bytes="],
+        "log_excludes": ["/private/path", ".jwk.json", "Bearer", "eval-secret"]
+      }
+    },
+    {
+      "id": "a_missing_key_is_logged_as_no_key",
+      "why": "the reason code distinguishes 'no key for this lens' from a helper fault",
+      "signer_fails": "no_key",
+      "steps": [{"gate": "pm"}],
+      "expect": {"all_signed_off": false, "log_contains": ["reason=no_key"], "log_excludes": ["private detail"]}
+    },
+    {
+      "id": "an_oversized_write_is_logged_as_payload_too_large",
+      "why": "an HTTP 413 is reported as payload_too_large with the size that was sent, so a size limit is visible when it is the cause",
+      "signer_fails": "payload_too_large",
+      "history_seed": {"kind": "doubled", "entries": 255, "priority": 1000},
+      "steps": [{"gate": "pm"}],
+      "expect": {"all_signed_off": false, "log_contains": ["HTTP 413", "reason=payload_too_large", "payload_bytes="]}
+    }
+  ]
+}

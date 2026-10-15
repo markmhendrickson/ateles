@@ -54,7 +54,8 @@ After merging the PR:
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "pr_review": "signed_off"},
   "current_owner": "phoenicurus",  # Phoenicurus and Buteo run in parallel
-  "owner_history": [*existing_history, {"agent": "vanellus", "gate": "pr_review", "at": "<ISO timestamp>", "action": "signed_off", "pr_number": <pr_number>, "merge_commit": "<sha>"}]
+  # owner_history: the store UNIONS corrections' arrays and keeps repeats. Send ONLY this new entry, never the history you read (resending it doubles the stored array on every write).
+  "owner_history": [{"agent": "vanellus", "gate": "pr_review", "at": "<ISO timestamp>", "action": "signed_off", "pr_number": <pr_number>, "merge_commit": "<sha>"}]
 }, observation_source="workflow_state")
 
 # 2. Store a plan_contribution
