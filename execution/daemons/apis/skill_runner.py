@@ -3227,34 +3227,17 @@ async def _run_skill_once(
         # config.toml.
         subprocess_env["CODEX_HOME"] = str(_codex_gate_config.home)
         subprocess_env[CODEX_GATE_BEARER_ENV] = _codex_gate_token
-    if (
+    # A local Codex or Cursor child never gets the operator's personal harness
+    # configuration: just before it is spawned (``_run_local``), it gets a
+    # generated home whose MCP servers are exactly the role's allowed ones.
+    _isolation_wanted = (
         provider in ISOLATED_PROVIDERS
         and _codex_gate_config is None  # a seated Codex review is isolated above
         and local_cfg is None
         and not local_review  # guarded lens runs bring their own isolated home
         and not inference_only
         and not (env_extra or {}).get("CODEX_HOME" if provider == "codex" else "HOME")
-    ):
-        # Never the operator's personal harness configuration: a generated
-        # home whose MCP servers are exactly the role's allowed ones.
-        try:
-            _isolated_home = prepare_isolated_harness_home(
-                provider, role=_role, agent_tools=agent_def.tools, cwd=cwd,
-                env_extra=env_extra,
-            )
-        except (OSError, RuntimeError) as exc:
-            msg = (f"{provider} launch failed: {HARNESS_ISOLATION_UNAVAILABLE}: {exc}; "
-                   "refusing to launch with the operator's personal harness configuration")
-            log.error(f"[apis] {skill} dispatch refused — {msg}")
-            if _mcp_tmp_path is not None:
-                try:
-                    os.unlink(_mcp_tmp_path)
-                except OSError:
-                    pass
-            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
-        subprocess_env.update(_isolated_home.env)
-        log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness home; "
-                 f"MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
+    )
 
     # ateles#109 / ateles#590 (PR #1334): inject the resolved per-agent GitHub
     # identity, if any. The fail-closed refusals for a network-enabled
@@ -3381,7 +3364,20 @@ async def _run_skill_once(
     proc = None
 
     async def _run_local() -> tuple[int | None, bytes, bytes]:
-        nonlocal proc
+        nonlocal proc, _isolated_home
+        if _isolation_wanted and _isolated_home is None:
+            try:
+                _isolated_home = prepare_isolated_harness_home(
+                    provider, role=_role, agent_tools=agent_def.tools, cwd=cwd,
+                    env_extra=env_extra,
+                )
+            except (OSError, RuntimeError) as exc:
+                raise _LocalSpawnError(
+                    f"{HARNESS_ISOLATION_UNAVAILABLE}: {exc}; refusing to launch with the "
+                    "operator's personal harness configuration") from None
+            subprocess_env.update(_isolated_home.env)
+            log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness "
+                     f"home; MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
