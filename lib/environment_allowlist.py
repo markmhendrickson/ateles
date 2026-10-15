@@ -137,6 +137,7 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "APIS_DRY_RUN",
         "APIS_FLY_API_BASE",
         "APIS_FLY_APP",
+        "APIS_FLY_CLAUDE_MACHINE_ID",
         "APIS_FLY_CODEX_MACHINE_ID",
         "APIS_FLY_CURSOR_LOGIN_DIRS",
         "APIS_FLY_CURSOR_MACHINE_ID",

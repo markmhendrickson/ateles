@@ -77,6 +77,7 @@ def test_scenario_set_covers_the_required_behaviours():
         "login_claim_waits_for_the_machine_to_settle",
         "login_machine_that_never_settles_fails_closed_without_job_files",
         "large_system_prompt_travels_as_a_file_not_an_argument",
+        "claude_runs_on_its_login_machine_with_the_volume_token",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -219,3 +220,11 @@ def test_judge_goes_red_when_a_large_prompt_is_one_argument(tmp_path, monkeypatc
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
     inline = dataclasses.replace(trace, argv_max_bytes=150_000, system_prompt_file_bytes=0)
     assert len(runner.judge(scenario, inline)) >= 2
+
+
+def test_judge_goes_red_when_the_claude_token_leaves_the_mac(tmp_path, monkeypatch):
+    scenario = _by_id("claude_runs_on_its_login_machine_with_the_volume_token")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    leaked = dataclasses.replace(trace, everything_sent=trace.everything_sent + runner.CLAUDE_OAUTH,
+                                 claude_login_job_files_after=True)  # fmt: skip
+    assert len(runner.judge(scenario, leaked)) >= 2
