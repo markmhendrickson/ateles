@@ -1700,6 +1700,10 @@ def _queue_behind_a_busy_slot(dispatch_env, monkeypatch, *, change):
         _mark(store, "ent_a_first_0001")
         _mark(store, "ent_b_queued_0001", title="as first read")
         await apis.recover_deferred_tasks(n)
+        for _ in range(500):  # real time: each step reads the task on a worker thread
+            if dispatched:
+                break
+            await asyncio.sleep(0.01)
         for _ in range(20):
             await asyncio.sleep(0)
         assert [e for e, _ in dispatched] == ["ent_a_first_0001"], "B should be queued"

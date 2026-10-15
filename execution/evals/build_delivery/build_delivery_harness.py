@@ -784,6 +784,10 @@ async def _drive_slot_wait(scenario: dict, world: World, obs: dict, notifier) ->
             {**_marked_row(title="as first read"), "dispatch_context": context},
         )
     await apis.recover_deferred_tasks(notifier)
+    for _ in range(500):  # real time: each step reads the task on a worker thread
+        if len(obs["spawns"]) >= apis._RECOVERY_CONCURRENCY:
+            break
+        await asyncio.sleep(0.01)
     for _ in range(50):
         await asyncio.sleep(0)
     obs["dispatched_while_waiting"] = [s["task"] for s in obs["spawns"]]
