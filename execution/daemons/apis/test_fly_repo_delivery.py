@@ -1281,10 +1281,20 @@ def test_a_default_or_release_branch_is_never_pushed(pushed_world, branch, defau
     assert exc.value.category in (rd.PUSH_REFUSED, rd.BRANCH_REFUSED)
 
 
-@pytest.mark.parametrize("leaf", ["main", "master", "release-2", "v2", "1.0", "hotfix/x"])
-def test_a_protected_leaf_name_is_refused(leaf):
-    with pytest.raises(rd.RepoWorkError):
-        rd.check_push_branch(f"cicada/{leaf}", "main")
+@pytest.mark.parametrize("leaf", ["release-notes", "release-2", "release-v2"])
+def test_a_release_looking_name_in_the_builder_shape_is_refused(leaf):
+    branch = f"cicada/{leaf}-20261015T120000-a1b2c3"
+    assert rd.check_branch(branch) == branch  # the builder pattern alone would accept it
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.check_push_branch(branch, "main")
+    assert exc.value.category == rd.PUSH_REFUSED
+
+
+def test_the_default_branch_is_refused_even_in_the_builder_shape():
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.check_push_branch(BRANCH, BRANCH)
+    assert exc.value.category == rd.PUSH_REFUSED
+    assert rd.check_push_branch(BRANCH, "main") == BRANCH
 
 
 def test_the_push_is_refused_while_a_quarantine_ref_exists(pushed_world):

@@ -936,9 +936,10 @@ def build_record(
             "delivery_reason": scrub(delivery.reason, job.secrets),
             "delivery_branch": delivery.spec.branch,
             "delivery_commit": delivery.commit,
-            "pr_number": delivery.pr_number,
             "pr_url": delivery.pr_url,
         })  # fmt: skip
+        if delivery.pr_number is not None:
+            record["pr_number"] = delivery.pr_number
     return record
 
 

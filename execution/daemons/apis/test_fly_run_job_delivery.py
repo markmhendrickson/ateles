@@ -141,6 +141,7 @@ def _agent(world, *, commits=1, rc=0, pr_text="# Fix the gate\n\nWhat changed.\n
             git(cwd, "add", "-A", home=world["home"])
             git(cwd, "commit", "-qm", f"agent {i}", home=world["home"])
         marker = stdin.split(b"to ", 1)[1].rstrip(b".")
+        assert os.path.isabs(marker), "the prompt must carry the absolute text path"
         if pr_text is not None:
             Path(marker.decode()).write_text(pr_text)
         return rc, out, b"", False
@@ -269,7 +270,7 @@ def test_a_failed_pull_request_step_keeps_the_pushed_branch(world):
     assert record["delivery_status"] == "pr_failed"
     assert record["delivery_reason"] == ("pr_failed: the open pull requests could not be read "
                                          "[http_500]")
-    assert _remote_ref(world) == record["delivery_commit"] and record["pr_number"] is None
+    assert _remote_ref(world) == record["delivery_commit"] and "pr_number" not in record
 
 
 def test_no_time_left_means_no_push(world, monkeypatch):
@@ -346,3 +347,16 @@ def test_a_delivery_without_its_token_is_refused(world):
     job_dir = _job(world["tmp"], secrets={"LANIUS_NEOTOMA_TOKEN": ROLE_TOKEN})
     rc, record = _run(job_dir, lambda *a, **k: pytest.fail("nothing may run"))
     assert rc == run_job.EXIT_JOB_INVALID
+
+
+def test_the_runner_keeps_the_same_delivery_reserve_the_token_life_assumes():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import fly_runner
+
+    assert run_job.DELIVERY_RESERVE_SECONDS == fly_runner.DELIVERY_RESERVE_SECONDS
+
+
+def test_the_header_form_of_the_token_is_a_job_secret(world):
+    job = run_job.load_job(_job(world["tmp"]))
+    assert job.secrets[run_job.DELIVERY_HEADER_SECRET_NAME] == HEADER
+    assert run_job.DELIVERY_TOKEN_NAME not in job.child_credential_names
