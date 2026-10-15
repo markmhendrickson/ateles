@@ -1523,6 +1523,95 @@
         "in_flight_after": 0,
         "revoked_all_minted": true
       }
+    },
+    {
+      "id": "fly_dispatch_is_not_gated_by_the_macs_usage_reading",
+      "description": "The Mac's own Claude login reads far over its weekly ceiling, and the usage gate is on. A dispatch that runs on Fly uses the runner's separately held login, so the Mac's reading does not gate it. It runs, and the envelope says which reading was set aside. The Fly caps still apply.",
+      "mac_usage": "over_ceiling",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY UNGATED OK\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY UNGATED OK",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "usage_gate_exempted_contains": "usage gate paced",
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
+    },
+    {
+      "id": "the_same_dispatch_bound_for_the_mac_keeps_its_usage_gate",
+      "description": "The same over-ceiling reading, but the dispatch is bound for the Mac. It is refused by the usage gate exactly as before, and nothing runs.",
+      "mac_usage": "over_ceiling",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "local",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "ceiling",
+        "local_cli_ran": false,
+        "machines_created": 0
+      }
+    },
+    {
+      "id": "fly_dispatch_keeps_the_operators_zero_headroom_override",
+      "description": "The operator has set Claude's headroom to zero, and the Mac's own Claude login reports itself exhausted. A Fly dispatch is not gated by the Mac's reading, but the operator's override still applies: the dispatch is refused, and no machine is created.",
+      "mac_usage": "exhausted",
+      "settings": {
+        "APIS_HARNESS_HEADROOM": "{\"claude\": 0.0}"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "SHOULD NOT RUN\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "headroom=0.000",
+        "local_cli_ran": false,
+        "machines_created": 0
+      }
     }
   ]
 }
