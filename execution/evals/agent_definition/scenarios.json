@@ -1,0 +1,95 @@
+{
+  "_comment": "Public-safe synthetic scenarios for an agent definition that cannot be loaded now. Each runs the REAL loader (and, for dispatch, the real dispatch entrypoint) against a scripted Neotoma.",
+  "scenarios": [
+    {
+      "id": "a_timeout_then_success_dispatches_on_the_real_definition",
+      "why": "the observed failure: one timed-out load. The loader retries once, loads the real definition, and the dispatch proceeds on its real prompt and tool list, not on a stand-in",
+      "kind": "dispatch",
+      "stop_after_definition": true,
+      "neotoma": ["timeout", "real"],
+      "expect": {
+        "past_definition_stage": true,
+        "loaded_prompt": "# the real role prompt",
+        "loaded_tools": ["Read", "Bash(gh pr:*)"],
+        "no_stand_in": true,
+        "requests": 2,
+        "sleeps": [0.5],
+        "nothing_spawned": true
+      }
+    },
+    {
+      "id": "a_persistent_timeout_refuses_the_dispatch_and_spawns_nothing",
+      "why": "every load times out: three requests, then a controlled refusal. No stand-in, no process, no provider cooled, no failover, and nothing from the failure in the error",
+      "kind": "dispatch",
+      "through_run_skill": true,
+      "neotoma": ["timeout"],
+      "expect": {
+        "refused": true,
+        "error_prefix": "agent_definition unavailable",
+        "requests": 3,
+        "sleeps": [0.5, 1.5],
+        "nothing_spawned": true,
+        "no_cooldown": true,
+        "attempted_providers": 1,
+        "log_excludes": ["private detail", "timed out"]
+      }
+    },
+    {
+      "id": "a_server_error_then_success_loads_the_real_definition",
+      "why": "a 503 is transient and retried",
+      "kind": "dispatch",
+      "stop_after_definition": true,
+      "neotoma": ["503", "real"],
+      "expect": {
+        "past_definition_stage": true,
+        "loaded_prompt": "# the real role prompt",
+        "no_stand_in": true,
+        "requests": 2
+      }
+    },
+    {
+      "id": "a_refused_request_is_final_at_once",
+      "why": "a 403 is an answer, not a hiccup: one request, no wait, the dispatch is refused",
+      "kind": "dispatch",
+      "neotoma": ["403", "real"],
+      "expect": {
+        "refused": true,
+        "requests": 1,
+        "sleeps": [],
+        "nothing_spawned": true
+      }
+    },
+    {
+      "id": "a_role_with_no_definition_runs_degraded_only_by_the_dispatchers_explicit_opt_in",
+      "why": "Neotoma answered and has no such definition: the dispatcher's existing, explicit degraded path is unchanged and is not mistaken for a failed load",
+      "kind": "dispatch",
+      "stop_after_definition": true,
+      "neotoma": ["none"],
+      "expect": {
+        "past_definition_stage": true,
+        "requests": 1,
+        "sleeps": []
+      }
+    },
+    {
+      "id": "a_daemon_that_cannot_read_its_definition_exits_instead_of_skipping_the_status_check",
+      "why": "at startup the status check decides whether a daemon may run at all; a daemon that could not read its definition must not carry on as if it had passed",
+      "kind": "startup",
+      "neotoma": ["timeout"],
+      "expect": {
+        "exit_code": 1,
+        "requests": 3
+      }
+    },
+    {
+      "id": "a_daemon_survives_one_timeout_at_startup",
+      "why": "one hiccup at startup is retried, not fatal",
+      "kind": "startup",
+      "neotoma": ["timeout", "real"],
+      "expect": {
+        "exit_code": null,
+        "requests": 2
+      }
+    }
+  ]
+}

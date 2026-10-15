@@ -320,3 +320,46 @@ def test_skip_warns_once_per_item_then_debug(monkeypatch, harness, caplog):
     skips = [r for r in caplog.records if "label gate active" in r.message]
     assert [r.levelno for r in skips] == [logging.WARNING, logging.DEBUG]
     assert not _launched(harness)
+
+
+# ── a gate owner whose definition cannot be loaded is not dispatched ─────────
+
+
+class _UnavailableLoader:
+    """Neotoma timed out on the owner's definition (the loader already retried)."""
+
+    code = "timeout"
+
+    def __init__(self, name):  # noqa: ANN001
+        self.name = name
+
+    def load(self):
+        from lib.daemon_runtime import AgentDefinitionUnavailable
+
+        raise AgentDefinitionUnavailable(self.name, self.code, 3)
+
+
+def test_a_gate_owner_whose_definition_cannot_load_is_not_spawned(monkeypatch, harness):
+    monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+    monkeypatch.setattr(anthus, "AgentLoader", _UnavailableLoader)
+
+    _run("issue", "ent_i9", {"repository": REPO, "github_number": 91, "labels": []})
+
+    assert harness["spawned"] == []
+    assert anthus._gate_states.get("ent_i9", {}).get("pm") is None or (
+        anthus._gate_states["ent_i9"]["pm"].status != "dispatched"
+    ), "the gate must stay ready so a later pass dispatches it"
+
+
+def test_a_gate_owner_with_no_definition_at_all_is_still_spawned_on_its_skill(monkeypatch, harness):
+    """Neotoma answered and has none: the spawn runs on the repo's SKILL.md, as before."""
+    monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+
+    class _NoDefinition(_UnavailableLoader):
+        code = "not_found"
+
+    monkeypatch.setattr(anthus, "AgentLoader", _NoDefinition)
+
+    _run("issue", "ent_i10", {"repository": REPO, "github_number": 92, "labels": []})
+
+    assert harness["spawned"] == ["ent_i10"]

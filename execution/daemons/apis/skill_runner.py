@@ -63,7 +63,7 @@ from lib.credential_scrub import (  # noqa: E402
     AGENT_CHILD_MARKER_ENV,
     is_generation_credential,
 )
-from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
+from lib.daemon_runtime import AgentDefinition, AgentDefinitionUnavailable, AgentLoader  # noqa: E402
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
@@ -559,9 +559,19 @@ _agent_def_cache: dict[str, AgentDefinition] = {}
 
 
 def _load_agent_def(role: str) -> AgentDefinition:
-    """Load (and cache) an AgentDefinition for the given role name."""
+    """Load (and cache) an AgentDefinition for the given role name.
+
+    Raises ``AgentDefinitionUnavailable`` when the definition cannot be loaded
+    (after the loader's short retry). A failure is never cached and never replaced
+    by a stand-in: the next dispatch asks Neotoma again.
+
+    ``allow_undefined=True`` is this dispatcher's explicit opt-in for a ROLE that
+    has no definition at all (Neotoma answered "no such definition"): it runs
+    degraded on its SKILL.md and is reported once per role (see the degraded
+    branch of ``_run_skill_once``). It does not cover a failed load.
+    """
     if role not in _agent_def_cache:
-        _agent_def_cache[role] = AgentLoader(role).load()
+        _agent_def_cache[role] = AgentLoader(role).load(allow_undefined=True)
     return _agent_def_cache[role]
 
 
@@ -1424,12 +1434,23 @@ class SkillResult:
     # (an uncertain launch, a lost wait, or a missing result record). An
     # unknown outcome is never a success and is never replayed locally.
     remote_outcome_unknown: bool = False
+    # The role's agent_definition could not be loaded, so NOTHING was dispatched.
+    # A repair state: not a success, not a provider capacity limit. It ends the
+    # whole dispatch (no failover to another provider, no cooldown), because every
+    # provider would hit the same missing definition; the task is retried later.
+    definition_unavailable: bool = False
     remote_run_id: str = ""
     remote_machine_state: str = ""
     # A Fly run is not gated by the Mac's usage reading (operator ruling
     # 2026-10-15). When that reading WOULD have refused this provider
     # locally, what it said; empty when it would have allowed it.
     usage_gate_exempted: str = ""
+
+
+# Leads the error of a dispatch refused because the role's agent_definition could
+# not be loaded. Fixed text: callers and tests match on it, and it carries no
+# response content.
+DEFINITION_UNAVAILABLE_PREFIX = "agent_definition unavailable"
 
 
 class _LocalSpawnError(Exception):
@@ -2395,7 +2416,18 @@ async def _run_skill_once(
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
-    agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    try:
+        agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    except AgentDefinitionUnavailable as exc:
+        msg = (
+            f"{DEFINITION_UNAVAILABLE_PREFIX}: {exc} — nothing was dispatched; "
+            "repair the load, the task is retried"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(
+            skill, False, None, "", "", error=msg, provider=provider,
+            definition_unavailable=True,
+        )
 
     binary = _provider_binaries().get(provider)
     if binary is None:
@@ -4252,6 +4284,12 @@ async def _run_provider_attempts(
         # its text: no cooldown, no failover to another provider, no retry,
         # even when an infrastructure message resembles a provider failure.
         if result.remote_outcome_unknown:
+            return result
+        # The role's definition could not be loaded: nothing ran, and every other
+        # provider would hit the same failure. Ends the dispatch BEFORE any
+        # classification of its text, so it is never read as provider capacity and
+        # never cools a provider down.
+        if result.definition_unavailable:
             return result
         # _run_skill_once carries an explicit delivery-only signal only after
         # independently excluding provider diagnostics from stderr. Preserve

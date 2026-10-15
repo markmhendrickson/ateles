@@ -41,7 +41,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
+    AgentDefinitionUnavailable,
     AgentLoader,
+    load_agent_definition_or_exit,
     enforce_status_or_exit,
     NeotomaEvent,
     SSEClient,
@@ -284,17 +286,39 @@ async def _orchestrate_workflow_for(event) -> None:
             f"[{DAEMON_NAME}] dispatch gate {gate.gate_name} → {gate.owner_agent} "
             f"on {event.entity_id}"
         )
+        # Pin the exact agent_definition version at dispatch time (ateles#22). A
+        # definition that cannot be LOADED right now (a timeout, a server error)
+        # refuses this dispatch: the gate stays ready and is dispatched again on a
+        # later pass. The spawn itself runs on the repo's SKILL.md, so a role that
+        # simply has no definition (Neotoma answered "none") is still pinned
+        # empty and spawned, as before; that case never involves a stand-in.
+        try:
+            gate_agent_def = await asyncio.to_thread(
+                AgentLoader(gate.owner_agent).load
+            )
+        except AgentDefinitionUnavailable as exc:
+            if exc.transient:
+                log.error(
+                    f"[{DAEMON_NAME}] gate {gate.gate_name} → {gate.owner_agent} "
+                    f"NOT dispatched on {event.entity_id}: {exc}"
+                )
+                continue
+            log.warning(
+                f"[{DAEMON_NAME}] {gate.owner_agent} has no agent_definition; "
+                "dispatching on its SKILL.md with an empty definition pin"
+            )
+            gate_agent_def = None
         state[gate.gate_name].status = "dispatched"
-        # Pin the exact agent_definition version at dispatch time (ateles#22).
-        gate_agent_def = AgentLoader(gate.owner_agent).load()
         try:
             await participation.record_dispatched(
                 work_entity_id=event.entity_id,
                 workflow_definition_id=wf.entity_id,
                 gate_name=gate.gate_name,
                 agent=gate.owner_agent,
-                agent_definition_ref=gate_agent_def.entity_id,
-                agent_definition_observation_id=gate_agent_def.last_observation_id,
+                agent_definition_ref=gate_agent_def.entity_id if gate_agent_def else "",
+                agent_definition_observation_id=(
+                    gate_agent_def.last_observation_id if gate_agent_def else ""
+                ),
             )
         except participation.ParticipationWriteFailed as exc:
             # The dispatch bookkeeping failed to land. Spawn anyway — the agent
@@ -776,7 +800,7 @@ async def main() -> None:
     log.info(f"[{DAEMON_NAME}] Starting up...")
 
     # 1. Load agent_definition from Neotoma
-    agent_def = AgentLoader(DAEMON_NAME).load()
+    agent_def = load_agent_definition_or_exit(DAEMON_NAME)
     log.info(
         f"[{DAEMON_NAME}] agent_definition: status={agent_def.status} "
         f"grant={agent_def.agent_grant} sub={agent_def.aauth_sub}"

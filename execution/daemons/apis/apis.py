@@ -230,7 +230,7 @@ from checkpoint_denial_store import (  # noqa: E402
 )
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
-    AgentLoader,
+    load_agent_definition_or_exit,
     enforce_status_or_exit,
     append_turn,
     assess_readiness,
@@ -4008,7 +4008,7 @@ async def main() -> None:
     )
 
     # 1. Load agent_definition from Neotoma
-    agent_def = AgentLoader(DAEMON_NAME).load()
+    agent_def = load_agent_definition_or_exit(DAEMON_NAME)
     log.info(
         f"[{DAEMON_NAME}] agent_definition: status={agent_def.status} "
         f"grant={agent_def.agent_grant} sub={agent_def.aauth_sub}"

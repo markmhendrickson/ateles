@@ -92,7 +92,7 @@ def test_stub_status_is_undefined_not_active():
     On origin/main `_stub()` returned status="active" with tool_allowlist="*",
     so a daemon with NO agent_definition looked fully configured in logs.
     """
-    stub = AgentLoader("nonexistent-agent")._stub()
+    stub = AgentLoader("nonexistent-agent")._undefined_definition("not_found")
     assert stub.status == UNDEFINED_STATUS
     assert stub.status != "active"
     assert evaluate_status(stub.status)[0] is StatusAction.WARN

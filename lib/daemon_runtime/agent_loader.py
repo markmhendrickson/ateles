@@ -5,13 +5,19 @@ Each T3 daemon calls AgentLoader(name).load() at startup to get its
 configuration from Neotoma. No config files. Updating an agent's prompt
 or tool_allowlist is a Neotoma correct() call — no code commit.
 
-If Neotoma is unreachable the loader returns a STUB definition rather than
-raising, so a daemon does not crash on a transient outage. A stub is a FAILURE,
-not a degraded success: it carries an empty ``prompt_markdown`` and a wildcard
-``tool_allowlist``, so an agent dispatched on one runs with no role instructions
-and unrestricted tools. Every stub is logged at ERROR and flagged
-``is_stub=True`` with a ``load_error`` reason. Callers MUST check ``is_stub``
-before treating a definition as loaded.
+A definition that cannot be loaded FAILS CLOSED. ``AgentLoader.load()`` retries a
+transient failure briefly (``LOAD_BACKOFFS_S``, capped by ``LOAD_TOTAL_CAP_S``) and,
+if it still cannot load, raises ``AgentDefinitionUnavailable`` with a fixed reason
+code and no response text. It never returns a stand-in definition: an agent
+dispatched on one would run with an empty ``prompt_markdown`` and a wildcard
+``tool_allowlist`` (no role instructions, unrestricted tools), and a daemon would
+skip the status check that decides whether it may run at all.
+
+The one narrow exception is explicit. A caller that runs a role with no definition
+ON PURPOSE passes ``allow_undefined=True``; it then receives the "undefined"
+definition (``is_stub=True``) ONLY when Neotoma answered and has no such
+definition (``not_found``). A transport failure, a timeout or a server error can
+never produce it, with or without the opt-in.
 
 Status enforcement (ateles#562). ``agent_definition.status`` used to be read,
 logged, and then ignored — setting an agent to ``retired`` had no runtime
@@ -38,6 +44,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -418,6 +425,66 @@ WARNING_STATUSES = frozenset({"planned", "proposed", "draft"})
 UNDEFINED_STATUS = "undefined"
 
 
+# A definition that cannot be loaded right now is retried briefly, then refused.
+# Short backoff (0.5 s, then 1.5 s) and a wall-clock cap: the load runs on the
+# dispatch path, so it must end. Reason codes that are retried are the ones that say
+# "the request did not get a usable answer"; a definite answer (not found, a 4xx) is
+# final at once.
+LOAD_BACKOFFS_S = (0.5, 1.5)
+LOAD_TOTAL_CAP_S = 25.0
+_RETRYABLE_LOAD_CODES = frozenset(
+    {"timeout", "transport_error", "server_error", "throttled"}
+)
+NOT_FOUND = "not_found"
+
+_monotonic = time.monotonic
+_sleep = time.sleep
+
+
+class AgentDefinitionUnavailable(RuntimeError):
+    """An agent_definition could not be loaded. The caller must NOT run the agent.
+
+    ``code`` is one of a fixed set (timeout, transport_error, server_error,
+    throttled, rejected, not_found, bad_response, unexpected). The message
+    carries the agent name, the code and the attempt count and nothing from the
+    response, the request or the underlying exception.
+    """
+
+    def __init__(self, agent_name: str, code: str, attempts: int) -> None:
+        self.agent_name = agent_name
+        self.code = code
+        self.attempts = attempts
+        super().__init__(
+            f"agent_definition for {agent_name!r} is unavailable "
+            f"({code}, {attempts} attempt(s)); the agent was not run"
+        )
+
+    @property
+    def transient(self) -> bool:
+        """True when a later attempt may succeed (everything except a definite 'no such definition')."""
+        return self.code != NOT_FOUND
+
+
+def load_failure_code(exc: BaseException) -> str:
+    """Map a load exception to a fixed reason code. Never includes exception text."""
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status == 404:
+            return NOT_FOUND
+        if status == 429:
+            return "throttled"
+        if status >= 500:
+            return "server_error"
+        return "rejected"
+    if isinstance(exc, httpx.TransportError):
+        return "transport_error"
+    if isinstance(exc, ValueError):  # includes json.JSONDecodeError
+        return "bad_response"
+    return "unexpected"
+
+
 def evaluate_status(status: str) -> tuple[StatusAction, str]:
     """Map an agent_definition.status to an action and a human-readable reason.
 
@@ -436,7 +503,7 @@ def evaluate_status(status: str) -> tuple[StatusAction, str]:
     if s == UNDEFINED_STATUS or not s:
         return (
             StatusAction.WARN,
-            "no agent_definition could be loaded (running on a stub); the "
+            "Neotoma has no agent_definition for this agent (explicit opt-in); the "
             "agent is unregistered and its tool allowlist is unscoped",
         )
     if s in WARNING_STATUSES:
@@ -471,6 +538,27 @@ def enforce_status_or_exit(agent_def: "AgentDefinition", daemon_name: str) -> No
         log.warning(f"[{daemon_name}] Status check: {reason}")
 
 
+def load_agent_definition_or_exit(daemon_name: str) -> "AgentDefinition":
+    """Load a daemon's OWN definition at startup; exit non-zero if it cannot be loaded.
+
+    The status check (``enforce_status_or_exit``) is what stops a retired agent
+    from running, so a daemon that could not read its definition must not carry on
+    as if the check had passed. Exit is non-zero, like the revoked-grant and
+    refusing-status cases, so the service manager restarts it. A daemon that is
+    simply not registered (Neotoma answered, no definition) keeps running with a
+    WARN, as before: that opt-in is narrow and never covers a failed load.
+    """
+    try:
+        return AgentLoader(daemon_name).load(allow_undefined=True)
+    except AgentDefinitionUnavailable as exc:
+        log.error(
+            f"[{daemon_name}] Refusing to start: agent_definition unavailable "
+            f"({exc.code}, {exc.attempts} attempt(s)). The status check could not "
+            "run. Exiting so the service manager restarts the daemon."
+        )
+        sys.exit(1)
+
+
 @dataclass
 class AgentDefinition:
     """Snapshot of an agent_definition entity from Neotoma."""
@@ -491,16 +579,13 @@ class AgentDefinition:
     raw: dict = field(default_factory=dict)
     # Observation ID that produced the current snapshot (for dispatch pinning, ateles#22)
     last_observation_id: str = ""
-    # True when this definition is the fallback stub rather than a real Neotoma
-    # load — i.e. the load FAILED. A stub carries prompt_markdown="" and
-    # tool_allowlist="*", so a caller that treats it as a definition dispatches
-    # an agent with NO prompt and UNRESTRICTED tools while reporting success.
-    # Callers MUST branch on this rather than assume load() succeeded.
+    # True only for the "undefined" definition a caller explicitly opted into
+    # (``load(allow_undefined=True)``) when Neotoma answered and has no definition
+    # for this agent. It carries prompt_markdown="" and tool_allowlist="*", so
+    # such a caller must treat it as "no definition", never as a loaded one. A
+    # FAILED load never produces it: that raises ``AgentDefinitionUnavailable``.
     is_stub: bool = False
-    # Why the load failed (transport error, 404, no matching entity). Empty on
-    # a successful load. Distinguishes "Neotoma said no rows" from "the request
-    # never succeeded" — the same distinction execution/mcp/ateles/server.py
-    # records via _last_transport_error.
+    # Why there is no definition ("not_found"); empty on a real load.
     load_error: str = ""
 
     @property
@@ -556,32 +641,77 @@ class AgentLoader:
     Priority of lookup:
       1. AGENT_DEFINITION_ID env var (e.g. MONEDULA_AGENT_DEFINITION_ID)
       2. Search by name field in agent_definition entities
-      3. Return a stub AgentDefinition if Neotoma is unreachable
+
+    A load that cannot complete raises ``AgentDefinitionUnavailable`` (after a
+    short bounded retry for a transient failure). There is no stand-in definition.
     """
 
     def __init__(self, agent_name: str) -> None:
         self.agent_name = agent_name.lower()
         self._prefix = agent_name.upper()
 
-    def load(self) -> AgentDefinition:
+    def load(self, *, allow_undefined: bool = False) -> AgentDefinition:
         """
-        Load agent_definition from Neotoma.
-        Returns a stub AgentDefinition if Neotoma is unavailable.
+        Load agent_definition from Neotoma, or raise ``AgentDefinitionUnavailable``.
+
+        A transient failure (timeout, transport error, 5xx, 429) is retried with
+        the short backoff in ``LOAD_BACKOFFS_S`` inside ``LOAD_TOTAL_CAP_S``; any
+        other failure is final at once. ``allow_undefined=True`` is the explicit,
+        narrow opt-in for a caller that runs this agent without a definition on
+        purpose: it turns ONLY a definite ``not_found`` into the "undefined"
+        definition and never a transient failure.
         """
         if not NEOTOMA_BEARER_TOKEN:
             # Open-mode Neotoma instances accept unauthenticated reads. Proceed
-            # without a token rather than falling back to the stub definition.
+            # without a token.
             log.info(
                 f"[{self.agent_name}] NEOTOMA_BEARER_TOKEN not set — "
                 "loading agent_definition without auth (open-mode Neotoma)"
             )
 
-        # Try explicit entity ID first
+        try:
+            return self._load_with_retry()
+        except AgentDefinitionUnavailable as exc:
+            if allow_undefined and exc.code == NOT_FOUND:
+                return self._undefined_definition(exc.code)
+            log.error(
+                f"[{self.agent_name}] agent_definition load FAILED "
+                f"({exc.code}, {exc.attempts} attempt(s)) — refusing: no stand-in "
+                "definition, no wildcard tools, no empty prompt."
+            )
+            raise
+
+    def _load_with_retry(self) -> AgentDefinition:
+        started = _monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return self._load_once()
+            except AgentDefinitionUnavailable:
+                raise
+            except Exception as exc:  # noqa: BLE001 — classified into a fixed code
+                code = load_failure_code(exc)
+                retries_done = attempt - 1
+                if code not in _RETRYABLE_LOAD_CODES or retries_done >= len(LOAD_BACKOFFS_S):
+                    raise AgentDefinitionUnavailable(
+                        self.agent_name, code, attempt
+                    ) from None
+                delay = LOAD_BACKOFFS_S[retries_done]
+                if _monotonic() - started + delay > LOAD_TOTAL_CAP_S:
+                    raise AgentDefinitionUnavailable(
+                        self.agent_name, code, attempt
+                    ) from None
+                log.warning(
+                    f"[{self.agent_name}] agent_definition load attempt {attempt} "
+                    f"failed ({code}) — retrying in {delay:.1f}s"
+                )
+                _sleep(delay)
+
+    def _load_once(self) -> AgentDefinition:
         explicit_id = os.environ.get(f"{self._prefix}_AGENT_DEFINITION_ID", "")
         if explicit_id:
             return self._load_by_id(explicit_id)
-
-        # Fall back to name search
         return self._load_by_name()
 
     def _neotoma(self, method: str, url: str, body: "dict | None" = None) -> dict:
@@ -614,13 +744,8 @@ class AgentLoader:
 
     def _load_by_id(self, entity_id: str) -> AgentDefinition:
         url = f"{NEOTOMA_BASE_URL}/entities/{entity_id}"
-        try:
-            data = self._neotoma("GET", url)
-            return self._parse(entity_id, data)
-        except Exception as exc:
-            return self._stub(
-                f"GET /entities/{entity_id} failed: {type(exc).__name__}: {exc}"
-            )
+        data = self._neotoma("GET", url)
+        return self._parse(entity_id, data)
 
     def _load_by_name(self) -> AgentDefinition:
         """Search for agent_definition by name field via POST /entities/query.
@@ -628,6 +753,7 @@ class AgentLoader:
         GET /entities does not exist on local Neotoma (404); /entities/query is
         the canonical list route (same fix applied to the Anthus orchestrator in
         PR #58). Its response nests the field dict as entity.snapshot.snapshot.
+        Raises on any failure; a 200 with no matching name is ``not_found``.
         """
         url = f"{NEOTOMA_BASE_URL}/entities/query"
         body = {
@@ -636,27 +762,19 @@ class AgentLoader:
             "limit": 5,
             "include_snapshots": True,
         }
-        try:
-            data = self._neotoma("POST", url, body)
-            entities = data.get("entities", [])
-            for ent in entities:
-                # Unwrap the doubly-nested snapshot to the flat field dict.
-                outer = ent.get("snapshot") or {}
-                snap = outer.get("snapshot", outer)
-                if str(snap.get("name", "")).lower() == self.agent_name:
-                    log.info(
-                        f"[{self.agent_name}] Loaded agent_definition "
-                        f"{ent['entity_id']} from Neotoma"
-                    )
-                    return self._parse(ent["entity_id"], {"snapshot": snap})
-            return self._stub(
-                f"no agent_definition named {self.agent_name!r} in "
-                f"{len(entities)} result(s) from POST /entities/query"
-            )
-        except Exception as exc:
-            return self._stub(
-                f"POST /entities/query failed: {type(exc).__name__}: {exc}"
-            )
+        data = self._neotoma("POST", url, body)
+        entities = data.get("entities", [])
+        for ent in entities:
+            # Unwrap the doubly-nested snapshot to the flat field dict.
+            outer = ent.get("snapshot") or {}
+            snap = outer.get("snapshot", outer)
+            if str(snap.get("name", "")).lower() == self.agent_name:
+                log.info(
+                    f"[{self.agent_name}] Loaded agent_definition "
+                    f"{ent['entity_id']} from Neotoma"
+                )
+                return self._parse(ent["entity_id"], {"snapshot": snap})
+        raise AgentDefinitionUnavailable(self.agent_name, NOT_FOUND, 1)
 
     def _parse(self, entity_id: str, data: dict) -> AgentDefinition:
         snap = data.get("snapshot") or data.get("entity", {}).get("snapshot", {})
@@ -684,25 +802,20 @@ class AgentLoader:
             last_observation_id=str(last_obs_id) if last_obs_id else "",
         )
 
-    def _stub(self, reason: str = "unknown") -> AgentDefinition:
-        """Fallback definition for a FAILED load — never a successful one.
+    def _undefined_definition(self, reason: str) -> AgentDefinition:
+        """The explicit opt-in result when Neotoma has NO definition for this agent.
 
-        A stub has an EMPTY prompt_markdown and a WILDCARD tool_allowlist. An
-        agent dispatched on one runs with no role instructions and unrestricted
-        tools. That must never present as a normal load, so the stub is logged
-        at ERROR and marked ``is_stub`` with the failure reason attached for the
-        caller to branch on.
+        Reached only through ``load(allow_undefined=True)`` and only for a definite
+        ``not_found``; a failed load raises instead. It has an EMPTY
+        prompt_markdown and a WILDCARD tool_allowlist, so it is logged at ERROR
+        and marked ``is_stub`` for the caller to branch on.
 
-        Its status is UNDEFINED_STATUS, not "active" (ateles#562). A stub is an
-        absence of information; reporting it as active made an unregistered
-        daemon indistinguishable from a configured one in logs and in every
-        downstream status check. UNDEFINED_STATUS WARNs rather than refusing, so
-        a transient Neotoma outage still cannot invent an outage of its own.
+        Its status is UNDEFINED_STATUS, not "active" (ateles#562): an absence of
+        information must not look like a configured agent.
         """
         log.error(
-            f"[{self.agent_name}] agent_definition load FAILED ({reason}) — "
-            "falling back to a STUB with an EMPTY prompt and wildcard tools. "
-            "Any agent dispatched on this definition has no role instructions."
+            f"[{self.agent_name}] no agent_definition exists ({reason}) — running "
+            "WITHOUT one by explicit opt-in: empty prompt, wildcard tools."
         )
         return AgentDefinition(
             name=self.agent_name,

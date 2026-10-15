@@ -95,10 +95,12 @@ from .agent_loader import (
     UNDEFINED_STATUS,
     WARNING_STATUSES,
     AgentDefinition,
+    AgentDefinitionUnavailable,
     AgentLoader,
     StatusAction,
     enforce_status_or_exit,
     evaluate_status,
+    load_agent_definition_or_exit,
 )
 from .drift import (
     DriftCluster,
@@ -191,6 +193,8 @@ from .task_lifecycle import (
 __all__ = [
     "AgentLoader",
     "AgentDefinition",
+    "AgentDefinitionUnavailable",
+    "load_agent_definition_or_exit",
     "StatusAction",
     "REFUSING_STATUSES",
     "WARNING_STATUSES",
