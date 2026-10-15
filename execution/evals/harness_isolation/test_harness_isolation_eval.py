@@ -76,4 +76,27 @@ def test_the_scenario_set_covers_the_required_cases():
             "cursor_missing_role_token_is_refused_before_launch",
             "invalid_neotoma_endpoint_is_refused_before_launch",
             "cursor_project_mcp_config_refuses_the_dispatch",
-            "fly_bound_dispatch_builds_no_local_home"} <= ids
+            "fly_bound_dispatch_builds_no_local_home",
+            "codex_malformed_bracketed_host_is_refused_before_launch",
+            "cursor_non_numeric_port_is_refused_before_launch",
+            "codex_out_of_range_port_is_refused_before_launch",
+            "cursor_zero_port_is_refused_before_launch",
+            "malformed_endpoint_fails_over_and_keeps_every_repair",
+            "cursor_relative_workspace_resolves_to_one_absolute_path",
+            "codex_relative_workspace_resolves_to_one_absolute_path"} <= ids
+
+
+def test_the_judge_goes_red_when_the_child_gets_a_different_workspace(tmp_path, monkeypatch):
+    scenario = _by_id("cursor_relative_workspace_resolves_to_one_absolute_path")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    moved = dataclasses.replace(trace, child={**trace.child, "workspace_flag_value": "ws",
+                                              "project_mcp": True})
+    assert len(runner.judge(scenario, moved)) >= 2
+
+
+def test_the_judge_goes_red_when_a_refused_value_is_echoed(tmp_path, monkeypatch):
+    scenario = _by_id("cursor_non_numeric_port_is_refused_before_launch")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    echoed = dataclasses.replace(trace, output_text=trace.output_text + " neotoma.eval.invalid:bad",
+                                 envelope={**trace.envelope, "cooled_until": "soon"})
+    assert len(runner.judge(scenario, echoed)) >= 2

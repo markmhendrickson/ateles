@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -488,8 +489,6 @@ def _role_neotoma_endpoint(role: str) -> tuple[str, str]:
     Neotoma is a hard dependency for such a role (failure_posture): a missing
     own token or an invalid endpoint refuses the launch (``IsolationRefusal``)
     rather than running without memory. The shared bearer is never used."""
-    from urllib.parse import urlsplit
-
     name = neotoma_token_env_name(role)
     token = os.environ.get(name, "").strip()
     if not token:
@@ -497,13 +496,47 @@ def _role_neotoma_endpoint(role: str) -> tuple[str, str]:
             f"role {role!r} is granted Neotoma tools but has no Neotoma token of its own "
             f"({name}); the operator's bearer is never used", setting=name)
     base = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
-    parts = urlsplit(base)
-    if (parts.scheme != "https" or not parts.hostname or "@" in parts.netloc
-            or parts.query or parts.fragment or any(c.isspace() for c in base)):  # fmt: skip
+    if not _valid_https_endpoint(base):
         raise IsolationRefusal(
             f"role {role!r} is granted Neotoma tools but NEOTOMA_BASE_URL is not a valid "
             "https endpoint", setting="NEOTOMA_BASE_URL")
     return f"{base}/mcp", token
+
+
+_HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_ENDPOINT_AUTHORITY = re.compile(
+    rf"(?:\[(?P<ipv6>[0-9A-Fa-f:.]+)\]|(?P<host>{_HOST_LABEL}(?:\.{_HOST_LABEL})*\.?))"
+    r"(?::(?P<port>[0-9]{1,5}))?"
+)
+
+
+def _valid_https_endpoint(base: str) -> bool:
+    """True only for an ``https://host[:port][/path]`` URL whose authority and
+    port are both well formed. Every parse failure is a False, never an
+    exception, so a malformed value always reaches the caller as a refusal."""
+    from urllib.parse import urlsplit
+
+    if not base or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in base):
+        return False
+    try:
+        parts = urlsplit(base)
+        host = parts.hostname
+        port = parts.port  # raises ValueError for a non-numeric or out-of-range port
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not host or parts.query or parts.fragment:
+        return False
+    match = _ENDPOINT_AUTHORITY.fullmatch(parts.netloc)
+    if match is None:
+        return False
+    if match["ipv6"] is not None:
+        try:
+            ipaddress.IPv6Address(match["ipv6"])
+        except ValueError:
+            return False
+    if match["port"] is not None and not (port is not None and 1 <= port <= 65535):
+        return False
+    return True
 
 
 def _codex_carried_settings() -> dict[str, str]:
@@ -574,6 +607,27 @@ def cursor_project_mcp_files(workspace: str) -> list[str]:
             break
     return sorted(str(c / ".cursor" / "mcp.json") for c in candidates
                   if os.path.lexists(c / ".cursor" / "mcp.json"))  # fmt: skip
+
+
+def resolve_dispatch_workspace(path: str) -> str:
+    """The one absolute, symlink-resolved workspace path a dispatch uses for
+    its guard, its child's cwd and its CLI workspace flag (the same
+    resolution ``cursor_project_mcp_files`` applies to the roots it walks)."""
+    return str(Path(path).resolve())
+
+
+def launch_workspace_mismatch(provider: str, cmd: list[str], workspace: str) -> str:
+    """Why the workspace the CLI will be told differs from *workspace* (the one
+    the guard checks), or ``""`` when they are the same absolute path."""
+    flag = {"cursor": "--workspace", "codex": "--cd"}.get(provider)
+    if flag is None or flag not in cmd:
+        return ""
+    i = cmd.index(flag)
+    value = cmd[i + 1] if i + 1 < len(cmd) else ""
+    if not os.path.isabs(value) or value != workspace:
+        return (f"the {provider} workspace flag does not name the checked workspace; "
+                "the launch is refused")  # fmt: skip
+    return ""
 
 
 def codex_config_overrides(cmd: list[str]) -> list[str]:
@@ -2655,6 +2709,12 @@ async def _run_skill_once(
             )
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
+    # The workspace is resolved to one absolute path here, before anything
+    # consumes it: the command's workspace flags, the git roots granted to
+    # the sandbox, the isolation guard and the child's cwd all use this value.
+    if cwd:
+        cwd = resolve_dispatch_workspace(cwd)
+
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
     agent_def = await asyncio.to_thread(_load_agent_def, _role)
 
@@ -3458,14 +3518,26 @@ async def _run_skill_once(
 
     async def _run_local() -> tuple[int | None, bytes, bytes]:
         nonlocal proc, _isolated_home
+        spawn_cwd = cwd
         if _isolation_wanted and _isolated_home is None:
-            workspace = cwd or os.getcwd()
+            # ONE absolute workspace (resolved above, or the daemon's own
+            # directory) is what the guard checks, the child's cwd and the
+            # CLI's workspace flag; nothing is resolved twice.
+            workspace = cwd or resolve_dispatch_workspace(os.getcwd())
+            spawn_cwd = workspace
             try:
                 overrides = codex_config_overrides(cmd) if provider == "codex" else []
                 if overrides:
                     raise IsolationRefusal(
                         f"the Codex command carries configuration overrides {overrides}",
                         setting="codex command")
+                if provider == "cursor" and "--workspace" not in cmd:
+                    # Cursor takes its project MCP file from --workspace: name
+                    # the workspace the guard checks, never an implicit one.
+                    cmd.extend(["--workspace", workspace])
+                mismatch = launch_workspace_mismatch(provider, cmd, workspace)
+                if mismatch:
+                    raise RuntimeError(mismatch)
                 _isolated_home = prepare_isolated_harness_home(
                     provider, role=_role, agent_tools=agent_def.tools, cwd=workspace,
                     env_extra=env_extra,
@@ -3474,10 +3546,12 @@ async def _run_skill_once(
                 raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})") from None
             except (OSError, RuntimeError) as exc:
                 raise _LocalIsolationRefused(str(exc)) from None
-            if provider == "cursor" and "--workspace" not in cmd:
-                # Cursor takes its project MCP file from --workspace: name the
-                # workspace the guard checked, never an implicit one.
-                cmd.extend(["--workspace", workspace])
+            except ValueError:
+                # Never let a malformed value escape as a generic error, and
+                # never echo it: it may be a credential-bearing setting.
+                raise _LocalIsolationRefused(
+                    "harness isolation could not be prepared from the current "
+                    "configuration") from None
             subprocess_env.update(_isolated_home.env)
             log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness "
                      f"home; MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
@@ -3488,7 +3562,7 @@ async def _run_skill_once(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=subprocess_env,
-                cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree
+                cwd=spawn_cwd,  # QE3: qa lens runs in a PR-branch worktree
                 start_new_session=True,
             )
         except OSError as exc:

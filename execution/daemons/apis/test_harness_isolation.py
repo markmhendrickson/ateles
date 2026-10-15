@@ -30,6 +30,16 @@ from lib.daemon_runtime import AgentDefinition  # noqa: E402
 
 ROLE_TOKEN = "lanius-own-token-canary-1234"
 SHARED_BEARER = "operator-shared-bearer-canary-5678"
+# Endpoint values whose authority or port is malformed: each must be a
+# value-free configuration repair, never an exception or an accepted URL.
+MALFORMED_AUTHORITIES = (
+    "https://[",
+    "https://[zz::1]",
+    "https://neotoma.example.test:bad",
+    "https://neotoma.example.test:0",
+    "https://neotoma.example.test:65536",
+    "https://neotoma.example.test:",
+)
 PERSONAL_SERVERS = ("neotoma-dev", "neotoma", "client-hosted", "typefully", "node_repl",
                     "computer-use", "ateles")  # fmt: skip
 
@@ -163,7 +173,8 @@ def test_a_granted_role_without_its_own_token_is_refused(operator_home, monkeypa
 @pytest.mark.parametrize("base", ["", "http://neotoma.example.test", "https://",
                                   "https://user@neotoma.example.test",
                                   "https://neotoma.example.test/ x", "neotoma.example.test",
-                                  "https://neotoma.example.test?x=1"])  # fmt: skip
+                                  "https://neotoma.example.test?x=1",
+                                  *MALFORMED_AUTHORITIES])  # fmt: skip
 @pytest.mark.parametrize("provider", ["codex", "cursor"])
 def test_a_granted_role_with_an_invalid_endpoint_is_refused(operator_home, monkeypatch,
                                                             provider, base):  # fmt: skip
@@ -171,6 +182,17 @@ def test_a_granted_role_with_an_invalid_endpoint_is_refused(operator_home, monke
     with pytest.raises(skill_runner.IsolationRefusal) as exc:
         _prepare(provider, ["*"])
     assert exc.value.setting == "NEOTOMA_BASE_URL" and ROLE_TOKEN not in str(exc.value)
+    if base:
+        assert base not in str(exc.value)  # the refusal never echoes the value
+
+
+@pytest.mark.parametrize("base", ["https://neotoma.example.test", "https://neotoma.example.test:8443",
+                                  "https://neotoma.example.test/api", "https://[2001:db8::1]:443",
+                                  "https://neotoma.example.test:65535"])  # fmt: skip
+def test_a_well_formed_https_endpoint_is_accepted(operator_home, monkeypatch, base):
+    monkeypatch.setenv("NEOTOMA_BASE_URL", base)
+    isolated = _prepare("cursor", ["*"])
+    _cleanup(isolated)
 
 
 @pytest.mark.parametrize("provider", ["codex", "cursor"])
@@ -410,3 +432,149 @@ def test_a_fly_bound_run_builds_no_local_home(operator_home, monkeypatch, tmp_pa
         "lanius", "task", provider="codex", role="lanius", runner="fly"))  # fmt: skip
     assert not result.ok and built == [] and not marker.exists()
     assert fly_runner.wants_fly("fly", None)
+
+
+# ── A malformed endpoint through the whole attempt path ─────────────────────
+
+
+@pytest.mark.parametrize("base", MALFORMED_AUTHORITIES)
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_malformed_endpoint_is_a_repair_on_the_pinned_path(operator_home, monkeypatch,
+                                                             tmp_path, provider, base):  # fmt: skip
+    marker, notified = _seam(monkeypatch, tmp_path)
+    monkeypatch.setenv("NEOTOMA_BASE_URL", base)
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                                provider=provider))  # fmt: skip
+    assert not result.ok and not marker.exists()  # no subprocess started
+    assert result.configuration_repair.startswith(f"{provider}: ")
+    assert "NEOTOMA_BASE_URL" in result.configuration_repair
+    assert "configuration repair needed" in result.error and not result.cooled_until
+    assert notified and "NEOTOMA_BASE_URL" in notified[0]["stderr"]
+    for text in (result.error, result.configuration_repair, notified[0]["stderr"]):
+        assert base not in text and ROLE_TOKEN not in text
+    import harness_router
+
+    assert provider not in harness_router.cooling_providers()
+
+
+@pytest.mark.parametrize("base", MALFORMED_AUTHORITIES)
+def test_a_malformed_endpoint_fails_over_and_keeps_both_repairs(operator_home, monkeypatch,
+                                                                tmp_path, base):  # fmt: skip
+    marker, notified = _seam(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("NEOTOMA_BASE_URL", base)
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius"))
+    assert not result.ok and not marker.exists()
+    assert set(result.attempted_providers) == {"codex", "cursor"}  # failed over
+    assert result.configuration_repair.count("(repair: NEOTOMA_BASE_URL)") == 2
+    assert "codex: " in result.configuration_repair and "; cursor: " in result.configuration_repair
+    assert "dispatch not launched: configuration repair needed" in result.error
+    assert base not in result.error and base not in notified[0]["stderr"]
+    import harness_router
+
+    assert not ({"codex", "cursor"} & set(harness_router.cooling_providers()))
+
+
+def test_an_unexpected_parse_error_is_still_a_value_free_repair(operator_home, monkeypatch,
+                                                                tmp_path):  # fmt: skip
+    """Defence in depth: should any isolation step raise ValueError, the launch
+    is still refused as a repair and the value is not echoed."""
+    marker, _ = _seam(monkeypatch, tmp_path)
+
+    def broken(*a, **k):
+        raise ValueError("secret-looking-value-9999")
+
+    monkeypatch.setattr(skill_runner, "prepare_isolated_harness_home", broken)
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                                provider="cursor"))  # fmt: skip
+    assert not result.ok and not marker.exists() and result.configuration_repair
+    assert "secret-looking-value-9999" not in result.error + result.configuration_repair
+
+
+# ── One workspace for the guard and the child ───────────────────────────────
+
+# A stand-in CLI that resolves its workspace flag the way a real CLI does,
+# against its OWN working directory, and reports the project root it would use.
+_WORKSPACE_PROBE = r'''#!{python}
+import json, os, subprocess, sys
+argv = sys.argv[1:]
+flag = "--workspace" if "--workspace" in argv else "--cd" if "--cd" in argv else None
+value = argv[argv.index(flag) + 1] if flag else None
+ws = os.path.realpath(value) if value else os.getcwd()
+top = subprocess.run(["git", "-C", ws, "rev-parse", "--show-toplevel"],
+                     capture_output=True, text=True)
+root = os.path.realpath(top.stdout.strip()) if top.returncode == 0 and top.stdout.strip() else ws
+print(json.dumps({{"flag_value": value, "workspace": ws, "cwd": os.getcwd(),
+                  "project_mcp": os.path.lexists(os.path.join(root, ".cursor", "mcp.json"))}}))
+'''
+
+
+def _probe_dispatch(monkeypatch, tmp_path, provider, cwd):
+    probe = tmp_path / "probe-cli"
+    probe.write_text(_WORKSPACE_PROBE.format(python=sys.executable), encoding="utf-8")
+    probe.chmod(0o755)
+    _seam(monkeypatch, tmp_path)
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", str(probe))
+    monkeypatch.setattr(skill_runner, "CURSOR_BIN", str(probe))
+    checked = []
+    real_prepare = skill_runner.prepare_isolated_harness_home
+
+    def recording_prepare(*a, **k):
+        checked.append(str(Path(k["cwd"]).resolve()))
+        return real_prepare(*a, **k)
+
+    monkeypatch.setattr(skill_runner, "prepare_isolated_harness_home", recording_prepare)
+    result = asyncio.run(skill_runner._run_skill_once(
+        "lanius", "task", provider=provider, role="lanius", cwd=cwd))  # fmt: skip
+    seen = json.loads(result.stdout.strip().splitlines()[-1]) if result.ok else None
+    return result, checked, seen
+
+
+@pytest.mark.parametrize("layout", ["clean", "config-at-the-checked-root",
+                                    "config-below-the-checked-root"])  # fmt: skip
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_relative_workspace_is_resolved_once_for_the_guard_and_the_child(
+        operator_home, monkeypatch, tmp_path, provider, layout):  # fmt: skip
+    """The workspace is resolved to one absolute path before the guard and the
+    spawn: whatever project root the child would use is the one checked."""
+    daemon_cwd = tmp_path / "daemon-cwd"
+    workspace = daemon_cwd / "ws"
+    (workspace / "ws").mkdir(parents=True)
+    if layout == "config-at-the-checked-root":
+        (workspace / ".cursor").mkdir()
+        (workspace / ".cursor" / "mcp.json").write_text("{}")
+    elif layout == "config-below-the-checked-root":
+        (workspace / "ws" / ".cursor").mkdir()
+        (workspace / "ws" / ".cursor" / "mcp.json").write_text("{}")
+    monkeypatch.chdir(daemon_cwd)
+    result, checked, seen = _probe_dispatch(monkeypatch, tmp_path, provider, "ws")
+    if provider == "cursor" and layout == "config-at-the-checked-root":
+        assert not result.ok and "NEOTOMA" not in result.configuration_repair
+        assert result.configuration_repair.endswith("/.cursor/mcp.json)")
+        return
+    assert result.ok, result.error
+    assert checked == [str(workspace.resolve())]
+    # The child is told, and runs in, exactly the workspace the guard checked.
+    assert seen["flag_value"] == checked[0] == seen["workspace"] == os.path.realpath(seen["cwd"])
+    if provider == "cursor":
+        assert seen["project_mcp"] is False  # nothing the guard did not check is loaded
+
+
+def test_a_symlinked_workspace_is_checked_and_launched_at_its_real_path(
+        operator_home, monkeypatch, tmp_path):  # fmt: skip
+    real = tmp_path / "real-ws"
+    real.mkdir()
+    (tmp_path / "link-ws").symlink_to(real)
+    result, checked, seen = _probe_dispatch(monkeypatch, tmp_path, "cursor",
+                                            str(tmp_path / "link-ws"))  # fmt: skip
+    assert result.ok
+    assert seen["flag_value"] == checked[0] == str(real.resolve())
+
+
+@pytest.mark.parametrize("provider,flag", [("cursor", "--workspace"), ("codex", "--cd")])
+def test_a_workspace_flag_that_differs_from_the_checked_one_refuses(provider, flag):
+    checked = "/abs/ws"
+    assert skill_runner.launch_workspace_mismatch(provider, ["x", flag, checked], checked) == ""
+    for other in ("ws", "./ws", "/abs/other"):
+        assert skill_runner.launch_workspace_mismatch(provider, ["x", flag, other], checked)
+    assert skill_runner.launch_workspace_mismatch(provider, ["x", flag], checked)

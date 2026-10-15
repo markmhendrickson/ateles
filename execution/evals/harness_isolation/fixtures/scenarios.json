@@ -4,63 +4,238 @@
       "id": "codex_child_sees_only_production_neotoma",
       "description": "A Codex role with a wildcard allowlist: the child's generated config declares only production Neotoma; none of the operator's personal servers, and the isolated home is removed afterwards.",
       "provider": "codex",
-      "expect": {"exit": 0, "spawned": true, "child_servers": ["mcpsrv_neotoma"], "homes_built": 1}
+      "expect": {
+        "exit": 0,
+        "spawned": true,
+        "child_servers": [
+          "mcpsrv_neotoma"
+        ],
+        "homes_built": 1
+      }
     },
     {
       "id": "cursor_child_sees_only_production_neotoma",
       "description": "The same for Cursor, which is also given an explicit --workspace (the directory its project configuration is checked for).",
       "provider": "cursor",
-      "expect": {"exit": 0, "spawned": true, "child_servers": ["mcpsrv_neotoma"], "homes_built": 1, "workspace_flag": true}
+      "expect": {
+        "exit": 0,
+        "spawned": true,
+        "child_servers": [
+          "mcpsrv_neotoma"
+        ],
+        "homes_built": 1,
+        "workspace_flag": true
+      }
     },
     {
       "id": "codex_restricted_grant_filters_the_tools",
       "description": "A role granted two Neotoma tools: the Codex child's only server exposes exactly those.",
       "provider": "codex",
       "tools": "mcp__mcpsrv_neotoma__retrieve_entities,mcp__mcpsrv_neotoma__store,Read",
-      "expect": {"exit": 0, "spawned": true, "child_servers": ["mcpsrv_neotoma"], "child_enabled_tools": {"mcpsrv_neotoma": ["retrieve_entities", "store"]}}
+      "expect": {
+        "exit": 0,
+        "spawned": true,
+        "child_servers": [
+          "mcpsrv_neotoma"
+        ],
+        "child_enabled_tools": {
+          "mcpsrv_neotoma": [
+            "retrieve_entities",
+            "store"
+          ]
+        }
+      }
     },
     {
       "id": "no_grant_role_launches_without_a_server",
       "description": "A role whose allowlist grants no Neotoma tools needs no token and launches with no MCP server at all.",
       "provider": "codex",
       "tools": "Read,Bash",
-      "settings": {"LANIUS_NEOTOMA_TOKEN": null},
-      "expect": {"exit": 0, "spawned": true, "child_servers": []}
+      "settings": {
+        "LANIUS_NEOTOMA_TOKEN": null
+      },
+      "expect": {
+        "exit": 0,
+        "spawned": true,
+        "child_servers": []
+      }
     },
     {
       "id": "codex_missing_role_token_is_refused_before_launch",
       "description": "A role granted Neotoma tools without a token of its own: no child starts, and the envelope names the setting to repair (never a value). The operator's bearer is never substituted.",
       "provider": "codex",
-      "settings": {"LANIUS_NEOTOMA_TOKEN": null},
-      "expect": {"exit": 1, "spawned": false, "repair_contains": "LANIUS_NEOTOMA_TOKEN"}
+      "settings": {
+        "LANIUS_NEOTOMA_TOKEN": null
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "LANIUS_NEOTOMA_TOKEN"
+      }
     },
     {
       "id": "cursor_missing_role_token_is_refused_before_launch",
       "description": "The same for Cursor.",
       "provider": "cursor",
-      "settings": {"LANIUS_NEOTOMA_TOKEN": null},
-      "expect": {"exit": 1, "spawned": false, "repair_contains": "LANIUS_NEOTOMA_TOKEN"}
+      "settings": {
+        "LANIUS_NEOTOMA_TOKEN": null
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "LANIUS_NEOTOMA_TOKEN"
+      }
     },
     {
       "id": "invalid_neotoma_endpoint_is_refused_before_launch",
       "description": "NEOTOMA_BASE_URL is not an https endpoint: no child starts and the envelope names it.",
       "provider": "cursor",
-      "settings": {"NEOTOMA_BASE_URL": "http://neotoma.eval.invalid"},
-      "expect": {"exit": 1, "spawned": false, "repair_contains": "NEOTOMA_BASE_URL"}
+      "settings": {
+        "NEOTOMA_BASE_URL": "http://neotoma.eval.invalid"
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "NEOTOMA_BASE_URL"
+      }
     },
     {
       "id": "cursor_project_mcp_config_refuses_the_dispatch",
       "description": "The workspace's project root carries its own Cursor MCP file, which Cursor would load for --workspace (here declaring a server under the allowed name). No child starts; the envelope names the file to repair.",
       "provider": "cursor",
       "project_cursor_config": "{\"mcpServers\": {\"mcpsrv_neotoma\": {\"url\": \"https://elsewhere.eval.invalid/mcp\"}}}",
-      "expect": {"exit": 1, "spawned": false, "repair_contains": ".cursor/mcp.json", "homes_built": 0}
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": ".cursor/mcp.json",
+        "homes_built": 0
+      }
     },
     {
       "id": "fly_bound_dispatch_builds_no_local_home",
       "description": "A dispatch forced to Fly (not configured here) is refused, and never builds a local isolated home or starts a local child.",
       "provider": "codex",
-      "args": ["--runner", "fly", "--github-delivery", "--repository", "owner/repo"],
-      "expect": {"exit": 1, "spawned": false, "homes_built": 0}
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "homes_built": 0
+      }
+    },
+    {
+      "id": "codex_malformed_bracketed_host_is_refused_before_launch",
+      "description": "NEOTOMA_BASE_URL has a malformed bracketed host: a value-free configuration repair, no child, no cooldown.",
+      "provider": "codex",
+      "settings": {
+        "NEOTOMA_BASE_URL": "https://["
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "NEOTOMA_BASE_URL",
+        "value_absent": "https://[",
+        "homes_built": 0
+      }
+    },
+    {
+      "id": "cursor_non_numeric_port_is_refused_before_launch",
+      "description": "NEOTOMA_BASE_URL has a non-numeric port: refused before launch, never accepted.",
+      "provider": "cursor",
+      "settings": {
+        "NEOTOMA_BASE_URL": "https://neotoma.eval.invalid:bad"
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "NEOTOMA_BASE_URL",
+        "value_absent": "neotoma.eval.invalid:bad",
+        "homes_built": 0
+      }
+    },
+    {
+      "id": "codex_out_of_range_port_is_refused_before_launch",
+      "description": "NEOTOMA_BASE_URL has a port above 65535: refused before launch.",
+      "provider": "codex",
+      "settings": {
+        "NEOTOMA_BASE_URL": "https://neotoma.eval.invalid:65536"
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "NEOTOMA_BASE_URL",
+        "value_absent": "neotoma.eval.invalid:65536",
+        "homes_built": 0
+      }
+    },
+    {
+      "id": "cursor_zero_port_is_refused_before_launch",
+      "description": "NEOTOMA_BASE_URL has port 0: refused before launch.",
+      "provider": "cursor",
+      "settings": {
+        "NEOTOMA_BASE_URL": "https://neotoma.eval.invalid:0"
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "NEOTOMA_BASE_URL",
+        "value_absent": "neotoma.eval.invalid:0",
+        "homes_built": 0
+      }
+    },
+    {
+      "id": "malformed_endpoint_fails_over_and_keeps_every_repair",
+      "description": "Unpinned, with Codex and Cursor eligible: each is refused as a repair, the dispatch fails over to the next, and both repairs reach the envelope and the notification.",
+      "provider": "codex",
+      "pin": false,
+      "settings": {
+        "APIS_HARNESS_PROVIDERS": "codex,cursor",
+        "NEOTOMA_BASE_URL": "https://neotoma.eval.invalid:bad"
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "NEOTOMA_BASE_URL",
+        "repairs_for": [
+          "codex",
+          "cursor"
+        ],
+        "value_absent": "neotoma.eval.invalid:bad"
+      }
+    },
+    {
+      "id": "cursor_relative_workspace_resolves_to_one_absolute_path",
+      "description": "A relative --cwd: the workspace is resolved to one absolute path before the guard and the spawn, so the Cursor child is told, and runs in, exactly the directory that was checked.",
+      "provider": "cursor",
+      "relative_workspace": true,
+      "expect": {
+        "exit": 0,
+        "spawned": true,
+        "child_servers": [
+          "mcpsrv_neotoma"
+        ],
+        "one_workspace": true,
+        "workspace_flag": true
+      }
+    },
+    {
+      "id": "codex_relative_workspace_resolves_to_one_absolute_path",
+      "description": "The same for Codex: its --cd and the child's cwd are the absolute directory that was checked.",
+      "provider": "codex",
+      "relative_workspace": true,
+      "expect": {
+        "exit": 0,
+        "spawned": true,
+        "child_servers": [
+          "mcpsrv_neotoma"
+        ],
+        "one_workspace": true
+      }
     }
   ]
 }

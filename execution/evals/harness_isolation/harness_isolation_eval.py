@@ -51,6 +51,8 @@ class Trace:
     homes_built: list = field(default_factory=list)
     homes_left: list = field(default_factory=list)
     output_text: str = ""
+    checked_workspaces: list = field(default_factory=list)
+    notifications: list = field(default_factory=list)
 
 
 # The stand-in CLI: reports the MCP servers its generated config declares.
@@ -58,7 +60,17 @@ _STAND_IN = r'''#!{python}
 import json, os, pathlib, sys, tomllib
 pathlib.Path({marker!r}).write_text("1")
 sys.stdin.read()
-report = {{"argv": sys.argv[1:]}}
+report = {{"argv": sys.argv[1:], "cwd": os.path.realpath(os.getcwd())}}
+# Resolve the workspace flag as a real CLI does (against the child's own cwd)
+# and note whether a project MCP file sits at the root it would use.
+import subprocess
+argv = sys.argv[1:]
+flag = "--workspace" if "--workspace" in argv else "--cd" if "--cd" in argv else None
+ws = os.path.realpath(argv[argv.index(flag) + 1]) if flag else os.path.realpath(os.getcwd())
+top = subprocess.run(["git", "-C", ws, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+root = os.path.realpath(top.stdout.strip()) if top.returncode == 0 and top.stdout.strip() else ws
+report["workspace_flag_value"] = argv[argv.index(flag) + 1] if flag else None
+report["project_mcp"] = os.path.lexists(os.path.join(root, ".cursor", "mcp.json"))
 codex_home = os.environ.get("CODEX_HOME", "")
 if codex_home and pathlib.Path(codex_home, "config.toml").is_file():
     cfg = tomllib.loads(pathlib.Path(codex_home, "config.toml").read_text())
@@ -120,14 +132,25 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         else:
             monkeypatch.setenv(name, value)
 
-    workspace = tmp_path / "repo"
-    workspace.mkdir()
-    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
-    if scenario.get("project_cursor_config"):
-        (workspace / ".cursor").mkdir()
-        (workspace / ".cursor" / "mcp.json").write_text(scenario["project_cursor_config"])
-    cwd = workspace / "sub"
-    cwd.mkdir()
+    if scenario.get("relative_workspace"):
+        # The daemon runs in one directory and is handed a RELATIVE workspace
+        # below it (not a git checkout). A Cursor MCP file sits one level
+        # further down, outside the workspace's own project root.
+        daemon_cwd = tmp_path / "daemon-cwd"
+        (daemon_cwd / "ws" / "ws" / ".cursor").mkdir(parents=True)
+        (daemon_cwd / "ws" / "ws" / ".cursor" / "mcp.json").write_text("{}")
+        monkeypatch.chdir(daemon_cwd)
+        cwd_arg = "ws"
+    else:
+        workspace = tmp_path / "repo"
+        workspace.mkdir()
+        subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+        if scenario.get("project_cursor_config"):
+            (workspace / ".cursor").mkdir()
+            (workspace / ".cursor" / "mcp.json").write_text(scenario["project_cursor_config"])
+        cwd = workspace / "sub"
+        cwd.mkdir()
+        cwd_arg = str(cwd)
 
     marker = tmp_path / "child-spawned"
     stand_in = tmp_path / f"{provider}-stand-in"
@@ -151,19 +174,31 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     harness_router.reset_state()
 
     built: list[Path] = []
+    checked: list[str] = []
     real_prepare = skill_runner.prepare_isolated_harness_home
 
     def recording_prepare(*args, **kwargs):  # observes; never changes the result
+        checked.append(str(Path(kwargs["cwd"]).resolve()) if kwargs.get("cwd") else "")
         isolated = real_prepare(*args, **kwargs)
         built.append(isolated.home)
         return isolated
+
+    notifications: list[dict] = []
+    real_notify = skill_runner.notify_dispatch_failure
+
+    def recording_notify(notifier, **kwargs):  # observes; never changes the result
+        notifications.append(kwargs)
+        return real_notify(notifier, **kwargs)
+
+    monkeypatch.setattr(skill_runner, "notify_dispatch_failure", recording_notify)
 
     monkeypatch.setattr(skill_runner, "prepare_isolated_harness_home", recording_prepare)
 
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = dispatch_role.main(["--role", ROLE, "--task", "Check the gates.", "--provider",
-                                   provider, "--cwd", str(cwd), "--json",
+        pin = ["--provider", provider] if scenario.get("pin", True) else []
+        code = dispatch_role.main(["--role", ROLE, "--task", "Check the gates.", *pin,
+                                   "--cwd", cwd_arg, "--json",
                                    *scenario.get("args", [])])  # fmt: skip
     try:
         envelope = json.loads(out.getvalue())
@@ -177,6 +212,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         exit_code=code, envelope=envelope, spawned=marker.exists(), child=child,
         homes_built=[str(h) for h in built], homes_left=[str(h) for h in built if h.exists()],
         output_text=out.getvalue() + err.getvalue(),
+        checked_workspaces=checked, notifications=notifications,
     )
 
 
@@ -196,8 +232,28 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         tools = (trace.child or {}).get("enabled_tools")
         if tools != e["child_enabled_tools"]:
             problems.append(f"the child's tool filter was {tools}")
-    if "repair_contains" in e and e["repair_contains"] not in str(env.get("configuration_repair", "")):
-        problems.append("the envelope does not name the configuration to repair")
+    if "repair_contains" in e:
+        if e["repair_contains"] not in str(env.get("configuration_repair", "")):
+            problems.append("the envelope does not name the configuration to repair")
+        if not any(e["repair_contains"] in str(n.get("stderr", "")) for n in trace.notifications):
+            problems.append("the notification does not name the configuration to repair")
+        if env.get("cooled_until"):
+            problems.append("a configuration repair was reported as a cooldown")
+    if "repairs_for" in e:
+        repair = str(env.get("configuration_repair", ""))
+        missing = [p for p in e["repairs_for"] if f"{p}: " not in repair]
+        if missing or sorted(env.get("attempted_providers", [])) != sorted(e["repairs_for"]):
+            problems.append(f"not every provider was attempted and kept its repair: {missing}")
+    if e.get("value_absent"):
+        everywhere = trace.output_text + json.dumps(trace.notifications)
+        if e["value_absent"] in everywhere:
+            problems.append("the refused setting's value appeared in the output")
+    if e.get("one_workspace"):
+        child = trace.child or {}
+        flag_value = child.get("workspace_flag_value")
+        if not (trace.checked_workspaces and flag_value == trace.checked_workspaces[0]
+                == child.get("cwd")):  # fmt: skip
+            problems.append("the child's workspace is not the one the guard checked")
     if "homes_built" in e and len(trace.homes_built) != e["homes_built"]:
         problems.append(f"{len(trace.homes_built)} isolated homes built, expected {e['homes_built']}")
     if "workspace_flag" in e and trace.child is not None:
@@ -208,6 +264,8 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
     for name in PERSONAL_SERVERS:
         if name in ((trace.child or {}).get("servers") or []):
             problems.append(f"the child saw the personal server {name!r}")
+    if (trace.child or {}).get("project_mcp") and scenario["provider"] == "cursor":
+        problems.append("the child's project root holds an MCP file the guard did not refuse")
     if trace.homes_left:
         problems.append("an isolated home was left behind")
     for label, value in (("role token", ROLE_TOKEN), ("shared bearer", SHARED_BEARER)):
