@@ -13,6 +13,9 @@ on:
       - "ateles/**"
       - ".claude/hooks/**"
       - "execution/daemons/apis/**"
+      # The Fly runner's own modules are tested from execution/daemons/apis/,
+      # so a change to them alone must re-run this lane.
+      - "deploy/fly-runner/**"
       - "execution/local_llm/**"
       - "execution/daemons/test_*.py"
       - "execution/daemons/cotinga/**"
