@@ -1324,6 +1324,154 @@ def revoke_job_github_token(token: str) -> None:
     _github_request("DELETE", "/installation/token", token)
 
 
+# ── Delivery token: one repository, contents and pull requests only ─────────
+#
+# A Fly job that delivers a branch and a pull request gets its own token from
+# the PR-opener App, requested with exactly these permissions for exactly one
+# repository, and checked against what GitHub actually granted. It is never
+# the read-class token above, never the swarm App's and never a PAT. GitHub
+# fixes an installation token's life at one hour; Apis revokes it when the job
+# ends, and a delivery whose run could outlive it stays on the Mac.
+
+DELIVERY_TOKEN_PERMISSIONS: dict[str, str] = {"contents": "write", "pull_requests": "write"}
+# GitHub adds read access to repository metadata to every installation token.
+DELIVERY_TOKEN_IMPLICIT_PERMISSIONS: dict[str, str] = {"metadata": "read"}
+# Time after the CLI for the runner's push and pull request steps.
+DELIVERY_RESERVE_SECONDS = 300
+# GitHub's fixed installation token life, and a margin for clock skew.
+GITHUB_TOKEN_LIFETIME_SECONDS = 3600
+TOKEN_EXPIRY_MARGIN_SECONDS = 60
+_REPOSITORY_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}", re.ASCII)
+
+
+@dataclass(frozen=True)
+class DeliveryToken:
+    token: str = field(repr=False)
+    expires_at: float
+    repository: str
+
+
+def delivery_run_seconds(timeout: float) -> float:
+    """How long a delivering job may run, start to hard deadline: the CLI's
+    timeout, the delivery steps after it and the usual deadline grace."""
+    return float(timeout) + DELIVERY_RESERVE_SECONDS + APIS_DEADLINE_GRACE_SECONDS
+
+
+def delivery_fits_token_life(timeout: float, expires_at: float, now: float) -> bool:
+    """True when the token outlives the job's hard deadline, with margin."""
+    return expires_at - now >= delivery_run_seconds(timeout) + TOKEN_EXPIRY_MARGIN_SECONDS
+
+
+def _delivery_repository(repository: str) -> str:
+    if not isinstance(repository, str) or not _REPOSITORY_RE.fullmatch(repository):
+        raise FlyIneligible("a delivery needs exactly one owner/name repository")
+    if repository.split("/", 1)[1] in (".", ".."):
+        raise FlyIneligible("a delivery needs exactly one owner/name repository")
+    return repository
+
+
+def check_delivery_token_response(payload: Any, repository: str, now: float) -> tuple[str, float]:
+    """``(token, expires_at)`` when GitHub granted exactly what a delivery asked
+    for; ``FlyIneligible`` naming the mismatch (never a value) otherwise."""
+    if not isinstance(payload, dict):
+        raise FlyIneligible("the delivery token response is not an object")
+    token = payload.get("token")
+    if not isinstance(token, str) or not token.strip():
+        raise FlyIneligible("the delivery token response carries no token")
+    granted = payload.get("permissions")
+    if not isinstance(granted, dict):
+        raise FlyIneligible("the delivery token response does not list its permissions")
+    expected = dict(DELIVERY_TOKEN_PERMISSIONS)
+    for name, level in DELIVERY_TOKEN_IMPLICIT_PERMISSIONS.items():
+        if name in granted:
+            expected[name] = level
+    if granted != expected:
+        extra = sorted(set(granted) - set(expected))
+        wrong = sorted(n for n in expected if granted.get(n) != expected[n])
+        raise FlyIneligible(
+            "the delivery token's permissions differ from the request"
+            + (f"; not requested: {extra}" if extra else "")
+            + (f"; missing or different: {wrong}" if wrong else ""))
+    if payload.get("repository_selection") != "selected":
+        raise FlyIneligible("the delivery token is not limited to selected repositories")
+    repos = payload.get("repositories")
+    names = [r.get("full_name") for r in repos if isinstance(r, dict)] if isinstance(repos, list) else []
+    if not isinstance(repos, list) or len(repos) != 1 or len(names) != 1 \
+            or not isinstance(names[0], str) or names[0].lower() != repository.lower():  # fmt: skip
+        raise FlyIneligible("the delivery token does not cover exactly the one repository")
+    raw = payload.get("expires_at")
+    try:
+        expires = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if expires.tzinfo is None:
+            raise ValueError
+        expires_at = expires.timestamp()
+    except (TypeError, ValueError):
+        raise FlyIneligible("the delivery token has no readable expiry") from None
+    if not math.isfinite(expires_at) or expires_at <= now:
+        raise FlyIneligible("the delivery token is already expired")
+    if expires_at - now > GITHUB_TOKEN_LIFETIME_SECONDS + TOKEN_EXPIRY_MARGIN_SECONDS:
+        raise FlyIneligible("the delivery token's expiry is later than an installation "
+                            "token can live")  # fmt: skip
+    return token, expires_at
+
+
+def mint_delivery_github_token(
+    repository: str,
+    *,
+    timeout: float,
+    clock: Callable[[], float] = time.time,
+    revoke: Callable[[str], None] | None = None,
+) -> DeliveryToken:
+    """A fresh PR-opener App token for one delivering job, or ``FlyIneligible``.
+
+    Refused before minting when the job could outlive any installation token;
+    after minting, the response is checked (permissions, one repository,
+    expiry) and a token that does not match is revoked before the refusal.
+    Never the read-class App, never a cached token, never a PAT."""
+    from lib import github_app_token as gat
+
+    repository = _delivery_repository(repository)
+    if not _finite_number(timeout, 1, MAX_JOB_TIMEOUT_SECONDS):
+        raise FlyIneligible("the delivery timeout is not a valid number of seconds")
+    if not delivery_fits_token_life(timeout, clock() + GITHUB_TOKEN_LIFETIME_SECONDS, clock()):
+        raise FlyIneligible(
+            f"a delivery with a {int(timeout)}s timeout could outlive its GitHub token "
+            f"({GITHUB_TOKEN_LIFETIME_SECONDS}s); it stays on the Mac")
+    prefix = gat.pr_opener_prefix()
+    if not gat.app_configured(prefix):
+        raise FlyIneligible(
+            f"the PR-opener App is not configured ({prefix}_ID and a private key); a "
+            "delivery never uses another App or a PAT")
+    try:
+        jwt = gat.mint_app_jwt(prefix)
+        installation = gat._resolve_installation_id(prefix, repository, lambda: jwt)
+        payload = _github_request(
+            "POST", f"/app/installations/{installation}/access_tokens", jwt,
+            {"repositories": [repository.split("/", 1)[1]],
+             "permissions": dict(DELIVERY_TOKEN_PERMISSIONS)},
+        )  # fmt: skip
+    except Exception as exc:  # noqa: BLE001 — the message carries no credential
+        raise FlyIneligible(f"the delivery token mint failed: {exc}") from None
+    revoke = revoke or revoke_job_github_token
+    try:
+        now = clock()
+        token, expires_at = check_delivery_token_response(payload, repository, now)
+        if not delivery_fits_token_life(timeout, expires_at, now):
+            raise FlyIneligible(
+                f"the delivery token expires before a {int(timeout)}s job would end; "
+                "it stays on the Mac")
+    except FlyIneligible:
+        minted = payload.get("token") if isinstance(payload, dict) else None
+        if isinstance(minted, str) and minted.strip():
+            try:
+                revoke(minted)
+            except Exception:  # noqa: BLE001
+                log.warning("[fly] a refused delivery token could not be revoked; it "
+                            "expires within the hour")  # fmt: skip
+        raise
+    return DeliveryToken(token=token, expires_at=expires_at, repository=repository)
+
+
 # ── Neotoma result record (read on the Mac with Apis's own access) ───────────
 
 
