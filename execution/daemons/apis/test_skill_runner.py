@@ -5199,10 +5199,11 @@ class TestGateOwnerToolDenyAcrossProviders:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_non_gate_codex_keeps_the_effective_codex_home(
+    def test_non_gate_codex_gets_an_isolated_home_with_the_effective_login(
         self, MockLoader, mock_write_harness, monkeypatch, tmp_path
     ) -> None:
-        """Ordinary Codex runs retain their ambient command/config behavior."""
+        """Ordinary Codex runs never use the operator's CODEX_HOME (its MCP
+        servers): they get an isolated home whose auth links to its login."""
         fake_def = _make_def(
             prompt_markdown="Role: Falco.",
             tool_allowlist="*",
@@ -5224,6 +5225,8 @@ class TestGateOwnerToolDenyAcrossProviders:
 
         async def fake_exec(*cmd, **kwargs):
             observed["codex_home"] = kwargs["env"]["CODEX_HOME"]
+            observed["auth_target"] = str(
+                (Path(kwargs["env"]["CODEX_HOME"]) / "auth.json").resolve())
             proc = MagicMock()
             proc.returncode = 0
 
@@ -5248,7 +5251,8 @@ class TestGateOwnerToolDenyAcrossProviders:
             )
 
         assert result.ok
-        assert observed["codex_home"] == str(source_home)
+        assert observed["codex_home"] != str(source_home)
+        assert observed["auth_target"] == str((source_home / "auth.json").resolve())
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")

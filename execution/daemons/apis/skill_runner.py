@@ -409,6 +409,195 @@ def _prepare_codex_gate_owner_config(
         raise
 
 
+# ── Isolated harness home for local Codex and Cursor dispatches ──────────────
+# A swarm child must not inherit the operator's personal harness
+# configuration: ~/.codex/config.toml and ~/.cursor/mcp.json declare MCP
+# servers for personal tools, a dev instance and a client's hosted instance.
+# Every local Codex and Cursor dispatch therefore runs with a generated,
+# per-dispatch home whose MCP servers are exactly the ones the role's tool
+# allowlist names: by default only the production Neotoma, reached over its
+# remote MCP endpoint with the ROLE's own token (never the operator's bearer).
+# Remote HTTP MCP is opened by the CLI itself, so no local stdio shim has to
+# start inside the dispatch sandbox. Only the CLI's own login capability is
+# carried over (Codex: a symlink to auth.json; Cursor: a link to the macOS
+# login keychain directory), plus Codex's non-secret model settings.
+
+HARNESS_ISOLATION_UNAVAILABLE = "harness isolation unavailable"
+# The child-only environment variable the isolated Codex config reads the
+# role's own Neotoma bearer from (the value never enters argv or a file).
+ROLE_NEOTOMA_BEARER_ENV = "ATELES_ROLE_NEOTOMA_TOKEN"
+# Non-secret Codex settings carried from the operator's config so the
+# default model behaves as before. Nothing else is copied.
+CODEX_CARRIED_SETTINGS = ("model", "model_reasoning_effort", "service_tier")
+ISOLATED_PROVIDERS = ("codex", "cursor")
+
+
+@dataclass(frozen=True)
+class IsolatedHarnessHome:
+    """A generated, verified harness home for one local dispatch."""
+
+    home: Path
+    config_path: Path
+    servers: tuple[str, ...]
+    env: dict[str, str]
+
+
+def allowed_mcp_servers(agent_tools: list[str]) -> dict[str, tuple[str, ...] | None]:
+    """The MCP servers a role's tool allowlist grants: ``{server: enabled tool
+    names, or None for the server's whole tool set}``. Only Neotoma can be
+    provided; a role with no Neotoma tools gets no server at all."""
+    if "*" in agent_tools or f"{CODEX_NEOTOMA_TOOL_PREFIX}*" in agent_tools:
+        return {CODEX_NEOTOMA_SERVER_ID: None}
+    tools = tuple(
+        t.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX)
+        for t in agent_tools if t.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+    )
+    return {CODEX_NEOTOMA_SERVER_ID: tools} if tools else {}
+
+
+def _role_neotoma_endpoint(role: str) -> tuple[str, str] | None:
+    """``(mcp url, role's own token)``, or None when the role has no token of
+    its own or no base URL is set. The shared daemon bearer is never used."""
+    token = os.environ.get(neotoma_token_env_name(role), "").strip()
+    base = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
+    if not token or not base.startswith("https://"):
+        return None
+    return f"{base}/mcp", token
+
+
+def _codex_carried_settings() -> dict[str, str]:
+    source = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "config.toml"
+    try:
+        with open(source, encoding="utf-8") as fh:
+            parsed = tomllib.loads(fh.read())
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return {k: parsed[k] for k in CODEX_CARRIED_SETTINGS
+            if k in parsed and isinstance(parsed[k], str)}  # fmt: skip
+
+
+def _isolated_codex_config_text(servers: dict[str, tuple[str, ...] | None], url: str) -> str:
+    lines = ['cli_auth_credentials_store = "file"']
+    for key, value in _codex_carried_settings().items():
+        lines.append(f"{key} = {json.dumps(value)}")
+    for server, enabled in servers.items():
+        lines += ["", f"[mcp_servers.{server}]", f"url = {json.dumps(url)}",
+                  f"bearer_token_env_var = {json.dumps(ROLE_NEOTOMA_BEARER_ENV)}",
+                  "required = true"]  # fmt: skip
+        if enabled is not None:
+            lines.append(f"enabled_tools = {json.dumps(list(enabled))}")
+    return "\n".join(lines) + "\n"
+
+
+def effective_mcp_servers(provider: str, config_path: Path) -> set[str]:
+    """The MCP server ids a generated harness config declares (read back)."""
+    with open(config_path, encoding="utf-8") as fh:
+        text = fh.read()
+    if provider == "codex":
+        parsed = tomllib.loads(text)
+        servers = parsed["mcp_servers"] if "mcp_servers" in parsed else {}
+    else:
+        parsed = json.loads(text)
+        servers = parsed["mcpServers"] if "mcpServers" in parsed else {}
+    if not isinstance(servers, dict):
+        raise RuntimeError("the generated MCP server table is not a table")
+    return set(servers)
+
+
+def _workspace_cursor_servers(cwd: str | None) -> set[str]:
+    """MCP servers a workspace's own ``.cursor/mcp.json`` would add."""
+    if not cwd:
+        return set()
+    path = Path(cwd) / ".cursor" / "mcp.json"
+    if not path.is_file():
+        return set()
+    try:
+        return effective_mcp_servers("cursor", path)
+    except (OSError, ValueError, RuntimeError):
+        return {"<unreadable workspace .cursor/mcp.json>"}
+
+
+def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list[str],
+                                  cwd: str | None,
+                                  env_extra: dict[str, str] | None) -> IsolatedHarnessHome:  # fmt: skip
+    """Generate and verify a per-dispatch harness home for *provider*.
+
+    Raises ``RuntimeError`` (the dispatch is refused) when the home cannot be
+    built and verified to declare exactly the allowed MCP servers."""
+    granted = allowed_mcp_servers(agent_tools)
+    endpoint = _role_neotoma_endpoint(role) if granted else None
+    if granted and endpoint is None:
+        log.warning(
+            f"[apis] {provider} child for {role!r} gets no Neotoma MCP server: the role has "
+            f"no token of its own ({neotoma_token_env_name(role)}) or NEOTOMA_BASE_URL is "
+            "not https; the operator's bearer is never used"
+        )
+        granted = {}
+    other = sorted({t.split("__")[1] for t in agent_tools
+                    if t.startswith("mcp__") and not t.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+                    and t.count("__") >= 2})  # fmt: skip
+    if other:
+        log.warning(f"[apis] {provider} child for {role!r}: MCP servers {other} in the "
+                    "allowlist are not provided to an isolated swarm child")  # fmt: skip
+    if provider == "cursor":
+        extra = _workspace_cursor_servers(cwd) - set(granted)
+        if extra:
+            raise RuntimeError(
+                f"the workspace's .cursor/mcp.json declares MCP servers outside the role's "
+                f"allowlist ({sorted(extra)})")
+    tmp_value = (env_extra or {}).get("TMPDIR", "").strip()
+    tmp_parent = Path(tmp_value) if tmp_value else None
+    if tmp_parent is not None:
+        tmp_parent.mkdir(parents=True, exist_ok=True)
+    home = Path(tempfile.mkdtemp(prefix=f"apis_{provider}_home_",
+                                 dir=str(tmp_parent) if tmp_parent else None))  # fmt: skip
+    try:
+        os.chmod(home, 0o700)
+        env: dict[str, str] = {}
+        if provider == "codex":
+            auth_source = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "auth.json"
+            if not auth_source.is_file():
+                raise RuntimeError("the Codex subscription login (auth.json) is unavailable")
+            (home / "auth.json").symlink_to(auth_source.resolve(strict=True))
+            config_path = home / "config.toml"
+            with open(config_path, "w", encoding="utf-8") as fh:
+                fh.write(_isolated_codex_config_text(granted, endpoint[0] if endpoint else ""))
+            env["CODEX_HOME"] = str(home)
+        else:
+            cursor_dir = home / ".cursor"
+            cursor_dir.mkdir(mode=0o700)
+            config_path = cursor_dir / "mcp.json"
+            servers = {
+                server: {"url": endpoint[0], "headers": {"Authorization": f"Bearer {endpoint[1]}"}}
+                for server in granted
+            } if endpoint else {}  # fmt: skip
+            fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"mcpServers": servers}, fh)
+            keychains = Path.home() / "Library" / "Keychains"
+            if keychains.is_dir():
+                # Cursor keeps its login in the macOS login keychain, found
+                # under HOME: link that directory, nothing else.
+                (home / "Library").mkdir(mode=0o700)
+                (home / "Library" / "Keychains").symlink_to(keychains)
+            gitconfig = Path.home() / ".gitconfig"
+            if gitconfig.is_file():
+                env["GIT_CONFIG_GLOBAL"] = str(gitconfig)  # commits keep their identity
+            env["HOME"] = str(home)
+            env["CURSOR_CONFIG_DIR"] = str(cursor_dir)
+        os.chmod(config_path, 0o600)
+        declared = effective_mcp_servers(provider, config_path)
+        if declared != set(granted):
+            raise RuntimeError(f"the generated {provider} config declares {sorted(declared)}, "
+                               f"not exactly {sorted(granted)}")  # fmt: skip
+        if provider == "codex" and endpoint:
+            env[ROLE_NEOTOMA_BEARER_ENV] = endpoint[1]
+        return IsolatedHarnessHome(home=home, config_path=config_path,
+                                   servers=tuple(sorted(declared)), env=env)  # fmt: skip
+    except Exception:
+        shutil.rmtree(home, ignore_errors=True)
+        raise
+
 # ── Per-agent Neotoma credential (ateles#795) ─────────────────────────────────
 # A lens that owns a pre-impl gate is INSTRUCTED to record its own verdict by
 # `correct()`-ing the parent issue entity. Neotoma admits that write against the
@@ -2774,6 +2963,7 @@ async def _run_skill_once(
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
     _codex_gate_config: CodexGateOwnerConfig | None = None
+    _isolated_home: IsolatedHarnessHome | None = None
     _codex_gate_token = ""
     if provider == "claude" and local_review:
         # Claude otherwise merges project/user MCP configuration. A local
@@ -3037,6 +3227,34 @@ async def _run_skill_once(
         # config.toml.
         subprocess_env["CODEX_HOME"] = str(_codex_gate_config.home)
         subprocess_env[CODEX_GATE_BEARER_ENV] = _codex_gate_token
+    if (
+        provider in ISOLATED_PROVIDERS
+        and _codex_gate_config is None  # a seated Codex review is isolated above
+        and local_cfg is None
+        and not local_review  # guarded lens runs bring their own isolated home
+        and not inference_only
+        and not (env_extra or {}).get("CODEX_HOME" if provider == "codex" else "HOME")
+    ):
+        # Never the operator's personal harness configuration: a generated
+        # home whose MCP servers are exactly the role's allowed ones.
+        try:
+            _isolated_home = prepare_isolated_harness_home(
+                provider, role=_role, agent_tools=agent_def.tools, cwd=cwd,
+                env_extra=env_extra,
+            )
+        except (OSError, RuntimeError) as exc:
+            msg = (f"{provider} launch failed: {HARNESS_ISOLATION_UNAVAILABLE}: {exc}; "
+                   "refusing to launch with the operator's personal harness configuration")
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            if _mcp_tmp_path is not None:
+                try:
+                    os.unlink(_mcp_tmp_path)
+                except OSError:
+                    pass
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+        subprocess_env.update(_isolated_home.env)
+        log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness home; "
+                 f"MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
 
     # ateles#109 / ateles#590 (PR #1334): inject the resolved per-agent GitHub
     # identity, if any. The fail-closed refusals for a network-enabled
@@ -3091,6 +3309,8 @@ async def _run_skill_once(
                 pass
         if _codex_gate_config is not None:
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
+        if _isolated_home is not None:
+            shutil.rmtree(_isolated_home.home, ignore_errors=True)
 
     # ── Executor choice (ateles#1456) ──────────────────────────────────────────
     # Local is today's code, unchanged. The fly executor takes the SAME argv,
@@ -3613,6 +3833,8 @@ async def _run_skill_once(
                 pass
         if _codex_gate_config is not None:
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
+        if _isolated_home is not None:
+            shutil.rmtree(_isolated_home.home, ignore_errors=True)
 
 
 def usable_providers() -> set[str]:
