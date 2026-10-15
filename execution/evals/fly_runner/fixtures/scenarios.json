@@ -1488,6 +1488,43 @@
       }
     },
     {
+      "id": "claude_runs_on_its_login_machine_with_the_volume_token",
+      "description": "Claude runs on its own login machine, like Codex and Cursor. The job names only the token file on the machine's volume; no Claude token is read on the Mac or sent to Fly. The machine is claimed, started, cleared of the job and left stopped, with no per-job machine created.",
+      "claude_login": true,
+      "settings": {
+        "APIS_FLY_CLAUDE_MACHINE_ID": "m-claude-login"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "CLAUDE LOGIN OK\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "CLAUDE LOGIN OK",
+        "local_cli_ran": false,
+        "machines_created": 0,
+        "login_starts": 1,
+        "claude_login_state": "stopped",
+        "claude_login_clear": true,
+        "claude_token_file": "/data/claude/oauth_token",
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
       "id": "fly_dispatch_is_not_gated_by_the_macs_usage_reading",
       "description": "The Mac's own Claude login reads far over its weekly ceiling, and the usage gate is on. A dispatch that runs on Fly uses the runner's separately held login, so the Mac's reading does not gate it. It runs, and the envelope says which reading was set aside. The Fly caps still apply.",
       "mac_usage": "over_ceiling",

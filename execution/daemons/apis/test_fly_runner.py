@@ -15,6 +15,7 @@ import copy
 import json
 import logging
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -292,6 +293,20 @@ class FakeFly:
         return [r for r in self.requests if r.method == method and r.url.path.endswith(suffix)]
 
 
+# Production runs every provider on its login machine. The per-job machine
+# path (create, wait, destroy, reap strays) is still the generic path for a
+# provider without one, and most tests below exercise those mechanics with
+# Claude as that provider. Tests of the Claude login machine request the
+# ``claude_login`` fixture instead.
+PER_JOB_TEST_LOGIN_PROVIDERS = frozenset({"codex", "cursor"})
+
+
+@pytest.fixture(autouse=True)
+def _claude_runs_per_job_unless_its_login_machine_is_tested(request, monkeypatch):
+    if "claude_login" not in request.fixturenames:
+        monkeypatch.setattr(fly_runner, "LOGIN_PROVIDERS", PER_JOB_TEST_LOGIN_PROVIDERS)
+
+
 @pytest.fixture
 def fly_env(monkeypatch, tmp_path):
     keys = tmp_path / "keys"
@@ -456,7 +471,7 @@ def test_per_job_machine_config_and_credential_set(fly_env, caplog):
     files = _files(body)
     secret_names = {p.rsplit("/", 1)[1] for p in files if "/secrets/" in p}
     assert secret_names == {
-        "GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "NEOTOMA_AAUTH_PRIVATE_JWK",
+        "GITHUB_TOKEN", "GH_TOKEN", "NEOTOMA_AAUTH_PRIVATE_JWK",
     }  # fmt: skip
     assert files["/run/job/secrets/GITHUB_TOKEN"].decode() == MINTED
     spec = json.loads(files["/run/job/job.json"])
@@ -634,9 +649,9 @@ def test_unconfigured_fly_is_ineligible(fly_env, monkeypatch):
         _job()
 
 
-def test_claude_without_setup_token_is_ineligible(fly_env, monkeypatch):
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
-    with pytest.raises(fly_runner.FlyIneligible, match="CLAUDE_CODE_OAUTH_TOKEN"):
+def test_claude_without_its_login_machine_is_ineligible(fly_env, monkeypatch, claude_login):
+    monkeypatch.delenv("APIS_FLY_CLAUDE_MACHINE_ID")
+    with pytest.raises(fly_runner.FlyIneligible, match="APIS_FLY_CLAUDE_MACHINE_ID"):
         _job()
 
 
@@ -4013,3 +4028,85 @@ def test_the_fly_budget_still_refuses_a_dispatch_the_mac_gate_would_refuse(
             repository="owner/repo", include_github_contract=True))  # fmt: skip
     assert not result.ok and "budget" in result.error  # the Fly cap, not the Mac's gate
     assert not fake.calls("POST", "/machines") and spawned == []
+
+
+# ── Claude on its login machine; its token only on the Fly volume ───────────
+
+
+@pytest.fixture
+def claude_login(monkeypatch):
+    """Claude as production runs it: on its own login machine."""
+    monkeypatch.setenv("APIS_FLY_CLAUDE_MACHINE_ID", "m-claude")
+    return "m-claude"
+
+
+def _claude_fake() -> FakeFly:
+    fake = FakeFly()
+    fake.machines["m-claude"] = {"id": "m-claude", "state": "stopped", "login": True,
+                                 "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
+    return fake
+
+
+def test_claude_is_a_login_provider_with_its_own_machine_setting(fly_env, claude_login,
+                                                                 monkeypatch):  # fmt: skip
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    config = fly_runner.FlyConfig.from_env()
+    assert "claude" in fly_runner.LOGIN_PROVIDERS
+    assert config.login_machines["claude"] == "m-claude"
+    assert fly_runner.login_machine_setting("claude") == "APIS_FLY_CLAUDE_MACHINE_ID"
+    # Storage is counted per login machine: volume plus stopped rootfs.
+    per_machine = (config.login_volume_gb + config.rootfs_gb) * config.storage_gb_month_usd
+    assert config.monthly_storage_usd() == pytest.approx(2 * per_machine)
+    from lib.environment_allowlist import is_allowed_environment_name
+
+    assert is_allowed_environment_name("APIS_FLY_CLAUDE_MACHINE_ID")
+
+
+def test_a_claude_job_names_the_volume_token_file_and_ships_no_token(fly_env, claude_login):
+    job = _job()
+    assert job.login and "CLAUDE_CODE_OAUTH_TOKEN" not in job.secrets
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in job.child_credential_names
+    assert CLAUDE_OAUTH not in repr(job) and CLAUDE_OAUTH not in json.dumps(job.secrets)
+    files = _files({"config": {"files": fly_runner.job_files(job, fly_runner.FlyConfig.from_env())}})
+    spec = json.loads(files["/run/job/job.json"])
+    assert spec["claude_token_file"] == "/data/claude/oauth_token"
+    assert "/run/job/secrets/CLAUDE_CODE_OAUTH_TOKEN" not in files
+    assert all(CLAUDE_OAUTH.encode() not in raw for raw in files.values())
+
+
+def test_a_claude_job_never_reads_the_token_from_the_mac(fly_env, claude_login, monkeypatch):
+    """Even with the token in the Mac environment, nothing reads or ships it."""
+    reads = []
+    real = os.environ.__class__.__getitem__
+
+    def spy(self, key):
+        if key == "CLAUDE_CODE_OAUTH_TOKEN":
+            reads.append(key)
+        return real(self, key)
+
+    monkeypatch.setattr(os.environ.__class__, "__getitem__", spy)
+    _job()
+    assert reads == []
+
+
+def test_a_claude_login_run_never_sends_the_token(fly_env, claude_login):
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "CLAUDE OK"})
+    job = _job()
+    rc, out, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and b"CLAUDE OK" in out
+    assert not fake.calls("POST", "/machines")  # no per-job machine: the login machine
+    assert len(fake.calls("POST", "/start")) == 1
+    for request in fake.requests:
+        assert CLAUDE_OAUTH.encode() not in request.content
+        assert CLAUDE_OAUTH not in str(request.url) and CLAUDE_OAUTH not in str(request.headers)
+    claimed = [json.loads(r.content) for r in fake.calls("POST", "/machines/m-claude")]
+    first = _files(claimed[0])
+    assert json.loads(first["/run/job/job.json"])["claude_token_file"] == CLAUDE_TOKEN_PATH
+    cfg = fake.machines["m-claude"]["config"]  # the stored config, after the clear
+    assert not fly_runner._has_job_config(cfg) and CLAUDE_OAUTH not in json.dumps(cfg)
+    assert CLAUDE_OAUTH not in executor.ledger.path.read_text()
+    assert executor.ledger.snapshot()["in_flight"] == {} and "m-claude" not in fake.leases
+
+
+CLAUDE_TOKEN_PATH = "/data/claude/oauth_token"

@@ -79,6 +79,7 @@ def test_scenario_set_covers_the_required_behaviours():
         "large_system_prompt_travels_as_a_file_not_an_argument",
         "fly_dispatch_is_not_gated_by_the_macs_usage_reading",
         "the_same_dispatch_bound_for_the_mac_keeps_its_usage_gate",
+        "claude_runs_on_its_login_machine_with_the_volume_token",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -228,3 +229,9 @@ def test_judge_goes_red_when_a_fly_run_hides_the_reading_it_set_aside(tmp_path, 
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
     hidden = dataclasses.replace(trace, envelope={**trace.envelope, "usage_gate_exempted": ""})
     assert runner.judge(scenario, hidden)
+def test_judge_goes_red_when_the_claude_token_leaves_the_mac(tmp_path, monkeypatch):
+    scenario = _by_id("claude_runs_on_its_login_machine_with_the_volume_token")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    leaked = dataclasses.replace(trace, everything_sent=trace.everything_sent + runner.CLAUDE_OAUTH,
+                                 claude_login_job_files_after=True)  # fmt: skip
+    assert len(runner.judge(scenario, leaked)) >= 2

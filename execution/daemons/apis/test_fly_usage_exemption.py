@@ -114,8 +114,7 @@ def test_mac_read_headroom_does_not_apply_but_an_operator_override_does(monkeypa
 
 @pytest.fixture
 def claude_on_fly(monkeypatch):
-    monkeypatch.setattr(fly_runner, "LOGIN_PROVIDERS",
-                        frozenset({"claude", "codex", "cursor"}))  # fmt: skip
+    assert "claude" in fly_runner.LOGIN_PROVIDERS  # Claude runs on a Fly login machine
     monkeypatch.setenv("APIS_FLY_CLAUDE_MACHINE_ID", "m-claude")
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
 

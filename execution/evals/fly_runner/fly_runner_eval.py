@@ -89,6 +89,7 @@ class FakeFly:
         self.lost_error = "eval: response lost"
         self.scrub_ignored = False  # a config clear is acknowledged but not applied
         self.starts: list[str] = []  # the run id each start found in the config
+        self.start_specs: list[dict] = []  # the job.json each start found
         # "ok" | "lost" (created, response 500) | "refused" (422, nothing created)
         self.create = create
         self.sticky_all = False
@@ -230,6 +231,8 @@ class FakeFly:
             self.machines[mid]["state"] = "started"
             cfg = self.machines[mid].get("config") or {}
             self.starts.append(str((cfg.get("env") or {}).get("ATELES_RUN_ID") or ""))
+            spec = _job_files(cfg).get("/run/job/job.json")
+            self.start_specs.append(json.loads(spec) if spec else {})
             if self.start_lost:
                 return httpx.Response(500, json={"error": self.lost_error})
             return httpx.Response(200, json={"ok": True})
@@ -277,6 +280,9 @@ class Trace:
     login_config_run_id: str = ""
     login_job_files_after: bool = False
     argv_max_bytes: int = 0  # the longest argument any machine was given
+    claude_login_state: str = ""
+    claude_login_job_files_after: bool = False
+    started_specs: list = field(default_factory=list)
     system_prompt_file_bytes: int = 0
     login_stop_requests: int = 0
     login_mutations: int = 0
@@ -408,11 +414,19 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
             {"name": "weekly_all", "used_percent": 95.0,
              "resets_at": harness_router._iso_from_wall(moment + 3 * 86400)}],
             observed_at=moment)  # fmt: skip
+    if not scenario.get("claude_login"):
+        # Production runs Claude on its login machine; most scenarios exercise
+        # the generic per-job machine path with Claude as its provider.
+        monkeypatch.setattr(fly_runner, "LOGIN_PROVIDERS", frozenset({"codex", "cursor"}))
     if scenario["fly"].get("lost_error"):
         fake.lost_error = scenario["fly"]["lost_error"]
         fake.start_lost = True
     fake.machines["m-codex-login"] = {"id": "m-codex-login", "state": "stopped", "login": True,
                                       "instance_id": "v1", "config": {"mounts": []}}  # fmt: skip
+    if scenario.get("claude_login"):
+        fake.machines["m-claude-login"] = {"id": "m-claude-login", "state": "stopped",
+                                           "login": True, "instance_id": "v1",
+                                           "config": {"mounts": []}}  # fmt: skip
     foreign_lease = scenario["fly"].get("login_lease")
     if foreign_lease:
         fake.leases["m-codex-login"] = {"nonce": "foreign-holder-nonce",
@@ -605,6 +619,10 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         exit_codes=exit_codes,
         starts=list(fake.starts),
         argv_max_bytes=_longest_argument(fake.created_configs),
+        claude_login_state=str(fake.machines.get("m-claude-login", {}).get("state", "")),
+        claude_login_job_files_after=fly_runner._has_job_config(
+            fake.machines.get("m-claude-login", {}).get("config") or {}),
+        started_specs=list(fake.start_specs),
         system_prompt_file_bytes=_job_file_bytes(fake.created_configs, "system_prompt.md"),
         login_job_files_after=fly_runner._has_job_config(
             fake.machines["m-codex-login"].get("config") or {}),
@@ -781,6 +799,14 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
     if "system_prompt_file_bytes_over" in e and not (
             trace.system_prompt_file_bytes > e["system_prompt_file_bytes_over"]):  # fmt: skip
         problems.append(f"the system prompt file holds {trace.system_prompt_file_bytes} bytes")
+    if "claude_login_state" in e and trace.claude_login_state != e["claude_login_state"]:
+        problems.append(f"the Claude login machine is {trace.claude_login_state!r}")
+    if e.get("claude_login_clear") and trace.claude_login_job_files_after:
+        problems.append("the Claude login machine still holds job files")
+    if "claude_token_file" in e and not trace.started_specs or any(
+            s.get("claude_token_file") != e["claude_token_file"] for s in trace.started_specs
+            if "claude_token_file" in e):  # fmt: skip
+        problems.append("a started job does not name the volume's Claude token file")
     if "login_starts" in e and len(trace.starts) != e["login_starts"]:
         problems.append(f"{len(trace.starts)} login machine starts, expected {e['login_starts']}")
     if "login_config_run_id" in e and trace.login_config_run_id != e["login_config_run_id"]:
@@ -810,7 +836,8 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append("the login lock is still held")
     # Always: no shared credential ever reaches Fly or the caller's output.
     for label, value in (("shared PAT", SHARED_PAT), ("shared bearer", SHARED_BEARER),
-                         ("deploy token", FLY_TOKEN)):  # fmt: skip
+                         ("deploy token", FLY_TOKEN),
+                         ("Mac's Claude token", CLAUDE_OAUTH)):  # fmt: skip
         if value in trace.everything_sent:
             problems.append(f"the {label} was sent to Fly")
         if value in trace.stdout_text or value in trace.stderr_text:

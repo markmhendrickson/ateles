@@ -3695,11 +3695,10 @@ def _fly_routing(runner: str | None, action_class: str | None) -> tuple[frozense
     if not fly_runner.wants_fly(runner, action_class):
         return frozenset(), ()
     extra: tuple[str, ...] = ()
-    login_providers = getattr(fly_runner, "LOGIN_PROVIDERS", frozenset())
-    if "claude" in login_providers and "claude" not in configured_providers():
-        # Its Fly login machine is configured (the same setting FlyConfig reads).
-        if os.environ.get("APIS_FLY_CLAUDE_MACHINE_ID", "").strip():
-            extra = ("claude",)
+    if ("claude" not in configured_providers()
+            and "claude" in fly_runner.FlyConfig.from_env().login_machines):  # fmt: skip
+        # Its Fly login machine is configured (APIS_FLY_CLAUDE_MACHINE_ID).
+        extra = ("claude",)
     return frozenset(FRONTIER_PROVIDERS), extra
 
 

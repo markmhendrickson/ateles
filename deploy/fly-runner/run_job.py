@@ -34,6 +34,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,13 @@ MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
 # its path replaces this placeholder in argv.
 SYSTEM_PROMPT_PLACEHOLDER = "@@ATELES_JOB_SYSTEM_PROMPT@@"
 SYSTEM_PROMPT_JOB_FILE = "system_prompt.md"
+# Claude's OAuth token lives only on its login machine's volume, in this file
+# (fly_runner.CLAUDE_TOKEN_FILE). It is read here as root and handed to the
+# CLI child alone: never this process's environment, the job config, the
+# result record or a log line.
+CLAUDE_TOKEN_FILE = "/data/claude/oauth_token"
+CLAUDE_TOKEN_NAME = "CLAUDE_CODE_OAUTH_TOKEN"
+MAX_TOKEN_FILE_BYTES = 4096
 
 # Exit codes the runner itself produces (never the CLI's own).
 # The longest timeout a job may carry (fly_runner.MAX_JOB_TIMEOUT_SECONDS).
@@ -170,6 +178,7 @@ class Job:
     machine_id: str = ""
     child_user: str = "agent"
     system_prompt: str | None = None
+    claude_token_file: str = ""
 
 
 def load_job(job_dir: Path) -> Job:
@@ -202,12 +211,18 @@ def load_job(job_dir: Path) -> Job:
             raise JobError(f"declared credential {name} has no file") from None
         if not secrets[name]:
             raise JobError(f"declared credential {name} is empty")
+    token_file = spec["claude_token_file"] if "claude_token_file" in spec else ""
+    if token_file and token_file != CLAUDE_TOKEN_FILE:
+        raise JobError("claude_token_file is not the login volume's token path")
     child_names = tuple(spec.get("child_credential_names") or ())
     for name in child_names:
         if name not in RUNNER_CHILD_CREDENTIAL_NAMES:
             raise JobError(f"credential {name} may not reach a runner child")
-        if name not in secrets:
+        from_volume = name == CLAUDE_TOKEN_NAME and bool(token_file)
+        if name not in secrets and not from_volume:
             raise JobError(f"child credential {name} was not declared")
+        if name in secrets and from_volume:
+            raise JobError(f"credential {name} may come only from the login volume")
     token_name = str(spec.get("neotoma_token_name") or "")
     jwk_name = str(spec.get("neotoma_jwk_name") or "")
     if token_name and token_name not in secrets:
@@ -253,6 +268,7 @@ def load_job(job_dir: Path) -> Job:
         probe_paths=tuple(spec.get("probe_paths") or ()),
         login_home_links=dict(spec.get("login_home_links") or {}),
         system_prompt=system_prompt,
+        claude_token_file=token_file,
         codex_home=str(spec.get("codex_home") or ""),
         machine_id=str(spec.get("machine_id") or os.environ.get("FLY_MACHINE_ID", "")),
         child_user=str(spec.get("child_user") or "agent"),
@@ -297,6 +313,33 @@ def ram_home(run_id: str) -> Path:
     home = Path(tempfile.mkdtemp(prefix=f"ateles-home-{safe}-", dir=base))
     os.chmod(home, 0o700)
     return home
+
+
+def read_token_file(path: Path) -> str:
+    """The OAuth token stored on the login volume, read as root. Refuses a
+    missing, non-regular, empty, oversized or non-printable file with
+    ``JobError``; no message ever carries any of the file's contents."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        raise JobError("the Claude token file on the login volume is missing or unreadable") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise JobError("the Claude token file on the login volume is not a regular file")
+        if info.st_size > MAX_TOKEN_FILE_BYTES:
+            raise JobError("the Claude token file on the login volume is too large")
+        raw = os.read(fd, MAX_TOKEN_FILE_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_TOKEN_FILE_BYTES:
+        raise JobError("the Claude token file on the login volume is too large")
+    token = raw.strip()
+    if not token:
+        raise JobError("the Claude token file on the login volume is empty")
+    if not all(0x21 <= b <= 0x7E for b in token):
+        raise JobError("the Claude token file on the login volume is not a printable token")
+    return token.decode("ascii")
 
 
 def write_mcp_config(home: Path, base_url: str, token: str) -> Path:
@@ -913,6 +956,17 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
 
     home = ram_home(job.run_id)
     try:
+        token_problem = ""
+        if job.claude_token_file:
+            # As root, before anything runs as the child user; held only in
+            # the job's secret set (so it is scrubbed from all output) and
+            # passed to the CLI child alone.
+            try:
+                job.secrets[CLAUDE_TOKEN_NAME] = read_token_file(Path(job.claude_token_file))
+            except JobError as exc:
+                token_problem = str(exc)
+                job.child_credential_names = tuple(
+                    n for n in job.child_credential_names if n != CLAUDE_TOKEN_NAME)
         try:
             ident = child_identity(job.child_user)
             identity_problem = ""
@@ -926,6 +980,11 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             delete_job_dir(job_dir)
             refused = deadline_problem
             probe = {"ok": False, "present": ["<deadline>"]}
+            rc, out, err, timed_out = EXIT_JOB_INVALID, b"", refused.encode(), False
+        elif token_problem:
+            delete_job_dir(job_dir)
+            refused = token_problem
+            probe = {"ok": False, "present": ["<claude token>"]}
             rc, out, err, timed_out = EXIT_JOB_INVALID, b"", refused.encode(), False
         elif identity_problem:
             delete_job_dir(job_dir)
