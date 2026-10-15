@@ -749,3 +749,72 @@ def test_a_normal_entrypoint_return_also_ends_in_an_explicit_exit(monkeypatch):
     run_job.entrypoint(Path("/nonexistent-job-dir"), hard_exit=codes.append,
                        writer=lambda *a: True)  # fmt: skip
     assert codes == [run_job.EXIT_JOB_INVALID] and cleaned == ["group", "all"]
+
+
+# A CLI stand-in that reports what it received: the size and digest of its
+# stdin, its longest argument, and any system prompt file it was given.
+_ECHO_CLI = r"""
+import hashlib, json, sys
+data = sys.stdin.buffer.read()
+args = sys.argv[1:]
+out = {"stdin_len": len(data), "stdin_sha": hashlib.sha256(data).hexdigest(),
+       "argv_max": max(len(a) for a in sys.argv)}
+if "--append-system-prompt-file" in args:
+    text = open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8").read()
+    out["system_len"] = len(text)
+    out["system_sha"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+print(json.dumps(out))
+"""
+
+
+@pytest.mark.parametrize("provider", ["cursor", "claude"])
+def test_a_prompt_over_the_argument_cap_reaches_the_cli_intact(tmp_path, provider):
+    """A real entrypoint process: a 250 KB prompt reaches the CLI on stdin,
+    and (claude) a 250 KB system prompt reaches it as a file, never as one
+    argument (Linux refuses a single argument over 128 KB)."""
+    import hashlib
+
+    prompt = ("prompt line é\n" * 20_000).encode("utf-8")  # over 250 KB
+    system = "system rule é\n" * 20_000
+    argv = [sys.executable, "-c", _ECHO_CLI, "--print"]
+    if provider == "claude":
+        argv += ["--append-system-prompt-file", run_job.SYSTEM_PROMPT_PLACEHOLDER]
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"}, argv=argv)
+    (job_dir / "stdin").write_bytes(prompt)
+    if provider == "claude":
+        (job_dir / run_job.SYSTEM_PROMPT_JOB_FILE).write_text(system, encoding="utf-8")
+    driver = tmp_path / "driver.py"
+    driver.write_text(_DRIVER)
+    record = tmp_path / "record.json"
+    (tmp_path / "tmp").mkdir()
+    child_vars = {"PATH": os.environ["PATH"], "TMPDIR": str(tmp_path / "tmp"),
+                  run_job.DEADLINE_ENV: _deadline_in(60)}  # fmt: skip
+    entry = subprocess.Popen(
+        [sys.executable, str(driver), str(_RUNNER_DIR / "run_job.py"), str(job_dir), str(record),
+         "record"],
+        env=child_vars, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )  # fmt: skip
+    try:
+        assert entry.wait(timeout=60) == 0
+    finally:
+        if entry.poll() is None:
+            entry.kill()
+            entry.wait()
+    data = json.loads(record.read_text())
+    assert data["exit_code"] == 0, data["stderr_tail"]
+    seen = json.loads(data["stdout"].strip().splitlines()[-1])
+    assert seen["stdin_len"] == len(prompt)
+    assert seen["stdin_sha"] == hashlib.sha256(prompt).hexdigest()
+    assert seen["argv_max"] < 10_000
+    if provider == "claude":
+        assert seen["system_len"] == len(system)
+        assert seen["system_sha"] == hashlib.sha256(system.encode("utf-8")).hexdigest()
+
+
+def test_a_system_prompt_placeholder_without_its_file_is_refused(tmp_path):
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},
+               argv=["claude", "--append-system-prompt-file", run_job.SYSTEM_PROMPT_PLACEHOLDER])
+    with pytest.raises(run_job.JobError, match="system prompt"):
+        run_job.load_job(job_dir)

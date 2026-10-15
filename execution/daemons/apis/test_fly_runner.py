@@ -3892,3 +3892,72 @@ def test_a_login_machine_leased_by_another_dispatcher_is_left_alone(fly_env, mon
     assert run_id not in asyncio.run(executor.reap())
     assert fake.machines["m-codex"]["config"] == before
     assert executor.ledger.entry(run_id)["unconfirmed"] is True
+
+
+
+# ── Large prompts never become one argument on Fly ──────────────────────────
+
+
+def _cursor_job(**kw):
+    return fly_runner.build_job(
+        provider="cursor", role="lanius", cmd=kw.pop("cmd"), stdin=kw.pop("stdin", b""),
+        timeout=60, repository="owner/repo", github_requested=False, mcp_config_path=None,
+        **kw,
+    )  # fmt: skip
+
+
+def test_a_cursor_job_carries_its_prompt_on_stdin(fly_env, monkeypatch):
+    monkeypatch.setenv("APIS_FLY_CURSOR_MACHINE_ID", "m-cursor")
+    prompt = "p" * 250_000
+    cmd, stdin = skill_runner._provider_command("cursor", "/x/cursor-agent", prompt, "WORK",
+                                               cwd=None)  # fmt: skip
+    job = _cursor_job(cmd=cmd, stdin=stdin)
+    assert all(len(a) < 1_000 for a in job.argv)
+    files = {f["guest_path"]: base64.b64decode(f["raw_value"])
+             for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())}  # fmt: skip
+    assert files["/run/job/stdin"].decode().startswith(prompt)
+    assert json.loads(files["/run/job/argv.json"]) == job.argv
+
+
+def test_a_claude_job_ships_its_system_prompt_as_a_file(fly_env):
+    system = "s" * 250_000
+    cmd, stdin = skill_runner._provider_command("claude", "/x/claude", system, "WORK",
+                                               cwd=None)  # fmt: skip
+    job = fly_runner.build_job(
+        provider="claude", role="lanius", cmd=cmd, stdin=b"WORK", timeout=60,
+        repository="owner/repo", github_requested=False, mcp_config_path=None,
+    )  # fmt: skip
+    assert "--append-system-prompt" not in job.argv
+    i = job.argv.index("--append-system-prompt-file")
+    assert job.argv[i + 1] == fly_runner.SYSTEM_PROMPT_PLACEHOLDER
+    assert all(len(a) < 1_000 for a in job.argv)
+    files = {f["guest_path"]: base64.b64decode(f["raw_value"])
+             for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())}  # fmt: skip
+    assert files["/run/job/system_prompt.md"].decode() == system
+
+
+@pytest.mark.parametrize("size", [100_001, 140_000])
+def test_an_oversized_argument_is_refused_before_launch(fly_env, monkeypatch, size):
+    monkeypatch.setenv("APIS_FLY_CURSOR_MACHINE_ID", "m-cursor")
+    cmd = ["/x/cursor-agent", "--print", "q" * size]
+    with pytest.raises(fly_runner.FlyConfigInvalid, match=f"cursor command has an argument "
+                                                          f"of {size} bytes"):  # fmt: skip
+        _cursor_job(cmd=cmd)
+
+
+def test_an_argument_at_the_bound_is_accepted(fly_env, monkeypatch):
+    monkeypatch.setenv("APIS_FLY_CURSOR_MACHINE_ID", "m-cursor")
+    job = _cursor_job(cmd=["/x/cursor-agent", "--print", "q" * 100_000])
+    assert len(job.argv[-1]) == 100_000
+
+
+def test_an_oversized_argument_never_starts_a_machine_or_falls_back(fly_env, seam, monkeypatch):
+    spawned, fake_exec = seam
+    fake = FakeFly()
+    executor, minted, _ = make_executor(fake)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    monkeypatch.setattr(fly_runner, "MAX_ARGV_ELEMENT_BYTES", 10)  # any real argument exceeds it
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+    assert not result.ok and "nothing was launched" in result.error
+    assert fake.requests == [] and minted == [] and spawned == []

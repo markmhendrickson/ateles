@@ -3028,9 +3028,18 @@ class TestCrossHarnessRouting:
             "text",
         ]
         assert "--workspace" in cmd
-        assert "SYSTEM" in cmd[-1]
-        assert "WORK" in cmd[-1]
-        assert stdin is None
+        # The composite prompt goes on stdin, never into argv.
+        assert not any("SYSTEM" in a or "WORK" in a for a in cmd)
+        assert cmd[-2:] == ["--workspace", "/repo"]
+        assert b"SYSTEM" in stdin and b"WORK" in stdin
+
+    def test_cursor_prompt_of_any_size_stays_out_of_argv(self) -> None:
+        big = "r" * 300_000  # a composite prompt far over Linux's one-argument cap
+        cmd, stdin = skill_runner._provider_command(
+            "cursor", "/bin/cursor-agent", big, "WORK", cwd=None,
+        )
+        assert max(len(a) for a in cmd) < 1_000
+        assert stdin.decode().startswith(big) and stdin.decode().endswith("WORK")
 
     @pytest.mark.parametrize("provider", ["claude", "codex", "cursor"])
     def test_live_policy_uses_every_provider_prompt_carrier(self, provider) -> None:
@@ -5549,10 +5558,9 @@ class TestModelTieringProviderCommandParity:
         workspace_index = cmd.index("--workspace")
         assert model_index < workspace_index
         assert cmd[model_index + 1] == "claude-sonnet-5-thinking-high"
-        # Composite prompt stays last — existing test asserts cmd[-1].
-        assert "SYSTEM" in cmd[-1]
-        assert "WORK" in cmd[-1]
-        assert stdin is None
+        # The composite prompt is on stdin, not a trailing argument.
+        assert cmd[-1] == "/repo"
+        assert b"SYSTEM" in stdin and b"WORK" in stdin
 
     def test_cursor_no_model_flag_when_model_is_none(self) -> None:
         cmd, _ = skill_runner._provider_command(

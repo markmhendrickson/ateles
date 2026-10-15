@@ -76,6 +76,7 @@ def test_scenario_set_covers_the_required_behaviours():
         "runner_entrypoint_exits_promptly_when_the_run_asks_to_exit",
         "login_claim_waits_for_the_machine_to_settle",
         "login_machine_that_never_settles_fails_closed_without_job_files",
+        "large_system_prompt_travels_as_a_file_not_an_argument",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -211,3 +212,10 @@ def test_judge_goes_red_when_job_files_are_left_on_a_login_machine(tmp_path, mon
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
     left = dataclasses.replace(trace, login_job_files_after=True, starts=["fly-x"])
     assert len(runner.judge(scenario, left)) >= 2
+
+
+def test_judge_goes_red_when_a_large_prompt_is_one_argument(tmp_path, monkeypatch):
+    scenario = _by_id("large_system_prompt_travels_as_a_file_not_an_argument")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    inline = dataclasses.replace(trace, argv_max_bytes=150_000, system_prompt_file_bytes=0)
+    assert len(runner.judge(scenario, inline)) >= 2

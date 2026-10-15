@@ -76,6 +76,10 @@ MIN_SCRUB_LENGTH = 8
 # goes. The real file is written here, on RAM-backed storage, after the job
 # directory is read and before it is deleted.
 MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
+# Claude's system prompt arrives as a job file (fly_runner.SYSTEM_PROMPT_*);
+# its path replaces this placeholder in argv.
+SYSTEM_PROMPT_PLACEHOLDER = "@@ATELES_JOB_SYSTEM_PROMPT@@"
+SYSTEM_PROMPT_JOB_FILE = "system_prompt.md"
 
 # Exit codes the runner itself produces (never the CLI's own).
 # The longest timeout a job may carry (fly_runner.MAX_JOB_TIMEOUT_SECONDS).
@@ -165,6 +169,7 @@ class Job:
     codex_home: str = ""
     machine_id: str = ""
     child_user: str = "agent"
+    system_prompt: str | None = None
 
 
 def load_job(job_dir: Path) -> Job:
@@ -181,6 +186,10 @@ def load_job(job_dir: Path) -> Job:
         raise JobError("argv.json must hold strings only")
     stdin_path = job_dir / "stdin"
     stdin = stdin_path.read_bytes() if stdin_path.is_file() else None
+    prompt_path = job_dir / SYSTEM_PROMPT_JOB_FILE
+    system_prompt = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else None
+    if SYSTEM_PROMPT_PLACEHOLDER in argv and system_prompt is None:
+        raise JobError("argv names a system prompt file but the job carries none")
     secrets: dict[str, str] = {}
     secrets_dir = job_dir / "secrets"
     for name in spec.get("credential_names") or []:
@@ -243,6 +252,7 @@ def load_job(job_dir: Path) -> Job:
         probe_env_names=tuple(spec.get("probe_env_names") or ()),
         probe_paths=tuple(spec.get("probe_paths") or ()),
         login_home_links=dict(spec.get("login_home_links") or {}),
+        system_prompt=system_prompt,
         codex_home=str(spec.get("codex_home") or ""),
         machine_id=str(spec.get("machine_id") or os.environ.get("FLY_MACHINE_ID", "")),
         child_user=str(spec.get("child_user") or "agent"),
@@ -327,6 +337,14 @@ def prepare_child(job: Job, home: Path, base_env,
             # identity is its signing key gets no Neotoma MCP server here.
             # The shared daemon bearer is never a substitute.
             argv = _drop_flag_with_value(argv, "--mcp-config", MCP_CONFIG_PLACEHOLDER)
+    if SYSTEM_PROMPT_PLACEHOLDER in argv and job.system_prompt is not None:
+        prompt_dir = home / ".ateles"
+        prompt_dir.mkdir(mode=0o700, exist_ok=True)
+        prompt_file = prompt_dir / "system-prompt.md"
+        fd = os.open(prompt_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(job.system_prompt)
+        argv = [str(prompt_file) if a == SYSTEM_PROMPT_PLACEHOLDER else a for a in argv]
     for rel, target in job.login_home_links.items():
         # Long-lived login machines: only the CLI's own login directory lives
         # on the volume; HOME itself stays on RAM-backed storage.

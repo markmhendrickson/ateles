@@ -2026,6 +2026,11 @@ def _provider_command(
             composite_prompt.encode(),
         )
     if provider == "cursor":
+        # The prompt goes on stdin (the CLI reads it there when no positional
+        # prompt is given), never as one argv element: a composite prompt is
+        # often over 100 KB, and Linux refuses any single argument over
+        # 128 KB (MAX_ARG_STRLEN), which a Fly machine hits before the CLI
+        # even starts.
         return (
             [
                 binary,
@@ -2037,9 +2042,8 @@ def _provider_command(
                 "text",
                 *(["--model", model] if model else []),
                 *(["--workspace", cwd] if cwd else []),
-                composite_prompt,
             ],
-            None,
+            composite_prompt.encode(),
         )
     raise ValueError(f"unsupported harness provider: {provider}")
 

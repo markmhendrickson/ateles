@@ -68,6 +68,14 @@ RESULT_ENTITY_TYPE = "fly_runner_result"
 # run_job.py keeps the LAST this-many bytes of stdout (STDOUT_CAP_BYTES there).
 RUNNER_STDOUT_CAP_BYTES = 256 * 1024
 MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
+# Where Claude's system prompt file goes in argv; run_job.py writes the file
+# (shipped as a job file) and puts its path here.
+SYSTEM_PROMPT_PLACEHOLDER = "@@ATELES_JOB_SYSTEM_PROMPT@@"
+SYSTEM_PROMPT_JOB_FILE = "system_prompt.md"
+# The largest single argument the Fly runner passes to a CLI. Linux refuses
+# any one argument over 131072 bytes (MAX_ARG_STRLEN) with E2BIG, after the
+# machine has started; this bound refuses before any launch, with room left.
+MAX_ARGV_ELEMENT_BYTES = 100_000
 AAUTH_JWK_JOB_NAME = "NEOTOMA_AAUTH_PRIVATE_JWK"
 APIS_DEADLINE_GRACE_SECONDS = 120
 REAPER_INTERVAL_SECONDS = 600
@@ -102,6 +110,14 @@ MAX_RECORD_COUNT = 10**9
 class FlyIneligible(Exception):
     """This job cannot run on Fly (no own identity, no App, unsupported
     shape). The reason names what is missing, never a value."""
+
+
+def _command_too_large(provider: str, size: int) -> "FlyConfigInvalid":
+    return FlyConfigInvalid(
+        f"the {provider} command has an argument of {size} bytes, over the Fly runner's "
+        f"{MAX_ARGV_ELEMENT_BYTES}-byte limit for one argument (Linux refuses one over "
+        "131072 bytes); nothing was launched"
+    )
 
 
 class FlyRefusal(Exception):
@@ -1377,6 +1393,8 @@ class FlyJob:
     neotoma_jwk_name: str = ""
     neotoma_base_url: str = ""
     probe_env_names: list[str] = field(default_factory=list)
+    # Claude's system prompt, shipped as a job file instead of an argument.
+    system_prompt: str = field(repr=False, default="")
     # Set by the executor: the machine the job ran on, and whether the
     # runner kept only the tail of an oversized stdout.
     machine_id: str = ""
@@ -1403,6 +1421,21 @@ def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None) -> l
     if mcp_config_path:
         argv = [MCP_CONFIG_PLACEHOLDER if a == mcp_config_path else a for a in argv]
     return argv
+
+
+def externalize_system_prompt(provider: str, argv: list[str]) -> tuple[list[str], str]:
+    """Claude's ``--append-system-prompt <text>`` rewritten to
+    ``--append-system-prompt-file <placeholder>``, and the text, which is
+    shipped as a job file: the prompt is often over 100 KB and must not be a
+    single argument on Linux. Other providers are returned unchanged."""
+    if provider != "claude" or "--append-system-prompt" not in argv:
+        return argv, ""
+    i = argv.index("--append-system-prompt")
+    if i + 1 >= len(argv) or "--append-system-prompt" in argv[i + 1:]:
+        raise FlyIneligible("the claude command's system prompt flag is malformed")
+    text = argv[i + 1]
+    return [*argv[:i], "--append-system-prompt-file", SYSTEM_PROMPT_PLACEHOLDER,
+            *argv[i + 2:]], text  # fmt: skip
 
 
 def role_jwk_path(role: str) -> Path | None:
@@ -1510,6 +1543,11 @@ def build_job(
     ]))  # fmt: skip
 
     argv = runner_argv(provider, cmd, mcp_config_path)
+    argv, system_prompt = externalize_system_prompt(provider, argv)
+    largest = max((len(a.encode("utf-8")) for a in argv), default=0)
+    if largest > MAX_ARGV_ELEMENT_BYTES:
+        # Refused before any token, reservation or machine.
+        raise _command_too_large(provider, largest)
     return FlyJob(
         run_id=f"fly-{uuid.uuid4().hex[:16]}",
         role=role,
@@ -1525,6 +1563,7 @@ def build_job(
         neotoma_jwk_name=AAUTH_JWK_JOB_NAME if jwk_text else "",
         neotoma_base_url=base_url,
         probe_env_names=probe,
+        system_prompt=system_prompt,
     )
 
 
@@ -1560,6 +1599,9 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         {"guest_path": f"{JOB_DIR}/argv.json", "raw_value": _b64(json.dumps(job.argv))},
         {"guest_path": f"{JOB_DIR}/stdin", "raw_value": _b64(job.stdin or b"")},
     ]
+    if job.system_prompt:
+        files.append({"guest_path": f"{JOB_DIR}/{SYSTEM_PROMPT_JOB_FILE}",
+                      "raw_value": _b64(job.system_prompt.encode("utf-8"))})  # fmt: skip
     for name, value in sorted(job.secrets.items()):
         files.append({"guest_path": f"{JOB_DIR}/secrets/{name}", "raw_value": _b64(value)})
     return files
