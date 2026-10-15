@@ -550,6 +550,34 @@
           "spawned": 52
         }
       }
+    },
+    {
+      "id": "queued_deferred_task_is_re_validated_when_its_slot_comes",
+      "why": "tasks queued behind the three busy recovery slots are read again when their turn comes: one completed, cancelled or re-marked while waiting is NOT dispatched and gets no status write (quietly); one unreadable is reported once; one still deferred is dispatched from the fresh read",
+      "path": "slot_wait",
+      "queued": [
+        "completed",
+        "cancelled",
+        "remarked",
+        "still_deferred",
+        "unreadable"
+      ],
+      "expect": {
+        "slot_wait": {
+          "not_dispatched": [
+            "completed",
+            "cancelled",
+            "remarked",
+            "unreadable"
+          ],
+          "dispatched_from_fresh_read": {
+            "still_deferred": "as re-read at its turn"
+          },
+          "announced_once": [
+            "unreadable"
+          ]
+        }
+      }
     }
   ]
 }

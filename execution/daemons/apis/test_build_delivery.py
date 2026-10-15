@@ -1636,3 +1636,99 @@ def test_a_deferral_that_reads_back_as_nothing_is_not_acknowledged(dispatch_env,
     monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: None)
     _, notifier = _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
     assert any("could not record" in m and "read-back" in m for m in notifier.sent)
+
+
+# ── a task that waited for a slot is judged as it reads when its turn comes ──
+
+
+def _queue_behind_a_busy_slot(dispatch_env, monkeypatch, *, change):
+    """Two marked tasks, one slot. A holds it; ``change(store)`` hits B while it waits."""
+    writes, _, store = dispatch_env
+    monkeypatch.setattr(apis, "_RECOVERY_CONCURRENCY", 1)
+    monkeypatch.setattr(apis, "_recovery_slots", __import__("weakref").WeakKeyDictionary())
+    dispatched: list[tuple[str, dict]] = []
+    n = _RecNotifier()
+
+    async def _go():
+        release = asyncio.Event()
+
+        async def _gated(skill, entity_id, snapshot, trigger, *a, **kw):
+            dispatched.append((entity_id, dict(snapshot)))
+            if entity_id == "ent_a_first_0001":
+                await release.wait()
+            return _SpawnResult()
+
+        monkeypatch.setattr(apis, "_spawn_harness_skill", _gated)
+        _mark(store, "ent_a_first_0001")
+        _mark(store, "ent_b_queued_0001", title="as first read")
+        await apis.recover_deferred_tasks(n)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert [e for e, _ in dispatched] == ["ent_a_first_0001"], "B should be queued"
+        change(store)
+        release.set()
+        await _settle()
+
+    asyncio.run(_go())
+    return dispatched, n, writes
+
+
+@pytest.mark.parametrize(
+    "label,change",
+    [
+        ("completed", lambda st: st.rows["ent_b_queued_0001"].update(status="done")),
+        ("cancelled", lambda st: st.rows["ent_b_queued_0001"].update(status="cancelled")),
+        ("superseded", lambda st: st.rows["ent_b_queued_0001"].update(status="superseded")),
+        (
+            "re-marked behind a different build",
+            lambda st: st.rows["ent_b_queued_0001"].update(
+                dispatch_context=f"deferred-behind:{REPO.lower()}#1448:fedcba9876543210"
+            ),
+        ),
+        ("no longer marked", lambda st: st.rows["ent_b_queued_0001"].pop("disposition")),
+    ],
+)
+def test_a_queued_task_that_stopped_qualifying_is_not_dispatched(dispatch_env, monkeypatch, label, change):
+    dispatched, n, writes = _queue_behind_a_busy_slot(dispatch_env, monkeypatch, change=change)
+
+    assert [e for e, _ in dispatched] == ["ent_a_first_0001"], label
+    assert not any(e == "ent_b_queued_0001" for e, _ in writes), "a status write for a task not dispatched"
+    # The normal case (finished while it waited) is quiet.
+    assert not any("ent_b_queued_0001" in m for m in n.sent)
+
+
+def test_a_queued_task_whose_build_is_running_again_is_not_dispatched(dispatch_env, monkeypatch):
+    claims: list = []
+
+    def _change(store):
+        cm = build_delivery.claim_build(REPO, 1448, "swarm-build-handoff")
+        cm.__enter__()
+        claims.append(cm)
+
+    try:
+        dispatched, _, writes = _queue_behind_a_busy_slot(dispatch_env, monkeypatch, change=_change)
+    finally:
+        for cm in claims:
+            cm.__exit__(None, None, None)
+    assert [e for e, _ in dispatched] == ["ent_a_first_0001"]
+    assert not any(e == "ent_b_queued_0001" for e, _ in writes)
+
+
+def test_a_queued_task_that_is_still_deferred_is_dispatched_from_the_fresh_read(dispatch_env, monkeypatch):
+    dispatched, _, _ = _queue_behind_a_busy_slot(
+        dispatch_env, monkeypatch,
+        change=lambda st: st.rows["ent_b_queued_0001"].update(title="as re-read at its turn"),
+    )
+    by_id = dict(dispatched)
+    assert set(by_id) == {"ent_a_first_0001", "ent_b_queued_0001"}
+    assert by_id["ent_b_queued_0001"]["title"] == "as re-read at its turn"
+
+
+def test_a_queued_task_that_cannot_be_re_read_is_reported_once_and_not_dispatched(dispatch_env, monkeypatch):
+    dispatched, n, writes = _queue_behind_a_busy_slot(
+        dispatch_env, monkeypatch,
+        change=lambda st: st.fail_reads.add("ent_b_queued_0001"),
+    )
+    assert [e for e, _ in dispatched] == ["ent_a_first_0001"]
+    assert sum("ent_b_queued_0001" in m for m in n.sent) == 1
+    assert not any(e == "ent_b_queued_0001" for e, _ in writes)

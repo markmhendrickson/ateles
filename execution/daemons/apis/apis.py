@@ -1175,6 +1175,34 @@ def _continue_later(
     _spawn_background(_go(), "apis-deferred-recovery-continue")
 
 
+def _qualify_deferred(
+    entity_id: str, fresh: dict, fallback: "tuple[dict, tuple[str, int]] | None"
+) -> "tuple[dict, tuple[str, int] | None, str]":
+    """Judge a task as it reads NOW: (merged snapshot, build it waits for, verdict).
+
+    Verdict is "" when the task is still deferred and resolvable, else why not:
+    ``no_longer_deferred`` (not pending, or no longer marked and unknown to this
+    process) or ``unresolvable`` (marked, but it does not say which build). Pure:
+    no I/O, so it is applied to every fresh read, at examination and again just
+    before dispatch.
+    """
+    snap = {**(fallback[0] if fallback else {}), **fresh}
+    marked = snap.get("disposition") == build_delivery.DEFERRED_DISPOSITION
+    if normalize_status(snap.get("status")) != TaskStatus.PENDING.value or (
+        not marked and not fallback
+    ):
+        return snap, None, "no_longer_deferred"
+    context = build_delivery.parse_deferral_context(snap.get("dispatch_context"))
+    if marked and context:
+        return snap, (context[0], context[1]), ""
+    # An unrecorded (or half-recorded) deferral still knows what it waits for from
+    # this process; a record that says nothing and has no such memory cannot be
+    # resolved.
+    if fallback:
+        return snap, fallback[1], ""
+    return snap, None, "unresolvable"
+
+
 async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) -> None:
     """Decide one marked task: run it, leave it, or surface it. Never raises."""
     try:
@@ -1191,11 +1219,8 @@ async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) ->
                 counts,
             )
             return
-        snap = {**(fallback[0] if fallback else {}), **fresh}
-        marked = snap.get("disposition") == build_delivery.DEFERRED_DISPOSITION
-        if normalize_status(snap.get("status")) != TaskStatus.PENDING.value or (
-            not marked and not fallback
-        ):
+        snap, waiting_for, verdict = _qualify_deferred(entity_id, fresh, fallback)
+        if verdict == "no_longer_deferred":
             counts["no_longer_deferred"] += 1
             _unrecorded_deferrals.pop(entity_id, None)
             log.info(
@@ -1203,14 +1228,6 @@ async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) ->
                 f"deferred (status={snap.get('status')!r}) — not re-dispatching"
             )
             return
-        context = build_delivery.parse_deferral_context(snap.get("dispatch_context"))
-        if marked and context:
-            waiting_for = (context[0], context[1])
-        else:
-            # An unrecorded (or half-recorded) deferral still knows what it waits
-            # for from this process; a record that says nothing and has no such
-            # memory cannot be resolved.
-            waiting_for = fallback[1] if fallback else None
         if waiting_for is None:
             _surface_once(
                 notifier, (entity_id, "unresolvable"),
@@ -1226,8 +1243,11 @@ async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) ->
         _unrecorded_deferrals.pop(entity_id, None)
         _recovering.add(entity_id)
         counts["redispatched"] += 1
+        # What this dispatch was approved against; re-checked after the slot wait.
+        approved = (snap.get("dispatch_context"), fallback)
         _spawn_background(
-            _redispatch_deferred(entity_id, snap, notifier), f"apis-deferred-{entity_id}"
+            _redispatch_deferred(entity_id, approved, notifier),
+            f"apis-deferred-{entity_id}",
         )
     except Exception as exc:  # noqa: BLE001 — one task must never stop the batch
         log.exception(f"[{DAEMON_NAME}] examining deferred task {entity_id} crashed")
@@ -1240,12 +1260,51 @@ async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) ->
         )
 
 
-async def _redispatch_deferred(entity_id: str, snapshot: dict, notifier: Notifier) -> None:
+async def _redispatch_deferred(entity_id: str, approved: tuple, notifier: Notifier) -> None:
+    """Dispatch a deferred task from a FRESH read taken after its slot is won.
+
+    A task can wait a long time for a slot (a dispatch awaits a whole agent run),
+    and may be completed, cancelled, superseded or re-marked in the meantime; the
+    snapshot taken before the wait says nothing about that. So after the slot is
+    acquired, and immediately before dispatch, the task is read again and must
+    still qualify: pending, the deferred disposition, the same dispatch_context
+    it was approved with, and its build not running again. If it no longer
+    qualifies nothing is dispatched or written. If it cannot be read, the operator
+    is told once and nothing is dispatched. What is dispatched is that fresh read.
+    """
+    approved_context, fallback = approved
+    counts = {"surfaced": 0, "already_surfaced": 0}
     try:
         async with _recovery_slot():
+            fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+            if fresh is None:
+                _surface_once(
+                    notifier, (entity_id, "unreadable"),
+                    f"Deferred task {entity_id} could not be re-read when its turn "
+                    "came, so it was not re-dispatched. Open it in Neotoma and "
+                    "re-dispatch it by hand once its build has ended.",
+                    counts,
+                )
+                return
+            snap, waiting_for, verdict = _qualify_deferred(entity_id, fresh, fallback)
+            reason = ""
+            if verdict:
+                reason = f"it is no longer deferred (status={snap.get('status')!r})" if (
+                    verdict == "no_longer_deferred"
+                ) else "it no longer says which build it waits for"
+            elif approved_context and snap.get("dispatch_context") != approved_context:
+                reason = "it was re-marked behind a different build while it waited"
+            elif waiting_for and build_delivery.active_build(*waiting_for):
+                reason = "its build is running again"
+            if reason:
+                log.info(
+                    f"[{DAEMON_NAME}] deferred task {entity_id!r} not dispatched "
+                    f"after waiting for a slot: {reason}"
+                )
+                return
             await dispatch_task(
                 entity_id,
-                snapshot,
+                snap,
                 trigger="build_released",
                 notifier=notifier,
                 snapshot_hydrated=True,

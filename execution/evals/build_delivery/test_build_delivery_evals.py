@@ -67,6 +67,7 @@ def test_the_eval_covers_every_required_behaviour():
         "restart_sweep_reaches_every_marked_task_past_broken_records",
         "restart_recovers_a_deferral_whose_first_write_dropped_a_field",
         "deferral_that_never_persists_is_warned_not_acknowledged",
+        "queued_deferred_task_is_re_validated_when_its_slot_comes",
         # the worktree itself is verified, on both paths
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
@@ -171,3 +172,10 @@ def test_the_worktree_scenarios_go_red_when_only_the_source_is_checked(path, cas
     obs = harness.run_scenario(scenario, tmp_path, mutation="no_worktree_check")
     assert harness.check(scenario, obs)
     assert obs["token_requests"], "the token was resolved for the unchecked worktree"
+
+
+def test_the_slot_wait_scenario_goes_red_without_the_re_validation(tmp_path):
+    scenario = BY_ID["queued_deferred_task_is_re_validated_when_its_slot_comes"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="no_revalidation")
+    problems = harness.check(scenario, obs)
+    assert any("stopped qualifying" in p or "status write" in p for p in problems), problems

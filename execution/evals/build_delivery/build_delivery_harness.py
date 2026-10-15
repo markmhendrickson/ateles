@@ -59,7 +59,7 @@ from unroutable_ledger import UnroutableLedger  # noqa: E402
 
 MUTATIONS = (
     "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep",
-    "no_continuation", "no_readback", "no_worktree_check",
+    "no_continuation", "no_readback", "no_worktree_check", "no_revalidation",
 )
 
 REPO = "eval-owner/eval-repo"
@@ -550,6 +550,20 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
         mp.setattr(apis, "start_deferred_recovery", _hook_only, raising=False)
     if mutation == "no_continuation":
         mp.setattr(apis, "_continue_later", lambda *a, **k: None, raising=False)
+    if mutation == "no_revalidation":
+        async def _stale(entity_id, approved, notifier):
+            # Read BEFORE the wait for a slot, dispatch whatever that read said.
+            try:
+                snap = await asyncio.to_thread(apis.fetch_task_snapshot, entity_id)
+                async with apis._recovery_slot():
+                    await apis.dispatch_task(
+                        entity_id, snap, trigger="build_released",
+                        notifier=notifier, snapshot_hydrated=True,
+                    )
+            finally:
+                apis._recovering.discard(entity_id)
+
+        mp.setattr(apis, "_redispatch_deferred", _stale, raising=False)
     if mutation == "no_readback":
         mp.setattr(apis, "_deferral_persisted", lambda *a, **k: [], raising=False)
     if mutation == "no_worktree_check":
@@ -605,7 +619,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
         return None
 
     mp.setattr(apis, "hydrate_snapshot", _no_hydrate)
-    if scenario["path"] in ("mid_build", "restart", "sweep_scale"):
+    if scenario["path"] in ("mid_build", "restart", "sweep_scale", "slot_wait"):
         # What gets dispatched for the OTHER tasks is not the subject; the child
         # the build itself launched still goes through the real run_skill.
         mp.setattr(apis, "_spawn_harness_skill", _recording_spawn(obs))
@@ -616,7 +630,11 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
 
 def _recording_spawn(obs: dict):
     async def _spawn(skill, entity_id, snapshot, trigger, *a, **kw):
-        obs["spawns"].append({"skill": skill, "task": entity_id, "trigger": trigger})
+        obs["spawns"].append(
+            {"skill": skill, "task": entity_id, "trigger": trigger, "title": snapshot.get("title")}
+        )
+        if entity_id.startswith("ent_a_busy") and obs.get("release") is not None:
+            await obs["release"].wait()  # holds a recovery slot until the scenario says
 
         class _R:
             ok = True
@@ -666,6 +684,46 @@ def _marked_row(**over) -> dict:
         blocked_reason="Deferred: swarm-build-handoff is building",
     )
     return row
+
+
+async def _drive_slot_wait(scenario: dict, world: World, obs: dict, notifier) -> None:
+    """Tasks queued behind busy recovery slots change while they wait.
+
+    Three marked tasks hold the three slots. The queued ones are then completed,
+    cancelled, re-marked behind a different build, left alone (control), or made
+    unreadable, BEFORE their turn comes; only the control may be dispatched, and
+    from the read taken at its turn.
+    """
+    store = obs["store"]
+    obs["release"] = asyncio.Event()
+    obs["notifier"] = notifier
+    context = f"deferred-behind:{REPO.lower()}#{ISSUE}:0123456789abcdef"
+    for i in range(apis._RECOVERY_CONCURRENCY):
+        store.put(f"ent_a_busy_{i:03d}", {**_marked_row(), "dispatch_context": context})
+    queued = scenario["queued"]
+    for kind in queued:
+        store.put(
+            f"ent_b_{kind}",
+            {**_marked_row(title="as first read"), "dispatch_context": context},
+        )
+    await apis.recover_deferred_tasks(notifier)
+    for _ in range(50):
+        await asyncio.sleep(0)
+    obs["dispatched_while_waiting"] = [s["task"] for s in obs["spawns"]]
+    for kind in queued:
+        row = store.rows[f"ent_b_{kind}"]
+        if kind == "completed":
+            row["status"] = "done"
+        elif kind == "cancelled":
+            row["status"] = "cancelled"
+        elif kind == "remarked":
+            row["dispatch_context"] = f"deferred-behind:{REPO.lower()}#{ISSUE}:fedcba9876543210"
+        elif kind == "unreadable":
+            store.unreadable.add(f"ent_b_{kind}")
+        elif kind == "still_deferred":
+            row["title"] = "as re-read at its turn"
+    obs["release"].set()
+    await _settle()
 
 
 async def _drive_scale(scenario: dict, world: World, obs: dict, notifier) -> None:
@@ -838,6 +896,10 @@ async def _drive(scenario: dict, world: World, obs: dict) -> None:
 
     if path == "sweep_scale":
         await _drive_scale(scenario, world, obs, notifier)
+        return
+
+    if path == "slot_wait":
+        await _drive_slot_wait(scenario, world, obs, notifier)
         return
 
     raise AssertionError(f"unknown path {path!r}")
@@ -1032,6 +1094,27 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for needle in exp["warning_before_restart_contains"]:
             if needle not in sent:
                 bad.append(f"the operator was not warned {needle!r}; got: {sent[:300]!r}")
+    if "slot_wait" in exp:
+        sw = exp["slot_wait"]
+        dispatched = {s["task"]: s for s in obs["spawns"]}
+        want("queued tasks held back while the slots were busy",
+             sorted(t for t in obs["dispatched_while_waiting"] if t.startswith("ent_b_")), [])
+        for kind in sw.get("not_dispatched", []):
+            eid = f"ent_b_{kind}"
+            if eid in dispatched:
+                bad.append(f"{eid} was dispatched after it stopped qualifying")
+            if [st for e, st in obs["statuses"] if e == eid]:
+                bad.append(f"{eid} got a status write although it was not dispatched")
+            if any(eid in m for m in obs["notifier"].sent) and kind != "unreadable":
+                bad.append(f"{eid} was announced, but finishing while it waited is the normal case")
+        for kind, title in sw.get("dispatched_from_fresh_read", {}).items():
+            got = dispatched.get(f"ent_b_{kind}")
+            want(f"ent_b_{kind} dispatched", got is not None, True)
+            if got:
+                want(f"ent_b_{kind} dispatched from the read at its turn", got["title"], title)
+        for kind in sw.get("announced_once", []):
+            n = sum(f"ent_b_{kind}" in m for m in obs["notifier"].sent)
+            want(f"ent_b_{kind} announced", n, 1)
     if "token_requests" in exp:
         want("token resolutions", len(obs.get("token_requests", [])), exp["token_requests"])
     if "scale" in exp:
