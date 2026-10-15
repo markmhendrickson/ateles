@@ -1377,6 +1377,20 @@ def fetch_task_snapshot(task_entity_id: str) -> dict | None:
     return _snapshot_with_tenant(data) if data is not None else None
 
 
+def fetch_task_snapshot_and_version(task_entity_id: str) -> tuple[dict | None, str | None]:
+    """The task snapshot and its `entity_version` token, from ONE read.
+
+    The token is what a conditional write (`/correct` with `expected_version`) is
+    made against. ``(None, None)`` when the task cannot be read; a snapshot with a
+    ``None`` token when the server returned none.
+    """
+    data = fetch_task_record(task_entity_id)
+    if data is None:
+        return None, None
+    version = data.get("entity_version")
+    return _snapshot_with_tenant(data), version if isinstance(version, str) and version else None
+
+
 def fetch_checkpoint_record(checkpoint_entity_id: str) -> dict | None:
     """Fetch a complete typed checkpoint record, including provenance."""
     data = _fetch_entity(checkpoint_entity_id)
