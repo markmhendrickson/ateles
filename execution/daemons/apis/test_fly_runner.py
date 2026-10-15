@@ -3961,3 +3961,55 @@ def test_an_oversized_argument_never_starts_a_machine_or_falls_back(fly_env, sea
         result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
     assert not result.ok and "nothing was launched" in result.error
     assert fake.requests == [] and minted == [] and spawned == []
+
+
+# ── Fly-bound dispatches and the Mac's usage gate (operator ruling 2026-10-15) ─
+
+
+@pytest.mark.parametrize("local_reason", ["usage reading stale", None])
+def test_a_fly_fallback_to_the_mac_is_gated_locally_again(fly_env, seam, monkeypatch,
+                                                         local_reason):  # fmt: skip
+    spawned, fake_exec = seam
+    fake = FakeFly()
+    fake.create_mode = "refused"  # provably nothing was created: a local fallback
+    executor, _, _ = make_executor(fake)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    checked = []
+
+    def check(provider):
+        checked.append(provider)
+        return local_reason
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local", include_github_contract=True,
+                       local_fallback_check=check)  # fmt: skip
+    assert checked == ["claude"]
+    if local_reason:
+        assert not result.ok and local_reason in result.error and spawned == []
+    else:
+        assert result.ok and len(spawned) == 1
+
+
+def test_the_fly_budget_still_refuses_a_dispatch_the_mac_gate_would_refuse(
+        fly_env, seam, monkeypatch, tmp_path):  # fmt: skip
+    import harness_router as hr
+
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    monkeypatch.setenv("APIS_USAGE_PROBE", "off")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    hr.record_usage("claude", [{"name": "weekly_all", "used_percent": 95.0,
+                                "resets_at": hr._iso_from_wall(time.time() + 3 * 86400)}])
+    assert hr.provider_exclusion_reason("claude", {"claude": "/usr/bin/claude-test"})
+    fake = FakeFly()
+    executor, minted, _ = make_executor(fake, **EXHAUSTING)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = asyncio.run(skill_runner.run_skill(
+            "lanius", "check the gates", role="lanius", provider="claude", runner="fly",
+            repository="owner/repo", include_github_contract=True))  # fmt: skip
+    assert not result.ok and "budget" in result.error  # the Fly cap, not the Mac's gate
+    assert not fake.calls("POST", "/machines") and spawned == []

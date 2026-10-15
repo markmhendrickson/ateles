@@ -5457,7 +5457,7 @@ class TestGateOwnerDenyCapableRouting:
         monkeypatch.setattr(
             skill_runner,
             "usable_provider_names",
-            lambda binaries: {name for name, path in binaries.items() if path},
+            lambda binaries, **_kw: {name for name, path in binaries.items() if path},
         )
 
         filtered = skill_runner._tier_bound_binaries(

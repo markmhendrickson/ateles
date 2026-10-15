@@ -399,6 +399,15 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     fake.settle_reads = int(scenario["fly"].get("settle_reads", 0))
     fake.never_settles = bool(scenario["fly"].get("never_settles"))
     monkeypatch.setattr(fly_runner, "LOGIN_SETTLE_POLL_SECONDS", 0.0, raising=False)
+    if scenario.get("mac_usage") == "over_ceiling":
+        # The Mac's own Claude login is far over its weekly ceiling; the gate is on.
+        monkeypatch.setenv("APIS_USAGE_GATE", "on")
+        monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+        moment = __import__("time").time()
+        harness_router.record_usage("claude", [
+            {"name": "weekly_all", "used_percent": 95.0,
+             "resets_at": harness_router._iso_from_wall(moment + 3 * 86400)}],
+            observed_at=moment)  # fmt: skip
     if scenario["fly"].get("lost_error"):
         fake.lost_error = scenario["fly"]["lost_error"]
         fake.start_lost = True
@@ -671,6 +680,9 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append(f"exit {trace.exit_code} != {e['exit']}")
     if bool(env.get("ok")) != e["ok"]:
         problems.append(f"envelope ok={env.get('ok')} != {e['ok']}")
+    if "usage_gate_exempted_contains" in e and (
+            e["usage_gate_exempted_contains"] not in str(env.get("usage_gate_exempted", ""))):
+        problems.append("the envelope does not say which Mac usage reading was set aside")
     if "stdout_contains" in e and e["stdout_contains"] not in str(env.get("stdout", "")):
         problems.append(f"result stdout lacks {e['stdout_contains']!r}")
     if "reason_contains" in e:

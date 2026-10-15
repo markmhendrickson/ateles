@@ -77,6 +77,8 @@ def test_scenario_set_covers_the_required_behaviours():
         "login_claim_waits_for_the_machine_to_settle",
         "login_machine_that_never_settles_fails_closed_without_job_files",
         "large_system_prompt_travels_as_a_file_not_an_argument",
+        "fly_dispatch_is_not_gated_by_the_macs_usage_reading",
+        "the_same_dispatch_bound_for_the_mac_keeps_its_usage_gate",
     } <= ids
     assert len(ids) == len(SCENARIOS)
 
@@ -219,3 +221,10 @@ def test_judge_goes_red_when_a_large_prompt_is_one_argument(tmp_path, monkeypatc
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
     inline = dataclasses.replace(trace, argv_max_bytes=150_000, system_prompt_file_bytes=0)
     assert len(runner.judge(scenario, inline)) >= 2
+
+
+def test_judge_goes_red_when_a_fly_run_hides_the_reading_it_set_aside(tmp_path, monkeypatch):
+    scenario = _by_id("fly_dispatch_is_not_gated_by_the_macs_usage_reading")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    hidden = dataclasses.replace(trace, envelope={**trace.envelope, "usage_gate_exempted": ""})
+    assert runner.judge(scenario, hidden)
