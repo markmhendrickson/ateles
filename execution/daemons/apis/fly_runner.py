@@ -1415,6 +1415,26 @@ def check_delivery_token_response(payload: Any, repository: str, now: float) -> 
     return token, expires_at
 
 
+def _revoke_refused_delivery_token(revoke: Callable[[str], None], token: str,
+                                   validated_expiry: float | None) -> None:
+    """Revoke a token that was minted and then refused, and say what is known:
+    revoked (GitHub accepted the revocation), or attempted and failed. A
+    failed revocation states an expiry only when one was validated."""
+    try:
+        revoke(token)
+    except Exception:  # noqa: BLE001 — the exception may carry request detail
+        if validated_expiry is None:
+            log.warning("[fly] revoking a refused delivery token was attempted and failed; "
+                        "revoke it manually if it is still live; its expiry was not "
+                        "confirmed")  # fmt: skip
+        else:
+            log.warning("[fly] revoking a refused delivery token was attempted and failed; "
+                        "revoke it manually if it is still live; GitHub reported its expiry "
+                        f"as {_render_wall(validated_expiry)}")  # fmt: skip
+        return
+    log.info("[fly] a refused delivery token was revoked")
+
+
 def mint_delivery_github_token(
     repository: str,
     *,
@@ -1453,9 +1473,13 @@ def mint_delivery_github_token(
     except Exception as exc:  # noqa: BLE001 — the message carries no credential
         raise FlyIneligible(f"the delivery token mint failed: {exc}") from None
     revoke = revoke or revoke_job_github_token
+    # Set only once the expiry has been read and checked to be within an
+    # installation token's life; only then may a log line state it.
+    validated_expiry: float | None = None
     try:
         now = clock()
         token, expires_at = check_delivery_token_response(payload, repository, now)
+        validated_expiry = expires_at
         if not delivery_fits_token_life(timeout, expires_at, now):
             raise FlyIneligible(
                 f"the delivery token expires before a {int(timeout)}s job would end; "
@@ -1463,11 +1487,7 @@ def mint_delivery_github_token(
     except FlyIneligible:
         minted = payload.get("token") if isinstance(payload, dict) else None
         if isinstance(minted, str) and minted.strip():
-            try:
-                revoke(minted)
-            except Exception:  # noqa: BLE001
-                log.warning("[fly] a refused delivery token could not be revoked; it "
-                            "expires within the hour")  # fmt: skip
+            _revoke_refused_delivery_token(revoke, minted, validated_expiry)
         raise
     return DeliveryToken(token=token, expires_at=expires_at, repository=repository)
 

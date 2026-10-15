@@ -257,3 +257,61 @@ def test_the_executor_still_mints_with_the_read_class_function():
 
     defaults = inspect.signature(fly_runner.FlyExecutor.__init__).parameters
     assert defaults["mint"].default is fly_runner.mint_job_github_token
+
+
+# ── What the log says when a refused token is revoked, or cannot be ──────────
+
+_NO_DEADLINE_PROMISE = ("within the hour", "expires within", "one hour", "will expire")
+
+
+def _failing_revoke(token):
+    raise RuntimeError("DELETE /installation/token -> HTTP 500")
+
+
+def _refuse_with_failed_revoke(github, caplog, payload, match, timeout=1800):
+    github["payload"] = payload
+    caplog.set_level("INFO", logger="apis.fly_runner")
+    with pytest.raises(fly_runner.FlyIneligible, match=match) as exc:
+        fly_runner.mint_delivery_github_token(REPO, timeout=timeout, clock=lambda: NOW,
+                                              revoke=_failing_revoke)  # fmt: skip
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert MINTED not in text and MINTED not in str(exc.value)
+    assert "attempted and failed" in text and "revoke it manually" in text
+    return text
+
+
+@pytest.mark.parametrize("expiry", [None, "soon", "2027-01-15T08:00:00", _iso(NOW + 3 * 3600),
+                                    _iso(NOW - 1)])  # fmt: skip
+def test_a_failed_revoke_after_an_unconfirmed_expiry_promises_no_deadline(github, caplog,
+                                                                          expiry):  # fmt: skip
+    text = _refuse_with_failed_revoke(github, caplog, _granted(expires_at=expiry), "expir")
+    assert "its expiry was not confirmed" in text
+    assert not any(p in text for p in _NO_DEADLINE_PROMISE)
+
+
+@pytest.mark.parametrize("case,match", [("extra-workflows", "permissions differ"),
+                                        ("all-repositories", "selected repositories")])
+def test_a_failed_revoke_after_a_grant_refusal_promises_no_deadline(github, caplog, case,
+                                                                     match):  # fmt: skip
+    text = _refuse_with_failed_revoke(github, caplog, _granted(**_MISMATCHES[case]), match)
+    assert "its expiry was not confirmed" in text
+    assert not any(p in text for p in _NO_DEADLINE_PROMISE)
+
+
+def test_a_failed_revoke_after_a_validated_expiry_states_only_that_expiry(github, caplog):
+    text = _refuse_with_failed_revoke(github, caplog, _granted(expires_at=_iso(NOW + 1800)),
+                                      "expires before")  # fmt: skip
+    assert "GitHub reported its expiry as " + fly_runner._render_wall(NOW + 1800) in text
+    assert "not confirmed" not in text
+    assert not any(p in text for p in _NO_DEADLINE_PROMISE)
+
+
+def test_a_confirmed_revoke_is_reported_as_done(github, caplog):
+    github["payload"] = _granted(repository_selection="all")
+    caplog.set_level("INFO", logger="apis.fly_runner")
+    with pytest.raises(fly_runner.FlyIneligible, match="selected repositories"):
+        _mint(github)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert github["revoked"] == [MINTED]
+    assert "a refused delivery token was revoked" in text and "failed" not in text
+    assert MINTED not in text
