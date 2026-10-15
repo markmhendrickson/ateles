@@ -74,6 +74,14 @@ def test_the_eval_covers_every_required_behaviour():
         "intact_marker_is_dispatched_once_when_the_build_ends_before_the_notice",
         "intact_marker_is_dispatched_once_when_the_build_ends_during_the_notice",
         "intact_marker_is_dispatched_once_when_the_build_ends_after_the_notice",
+        # the rollback never overwrites a task that moved on, and says what is true
+        "rollback_never_overwrites_a_gate_hold_arriving_before_the_clears",
+        "rollback_never_overwrites_a_gate_hold_arriving_between_the_clears",
+        "rollback_never_overwrites_a_gate_hold_arriving_after_the_clears",
+        "rollback_reports_a_task_dispatched_meanwhile_as_dispatched",
+        "rollback_reports_a_task_finished_meanwhile_as_finished",
+        "rollback_reports_a_task_cancelled_meanwhile_as_cancelled",
+        "rollback_reports_an_unmapped_status_as_unknown",
         # the worktree itself is verified, on both paths
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
@@ -214,3 +222,11 @@ def test_the_intact_marker_scenarios_go_red_without_the_registration(tmp_path):
     problems = harness.check(scenario, obs)
     assert problems and obs["spawns"] == [], problems
     assert any("WILL re-dispatch" in m for m in obs["notifier"].sent), "the promise was made"
+
+
+@pytest.mark.parametrize("when", ["before", "between"])
+def test_the_gate_hold_scenarios_go_red_if_the_rollback_does_not_re_read_first(when, tmp_path):
+    scenario = BY_ID[f"rollback_never_overwrites_a_gate_hold_arriving_{when}_the_clears"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="skip_pre_clear_read")
+    problems = harness.check(scenario, obs)
+    assert any("blocked_reason after the rollback" in p or "moved on" in p for p in problems), problems

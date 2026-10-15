@@ -61,6 +61,7 @@ MUTATIONS = (
     "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep",
     "no_continuation", "no_readback", "no_worktree_check", "no_revalidation",
     "silent_unrecorded", "reason_not_required", "drop_intact_registration",
+    "skip_pre_clear_read",
 )
 
 REPO = "eval-owner/eval-repo"
@@ -592,6 +593,16 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
             return real_target(*a, **k)
 
         mp.setattr(apis, target, _release_then)
+    if mutation == "skip_pre_clear_read":
+        def _blind_rollback(entity_id, snapshot, claim):
+            for field in ("blocked_reason", "dispatch_context", "disposition"):
+                apis.set_task_field(
+                    entity_id, field, snapshot.get(field) or "",
+                    handler="apis", key_suffix=f"deferral-rollback-{claim.run_id}",
+                )
+            return apis._classify_deferral_state(entity_id, claim)
+
+        mp.setattr(apis, "_roll_back_deferral", _blind_rollback, raising=False)
     if mutation == "drop_intact_registration":
         real_record = apis._record_deferral
 
@@ -639,6 +650,40 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     obs["store"] = store
     mp.setattr(apis, "set_task_status", store.status)
     mp.setattr(apis, "set_task_field", store.field, raising=False)
+
+    if scenario["path"] == "rollback_race":
+        # The task moves on (to a gate hold, a dispatch, a terminal state, ...) before
+        # the first clear, between two clears, or after the last one.
+        race = scenario["race"]
+
+        def _move() -> None:
+            obs["store"].rows["ent_eval_race_0000"].update(
+                status=race["status"], blocked_reason=race.get("reason", "")
+            )
+
+        if race["when"] == "before":
+            real_roll = apis._roll_back_deferral
+
+            def _roll_after_move(*a, **k):
+                _move()
+                return real_roll(*a, **k)
+
+            mp.setattr(apis, "_roll_back_deferral", _roll_after_move)
+        else:
+            trigger = 1 if race["when"] == "between" else 3
+            rollback_writes: list[str] = []
+            store_field = apis.set_task_field
+
+            def _field(entity_id, field, value, **kw):
+                result = store_field(entity_id, field, value, **kw)
+                if kw.get("key_suffix", "").startswith("deferral-rollback"):
+                    rollback_writes.append(field)
+                    if len(rollback_writes) == trigger:
+                        _move()
+                return result
+
+            mp.setattr(apis, "set_task_field", _field)
+            obs["rollback_writes"] = rollback_writes
     mp.setattr(apis, "query_all_entities", store.query)
     mp.setattr(apis, "fetch_task_snapshot", store.read)
     obs["token_requests"] = []
@@ -663,7 +708,9 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
         return None
 
     mp.setattr(apis, "hydrate_snapshot", _no_hydrate)
-    if scenario["path"] in ("mid_build", "restart", "sweep_scale", "slot_wait", "intact_order"):
+    if scenario["path"] in (
+        "mid_build", "restart", "sweep_scale", "slot_wait", "intact_order", "rollback_race"
+    ):
         # What gets dispatched for the OTHER tasks is not the subject; the child
         # the build itself launched still goes through the real run_skill.
         mp.setattr(apis, "_spawn_harness_skill", _recording_spawn(obs))
@@ -729,6 +776,22 @@ def _marked_row(**over) -> dict:
         ),
     )
     return row
+
+
+async def _drive_rollback_race(scenario: dict, world: World, obs: dict, notifier) -> None:
+    """A deferral that cannot be confirmed is rolled back while the task moves on."""
+    store = obs["store"]
+    store.fail_next_reads = 2
+    obs["notifier"] = notifier
+    apis.install_build_release_hook(notifier)
+    cm = build_delivery.claim_build(REPO, ISSUE, "swarm-build-handoff")
+    cm.__enter__()
+    task = _task_snapshot(action_type="local_edit")
+    store.put("ent_eval_race_0000", task)
+    await apis.handle_event(_created("ent_eval_race_0000", task), notifier)
+    obs["row_after_notice"] = dict(store.rows["ent_eval_race_0000"])
+    cm.__exit__(None, None, None)
+    await _settle()
 
 
 async def _drive_intact_order(scenario: dict, world: World, obs: dict, notifier) -> None:
@@ -1008,6 +1071,10 @@ async def _drive(scenario: dict, world: World, obs: dict) -> None:
         await _drive_intact_order(scenario, world, obs, notifier)
         return
 
+    if path == "rollback_race":
+        await _drive_rollback_race(scenario, world, obs, notifier)
+        return
+
     raise AssertionError(f"unknown path {path!r}")
 
 
@@ -1229,6 +1296,13 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for kind in sw.get("announced_once", []):
             n = sum(f"ent_b_{kind}" in m for m in obs["notifier"].sent)
             want(f"ent_b_{kind} announced", n, 1)
+    if "race_row" in exp:
+        row = obs["row_after_notice"]
+        for field, value in exp["race_row"].items():
+            want(f"the task's {field} after the rollback", row.get(field), value)
+        want("dispatches", obs["spawns"], [])
+    if "rollback_writes" in exp:
+        want("writes made to a task that had moved on", len(obs.get("rollback_writes", [])), exp["rollback_writes"])
     if "notification_excludes" in exp:
         sent = "\n".join(getattr(obs.get("notifier"), "sent", []))
         for needle in exp["notification_excludes"]:

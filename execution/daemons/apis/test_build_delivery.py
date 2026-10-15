@@ -1628,8 +1628,9 @@ def test_an_unrecordable_deferral_is_not_held_and_not_dispatched(dispatch_env, f
     assert "NOT held and NOT dispatched" in msg and "by hand when the build" in msg
     # Not dispatched mid-build, and not by the release that follows.
     assert out["spawns_mid_build"] == [] and spawns == []
-    # No half-written marker is left to get it picked up later.
-    assert store.rows["ent_followup_00001"].get("disposition") != build_delivery.DEFERRED_DISPOSITION
+    # Whatever is left behind does not qualify, so nothing will pick it up.
+    row = dict(store.rows["ent_followup_00001"])
+    assert apis._qualify_deferred("ent_followup_00001", row)[1] != ""
     _no_state_left_behind()
 
 
@@ -1913,15 +1914,14 @@ def test_when_the_reason_cannot_be_cleared_the_notice_says_apis_will_dispatch_an
     assert spawns == [("cicada", "ent_followup_00001", "build_released")]
 
 
-def test_a_reason_clear_that_is_acknowledged_but_not_applied_is_judged_by_what_is_read_back(dispatch_env):
-    """The rollback goes on past an acknowledged clear; the read-back says what is left."""
+def test_a_reason_clear_that_is_acknowledged_but_not_applied_is_judged_by_what_is_read(dispatch_env):
+    """The rollback re-reads before going on, sees the reason still there, and stops."""
     _, spawns, _ = dispatch_env
     out, n = _failed_deferral(dispatch_env, failing_clear="blocked_reason", how="drop")
 
     (msg,) = [m for m in n.sent if "could not record a deferral" in m]
-    assert "NOT held and NOT dispatched" in msg and "blocked_reason" in msg
-    assert "WILL re-dispatch" not in msg
-    assert spawns == []
+    assert "WILL re-dispatch" in msg and "NOT dispatched" not in msg
+    assert spawns == [("cicada", "ent_followup_00001", "build_released")]
 
 
 @pytest.mark.parametrize(
@@ -1930,7 +1930,7 @@ def test_a_reason_clear_that_is_acknowledged_but_not_applied_is_judged_by_what_i
         ("dispatch_context", "reject", 1),
         ("disposition", "reject", 1),
         ("disposition", "drop", 1),
-        ("dispatch_context", "drop", 0),  # the rollback goes on and unmarks it
+        ("dispatch_context", "drop", 1),  # the rollback stops at the unapplied clear
     ],
 )
 def test_when_a_later_clear_fails_the_marker_does_not_qualify_and_nothing_is_dispatched(
@@ -1959,7 +1959,7 @@ def test_when_a_later_clear_fails_the_marker_does_not_qualify_and_nothing_is_dis
 
 def test_when_the_state_after_a_rollback_cannot_be_read_the_notice_says_so(dispatch_env):
     _, spawns, _ = dispatch_env
-    out, n = _failed_deferral(dispatch_env, unreadable_reads=3)
+    out, n = _failed_deferral(dispatch_env, unreadable_reads=99)
 
     (msg,) = [m for m in n.sent if "could not record a deferral" in m]
     assert "could not verify the task's state" in msg
@@ -2064,7 +2064,8 @@ def test_an_intact_marker_is_dispatched_exactly_once_after_the_build_whenever_it
     assert spawns == [("cicada", "ent_followup_00001", "build_released")], where
     (msg,) = [m for m in n.sent if "could not record a deferral" in m]
     if where == "during":
-        assert "already been dispatched" in msg and "NOT dispatched" not in msg
+        assert "ended meanwhile" in msg and "(status:" in msg
+        assert "NOT held and NOT dispatched" not in msg and "WILL re-dispatch" not in msg
     else:
         assert "WILL re-dispatch" in msg and "NOT dispatched" not in msg
 
@@ -2080,3 +2081,147 @@ def test_the_outcome_says_whether_the_sweep_owns_the_task():
     O = apis.DeferralOutcome
     assert O.RECORDED.sweep_owns_it and O.INTACT_MARKER.sweep_owns_it
     assert not O.NOT_HELD.sweep_owns_it and not O.MOVED_ON.sweep_owns_it
+
+
+# ── the rollback never overwrites a task that moved on, and says what happened ─
+
+GATE_REASON = "Held for approval: high blast radius"
+
+MOVES = [
+    # (status, outcome, wording that must appear, wording that must not)
+    ("routed", "MOVED_ON", "has already been dispatched", "gate"),
+    ("executing", "MOVED_ON", "has already been dispatched", "gate"),
+    ("in_progress", "MOVED_ON", "has already been dispatched", "gate"),
+    ("verified", "MOVED_ON", "has already run", "gate"),
+    ("done", "MOVED_ON", "has already finished", "gate"),
+    ("completed", "MOVED_ON", "has already finished", "gate"),
+    ("failed", "MOVED_ON", "has failed", "no action needed"),
+    ("declined", "MOVED_ON", "cancelled or declined", "dispatched and"),
+    ("cancelled", "MOVED_ON", "cancelled or declined", "dispatched and"),
+    ("superseded", "MOVED_ON", "superseded", "dispatched and"),
+    ("awaiting_approval", "MOVED_TO_GATE", "approval gate", "no action needed"),
+    ("awaiting_input", "MOVED_TO_GATE", "waiting for your input", "no action needed"),
+    ("blocked", "MOVED_TO_GATE", "is now blocked", "no action needed"),
+    ("quantum_superposition", "STATE_UNKNOWN", "does not recognise", "no action needed"),
+]
+
+
+def _move_during_rollback(dispatch_env, monkeypatch, when, status, *, hold_reason=GATE_REASON):
+    """Record a deferral that cannot be confirmed (so it is rolled back), and have the
+    task move to ``status`` before the first clear, between two clears, or after
+    the last one."""
+    _, _, store = dispatch_env
+    n = _RecNotifier()
+    store.fail_next_reads = 2  # both read-backs fail: the deferral is not confirmed
+    rollback_writes: list[str] = []
+    real_field = apis.set_task_field
+
+    def move():
+        store.rows["ent_followup_00001"].update(status=status, blocked_reason=hold_reason)
+
+    if when == "before":
+        real_roll = apis._roll_back_deferral
+        monkeypatch.setattr(
+            apis, "_roll_back_deferral", lambda *a, **k: (move(), real_roll(*a, **k))[1]
+        )
+    else:
+        trigger = 1 if when == "between" else 3
+
+        def field(entity_id, f, v, **kw):
+            result = real_field(entity_id, f, v, **kw)
+            if kw.get("key_suffix", "").startswith("deferral-rollback"):
+                rollback_writes.append(f)
+                if len(rollback_writes) == trigger:
+                    move()
+            return result
+
+        monkeypatch.setattr(apis, "set_task_field", field)
+
+    async def _go():
+        with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff") as claim:
+            store.put("ent_followup_00001", _local())
+            return await apis._record_deferral("ent_followup_00001", _local(), claim, n), claim
+
+    outcome, _ = asyncio.run(_go())
+    return outcome, n, store, rollback_writes
+
+
+@pytest.mark.parametrize("when", ["before", "between", "after"])
+@pytest.mark.parametrize("status", ["awaiting_approval", "awaiting_input", "blocked"])
+def test_a_gate_hold_that_arrives_during_the_rollback_is_never_overwritten(dispatch_env, monkeypatch, when, status):
+    outcome, n, store, writes = _move_during_rollback(dispatch_env, monkeypatch, when, status)
+
+    row = store.rows["ent_followup_00001"]
+    assert row["status"] == status and row["blocked_reason"] == GATE_REASON, "the hold was overwritten"
+    assert outcome is apis.DeferralOutcome.MOVED_TO_GATE
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert f"(status: {status}" in msg and "may need your decision" in msg
+    assert GATE_REASON[:20] in msg, "the notice does not name the gate"
+    assert "dispatched" not in msg and "no action needed" not in msg
+    assert "Apis did not change it" in msg
+    if when == "before":
+        assert writes == [], "something was written to a task that had already moved on"
+
+
+@pytest.mark.parametrize("when", ["before", "between", "after"])
+def test_nothing_is_written_once_the_task_has_moved_on(dispatch_env, monkeypatch, when):
+    outcome, n, store, writes = _move_during_rollback(dispatch_env, monkeypatch, when, "awaiting_approval")
+    expected = {"before": 0, "between": 1, "after": 3}[when]
+    assert len(writes) == expected, writes
+
+
+@pytest.mark.parametrize("status,outcome_name,must,must_not", MOVES)
+def test_each_status_is_classified_by_what_it_is(dispatch_env, monkeypatch, status, outcome_name, must, must_not):
+    outcome, n, store, _ = _move_during_rollback(dispatch_env, monkeypatch, "before", status)
+
+    assert outcome is getattr(apis.DeferralOutcome, outcome_name), status
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert must in msg, (status, msg)
+    assert must_not not in msg, (status, msg)
+    assert "NOT held and NOT dispatched" not in msg and "WILL re-dispatch" not in msg
+    if outcome_name == "STATE_UNKNOWN":
+        assert repr(status) in msg and "Apis did not change it" in msg
+
+
+def test_a_task_that_cannot_be_read_before_a_clear_is_not_written(dispatch_env, monkeypatch):
+    _, _, store = dispatch_env
+    store.fail_next_reads = 99
+    n = _RecNotifier()
+    writes: list[str] = []
+    real_field = apis.set_task_field
+    monkeypatch.setattr(
+        apis, "set_task_field",
+        lambda e, f, v, **kw: (writes.append(kw.get("key_suffix", "")), real_field(e, f, v, **kw))[1],
+    )
+
+    async def _go():
+        with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff") as claim:
+            store.put("ent_followup_00001", _local())
+            return await apis._record_deferral("ent_followup_00001", _local(), claim, n)
+
+    outcome = asyncio.run(_go())
+    assert not any(w.startswith("deferral-rollback") for w in writes)
+    assert outcome is apis.DeferralOutcome.INTACT_MARKER  # "state unknown", said as such
+    assert any("could not verify" in m for m in n.sent)
+
+
+def test_a_value_someone_else_wrote_stops_the_rollback(dispatch_env, monkeypatch):
+    _, _, store = dispatch_env
+    n = _RecNotifier()
+    store.fail_next_reads = 2
+
+    real_roll = apis._roll_back_deferral
+
+    def wrapped(*a, **k):
+        store.rows["ent_followup_00001"]["dispatch_context"] = "written-by-someone-else"
+        return real_roll(*a, **k)
+
+    monkeypatch.setattr(apis, "_roll_back_deferral", wrapped)
+
+    async def _go():
+        with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff") as claim:
+            store.put("ent_followup_00001", _local())
+            return await apis._record_deferral("ent_followup_00001", _local(), claim, n)
+
+    asyncio.run(_go())
+    assert store.rows["ent_followup_00001"]["dispatch_context"] == "written-by-someone-else"

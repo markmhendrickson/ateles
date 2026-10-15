@@ -1005,18 +1005,84 @@ class DeferralOutcome(str, Enum):
                    operator was told exactly that; the caller must give it the same
                    catch-up as a recorded deferral, or the promise is empty.
     NOT_HELD       the marker is gone or does not qualify: nothing will dispatch it.
-    MOVED_ON       the task was dispatched (by a release sweep) while the deferral
-                   was being recorded; nothing is left to do for it.
+    MOVED_ON       the task was dispatched, finished or cancelled (by a release
+                   sweep or someone else) while the deferral was being recorded;
+                   nothing is left to do for it.
+    MOVED_TO_GATE  the task is now held at a gate or waiting on a person; it may
+                   need the operator's decision, and Apis did not touch it.
+    STATE_UNKNOWN  the task is in a state Apis cannot classify; it was not touched.
     """
 
     RECORDED = "recorded"
     INTACT_MARKER = "intact_marker"
     NOT_HELD = "not_held"
     MOVED_ON = "moved_on"
+    MOVED_TO_GATE = "moved_to_gate"
+    STATE_UNKNOWN = "state_unknown"
 
     @property
     def sweep_owns_it(self) -> bool:
         return self in (DeferralOutcome.RECORDED, DeferralOutcome.INTACT_MARKER)
+
+
+# What a task's status means for a deferral that was being recorded, by the
+# lifecycle vocabulary in lib/daemon_runtime/task_lifecycle.TaskStatus (after
+# `normalize_status`, which already folds completed->done and cancelled->declined)
+# plus `in_progress`, which agents write for a task that is running:
+#
+#   routed, executing, in_progress   MOVED_ON       dispatched
+#   verified                         MOVED_ON       ran; only its completion record is pending
+#   done                             MOVED_ON       finished
+#   failed                           MOVED_ON       dispatched and failed (watchdog may retry)
+#   declined                         MOVED_ON       cancelled / declined, never dispatched
+#   superseded                       MOVED_ON       replaced, never dispatched
+#   awaiting_approval                MOVED_TO_GATE  held at an approval checkpoint
+#   awaiting_input                   MOVED_TO_GATE  parked for a person
+#   blocked                          MOVED_TO_GATE  needs the operator
+#   pending / absent                 (not moved)    judged by the marker
+#   anything else                    STATE_UNKNOWN  never "no action needed"
+_DISPATCHED = "has already been dispatched"
+_STATUS_OUTCOMES: dict[str, tuple["DeferralOutcome", str, str]] = {
+    "routed": (DeferralOutcome.MOVED_ON, _DISPATCHED, "no action needed"),
+    "executing": (DeferralOutcome.MOVED_ON, _DISPATCHED, "no action needed"),
+    "in_progress": (DeferralOutcome.MOVED_ON, _DISPATCHED, "no action needed"),
+    "verified": (
+        DeferralOutcome.MOVED_ON,
+        "has already run and is only waiting for its completion record",
+        "no action needed",
+    ),
+    "done": (DeferralOutcome.MOVED_ON, "has already finished", "no action needed"),
+    "failed": (
+        DeferralOutcome.MOVED_ON,
+        "was dispatched and has failed",
+        "the watchdog may retry it; check it if it does not recover",
+    ),
+    "declined": (
+        DeferralOutcome.MOVED_ON,
+        "has been cancelled or declined and was not dispatched",
+        "no action needed",
+    ),
+    "superseded": (
+        DeferralOutcome.MOVED_ON,
+        "has been superseded and was not dispatched",
+        "no action needed",
+    ),
+    "awaiting_approval": (
+        DeferralOutcome.MOVED_TO_GATE,
+        "is now held at an approval gate",
+        "it may need your decision",
+    ),
+    "awaiting_input": (
+        DeferralOutcome.MOVED_TO_GATE,
+        "is now parked waiting for your input",
+        "it may need your decision",
+    ),
+    "blocked": (
+        DeferralOutcome.MOVED_TO_GATE,
+        "is now blocked",
+        "it may need your decision",
+    ),
+}
 
 
 async def _record_deferral(
@@ -1058,80 +1124,141 @@ async def _record_deferral(
     state = await asyncio.to_thread(_roll_back_deferral, entity_id, snapshot, claim)
     fields = ", ".join(problems)
     where = f"{claim.repository}#{claim.number}"
+    head = f"Apis could not record a deferral for {entity_id}"
+    outcome = state["outcome"]
     if state["verdict"] == "cleared":
         left = f" Fields left behind: {', '.join(state['left'])}." if state["left"] else ""
         text = (
-            f"Apis could not record a deferral for {entity_id}; it was NOT held and "
-            f"NOT dispatched (did not persist: {fields}).{left} Re-dispatch it by "
-            f"hand when the build of {where} ends."
+            f"{head}; it was NOT held and NOT dispatched (did not persist: "
+            f"{fields}).{left} Re-dispatch it by hand when the build of {where} ends."
         )
-    elif state["verdict"] == "moved_on":
+    elif state["verdict"] == "moved":
+        status = state["status"]
+        if outcome is DeferralOutcome.MOVED_TO_GATE:
+            detail = f"; {state['detail']}" if state["detail"] else ""
+            text = (
+                f"{head}; the task {state['phrase']} (status: {status}{detail}) and "
+                f"{state['tail']}. Apis did not change it."
+            )
+        else:
+            text = (
+                f"{head}, but the build of {where} ended meanwhile and the task "
+                f"{state['phrase']} (status: {status}); {state['tail']}."
+            )
+    elif state["verdict"] == "unknown_state":
         text = (
-            f"Apis could not record a deferral for {entity_id}, but the build of "
-            f"{where} ended meanwhile and the task has already been dispatched; no "
-            "action needed."
+            f"{head}; the task is in a state Apis does not recognise (status: "
+            f"{state['status']!r}), so nothing can be said about whether it will run. "
+            "Check it. Apis did not change it."
         )
     elif state["verdict"] == "intact":
         text = (
-            f"Apis could not record a deferral for {entity_id} and could not clear "
-            f"its marker; Apis WILL re-dispatch it when the build of {where} ends "
-            f"unless you cancel the task (did not persist: {fields}; marker fields "
-            f"still present: {', '.join(state['left'])})."
+            f"{head} and could not clear its marker; Apis WILL re-dispatch it when "
+            f"the build of {where} ends unless you cancel the task (did not persist: "
+            f"{fields}; marker fields still present: {', '.join(state['left'])})."
         )
     else:
         text = (
-            f"Apis could not record a deferral for {entity_id} and could not verify "
-            f"the task's state afterwards (did not persist: {fields}). If its "
-            f"deferral marker is intact Apis may re-dispatch it when the build of "
-            f"{where} ends; check the task and cancel it if that is not wanted."
+            f"{head} and could not verify the task's state afterwards (did not "
+            f"persist: {fields}). If its deferral marker is intact Apis may "
+            f"re-dispatch it when the build of {where} ends; check the task and "
+            "cancel it if that is not wanted."
         )
     log.error(f"[{DAEMON_NAME}] could not record the deferral of task {entity_id}: {text}")
     _surface_once(
         notifier, (entity_id, "unrecorded"), text, {"surfaced": 0, "already_surfaced": 0}
     )
-    # "Intact" and "unknown" both leave a marker the sweep may act on, and the
-    # notice says so: they get the same catch-up and release coverage as a
-    # recorded deferral.
-    return {
-        "cleared": DeferralOutcome.NOT_HELD,
-        "moved_on": DeferralOutcome.MOVED_ON,
-    }.get(state["verdict"], DeferralOutcome.INTACT_MARKER)
+    return outcome
+
+
+_DEFERRAL_FIELDS = ("disposition", "dispatch_context", "blocked_reason")
 
 
 def _roll_back_deferral(entity_id: str, snapshot: dict, claim: "build_delivery.BuildClaim") -> dict:
-    """Undo a deferral that did not persist, in REVERSE commit order, and say what is true.
+    """Undo a deferral that did not persist, compare-and-set, and say what is true.
 
     The reason (the commit marker) is cleared first, then dispatch_context, then
-    disposition, each to what the task read before, stopping at the first failure:
-    once the reason is gone the rest is a marker the sweep will not act on, so only
-    a failure to clear the reason itself can leave a complete one. Then ONE read
-    back decides what the operator is told, from what the task holds rather than
-    from what was attempted: ``cleared`` (the marker does not qualify), ``intact``
-    (it still qualifies, so the sweep WILL dispatch the task), or ``unknown``.
+    disposition. Before EACH clear the task is read again and the clear is made only
+    if the task is still as this attempt left it: status pending, and every
+    deferral field either ours, unchanged from before, or already cleared. If
+    anything else has changed (a newer gate hold, a dispatch, a cancellation, a
+    value someone else wrote) the rollback stops with nothing further written and
+    classifies from what is there: a newer status or hold is never overwritten.
+    It also stops at the first failed clear, so only a failure to clear the reason
+    itself can leave a complete marker.
+
+    Then ONE read decides what the operator is told, from what the task holds:
+    ``cleared`` (the marker does not qualify), ``intact`` (it still qualifies, so the
+    sweep WILL dispatch it), ``moved`` (the task is past pending: see
+    ``_STATUS_OUTCOMES``), ``unknown_state`` (a status that maps to nothing) or
+    ``unknown`` (it cannot be read).
     """
     suffix = f"deferral-rollback-{claim.run_id}"
+    expected = _expected_deferral(claim)
+    before = {f: snapshot.get(f) or "" for f in _DEFERRAL_FIELDS}
+    done: set[str] = set()
+
+    def _still_as_left(fresh: dict) -> bool:
+        if normalize_status(fresh.get("status")) not in ("", TaskStatus.PENDING.value):
+            return False
+        for f in _DEFERRAL_FIELDS:
+            allowed = {before[f], ""} | (set() if f in done else {expected[f]})
+            if (fresh.get(f) or "") not in allowed:
+                return False
+        return True
+
     for field in ("blocked_reason", "dispatch_context", "disposition"):
-        ok = set_task_field(
-            entity_id, field, snapshot.get(field) or "", handler=DAEMON_NAME, key_suffix=suffix
-        )
-        if not ok:
+        try:
+            fresh = fetch_task_snapshot(entity_id)
+        except Exception:  # noqa: BLE001 — cannot tell what the task is: write nothing
+            fresh = None
+        if not isinstance(fresh, dict) or not _still_as_left(fresh):
+            break
+        if (fresh.get(field) or "") != expected[field]:
+            done.add(field)  # nothing of ours to clear here
+            continue
+        if not set_task_field(
+            entity_id, field, before[field], handler=DAEMON_NAME, key_suffix=suffix
+        ):
             log.warning(f"[{DAEMON_NAME}] rollback of {field} on task {entity_id} failed")
             break
+        done.add(field)
+
+    return _classify_deferral_state(entity_id, claim)
+
+
+def _classify_deferral_state(entity_id: str, claim: "build_delivery.BuildClaim") -> dict:
+    """One read of the task, classified by its ACTUAL status and marker."""
+    expected = _expected_deferral(claim)
     try:
         fresh = fetch_task_snapshot(entity_id)
     except Exception:  # noqa: BLE001 — unknown, said as such
         fresh = None
     if not isinstance(fresh, dict):
-        return {"verdict": "unknown", "left": []}
-    if normalize_status(fresh.get("status")) not in ("", TaskStatus.PENDING.value):
-        # A release sweep got to the task while it was being recorded.
-        return {"verdict": "moved_on", "left": []}
-    expected = _expected_deferral(claim)
-    left = [
-        f for f in ("disposition", "dispatch_context", "blocked_reason") if fresh.get(f) == expected[f]
-    ]
+        return {"verdict": "unknown", "left": [], "outcome": DeferralOutcome.INTACT_MARKER}
+    status = normalize_status(fresh.get("status"))
+    if status not in ("", TaskStatus.PENDING.value):
+        mapped = _STATUS_OUTCOMES.get(status)
+        if mapped is None:
+            return {
+                "verdict": "unknown_state",
+                "status": fresh.get("status"),
+                "left": [],
+                "outcome": DeferralOutcome.STATE_UNKNOWN,
+            }
+        outcome, phrase, tail = mapped
+        detail = str(fresh.get("blocked_reason") or "")[:140]
+        if detail.startswith("Deferred:"):
+            detail = ""
+        return {
+            "verdict": "moved", "status": status, "phrase": phrase, "tail": tail,
+            "detail": detail, "left": [], "outcome": outcome,
+        }
+    left = [f for f in _DEFERRAL_FIELDS if fresh.get(f) == expected[f]]
     _, verdict = _qualify_deferred(entity_id, fresh)
-    return {"verdict": "intact" if verdict == "" else "cleared", "left": left}
+    if verdict == "":
+        return {"verdict": "intact", "left": left, "outcome": DeferralOutcome.INTACT_MARKER}
+    return {"verdict": "cleared", "left": left, "outcome": DeferralOutcome.NOT_HELD}
 
 
 def install_build_release_hook(notifier: Notifier) -> None:
