@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -1217,3 +1218,216 @@ def test_a_failed_removal_after_an_import_is_a_fixed_error(world, monkeypatch):
         rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"])
     assert exc.value.category == rd.IMPORT_FAILED and "nothing may be pushed" in str(exc.value)
     _assert_chain_free(exc.value)
+
+
+# ── Push: one explicit refspec from origin.git, never forced ─────────────────
+
+
+@pytest.fixture
+def pushed_world(world, monkeypatch):
+    """The agent's work imported, and GitHub's place taken by the local bare
+    'remote' the clone came from."""
+    monkeypatch.setattr(rd, "GITHUB_REMOTE", f"file://{world['remote']}")
+    monkeypatch.setattr(rd, "GITHUB_REMOTE_TRANSPORT", "file")
+    head = agent_commit(world)
+    assert deliver(world).head == head
+    world["head"] = head
+    return world
+
+
+def _remote(world, ref):
+    done = subprocess.run(["git", "-C", str(world["remote"]), "rev-parse", "--verify", "-q", ref],
+                          env=_env(world["home"]), capture_output=True)
+    return done.stdout.decode().strip() or None
+
+
+def _push(world, **kw):
+    args = {"repository": REPO, "branch": BRANCH, "default_branch": "main",
+            "head": world["head"], "token": TOKEN, **kw}
+    rd.push_branch(world["work"], **args)
+
+
+def test_the_push_lands_exactly_the_branch(pushed_world):
+    w = pushed_world
+    git(w["work"].origin, "tag", "v9", w["head"], home=w["home"])  # never pushed
+    before = git(w["remote"], "for-each-ref", "--format=%(refname)", home=w["home"]).split()
+    _push(w)
+    after = git(w["remote"], "for-each-ref", "--format=%(refname)", home=w["home"]).split()
+    assert sorted(set(after) - set(before)) == [f"refs/heads/{BRANCH}"]
+    assert _remote(w, f"refs/heads/{BRANCH}") == w["head"]
+
+
+def test_the_push_never_forces(pushed_world):
+    w = pushed_world
+    src = w["src"]
+    git(src, "checkout", "-q", "-b", BRANCH, home=w["home"])
+    (src / "theirs.txt").write_text("theirs\n")
+    git(src, "add", ".", home=w["home"])
+    git(src, "commit", "-qm", "theirs", home=w["home"])
+    git(src, "push", "-q", str(w["remote"]), BRANCH, home=w["home"])
+    theirs = _remote(w, f"refs/heads/{BRANCH}")
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _push(w)
+    assert exc.value.category == rd.PUSH_FAILED and _remote(w, f"refs/heads/{BRANCH}") == theirs
+
+
+@pytest.mark.parametrize("branch,default", [
+    ("main", "main"), ("cicada/x-20261015T120000-a1b2c3", "cicada/x-20261015T120000-a1b2c3"),
+    ("release/1.0", "main"), ("v1.2.3", "main"), ("refs/heads/x", "main"),
+])
+def test_a_default_or_release_branch_is_never_pushed(pushed_world, branch, default):
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _push(pushed_world, branch=branch, default_branch=default)
+    assert exc.value.category in (rd.PUSH_REFUSED, rd.BRANCH_REFUSED)
+
+
+@pytest.mark.parametrize("leaf", ["main", "master", "release-2", "v2", "1.0", "hotfix/x"])
+def test_a_protected_leaf_name_is_refused(leaf):
+    with pytest.raises(rd.RepoWorkError):
+        rd.check_push_branch(f"cicada/{leaf}", "main")
+
+
+def test_the_push_is_refused_while_a_quarantine_ref_exists(pushed_world):
+    w = pushed_world
+    git(w["work"].origin, "update-ref", rd.QUARANTINE_REF, w["head"], home=w["home"])
+    with pytest.raises(rd.RepoWorkError, match="quarantine ref is not confirmed gone"):
+        _push(w)
+    assert _remote(w, f"refs/heads/{BRANCH}") is None
+
+
+def test_the_push_is_refused_when_the_branch_is_not_the_imported_head(pushed_world):
+    with pytest.raises(rd.RepoWorkError, match="not the imported head"):
+        _push(pushed_world, head=pushed_world["base"])
+
+
+def test_the_push_never_runs_in_the_agents_checkout(pushed_world, monkeypatch):
+    real = subprocess.run
+    seen = []
+
+    def spy(args, *a, **k):
+        if "push" in args:
+            seen.append(args)
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(rd.subprocess, "run", spy)
+    _push(pushed_world)
+    assert len(seen) == 1
+    args = seen[0]
+    assert args[1:3] == ["-C", str(pushed_world["work"].origin)]
+    assert args[-1] == f"refs/heads/{BRANCH}:refs/heads/{BRANCH}"
+    assert not any(a.startswith("+") or a in ("--force", "-f", "--all", "--mirror", "--tags")
+                   for a in args)
+    assert TOKEN not in " ".join(args)
+
+
+def test_a_connection_failure_is_retried_once(pushed_world, monkeypatch):
+    real = subprocess.run
+    pushes = []
+
+    def flaky(args, *a, **k):
+        if "push" in args:
+            pushes.append(1)
+            if len(pushes) == 1:
+                return subprocess.CompletedProcess(args, 128, b"", b"")
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(rd.subprocess, "run", flaky)
+    _push(pushed_world)
+    assert len(pushes) == 2 and _remote(pushed_world, f"refs/heads/{BRANCH}") == pushed_world["head"]
+
+
+# ── The pull request ─────────────────────────────────────────────────────────
+
+
+def _pr_payload(number=5, **over):
+    payload = {"number": number, "html_url": f"https://github.com/{REPO}/pull/{number}",
+               "head": {"ref": BRANCH, "repo": {"full_name": REPO}}, "base": {"ref": "main"}}
+    payload.update(over)
+    return payload
+
+
+def _with_api(monkeypatch, responses):
+    calls = []
+
+    def fake(method, path, token, body=None):
+        calls.append((method, path, body))
+        return responses[method]
+
+    monkeypatch.setattr(rd, "_api", fake)
+    return calls
+
+
+def _open(title="T", body="B"):
+    return rd.open_or_update_pr(repository=REPO, branch=BRANCH, default_branch="main",
+                                token=TOKEN, title=title, body=body)
+
+
+def test_a_missing_pull_request_is_opened_against_the_default_branch(monkeypatch):
+    calls = _with_api(monkeypatch, {"GET": (200, []), "POST": (201, _pr_payload())})
+    pr = _open()
+    assert pr == rd.PullRequest(number=5, url=f"https://github.com/{REPO}/pull/5", action="opened")
+    assert calls[0][1] == f"/repos/{REPO}/pulls?head=owner%3A{BRANCH.replace('/', '%2F')}&state=open"
+    assert calls[1][2] == {"title": "T", "head": BRANCH, "base": "main", "body": "B"}
+
+
+def test_an_existing_pull_request_is_updated_only_with_new_text(monkeypatch):
+    calls = _with_api(monkeypatch, {"GET": (200, [_pr_payload(9)]), "PATCH": (200, None)})
+    assert _open().action == "updated" and [c[0] for c in calls] == ["GET", "PATCH"]
+    calls = _with_api(monkeypatch, {"GET": (200, [_pr_payload(9)])})
+    assert _open(title="", body="").number == 9 and [c[0] for c in calls] == ["GET"]
+
+
+@pytest.mark.parametrize("found", [
+    [_pr_payload(1), _pr_payload(2)],                                 # ambiguous
+    [_pr_payload(head={"ref": BRANCH, "repo": {"full_name": "fork/repo"}})],  # a fork's
+    [_pr_payload(base={"ref": "develop"})],                           # another base
+    [_pr_payload(html_url="https://example.invalid/pull/5")],         # another host
+])
+def test_a_pull_request_that_is_not_this_branchs_is_never_used(monkeypatch, found):
+    calls = _with_api(monkeypatch, {"GET": (200, found)})
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _open()
+    assert exc.value.category == rd.PR_FAILED and [c[0] for c in calls] == ["GET"]
+
+
+@pytest.mark.parametrize("responses,reason", [
+    ({"GET": (0, None)}, "could not be read [unreachable]"),
+    ({"GET": (403, None)}, "could not be read [http_403]"),
+    ({"GET": (200, []), "POST": (422, None)}, "could not be opened [http_422]"),
+    ({"GET": (200, []), "POST": (201, {"number": 5})}, "could not be opened [http_201]"),
+    ({"GET": (200, [_pr_payload()]), "PATCH": (500, None)}, "could not be updated [http_500]"),
+])
+def test_a_failed_pull_request_call_is_a_fixed_reason(monkeypatch, responses, reason):
+    _with_api(monkeypatch, responses)
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _open()
+    assert exc.value.category == rd.PR_FAILED and str(exc.value).endswith(reason)
+
+
+@pytest.mark.parametrize("content,expected", [
+    (b"# Fix it\n\nWhy.\n", ("Fix it", "Why.")),
+    (b"Plain title\nline two\n", ("Plain title", "line two")),
+    (b"\xff\xfe not text", ("", "")),
+    (b"x" * (64 * 1024 + 1), ("", "")),
+    (None, ("", "")),
+])
+def test_the_pull_request_text_is_read_safely(world, content, expected):
+    path = world["work"].export / rd.PR_TEXT_NAME
+    if content is not None:
+        path.write_bytes(content)
+    assert rd.read_pr_text(world["work"]) == expected
+
+
+def test_a_pull_request_text_link_is_not_followed(world, tmp_path):
+    secret = tmp_path / "elsewhere.md"
+    secret.write_text("# Not the agent's\n")
+    (world["work"].export / rd.PR_TEXT_NAME).symlink_to(secret)
+    assert rd.read_pr_text(world["work"]) == ("", "")
+
+
+def test_calls_are_bounded_by_the_deadline(monkeypatch):
+    assert rd._call_timeout(300) == 300
+    with rd.bounded_by(time.time() + 5):
+        assert rd._call_timeout(300) <= 5
+    with rd.bounded_by(time.time() - 5):
+        assert rd._call_timeout(300) == 0.1

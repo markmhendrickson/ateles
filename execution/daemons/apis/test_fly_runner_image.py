@@ -111,6 +111,7 @@ class TestImageContext:
             "lib/credential_env_names.py",
             "lib/daemon_runtime/aauth_httpsig.py",
             "deploy/fly-runner/run_job.py",
+            "deploy/fly-runner/repo_delivery.py",
         }
 
     def test_every_copy_source_is_in_the_context(self):
