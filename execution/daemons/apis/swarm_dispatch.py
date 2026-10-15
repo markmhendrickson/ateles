@@ -98,6 +98,7 @@ from review_panel import (
     select_expectation_agents,
     select_panel,
 )
+import build_delivery
 import model_tiering
 import lens_authors
 import review_carry
@@ -6108,28 +6109,13 @@ class SwarmDispatcher:
             "the build manually once gates are green."
         )
         if self.config.auto_build and gates_green:
-            pr_url = await self._open_implementation_pr(trigger, state)
-            if pr_url:
-                self.notifier.clear_dedupe(spec_ready_key)
-                self.notifier.send(
-                    f"Issue {ref}: additive spec assembled ("
-                    f"{', '.join(completed) or 'none'}); "
-                    f"auto-build ON — implementation PR opened ({pr_url}); the "
-                    "PR gate pipeline now owns it (merge stays operator-gated).",
-                    priority=Priority.INFO,
-                    handler=DAEMON_NAME,
-                )
-            else:
-                self.notifier.send(
-                    f"Issue {ref}: additive spec assembled ("
-                    f"{', '.join(completed) or 'none'}); "
-                    "auto-build ON, but the Cicada build handoff opened NO PR "
-                    "(spec may be incomplete or the build produced nothing). "
-                    f"{spec_action}",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                    dedupe_key=spec_ready_key,
-                )
+            await self._hand_off_to_build(
+                trigger,
+                state,
+                completed=completed,
+                spec_action=spec_action,
+                spec_ready_key=spec_ready_key,
+            )
         else:
             reason = (
                 "auto-build OFF"
@@ -6142,6 +6128,58 @@ class SwarmDispatcher:
                 f"{'✓' if lanius.ok else '✗'}. "
                 f"Spec is ready and awaiting `build` approval ({reason}). "
                 f"{spec_action} No PR opened; nothing auto-merged.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=spec_ready_key,
+            )
+
+    async def _hand_off_to_build(
+        self,
+        trigger: SwarmTrigger,
+        state: SpecState,
+        *,
+        completed: list[str],
+        spec_action: str,
+        spec_ready_key: str,
+    ) -> None:
+        """Run the auto-build handoff and tell the operator what actually happened.
+
+        Three outcomes, three messages: a PR opened; the build ran and produced no
+        PR (the spec may be at fault); and the build was never started (a
+        prerequisite is missing, which no amount of spec work or re-approval will
+        fix). Conflating the last two sends the operator after the wrong thing.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        done = ", ".join(completed) or "none"
+        try:
+            pr_url = await self._open_implementation_pr(trigger, state)
+        except build_delivery.BuildNotStarted as exc:
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ({done}); auto-build ON, but "
+                f"{exc.operator_text()} The spec and the gates are not in question.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"build-not-started:{ref}",
+            )
+            return
+        if pr_url:
+            self.notifier.clear_dedupe(spec_ready_key)
+            self.notifier.clear_dedupe(f"build-not-started:{ref}")
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ("
+                f"{done}); "
+                f"auto-build ON — implementation PR opened ({pr_url}); the "
+                "PR gate pipeline now owns it (merge stays operator-gated).",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+        else:
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ("
+                f"{done}); "
+                "auto-build ON, but the Cicada build handoff opened NO PR "
+                "(spec may be incomplete or the build produced nothing). "
+                f"{spec_action}",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
                 dedupe_key=spec_ready_key,
@@ -6634,6 +6672,11 @@ class SwarmDispatcher:
         issue (`Closes #<n>`) so the existing ``_handle_pr`` gate pipeline takes
         over.  This method NEVER merges anything.
 
+        Raises ``build_delivery.BuildNotStarted`` when the build could not be
+        launched at all (no worktree could be provisioned): distinct from a build
+        that ran, so the caller can name the prerequisite instead of suggesting
+        the spec is at fault.
+
         Returns the opened PR URL when a PR was ACTUALLY opened, else None.
         A successful dispatch (exit 0) is NOT sufficient: on #1882 Cicada
         returned ok in ~30s with no PR (it had a narration-only Engineering
@@ -6642,14 +6685,41 @@ class SwarmDispatcher:
         referencing this issue — so the caller can notify honestly instead of a
         false "PR gate pipeline now owns it".
         """
-        result = await run_skill(
-            "cicada",
-            self._cicada_build_prompt(trigger, state),
-            github_token=_token_for_agent_on_repo("cicada", trigger.repository),
-            include_github_contract=True,
-            notifier=self.notifier,
-            action_class=model_tiering.ACTION_BUILD,
-        )
+        # A build that is meant to open a PR gets everything delivery needs, from
+        # one place (build_delivery): a dedicated worktree as the child's cwd —
+        # from which skill_runner derives the git-root grants on Codex — plus
+        # network via include_github_contract. The worktree is provisioned
+        # BEFORE the dispatch so a missing clone fails here, in seconds and by
+        # name, rather than after a build that cannot deliver.
+        try:
+            worktree = await build_delivery.prepare_build_worktree(
+                trigger.repository, f"issue-{trigger.number}"
+            )
+        except build_delivery.BuildWorktreeError as exc:
+            log.error(
+                f"[{DAEMON_NAME}] Cicada build handoff for "
+                f"{trigger.repository}#{trigger.number} not started: {exc}"
+            )
+            # Not "no PR": nothing ran. The caller tells the operator so.
+            raise build_delivery.BuildNotStarted(
+                trigger.repository, trigger.number, exc
+            ) from exc
+        # Registered for the whole run so a task the build files to track its own
+        # work is recognised as this build, not dispatched as a second one.
+        with build_delivery.claim_build(
+            trigger.repository, trigger.number, "swarm-build-handoff"
+        ) as claim:
+            result = await run_skill(
+                "cicada",
+                self._cicada_build_prompt(
+                    trigger, state, worktree=worktree, claim=claim
+                ),
+                github_token=_token_for_agent_on_repo("cicada", trigger.repository),
+                include_github_contract=True,
+                notifier=self.notifier,
+                action_class=model_tiering.ACTION_BUILD,
+                cwd=worktree.path,
+            )
         if not result.ok:
             log.error(
                 f"[{DAEMON_NAME}] Cicada build handoff failed for "
@@ -11897,7 +11967,12 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _cicada_build_prompt(t: SwarmTrigger, state: SpecState) -> str:
+    def _cicada_build_prompt(
+        t: SwarmTrigger,
+        state: SpecState,
+        worktree: "build_delivery.BuildWorktree | None" = None,
+        claim: "build_delivery.BuildClaim | None" = None,
+    ) -> str:
         """Auto-build handoff prompt: Cicada opens an implementation PR.
 
         Only used when ``ATELES_SWARM_AUTO_BUILD`` is ON.  Cicada branches off
@@ -11906,6 +11981,20 @@ class SwarmDispatcher:
         takes over.  NEVER merges — the merge boundary stays operator-gated.
         """
         spec_md = assemble_spec_markdown(state.sections or {})
+        if worktree:
+            wt_block = f"{build_delivery.worktree_instructions(worktree)}\n\n"
+            if claim:
+                wt_block += f"{build_delivery.tracking_instructions(claim)}\n\n"
+            step_one = (
+                "  1. Build on the worktree branch above, which is already off "
+                "fresh origin/main — never off a feature branch.\n"
+            )
+        else:
+            wt_block = ""
+            step_one = (
+                "  1. Branch off FRESH origin/main (fetch first) in an isolated "
+                "git worktree — never off a feature branch.\n"
+            )
         return (
             "Invoke the cicada agent per your appended system prompt.\n\n"
             f"The Ateles swarm has assembled a full additive specification for "
@@ -11932,9 +12021,9 @@ class SwarmDispatcher:
             "a checkpoint instead of opening a PR only if you cannot produce a "
             "working implementation at all — never merely because the spec "
             "contains the word 'blocking'.\n\n"
+            f"{wt_block}"
             "BUILD PROTOCOL:\n"
-            "  1. Branch off FRESH origin/main (fetch first) in an isolated git "
-            "worktree — never off a feature branch.\n"
+            f"{step_one}"
             "  2. Implement the spec, following the Engineering section's plan "
             "and honoring the QA/Security/Legal requirements as "
             "definition-of-done.\n"

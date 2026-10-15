@@ -105,6 +105,36 @@ def _isolate_lens_comment_identities(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_build_worktrees(monkeypatch, tmp_path):
+    """Never let a test add a real worktree to the operator's real clones.
+
+    A delivery-bearing Cicada dispatch provisions a linked worktree off the
+    repository's local clone (`build_delivery.prepare_build_worktree`). The
+    clone for a fixture slug like `owner/repo` does not exist, and for a real
+    slug like `markmhendrickson/neotoma` it does — so an unisolated test would
+    either fail on the host's layout or write `git worktree` metadata into the
+    operator's checkout. Every test gets a fake; `test_build_delivery.py`
+    exercises the real function, kept as `prepare_build_worktree.real`,
+    against a throwaway repository.
+    """
+    import build_delivery
+
+    async def _fake_prepare(repository, label):
+        return build_delivery.BuildWorktree(
+            path=str(tmp_path / "build-worktree"),
+            branch=f"cicada/{label}-test",
+            base_sha="0" * 40,
+            clone=str(tmp_path / "clone"),
+            base_fresh=True,
+        )
+
+    _fake_prepare.real = build_delivery.prepare_build_worktree
+    monkeypatch.setattr(build_delivery, "prepare_build_worktree", _fake_prepare)
+    monkeypatch.setattr(build_delivery, "_inflight", {})
+    monkeypatch.setattr(build_delivery, "_release_hook", None)
+
+
+@pytest.fixture(autouse=True)
 def _fly_runner_off_and_isolated(monkeypatch, tmp_path):
     """The Fly executor is off by default (ateles#1456): no test inherits an
     operator's ``APIS_FLY_RUNNER_CLASSES``, and none touches the real ledger."""
