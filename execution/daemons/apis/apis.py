@@ -106,6 +106,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+from enum import Enum
 import functools
 import hashlib
 import logging
@@ -995,9 +996,32 @@ def _deferral_persisted(entity_id: str, claim: "build_delivery.BuildClaim") -> l
     return missing
 
 
+class DeferralOutcome(str, Enum):
+    """What `_record_deferral` leaves behind, which decides what the caller must do.
+
+    RECORDED       the deferral is on the task and read back: the sweep owns it.
+    INTACT_MARKER  the deferral could not be confirmed, but a COMPLETE marker is
+                   (or may be) on the task, so the sweep WILL act on it. The
+                   operator was told exactly that; the caller must give it the same
+                   catch-up as a recorded deferral, or the promise is empty.
+    NOT_HELD       the marker is gone or does not qualify: nothing will dispatch it.
+    MOVED_ON       the task was dispatched (by a release sweep) while the deferral
+                   was being recorded; nothing is left to do for it.
+    """
+
+    RECORDED = "recorded"
+    INTACT_MARKER = "intact_marker"
+    NOT_HELD = "not_held"
+    MOVED_ON = "moved_on"
+
+    @property
+    def sweep_owns_it(self) -> bool:
+        return self in (DeferralOutcome.RECORDED, DeferralOutcome.INTACT_MARKER)
+
+
 async def _record_deferral(
     entity_id: str, snapshot: dict, claim: "build_delivery.BuildClaim", notifier: Notifier
-) -> bool:
+) -> "DeferralOutcome":
     """Mark the task deferred behind ``claim`` and PROVE it by reading it back.
 
     A write's success status is not persistence (failure_posture.md, rule 6): the
@@ -1030,7 +1054,7 @@ async def _record_deferral(
 
     problems = await asyncio.to_thread(_attempt)
     if not problems:
-        return True
+        return DeferralOutcome.RECORDED
     state = await asyncio.to_thread(_roll_back_deferral, entity_id, snapshot, claim)
     fields = ", ".join(problems)
     where = f"{claim.repository}#{claim.number}"
@@ -1040,6 +1064,12 @@ async def _record_deferral(
             f"Apis could not record a deferral for {entity_id}; it was NOT held and "
             f"NOT dispatched (did not persist: {fields}).{left} Re-dispatch it by "
             f"hand when the build of {where} ends."
+        )
+    elif state["verdict"] == "moved_on":
+        text = (
+            f"Apis could not record a deferral for {entity_id}, but the build of "
+            f"{where} ended meanwhile and the task has already been dispatched; no "
+            "action needed."
         )
     elif state["verdict"] == "intact":
         text = (
@@ -1059,7 +1089,13 @@ async def _record_deferral(
     _surface_once(
         notifier, (entity_id, "unrecorded"), text, {"surfaced": 0, "already_surfaced": 0}
     )
-    return False
+    # "Intact" and "unknown" both leave a marker the sweep may act on, and the
+    # notice says so: they get the same catch-up and release coverage as a
+    # recorded deferral.
+    return {
+        "cleared": DeferralOutcome.NOT_HELD,
+        "moved_on": DeferralOutcome.MOVED_ON,
+    }.get(state["verdict"], DeferralOutcome.INTACT_MARKER)
 
 
 def _roll_back_deferral(entity_id: str, snapshot: dict, claim: "build_delivery.BuildClaim") -> dict:
@@ -1087,6 +1123,9 @@ def _roll_back_deferral(entity_id: str, snapshot: dict, claim: "build_delivery.B
         fresh = None
     if not isinstance(fresh, dict):
         return {"verdict": "unknown", "left": []}
+    if normalize_status(fresh.get("status")) not in ("", TaskStatus.PENDING.value):
+        # A release sweep got to the task while it was being recorded.
+        return {"verdict": "moved_on", "left": []}
     expected = _expected_deferral(claim)
     left = [
         f for f in ("disposition", "dispatch_context", "blocked_reason") if fresh.get(f) == expected[f]
@@ -1632,15 +1671,17 @@ async def dispatch_task(
         if holder:
             # Recorded ON THE TASK before it is acknowledged: nothing in memory
             # carries this deferral, so a restart cannot strand it.
-            recorded = await _record_deferral(entity_id, snapshot, holder, notifier)
+            outcome = await _record_deferral(entity_id, snapshot, holder, notifier)
             log.info(
                 f"[{DAEMON_NAME}] task {entity_id!r} is about {key[0]}#{key[1]}, "
                 f"which {holder.holder!r} is building — deferred until that "
                 f"build ends (trigger={trigger})"
             )
-            if recorded and build_delivery.active_build(*key) is None:
+            if outcome.sweep_owns_it and build_delivery.active_build(*key) is None:
                 # The build ended while the deferral was being recorded, and its
-                # release sweep may already have run.
+                # release sweep may already have run without seeing a complete
+                # marker. A recorded deferral and an intact marker (which the
+                # operator was told Apis WILL act on) both need this catch-up.
                 schedule_deferred_recovery()
             return
 

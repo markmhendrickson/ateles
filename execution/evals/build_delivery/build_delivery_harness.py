@@ -60,7 +60,7 @@ from unroutable_ledger import UnroutableLedger  # noqa: E402
 MUTATIONS = (
     "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep",
     "no_continuation", "no_readback", "no_worktree_check", "no_revalidation",
-    "silent_unrecorded", "reason_not_required",
+    "silent_unrecorded", "reason_not_required", "drop_intact_registration",
 )
 
 REPO = "eval-owner/eval-repo"
@@ -553,7 +553,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     mp.setattr(swarm_dispatch, "run_skill", wrapped)
     if mutation == "no_durable_record":
         async def _forget(*a, **k):
-            return True
+            return getattr(getattr(apis, "DeferralOutcome", None), "RECORDED", True)
 
         mp.setattr(apis, "_record_deferral", _forget, raising=False)
     if mutation == "no_startup_sweep":
@@ -578,11 +578,35 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
                 apis._recovering.discard(entity_id)
 
         mp.setattr(apis, "_redispatch_deferred", _stale, raising=False)
+    if scenario["path"] == "intact_order" and scenario.get("release") in ("before", "during"):
+        # Release the build (and let its sweep finish) at the chosen point of the
+        # deferral being recorded: before the reason is written, or during rollback.
+        target = "_write_deferral" if scenario["release"] == "before" else "_roll_back_deferral"
+        real_target = getattr(apis, target)
+        fired: list[int] = []
+
+        def _release_then(*a, **k):
+            if not fired:
+                fired.append(1)
+                asyncio.run_coroutine_threadsafe(obs["release_and_settle"](), obs["loop"]).result(10)
+            return real_target(*a, **k)
+
+        mp.setattr(apis, target, _release_then)
+    if mutation == "drop_intact_registration":
+        real_record = apis._record_deferral
+
+        async def _unregistered(*a, **k):
+            outcome = await real_record(*a, **k)
+            if outcome is apis.DeferralOutcome.INTACT_MARKER:
+                return apis.DeferralOutcome.NOT_HELD
+            return outcome
+
+        mp.setattr(apis, "_record_deferral", _unregistered, raising=False)
     if mutation == "reason_not_required":
         mp.setattr(build_delivery, "reason_matches_context", lambda reason, context: True)
     if mutation == "silent_unrecorded":
         async def _quiet_failure(*a, **k):
-            return False
+            return getattr(getattr(apis, "DeferralOutcome", None), "NOT_HELD", False)
 
         mp.setattr(apis, "_record_deferral", _quiet_failure, raising=False)
     if mutation == "no_readback":
@@ -639,7 +663,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
         return None
 
     mp.setattr(apis, "hydrate_snapshot", _no_hydrate)
-    if scenario["path"] in ("mid_build", "restart", "sweep_scale", "slot_wait"):
+    if scenario["path"] in ("mid_build", "restart", "sweep_scale", "slot_wait", "intact_order"):
         # What gets dispatched for the OTHER tasks is not the subject; the child
         # the build itself launched still goes through the real run_skill.
         mp.setattr(apis, "_spawn_harness_skill", _recording_spawn(obs))
@@ -705,6 +729,38 @@ def _marked_row(**over) -> dict:
         ),
     )
     return row
+
+
+async def _drive_intact_order(scenario: dict, world: World, obs: dict, notifier) -> None:
+    """A deferral that cannot be confirmed AND whose marker cannot be cleared, with the
+    build released at a chosen moment relative to it. The notice promises that Apis
+    WILL dispatch the task; the task must be dispatched exactly once after the
+    build ends, in every ordering."""
+    store = obs["store"]
+    store.fail_next_reads = 2
+    store.policy = {"blocked_reason": lambda v: "reject" if v == "" else "apply"}
+    obs["notifier"] = notifier
+    obs["loop"] = asyncio.get_running_loop()
+    apis.install_build_release_hook(notifier)
+    cm = build_delivery.claim_build(REPO, ISSUE, "swarm-build-handoff")
+    cm.__enter__()
+    released: list[int] = []
+
+    def release() -> None:
+        if not released:
+            released.append(1)
+            cm.__exit__(None, None, None)
+
+    async def release_and_settle() -> None:
+        release()
+        await _settle()
+
+    obs["release_and_settle"] = release_and_settle
+    task = _task_snapshot(action_type="local_edit")
+    store.put("ent_eval_ord_0000", task)
+    await apis.handle_event(_created("ent_eval_ord_0000", task), notifier)
+    release()  # a no-op unless the build was meant to end only after the notice
+    await _settle()
 
 
 async def _drive_slot_wait(scenario: dict, world: World, obs: dict, notifier) -> None:
@@ -944,6 +1000,10 @@ async def _drive(scenario: dict, world: World, obs: dict) -> None:
         await _drive_slot_wait(scenario, world, obs, notifier)
         return
 
+    if path == "intact_order":
+        await _drive_intact_order(scenario, world, obs, notifier)
+        return
+
     raise AssertionError(f"unknown path {path!r}")
 
 
@@ -1165,6 +1225,11 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for kind in sw.get("announced_once", []):
             n = sum(f"ent_b_{kind}" in m for m in obs["notifier"].sent)
             want(f"ent_b_{kind} announced", n, 1)
+    if "notification_excludes" in exp:
+        sent = "\n".join(getattr(obs.get("notifier"), "sent", []))
+        for needle in exp["notification_excludes"]:
+            if needle in sent:
+                bad.append(f"a notice wrongly says {needle!r}")
     if "notification_counts" in exp:
         sent = obs.get("notifier").sent if obs.get("notifier") else []
         for needle, count in exp["notification_counts"].items():

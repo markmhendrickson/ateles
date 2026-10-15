@@ -1982,3 +1982,97 @@ def test_a_fully_written_deferral_still_qualifies_and_dispatches(dispatch_env):
     out, n = _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
     assert not any("could not record" in m for m in n.sent)
     assert spawns == [("cicada", "ent_followup_00001", "build_released")]
+
+
+# ── an intact marker gets the same catch-up as a recorded deferral ───────────
+
+
+def _intact_marker_with_release(dispatch_env, monkeypatch, where, *, drop_registration=False):
+    """A deferral that cannot be confirmed and whose marker cannot be cleared, with the
+    build released BEFORE the reason lands, DURING the rollback, or AFTER the notice."""
+    _, spawns, store = dispatch_env
+    n = _RecNotifier()
+    apis.install_build_release_hook(n)
+    store.fail_next_reads = 2
+    store.policy["blocked_reason"] = lambda v: "reject" if v == "" else "apply"
+
+    if drop_registration:
+        real_record = apis._record_deferral
+
+        async def _unregistered(*a, **k):
+            outcome = await real_record(*a, **k)
+            if outcome is apis.DeferralOutcome.INTACT_MARKER:
+                return apis.DeferralOutcome.NOT_HELD
+            return outcome
+
+        monkeypatch.setattr(apis, "_record_deferral", _unregistered)
+
+    async def _go():
+        loop = asyncio.get_running_loop()
+        cm = build_delivery.claim_build(REPO, 1448, "swarm-build-handoff")
+        cm.__enter__()
+        released: list[int] = []
+
+        def release():
+            if not released:
+                released.append(1)
+                cm.__exit__(None, None, None)
+
+        async def release_and_settle():
+            release()
+            await _settle()
+
+        def from_thread():
+            asyncio.run_coroutine_threadsafe(release_and_settle(), loop).result(10)
+
+        def once(name):
+            real = getattr(apis, name)
+            seen: list[int] = []
+
+            def wrapper(*a, **k):
+                if not seen:
+                    seen.append(1)
+                    from_thread()
+                return real(*a, **k)
+
+            monkeypatch.setattr(apis, name, wrapper)
+
+        if where == "before":
+            once("_write_deferral")
+        elif where == "during":
+            once("_roll_back_deferral")
+        event = _created("ent_followup_00001", _local())
+        store.put(event.entity_id, event.snapshot)
+        await apis.handle_event(event, n)
+        release()
+        await _settle()
+
+    asyncio.run(_go())
+    return n, spawns
+
+
+@pytest.mark.parametrize("where", ["before", "during", "after"])
+def test_an_intact_marker_is_dispatched_exactly_once_after_the_build_whenever_it_releases(
+    dispatch_env, monkeypatch, where
+):
+    n, spawns = _intact_marker_with_release(dispatch_env, monkeypatch, where)
+
+    assert spawns == [("cicada", "ent_followup_00001", "build_released")], where
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    if where == "during":
+        assert "already been dispatched" in msg and "NOT dispatched" not in msg
+    else:
+        assert "WILL re-dispatch" in msg and "NOT dispatched" not in msg
+
+
+def test_dropping_the_intact_marker_registration_strands_the_release_before_case(dispatch_env, monkeypatch):
+    """The mutation: without the catch-up the promised dispatch never happens."""
+    n, spawns = _intact_marker_with_release(dispatch_env, monkeypatch, "before", drop_registration=True)
+    assert spawns == [], "the test cannot tell whether the catch-up is there"
+    assert any("WILL re-dispatch" in m for m in n.sent), "the promise was made"
+
+
+def test_the_outcome_says_whether_the_sweep_owns_the_task():
+    O = apis.DeferralOutcome
+    assert O.RECORDED.sweep_owns_it and O.INTACT_MARKER.sweep_owns_it
+    assert not O.NOT_HELD.sweep_owns_it and not O.MOVED_ON.sweep_owns_it

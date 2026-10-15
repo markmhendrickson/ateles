@@ -71,6 +71,9 @@ def test_the_eval_covers_every_required_behaviour():
         "unrecordable_deferral_whose_marker_cannot_be_cleared_is_announced_truthfully_and_dispatched_once",
         "unrecordable_deferral_whose_context_cannot_be_cleared_is_never_dispatched",
         "partially_written_deferral_without_its_reason_is_never_dispatched",
+        "intact_marker_is_dispatched_once_when_the_build_ends_before_the_notice",
+        "intact_marker_is_dispatched_once_when_the_build_ends_during_the_notice",
+        "intact_marker_is_dispatched_once_when_the_build_ends_after_the_notice",
         # the worktree itself is verified, on both paths
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
@@ -202,3 +205,12 @@ def test_the_half_written_marker_scenarios_go_red_if_the_reason_is_not_required(
     obs = harness.run_scenario(scenario, tmp_path, mutation="reason_not_required")
     assert harness.check(scenario, obs), "a marker without its reason was acted on unnoticed"
     assert obs["spawns"], "the half-written marker was dispatched"
+
+
+def test_the_intact_marker_scenarios_go_red_without_the_registration(tmp_path):
+    """Dropping the catch-up strands the release-before case behind its promise."""
+    scenario = BY_ID["intact_marker_is_dispatched_once_when_the_build_ends_before_the_notice"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="drop_intact_registration")
+    problems = harness.check(scenario, obs)
+    assert problems and obs["spawns"] == [], problems
+    assert any("WILL re-dispatch" in m for m in obs["notifier"].sent), "the promise was made"

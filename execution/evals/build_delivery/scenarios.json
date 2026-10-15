@@ -666,6 +666,80 @@
           "does not say which build": 1
         }
       }
+    },
+    {
+      "id": "intact_marker_is_dispatched_once_when_the_build_ends_before_the_notice",
+      "why": "an unconfirmed deferral whose marker cannot be cleared is announced as 'Apis WILL re-dispatch' and then is: the build ends (and its sweep finishes) BEFORE the reason lands, so that sweep sees no complete marker; in every ordering the task is dispatched exactly once, after the build",
+      "path": "intact_order",
+      "release": "before",
+      "expect": {
+        "final_spawns": [
+          [
+            "ent_eval_ord_0000",
+            "build_released"
+          ]
+        ],
+        "claim_released": true,
+        "notification_counts": {
+          "could not record a deferral": 1
+        },
+        "notification_contains": [
+          "WILL re-dispatch",
+          "unless you cancel the task"
+        ],
+        "notification_excludes": [
+          "NOT held and NOT dispatched"
+        ]
+      }
+    },
+    {
+      "id": "intact_marker_is_dispatched_once_when_the_build_ends_during_the_notice",
+      "why": "an unconfirmed deferral whose marker cannot be cleared is announced as 'Apis WILL re-dispatch' and then is: the build ends DURING the rollback, so its sweep dispatches the task while the deferral is still being unwound; in every ordering the task is dispatched exactly once, after the build",
+      "path": "intact_order",
+      "release": "during",
+      "expect": {
+        "final_spawns": [
+          [
+            "ent_eval_ord_0000",
+            "build_released"
+          ]
+        ],
+        "claim_released": true,
+        "notification_counts": {
+          "could not record a deferral": 1
+        },
+        "notification_contains": [
+          "already been dispatched"
+        ],
+        "notification_excludes": [
+          "NOT held and NOT dispatched"
+        ]
+      }
+    },
+    {
+      "id": "intact_marker_is_dispatched_once_when_the_build_ends_after_the_notice",
+      "why": "an unconfirmed deferral whose marker cannot be cleared is announced as 'Apis WILL re-dispatch' and then is: the build ends AFTER the notice; in every ordering the task is dispatched exactly once, after the build",
+      "path": "intact_order",
+      "release": "after",
+      "expect": {
+        "final_spawns": [
+          [
+            "ent_eval_ord_0000",
+            "build_released"
+          ]
+        ],
+        "claim_released": true,
+        "notification_counts": {
+          "could not record a deferral": 1
+        },
+        "notification_contains": [
+          "WILL re-dispatch",
+          "unless you cancel the task"
+        ],
+        "notification_excludes": [
+          "NOT held and NOT dispatched"
+        ]
+      }
     }
   ]
 }
