@@ -818,3 +818,137 @@ def test_a_system_prompt_placeholder_without_its_file_is_refused(tmp_path):
                argv=["claude", "--append-system-prompt-file", run_job.SYSTEM_PROMPT_PLACEHOLDER])
     with pytest.raises(run_job.JobError, match="system prompt"):
         run_job.load_job(job_dir)
+
+
+
+# ── Claude's token from the login volume (child only) ───────────────────────
+
+_TOKEN = "sk-ant-oat01-runner-test-token-0123456789"
+
+
+@pytest.mark.parametrize("content,why", [
+    (None, "missing"), (b"", "empty"), (b"  \n", "empty"),
+    (b"x" * 5000, "too large"), (b"sk-ant-\x00oops", "not a printable token"),
+    (b"sk ant spaced", "not a printable token"),
+], ids=["missing", "empty", "blank", "oversized", "control-byte", "inner-space"])
+def test_a_bad_token_file_is_refused_without_its_contents(tmp_path, content, why):
+    path = tmp_path / "oauth_token"
+    if content is not None:
+        path.write_bytes(content)
+    with pytest.raises(run_job.JobError, match=why) as exc:
+        run_job.read_token_file(path)
+    if content:
+        assert content.decode("latin-1").strip() not in str(exc.value) or not content.strip()
+
+
+def test_a_token_file_that_is_a_link_is_refused(tmp_path):
+    (tmp_path / "real").write_text(_TOKEN)
+    (tmp_path / "oauth_token").symlink_to(tmp_path / "real")
+    with pytest.raises(run_job.JobError):
+        run_job.read_token_file(tmp_path / "oauth_token")
+
+
+def test_a_good_token_file_is_read():
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+        fh.write(_TOKEN + "\n")
+    try:
+        assert run_job.read_token_file(Path(fh.name)) == _TOKEN
+    finally:
+        os.unlink(fh.name)
+
+
+def test_the_token_path_must_be_the_login_volume_path(tmp_path):
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},
+               spec={"claude_token_file": "/etc/shadow",
+                     "child_credential_names": ["CLAUDE_CODE_OAUTH_TOKEN"]})  # fmt: skip
+    with pytest.raises(run_job.JobError, match="token path"):
+        run_job.load_job(job_dir)
+
+
+def test_a_shipped_claude_token_is_refused_when_the_volume_supplies_it(tmp_path):
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123",
+                                 "CLAUDE_CODE_OAUTH_TOKEN": _TOKEN},
+               spec={"claude_token_file": run_job.CLAUDE_TOKEN_FILE,
+                     "child_credential_names": ["CLAUDE_CODE_OAUTH_TOKEN"]})  # fmt: skip
+    with pytest.raises(run_job.JobError, match="only from the login volume"):
+        run_job.load_job(job_dir)
+
+
+_TOKEN_DRIVER = """
+import importlib.util, json, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("run_job_entry", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+m.probe_paths_default = lambda: ()
+m.CLAUDE_TOKEN_FILE = sys.argv[4]  # the login volume's path, on this host
+record_path = Path(sys.argv[3])
+def writer(base_url, auth, record):
+    record["entrypoint_env_has_token"] = "CLAUDE_CODE_OAUTH_TOKEN" in os.environ
+    record_path.write_text(json.dumps(record))
+    return True
+m.entrypoint(Path(sys.argv[2]), writer=writer)
+"""
+
+_TOKEN_CLI = r"""
+import hashlib, json, os
+token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+print(json.dumps({"received_sha": hashlib.sha256(token.encode()).hexdigest()}))
+print("raw:" + token)
+"""
+
+
+def _run_with_token_file(tmp_path, content):
+    import hashlib
+
+    token_file = tmp_path / "volume" / "oauth_token"
+    token_file.parent.mkdir()
+    if content is not None:
+        token_file.write_bytes(content)
+        token_file.chmod(0o600)
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},
+               argv=[sys.executable, "-c", _TOKEN_CLI],
+               spec={"claude_token_file": str(token_file),
+                     "child_credential_names": ["CLAUDE_CODE_OAUTH_TOKEN"]})  # fmt: skip
+    driver = tmp_path / "driver.py"
+    driver.write_text(_TOKEN_DRIVER)
+    record = tmp_path / "record.json"
+    (tmp_path / "tmp").mkdir()
+    child_vars = {"PATH": os.environ["PATH"], "TMPDIR": str(tmp_path / "tmp"),
+                  run_job.DEADLINE_ENV: _deadline_in(60)}  # fmt: skip
+    entry = subprocess.Popen(
+        [sys.executable, str(driver), str(_RUNNER_DIR / "run_job.py"), str(job_dir), str(record),
+         str(token_file)],
+        env=child_vars, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )  # fmt: skip
+    try:
+        out, err = entry.communicate(timeout=60)
+    finally:
+        if entry.poll() is None:
+            entry.kill()
+            entry.wait()
+    return entry.returncode, out + err, json.loads(record.read_text()), hashlib
+
+
+def test_the_volume_token_reaches_only_the_child_and_is_scrubbed(tmp_path):
+    rc, logs, data, hashlib = _run_with_token_file(tmp_path, (_TOKEN + "\n").encode())
+    assert rc == 0 and data["exit_code"] == 0, data["stderr_tail"]
+    received = json.loads(data["stdout"].strip().splitlines()[0])
+    assert received["received_sha"] == hashlib.sha256(_TOKEN.encode()).hexdigest()  # child got it
+    assert data["probe_ok"] is True  # declared: the probe sees no undeclared credential
+    assert data["entrypoint_env_has_token"] is False  # never this process's environment
+    assert _TOKEN not in json.dumps(data)  # scrubbed from the record
+    assert _TOKEN.encode() not in logs  # and from the entrypoint's own output
+
+
+def test_a_bad_volume_token_is_a_refusal_record_that_runs_nothing(tmp_path):
+    rc, logs, data, _ = _run_with_token_file(tmp_path, b"")
+    assert rc == run_job.EXIT_JOB_INVALID
+    assert "token file" in data["refused"] and data["stdout"] == ""
+    assert _TOKEN.encode() not in logs

@@ -19,9 +19,12 @@ The per-job credential set, and nothing else:
   (``<ATELES_PRIVATE_KEYS_DIR>/<role>.jwk.json``) and/or its own bearer
   (``<ROLE>_NEOTOMA_TOKEN``). A role with neither is not eligible. The shared
   daemon bearer never leaves the Mac.
-* **Provider**: Claude gets ``CLAUDE_CODE_OAUTH_TOKEN`` (a ``claude
-  setup-token`` OAuth token). Codex and Cursor get NO per-job credential: each
-  runs on its own long-lived login machine, stopped between jobs.
+* **Provider**: NO provider credential leaves the Mac. Claude, Codex and
+  Cursor each run on their own long-lived login machine, stopped between
+  jobs, whose volume holds the provider's login. For Claude that is the
+  ``claude setup-token`` OAuth token in a file on the volume; the job carries
+  only that file's fixed path, and ``run_job.py`` reads it on the machine and
+  hands it to the CLI child alone.
 
 Secrets travel as machine-level files (Machines API ``config.files``), never
 Fly app secrets. The Fly deploy token (``APIS_FLY_API_TOKEN``) stays on the
@@ -85,7 +88,11 @@ RUNNER_BINARIES: dict[str, str] = {
     "codex": "codex",
     "cursor": "cursor-agent",
 }
-LOGIN_PROVIDERS: frozenset[str] = frozenset({"codex", "cursor"})
+LOGIN_PROVIDERS: frozenset[str] = frozenset({"claude", "codex", "cursor"})
+# Claude's OAuth token lives ONLY on its login machine's volume, in this file.
+# The job names the path (non-secret); run_job.py reads it on the machine.
+CLAUDE_TOKEN_FILE = "/data/claude/oauth_token"
+CLAUDE_TOKEN_NAME = "CLAUDE_CODE_OAUTH_TOKEN"
 # shared-cpu-2x / 2 GB, Amsterdam list price (ateles#1456 cost table): about
 # $13.90 per 30 days.
 DEFAULT_RATE_PER_HOUR_USD = 13.90 / (30 * 24)
@@ -479,10 +486,10 @@ class FlyConfig:
                 # admission refuses on ``problems`` before any check runs.
                 limits[limit.attr] = math.nan
         login = {}
-        if env.get("APIS_FLY_CODEX_MACHINE_ID", "").strip():
-            login["codex"] = env["APIS_FLY_CODEX_MACHINE_ID"].strip()
-        if env.get("APIS_FLY_CURSOR_MACHINE_ID", "").strip():
-            login["cursor"] = env["APIS_FLY_CURSOR_MACHINE_ID"].strip()
+        for provider in sorted(LOGIN_PROVIDERS):
+            name = login_machine_setting(provider)
+            if name in env and env[name].strip():
+                login[provider] = env[name].strip()
         ledger = env.get("APIS_FLY_LEDGER_FILE", "").strip()
         return cls(
             app=env.get("APIS_FLY_APP", "").strip(),
@@ -1413,6 +1420,11 @@ class FlyJob:
         return self.provider in LOGIN_PROVIDERS
 
 
+def login_machine_setting(provider: str) -> str:
+    """The setting that names *provider*'s login machine."""
+    return f"APIS_FLY_{provider.upper()}_MACHINE_ID"
+
+
 def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None) -> list[str]:
     """The local argv rewritten for the runner image: the binary by name, and
     the Mac's temporary MCP config path (which may name the shared bearer)
@@ -1490,9 +1502,9 @@ def build_job(
     ):
         if flag:
             raise FlyIneligible(why)
-    if provider in LOGIN_PROVIDERS and not config.login_machines.get(provider):
+    if provider in LOGIN_PROVIDERS and provider not in config.login_machines:
         raise FlyIneligible(
-            f"no {provider} login machine configured (APIS_FLY_{provider.upper()}_MACHINE_ID)"
+            f"no {provider} login machine configured ({login_machine_setting(provider)})"
         )
 
     secrets: dict[str, str] = {}
@@ -1522,12 +1534,11 @@ def build_job(
         secrets[token_name] = own_token
 
     child_names: list[str] = []
-    if provider == "claude":
-        oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
-        if not oauth:
-            raise FlyIneligible("CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) is unset")
-        secrets["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
-        child_names.append("CLAUDE_CODE_OAUTH_TOKEN")
+    if provider == "claude" and provider in LOGIN_PROVIDERS:
+        # The token is NOT read here and never shipped: it is on the login
+        # machine's volume. The child is declared to receive it; run_job.py
+        # supplies it from CLAUDE_TOKEN_FILE.
+        child_names.append(CLAUDE_TOKEN_NAME)
 
     base_url = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
     if not base_url.startswith("https://"):
@@ -1588,6 +1599,8 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         "neotoma_base_url": job.neotoma_base_url,
         "probe_env_names": job.probe_env_names,
     }
+    if job.provider == "claude" and job.login:
+        spec["claude_token_file"] = CLAUDE_TOKEN_FILE
     if job.provider == "codex":
         spec["codex_home"] = "/data/codex"
     if job.provider == "cursor":

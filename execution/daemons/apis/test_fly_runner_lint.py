@@ -90,12 +90,8 @@ ALLOWLIST: dict[str, str] = {
         'unset is reported by FlyConfig.missing() and refuses Fly',
     "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_APP', '')":
         'unset is reported by FlyConfig.missing() and refuses Fly',
-    "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_CODEX_MACHINE_ID', '')":
-        'unset: Codex is not eligible for Fly (build_job refuses)',
     "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_CURSOR_LOGIN_DIRS', '')":
         'unset means the documented default Cursor login directories',
-    "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_CURSOR_MACHINE_ID', '')":
-        'unset: Cursor is not eligible for Fly (build_job refuses)',
     "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_GITHUB_APP_PREFIX', '')":
         'unset means the documented default GitHub App',
     "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_GITHUB_APP_PREFIX', '').strip() or 'ATELES_REVIEWER_APP'":
@@ -134,8 +130,6 @@ ALLOWLIST: dict[str, str] = {
         'an unreadable time: the reaper then charges the whole window',
     "execution/daemons/apis/fly_runner.py:build_job:jwk.get('sub') or ''":
         "a missing subject cannot equal the role's and is refused",
-    "execution/daemons/apis/fly_runner.py:build_job:os.environ.get('CLAUDE_CODE_OAUTH_TOKEN', '')":
-        'unset is refused straight after: Claude is not eligible',
     "execution/daemons/apis/fly_runner.py:build_job:os.environ.get('NEOTOMA_BASE_URL', '')":
         'unset is refused straight after (must be https)',
     "execution/daemons/apis/fly_runner.py:build_job:os.environ.get('NEOTOMA_BEARER_TOKEN', '')":
