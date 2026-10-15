@@ -1132,6 +1132,9 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for kind in sw.get("task_untouched_by_apis", []):
             eid = f"ent_b_{kind}"
             want(f"{eid} left as it was", obs["rows_final"][eid], obs["rows_after_change"][eid])
+        for kind in sw.get("announced_at_its_turn", []):
+            n = sum(f"ent_b_{kind}" in m for m in obs["sent_at_turn"])
+            want(f"ent_b_{kind} announced when its turn came", n, 1)
         for kind in sw.get("announced_once", []):
             n = sum(f"ent_b_{kind}" in m for m in obs["notifier"].sent)
             want(f"ent_b_{kind} announced", n, 1)

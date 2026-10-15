@@ -588,6 +588,11 @@
             "context_missing",
             "context_garbled",
             "remarked"
+          ],
+          "announced_at_its_turn": [
+            "unreadable",
+            "context_missing",
+            "context_garbled"
           ]
         }
       }
