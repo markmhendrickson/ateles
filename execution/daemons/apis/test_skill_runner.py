@@ -5217,6 +5217,8 @@ class TestGateOwnerToolDenyAcrossProviders:
         source_home.mkdir()
         (source_home / "auth.json").write_text("{}", encoding="utf-8")
         monkeypatch.setenv("CODEX_HOME", str(source_home))
+        monkeypatch.setenv("FALCO_NEOTOMA_TOKEN", "falco-own-token")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
         skill_root = tmp_path / ".claude" / "skills" / "falco"
         skill_root.mkdir(parents=True)
         (skill_root / "SKILL.md").write_text("skill md", encoding="utf-8")
@@ -5914,7 +5916,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv(
             "APIS_VENDOR_BINDING",
@@ -5985,7 +5988,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv(
             "APIS_VENDOR_BINDING", '{"codex": {"mid": "codex-mid-model"}}'
@@ -6107,7 +6111,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
 
         policy_path = tmp_path / "action-policy.json"
         policy_path.write_text('{"build": "mid"}')

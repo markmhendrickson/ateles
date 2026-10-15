@@ -421,8 +421,18 @@ def _prepare_codex_gate_owner_config(
 # start inside the dispatch sandbox. Only the CLI's own login capability is
 # carried over (Codex: a symlink to auth.json; Cursor: a link to the macOS
 # login keychain directory), plus Codex's non-secret model settings.
+#
+# Every place each CLI reads MCP servers from was checked against the
+# installed CLIs (see the PR). The home and the guards below cover each:
+# Codex: CODEX_HOME/config.toml (generated), project .codex/config.toml
+# layers (read only for a TRUSTED project; the generated config trusts none),
+# -c/--config overrides (refused), --profile (refused). Cursor: HOME's
+# .cursor/mcp.json and local plugins (generated home, no plugins), and the
+# project root's .cursor/mcp.json, where the project root is the git root of
+# --workspace or --workspace itself (a dispatch whose project root holds any
+# such file is refused, whatever it contains).
 
-HARNESS_ISOLATION_UNAVAILABLE = "harness isolation unavailable"
+HARNESS_ISOLATION_REFUSED = "harness isolation refused"
 # The child-only environment variable the isolated Codex config reads the
 # role's own Neotoma bearer from (the value never enters argv or a file).
 ROLE_NEOTOMA_BEARER_ENV = "ATELES_ROLE_NEOTOMA_TOKEN"
@@ -430,6 +440,17 @@ ROLE_NEOTOMA_BEARER_ENV = "ATELES_ROLE_NEOTOMA_TOKEN"
 # default model behaves as before. Nothing else is copied.
 CODEX_CARRIED_SETTINGS = ("model", "model_reasoning_effort", "service_tier")
 ISOLATED_PROVIDERS = ("codex", "cursor")
+# Codex flags that would bring configuration from outside the isolated home.
+_CODEX_CONFIG_FLAGS = ("-c", "--config", "-p", "--profile")
+
+
+class IsolationRefusal(RuntimeError):
+    """The isolated home cannot be built: a CONFIGURATION REPAIR is needed
+    (not a wait). ``setting`` names what to fix; never a value."""
+
+    def __init__(self, message: str, *, setting: str):
+        super().__init__(message)
+        self.setting = setting
 
 
 @dataclass(frozen=True)
@@ -455,13 +476,27 @@ def allowed_mcp_servers(agent_tools: list[str]) -> dict[str, tuple[str, ...] | N
     return {CODEX_NEOTOMA_SERVER_ID: tools} if tools else {}
 
 
-def _role_neotoma_endpoint(role: str) -> tuple[str, str] | None:
-    """``(mcp url, role's own token)``, or None when the role has no token of
-    its own or no base URL is set. The shared daemon bearer is never used."""
-    token = os.environ.get(neotoma_token_env_name(role), "").strip()
+def _role_neotoma_endpoint(role: str) -> tuple[str, str]:
+    """``(mcp url, the role's own token)`` for a role granted Neotoma tools.
+
+    Neotoma is a hard dependency for such a role (failure_posture): a missing
+    own token or an invalid endpoint refuses the launch (``IsolationRefusal``)
+    rather than running without memory. The shared bearer is never used."""
+    from urllib.parse import urlsplit
+
+    name = neotoma_token_env_name(role)
+    token = os.environ.get(name, "").strip()
+    if not token:
+        raise IsolationRefusal(
+            f"role {role!r} is granted Neotoma tools but has no Neotoma token of its own "
+            f"({name}); the operator's bearer is never used", setting=name)
     base = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
-    if not token or not base.startswith("https://"):
-        return None
+    parts = urlsplit(base)
+    if (parts.scheme != "https" or not parts.hostname or "@" in parts.netloc
+            or parts.query or parts.fragment or any(c.isspace() for c in base)):  # fmt: skip
+        raise IsolationRefusal(
+            f"role {role!r} is granted Neotoma tools but NEOTOMA_BASE_URL is not a valid "
+            "https endpoint", setting="NEOTOMA_BASE_URL")
     return f"{base}/mcp", token
 
 
@@ -496,6 +531,9 @@ def effective_mcp_servers(provider: str, config_path: Path) -> set[str]:
     if provider == "codex":
         parsed = tomllib.loads(text)
         servers = parsed["mcp_servers"] if "mcp_servers" in parsed else {}
+        for key in ("projects", "profiles", "profile"):
+            if key in parsed:  # trust or a profile would admit other config
+                raise RuntimeError(f"the generated Codex config must not declare {key!r}")
     else:
         parsed = json.loads(text)
         servers = parsed["mcpServers"] if "mcpServers" in parsed else {}
@@ -504,17 +542,48 @@ def effective_mcp_servers(provider: str, config_path: Path) -> set[str]:
     return set(servers)
 
 
-def _workspace_cursor_servers(cwd: str | None) -> set[str]:
-    """MCP servers a workspace's own ``.cursor/mcp.json`` would add."""
-    if not cwd:
-        return set()
-    path = Path(cwd) / ".cursor" / "mcp.json"
-    if not path.is_file():
-        return set()
-    try:
-        return effective_mcp_servers("cursor", path)
-    except (OSError, ValueError, RuntimeError):
-        return {"<unreadable workspace .cursor/mcp.json>"}
+def cursor_project_mcp_files(workspace: str) -> list[str]:
+    """Every project-level MCP file the Cursor CLI could load for
+    ``--workspace``: ``.cursor/mcp.json`` at the project root, which Cursor
+    takes as the git root of the workspace, else the workspace itself. To be
+    sure of the same root, every candidate is checked: the workspace, its
+    ``git rev-parse`` top level and main worktree, and its nearest ancestor
+    holding a ``.git`` entry. Presence alone counts (a link or any content)."""
+    root = Path(workspace).resolve()
+    candidates = {root}
+    for args in (["rev-parse", "--show-toplevel"], ["rev-parse", "--git-common-dir"]):
+        try:
+            out = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                                 text=True, timeout=10, check=False)  # fmt: skip
+        except (OSError, subprocess.SubprocessError):
+            continue
+        value = out.stdout.strip()
+        if out.returncode == 0 and value:
+            path = Path(value) if os.path.isabs(value) else root / value
+            candidates.add(path.resolve().parent if args[1] == "--git-common-dir"
+                           else path.resolve())  # fmt: skip
+    for parent in (root, *root.parents):
+        if os.path.lexists(parent / ".git"):
+            candidates.add(parent)
+            break
+    return sorted(str(c / ".cursor" / "mcp.json") for c in candidates
+                  if os.path.lexists(c / ".cursor" / "mcp.json"))  # fmt: skip
+
+
+def codex_config_overrides(cmd: list[str]) -> list[str]:
+    """Codex flags in *cmd* that would bring MCP servers, trust or a profile
+    from outside the isolated home (``-c mcp_servers...``, ``--profile``)."""
+    found = []
+    for i, arg in enumerate(cmd):
+        flag, _, inline = arg.partition("=")
+        if flag in ("-p", "--profile"):
+            found.append(flag)
+        elif flag in ("-c", "--config"):
+            value = inline or (cmd[i + 1] if i + 1 < len(cmd) else "")
+            if value.split("=", 1)[0].strip().split(".", 1)[0] in (
+                    "mcp_servers", "projects", "profiles", "profile"):  # fmt: skip
+                found.append(f"{flag} {value.split('=', 1)[0].strip()}")
+    return found
 
 
 def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list[str],
@@ -522,17 +591,10 @@ def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list
                                   env_extra: dict[str, str] | None) -> IsolatedHarnessHome:  # fmt: skip
     """Generate and verify a per-dispatch harness home for *provider*.
 
-    Raises ``RuntimeError`` (the dispatch is refused) when the home cannot be
-    built and verified to declare exactly the allowed MCP servers."""
+    Raises ``IsolationRefusal`` (a configuration repair) or ``RuntimeError``;
+    either way nothing is launched. ``cwd`` is the Cursor workspace."""
     granted = allowed_mcp_servers(agent_tools)
     endpoint = _role_neotoma_endpoint(role) if granted else None
-    if granted and endpoint is None:
-        log.warning(
-            f"[apis] {provider} child for {role!r} gets no Neotoma MCP server: the role has "
-            f"no token of its own ({neotoma_token_env_name(role)}) or NEOTOMA_BASE_URL is "
-            "not https; the operator's bearer is never used"
-        )
-        granted = {}
     other = sorted({t.split("__")[1] for t in agent_tools
                     if t.startswith("mcp__") and not t.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
                     and t.count("__") >= 2})  # fmt: skip
@@ -540,11 +602,11 @@ def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list
         log.warning(f"[apis] {provider} child for {role!r}: MCP servers {other} in the "
                     "allowlist are not provided to an isolated swarm child")  # fmt: skip
     if provider == "cursor":
-        extra = _workspace_cursor_servers(cwd) - set(granted)
-        if extra:
-            raise RuntimeError(
-                f"the workspace's .cursor/mcp.json declares MCP servers outside the role's "
-                f"allowlist ({sorted(extra)})")
+        found = cursor_project_mcp_files(cwd or os.getcwd())
+        if found:
+            raise IsolationRefusal(
+                "the dispatch's workspace has its own Cursor MCP configuration at its project "
+                "root, which would add servers to an isolated child", setting=found[0])
     tmp_value = (env_extra or {}).get("TMPDIR", "").strip()
     tmp_parent = Path(tmp_value) if tmp_value else None
     if tmp_parent is not None:
@@ -557,7 +619,8 @@ def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list
         if provider == "codex":
             auth_source = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "auth.json"
             if not auth_source.is_file():
-                raise RuntimeError("the Codex subscription login (auth.json) is unavailable")
+                raise IsolationRefusal("the Codex subscription login is unavailable",
+                                       setting="Codex login (CODEX_HOME/auth.json)")  # fmt: skip
             (home / "auth.json").symlink_to(auth_source.resolve(strict=True))
             config_path = home / "config.toml"
             with open(config_path, "w", encoding="utf-8") as fh:
@@ -585,6 +648,8 @@ def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list
                 env["GIT_CONFIG_GLOBAL"] = str(gitconfig)  # commits keep their identity
             env["HOME"] = str(home)
             env["CURSOR_CONFIG_DIR"] = str(cursor_dir)
+            if os.path.lexists(cursor_dir / "plugins"):
+                raise RuntimeError("the isolated Cursor home must hold no plugins")
         os.chmod(config_path, 0o600)
         declared = effective_mcp_servers(provider, config_path)
         if declared != set(granted):
@@ -1609,10 +1674,17 @@ class SkillResult:
     remote_outcome_unknown: bool = False
     remote_run_id: str = ""
     remote_machine_state: str = ""
+    # A configuration the operator must repair before this dispatch can run
+    # (not a wait): per provider, naming the setting, never a value.
+    configuration_repair: str = ""
 
 
 class _LocalSpawnError(Exception):
     """The local CLI could not be started (an OSError from the spawn)."""
+
+
+class _LocalIsolationRefused(_LocalSpawnError):
+    """The isolated harness home was refused before any child started."""
 
 
 # ── Harness adapters + capacity detection ─────────────────────────────────────
@@ -3366,15 +3438,25 @@ async def _run_skill_once(
     async def _run_local() -> tuple[int | None, bytes, bytes]:
         nonlocal proc, _isolated_home
         if _isolation_wanted and _isolated_home is None:
+            workspace = cwd or os.getcwd()
             try:
+                overrides = codex_config_overrides(cmd) if provider == "codex" else []
+                if overrides:
+                    raise IsolationRefusal(
+                        f"the Codex command carries configuration overrides {overrides}",
+                        setting="codex command")
                 _isolated_home = prepare_isolated_harness_home(
-                    provider, role=_role, agent_tools=agent_def.tools, cwd=cwd,
+                    provider, role=_role, agent_tools=agent_def.tools, cwd=workspace,
                     env_extra=env_extra,
                 )
+            except IsolationRefusal as exc:
+                raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})") from None
             except (OSError, RuntimeError) as exc:
-                raise _LocalSpawnError(
-                    f"{HARNESS_ISOLATION_UNAVAILABLE}: {exc}; refusing to launch with the "
-                    "operator's personal harness configuration") from None
+                raise _LocalIsolationRefused(str(exc)) from None
+            if provider == "cursor" and "--workspace" not in cmd:
+                # Cursor takes its project MCP file from --workspace: name the
+                # workspace the guard checked, never an implicit one.
+                cmd.extend(["--workspace", workspace])
             subprocess_env.update(_isolated_home.env)
             log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness "
                      f"home; MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
@@ -3490,6 +3572,14 @@ async def _run_skill_once(
                         )
             else:
                 returncode, stdout, stderr = await _run_local()
+        except _LocalIsolationRefused as exc:
+            # A configuration repair, not a provider failure: no child started.
+            msg = f"{provider} launch failed: {HARNESS_ISOLATION_REFUSED}: {exc}"
+            log.error(f"[apis] {skill} dispatch refused before launch — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                configuration_repair=f"{provider}: {exc}",
+            )
         except _LocalSpawnError as exc:
             msg = f"{provider} launch failed: {exc}"
             log.warning(f"[apis] {skill} dispatch skipped — {msg}")
@@ -4332,6 +4422,7 @@ async def _run_provider_attempts(
         return SkillResult(skill, False, None, "", "", error=msg)
 
     attempted: list[str] = []
+    repairs: list[str] = []
     last_result: SkillResult | None = None
     # Local-first work has no silent frontier path. `fallback_models` is None
     # while claude-local is still ahead in the queue; once local has failed (or
@@ -4374,6 +4465,15 @@ async def _run_provider_attempts(
         # even when an infrastructure message resembles a provider failure.
         if result.remote_outcome_unknown:
             return result
+        if result.configuration_repair:
+            # The isolated harness home was refused before any child started:
+            # a configuration the operator must repair, not a provider failure
+            # or a wait. No cooldown; the next provider may still run.
+            repairs.append(result.configuration_repair)
+            last_result = result
+            log.warning(f"[apis] {skill}: {selected} needs a configuration repair "
+                        f"({result.configuration_repair}); trying the next provider")  # fmt: skip
+            continue
         # _run_skill_once carries an explicit delivery-only signal only after
         # independently excluding provider diagnostics from stderr. Preserve
         # that result before scanning the child's large stdout transcript:
@@ -4508,6 +4608,15 @@ async def _run_provider_attempts(
         "all eligible subscription-backed harness providers were exhausted "
         f"after attempts: {', '.join(attempted)}"
     )
+    if repairs:
+        # Kept to the end: what to fix, per provider (names, never values).
+        last_result.configuration_repair = "; ".join(repairs)
+        if len(repairs) == len(attempted):
+            last_result.error = (
+                "dispatch not launched: configuration repair needed "
+                f"({last_result.configuration_repair}); attempted: {', '.join(attempted)}")
+        else:
+            last_result.error += f"; configuration repair needed: {last_result.configuration_repair}"
     windows = cooled_until_all({provider: binaries.get(provider)} if provider else binaries)
     if windows:
         # This dispatch's own refusals spent the last usable window: say when

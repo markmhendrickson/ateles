@@ -149,31 +149,135 @@ def test_a_role_with_no_neotoma_tools_gets_no_server(operator_home, provider):
 
 
 @pytest.mark.parametrize("provider", ["codex", "cursor"])
-def test_a_role_without_its_own_token_never_gets_the_operators(operator_home, monkeypatch,
-                                                               provider):  # fmt: skip
+def test_a_granted_role_without_its_own_token_is_refused(operator_home, monkeypatch, provider):
+    """Neotoma is a hard dependency for a role granted its tools: no own
+    token is a configuration repair, never a launch without memory, and
+    never the operator's bearer."""
     monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
-    isolated = _prepare(provider, ["*"])
+    with pytest.raises(skill_runner.IsolationRefusal) as exc:
+        _prepare(provider, ["*"])
+    assert exc.value.setting == "LANIUS_NEOTOMA_TOKEN"
+    assert SHARED_BEARER not in str(exc.value)
+
+
+@pytest.mark.parametrize("base", ["", "http://neotoma.example.test", "https://",
+                                  "https://user@neotoma.example.test",
+                                  "https://neotoma.example.test/ x", "neotoma.example.test",
+                                  "https://neotoma.example.test?x=1"])  # fmt: skip
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_granted_role_with_an_invalid_endpoint_is_refused(operator_home, monkeypatch,
+                                                            provider, base):  # fmt: skip
+    monkeypatch.setenv("NEOTOMA_BASE_URL", base)
+    with pytest.raises(skill_runner.IsolationRefusal) as exc:
+        _prepare(provider, ["*"])
+    assert exc.value.setting == "NEOTOMA_BASE_URL" and ROLE_TOKEN not in str(exc.value)
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_role_without_neotoma_tools_needs_no_token(operator_home, monkeypatch, provider):
+    monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+    isolated = _prepare(provider, ["Read", "Bash"])
     try:
         assert skill_runner.effective_mcp_servers(provider, isolated.config_path) == set()
-        assert SHARED_BEARER not in isolated.config_path.read_text()
-        assert SHARED_BEARER not in json.dumps(isolated.env)
     finally:
         _cleanup(isolated)
 
 
-def test_a_workspace_cursor_config_with_other_servers_is_refused(operator_home, tmp_path):
-    workspace = tmp_path / "workspace"
-    (workspace / ".cursor").mkdir(parents=True)
-    (workspace / ".cursor" / "mcp.json").write_text(
-        json.dumps({"mcpServers": {"client-hosted": {"url": "https://x.example.test"}}}))
-    with pytest.raises(RuntimeError, match="outside the role's allowlist"):
+def _git(path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+
+
+_PROJECT_FILES = {
+    "plain": json.dumps({"mcpServers": {"client-hosted": {"url": "https://x.example.test"}}}),
+    "allowed-name": json.dumps({"mcpServers": {"mcpsrv_neotoma": {"url": "https://x.example.test"}}}),
+    "allowed-name-extra-keys": json.dumps({"mcpServers": {"mcpsrv_neotoma": {
+        "args": ["--x"], "headers": {"X-Other": "1"}}}}),
+    "jsonc": '{\n // comment\n "mcpServers": {"x": {"command": "/usr/bin/true"},},\n}',
+    "duplicate-keys": '{"mcpServers": {}, "mcpServers": {"x": {"command": "/usr/bin/true"}}}',
+    "name-variant": json.dumps({"mcpServers": {"MCPSRV_NEOTOMA ": {"command": "/usr/bin/true"}}}),
+    "empty": "",
+}
+
+
+@pytest.mark.parametrize("content", sorted(_PROJECT_FILES))
+@pytest.mark.parametrize("where", ["workspace", "git-root-above-workspace", "symlink"])
+def test_any_project_cursor_mcp_file_refuses_the_dispatch(operator_home, tmp_path, where,
+                                                          content):  # fmt: skip
+    """Cursor reads <project root>/.cursor/mcp.json, the project root being the
+    git root of --workspace (else --workspace). Whatever it holds, a file
+    there refuses the dispatch."""
+    repo = tmp_path / "repo"
+    workspace = repo / "sub" / "deeper" if where == "git-root-above-workspace" else repo
+    workspace.mkdir(parents=True)
+    _git(repo)
+    target = repo / ".cursor" / "mcp.json"
+    target.parent.mkdir()
+    if where == "symlink":
+        real = tmp_path / "elsewhere.json"
+        real.write_text(_PROJECT_FILES[content])
+        target.symlink_to(real)
+    else:
+        target.write_text(_PROJECT_FILES[content])
+    with pytest.raises(skill_runner.IsolationRefusal) as exc:
         _prepare("cursor", ["*"], cwd=str(workspace))
+    assert exc.value.setting == str(target.resolve().parent.parent / ".cursor" / "mcp.json") \
+        or exc.value.setting.endswith("/.cursor/mcp.json")  # fmt: skip
+
+
+def test_a_linked_worktree_checks_its_main_checkout(operator_home, tmp_path):
+    import subprocess
+
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main)
+    subprocess.run(["git", "-C", str(main), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-q", "--allow-empty", "-m", "x"], check=True)  # fmt: skip
+    worktree = tmp_path / "linked"
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(worktree)], check=True)
+    (main / ".cursor").mkdir()
+    (main / ".cursor" / "mcp.json").write_text("{}")
+    with pytest.raises(skill_runner.IsolationRefusal):
+        _prepare("cursor", ["*"], cwd=str(worktree))
+
+
+def test_a_cursor_workspace_without_project_config_is_fine(operator_home, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "sub" / ".cursor").mkdir(parents=True)
+    _git(repo)
+    # A .cursor/mcp.json below the project root is never read by Cursor.
+    (repo / "sub" / ".cursor" / "rules").mkdir()
+    isolated = _prepare("cursor", ["*"], cwd=str(repo / "sub"))
+    _cleanup(isolated)
 
 
 def test_codex_without_its_login_is_refused(operator_home):
     (operator_home / ".codex" / "auth.json").unlink()
-    with pytest.raises(RuntimeError, match="auth.json"):
+    with pytest.raises(skill_runner.IsolationRefusal) as exc:
         _prepare("codex", ["*"])
+    assert "auth.json" in exc.value.setting
+
+
+@pytest.mark.parametrize("cmd,refused", [
+    (["codex", "exec", "-c", "sandbox_workspace_write.network_access=true", "-"], False),
+    (["codex", "exec", "-c", "mcp_servers.x.command=\"/bin/x\"", "-"], True),
+    (["codex", "exec", "--config=mcp_servers.x.url=\"https://x\"", "-"], True),
+    (["codex", "exec", "-c", "projects.\"/r\".trust_level=\"trusted\"", "-"], True),
+    (["codex", "exec", "--profile", "personal", "-"], True),
+    (["codex", "exec", "-p", "personal", "-"], True),
+])  # fmt: skip
+def test_codex_flags_that_bring_outside_config_are_found(cmd, refused):
+    assert bool(skill_runner.codex_config_overrides(cmd)) is refused
+
+
+def test_the_codex_config_trusts_no_project(operator_home):
+    isolated = _prepare("codex", ["*"])
+    try:
+        parsed = tomllib.loads(isolated.config_path.read_text())
+        assert "projects" not in parsed and "profiles" not in parsed
+    finally:
+        _cleanup(isolated)
 
 
 # ── A real child process: what it actually sees ─────────────────────────────
@@ -213,3 +317,96 @@ def test_a_dispatched_child_sees_only_the_allowed_servers(operator_home, monkeyp
     assert seen["servers"] == ["mcpsrv_neotoma"]
     assert seen["home"] != str(operator_home / ".codex") and seen["home"] != str(operator_home)
     assert not Path(seen["home"]).exists()  # the isolated home is removed afterwards
+
+
+
+# ── The whole attempt path: refusals are configuration repairs, kept to the end ─
+
+
+def _seam(monkeypatch, tmp_path, *, tools="*"):
+    stand_in = tmp_path / "stand-in"
+    marker = tmp_path / "spawned"
+    stand_in.write_text("#!%s\nimport pathlib, sys\npathlib.Path(%r).write_text('1')\n"
+                        "print('ran')\n" % (sys.executable, str(marker)), encoding="utf-8")
+    stand_in.chmod(0o755)
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", str(stand_in))
+    monkeypatch.setattr(skill_runner, "CURSOR_BIN", str(stand_in))
+    skills = tmp_path / ".claude" / "skills" / "lanius"
+    skills.mkdir(parents=True)
+    (skills / "SKILL.md").write_text("# lanius\n")
+    monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: AgentDefinition(
+        entity_id="e", name=role, prompt_markdown="You are lanius.", tool_allowlist=tools,
+        aauth_sub=f"{role}@ateles-swarm"))  # fmt: skip
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
+    notified = []
+    monkeypatch.setattr(skill_runner, "notify_dispatch_failure",
+                        lambda notifier, **kw: notified.append(kw) or True)  # fmt: skip
+    import harness_router
+
+    harness_router.reset_state()
+    return marker, notified
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_pinned_dispatch_keeps_the_repair_and_starts_nothing(operator_home, monkeypatch,
+                                                              tmp_path, provider):  # fmt: skip
+    marker, notified = _seam(monkeypatch, tmp_path)
+    monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                                provider=provider))  # fmt: skip
+    assert not result.ok and not marker.exists()  # no subprocess started
+    assert result.configuration_repair.startswith(f"{provider}: ")
+    assert "LANIUS_NEOTOMA_TOKEN" in result.configuration_repair
+    assert "configuration repair needed" in result.error
+    assert result.attempted_providers == (provider,) and not result.cooled_until
+    assert notified and "LANIUS_NEOTOMA_TOKEN" in notified[0]["stderr"]
+    import harness_router
+
+    assert provider not in harness_router.cooling_providers()  # a repair is not a cooldown
+    assert ROLE_TOKEN not in result.error and SHARED_BEARER not in result.error
+
+
+def test_exhausted_alternatives_keep_every_providers_repair(operator_home, monkeypatch,
+                                                            tmp_path):  # fmt: skip
+    marker, notified = _seam(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius"))
+    assert not result.ok and not marker.exists()
+    assert set(result.attempted_providers) == {"codex", "cursor"}
+    assert "codex: " in result.configuration_repair and "cursor: " in result.configuration_repair
+    assert "dispatch not launched: configuration repair needed" in result.error
+    assert "configuration repair" in notified[0]["stderr"]
+
+
+def test_one_providers_repair_lets_the_next_provider_run(operator_home, monkeypatch, tmp_path):
+    marker, notified = _seam(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    (operator_home / ".codex" / "auth.json").unlink()  # only Codex needs a repair
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius"))
+    assert result.ok and marker.exists()
+    assert result.attempted_providers == ("codex", "cursor")
+
+
+def test_a_no_grant_role_launches_with_no_server(operator_home, monkeypatch, tmp_path):
+    marker, _ = _seam(monkeypatch, tmp_path, tools="Read,Bash")
+    monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                                provider="codex"))  # fmt: skip
+    assert result.ok and marker.exists() and not result.configuration_repair
+
+
+def test_a_fly_bound_run_builds_no_local_home(operator_home, monkeypatch, tmp_path):
+    import fly_runner
+
+    marker, _ = _seam(monkeypatch, tmp_path)
+    built = []
+    monkeypatch.setattr(skill_runner, "prepare_isolated_harness_home",
+                        lambda *a, **k: built.append(a) or pytest.fail("local home built"))
+    # Forced to Fly, which is not configured here: refused, nothing local.
+    result = asyncio.run(skill_runner._run_skill_once(
+        "lanius", "task", provider="codex", role="lanius", runner="fly"))  # fmt: skip
+    assert not result.ok and built == [] and not marker.exists()
+    assert fly_runner.wants_fly("fly", None)
