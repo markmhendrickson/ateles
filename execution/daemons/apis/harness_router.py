@@ -336,13 +336,20 @@ HEADROOM_SOURCE_DEFAULT = "default"
 
 
 def headroom_resolution(
-    *, now_wall: float | None = None
+    *, now_wall: float | None = None, without_mac_readings: Collection[str] = ()
 ) -> dict[str, tuple[float, str]]:
     """Return ``{provider: (headroom, source)}`` for every provider.
 
     This is the single implementation of the precedence; ``configured_headroom``
     is its value-only projection.  ``source`` is one of the
     ``HEADROOM_SOURCE_*`` constants and names the tier that produced the value.
+
+    ``without_mac_readings`` (operator ruling 2026-10-15): for these providers
+    the Mac's own usage readings (the usage snapshot and the provider probe)
+    are left OUT of the evidence before anything is resolved, so they can
+    neither stand as the value nor outvote or expire an operator override.
+    The operator's overrides then resolve exactly as they do for any
+    dispatch.
     """
     moment = time.time() if now_wall is None else now_wall
     overrides, written_at = _override_values()
@@ -370,7 +377,8 @@ def headroom_resolution(
             if undated is None:
                 undated = 1.0
 
-        probe = _probe_evidence(provider, now_wall=moment)
+        mac_readings = provider not in without_mac_readings
+        probe = _probe_evidence(provider, now_wall=moment) if mac_readings else None
         probe_observed = (
             _wall_from_iso(probe.get("observed_at")) if probe is not None else None
         )
@@ -385,7 +393,7 @@ def headroom_resolution(
         if dated is not None and not dated_is_stale:
             result[provider] = (dated, dated_source)
             continue
-        live = live_headroom(provider, now_wall=moment)
+        live = live_headroom(provider, now_wall=moment) if mac_readings else None
         if live is not None:
             observed = _live_observed_at(provider)
             # A reported exhaustion is never outvoted by a hand-set number;
@@ -427,15 +435,15 @@ MAC_READING_SOURCES = frozenset({HEADROOM_SOURCE_LIVE_USAGE, HEADROOM_SOURCE_LIV
 
 def _headroom_for(fly_bound: Collection[str] = (), *,
                   now_wall: float | None = None) -> dict[str, float]:  # fmt: skip
-    """``configured_headroom``, except that for a provider in *fly_bound* a
-    value read from the Mac's usage snapshot or probe does not count (it is
-    the Mac's login, not the Fly runner's): it reads as full headroom. An
-    operator's override still applies."""
-    if not fly_bound:
-        return configured_headroom(now_wall=now_wall)
+    """``configured_headroom``, except that for a provider in *fly_bound* the
+    Mac's own usage readings are removed from the evidence BEFORE resolution
+    (they describe the Mac's login, not the Fly runner's). Every operator
+    override, manual, dated or undated, zero or not, then wins exactly as it
+    does for a local dispatch; with none, the default applies."""
     return {
-        provider: (1.0 if provider in fly_bound and source in MAC_READING_SOURCES else value)
-        for provider, (value, source) in headroom_resolution(now_wall=now_wall).items()
+        provider: value
+        for provider, (value, _source) in headroom_resolution(
+            now_wall=now_wall, without_mac_readings=fly_bound).items()
     }
 
 

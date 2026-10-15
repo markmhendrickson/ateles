@@ -1581,6 +1581,37 @@
         "local_cli_ran": false,
         "machines_created": 0
       }
+    },
+    {
+      "id": "fly_dispatch_keeps_the_operators_zero_headroom_override",
+      "description": "The operator has set Claude's headroom to zero, and the Mac's own Claude login reports itself exhausted. A Fly dispatch is not gated by the Mac's reading, but the operator's override still applies: the dispatch is refused, and no machine is created.",
+      "mac_usage": "exhausted",
+      "settings": {
+        "APIS_HARNESS_HEADROOM": "{\"claude\": 0.0}"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "SHOULD NOT RUN\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "headroom=0.000",
+        "local_cli_ran": false,
+        "machines_created": 0
+      }
     }
   ]
 }

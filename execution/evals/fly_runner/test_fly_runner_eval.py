@@ -79,6 +79,7 @@ def test_scenario_set_covers_the_required_behaviours():
         "large_system_prompt_travels_as_a_file_not_an_argument",
         "fly_dispatch_is_not_gated_by_the_macs_usage_reading",
         "the_same_dispatch_bound_for_the_mac_keeps_its_usage_gate",
+        "fly_dispatch_keeps_the_operators_zero_headroom_override",
         "claude_runs_on_its_login_machine_with_the_volume_token",
     } <= ids
     assert len(ids) == len(SCENARIOS)

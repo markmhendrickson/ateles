@@ -12,6 +12,8 @@ against the local gate again. Local dispatches are gated exactly as before.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -213,3 +215,108 @@ def test_run_skill_bound_for_the_mac_gets_no_fallback_exemption(monkeypatch):
                                                 provider="codex"))  # fmt: skip
     assert result.ok and calls[0][1]["local_fallback_check"] is None
     assert result.usage_gate_exempted == ""
+
+
+# ── Operator overrides always win, for Fly-bound dispatches too ─────────────
+# The Fly exemption removes ONLY the Mac's own readings, and it removes them
+# from the evidence BEFORE resolution: a Mac reading can then neither stand as
+# the value nor outvote or expire an operator's override.
+
+OVERRIDE_KINDS = ("manual", "dated", "undated")
+
+
+def _override_zero(tmp_path, provider: str, kind: str, *, expired: bool = False) -> None:
+    """The operator sets *provider*'s headroom to zero, in the override file."""
+    now = time.time()
+    if kind == "manual":
+        value = {"headroom": 0.0, "cooldown_reason": "manual"}
+    elif kind == "dated":
+        until = now - 60 if expired else now + 3600
+        value = {"headroom": 0.0, "cooldown_until": hr._iso_from_wall(until)}
+    else:
+        value = 0.0
+    path = tmp_path / "no-headroom.json"
+    path.write_text(json.dumps({provider: value}), encoding="utf-8")
+    past = now - 600  # written before the Mac reading below is observed
+    os.utime(path, (past, past))
+
+
+def _mac_reading(provider: str, state: str) -> None:
+    now = time.time()
+    if state == "exhausted":
+        hr.record_exhausted(provider, now + 3600, observed_at=now)
+    else:  # healthy, from the provider's own probe, observed after the override
+        hr.record_usage(provider, [{"name": "weekly_all", "used_percent": 1.0,
+                                    "resets_at": hr._iso_from_wall(now + 86400)}],
+                        observed_at=now, provider_probe=True)  # fmt: skip
+
+
+@pytest.mark.parametrize("state", ["exhausted", "healthy"])
+@pytest.mark.parametrize("kind", OVERRIDE_KINDS)
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_an_operator_zero_override_refuses_a_fly_bound_dispatch(tmp_path, provider, kind,
+                                                               state):  # fmt: skip
+    _override_zero(tmp_path, provider, kind)
+    _mac_reading(provider, state)
+    assert hr.provider_candidates(BINARIES, preferred=provider, fly_bound=FLY) == []
+    reason = hr.provider_exclusion_reason(provider, BINARIES, fly_bound=FLY)
+    assert reason and "headroom=0.000" in reason
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_no_override_and_an_exhausted_mac_reading_admits_a_fly_bound_dispatch(provider):
+    _mac_reading(provider, "exhausted")
+    assert hr.provider_candidates(BINARIES, preferred=provider) == []  # local: refused
+    assert hr.provider_candidates(BINARIES, preferred=provider, fly_bound=FLY) == [provider]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_an_expired_dated_override_no_longer_refuses(tmp_path, provider):
+    _override_zero(tmp_path, provider, "dated", expired=True)
+    _mac_reading(provider, "exhausted")
+    assert hr.provider_candidates(BINARIES, preferred=provider, fly_bound=FLY) == [provider]
+    _override_zero(tmp_path, provider, "dated")
+    assert hr.provider_candidates(BINARIES, preferred=provider, fly_bound=FLY) == []
+
+
+def _exemption_after_resolution(fly_bound=(), *, now_wall=None):
+    """The rejected design: resolve first, then rewrite a Mac-read value."""
+    return {
+        provider: (1.0 if provider in fly_bound and source in hr.MAC_READING_SOURCES
+                   else value)
+        for provider, (value, source) in hr.headroom_resolution(now_wall=now_wall).items()
+    }  # fmt: skip
+
+
+@pytest.mark.parametrize("kind,state", [("undated", "exhausted"), ("dated", "healthy")])
+def test_an_exemption_applied_after_resolution_would_admit_it(tmp_path, monkeypatch,
+                                                              kind, state):  # fmt: skip
+    """The tests above go red against the post-resolution exemption: under it
+    the Mac reading outvotes the operator's zero and is then rewritten."""
+    _override_zero(tmp_path, "codex", kind)
+    _mac_reading("codex", state)
+    assert hr.provider_candidates(BINARIES, preferred="codex", fly_bound=FLY) == []
+    monkeypatch.setattr(hr, "_headroom_for", _exemption_after_resolution)
+    assert hr.provider_candidates(BINARIES, preferred="codex", fly_bound=FLY) == ["codex"]
+
+
+# ── The explanation for an unpinned seated review uses selection's inputs ───
+
+
+def test_a_seated_review_names_the_fly_reason_not_the_macs_reading(monkeypatch, tmp_path):
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
+    calls = _stub_attempts(monkeypatch, on_fly=True)
+    binaries = dict(BINARIES, codex=None)  # codex is not installed
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: dict(binaries))
+    _reading("claude", "over-ceiling")  # the Mac's own Claude login is over its ceiling
+    _override_zero(tmp_path, "claude", "manual")  # and the operator has held Claude out
+    fly = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius", runner="fly",
+                                             owns_pending_gate=True))  # fmt: skip
+    assert not fly.ok and calls == []
+    assert "claude=headroom=0.000" in fly.error  # the reason selection actually used
+    assert "usage gate" not in fly.error and "pace" not in fly.error
+    hr.reset_state()
+    local = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                               owns_pending_gate=True))  # fmt: skip
+    # Bound for the Mac, the Mac's usage gate is the real reason, and is named.
+    assert not local.ok and "usage gate" in local.error and "claude" in local.error

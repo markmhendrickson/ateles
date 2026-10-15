@@ -4182,7 +4182,7 @@ async def _run_provider_attempts(
             )
         if owns_pending_gate and provider is None:
             reasons = "; ".join(
-                f"{name}={provider_exclusion_reason(name, binaries) or 'not eligible'}"
+                f"{name}={provider_exclusion_reason(name, binaries, fly_bound=fly_bound) or 'not eligible'}"
                 for name in GATE_OWNER_DENY_CAPABLE_PROVIDERS
             )
             msg = (

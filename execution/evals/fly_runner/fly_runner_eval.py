@@ -405,6 +405,10 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     fake.settle_reads = int(scenario["fly"].get("settle_reads", 0))
     fake.never_settles = bool(scenario["fly"].get("never_settles"))
     monkeypatch.setattr(fly_runner, "LOGIN_SETTLE_POLL_SECONDS", 0.0, raising=False)
+    if scenario.get("mac_usage") == "exhausted":
+        # The Mac's own Claude login reports itself exhausted.
+        moment = __import__("time").time()
+        harness_router.record_exhausted("claude", moment + 3600, observed_at=moment)
     if scenario.get("mac_usage") == "over_ceiling":
         # The Mac's own Claude login is far over its weekly ceiling; the gate is on.
         monkeypatch.setenv("APIS_USAGE_GATE", "on")
