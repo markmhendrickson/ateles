@@ -376,7 +376,6 @@ def dispatch_env(monkeypatch, tmp_path):
     monkeypatch.setattr(apis, "_created_seen", {})
     monkeypatch.setattr(apis, "_recovering", set())
     monkeypatch.setattr(apis, "_surfaced", set())
-    monkeypatch.setattr(apis, "_unrecorded_deferrals", {})
     monkeypatch.setattr(apis, "_RECOVERY_PASS_DELAY_S", 0.001)
     monkeypatch.setattr(apis, "_RECOVERY_LIST_RETRY_DELAY_S", 0.001)
     monkeypatch.setattr(apis, "READINESS_GATE", False)
@@ -573,12 +572,11 @@ def test_a_deferred_task_the_build_finished_is_not_run(dispatch_env):
 
 def test_a_deferred_task_that_cannot_be_re_read_is_surfaced_not_run(dispatch_env):
     _, spawns, store = dispatch_env
+    _mark(store, "ent_followup_00001")
     store.fail_reads.add("ent_followup_00001")
-    _, notifier = _during_build(
-        dispatch_env, lambda c: _created("ent_followup_00001", _local())
-    )
+    n = _sweep(dispatch_env)
     assert spawns == []
-    assert any("ent_followup_00001" in m and "re-dispatch it by hand" in m for m in notifier.sent)
+    assert any("ent_followup_00001" in m and "re-dispatch it by hand" in m for m in n.sent)
 
 
 def test_a_failed_task_query_is_surfaced_once_and_retried(dispatch_env):
@@ -598,18 +596,6 @@ def test_a_query_that_recovers_on_retry_still_dispatches(dispatch_env):
     store.fail_query_times = 1
     _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
     assert spawns == [("cicada", "ent_followup_00001", "build_released")]
-
-
-def test_a_deferral_that_cannot_be_recorded_is_reported_and_still_retried_in_process(
-    dispatch_env,
-):
-    _, spawns, store = dispatch_env
-    store.fail_writes = True
-    out, notifier = _during_build(
-        dispatch_env, lambda c: _created("ent_followup_00001", _local())
-    )
-    assert any("could not record" in m for m in notifier.sent)
-    assert out["spawns_mid_build"] == []
 
 
 def test_a_deferred_task_with_an_unreadable_record_is_surfaced(dispatch_env):
@@ -1603,39 +1589,72 @@ def test_a_write_that_lost_a_field_once_is_rewritten_and_then_acknowledged(
     assert spawns == [("cicada", "ent_followup_00001", "build_released")]
 
 
+def _no_state_left_behind():
+    assert apis._recovering == set()
+    assert not build_delivery._inflight and not build_delivery._runs
+    assert not hasattr(apis, "_unrecorded_deferrals"), "an in-memory deferral queue exists"
+    assert not hasattr(build_delivery, "_deferred")
+
+
 @pytest.mark.parametrize(
     "field,mode",
-    [(f, m) for f in ("disposition", "dispatch_context", "blocked_reason") for m in ("omit", "mismatch")]
+    [(f, m) for f in ("disposition", "dispatch_context", "blocked_reason") for m in ("omit", "mismatch")],
 )
-def test_a_write_that_never_persists_is_reported_not_acknowledged(dispatch_env, field, mode):
+def test_an_unrecordable_deferral_is_not_held_and_not_dispatched(dispatch_env, field, mode):
     _, spawns, store = dispatch_env
     out, notifier = _defer_with(dispatch_env, lossy={field: [mode, 99]})
 
-    (msg,) = [m for m in notifier.sent if "could not record" in m]
-    assert "ent_followup_00001" in msg and field in msg and "re-dispatch the task by hand" in msg
-    assert out["spawns_mid_build"] == []
-    # The in-process fallback still runs it when the build ends.
-    assert spawns == [("cicada", "ent_followup_00001", "build_released")]
+    (msg,) = [m for m in notifier.sent if "could not record a deferral" in m]
+    assert "ent_followup_00001" in msg and field in msg
+    assert "NOT held and NOT dispatched" in msg and "by hand when the build" in msg
+    # Not dispatched mid-build, and not by the release that follows.
+    assert out["spawns_mid_build"] == [] and spawns == []
+    # No half-written marker is left to get it picked up later.
+    assert store.rows["ent_followup_00001"].get("disposition") != build_delivery.DEFERRED_DISPOSITION
+    _no_state_left_behind()
 
 
-def test_an_unrecorded_deferral_does_not_survive_a_restart_and_the_operator_was_told(dispatch_env):
+def test_an_unrecordable_deferral_leaves_the_task_exactly_as_it_was(dispatch_env):
     _, spawns, store = dispatch_env
-    out, notifier = _defer_with(
-        dispatch_env, lossy={"dispatch_context": ["omit", 99]}, release=False
-    )
-    assert any("re-dispatch the task by hand" in m for m in notifier.sent)
-    # A new process finds nothing marked to recover (the record never held).
-    apis._unrecorded_deferrals.clear()
-    spawns.clear()
-    asyncio.run(apis.recover_deferred_tasks(_RecNotifier()))
+    store.fail_writes = True
+    original = _local()
+    out, notifier = _defer_with(dispatch_env)
+
+    assert out["rows_mid_build"]["ent_followup_00001"] == original
+    assert store.rows["ent_followup_00001"] == original
     assert spawns == []
+    assert sum("could not record a deferral" in m for m in notifier.sent) == 1
+
+
+def test_an_unrecordable_deferral_is_announced_once_however_often_it_is_tried(dispatch_env):
+    writes, spawns, store = dispatch_env
+    store.fail_writes = True
+    n = _RecNotifier()
+
+    async def _go():
+        with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff"):
+            store.put("ent_followup_00001", _local())
+            for trigger in ("created", "retry", "retry"):
+                await apis.dispatch_task(
+                    "ent_followup_00001", _local(), trigger=trigger, notifier=n,
+                    snapshot_hydrated=True,
+                )
+        await apis.recover_deferred_tasks(n)
+        await apis.recover_deferred_tasks(n)
+        await _settle()
+
+    asyncio.run(_go())
+    assert sum("could not record a deferral" in m for m in n.sent) == 1
+    assert spawns == []
+    _no_state_left_behind()
 
 
 def test_a_deferral_that_reads_back_as_nothing_is_not_acknowledged(dispatch_env, monkeypatch):
-    _, _, store = dispatch_env
+    _, spawns, store = dispatch_env
     monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: None)
     _, notifier = _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
-    assert any("could not record" in m and "read-back" in m for m in notifier.sent)
+    assert any("could not record a deferral" in m and "read-back" in m for m in notifier.sent)
+    assert spawns == []
 
 
 # ── a task that waited for a slot is judged as it reads when its turn comes ──
@@ -1732,3 +1751,49 @@ def test_a_queued_task_that_cannot_be_re_read_is_reported_once_and_not_dispatche
     assert [e for e, _ in dispatched] == ["ent_a_first_0001"]
     assert sum("ent_b_queued_0001" in m for m in n.sent) == 1
     assert not any(e == "ent_b_queued_0001" for e, _ in writes)
+
+
+@pytest.mark.parametrize(
+    "label,change",
+    [
+        ("missing", lambda st: st.rows["ent_b_queued_0001"].pop("dispatch_context")),
+        ("empty", lambda st: st.rows["ent_b_queued_0001"].update(dispatch_context="")),
+        ("malformed", lambda st: st.rows["ent_b_queued_0001"].update(dispatch_context="garbled")),
+    ],
+)
+def test_a_queued_task_whose_context_became_unusable_is_reported_once_and_untouched(
+    dispatch_env, monkeypatch, label, change
+):
+    _, _, store = dispatch_env
+    seen: dict = {}
+
+    def _change_and_remember(st):
+        change(st)
+        seen["row"] = dict(st.rows["ent_b_queued_0001"])
+
+    dispatched, n, writes = _queue_behind_a_busy_slot(
+        dispatch_env, monkeypatch, change=_change_and_remember
+    )
+
+    assert [e for e, _ in dispatched] == ["ent_a_first_0001"], label
+    assert sum("ent_b_queued_0001" in m for m in n.sent) == 1
+    (msg,) = [m for m in n.sent if "ent_b_queued_0001" in m]
+    assert "does not say which build" in msg and "re-dispatch it by hand" in msg
+    assert not any(e == "ent_b_queued_0001" for e, _ in writes)
+    assert store.rows["ent_b_queued_0001"] == seen["row"], "Apis changed the task"
+
+    # Examined again (a later trigger): still one notice, still not dispatched.
+    asyncio.run(apis.recover_deferred_tasks(n))
+    assert sum("ent_b_queued_0001" in m for m in n.sent) == 1
+
+
+def test_an_empty_approved_context_is_refused_not_enqueued(dispatch_env):
+    _, spawns, store = dispatch_env
+    _mark(store, "ent_a_first_0001")
+
+    async def _go():
+        apis._recovering.add("ent_a_first_0001")
+        await apis._redispatch_deferred("ent_a_first_0001", "", _RecNotifier())
+
+    asyncio.run(_go())
+    assert spawns == [] and apis._recovering == set()

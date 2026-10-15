@@ -509,7 +509,7 @@
     },
     {
       "id": "deferral_that_never_persists_is_warned_not_acknowledged",
-      "why": "a deferral whose fields never persist is not acknowledged: the operator is warned with the task and the next action, and after a restart nothing pretends it was recorded",
+      "why": "a deferral whose fields never persist is neither held in memory nor dispatched: the task is left as it was, the operator is told once with the task, the fields and the next action, and after a restart nothing pretends it was recorded",
       "path": "restart",
       "events": [
         {}
@@ -527,9 +527,11 @@
         "final_spawns": [],
         "warning_before_restart_contains": [
           "ent_eval_rst_0000",
-          "could not record",
-          "re-dispatch the task by hand"
-        ]
+          "could not record a deferral",
+          "NOT held and NOT dispatched",
+          "by hand when the build"
+        ],
+        "spawns_after_wipe": 0
       }
     },
     {
@@ -553,14 +555,16 @@
     },
     {
       "id": "queued_deferred_task_is_re_validated_when_its_slot_comes",
-      "why": "tasks queued behind the three busy recovery slots are read again when their turn comes: one completed, cancelled or re-marked while waiting is NOT dispatched and gets no status write (quietly); one unreadable is reported once; one still deferred is dispatched from the fresh read",
+      "why": "tasks queued behind the three busy recovery slots are read again when their turn comes: one completed, cancelled or re-marked while waiting is NOT dispatched and gets no status write (quietly); one whose context became missing or malformed, or that became unreadable, is reported once (and not again by a later sweep), not dispatched and not changed; one still deferred is dispatched from the fresh read",
       "path": "slot_wait",
       "queued": [
         "completed",
         "cancelled",
         "remarked",
         "still_deferred",
-        "unreadable"
+        "unreadable",
+        "context_missing",
+        "context_garbled"
       ],
       "expect": {
         "slot_wait": {
@@ -568,13 +572,22 @@
             "completed",
             "cancelled",
             "remarked",
-            "unreadable"
+            "unreadable",
+            "context_missing",
+            "context_garbled"
           ],
           "dispatched_from_fresh_read": {
             "still_deferred": "as re-read at its turn"
           },
           "announced_once": [
-            "unreadable"
+            "unreadable",
+            "context_missing",
+            "context_garbled"
+          ],
+          "task_untouched_by_apis": [
+            "context_missing",
+            "context_garbled",
+            "remarked"
           ]
         }
       }

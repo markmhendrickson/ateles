@@ -179,3 +179,9 @@ def test_the_slot_wait_scenario_goes_red_without_the_re_validation(tmp_path):
     obs = harness.run_scenario(scenario, tmp_path, mutation="no_revalidation")
     problems = harness.check(scenario, obs)
     assert any("stopped qualifying" in p or "status write" in p for p in problems), problems
+
+
+def test_an_unrecordable_deferral_that_nobody_is_told_about_goes_red(tmp_path):
+    scenario = BY_ID["deferral_that_never_persists_is_warned_not_acknowledged"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="silent_unrecorded")
+    assert any("not warned" in p for p in harness.check(scenario, obs))

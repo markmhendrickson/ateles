@@ -60,6 +60,7 @@ from unroutable_ledger import UnroutableLedger  # noqa: E402
 MUTATIONS = (
     "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep",
     "no_continuation", "no_readback", "no_worktree_check", "no_revalidation",
+    "silent_unrecorded",
 )
 
 REPO = "eval-owner/eval-repo"
@@ -564,6 +565,11 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
                 apis._recovering.discard(entity_id)
 
         mp.setattr(apis, "_redispatch_deferred", _stale, raising=False)
+    if mutation == "silent_unrecorded":
+        async def _quiet_failure(*a, **k):
+            return False
+
+        mp.setattr(apis, "_record_deferral", _quiet_failure, raising=False)
     if mutation == "no_readback":
         mp.setattr(apis, "_deferral_persisted", lambda *a, **k: [], raising=False)
     if mutation == "no_worktree_check":
@@ -609,7 +615,6 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     mp.setattr(apis, "_RECOVERY_LIST_RETRY_DELAY_S", 0.001, raising=False)
     mp.setattr(apis, "_surfaced", set(), raising=False)
     mp.setattr(apis, "_recovering", set(), raising=False)
-    mp.setattr(apis, "_unrecorded_deferrals", {}, raising=False)
     mp.setattr(apis, "_recovery_notifier", None, raising=False)
     mp.setattr(build_delivery, "_release_hook", None, raising=False)
     mp.setattr(apis, "write_checkpoint_brief", lambda **kw: "ent_brief")
@@ -669,7 +674,6 @@ def _wipe_process_state() -> None:
     apis._created_seen.clear()
     apis._recovering.clear()
     apis._surfaced.clear()
-    apis._unrecorded_deferrals.clear()
     apis._recovery_notifier = None
     for task in list(apis._background_dispatch_tasks):
         task.cancel()
@@ -716,13 +720,24 @@ async def _drive_slot_wait(scenario: dict, world: World, obs: dict, notifier) ->
             row["status"] = "done"
         elif kind == "cancelled":
             row["status"] = "cancelled"
+        elif kind == "context_missing":
+            row.pop("dispatch_context", None)
+        elif kind == "context_garbled":
+            row["dispatch_context"] = "garbled"
         elif kind == "remarked":
             row["dispatch_context"] = f"deferred-behind:{REPO.lower()}#{ISSUE}:fedcba9876543210"
         elif kind == "unreadable":
             store.unreadable.add(f"ent_b_{kind}")
         elif kind == "still_deferred":
             row["title"] = "as re-read at its turn"
+    obs["rows_after_change"] = {k: dict(v) for k, v in store.rows.items()}
     obs["release"].set()
+    await _settle()
+    obs["rows_final"] = {k: dict(v) for k, v in store.rows.items()}
+    obs["spawns_at_turn"] = list(obs["spawns"])
+    obs["statuses_at_turn"] = list(obs["statuses"])
+    obs["sent_at_turn"] = list(notifier.sent)
+    await apis.recover_deferred_tasks(notifier)  # a later trigger re-examines them
     await _settle()
 
 
@@ -1096,22 +1111,27 @@ def check(scenario: dict, obs: dict) -> list[str]:
                 bad.append(f"the operator was not warned {needle!r}; got: {sent[:300]!r}")
     if "slot_wait" in exp:
         sw = exp["slot_wait"]
-        dispatched = {s["task"]: s for s in obs["spawns"]}
+        dispatched = {s["task"]: s for s in obs["spawns_at_turn"]}
         want("queued tasks held back while the slots were busy",
              sorted(t for t in obs["dispatched_while_waiting"] if t.startswith("ent_b_")), [])
         for kind in sw.get("not_dispatched", []):
             eid = f"ent_b_{kind}"
             if eid in dispatched:
                 bad.append(f"{eid} was dispatched after it stopped qualifying")
-            if [st for e, st in obs["statuses"] if e == eid]:
+            if [st for e, st in obs["statuses_at_turn"] if e == eid]:
                 bad.append(f"{eid} got a status write although it was not dispatched")
-            if any(eid in m for m in obs["notifier"].sent) and kind != "unreadable":
+            if any(eid in m for m in obs["sent_at_turn"]) and kind not in (
+                "unreadable", "context_missing", "context_garbled"
+            ):
                 bad.append(f"{eid} was announced, but finishing while it waited is the normal case")
         for kind, title in sw.get("dispatched_from_fresh_read", {}).items():
             got = dispatched.get(f"ent_b_{kind}")
             want(f"ent_b_{kind} dispatched", got is not None, True)
             if got:
                 want(f"ent_b_{kind} dispatched from the read at its turn", got["title"], title)
+        for kind in sw.get("task_untouched_by_apis", []):
+            eid = f"ent_b_{kind}"
+            want(f"{eid} left as it was", obs["rows_final"][eid], obs["rows_after_change"][eid])
         for kind in sw.get("announced_once", []):
             n = sum(f"ent_b_{kind}" in m for m in obs["notifier"].sent)
             want(f"ent_b_{kind} announced", n, 1)

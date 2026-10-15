@@ -938,9 +938,6 @@ _recovering: set[str] = set()
 # reported once per process, so a record that stays broken is not re-announced by
 # every sweep, and the sweep still moves past it every time.
 _surfaced: set[tuple[str, str]] = set()
-# Deferrals whose durable record could not be written: still retried in-process on
-# release, and the operator has been told they will not survive a restart.
-_unrecorded_deferrals: dict[str, tuple[dict, tuple[str, int]]] = {}
 _recovery_notifier: "Notifier | None" = None
 
 
@@ -1005,9 +1002,22 @@ async def _record_deferral(
     A write's success status is not persistence (failure_posture.md, rule 6): the
     deferral is acknowledged only when the task read back holds the expected
     status, disposition, dispatch_context and reason. A missing or mismatched
-    field is a failed write: it is written once more, and if it still does not
-    hold, the operator is told and the in-process fallback takes over.
+    field is a failed write: it is written once more.
+
+    If it still does not hold, nothing is kept in memory and the task is NOT
+    dispatched: the deferral fields are put back to what the task read before
+    (best effort, so a half-written marker cannot get it picked up later) and the
+    operator is told, once per task, which fields did not persist and what to do.
+    A deferral either has a durable record or visibly does not exist; there is no
+    third, hidden state.
     """
+
+    def _rollback() -> None:
+        for field in ("disposition", "dispatch_context", "blocked_reason"):
+            set_task_field(
+                entity_id, field, snapshot.get(field) or "",
+                handler=DAEMON_NAME, key_suffix=f"deferral-rollback-{claim.run_id}",
+            )
 
     def _attempt() -> list[str]:
         problems: list[str] = []
@@ -1027,18 +1037,18 @@ async def _record_deferral(
     problems = await asyncio.to_thread(_attempt)
     if not problems:
         return True
-    _unrecorded_deferrals[entity_id] = (snapshot, (claim.repository, claim.number))
+    await asyncio.to_thread(_rollback)
     log.error(
-        f"[{DAEMON_NAME}] could not record the deferral of task {entity_id} on the "
-        f"task ({', '.join(problems)}) — retried in this process only"
+        f"[{DAEMON_NAME}] could not record the deferral of task {entity_id} "
+        f"({', '.join(problems)}) — it is NOT held and NOT dispatched"
     )
-    notifier.send(
-        f"Task {entity_id} waits for the build of {claim.repository}#{claim.number}, "
-        f"but Apis could not record that on the task ({', '.join(problems)}). It "
-        "will re-run when the build ends unless Apis restarts first; if it does, "
-        "re-dispatch the task by hand.",
-        priority=Priority.WARN,
-        handler=DAEMON_NAME,
+    _surface_once(
+        notifier,
+        (entity_id, "unrecorded"),
+        f"Apis could not record a deferral for {entity_id}; it was NOT held and "
+        f"NOT dispatched (did not persist: {', '.join(problems)}). Re-dispatch it "
+        f"by hand when the build of {claim.repository}#{claim.number} ends.",
+        {"surfaced": 0, "already_surfaced": 0},
     )
     return False
 
@@ -1145,9 +1155,6 @@ async def recover_deferred_tasks(
                 )
             return counts
         ids = [str(r.get("entity_id") or "") for r in rows if r.get("entity_id")]
-        for entity_id in _unrecorded_deferrals:
-            if entity_id not in ids:
-                ids.append(entity_id)
         counts["found"] = len(ids)
         unexamined = [i for i in ids if i not in visited]
         batch = unexamined[:_RECOVERY_BATCH]
@@ -1175,32 +1182,33 @@ def _continue_later(
     _spawn_background(_go(), "apis-deferred-recovery-continue")
 
 
-def _qualify_deferred(
-    entity_id: str, fresh: dict, fallback: "tuple[dict, tuple[str, int]] | None"
-) -> "tuple[dict, tuple[str, int] | None, str]":
-    """Judge a task as it reads NOW: (merged snapshot, build it waits for, verdict).
+def _qualify_deferred(entity_id: str, fresh: dict) -> "tuple[tuple[str, int] | None, str]":
+    """Judge a task as it reads NOW: (build it waits for, verdict).
 
     Verdict is "" when the task is still deferred and resolvable, else why not:
-    ``no_longer_deferred`` (not pending, or no longer marked and unknown to this
-    process) or ``unresolvable`` (marked, but it does not say which build). Pure:
-    no I/O, so it is applied to every fresh read, at examination and again just
-    before dispatch.
+    ``no_longer_deferred`` (not pending, or no longer marked) or ``unresolvable``
+    (marked, but its dispatch_context is missing or malformed). Pure: no I/O, so
+    it is applied to every fresh read, at examination and again just before
+    dispatch. Every deferral has a durable record, so there is nothing else to
+    consult.
     """
-    snap = {**(fallback[0] if fallback else {}), **fresh}
-    marked = snap.get("disposition") == build_delivery.DEFERRED_DISPOSITION
-    if normalize_status(snap.get("status")) != TaskStatus.PENDING.value or (
-        not marked and not fallback
-    ):
-        return snap, None, "no_longer_deferred"
-    context = build_delivery.parse_deferral_context(snap.get("dispatch_context"))
-    if marked and context:
-        return snap, (context[0], context[1]), ""
-    # An unrecorded (or half-recorded) deferral still knows what it waits for from
-    # this process; a record that says nothing and has no such memory cannot be
-    # resolved.
-    if fallback:
-        return snap, fallback[1], ""
-    return snap, None, "unresolvable"
+    marked = fresh.get("disposition") == build_delivery.DEFERRED_DISPOSITION
+    if normalize_status(fresh.get("status")) != TaskStatus.PENDING.value or not marked:
+        return None, "no_longer_deferred"
+    context = build_delivery.parse_deferral_context(fresh.get("dispatch_context"))
+    if not context:
+        return None, "unresolvable"
+    return (context[0], context[1]), ""
+
+
+def _unresolvable_notice(entity_id: str, notifier: Notifier, counts: dict) -> None:
+    _surface_once(
+        notifier, (entity_id, "unresolvable"),
+        f"Deferred task {entity_id} does not say which build it waits for, "
+        "so it was not re-dispatched. Check that no build of its issue is "
+        "running, then re-dispatch it by hand.",
+        counts,
+    )
 
 
 async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) -> None:
@@ -1208,7 +1216,6 @@ async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) ->
     try:
         if entity_id in _recovering:
             return
-        fallback = _unrecorded_deferrals.get(entity_id)
         fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
         if fresh is None:
             _surface_once(
@@ -1219,34 +1226,27 @@ async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) ->
                 counts,
             )
             return
-        snap, waiting_for, verdict = _qualify_deferred(entity_id, fresh, fallback)
+        waiting_for, verdict = _qualify_deferred(entity_id, fresh)
         if verdict == "no_longer_deferred":
             counts["no_longer_deferred"] += 1
-            _unrecorded_deferrals.pop(entity_id, None)
             log.info(
                 f"[{DAEMON_NAME}] deferred task {entity_id!r} is no longer "
-                f"deferred (status={snap.get('status')!r}) — not re-dispatching"
+                f"deferred (status={fresh.get('status')!r}) — not re-dispatching"
             )
             return
-        if waiting_for is None:
-            _surface_once(
-                notifier, (entity_id, "unresolvable"),
-                f"Deferred task {entity_id} does not say which build it waits for, "
-                "so it was not re-dispatched. Check that no build of its issue is "
-                "running, then re-dispatch it by hand.",
-                counts,
-            )
+        if verdict == "unresolvable":
+            _unresolvable_notice(entity_id, notifier, counts)
             return
         if build_delivery.active_build(*waiting_for):
             counts["still_building"] += 1
             return
-        _unrecorded_deferrals.pop(entity_id, None)
+        approved_context = fresh.get("dispatch_context")
+        if not approved_context:  # unreachable: a resolvable task has one
+            raise AssertionError("refusing to enqueue a deferred dispatch with no approved context")
         _recovering.add(entity_id)
         counts["redispatched"] += 1
-        # What this dispatch was approved against; re-checked after the slot wait.
-        approved = (snap.get("dispatch_context"), fallback)
         _spawn_background(
-            _redispatch_deferred(entity_id, approved, notifier),
+            _redispatch_deferred(entity_id, approved_context, notifier),
             f"apis-deferred-{entity_id}",
         )
     except Exception as exc:  # noqa: BLE001 — one task must never stop the batch
@@ -1260,21 +1260,31 @@ async def _examine_deferred(entity_id: str, notifier: Notifier, counts: dict) ->
         )
 
 
-async def _redispatch_deferred(entity_id: str, approved: tuple, notifier: Notifier) -> None:
+async def _redispatch_deferred(
+    entity_id: str, approved_context: str, notifier: Notifier
+) -> None:
     """Dispatch a deferred task from a FRESH read taken after its slot is won.
 
     A task can wait a long time for a slot (a dispatch awaits a whole agent run),
-    and may be completed, cancelled, superseded or re-marked in the meantime; the
-    snapshot taken before the wait says nothing about that. So after the slot is
+    and may be completed, cancelled, superseded or re-marked in the meantime; a
+    read taken before the wait says nothing about that. So after the slot is
     acquired, and immediately before dispatch, the task is read again and must
-    still qualify: pending, the deferred disposition, the same dispatch_context
-    it was approved with, and its build not running again. If it no longer
-    qualifies nothing is dispatched or written. If it cannot be read, the operator
-    is told once and nothing is dispatched. What is dispatched is that fresh read.
+    still be pending, marked deferred, with EXACTLY the dispatch_context it was
+    approved with (always compared; an empty approved context is refused), and its
+    build not running again. If it no longer qualifies nothing is dispatched or
+    written (a quiet log line); a context that is now missing or malformed is
+    reported through the same once-only `unresolvable` notice as at examination.
+    If the task cannot be read the operator is told once. What is dispatched is
+    that fresh read.
     """
-    approved_context, fallback = approved
     counts = {"surfaced": 0, "already_surfaced": 0}
     try:
+        if not approved_context:
+            log.error(
+                f"[{DAEMON_NAME}] refusing to dispatch deferred task {entity_id!r}: "
+                "no approved dispatch_context to compare against"
+            )
+            return
         async with _recovery_slot():
             fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
             if fresh is None:
@@ -1286,15 +1296,16 @@ async def _redispatch_deferred(entity_id: str, approved: tuple, notifier: Notifi
                     counts,
                 )
                 return
-            snap, waiting_for, verdict = _qualify_deferred(entity_id, fresh, fallback)
+            waiting_for, verdict = _qualify_deferred(entity_id, fresh)
             reason = ""
-            if verdict:
-                reason = f"it is no longer deferred (status={snap.get('status')!r})" if (
-                    verdict == "no_longer_deferred"
-                ) else "it no longer says which build it waits for"
-            elif approved_context and snap.get("dispatch_context") != approved_context:
+            if verdict == "unresolvable":
+                _unresolvable_notice(entity_id, notifier, counts)
+                reason = "its dispatch_context is missing or malformed"
+            elif verdict:
+                reason = f"it is no longer deferred (status={fresh.get('status')!r})"
+            elif fresh.get("dispatch_context") != approved_context:
                 reason = "it was re-marked behind a different build while it waited"
-            elif waiting_for and build_delivery.active_build(*waiting_for):
+            elif build_delivery.active_build(*waiting_for):
                 reason = "its build is running again"
             if reason:
                 log.info(
@@ -1304,7 +1315,7 @@ async def _redispatch_deferred(entity_id: str, approved: tuple, notifier: Notifi
                 return
             await dispatch_task(
                 entity_id,
-                snap,
+                fresh,
                 trigger="build_released",
                 notifier=notifier,
                 snapshot_hydrated=True,
@@ -1574,13 +1585,13 @@ async def dispatch_task(
         if holder:
             # Recorded ON THE TASK before it is acknowledged: nothing in memory
             # carries this deferral, so a restart cannot strand it.
-            await _record_deferral(entity_id, snapshot, holder, notifier)
+            recorded = await _record_deferral(entity_id, snapshot, holder, notifier)
             log.info(
                 f"[{DAEMON_NAME}] task {entity_id!r} is about {key[0]}#{key[1]}, "
                 f"which {holder.holder!r} is building — deferred until that "
                 f"build ends (trigger={trigger})"
             )
-            if build_delivery.active_build(*key) is None:
+            if recorded and build_delivery.active_build(*key) is None:
                 # The build ended while the deferral was being recorded, and its
                 # release sweep may already have run.
                 schedule_deferred_recovery()
