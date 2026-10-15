@@ -68,6 +68,9 @@ def test_the_eval_covers_every_required_behaviour():
         "restart_recovers_a_deferral_whose_first_write_dropped_a_field",
         "deferral_that_never_persists_is_warned_not_acknowledged",
         "queued_deferred_task_is_re_validated_when_its_slot_comes",
+        "unrecordable_deferral_whose_marker_cannot_be_cleared_is_announced_truthfully_and_dispatched_once",
+        "unrecordable_deferral_whose_context_cannot_be_cleared_is_never_dispatched",
+        "partially_written_deferral_without_its_reason_is_never_dispatched",
         # the worktree itself is verified, on both paths
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
@@ -185,3 +188,17 @@ def test_an_unrecordable_deferral_that_nobody_is_told_about_goes_red(tmp_path):
     scenario = BY_ID["deferral_that_never_persists_is_warned_not_acknowledged"]
     obs = harness.run_scenario(scenario, tmp_path, mutation="silent_unrecorded")
     assert any("not warned" in p for p in harness.check(scenario, obs))
+
+
+@pytest.mark.parametrize(
+    "scenario_id",
+    [
+        "unrecordable_deferral_whose_context_cannot_be_cleared_is_never_dispatched",
+        "partially_written_deferral_without_its_reason_is_never_dispatched",
+    ],
+)
+def test_the_half_written_marker_scenarios_go_red_if_the_reason_is_not_required(scenario_id, tmp_path):
+    scenario = BY_ID[scenario_id]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="reason_not_required")
+    assert harness.check(scenario, obs), "a marker without its reason was acted on unnoticed"
+    assert obs["spawns"], "the half-written marker was dispatched"

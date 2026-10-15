@@ -214,7 +214,9 @@ def active_build(repository: str, number: int) -> BuildClaim | None:
 # ── The durable deferral record ──────────────────────────────────────────────
 #
 # A task deferred behind a build is marked ON THE TASK, with existing task fields,
-# before the deferral is acknowledged:
+# before the deferral is acknowledged. The fields are written in this order, with
+# blocked_reason LAST as the commit marker, and removed in the reverse order (reason
+# first); a marker without a matching reason is never acted on:
 #
 #   status          pending   (unchanged: it has not been routed)
 #   disposition     DEFERRED_DISPOSITION   (exact-matchable by the recovery sweep)
@@ -240,6 +242,29 @@ def deferral_reason(claim: BuildClaim) -> str:
         f"Deferred: {claim.holder} is building {claim.repository}#{claim.number} "
         f"(run {claim.run_id}). Apis re-dispatches this task when that build ends "
         "and on every restart; no action needed unless you are notified."
+    )
+
+
+_DEFERRAL_REASON_RE = re.compile(
+    r"Deferred: (?P<holder>\S+) is building (?P<repo>[^#\s]+)#(?P<number>\d+) "
+    r"\(run (?P<run>[0-9a-f]{16})\)\. Apis re-dispatches this task when that "
+    r"build ends and on every restart; no action needed unless you are notified\."
+)
+
+
+def reason_matches_context(reason: object, context: tuple[str, int, str]) -> bool:
+    """Whether ``reason`` is the exact recorded form, for the build ``context`` names.
+
+    The reason is the COMMIT MARKER of a deferral: it is written last and cleared
+    first, so a task carrying the other fields without it is a half-written (or
+    half-removed) record, never a deferral to act on.
+    """
+    match = _DEFERRAL_REASON_RE.fullmatch(str(reason or ""))
+    return bool(
+        match
+        and match.group("repo") == context[0]
+        and int(match.group("number")) == context[1]
+        and match.group("run") == context[2]
     )
 
 

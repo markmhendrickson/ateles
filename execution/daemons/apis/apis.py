@@ -951,27 +951,28 @@ def _expected_deferral(claim: "build_delivery.BuildClaim") -> dict:
 
 
 def _write_deferral(entity_id: str, claim: "build_delivery.BuildClaim", attempt: int) -> bool:
+    """Write the deferral record in commit order: disposition, dispatch_context, then
+    status with blocked_reason LAST (the commit marker). Stops at the first failed
+    write, so the marker is never written after a failure."""
     expected = _expected_deferral(claim)
     # A retry uses its own idempotency keys: a write the server dropped but
     # acknowledged would otherwise be answered "already done" and never applied.
     suffix = f"deferred-{claim.run_id}" + (f"-retry{attempt}" if attempt else "")
-    return all(
-        (
-            set_task_field(
-                entity_id, "disposition", expected["disposition"],
-                handler=DAEMON_NAME, key_suffix=suffix,
-            ),
-            set_task_field(
-                entity_id, "dispatch_context", expected["dispatch_context"],
-                handler=DAEMON_NAME, key_suffix=suffix,
-            ),
-            set_task_status(
-                entity_id,
-                TaskStatus.PENDING,
-                handler=DAEMON_NAME,
-                reason=expected["blocked_reason"],
-                key_suffix=suffix,
-            ),
+    return bool(
+        set_task_field(
+            entity_id, "disposition", expected["disposition"],
+            handler=DAEMON_NAME, key_suffix=suffix,
+        )
+        and set_task_field(
+            entity_id, "dispatch_context", expected["dispatch_context"],
+            handler=DAEMON_NAME, key_suffix=suffix,
+        )
+        and set_task_status(
+            entity_id,
+            TaskStatus.PENDING,
+            handler=DAEMON_NAME,
+            reason=expected["blocked_reason"],
+            key_suffix=suffix,
         )
     )
 
@@ -1012,13 +1013,6 @@ async def _record_deferral(
     third, hidden state.
     """
 
-    def _rollback() -> None:
-        for field in ("disposition", "dispatch_context", "blocked_reason"):
-            set_task_field(
-                entity_id, field, snapshot.get(field) or "",
-                handler=DAEMON_NAME, key_suffix=f"deferral-rollback-{claim.run_id}",
-            )
-
     def _attempt() -> list[str]:
         problems: list[str] = []
         for attempt in (0, 1):
@@ -1037,20 +1031,68 @@ async def _record_deferral(
     problems = await asyncio.to_thread(_attempt)
     if not problems:
         return True
-    await asyncio.to_thread(_rollback)
-    log.error(
-        f"[{DAEMON_NAME}] could not record the deferral of task {entity_id} "
-        f"({', '.join(problems)}) — it is NOT held and NOT dispatched"
-    )
+    state = await asyncio.to_thread(_roll_back_deferral, entity_id, snapshot, claim)
+    fields = ", ".join(problems)
+    where = f"{claim.repository}#{claim.number}"
+    if state["verdict"] == "cleared":
+        left = f" Fields left behind: {', '.join(state['left'])}." if state["left"] else ""
+        text = (
+            f"Apis could not record a deferral for {entity_id}; it was NOT held and "
+            f"NOT dispatched (did not persist: {fields}).{left} Re-dispatch it by "
+            f"hand when the build of {where} ends."
+        )
+    elif state["verdict"] == "intact":
+        text = (
+            f"Apis could not record a deferral for {entity_id} and could not clear "
+            f"its marker; Apis WILL re-dispatch it when the build of {where} ends "
+            f"unless you cancel the task (did not persist: {fields}; marker fields "
+            f"still present: {', '.join(state['left'])})."
+        )
+    else:
+        text = (
+            f"Apis could not record a deferral for {entity_id} and could not verify "
+            f"the task's state afterwards (did not persist: {fields}). If its "
+            f"deferral marker is intact Apis may re-dispatch it when the build of "
+            f"{where} ends; check the task and cancel it if that is not wanted."
+        )
+    log.error(f"[{DAEMON_NAME}] could not record the deferral of task {entity_id}: {text}")
     _surface_once(
-        notifier,
-        (entity_id, "unrecorded"),
-        f"Apis could not record a deferral for {entity_id}; it was NOT held and "
-        f"NOT dispatched (did not persist: {', '.join(problems)}). Re-dispatch it "
-        f"by hand when the build of {claim.repository}#{claim.number} ends.",
-        {"surfaced": 0, "already_surfaced": 0},
+        notifier, (entity_id, "unrecorded"), text, {"surfaced": 0, "already_surfaced": 0}
     )
     return False
+
+
+def _roll_back_deferral(entity_id: str, snapshot: dict, claim: "build_delivery.BuildClaim") -> dict:
+    """Undo a deferral that did not persist, in REVERSE commit order, and say what is true.
+
+    The reason (the commit marker) is cleared first, then dispatch_context, then
+    disposition, each to what the task read before, stopping at the first failure:
+    once the reason is gone the rest is a marker the sweep will not act on, so only
+    a failure to clear the reason itself can leave a complete one. Then ONE read
+    back decides what the operator is told, from what the task holds rather than
+    from what was attempted: ``cleared`` (the marker does not qualify), ``intact``
+    (it still qualifies, so the sweep WILL dispatch the task), or ``unknown``.
+    """
+    suffix = f"deferral-rollback-{claim.run_id}"
+    for field in ("blocked_reason", "dispatch_context", "disposition"):
+        ok = set_task_field(
+            entity_id, field, snapshot.get(field) or "", handler=DAEMON_NAME, key_suffix=suffix
+        )
+        if not ok:
+            log.warning(f"[{DAEMON_NAME}] rollback of {field} on task {entity_id} failed")
+            break
+    try:
+        fresh = fetch_task_snapshot(entity_id)
+    except Exception:  # noqa: BLE001 — unknown, said as such
+        fresh = None
+    if not isinstance(fresh, dict):
+        return {"verdict": "unknown", "left": []}
+    expected = _expected_deferral(claim)
+    left = [
+        f for f in ("disposition", "dispatch_context", "blocked_reason") if fresh.get(f) == expected[f]
+    ]
+    _, verdict = _qualify_deferred(entity_id, fresh)
+    return {"verdict": "intact" if verdict == "" else "cleared", "left": left}
 
 
 def install_build_release_hook(notifier: Notifier) -> None:
@@ -1187,7 +1229,8 @@ def _qualify_deferred(entity_id: str, fresh: dict) -> "tuple[tuple[str, int] | N
 
     Verdict is "" when the task is still deferred and resolvable, else why not:
     ``no_longer_deferred`` (not pending, or no longer marked) or ``unresolvable``
-    (marked, but its dispatch_context is missing or malformed). Pure: no I/O, so
+    (marked, but its dispatch_context is missing or malformed, or its reason is not
+    the recorded form for that context). Pure: no I/O, so
     it is applied to every fresh read, at examination and again just before
     dispatch. Every deferral has a durable record, so there is nothing else to
     consult.
@@ -1196,7 +1239,11 @@ def _qualify_deferred(entity_id: str, fresh: dict) -> "tuple[tuple[str, int] | N
     if normalize_status(fresh.get("status")) != TaskStatus.PENDING.value or not marked:
         return None, "no_longer_deferred"
     context = build_delivery.parse_deferral_context(fresh.get("dispatch_context"))
-    if not context:
+    # The reason is the commit marker: a record without the exact reason for THIS
+    # context is a half-written or half-removed one, never a deferral to act on.
+    if not context or not build_delivery.reason_matches_context(
+        fresh.get("blocked_reason"), context
+    ):
         return None, "unresolvable"
     return (context[0], context[1]), ""
 

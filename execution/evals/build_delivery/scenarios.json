@@ -596,6 +596,76 @@
           ]
         }
       }
+    },
+    {
+      "id": "unrecordable_deferral_whose_marker_cannot_be_cleared_is_announced_truthfully_and_dispatched_once",
+      "why": "the double fault: the deferral cannot be confirmed AND the commit marker (the reason) cannot be cleared, so a complete marker remains. The notice says Apis WILL re-dispatch it (and names the fields), and after the build ends it is dispatched exactly once: the notice and the behaviour agree",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "fail_next_reads": 2,
+      "store_policy": {
+        "blocked_reason": "reject_clear"
+      },
+      "expect": {
+        "warning_before_restart_contains": [
+          "ent_eval_rst_0000",
+          "could not clear its marker",
+          "WILL re-dispatch",
+          "unless you cancel the task",
+          "blocked_reason"
+        ],
+        "final_spawns": [
+          [
+            "ent_eval_rst_0000",
+            "build_released"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "unrecordable_deferral_whose_context_cannot_be_cleared_is_never_dispatched",
+      "why": "the reason (commit marker) is cleared first and verified by read-back, so a marker left by a later failed clear does not qualify: the notice says NOT held and NOT dispatched, the sweep reports the leftover once as unresolvable, and nothing is dispatched",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "fail_next_reads": 2,
+      "store_policy": {
+        "dispatch_context": "reject_clear"
+      },
+      "expect": {
+        "warning_before_restart_contains": [
+          "NOT held and NOT dispatched",
+          "by hand when the build"
+        ],
+        "final_spawns": [],
+        "notification_counts": {
+          "does not say which build": 1
+        }
+      }
+    },
+    {
+      "id": "partially_written_deferral_without_its_reason_is_never_dispatched",
+      "why": "the reason is written last as the commit marker: when it never lands, the other fields are a half-written record that the sweep reports once and never dispatches, even if the rollback also fails",
+      "path": "restart",
+      "events": [
+        {}
+      ],
+      "store_policy": {
+        "blocked_reason": "drop_write",
+        "dispatch_context": "reject_clear"
+      },
+      "expect": {
+        "warning_before_restart_contains": [
+          "NOT held and NOT dispatched"
+        ],
+        "final_spawns": [],
+        "notification_counts": {
+          "does not say which build": 1
+        }
+      }
     }
   ]
 }

@@ -60,7 +60,7 @@ from unroutable_ledger import UnroutableLedger  # noqa: E402
 MUTATIONS = (
     "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep",
     "no_continuation", "no_readback", "no_worktree_check", "no_revalidation",
-    "silent_unrecorded",
+    "silent_unrecorded", "reason_not_required",
 )
 
 REPO = "eval-owner/eval-repo"
@@ -357,31 +357,41 @@ class _TaskStore:
         # field -> [mode, remaining]: a write that SUCCEEDS but is not persisted as
         # sent ("omit": dropped, "mismatch": stored with a different value).
         self.lossy: dict[str, list] = {}
+        # field -> fn(value) -> "apply" | "drop" | "reject": faults that depend on
+        # WHAT is written (e.g. a write that clears a field fails).
+        self.policy: dict[str, object] = {}
+        self.fail_next_reads = 0
 
     def put(self, entity_id: str, snapshot: dict) -> None:
         self.rows[entity_id] = dict(snapshot)
 
-    def _persist(self, entity_id: str, field: str, value) -> None:
+    def _persist(self, entity_id: str, field: str, value) -> bool:
         row = self.rows.setdefault(entity_id, {})
+        rule = self.policy.get(field)
+        verdict = rule(value) if rule else "apply"
+        if verdict == "reject":
+            return False
+        if verdict == "drop":
+            return True
         loss = self.lossy.get(field)
         if loss and loss[1] > 0:
             loss[1] -= 1
             if loss[0] == "mismatch":
                 row[field] = "altered-" + str(value)[:8]
-            return
+            return True
         row[field] = value
+        return True
 
     def field(self, entity_id, field, value, **kw) -> bool:
-        self._persist(entity_id, field, value)
-        return True
+        return self._persist(entity_id, field, value)
 
     def status(self, entity_id, status, **kw) -> bool:
         value = getattr(status, "value", status)
-        self._persist(entity_id, "status", value)
+        ok = self._persist(entity_id, "status", value)
         if kw.get("reason") is not None:
-            self._persist(entity_id, "blocked_reason", kw["reason"])
+            ok = self._persist(entity_id, "blocked_reason", kw["reason"]) and ok
         self.obs["statuses"].append((entity_id, value))
-        return True
+        return ok
 
     def query(self, entity_type, *, snapshot_filters, limit=None, **kw):
         found = [
@@ -392,6 +402,9 @@ class _TaskStore:
         return found[:limit] if limit else found
 
     def read(self, entity_id):
+        if self.fail_next_reads > 0:
+            self.fail_next_reads -= 1
+            return None
         if entity_id in self.unreadable or entity_id not in self.rows:
             return None
         return dict(self.rows[entity_id])
@@ -565,6 +578,8 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
                 apis._recovering.discard(entity_id)
 
         mp.setattr(apis, "_redispatch_deferred", _stale, raising=False)
+    if mutation == "reason_not_required":
+        mp.setattr(build_delivery, "reason_matches_context", lambda reason, context: True)
     if mutation == "silent_unrecorded":
         async def _quiet_failure(*a, **k):
             return False
@@ -685,7 +700,9 @@ def _marked_row(**over) -> dict:
     row.update(
         status="pending",
         disposition=build_delivery.DEFERRED_DISPOSITION,
-        blocked_reason="Deferred: swarm-build-handoff is building",
+        blocked_reason=build_delivery.deferral_reason(
+            build_delivery.BuildClaim(REPO.lower(), ISSUE, "swarm-build-handoff", "0123456789abcdef")
+        ),
     )
     return row
 
@@ -726,6 +743,9 @@ async def _drive_slot_wait(scenario: dict, world: World, obs: dict, notifier) ->
             row["dispatch_context"] = "garbled"
         elif kind == "remarked":
             row["dispatch_context"] = f"deferred-behind:{REPO.lower()}#{ISSUE}:fedcba9876543210"
+            row["blocked_reason"] = build_delivery.deferral_reason(
+                build_delivery.BuildClaim(REPO.lower(), ISSUE, "swarm-build-handoff", "fedcba9876543210")
+            )
         elif kind == "unreadable":
             store.unreadable.add(f"ent_b_{kind}")
         elif kind == "still_deferred":
@@ -805,6 +825,13 @@ async def _drive_restart(scenario: dict, world: World, obs: dict, notifier) -> N
     store = obs["store"]
     obs["notifier_before"] = notifier
     store.lossy = {k: list(v) for k, v in (scenario.get("store_faults") or {}).items()}
+    rules = {
+        "reject_clear": lambda v: "reject" if v == "" else "apply",
+        "drop_clear": lambda v: "drop" if v == "" else "apply",
+        "drop_write": lambda v: "drop" if v else "apply",
+    }
+    store.policy = {f: rules[r] for f, r in (scenario.get("store_policy") or {}).items()}
+    store.fail_next_reads = scenario.get("fail_next_reads", 0)
     apis.install_build_release_hook(notifier)
     claim_cm = build_delivery.claim_build(REPO, ISSUE, "swarm-build-handoff")
     claim_cm.__enter__()
@@ -1138,6 +1165,10 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for kind in sw.get("announced_once", []):
             n = sum(f"ent_b_{kind}" in m for m in obs["notifier"].sent)
             want(f"ent_b_{kind} announced", n, 1)
+    if "notification_counts" in exp:
+        sent = obs.get("notifier").sent if obs.get("notifier") else []
+        for needle, count in exp["notification_counts"].items():
+            want(f"notices containing {needle!r}", sum(needle in m for m in sent), count)
     if "token_requests" in exp:
         want("token resolutions", len(obs.get("token_requests", [])), exp["token_requests"])
     if "scale" in exp:

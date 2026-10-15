@@ -325,34 +325,44 @@ class _TaskStore:
         # as sent ("omit": dropped, "mismatch": stored with another value).
         self.lossy: dict[str, list] = {}
         self.key_suffixes: list[str] = []
+        # field -> fn(value) -> "apply" | "drop" (acknowledged, not stored) |
+        # "reject" (the write fails): for faults that depend on WHAT is written.
+        self.policy: dict[str, object] = {}
+        self.fail_next_reads = 0
 
     def put(self, entity_id: str, snapshot: dict) -> None:
         self.rows[entity_id] = dict(snapshot)
 
-    def _persist(self, entity_id, field, value) -> None:
+    def _persist(self, entity_id, field, value) -> bool:
         row = self.rows.setdefault(entity_id, {})
+        rule = self.policy.get(field)
+        verdict = rule(value) if rule else "apply"
+        if verdict == "reject":
+            return False
+        if verdict == "drop":
+            return True
         loss = self.lossy.get(field)
         if loss and loss[1] > 0:
             loss[1] -= 1
             if loss[0] == "mismatch":
                 row[field] = "garbled-" + str(value)[:8]
-            return
+            return True
         row[field] = value
+        return True
 
     def field(self, entity_id, field, value, **kw) -> bool:
         if self.fail_writes:
             return False
         self.key_suffixes.append(kw.get("key_suffix", ""))
-        self._persist(entity_id, field, value)
-        return True
+        return self._persist(entity_id, field, value)
 
     def status(self, entity_id, status, **kw) -> bool:
         if self.fail_writes:
             return False
-        self._persist(entity_id, "status", getattr(status, "value", status))
+        ok = self._persist(entity_id, "status", getattr(status, "value", status))
         if kw.get("reason") is not None:
-            self._persist(entity_id, "blocked_reason", kw["reason"])
-        return True
+            ok = self._persist(entity_id, "blocked_reason", kw["reason"]) and ok
+        return ok
 
     def query(self, entity_type, *, snapshot_filters, limit=None, **kw):
         self.queries += 1
@@ -365,6 +375,9 @@ class _TaskStore:
         return out[:limit] if limit else out
 
     def read(self, entity_id):
+        if self.fail_next_reads > 0:
+            self.fail_next_reads -= 1
+            return None
         if entity_id in self.fail_reads:
             return None
         return dict(self.rows[entity_id]) if entity_id in self.rows else None
@@ -1437,6 +1450,12 @@ def test_a_linked_worktree_source_with_its_own_configuration_is_verified(clone, 
 # ── the sweep examines every marked task ─────────────────────────────────────
 
 
+def _reason_for(run_id: str, number: int = 1448) -> str:
+    return build_delivery.deferral_reason(
+        build_delivery.BuildClaim(REPO.lower(), number, "swarm-build-handoff", run_id)
+    )
+
+
 def _mark(store, entity_id, *, context="ok", **over):
     row = _task_snapshot(action_type=over.pop("action_type", "local_edit"), **over)
     row.update(status="pending", disposition=build_delivery.DEFERRED_DISPOSITION)
@@ -1444,7 +1463,7 @@ def _mark(store, entity_id, *, context="ok", **over):
         row["dispatch_context"] = f"deferred-behind:{REPO.lower()}#1448:{'0123456789abcdef'}"
     elif context is not None:
         row["dispatch_context"] = context
-    row["blocked_reason"] = "Deferred: swarm-build-handoff is building"
+    row["blocked_reason"] = _reason_for("0123456789abcdef")
     store.put(entity_id, row)
 
 
@@ -1701,7 +1720,8 @@ def _queue_behind_a_busy_slot(dispatch_env, monkeypatch, *, change):
         (
             "re-marked behind a different build",
             lambda st: st.rows["ent_b_queued_0001"].update(
-                dispatch_context=f"deferred-behind:{REPO.lower()}#1448:fedcba9876543210"
+                dispatch_context=f"deferred-behind:{REPO.lower()}#1448:fedcba9876543210",
+                blocked_reason=_reason_for("fedcba9876543210"),
             ),
         ),
         ("no longer marked", lambda st: st.rows["ent_b_queued_0001"].pop("disposition")),
@@ -1797,3 +1817,168 @@ def test_an_empty_approved_context_is_refused_not_enqueued(dispatch_env):
 
     asyncio.run(_go())
     assert spawns == [] and apis._recovering == set()
+
+
+# ── the reason is the commit marker ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "label,reason",
+    [
+        ("missing", None),
+        ("empty", ""),
+        ("another run", None),
+        ("another repository", None),
+        ("another issue", None),
+        ("altered text", None),
+    ],
+)
+def test_a_marker_without_the_exact_reason_for_its_context_does_not_qualify(label, reason):
+    row = _task_snapshot(action_type="local_edit")
+    row.update(
+        status="pending",
+        disposition=build_delivery.DEFERRED_DISPOSITION,
+        dispatch_context=f"deferred-behind:{REPO.lower()}#1448:0123456789abcdef",
+    )
+    good = _reason_for("0123456789abcdef")
+    row["blocked_reason"] = {
+        "missing": None,
+        "empty": "",
+        "another run": _reason_for("fedcba9876543210"),
+        "another repository": good.replace(REPO.lower(), "someone/else"),
+        "another issue": good.replace("#1448", "#9"),
+        "altered text": good.replace("Deferred:", "Waiting:"),
+    }[label]
+    if row["blocked_reason"] is None:
+        row.pop("blocked_reason")
+
+    assert apis._qualify_deferred("ent_x", row) == (None, "unresolvable")
+    row["blocked_reason"] = good
+    assert apis._qualify_deferred("ent_x", row) == ((REPO.lower(), 1448), "")
+
+
+def test_the_commit_marker_is_written_last_and_never_after_a_failed_write(dispatch_env, monkeypatch):
+    _, _, store = dispatch_env
+    order: list[str] = []
+    monkeypatch.setattr(
+        apis, "set_task_field",
+        lambda e, f, v, **kw: order.append(f) or store.field(e, f, v, **kw),
+    )
+    monkeypatch.setattr(
+        apis, "set_task_status",
+        lambda e, st, **kw: order.append("status+reason") or store.status(e, st, **kw),
+    )
+    claim = build_delivery.BuildClaim(REPO.lower(), 1448, "swarm-build-handoff", "0123456789abcdef")
+    store.put("ent_x", _local())
+    assert apis._write_deferral("ent_x", claim, 0)
+    assert order == ["disposition", "dispatch_context", "status+reason"]
+
+    order.clear()
+    store.policy["disposition"] = lambda v: "reject"
+    assert not apis._write_deferral("ent_x", claim, 1)
+    assert order == ["disposition"], "later writes (the marker) followed a failed one"
+
+
+# ── a rollback that fails part-way: the notice matches what happens ──────────
+
+CLEAR_STEPS = ["blocked_reason", "dispatch_context", "disposition"]
+
+
+def _failed_deferral(dispatch_env, *, failing_clear=None, how="reject", unreadable_reads=2, extra=None):
+    """A deferral whose read-back fails twice (every field was actually written),
+    then a rollback in which clearing ``failing_clear`` fails. Release follows."""
+    _, _, store = dispatch_env
+    store.fail_next_reads = unreadable_reads
+    if failing_clear:
+        store.policy[failing_clear] = lambda v, how=how: how if v == "" else "apply"
+    for field, rule in (extra or {}).items():
+        store.policy[field] = rule
+    return _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
+
+
+def test_when_the_reason_cannot_be_cleared_the_notice_says_apis_will_dispatch_and_it_does(dispatch_env):
+    _, spawns, _ = dispatch_env
+    out, n = _failed_deferral(dispatch_env, failing_clear="blocked_reason", how="reject")
+
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert "could not clear its marker" in msg and "WILL re-dispatch" in msg
+    assert "unless you cancel the task" in msg and "blocked_reason" in msg
+    assert "NOT dispatched" not in msg
+    # Notice and behaviour agree: dispatched after the build ends, exactly once.
+    assert out["spawns_mid_build"] == []
+    assert spawns == [("cicada", "ent_followup_00001", "build_released")]
+
+
+def test_a_reason_clear_that_is_acknowledged_but_not_applied_is_judged_by_what_is_read_back(dispatch_env):
+    """The rollback goes on past an acknowledged clear; the read-back says what is left."""
+    _, spawns, _ = dispatch_env
+    out, n = _failed_deferral(dispatch_env, failing_clear="blocked_reason", how="drop")
+
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert "NOT held and NOT dispatched" in msg and "blocked_reason" in msg
+    assert "WILL re-dispatch" not in msg
+    assert spawns == []
+
+
+@pytest.mark.parametrize(
+    "step,how,announced",
+    [
+        ("dispatch_context", "reject", 1),
+        ("disposition", "reject", 1),
+        ("disposition", "drop", 1),
+        ("dispatch_context", "drop", 0),  # the rollback goes on and unmarks it
+    ],
+)
+def test_when_a_later_clear_fails_the_marker_does_not_qualify_and_nothing_is_dispatched(
+    dispatch_env, step, how, announced
+):
+    _, spawns, store = dispatch_env
+    out, n = _failed_deferral(dispatch_env, failing_clear=step, how=how)
+
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert "NOT held and NOT dispatched" in msg and "WILL re-dispatch" not in msg
+    assert spawns == []
+    # A leftover that is still marked is announced once by the sweep, however often
+    # it is examined.
+    asyncio.run(apis.recover_deferred_tasks(n))
+    asyncio.run(apis.recover_deferred_tasks(n))
+    assert sum("does not say which build" in m for m in n.sent) == announced
+    assert spawns == []
+    # And the post-slot recheck refuses it too, without a write or a second notice.
+    before = dict(store.rows["ent_followup_00001"])
+    asyncio.run(apis._redispatch_deferred(
+        "ent_followup_00001", f"deferred-behind:{REPO.lower()}#1448:{out['claim'].run_id}", n
+    ))
+    assert spawns == [] and store.rows["ent_followup_00001"] == before
+    assert sum("does not say which build" in m for m in n.sent) == announced
+
+
+def test_when_the_state_after_a_rollback_cannot_be_read_the_notice_says_so(dispatch_env):
+    _, spawns, _ = dispatch_env
+    out, n = _failed_deferral(dispatch_env, unreadable_reads=3)
+
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert "could not verify the task's state" in msg
+    assert "NOT held and NOT dispatched" not in msg and "WILL re-dispatch" not in msg
+    assert "may re-dispatch" in msg and "cancel it" in msg
+
+
+def test_a_partial_write_missing_its_reason_is_never_dispatched(dispatch_env):
+    _, spawns, store = dispatch_env
+    out, n = _failed_deferral(
+        dispatch_env,
+        unreadable_reads=0,
+        failing_clear="dispatch_context",
+        extra={"blocked_reason": lambda v: "drop" if v else "apply"},
+    )
+    assert spawns == []
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert "NOT held and NOT dispatched" in msg
+    assert sum("does not say which build" in m for m in n.sent) == 1
+
+
+def test_a_fully_written_deferral_still_qualifies_and_dispatches(dispatch_env):
+    _, spawns, _ = dispatch_env
+    out, n = _during_build(dispatch_env, lambda c: _created("ent_followup_00001", _local()))
+    assert not any("could not record" in m for m in n.sent)
+    assert spawns == [("cicada", "ent_followup_00001", "build_released")]
