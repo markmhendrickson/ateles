@@ -35,7 +35,6 @@ TOKEN = "ghs_placeholder_delivery_token_value_0042"
 BRANCH = "cicada/fix-the-gate-20261015T120000-a1b2c3"
 REPO = "owner/repo"
 AUTHOR = ("cicada", "cicada@agents.example.invalid")
-NOFORBIDDEN: tuple[str, ...] = ()
 
 
 def _env(home):
@@ -65,7 +64,7 @@ def world(tmp_path):
     remote = tmp_path / "remote.git"
     git(tmp_path, "clone", "-q", "--bare", str(src), str(remote), home=home)
     root = tmp_path / "work-root"
-    work = rd.prepare_work(root, run_id="fly-test-0001", forbidden=NOFORBIDDEN)
+    work = rd.prepare_work(root, run_id="fly-test-0001")
     base = rd.clone_origin(work, url=f"file://{remote}", base_branch="main", token=TOKEN,
                            allow="file")
     rd.make_checkout(work, branch=BRANCH, base_branch="main", repository=REPO, ident=None,
@@ -105,8 +104,9 @@ def plant_bundle(world, *refspecs, cwd=None):
 
 
 def refused(world, match, **limits):
-    with pytest.raises(rd.RepoWorkError, match=match):
+    with pytest.raises(rd.RepoWorkError, match=match) as exc:
         rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"], **limits)
+    assert exc.value.category == rd.IMPORT_REFUSED
     assert origin_ref(world) is None  # the branch was never recorded
     assert origin_ref(world, rd.QUARANTINE_REF) is None  # and the quarantine is gone
 
@@ -136,14 +136,14 @@ def test_the_clone_is_shallow_and_single_branch(world):
 
 
 def test_a_clone_larger_than_the_cap_is_refused(tmp_path, world):
-    work = rd.prepare_work(tmp_path / "other-root", run_id="r2", forbidden=NOFORBIDDEN)
-    with pytest.raises(rd.RepoWorkError, match="larger than 10 bytes"):
+    work = rd.prepare_work(tmp_path / "other-root", run_id="r2")
+    with pytest.raises(rd.RepoWorkError, match="clone_refused: the clone is larger than the accepted size"):
         rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main", token=TOKEN,
                         allow="file", max_bytes=10)
 
 
 def test_a_failed_clone_names_no_credential(tmp_path, world):
-    work = rd.prepare_work(tmp_path / "other-root", run_id="r3", forbidden=NOFORBIDDEN)
+    work = rd.prepare_work(tmp_path / "other-root", run_id="r3")
     with pytest.raises(rd.RepoWorkError) as exc:
         rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="no-such-branch",
                         token=TOKEN, allow="file")
@@ -151,14 +151,14 @@ def test_a_failed_clone_names_no_credential(tmp_path, world):
 
 
 def test_the_clone_uses_only_the_allowed_transport(tmp_path, world):
-    work = rd.prepare_work(tmp_path / "other-root", run_id="r4", forbidden=NOFORBIDDEN)
-    with pytest.raises(rd.RepoWorkError, match="the clone failed"):
+    work = rd.prepare_work(tmp_path / "other-root", run_id="r4")
+    with pytest.raises(rd.RepoWorkError, match="clone_failed: fetching the base branch"):
         rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main", token=TOKEN)
 
 
 @pytest.mark.parametrize("base", ["", "-main", "a..b", "refs/heads/main", "main branch", "x" * 101])
 def test_an_unacceptable_base_branch_is_refused(tmp_path, base):
-    work = rd.prepare_work(tmp_path / "r", run_id="r", forbidden=NOFORBIDDEN)
+    work = rd.prepare_work(tmp_path / "r", run_id="r")
     with pytest.raises(rd.RepoWorkError, match="base branch"):
         rd.clone_origin(work, url="file:///nowhere", base_branch=base, token=TOKEN, allow="file")
 
@@ -183,7 +183,7 @@ def test_a_work_root_reached_through_a_link_is_refused(tmp_path):
     real.mkdir()
     (tmp_path / "link").symlink_to(real)
     with pytest.raises(rd.RepoWorkError, match="link"):
-        rd.prepare_work(tmp_path / "link" / "work", run_id="r", forbidden=NOFORBIDDEN)
+        rd.prepare_work(tmp_path / "link" / "work", run_id="r")
 
 
 def test_leftovers_are_cleared_without_following_links(tmp_path):
@@ -194,7 +194,7 @@ def test_leftovers_are_cleared_without_following_links(tmp_path):
     (outside / "keep.txt").write_text("keep")
     (root / "escape").symlink_to(outside)
     (root / "job-old" / "escape").symlink_to(outside)
-    rd.prepare_work(root, run_id="new", forbidden=NOFORBIDDEN)
+    rd.prepare_work(root, run_id="new")
     assert sorted(os.listdir(root)) == ["job-new"]
     assert (outside / "keep.txt").read_text() == "keep"
     rd.remove_work(root)
@@ -290,7 +290,7 @@ def test_a_branch_rewritten_onto_older_history_is_refused(world):
     git(src, "add", ".", home=world["home"])
     git(src, "commit", "-qm", "side", home=world["home"])
     plant_bundle(world, f"refs/heads/{BRANCH}", f"^{world['old']}", cwd=src)
-    refused(world, "importing the agent's bundle failed|does not descend")
+    refused(world, "could not be imported|does not descend")
 
 
 def test_a_full_history_bundle_that_skips_the_base_is_refused(world):
@@ -306,7 +306,7 @@ def test_a_full_history_bundle_that_skips_the_base_is_refused(world):
 def test_more_commits_than_the_cap_are_refused(world):
     agent_commit(world, n=4)
     rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
-    refused(world, "adds 4 commits; at most 3", max_commits=3)
+    refused(world, "more commits than accepted", max_commits=3)
 
 
 def test_a_merge_commit_is_refused(world):
@@ -323,13 +323,13 @@ def test_a_merge_commit_is_refused(world):
 def test_an_oversized_file_is_refused(world):
     agent_commit(world, content="x" * 5000)
     rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
-    refused(world, "file larger than 1000 bytes", max_blob_bytes=1000)
+    refused(world, "file is larger than accepted", max_blob_bytes=1000)
 
 
 def test_an_oversized_bundle_is_refused_before_it_is_read(world):
     agent_commit(world, content="y" * 5000)
     rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
-    refused(world, "bundle is larger than 100 bytes", max_bundle_bytes=100)
+    refused(world, "bundle is larger than accepted", max_bundle_bytes=100)
 
 
 @pytest.mark.parametrize("target", ["/etc/passwd", "../../outside", "../.git/config", "a/../../x"])
@@ -340,7 +340,7 @@ def test_a_link_pointing_outside_the_repository_is_refused(world, target):
     git(co, "add", ".", home=world["home"])
     git(co, "commit", "-qm", "link", home=world["home"])
     rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
-    refused(world, "link that points outside")
+    refused(world, "link points outside")
 
 
 def test_a_link_inside_the_repository_is_accepted(world):
@@ -366,7 +366,7 @@ def _crafted_tree_commit(world, name):
 def test_a_crafted_path_into_git_or_out_of_the_repository_is_refused(world, name):
     _crafted_tree_commit(world, name)
     rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
-    refused(world, "importing the agent's bundle failed|leaves the repository")
+    refused(world, "could not be imported|leaves the repository")
 
 
 def test_a_gitmodules_file_is_refused(world):
@@ -412,7 +412,7 @@ def test_a_bundle_that_is_not_a_regular_file_is_refused(world):
 
 def test_a_garbage_bundle_is_refused(world):
     (world["work"].export / rd.BUNDLE_NAME).write_bytes(b"# v2 git bundle\nnot really\n")
-    refused(world, "reading the agent's bundle failed")
+    refused(world, "bundle could not be read")
 
 
 # ── Branch names ─────────────────────────────────────────────────────────────
@@ -453,3 +453,321 @@ def test_the_git_environment_inherits_nothing(monkeypatch, tmp_path):
 
 def test_the_origin_repository_is_private_to_root(world):
     assert os.stat(world["work"].origin).st_mode & 0o077 == 0
+
+
+# ── Errors carry a category and a fixed reason, never a value ────────────────
+
+SENTINELS = (TOKEN, "/srv/sentinel-path-7f3a", "cicada/sentinel-branch-20261015T120000-ffffff",
+             "https://sentinel.example.invalid/owner/repo.git", "sentinel-base-branch")
+
+
+def _assert_value_free(exc, *extra):
+    texts = [str(exc), repr(exc), *map(str, exc.args), exc.reason, exc.status]
+    for value in (*SENTINELS, rd.auth_config(TOKEN)[0][1], *extra):
+        assert not any(value in t for t in texts), value
+    assert exc.category in {rd.WORK_ROOT_REFUSED, rd.BRANCH_REFUSED, rd.CLONE_FAILED,
+                            rd.CLONE_REFUSED, rd.CHECKOUT_FAILED, rd.EXPORT_FAILED,
+                            rd.IMPORT_FAILED, rd.IMPORT_REFUSED, rd.QUARANTINE_FAILED}
+    assert exc.status in {"", "exit_nonzero", "timed_out", "not_started", "killed_by_signal"}
+
+
+def _failing(monkeypatch, *, when):
+    """Make the git call whose argv contains every word in *when* fail, with
+    every sentinel in its stderr and stdout."""
+    real = subprocess.run
+    noisy = " ".join(SENTINELS).encode()
+
+    def fake(args, *a, **k):
+        if all(w in args for w in when):
+            return subprocess.CompletedProcess(args, 128, stdout=noisy, stderr=b"fatal: " + noisy)
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(rd.subprocess, "run", fake)
+
+
+def test_a_failed_clone_names_no_value(tmp_path, world):
+    work = rd.prepare_work(tmp_path / "other-root", run_id="r3")
+    url = f"file://{world['remote']}-{SENTINELS[1].strip('/')}"
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.clone_origin(work, url=url, base_branch="sentinel-base-branch", token=TOKEN,
+                        allow="file")
+    assert exc.value.category == rd.CLONE_FAILED and exc.value.status == "exit_nonzero"
+    _assert_value_free(exc.value, url, str(world["remote"]), str(tmp_path))
+
+
+@pytest.mark.parametrize("step,when,category", [
+    ("clone", ("fetch", "--depth=1"), rd.CLONE_FAILED),
+    ("clone", ("init",), rd.CLONE_FAILED),
+    ("export", ("bundle", "create"), rd.EXPORT_FAILED),
+    ("export", ("rev-parse", "-q"), rd.EXPORT_FAILED),
+    ("import", ("bundle", "list-heads"), rd.IMPORT_REFUSED),
+    ("import", ("fetch", "--no-tags"), rd.IMPORT_REFUSED),
+    ("import", ("diff-tree",), rd.IMPORT_FAILED),
+    ("import", ("cat-file",), rd.IMPORT_FAILED),
+    ("import", ("update-ref", "00" * 20), rd.IMPORT_FAILED),
+])
+def test_no_git_output_or_argument_reaches_the_error(world, monkeypatch, tmp_path, step, when,
+                                                     category):
+    if step == "clone":
+        work = rd.prepare_work(tmp_path / "clone-root", run_id="r5")
+        _failing(monkeypatch, when=when)
+        with pytest.raises(rd.RepoWorkError) as exc:
+            rd.clone_origin(work, url=f"file://{world['remote']}", base_branch="main",
+                            token=TOKEN, allow="file")
+    else:
+        agent_commit(world)
+        if step == "import":
+            rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+        _failing(monkeypatch, when=when)
+        with pytest.raises(rd.RepoWorkError) as exc:
+            deliver(world) if step == "export" else rd.import_agent_work(
+                world["work"], branch=BRANCH, base=world["base"])
+    assert exc.value.category == category
+    _assert_value_free(exc.value, str(tmp_path), BRANCH, world["base"])
+
+
+def test_a_git_that_cannot_start_or_times_out_reports_only_that(world, monkeypatch, tmp_path):
+    work = rd.prepare_work(tmp_path / "t-root", run_id="r6")
+
+    def timeout(args, *a, **k):
+        raise subprocess.TimeoutExpired(args, 1, output=SENTINELS[0].encode())
+
+    monkeypatch.setattr(rd.subprocess, "run", timeout)
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.clone_origin(work, url="file:///x", base_branch="main", token=TOKEN, allow="file")
+    assert exc.value.status == "timed_out"
+    _assert_value_free(exc.value)
+
+
+# ── The quarantine ref: an import is complete only when it is gone ───────────
+
+
+def _quarantine_delete(monkeypatch, *, fail_times, check_rc=None):
+    """Make deleting the quarantine ref do nothing (exit 1) *fail_times* times."""
+    real = subprocess.run
+    state = {"left": fail_times}
+
+    def fake(args, *a, **k):
+        if "update-ref" in args and "-d" in args and rd.QUARANTINE_REF in args and state["left"]:
+            state["left"] -= 1
+            return subprocess.CompletedProcess(args, 1, b"", b"")
+        if check_rc is not None and "rev-parse" in args and rd.QUARANTINE_REF in args:
+            return subprocess.CompletedProcess(args, check_rc, b"", b"")
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(rd.subprocess, "run", fake)
+
+
+def test_a_quarantine_that_cannot_be_removed_withdraws_the_import(world, monkeypatch):
+    agent_commit(world)
+    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    _quarantine_delete(monkeypatch, fail_times=99)
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"])
+    assert exc.value.category == rd.QUARANTINE_FAILED
+    assert origin_ref(world) is None  # the branch record was withdrawn: nothing to push from
+    assert origin_ref(world, rd.QUARANTINE_REF) is not None  # left over, and reported
+
+
+def test_a_quarantine_removed_on_the_second_attempt_completes(world, monkeypatch):
+    head = agent_commit(world)
+    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    _quarantine_delete(monkeypatch, fail_times=1)
+    assert rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"]).head == head
+    assert origin_ref(world) == head and origin_ref(world, rd.QUARANTINE_REF) is None
+
+
+def test_an_unconfirmed_quarantine_removal_is_not_a_clean_import(world, monkeypatch):
+    agent_commit(world)
+    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    _quarantine_delete(monkeypatch, fail_times=0, check_rc=128)  # absence cannot be read
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"])
+    assert exc.value.category == rd.QUARANTINE_FAILED and origin_ref(world) is None
+
+
+def test_a_refused_import_with_a_leftover_quarantine_is_still_refused(world, monkeypatch):
+    agent_commit(world, n=4)
+    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    _quarantine_delete(monkeypatch, fail_times=99)
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"], max_commits=3)
+    assert exc.value.category == rd.IMPORT_REFUSED and origin_ref(world) is None
+
+
+# ── Every entry point that deletes or creates under a work root is guarded ───
+
+
+@pytest.fixture
+def forbidden(tmp_path, monkeypatch):
+    """Stand-ins for the login volume and the job directory, each with a
+    sentinel file in it and in a child."""
+    data, job = tmp_path / "data", tmp_path / "run" / "job"
+    for d in (data, data / "child", job, job / "child"):
+        d.mkdir(parents=True)
+        (d / "sentinel").write_text("keep")
+    monkeypatch.setattr(rd, "FORBIDDEN_ROOTS", (str(data), str(job)))
+    return [data, data / "child", job, job / "child", tmp_path / "run"]
+
+
+def _intact(paths):
+    for d in paths:
+        if d.name != "run":
+            assert (d / "sentinel").read_text() == "keep", d
+
+
+def _entry_points():
+    return {
+        "clear_work_root": lambda root: rd.clear_work_root(root),
+        "remove_work": lambda root: rd.remove_work(root),
+        "prepare_work": lambda root: rd.prepare_work(root, run_id="r"),
+    }
+
+
+@pytest.mark.parametrize("entry", sorted(_entry_points()))
+def test_cleanup_never_reaches_a_forbidden_root(forbidden, entry):
+    for root in forbidden:
+        with pytest.raises(rd.RepoWorkError) as exc:
+            _entry_points()[entry](root)
+        assert exc.value.category == rd.WORK_ROOT_REFUSED
+    _intact(forbidden)
+
+
+@pytest.mark.parametrize("entry", sorted(_entry_points()))
+def test_cleanup_never_reaches_a_root_through_a_link(tmp_path, entry):
+    real = tmp_path / "real"
+    (real / "inner").mkdir(parents=True)
+    for d in (real, real / "inner"):
+        (d / "sentinel").write_text("keep")
+    (tmp_path / "link").symlink_to(real)
+    for root in (tmp_path / "link", tmp_path / "link" / "inner"):
+        with pytest.raises(rd.RepoWorkError) as exc:
+            _entry_points()[entry](root)
+        assert exc.value.category == rd.WORK_ROOT_REFUSED
+    _intact([real, real / "inner"])
+
+
+@pytest.mark.parametrize("entry", sorted(_entry_points()))
+def test_cleanup_never_reaches_a_relative_or_unnormalised_root(tmp_path, monkeypatch, entry):
+    target = tmp_path / "rel" / "dir"
+    target.mkdir(parents=True)
+    (target / "sentinel").write_text("keep")
+    monkeypatch.chdir(tmp_path)
+    for root in (Path("rel/dir"), f"{tmp_path}/rel/../rel/dir", f"{tmp_path}/rel/dir/"):
+        with pytest.raises(rd.RepoWorkError) as exc:
+            _entry_points()[entry](root)
+        assert exc.value.category == rd.WORK_ROOT_REFUSED
+    _intact([target])
+
+
+def test_a_work_layout_not_from_prepare_work_is_refused_everywhere(world, tmp_path):
+    w = world["work"]
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "sentinel").write_text("keep")
+    forged = [
+        rd.Work(root=w.root, job=w.job, origin=elsewhere, checkout=w.checkout, export=w.export,
+                home=w.home),
+        rd.Work(root=w.root, job=w.job, origin=w.origin, checkout=elsewhere, export=w.export,
+                home=w.home),
+        rd.Work(root=elsewhere, job=elsewhere / "job-x", origin=elsewhere / "job-x" / "origin.git",
+                checkout=elsewhere / "job-x" / "checkout", export=elsewhere / "job-x" / "export",
+                home=elsewhere / "job-x" / "home"),
+    ]
+    calls = [
+        lambda f: rd.clone_origin(f, url="file:///x", base_branch="main", token=TOKEN, allow="file"),
+        lambda f: rd.make_checkout(f, branch=BRANCH, base_branch="main", repository=REPO,
+                                   ident=None, author=AUTHOR),
+        lambda f: rd.export_agent_work(f, branch=BRANCH, base=world["base"], ident=None),
+        lambda f: rd.import_agent_work(f, branch=BRANCH, base=world["base"]),
+    ]
+    for f in forged[:2]:
+        for call in calls:
+            with pytest.raises(rd.RepoWorkError) as exc:
+                call(f)
+            assert exc.value.category == rd.WORK_ROOT_REFUSED
+    assert sorted(os.listdir(elsewhere)) == ["sentinel"]
+    # A layout of the right shape under an accepted root is not refused for its shape.
+    assert rd._check_work(forged[2]) == forged[2]
+
+
+def test_remove_work_on_a_missing_root_does_nothing(tmp_path):
+    rd.remove_work(tmp_path / "never-made")
+    assert not (tmp_path / "never-made").exists()
+
+
+# ── Exact limits are accepted ────────────────────────────────────────────────
+
+
+def test_exactly_the_commit_cap_is_accepted(world):
+    agent_commit(world, n=3)
+    assert deliver(world, max_commits=3).commits == 3
+
+
+def test_a_file_of_exactly_the_size_cap_is_accepted(world):
+    agent_commit(world, content="x" * 1000)
+    assert deliver(world, max_blob_bytes=1000).commits == 1
+
+
+def test_a_bundle_of_exactly_the_size_cap_is_accepted(world):
+    agent_commit(world)
+    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    size = (world["work"].export / rd.BUNDLE_NAME).stat().st_size
+    imported = rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"],
+                                    max_bundle_bytes=size)
+    assert imported.commits == 1
+
+
+def test_a_bundle_one_byte_over_the_cap_is_refused(world):
+    agent_commit(world)
+    rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None)
+    size = (world["work"].export / rd.BUNDLE_NAME).stat().st_size
+    refused(world, "bundle is larger than accepted", max_bundle_bytes=size - 1)
+
+
+# ── A link may not pass through another link, inherited ones included ────────
+
+
+@pytest.fixture
+def linked_world(tmp_path):
+    """A base tree that already holds a link pointing outside the repository."""
+    home = tmp_path / "home"
+    home.mkdir()
+    src = tmp_path / "src"
+    git(tmp_path, "init", "-q", "-b", "main", str(src), home=home)
+    (src / "f0.txt").write_text("0\n")
+    os.symlink("/etc", src / "inherited")
+    (src / "dir").mkdir()
+    (src / "dir" / "f1.txt").write_text("1\n")
+    git(src, "add", ".", home=home)
+    git(src, "commit", "-qm", "base", home=home)
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "clone", "-q", "--bare", str(src), str(remote), home=home)
+    work = rd.prepare_work(tmp_path / "work-root", run_id="linked")
+    base = rd.clone_origin(work, url=f"file://{remote}", base_branch="main", token=TOKEN,
+                           allow="file")
+    rd.make_checkout(work, branch=BRANCH, base_branch="main", repository=REPO, ident=None,
+                     author=AUTHOR)
+    return {"home": home, "work": work, "base": base, "src": src}
+
+
+@pytest.mark.parametrize("path,target,accepted", [
+    ("through", "inherited/passwd", False),   # through the inherited link
+    ("sub/through", "../inherited/x", False),
+    ("to-link", "inherited", False),          # a link to a link
+    ("plain", "f0.txt", True),
+    ("sub/plain", "../dir/f1.txt", True),
+])
+def test_a_link_through_an_inherited_link_is_refused(linked_world, path, target, accepted):
+    w = linked_world
+    co = w["work"].checkout
+    (co / path).parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(target, co / path)
+    git(co, "add", ".", home=w["home"])
+    git(co, "commit", "-qm", "link", home=w["home"])
+    rd.export_agent_work(w["work"], branch=BRANCH, base=w["base"], ident=None)
+    if accepted:
+        assert rd.import_agent_work(w["work"], branch=BRANCH, base=w["base"]).commits == 1
+    else:
+        with pytest.raises(rd.RepoWorkError, match="link points outside"):
+            rd.import_agent_work(w["work"], branch=BRANCH, base=w["base"])
