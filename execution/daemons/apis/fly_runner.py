@@ -1431,8 +1431,8 @@ def _revoke_refused_delivery_token(revoke: Callable[[str], None], token: str,
             log.warning("[fly] revoking a refused delivery token was attempted and failed; "
                         "revoke it manually if it is still live; GitHub reported its expiry "
                         f"as {_render_wall(validated_expiry)}")  # fmt: skip
-        return
-    log.info("[fly] a refused delivery token was revoked")
+    else:
+        log.info("[fly] a refused delivery token was revoked")
 
 
 def mint_delivery_github_token(
