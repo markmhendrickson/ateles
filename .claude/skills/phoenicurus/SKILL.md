@@ -110,8 +110,7 @@ Phoenicurus runs **in parallel with Buteo (legal gate)** — both must sign off 
 # 1. Sign off qa gate on the issue entity (only when eval present + green, or no-functional-surface)
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "qa": "signed_off"},
-  # owner_history: the store UNIONS corrections' arrays and keeps repeats. Send ONLY this new entry, never the history you read (resending it doubles the stored array on every write).
-  "owner_history": [{"agent": "phoenicurus", "gate": "qa", "at": "<ISO timestamp>", "action": "signed_off"}]
+  "owner_history": [*existing_history, {"agent": "phoenicurus", "gate": "qa", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
 # 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed

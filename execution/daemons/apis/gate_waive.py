@@ -192,7 +192,9 @@ def parse_owner_history(raw: object) -> list[dict]:
 # rule for reading: the same agent doing the same thing to the same gate on the same
 # commit for the same reason is ONE event, however many times it is recorded, so its
 # timestamp is not part of it.
-_ENTRY_IDENTITY_FIELDS = ("gate", "action", "actor", "agent", "commit", "reason", "gate_after")
+_ENTRY_IDENTITY_FIELDS = (
+    "gate", "action", "actor", "agent", "commit", "reason", "gate_after", "attempt",
+)
 
 
 def history_entry_identity(entry: dict) -> str:
@@ -216,15 +218,39 @@ def with_entry_id(entry: dict) -> dict:
     return {**entry, "entry_id": digest}
 
 
+def _is_recorded(current: list[dict], entry: dict) -> bool:
+    """Whether *entry* is already on record, in the sense that matters for writing.
+
+    An entry with the same identity counts as recorded, with ONE exception: a
+    `signed_off` entry is not "still recorded" once a `sign_off_failed` note for the
+    same gate and commit has been written after it. The history must tell the order
+    things happened in (a sign-off, its failure, a later success), and it must never
+    end on a `signed_off` whose operation failed.
+    """
+    ident = history_entry_identity(entry)
+    last = None
+    for index, existing in enumerate(current):
+        if history_entry_identity(existing) == ident:
+            last = index
+    if last is None:
+        return False
+    if entry.get("action") == "signed_off":
+        for later in current[last + 1 :]:
+            if (
+                later.get("action") == "sign_off_failed"
+                and later.get("gate") == entry.get("gate")
+                and later.get("commit") == entry.get("commit")
+            ):
+                return False
+    return True
+
+
 def new_history_entries(current: list[dict], entries: list[dict]) -> list[dict]:
-    """The *entries* the history does not already record (by identity), in order."""
-    known = {history_entry_identity(e) for e in current}
+    """The *entries* the history does not already record (see `_is_recorded`), in order."""
     out: list[dict] = []
     for entry in entries:
-        key = history_entry_identity(entry)
-        if key in known:
+        if _is_recorded(list(current) + out, entry):
             continue
-        known.add(key)
         out.append(with_entry_id(entry))
     return out
 
@@ -270,7 +296,8 @@ def http_failure_code(status: int) -> str:
     return "unexpected_status"
 
 
-def _payload_bytes(value: object) -> int:
+def _value_bytes(value: object) -> int:
+    """Size of the serialized field value (not the whole signed request body)."""
     try:
         return len(json.dumps(value))
     except (TypeError, ValueError):
@@ -282,6 +309,10 @@ def _payload_bytes(value: object) -> int:
 # carries the field; lower-priority ones (a plain `store()`) stop counting once any
 # correction carries it.
 CORRECTION_PRIORITY = 1000
+# How the tier check reads an entity's observations: pages of this size, at most
+# this many (200 x 100 = 20,000 observations), after which the answer is unknown.
+OBSERVATION_PAGE_SIZE = 200
+OBSERVATION_MAX_PAGES = 100
 
 
 def owner_history_is_unreadable(raw: object) -> bool:
@@ -1022,36 +1053,79 @@ class IssueGateStore:
             log.error("[apis.gate_waive] %s failed: %s", path, exc)
             return None
 
+    async def _observations_page(
+        self, entity_id: str, *, limit: int, offset: int
+    ) -> tuple[list[dict], int | None] | None:
+        """One page of an entity's observations (newest first) and the entity's total.
+
+        ``None`` when the page could not be read. The total is what lets a caller
+        PROVE it has seen every observation; without it a page is only a page.
+        """
+        if not self.token:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"{self.base_url}/entities/{entity_id}/observations",
+                    headers=self._headers(),
+                    params={"limit": limit, "offset": offset},
+                )
+                resp.raise_for_status()
+                data = resp.json() if resp.content else {}
+        except Exception as exc:  # noqa: BLE001 — unknown, never "absent"
+            log.warning(
+                "[apis.gate_waive] could not fetch an observations page for %s: %s",
+                entity_id,
+                type(exc).__name__,
+            )
+            return None
+        rows = data.get("observations") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            return None
+        total = data.get("total") if isinstance(data, dict) else None
+        return rows, total if isinstance(total, int) else None
+
     async def _owner_history_in_correction_tier(self, entity_id: str) -> bool | None:
         """Whether a correction-tier observation already carries `owner_history`.
 
         The store's array reducer unions the `owner_history` arrays of the
         observations at the highest priority that carries it. While only
-        lower-priority ones exist (a triage `store()`), the first correction
-        must CARRY that history up or it stops counting; once a correction
-        carries it, every later correction need only add its own entries, because
-        the union already includes the rest. ``None`` when the observations could
-        not be read.
-        """
-        observations = await self._history_observations(entity_id)
-        if not observations:
-            return None
-        for obs in observations:
-            if not isinstance(obs, dict):
-                continue
-            fields = obs.get("fields")
-            if (
-                isinstance(fields, dict)
-                and "owner_history" in fields
-                and int(obs.get("source_priority") or 0) >= CORRECTION_PRIORITY
-            ):
-                return True
-        return False
+        lower-priority ones exist (a triage `store()`), the first correction must
+        CARRY that history up or it stops counting; once a correction carries it,
+        every later correction need only add its own entries.
 
-    async def _history_observations(self, entity_id: str) -> list[dict]:
-        """The observations the tier check reads (its own seam, so tests of the
-        attribution read-back, which count `_observations` calls, are unaffected)."""
-        return await self._fetch_observations(entity_id, limit=500)
+        ``True`` or ``False`` only from a PROVEN-COMPLETE read: pages are walked
+        until the entity's reported total is covered (or a short page ends the
+        list when no total is reported). A bounded page is never proof of absence
+        (repeated gate re-signs keep adding newer observations, pushing an older
+        history correction out of any fixed window), so a truncated, failed or
+        non-terminating read is ``None`` (unknown), never ``False``.
+        """
+        offset = 0
+        for _ in range(OBSERVATION_MAX_PAGES):
+            page = await self._observations_page(
+                entity_id, limit=OBSERVATION_PAGE_SIZE, offset=offset
+            )
+            if page is None:
+                return None
+            rows, total = page
+            for obs in rows:
+                fields = obs.get("fields") if isinstance(obs, dict) else None
+                if (
+                    isinstance(fields, dict)
+                    and "owner_history" in fields
+                    and int(obs.get("source_priority") or 0) >= CORRECTION_PRIORITY
+                ):
+                    return True
+            offset += len(rows)
+            if total is not None:
+                if offset >= total:
+                    return False
+                if not rows:
+                    return None  # the total says more exists, but no page produced any
+            elif len(rows) < OBSERVATION_PAGE_SIZE:
+                return False  # a short page ends the list when no total is reported
+        return None  # more observations than this will walk: unknown
 
     async def _history_write_value(
         self, entity_id: str, current: list[dict], entries: list[dict]
@@ -1070,9 +1144,10 @@ class IssueGateStore:
         * the new entries alone, once a correction already carries the history;
         * the de-duplicated current history plus the new entries only for the
           FIRST correction, to carry lower-priority history up;
-        * when the observations cannot be read, the new entries alone: losing the
-          carry-up costs a snapshot view of older entries (the observations are
-          immutable), carrying it without knowing costs a doubling.
+        * when the observations cannot be PROVEN fully read, the new entries alone
+          (append-only): losing the carry-up costs a snapshot view of older
+          entries, never the observations themselves, which stay immutable and
+          available; carrying it without knowing costs a doubling.
         """
         fresh = new_history_entries(current, entries)
         if not fresh:
@@ -1081,9 +1156,13 @@ class IssueGateStore:
         if carried is False:
             return dedupe_exact(list(current)) + fresh
         if carried is None:
+            # "No carry-up": entries written before the first correction may stop
+            # contributing to the entity SNAPSHOT (the observations that carry them
+            # stay available), which is the safe side of not knowing.
             log.warning(
-                "[apis.gate_waive] owner_history tier unreadable for %s — writing the "
-                "new entries only (no carry-up)",
+                "[apis.gate_waive] owner_history tier unknown for %s (observations "
+                "not proven fully read) — writing the new entries only, so earlier "
+                "entries may stop contributing to the snapshot",
                 entity_id,
             )
         return fresh
@@ -1744,6 +1823,8 @@ class IssueGateStore:
                 idempotency_suffix=f"{key}-{now[:16]}",
                 gate_written=gate_written,
                 history_written=history_written,
+                head_sha=head_sha,
+                attempt=now,
             )
 
         # 1. The non-safety fields first. A failure here leaves `gate_status`
@@ -1997,12 +2078,13 @@ class IssueGateStore:
             )
         except Exception as exc:  # noqa: BLE001 — classify, never crash
             # The exception's CLASS and a fixed reason code, plus the size of the
-            # value being written (an integer): enough to tell "no key" from a
-            # helper fault from an oversized write, with none of the text that
-            # could carry a body, a header or a path.
+            # serialized FIELD VALUE being written (an integer; the signed request
+            # wraps it in a small envelope, so the body is a little larger):
+            # enough to tell "no key" from a helper fault from an oversized write,
+            # with none of the text that could carry a body, a header or a path.
             log.error(
                 "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
-                "(%s) reason=%s payload_bytes=%s",
+                "(%s) reason=%s value_bytes=%s",
                 repo,
                 issue_number,
                 gate,
@@ -2011,13 +2093,13 @@ class IssueGateStore:
                 SIGN_OFF_SIGNING_FAILED,
                 type(exc).__name__,
                 signed_failure_code(exc),
-                _payload_bytes(value),
+                _value_bytes(value),
             )
             return SIGN_OFF_SIGNING_FAILED
         if status < 200 or status >= 300:
             log.error(
                 "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
-                "(HTTP %s) reason=%s payload_bytes=%s",
+                "(HTTP %s) reason=%s value_bytes=%s",
                 repo,
                 issue_number,
                 gate,
@@ -2026,7 +2108,7 @@ class IssueGateStore:
                 SIGN_OFF_SIGNING_FAILED,
                 status,
                 http_failure_code(status),
-                _payload_bytes(value),
+                _value_bytes(value),
             )
             return SIGN_OFF_SIGNING_FAILED
         return ""
@@ -2044,6 +2126,8 @@ class IssueGateStore:
         idempotency_suffix: str,
         gate_written: bool,
         history_written: bool,
+        head_sha: str = "",
+        attempt: str = "",
     ) -> SignOffOutcome:
         """Make a failed sign-off leave the record as it found it, and say so.
 
@@ -2093,6 +2177,8 @@ class IssueGateStore:
                 error=outcome.error or original_error,
                 observed=outcome.observed_state,
                 idempotency_suffix=idempotency_suffix,
+                head_sha=head_sha,
+                attempt=attempt,
             )
         return outcome
 
@@ -2198,8 +2284,16 @@ class IssueGateStore:
         error: str,
         observed: str,
         idempotency_suffix: str,
+        head_sha: str = "",
+        attempt: str = "",
     ) -> None:
         """Append a `sign_off_failed` entry after this call's `signed_off` one.
+
+        The note is bound to the sign-off event it qualifies: it carries the
+        reviewed commit and this attempt's identity (the instant the attempt began,
+        to the microsecond). Only a transport REPLAY of the same failed attempt is
+        deduplicated; a failure on another commit, or a new attempt, is a new
+        entry, so the history never ends on a `signed_off` whose operation failed.
 
         Built on the settling re-read's `owner_history` (a fresh read, taken
         under the per-issue lock). Never written through an unreadable stored
@@ -2221,6 +2315,8 @@ class IssueGateStore:
             "gate": gate,
             "action": "sign_off_failed",
             "actor": lens_agent,
+            "commit": head_sha,
+            "attempt": attempt,
             "reason": error,
             "gate_after": observed,
             "timestamp": datetime.now(timezone.utc).isoformat(),

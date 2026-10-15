@@ -39,7 +39,7 @@ import gate_waive  # noqa: E402
 from gate_waive import GATE_STATUS_FIELD, IssueGateState, IssueGateStore, parse_gate_status  # noqa: E402
 from lib.daemon_runtime import neotoma_signed as ns  # noqa: E402
 
-MUTATIONS = ("none", "old_writer")
+MUTATIONS = ("none", "old_writer", "fixed_window", "suppress_repeated_failure_notes")
 LENS_TP = "L" * 43
 LATER = "2099-01-01T00:00:00+00:00"
 LENSES = {"pm": "pavo", "ux": "accipiter", "arch": "waxwing"}
@@ -58,6 +58,7 @@ class FakeIssueStore:
         self.observations: list[dict] = []  # newest first
         self.writes: list[tuple[str, object]] = []
         self.refused = 0
+        self.fail_fields: set[str] = set()  # writes to these fields are refused (503)
         self._n = 0
         if history_seed:
             self._add("owner_history", history_seed, seed_priority, signer=None)
@@ -105,6 +106,8 @@ class FakeIssueStore:
             self.refused += 1
             return 409, {"error_code": "ERR_FIELD_VERSION_CONFLICT"}
         field, value = body["field"], body["value"]
+        if field in self.fail_fields:
+            return 503, {}
         self.writes.append((field, value))
         if field == GATE_STATUS_FIELD:
             self.gate_status = parse_gate_status(value)
@@ -131,8 +134,14 @@ class FakeIssueStore:
     async def observations_for(self, entity_id: str, *, limit: int = 100) -> list[dict]:
         return list(self.observations)
 
-    async def history_observations(self, entity_id: str) -> list[dict]:
-        return list(self.observations)
+    async def observations_page(self, entity_id: str, *, limit: int, offset: int):
+        """One page, newest first, like the real endpoint (at most ``limit`` rows) and
+        the total: a store that returns everything hides page-boundary bugs."""
+        rows = list(self.observations)
+        return rows[offset : offset + limit], len(rows)
+
+    async def fetch_observations_limited(self, entity_id: str, *, limit: int = 100) -> list[dict]:
+        return list(self.observations)[:limit]
 
 
 def _wire(mp: pytest.MonkeyPatch, store: FakeIssueStore, *, signer_fails: str | None) -> IssueGateStore:
@@ -156,7 +165,8 @@ def _wire(mp: pytest.MonkeyPatch, store: FakeIssueStore, *, signer_fails: str | 
     mp.setattr(gate_waive, "_lens_key_thumbprint", lambda identity: LENS_TP, raising=False)
     mp.setattr(issue_store, "load", store.load)
     mp.setattr(issue_store, "_observations", store.observations_for)
-    mp.setattr(issue_store, "_history_observations", store.history_observations)
+    mp.setattr(issue_store, "_observations_page", store.observations_page, raising=False)
+    mp.setattr(issue_store, "_fetch_observations", store.fetch_observations_limited)
     return issue_store
 
 
@@ -203,13 +213,44 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
             # And the old reader, which kept exact duplicates.
             mp.setattr(gate_waive, "dedupe_exact", lambda entries: list(entries))
 
+        if mutation == "fixed_window":
+            async def _windowed(self, entity_id):
+                rows = await self._fetch_observations(entity_id, limit=500)
+                return any(
+                    isinstance(o.get("fields"), dict) and "owner_history" in o["fields"]
+                    for o in rows
+                )
+
+            mp.setattr(IssueGateStore, "_owner_history_in_correction_tier", _windowed)
+        if mutation == "suppress_repeated_failure_notes":
+            real_new = gate_waive.new_history_entries
+
+            def _suppress(current, entries):
+                out = real_new(current, entries)
+                known = {
+                    (e.get("gate"), e.get("reason"), e.get("gate_after"))
+                    for e in current
+                    if e.get("action") == "sign_off_failed"
+                }
+                return [
+                    e for e in out
+                    if not (
+                        e.get("action") == "sign_off_failed"
+                        and (e.get("gate"), e.get("reason"), e.get("gate_after")) in known
+                    )
+                ]
+
+            mp.setattr(gate_waive, "new_history_entries", _suppress)
+
         async def _go():
             for step in scenario["steps"]:
                 gate = step["gate"]
-                outcome = await issue_store.sign_off(
-                    "o/r", 795, gate, step.get("lens") or LENSES[gate], step.get("head", "a" * 40)
-                )
-                obs["outcomes"].append(outcome)
+                store.fail_fields = {GATE_STATUS_FIELD} if step.get("fail_gate") else set()
+                for _ in range(step.get("repeat", 1)):
+                    outcome = await issue_store.sign_off(
+                        "o/r", 795, gate, step.get("lens") or LENSES[gate], step.get("head", "a" * 40)
+                    )
+                    obs["outcomes"].append(outcome)
             obs["read_back"] = (await store.load("o/r", 795)).owner_history
 
         try:
@@ -244,6 +285,11 @@ def check(scenario: dict, obs: dict) -> list[str]:
             sum(1 for e in store.owner_history if e.get("action") == "triaged"),
             exp["triaged_entries"],
         )
+    if "history_actions" in exp:
+        got = [[e.get("action"), (e.get("commit") or "")[:1]] for e in store.owner_history]
+        want("stored history (action, first char of commit)", got, exp["history_actions"])
+    if "last_action" in exp:
+        want("the history ends on", store.owner_history[-1].get("action"), exp["last_action"])
     if "all_signed_off" in exp:
         want("every sign-off ok", all(o.ok for o in obs["outcomes"]), exp["all_signed_off"])
     if "gates" in exp:

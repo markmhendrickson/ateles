@@ -107,8 +107,7 @@ When Pavo completes PM scoping on a GitHub issue, sign off the `pm` gate and han
 # 1. Sign off pm gate on the issue entity (gate_status only — owner advances after read-back)
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "pm": "signed_off"},
-  # owner_history: the store UNIONS corrections' arrays and keeps repeats. Send ONLY this new entry, never the history you read (resending it doubles the stored array on every write).
-  "owner_history": [{"agent": "pavo", "gate": "pm", "at": "<ISO timestamp>", "action": "signed_off"}]
+  "owner_history": [*existing_history, {"agent": "pavo", "gate": "pm", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
 # 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed

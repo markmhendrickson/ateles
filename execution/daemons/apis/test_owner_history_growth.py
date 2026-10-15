@@ -115,15 +115,149 @@ def test_history_seeded_by_a_triage_store_is_carried_up_exactly_once(monkeypatch
     assert sizes == [2, 1, 1, 1], sizes
 
 
-def test_a_failed_sign_off_note_is_recorded_once_however_often_it_fails(monkeypatch):
+def _actions(rec) -> list[tuple[str, str]]:
+    return [(e.get("action"), e.get("commit")) for e in rec.owner_history]
+
+
+def test_history_never_ends_on_a_signed_off_whose_operation_failed(monkeypatch):
+    """A failure on commit A, then the same failure on commit B: both stay
+    attributable, and the second attempt does not end as a success."""
     rec = _Record({"pm": "pending"}, fail_fields=frozenset({gate_waive.GATE_STATUS_FIELD}))
     store = _wire(monkeypatch, rec)
 
-    for _ in range(6):
-        assert not _sign(store, gate="pm", lens="pavo").ok
+    assert not _sign(store, _heads(2)[0], gate="pm", lens="pavo").ok
+    assert not _sign(store, _heads(2)[1], gate="pm", lens="pavo").ok
 
-    actions = [e["action"] for e in rec.owner_history]
-    assert actions.count("sign_off_failed") == 1 and actions.count("signed_off") == 1, actions
+    a, b = _heads(2)
+    assert _actions(rec) == [
+        ("signed_off", a), ("sign_off_failed", a), ("signed_off", b), ("sign_off_failed", b),
+    ], _actions(rec)
+    assert rec.owner_history[-1]["action"] == "sign_off_failed"
+    assert rec.owner_history[-1]["commit"] == b
+
+
+def test_success_failure_success_on_one_commit_is_told_in_order(monkeypatch):
+    rec = _Record({"pm": "pending"})
+    store = _wire(monkeypatch, rec)
+
+    assert _sign(store, HEAD, gate="pm", lens="pavo").ok
+    rec.fail_fields = frozenset({gate_waive.GATE_STATUS_FIELD})
+    assert not _sign(store, HEAD, gate="pm", lens="pavo").ok
+    rec.fail_fields = frozenset()
+    assert _sign(store, HEAD, gate="pm", lens="pavo").ok
+
+    assert _actions(rec) == [
+        ("signed_off", HEAD), ("sign_off_failed", HEAD), ("signed_off", HEAD),
+    ], _actions(rec)
+    # And once recorded again, a repeat of the same success adds nothing.
+    assert _sign(store, HEAD, gate="pm", lens="pavo").ok
+    assert len(rec.owner_history) == 3
+
+
+def test_a_genuine_replay_of_the_same_failed_attempt_is_one_entry(monkeypatch):
+    rec = _Record({"pm": "pending"})
+    store = _wire(monkeypatch, rec)
+    state = _run(store.load("o/r", 795))
+    kwargs = dict(
+        repo="o/r", issue_number=795, gate="pm", lens_agent="pavo",
+        lens_sub="pavo@ateles-swarm", error="sign_off: signed write failed",
+        observed="pending", idempotency_suffix="k", head_sha=HEAD,
+        attempt="2026-10-15T12:00:00.000001+00:00",
+    )
+
+    _run(store._record_failed_sign_off(state, **kwargs))
+    state = _run(store.load("o/r", 795))
+    _run(store._record_failed_sign_off(state, **kwargs))  # the transport replayed it
+    state = _run(store.load("o/r", 795))
+    _run(store._record_failed_sign_off(state, **dict(kwargs, attempt="2026-10-15T12:00:09.000001+00:00")))
+
+    notes = [e for e in rec.owner_history if e["action"] == "sign_off_failed"]
+    assert len(notes) == 2, "the replay was one entry; the NEW attempt is another"
+
+
+def test_repeated_failures_grow_linearly_not_exponentially(monkeypatch):
+    rec = _Record({"pm": "pending"}, fail_fields=frozenset({gate_waive.GATE_STATUS_FIELD}))
+    store = _wire(monkeypatch, rec)
+    for _ in range(8):
+        assert not _sign(store, gate="pm", lens="pavo").ok
+    assert len(rec.owner_history) == 16  # a signed_off and a failure note per attempt
+    assert rec.owner_history[-1]["action"] == "sign_off_failed"
+
+
+# ── a bounded page is never proof that no history correction exists ──────────
+
+
+def test_an_older_history_correction_behind_many_newer_observations_is_not_missed(monkeypatch):
+    """Re-signing the same commit keeps adding gate observations. After enough of
+    them the history correction is older than any fixed window, and a different
+    commit must STILL add one entry, not resend the snapshot plus the new one."""
+    rec = _Record({"arch": "pending"})
+    store = _wire(monkeypatch, rec)
+    a, b = _heads(2)
+
+    assert _sign(store, a).ok
+    for _ in range(gate_waive.OBSERVATION_PAGE_SIZE * 3 + 5):  # >500 newer observations
+        assert _sign(store, a).ok
+    assert len(rec.observations) > 500
+
+    assert _sign(store, b).ok
+
+    history_writes = [v for f, v, _ in rec.writes if f == "owner_history"]
+    assert [len(v) for v in history_writes] == [1, 1], history_writes
+    assert len(rec.owner_history) == 2, rec.owner_history
+    # The gate is still re-signed and attributed by the lens's own fresh write.
+    assert rec.gate_status["arch"] == "signed_off"
+
+
+def test_an_incomplete_read_is_unknown_never_absent(monkeypatch):
+    rec = _Record({"arch": "pending"})
+    store = _wire(monkeypatch, rec)
+    for head in _heads(3):
+        _sign(store, head)
+
+    async def truncated(entity_id, *, limit, offset):
+        # Newer filler observations; the history correction lies beyond the page bound.
+        filler = [{"id": f"f{offset + i}", "source_priority": 1000, "fields": {"current_owner": "x"}}
+                  for i in range(limit)]
+        return filler, 100_000
+
+    monkeypatch.setattr(store, "_observations_page", truncated)
+    monkeypatch.setattr(gate_waive, "OBSERVATION_MAX_PAGES", 3)
+    # The history correction is the OLDEST observation here, behind the page bound.
+    tier = _run(store._owner_history_in_correction_tier("ent_1"))
+    assert tier is None
+
+    async def failing(entity_id, *, limit, offset):
+        return None
+
+    monkeypatch.setattr(store, "_observations_page", failing)
+    assert _run(store._owner_history_in_correction_tier("ent_1")) is None
+
+    async def exhausted(entity_id, *, limit, offset):
+        return [], 0
+
+    monkeypatch.setattr(store, "_observations_page", exhausted)
+    assert _run(store._owner_history_in_correction_tier("ent_1")) is False  # proven: total 0
+
+
+def test_planted_red_a_fixed_window_misses_the_older_history_correction(monkeypatch):
+    """The rejected read: the newest 500 observations, an empty answer meaning 'absent'."""
+
+    async def windowed(self, entity_id):
+        rows = await self._fetch_observations(entity_id, limit=500)
+        return any(
+            isinstance(o.get("fields"), dict) and "owner_history" in o["fields"] for o in rows
+        )
+
+    monkeypatch.setattr(IssueGateStore, "_owner_history_in_correction_tier", windowed)
+    rec = _Record({"arch": "pending"})
+    store = _wire(monkeypatch, rec)
+    a, b = _heads(2)
+    _sign(store, a)
+    for _ in range(520):
+        _sign(store, a)
+    _sign(store, b)
+    assert len(rec.owner_history) == 3, "the window no longer hides the older correction"
 
 
 # ── an already-doubled array does not mislead, and does not double again ─────
@@ -248,7 +382,7 @@ def test_failures_are_logged_as_a_code_with_no_body_header_or_path(monkeypatch, 
     assert not outcome.ok
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert f"reason={code}" in text, text
-    assert "payload_bytes=" in text
+    assert "value_bytes=" in text
     for forbidden in (HEADER_TEXT, KEY_PATH, BODY_MARK, "Bearer", ".jwk.json"):
         assert forbidden not in text, f"{forbidden!r} leaked into the log"
 
@@ -279,7 +413,7 @@ def test_a_413_is_logged_as_payload_too_large_with_the_size(monkeypatch, caplog)
         _sign(store)
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "HTTP 413" in text and "reason=payload_too_large" in text
-    assert re.search(r"payload_bytes=\d+", text)
+    assert re.search(r"value_bytes=\d+", text)
 
 
 def test_signed_failure_code_ignores_a_message_that_looks_like_a_code():

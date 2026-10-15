@@ -40,6 +40,22 @@ GROWTH = [
 ]
 
 
+def test_the_failure_scenarios_go_red_if_a_failure_note_is_suppressed_by_an_earlier_one():
+    """Planted red: the rejected rule, a failure note dropped when an identical one
+    (same gate, reason and observed state) exists ANYWHERE in the history."""
+    scenario = BY_ID["a_failure_on_each_of_two_commits_stays_attributable_and_the_history_does_not_end_as_success"]
+    obs = harness.run_scenario(scenario, mutation="suppress_repeated_failure_notes")
+    problems = harness.check(scenario, obs)
+    assert problems and any("ends on" in p or "history" in p for p in problems), problems
+
+
+def test_the_window_scenario_goes_red_with_a_fixed_observation_window():
+    scenario = BY_ID["an_older_history_correction_is_not_missed_behind_many_newer_observations"]
+    obs = harness.run_scenario(scenario, mutation="fixed_window")
+    problems = harness.check(scenario, obs)
+    assert problems and any("length" in p or "write" in p for p in problems), problems
+
+
 @pytest.mark.parametrize("scenario_id", GROWTH)
 def test_the_growth_scenarios_go_red_with_the_old_writer(scenario_id):
     """Planted red: resend the history that was read, plus one entry."""

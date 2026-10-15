@@ -124,8 +124,15 @@ class _Record:
                  "source_priority": 100, "fields": {"owner_history": list(value)}}
             )
 
-    async def history_observations(self, entity_id: str) -> list[dict]:
-        return list(self.observations)
+    async def observations_page(self, entity_id: str, *, limit: int, offset: int):
+        """One page, newest first, like the real endpoint: at most ``limit`` rows
+        from ``offset``, and the entity's total. (A fake that returns everything
+        hides every bug that depends on the page boundary.)"""
+        rows = list(self.observations)
+        return rows[offset : offset + limit], len(rows)
+
+    async def fetch_observations_limited(self, entity_id: str, *, limit: int = 100) -> list[dict]:
+        return list(self.observations)[:limit]
 
     async def load(self, repo: str, issue_number: int) -> IssueGateState:
         return IssueGateState(
@@ -217,7 +224,8 @@ def _wire(monkeypatch, rec: _Record, *, sync: bool = False) -> IssueGateStore:
     )
     monkeypatch.setattr(store, "load", rec.load)
     monkeypatch.setattr(store, "_observations", rec.fetch_observations)
-    monkeypatch.setattr(store, "_history_observations", rec.history_observations)
+    monkeypatch.setattr(store, "_observations_page", rec.observations_page, raising=False)
+    monkeypatch.setattr(store, "_fetch_observations", rec.fetch_observations_limited)
     return store
 
 
