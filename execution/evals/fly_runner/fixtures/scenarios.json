@@ -1453,6 +1453,39 @@
         "revoked_all_minted": true,
         "login_lock_free": true
       }
+    },
+    {
+      "id": "large_system_prompt_travels_as_a_file_not_an_argument",
+      "description": "The role's system prompt is about 150 KB, as real agent definitions with their rule index are. On Fly it is shipped as a job file and passed by path, so no argument the machine receives comes near Linux's 128 KB limit for one argument, and the run completes.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "agent_prompt_bytes": 150000,
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY LARGE PROMPT OK\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY LARGE PROMPT OK",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "argv_max_bytes_below": 10000,
+        "system_prompt_file_bytes_over": 150000,
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
     }
   ]
 }

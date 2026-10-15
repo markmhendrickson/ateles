@@ -95,6 +95,7 @@ class FakeFly:
         self.requests: list[httpx.Request] = []
         self.machines: dict[str, dict] = {}
         self.created: list[str] = []
+        self.created_configs: list[dict] = []  # every per-job machine's config, as sent
         self.deleted: list[str] = []
         self.sticky: set[str] = set()  # delete acknowledged, machine keeps running
         self.leases: dict[str, dict] = {}
@@ -117,6 +118,7 @@ class FakeFly:
                 return httpx.Response(422, json={"error": "eval: invalid machine config"})
             mid = f"m{len(self.created) + 1}"
             self.created.append(mid)
+            self.created_configs.append(json.loads(request.content)["config"])
             self.machines[mid] = {"id": mid, "state": "started",
                                   "config": json.loads(request.content)["config"]}  # fmt: skip
             if self.sticky_all:
@@ -274,6 +276,8 @@ class Trace:
     login_lock_held: bool = False
     login_config_run_id: str = ""
     login_job_files_after: bool = False
+    argv_max_bytes: int = 0  # the longest argument any machine was given
+    system_prompt_file_bytes: int = 0
     login_stop_requests: int = 0
     login_mutations: int = 0
     ledger_after: object = None
@@ -367,7 +371,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     skills.mkdir(parents=True)
     (skills / "SKILL.md").write_text(f"# {ROLE}\n")
     cli, marker = _stand_in_cli(tmp_path)
-    agent_def = AgentDefinition(entity_id="eval", name=ROLE, prompt_markdown="You are the eval role.",
+    role_prompt = "You are the eval role."
+    if scenario.get("agent_prompt_bytes"):
+        # A large agent definition, as real ones with their rule index are.
+        role_prompt += "\n" + "Follow the rule. " * (int(scenario["agent_prompt_bytes"]) // 17)
+    agent_def = AgentDefinition(entity_id="eval", name=ROLE, prompt_markdown=role_prompt,
                                 tool_allowlist="*", aauth_sub=f"{ROLE}@ateles-swarm")  # fmt: skip
     monkeypatch.setattr(dispatch_role, "ATELES_REPO", tmp_path)
     monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
@@ -587,6 +595,8 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         envelopes=envelopes,
         exit_codes=exit_codes,
         starts=list(fake.starts),
+        argv_max_bytes=_longest_argument(fake.created_configs),
+        system_prompt_file_bytes=_job_file_bytes(fake.created_configs, "system_prompt.md"),
         login_job_files_after=fly_runner._has_job_config(
             fake.machines["m-codex-login"].get("config") or {}),
         everything_sent=sent,
@@ -594,6 +604,24 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         ledger_text_after=(executor.ledger.path.read_text()
                            if executor.ledger.path.exists() else None),
     )
+
+
+def _job_files(config: dict) -> dict[str, bytes]:
+    return {f["guest_path"]: base64.b64decode(f["raw_value"]) for f in config.get("files") or []}
+
+
+def _longest_argument(configs: list[dict]) -> int:
+    """The longest single argument in any machine's argv job file, in bytes."""
+    longest = 0
+    for config in configs:
+        raw = _job_files(config).get("/run/job/argv.json")
+        if raw:
+            longest = max([longest, *(len(a.encode("utf-8")) for a in json.loads(raw))])
+    return longest
+
+
+def _job_file_bytes(configs: list[dict], name: str) -> int:
+    return max([0, *(len(_job_files(c).get(f"/run/job/{name}", b"")) for c in configs)])
 
 
 def _ledger_file_json(path: Path) -> object:
@@ -736,6 +764,11 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
     if "login_job_files_after" in e and trace.login_job_files_after != e["login_job_files_after"]:
         problems.append("the login machine's stored config still holds job files"
                         if trace.login_job_files_after else "expected job files on the machine")
+    if "argv_max_bytes_below" in e and not trace.argv_max_bytes < e["argv_max_bytes_below"]:
+        problems.append(f"a machine was given a {trace.argv_max_bytes}-byte argument")
+    if "system_prompt_file_bytes_over" in e and not (
+            trace.system_prompt_file_bytes > e["system_prompt_file_bytes_over"]):  # fmt: skip
+        problems.append(f"the system prompt file holds {trace.system_prompt_file_bytes} bytes")
     if "login_starts" in e and len(trace.starts) != e["login_starts"]:
         problems.append(f"{len(trace.starts)} login machine starts, expected {e['login_starts']}")
     if "login_config_run_id" in e and trace.login_config_run_id != e["login_config_run_id"]:
