@@ -61,7 +61,7 @@ MUTATIONS = (
     "none", "no_grants", "no_network", "no_git_roots", "no_durable_record", "no_startup_sweep",
     "no_continuation", "no_readback", "no_worktree_check", "no_revalidation",
     "silent_unrecorded", "reason_not_required", "drop_intact_registration",
-    "skip_pre_clear_read",
+    "skip_pre_clear_read", "no_expected_version",
 )
 
 REPO = "eval-owner/eval-repo"
@@ -362,9 +362,37 @@ class _TaskStore:
         # WHAT is written (e.g. a write that clears a field fails).
         self.policy: dict[str, object] = {}
         self.fail_next_reads = 0
+        self.conflicts = 0  # conditional writes refused for a stale version
 
     def put(self, entity_id: str, snapshot: dict) -> None:
         self.rows[entity_id] = dict(snapshot)
+
+    def version(self, entity_id: str) -> str:
+        """An opaque token that changes whenever the row does (any field, any writer)."""
+        import hashlib
+
+        row = self.rows.get(entity_id, {})
+        return hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()
+
+    def read_versioned(self, entity_id):
+        if entity_id in self.unreadable or entity_id not in self.rows:
+            return None, None
+        return dict(self.rows[entity_id]), self.version(entity_id)
+
+    def field_if(self, entity_id, field, value, *, expected_version, **kw):
+        """Neotoma's /correct with expected_version: a stale token is refused and
+        NOTHING is written."""
+        from lib.daemon_runtime.task_lifecycle import FieldWrite
+
+        if not expected_version:
+            return FieldWrite(False)
+        if expected_version != self.version(entity_id):
+            self.conflicts += 1
+            return FieldWrite(False, conflict=True)
+        ok = self._persist(entity_id, field, value)
+        if ok and field == "status":
+            self.obs["statuses"].append((entity_id, value))
+        return FieldWrite(ok, version=self.version(entity_id) if ok else None)
 
     def _persist(self, entity_id: str, field: str, value) -> bool:
         row = self.rows.setdefault(entity_id, {})
@@ -596,10 +624,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     if mutation == "skip_pre_clear_read":
         def _blind_rollback(entity_id, snapshot, claim):
             for field in ("blocked_reason", "dispatch_context", "disposition"):
-                apis.set_task_field(
-                    entity_id, field, snapshot.get(field) or "",
-                    handler="apis", key_suffix=f"deferral-rollback-{claim.run_id}",
-                )
+                obs["store"].field(entity_id, field, snapshot.get(field) or "")
             return apis._classify_deferral_state(entity_id, claim)
 
         mp.setattr(apis, "_roll_back_deferral", _blind_rollback, raising=False)
@@ -649,7 +674,8 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     store = _TaskStore(obs)
     obs["store"] = store
     mp.setattr(apis, "set_task_status", store.status)
-    mp.setattr(apis, "set_task_field", store.field, raising=False)
+    mp.setattr(apis, "set_task_field_if_version", store.field_if, raising=False)
+    mp.setattr(apis, "fetch_task_snapshot_and_version", store.read_versioned, raising=False)
 
     if scenario["path"] == "rollback_race":
         # The task moves on (to a gate hold, a dispatch, a terminal state, ...) before
@@ -661,7 +687,28 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
                 status=race["status"], blocked_reason=race.get("reason", "")
             )
 
-        if race["when"] == "before":
+        if race["when"] == "landing":
+            # RIGHT AFTER the rollback reads the task for its first clear, BEFORE the
+            # clear is written: the window a read-then-write cannot close.
+            real_roll = apis._roll_back_deferral
+            real_read = apis.fetch_task_snapshot_and_version
+            in_rollback = {"on": False, "reads": 0}
+
+            def _roll_flag(*a, **k):
+                in_rollback["on"] = True
+                return real_roll(*a, **k)
+
+            def _read_then_land(entity_id):
+                result = real_read(entity_id)
+                if in_rollback["on"]:
+                    in_rollback["reads"] += 1
+                    if in_rollback["reads"] == 1:
+                        _move()
+                return result
+
+            mp.setattr(apis, "_roll_back_deferral", _roll_flag)
+            mp.setattr(apis, "fetch_task_snapshot_and_version", _read_then_land)
+        elif race["when"] == "before":
             real_roll = apis._roll_back_deferral
 
             def _roll_after_move(*a, **k):
@@ -672,7 +719,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
         else:
             trigger = 1 if race["when"] == "between" else 3
             rollback_writes: list[str] = []
-            store_field = apis.set_task_field
+            store_field = apis.set_task_field_if_version
 
             def _field(entity_id, field, value, **kw):
                 result = store_field(entity_id, field, value, **kw)
@@ -682,8 +729,16 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
                         _move()
                 return result
 
-            mp.setattr(apis, "set_task_field", _field)
+            mp.setattr(apis, "set_task_field_if_version", _field)
             obs["rollback_writes"] = rollback_writes
+    if mutation == "no_expected_version":
+        real_conditional = apis.set_task_field_if_version
+
+        def _unconditional(entity_id, field, value, **kw):
+            kw["expected_version"] = obs["store"].version(entity_id)  # always "current"
+            return real_conditional(entity_id, field, value, **kw)
+
+        mp.setattr(apis, "set_task_field_if_version", _unconditional, raising=False)
     mp.setattr(apis, "query_all_entities", store.query)
     mp.setattr(apis, "fetch_task_snapshot", store.read)
     obs["token_requests"] = []
@@ -1301,6 +1356,10 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for field, value in exp["race_row"].items():
             want(f"the task's {field} after the rollback", row.get(field), value)
         want("dispatches", obs["spawns"], [])
+    if "store_conflicts_at_least" in exp:
+        got = obs["store"].conflicts
+        if got < exp["store_conflicts_at_least"]:
+            bad.append(f"expected a refused (stale-version) write, saw {got}")
     if "rollback_writes" in exp:
         want("writes made to a task that had moved on", len(obs.get("rollback_writes", [])), exp["rollback_writes"])
     if "notification_excludes" in exp:

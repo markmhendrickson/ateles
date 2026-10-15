@@ -78,10 +78,11 @@ def test_the_eval_covers_every_required_behaviour():
         "rollback_never_overwrites_a_gate_hold_arriving_before_the_clears",
         "rollback_never_overwrites_a_gate_hold_arriving_between_the_clears",
         "rollback_never_overwrites_a_gate_hold_arriving_after_the_clears",
-        "rollback_reports_a_task_dispatched_meanwhile_as_dispatched",
-        "rollback_reports_a_task_finished_meanwhile_as_finished",
-        "rollback_reports_a_task_cancelled_meanwhile_as_cancelled",
+        "rollback_reports_a_running_status_as_observed_and_asks_for_a_check",
+        "rollback_reports_a_terminal_status_with_a_marker_left_as_not_settled",
+        "rollback_reports_a_cancelled_status_as_observed_not_as_a_story",
         "rollback_reports_an_unmapped_status_as_unknown",
+        "rollback_clear_is_conditional_so_a_hold_landing_after_the_read_survives",
         # the worktree itself is verified, on both paths
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_1",
         "handoff_launches_no_child_when_the_worktree_remote_is_wrong_case_2",
@@ -230,3 +231,10 @@ def test_the_gate_hold_scenarios_go_red_if_the_rollback_does_not_re_read_first(w
     obs = harness.run_scenario(scenario, tmp_path, mutation="skip_pre_clear_read")
     problems = harness.check(scenario, obs)
     assert any("blocked_reason after the rollback" in p or "moved on" in p for p in problems), problems
+
+
+def test_the_landing_scenario_goes_red_if_the_clear_ignores_the_version(tmp_path):
+    scenario = BY_ID["rollback_clear_is_conditional_so_a_hold_landing_after_the_read_survives"]
+    obs = harness.run_scenario(scenario, tmp_path, mutation="no_expected_version")
+    problems = harness.check(scenario, obs)
+    assert any("blocked_reason after the rollback" in p or "refused" in p for p in problems), problems

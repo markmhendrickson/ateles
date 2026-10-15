@@ -709,8 +709,8 @@
           "could not record a deferral": 1
         },
         "notification_contains": [
-          "ended meanwhile",
-          "(status:"
+          "status is now",
+          "(read at"
         ],
         "notification_excludes": [
           "NOT held and NOT dispatched",
@@ -758,14 +758,16 @@
           "blocked_reason": "Held for approval: high blast radius"
         },
         "notification_contains": [
-          "now held at an approval gate",
-          "(status: awaiting_approval",
+          "status is now awaiting_approval",
+          "(read at",
+          "waiting at a gate",
           "Held for approval",
           "may need your decision",
           "Apis did not change it"
         ],
         "notification_excludes": [
           "dispatched",
+          "finished",
           "no action needed",
           "NOT held and NOT dispatched",
           "WILL re-dispatch"
@@ -791,14 +793,16 @@
           "blocked_reason": "Held for approval: high blast radius"
         },
         "notification_contains": [
-          "now held at an approval gate",
-          "(status: awaiting_approval",
+          "status is now awaiting_approval",
+          "(read at",
+          "waiting at a gate",
           "Held for approval",
           "may need your decision",
           "Apis did not change it"
         ],
         "notification_excludes": [
           "dispatched",
+          "finished",
           "no action needed",
           "NOT held and NOT dispatched",
           "WILL re-dispatch"
@@ -824,14 +828,16 @@
           "blocked_reason": "Held for approval: high blast radius"
         },
         "notification_contains": [
-          "now held at an approval gate",
-          "(status: awaiting_approval",
+          "status is now awaiting_approval",
+          "(read at",
+          "waiting at a gate",
           "Held for approval",
           "may need your decision",
           "Apis did not change it"
         ],
         "notification_excludes": [
           "dispatched",
+          "finished",
           "no action needed",
           "NOT held and NOT dispatched",
           "WILL re-dispatch"
@@ -843,8 +849,8 @@
       }
     },
     {
-      "id": "rollback_reports_a_task_dispatched_meanwhile_as_dispatched",
-      "why": "a task dispatched while its deferral was unwound is reported as dispatched",
+      "id": "rollback_reports_a_running_status_as_observed_and_asks_for_a_check",
+      "why": "a task found in a running status after the rollback is reported by the status read and when, with what to check; no claim about how it got there",
       "path": "rollback_race",
       "race": {
         "when": "between",
@@ -857,12 +863,15 @@
           "blocked_reason": ""
         },
         "notification_contains": [
-          "has already been dispatched",
-          "(status: routed",
-          "no action needed"
+          "status is now routed",
+          "(read at",
+          "Check that it is running as expected",
+          "Apis did not change it"
         ],
         "notification_excludes": [
-          "approval gate",
+          "dispatched",
+          "no action needed",
+          "waiting at a gate",
           "NOT held and NOT dispatched"
         ],
         "notification_counts": {
@@ -871,8 +880,8 @@
       }
     },
     {
-      "id": "rollback_reports_a_task_finished_meanwhile_as_finished",
-      "why": "a task that finished meanwhile is reported as finished",
+      "id": "rollback_reports_a_terminal_status_with_a_marker_left_as_not_settled",
+      "why": "a terminal status is reported as observed; because a deferral marker remains on the task, it is NOT called settled and the notice says what remains",
       "path": "rollback_race",
       "race": {
         "when": "before",
@@ -885,12 +894,14 @@
           "blocked_reason": ""
         },
         "notification_contains": [
-          "has already finished",
-          "(status: done"
+          "status is now done",
+          "(read at",
+          "deferral marker remains"
         ],
         "notification_excludes": [
-          "approval gate",
-          "has already been dispatched"
+          "finished",
+          "no action needed",
+          "dispatched"
         ],
         "notification_counts": {
           "could not record a deferral": 1
@@ -898,8 +909,8 @@
       }
     },
     {
-      "id": "rollback_reports_a_task_cancelled_meanwhile_as_cancelled",
-      "why": "a task cancelled meanwhile is reported as cancelled, not dispatched",
+      "id": "rollback_reports_a_cancelled_status_as_observed_not_as_a_story",
+      "why": "a cancelled task is reported by its status (declined) and read time, with no claim that anyone cancelled it or what happened before",
       "path": "rollback_race",
       "race": {
         "when": "before",
@@ -912,12 +923,14 @@
           "blocked_reason": ""
         },
         "notification_contains": [
-          "cancelled or declined",
-          "was not dispatched"
+          "status is now cancelled",
+          "(read at"
         ],
         "notification_excludes": [
-          "approval gate",
-          "has already been dispatched"
+          "was not dispatched",
+          "has been cancelled",
+          "dispatched",
+          "no action needed"
         ],
         "notification_counts": {
           "could not record a deferral": 1
@@ -939,18 +952,50 @@
           "blocked_reason": ""
         },
         "notification_contains": [
+          "status is now 'quantum_superposition'",
+          "(read at",
           "does not recognise",
-          "'quantum_superposition'",
           "Apis did not change it"
         ],
         "notification_excludes": [
           "no action needed",
-          "has already",
-          "NOT held and NOT dispatched"
+          "dispatched"
         ],
         "notification_counts": {
           "could not record a deferral": 1
         }
+      }
+    },
+    {
+      "id": "rollback_clear_is_conditional_so_a_hold_landing_after_the_read_survives",
+      "why": "a gate hold that lands AFTER the rollback read the task and BEFORE its clear is written is not overwritten: the clear carries the version that was read, Neotoma refuses it and writes nothing, and the task is reported as waiting at its gate",
+      "path": "rollback_race",
+      "race": {
+        "when": "landing",
+        "status": "awaiting_approval",
+        "reason": "Held for approval: high blast radius"
+      },
+      "expect": {
+        "race_row": {
+          "status": "awaiting_approval",
+          "blocked_reason": "Held for approval: high blast radius"
+        },
+        "notification_contains": [
+          "status is now awaiting_approval",
+          "waiting at a gate",
+          "Held for approval",
+          "may need your decision"
+        ],
+        "notification_excludes": [
+          "dispatched",
+          "no action needed",
+          "NOT held and NOT dispatched"
+        ],
+        "notification_counts": {
+          "could not record a deferral": 1
+        },
+        "rollback_writes": 0,
+        "store_conflicts_at_least": 1
       }
     }
   ]

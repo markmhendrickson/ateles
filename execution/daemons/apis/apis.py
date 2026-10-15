@@ -106,6 +106,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+from datetime import datetime, timezone
 from enum import Enum
 import functools
 import hashlib
@@ -260,6 +261,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     fetch_entity_user_id,
     fetch_task_record,
     fetch_task_snapshot,
+    fetch_task_snapshot_and_version,
     mark_task_declined,
     read_authenticated_checkpoint_authorization,
     read_authenticated_checkpoint_resolution,
@@ -275,7 +277,7 @@ from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     complete_task_with_result,
     is_terminal,
     normalize as normalize_status,
-    set_task_field,
+    set_task_field_if_version,
     set_task_status,
 )
 from lib.daemon_runtime.artifact_contract import (  # noqa: E402
@@ -951,31 +953,41 @@ def _expected_deferral(claim: "build_delivery.BuildClaim") -> dict:
     }
 
 
-def _write_deferral(entity_id: str, claim: "build_delivery.BuildClaim", attempt: int) -> bool:
-    """Write the deferral record in commit order: disposition, dispatch_context, then
-    status with blocked_reason LAST (the commit marker). Stops at the first failed
-    write, so the marker is never written after a failure."""
+def _write_deferral(entity_id: str, claim: "build_delivery.BuildClaim", attempt: int) -> str:
+    """Write the deferral record in commit order, each write CONDITIONAL on the
+    version the previous step left: disposition, dispatch_context, status, then
+    blocked_reason LAST (the commit marker). Stops at the first failed write, so the
+    marker is never written after a failure.
+
+    Returns "ok", "failed" (a write was refused for any reason other than a version
+    conflict, or no version token was available, so nothing could be conditioned) or
+    "conflict" (the task changed since it was read: NOTHING further is written and
+    the caller re-reads; a task that moved on is never stamped with a deferral).
+    """
     expected = _expected_deferral(claim)
     # A retry uses its own idempotency keys: a write the server dropped but
     # acknowledged would otherwise be answered "already done" and never applied.
     suffix = f"deferred-{claim.run_id}" + (f"-retry{attempt}" if attempt else "")
-    return bool(
-        set_task_field(
-            entity_id, "disposition", expected["disposition"],
-            handler=DAEMON_NAME, key_suffix=suffix,
+    snap, version = fetch_task_snapshot_and_version(entity_id)
+    if snap is None or not version:
+        return "failed"
+    if normalize_status(snap.get("status")) not in ("", TaskStatus.PENDING.value):
+        return "conflict"
+    for field in ("disposition", "dispatch_context", "status", "blocked_reason"):
+        write = set_task_field_if_version(
+            entity_id, field, expected[field],
+            expected_version=version, handler=DAEMON_NAME, key_suffix=suffix,
         )
-        and set_task_field(
-            entity_id, "dispatch_context", expected["dispatch_context"],
-            handler=DAEMON_NAME, key_suffix=suffix,
-        )
-        and set_task_status(
-            entity_id,
-            TaskStatus.PENDING,
-            handler=DAEMON_NAME,
-            reason=expected["blocked_reason"],
-            key_suffix=suffix,
-        )
-    )
+        if write.conflict:
+            return "conflict"
+        if not write.ok:
+            return "failed"
+        version = write.version
+        if not version:  # committed, but no token to condition the next write on
+            _, version = fetch_task_snapshot_and_version(entity_id)
+            if not version:
+                return "failed"
+    return "ok"
 
 
 def _deferral_persisted(entity_id: str, claim: "build_delivery.BuildClaim") -> list[str]:
@@ -1025,64 +1037,76 @@ class DeferralOutcome(str, Enum):
         return self in (DeferralOutcome.RECORDED, DeferralOutcome.INTACT_MARKER)
 
 
-# What a task's status means for a deferral that was being recorded, by the
-# lifecycle vocabulary in lib/daemon_runtime/task_lifecycle.TaskStatus (after
-# `normalize_status`, which already folds completed->done and cancelled->declined)
-# plus `in_progress`, which agents write for a task that is running:
+# What a task's status means for a deferral that was being recorded. Each status
+# is read, never explained: the notice states the status that was OBSERVED and when,
+# and says what to check; it makes no claim about how the task got there.
 #
-#   routed, executing, in_progress   MOVED_ON       dispatched
-#   verified                         MOVED_ON       ran; only its completion record is pending
-#   done                             MOVED_ON       finished
-#   failed                           MOVED_ON       dispatched and failed (watchdog may retry)
-#   declined                         MOVED_ON       cancelled / declined, never dispatched
-#   superseded                       MOVED_ON       replaced, never dispatched
-#   awaiting_approval                MOVED_TO_GATE  held at an approval checkpoint
-#   awaiting_input                   MOVED_TO_GATE  parked for a person
-#   blocked                          MOVED_TO_GATE  needs the operator
-#   pending / absent                 (not moved)    judged by the marker
-#   anything else                    STATE_UNKNOWN  never "no action needed"
-_DISPATCHED = "has already been dispatched"
-_STATUS_OUTCOMES: dict[str, tuple["DeferralOutcome", str, str]] = {
-    "routed": (DeferralOutcome.MOVED_ON, _DISPATCHED, "no action needed"),
-    "executing": (DeferralOutcome.MOVED_ON, _DISPATCHED, "no action needed"),
-    "in_progress": (DeferralOutcome.MOVED_ON, _DISPATCHED, "no action needed"),
-    "verified": (
-        DeferralOutcome.MOVED_ON,
-        "has already run and is only waiting for its completion record",
-        "no action needed",
-    ),
-    "done": (DeferralOutcome.MOVED_ON, "has already finished", "no action needed"),
-    "failed": (
-        DeferralOutcome.MOVED_ON,
-        "was dispatched and has failed",
-        "the watchdog may retry it; check it if it does not recover",
-    ),
-    "declined": (
-        DeferralOutcome.MOVED_ON,
-        "has been cancelled or declined and was not dispatched",
-        "no action needed",
-    ),
-    "superseded": (
-        DeferralOutcome.MOVED_ON,
-        "has been superseded and was not dispatched",
-        "no action needed",
-    ),
-    "awaiting_approval": (
-        DeferralOutcome.MOVED_TO_GATE,
-        "is now held at an approval gate",
-        "it may need your decision",
-    ),
-    "awaiting_input": (
-        DeferralOutcome.MOVED_TO_GATE,
-        "is now parked waiting for your input",
-        "it may need your decision",
-    ),
-    "blocked": (
-        DeferralOutcome.MOVED_TO_GATE,
-        "is now blocked",
-        "it may need your decision",
-    ),
+# status (after `normalize_status`, which folds completed->done and
+# cancelled->declined; plus `in_progress`, which agents write for a running task)
+#
+#   routed, executing, in_progress, verified   active    MOVED_ON       check it is running
+#   failed                                     failed    MOVED_ON       watchdog may retry; check
+#   done, declined, superseded                 terminal  MOVED_ON       "no action needed" only if
+#                                                                       no marker remains AND
+#                                                                       nothing is queued for it
+#   awaiting_approval, awaiting_input, blocked gate      MOVED_TO_GATE  may need the operator
+#   pending / absent                           (not moved)              judged by the marker
+#   anything else                              unknown   STATE_UNKNOWN  check it
+_STATUS_KINDS: dict[str, tuple[str, "DeferralOutcome"]] = {
+    "routed": ("active", DeferralOutcome.MOVED_ON),
+    "executing": ("active", DeferralOutcome.MOVED_ON),
+    "in_progress": ("active", DeferralOutcome.MOVED_ON),
+    "verified": ("active", DeferralOutcome.MOVED_ON),
+    "failed": ("failed", DeferralOutcome.MOVED_ON),
+    "done": ("terminal", DeferralOutcome.MOVED_ON),
+    "declined": ("terminal", DeferralOutcome.MOVED_ON),
+    "superseded": ("terminal", DeferralOutcome.MOVED_ON),
+    "awaiting_approval": ("gate", DeferralOutcome.MOVED_TO_GATE),
+    "awaiting_input": ("gate", DeferralOutcome.MOVED_TO_GATE),
+    "blocked": ("gate", DeferralOutcome.MOVED_TO_GATE),
 }
+
+
+def _read_stamp() -> str:
+    """When a task was read, for notices that state an observation."""
+    return datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+
+
+def _moved_notice(head: str, entity_id: str, state: dict) -> str:
+    """The notice for a task that is no longer pending: what was OBSERVED, not why."""
+    status, kind, stamp = state["status"], state["kind"], state["read_at"]
+    base = f"{head}; the task's status is now {status} (read at {stamp})"
+    left = state["left"]
+    if kind == "active":
+        return (
+            f"{base}. Apis did not change it. Check that it is running as expected; "
+            "this read does not show what moved it there."
+        )
+    if kind == "failed":
+        return (
+            f"{base}. Apis did not change it. The watchdog may retry a failed task; "
+            "check it if it does not recover."
+        )
+    if kind == "terminal":
+        queued = entity_id in _recovering
+        if not left and not queued:
+            return (
+                f"{base}. It is in a terminal state, no deferral marker remains on it "
+                "and Apis has nothing queued for it: no action needed."
+            )
+        extra = (
+            f" A deferral marker remains on it ({', '.join(left)}); Apis will not "
+            "act on a task in this state, so clear it if you do not want it there."
+            if left else ""
+        )
+        extra += " Apis still has it queued; check it." if queued else ""
+        return f"{base}. Apis did not change it.{extra}"
+    # gate
+    detail = f" ({state['detail']})" if state["detail"] else ""
+    return (
+        f"{base}. It is waiting at a gate{detail} and may need your decision. "
+        "Apis did not change it."
+    )
 
 
 async def _record_deferral(
@@ -1108,10 +1132,12 @@ async def _record_deferral(
         for attempt in (0, 1):
             wrote = _write_deferral(entity_id, claim, attempt)
             problems = _deferral_persisted(entity_id, claim)
-            if wrote and not problems:
+            if wrote == "ok" and not problems:
                 return []
-            if not problems and not wrote:
-                problems = ["a write was rejected"]
+            if wrote == "conflict":
+                problems = ["the task changed while it was being recorded (version conflict)"]
+            elif wrote == "failed" and not problems:
+                problems = ["a write was refused or could not be made conditional"]
             log.warning(
                 f"[{DAEMON_NAME}] deferral of task {entity_id} did not persist "
                 f"(attempt {attempt + 1}/2): {', '.join(problems)}"
@@ -1133,23 +1159,12 @@ async def _record_deferral(
             f"{fields}).{left} Re-dispatch it by hand when the build of {where} ends."
         )
     elif state["verdict"] == "moved":
-        status = state["status"]
-        if outcome is DeferralOutcome.MOVED_TO_GATE:
-            detail = f"; {state['detail']}" if state["detail"] else ""
-            text = (
-                f"{head}; the task {state['phrase']} (status: {status}{detail}) and "
-                f"{state['tail']}. Apis did not change it."
-            )
-        else:
-            text = (
-                f"{head}, but the build of {where} ended meanwhile and the task "
-                f"{state['phrase']} (status: {status}); {state['tail']}."
-            )
+        text = _moved_notice(head, entity_id, state)
     elif state["verdict"] == "unknown_state":
         text = (
-            f"{head}; the task is in a state Apis does not recognise (status: "
-            f"{state['status']!r}), so nothing can be said about whether it will run. "
-            "Check it. Apis did not change it."
+            f"{head}; the task's status is now {state['status']!r} (read at "
+            f"{state['read_at']}), which Apis does not recognise. Apis did not "
+            "change it. Check it."
         )
     elif state["verdict"] == "intact":
         text = (
@@ -1190,7 +1205,7 @@ def _roll_back_deferral(entity_id: str, snapshot: dict, claim: "build_delivery.B
     Then ONE read decides what the operator is told, from what the task holds:
     ``cleared`` (the marker does not qualify), ``intact`` (it still qualifies, so the
     sweep WILL dispatch it), ``moved`` (the task is past pending: see
-    ``_STATUS_OUTCOMES``), ``unknown_state`` (a status that maps to nothing) or
+    ``_STATUS_KINDS``), ``unknown_state`` (a status that maps to nothing) or
     ``unknown`` (it cannot be read).
     """
     suffix = f"deferral-rollback-{claim.run_id}"
@@ -1209,18 +1224,27 @@ def _roll_back_deferral(entity_id: str, snapshot: dict, claim: "build_delivery.B
 
     for field in ("blocked_reason", "dispatch_context", "disposition"):
         try:
-            fresh = fetch_task_snapshot(entity_id)
+            fresh, version = fetch_task_snapshot_and_version(entity_id)
         except Exception:  # noqa: BLE001 — cannot tell what the task is: write nothing
-            fresh = None
-        if not isinstance(fresh, dict) or not _still_as_left(fresh):
+            fresh, version = None, None
+        if not isinstance(fresh, dict) or not version or not _still_as_left(fresh):
             break
         if (fresh.get(field) or "") != expected[field]:
             done.add(field)  # nothing of ours to clear here
             continue
-        if not set_task_field(
-            entity_id, field, before[field], handler=DAEMON_NAME, key_suffix=suffix
-        ):
-            log.warning(f"[{DAEMON_NAME}] rollback of {field} on task {entity_id} failed")
+        # CONDITIONAL on the version just read: if anything lands between that read
+        # and this write (a gate hold, a dispatch, anyone's edit) Neotoma refuses it
+        # and writes nothing. The loop then stops and the task is classified from
+        # what is now there; there is no unconditional clear anywhere.
+        write = set_task_field_if_version(
+            entity_id, field, before[field],
+            expected_version=version, handler=DAEMON_NAME, key_suffix=suffix,
+        )
+        if not write.ok:
+            log.warning(
+                f"[{DAEMON_NAME}] rollback of {field} on task {entity_id} "
+                f"{'conflicted — the task changed' if write.conflict else 'failed'}"
+            )
             break
         done.add(field)
 
@@ -1237,22 +1261,23 @@ def _classify_deferral_state(entity_id: str, claim: "build_delivery.BuildClaim")
     if not isinstance(fresh, dict):
         return {"verdict": "unknown", "left": [], "outcome": DeferralOutcome.INTACT_MARKER}
     status = normalize_status(fresh.get("status"))
+    left_now = [f for f in _DEFERRAL_FIELDS if fresh.get(f) == expected[f]]
     if status not in ("", TaskStatus.PENDING.value):
-        mapped = _STATUS_OUTCOMES.get(status)
+        stamp = _read_stamp()
+        mapped = _STATUS_KINDS.get(status)
         if mapped is None:
             return {
-                "verdict": "unknown_state",
-                "status": fresh.get("status"),
-                "left": [],
+                "verdict": "unknown_state", "status": fresh.get("status"),
+                "read_at": stamp, "left": left_now,
                 "outcome": DeferralOutcome.STATE_UNKNOWN,
             }
-        outcome, phrase, tail = mapped
+        kind, outcome = mapped
         detail = str(fresh.get("blocked_reason") or "")[:140]
         if detail.startswith("Deferred:"):
             detail = ""
         return {
-            "verdict": "moved", "status": status, "phrase": phrase, "tail": tail,
-            "detail": detail, "left": [], "outcome": outcome,
+            "verdict": "moved", "status": fresh.get("status") or status, "kind": kind,
+            "read_at": stamp, "detail": detail, "left": left_now, "outcome": outcome,
         }
     left = [f for f in _DEFERRAL_FIELDS if fresh.get(f) == expected[f]]
     _, verdict = _qualify_deferred(entity_id, fresh)

@@ -29,6 +29,7 @@ Run: pytest execution/daemons/apis/test_build_delivery.py -v
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -329,9 +330,41 @@ class _TaskStore:
         # "reject" (the write fails): for faults that depend on WHAT is written.
         self.policy: dict[str, object] = {}
         self.fail_next_reads = 0
+        self.fail_next_version_reads = 0
+        self.conflicts = 0  # conditional writes refused for a stale version
 
     def put(self, entity_id: str, snapshot: dict) -> None:
         self.rows[entity_id] = dict(snapshot)
+
+    def version(self, entity_id: str) -> str:
+        """An opaque token that changes whenever the row does (any field, any writer)."""
+        import hashlib
+        import json as _json
+
+        row = self.rows.get(entity_id, {})
+        return hashlib.sha256(_json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()
+
+    def read_versioned(self, entity_id):
+        if self.fail_next_version_reads > 0:
+            self.fail_next_version_reads -= 1
+            return None, None
+        if entity_id in self.fail_reads or entity_id not in self.rows:
+            return None, None
+        return dict(self.rows[entity_id]), self.version(entity_id)
+
+    def field_if(self, entity_id, field, value, *, expected_version, **kw):
+        """A conditional write, as Neotoma's /correct with expected_version does it:
+        a stale token is refused (409) and NOTHING is written."""
+        from lib.daemon_runtime.task_lifecycle import FieldWrite
+
+        if not expected_version or self.fail_writes:
+            return FieldWrite(False)
+        if expected_version != self.version(entity_id):
+            self.conflicts += 1
+            return FieldWrite(False, conflict=True)
+        self.key_suffixes.append(kw.get("key_suffix", ""))
+        ok = self._persist(entity_id, field, value)
+        return FieldWrite(ok, version=self.version(entity_id) if ok else None)
 
     def _persist(self, entity_id, field, value) -> bool:
         row = self.rows.setdefault(entity_id, {})
@@ -402,7 +435,8 @@ def dispatch_env(monkeypatch, tmp_path):
         return store.status(eid, status, **kw)
 
     monkeypatch.setattr(apis, "set_task_status", _status)
-    monkeypatch.setattr(apis, "set_task_field", store.field)
+    monkeypatch.setattr(apis, "set_task_field_if_version", store.field_if)
+    monkeypatch.setattr(apis, "fetch_task_snapshot_and_version", store.read_versioned)
     monkeypatch.setattr(apis, "query_all_entities", store.query)
     monkeypatch.setattr(apis, "fetch_task_snapshot", store.read)
     monkeypatch.setattr(apis, "write_checkpoint_brief", lambda **kw: "ent_brief")
@@ -1591,7 +1625,6 @@ def _defer_with(dispatch_env, *, lossy=None, events=None, **kw):
         ("disposition", "mismatch"),
         ("dispatch_context", "mismatch"),
         ("blocked_reason", "mismatch"),
-        ("status", "mismatch"),
     ],
 )
 def test_a_write_that_lost_a_field_once_is_rewritten_and_then_acknowledged(
@@ -1865,22 +1898,24 @@ def test_a_marker_without_the_exact_reason_for_its_context_does_not_qualify(labe
 def test_the_commit_marker_is_written_last_and_never_after_a_failed_write(dispatch_env, monkeypatch):
     _, _, store = dispatch_env
     order: list[str] = []
+    real = store.field_if
     monkeypatch.setattr(
-        apis, "set_task_field",
-        lambda e, f, v, **kw: order.append(f) or store.field(e, f, v, **kw),
-    )
-    monkeypatch.setattr(
-        apis, "set_task_status",
-        lambda e, st, **kw: order.append("status+reason") or store.status(e, st, **kw),
+        apis, "set_task_field_if_version",
+        lambda e, f, v, **kw: order.append(f) or real(e, f, v, **kw),
     )
     claim = build_delivery.BuildClaim(REPO.lower(), 1448, "swarm-build-handoff", "0123456789abcdef")
     store.put("ent_x", _local())
-    assert apis._write_deferral("ent_x", claim, 0)
-    assert order == ["disposition", "dispatch_context", "status+reason"]
+    assert apis._write_deferral("ent_x", claim, 0) == "ok"
+    assert order == ["disposition", "dispatch_context", "status", "blocked_reason"]
 
     order.clear()
     store.policy["disposition"] = lambda v: "reject"
-    assert not apis._write_deferral("ent_x", claim, 1)
+    store.put("ent_x", _local())
+    store.fail_writes = False
+    # A refused write (here: not applied) is seen by the read-back; a REJECTED one
+    # stops the chain.
+    store.policy["disposition"] = lambda v: "reject"
+    assert apis._write_deferral("ent_x", claim, 1) == "failed"
     assert order == ["disposition"], "later writes (the marker) followed a failed one"
 
 
@@ -2064,7 +2099,7 @@ def test_an_intact_marker_is_dispatched_exactly_once_after_the_build_whenever_it
     assert spawns == [("cicada", "ent_followup_00001", "build_released")], where
     (msg,) = [m for m in n.sent if "could not record a deferral" in m]
     if where == "during":
-        assert "ended meanwhile" in msg and "(status:" in msg
+        assert "status is now" in msg and "(read at" in msg
         assert "NOT held and NOT dispatched" not in msg and "WILL re-dispatch" not in msg
     else:
         assert "WILL re-dispatch" in msg and "NOT dispatched" not in msg
@@ -2088,43 +2123,70 @@ def test_the_outcome_says_whether_the_sweep_owns_the_task():
 GATE_REASON = "Held for approval: high blast radius"
 
 MOVES = [
-    # (status, outcome, wording that must appear, wording that must not)
-    ("routed", "MOVED_ON", "has already been dispatched", "gate"),
-    ("executing", "MOVED_ON", "has already been dispatched", "gate"),
-    ("in_progress", "MOVED_ON", "has already been dispatched", "gate"),
-    ("verified", "MOVED_ON", "has already run", "gate"),
-    ("done", "MOVED_ON", "has already finished", "gate"),
-    ("completed", "MOVED_ON", "has already finished", "gate"),
-    ("failed", "MOVED_ON", "has failed", "no action needed"),
-    ("declined", "MOVED_ON", "cancelled or declined", "dispatched and"),
-    ("cancelled", "MOVED_ON", "cancelled or declined", "dispatched and"),
-    ("superseded", "MOVED_ON", "superseded", "dispatched and"),
-    ("awaiting_approval", "MOVED_TO_GATE", "approval gate", "no action needed"),
-    ("awaiting_input", "MOVED_TO_GATE", "waiting for your input", "no action needed"),
-    ("blocked", "MOVED_TO_GATE", "is now blocked", "no action needed"),
-    ("quantum_superposition", "STATE_UNKNOWN", "does not recognise", "no action needed"),
+    # (status as read, outcome, kind of notice)
+    ("routed", "MOVED_ON", "active"),
+    ("executing", "MOVED_ON", "active"),
+    ("in_progress", "MOVED_ON", "active"),
+    ("verified", "MOVED_ON", "active"),
+    ("failed", "MOVED_ON", "failed"),
+    ("done", "MOVED_ON", "terminal"),
+    ("completed", "MOVED_ON", "terminal"),
+    ("declined", "MOVED_ON", "terminal"),
+    ("cancelled", "MOVED_ON", "terminal"),
+    ("superseded", "MOVED_ON", "terminal"),
+    ("awaiting_approval", "MOVED_TO_GATE", "gate"),
+    ("awaiting_input", "MOVED_TO_GATE", "gate"),
+    ("blocked", "MOVED_TO_GATE", "gate"),
+    ("quantum_superposition", "STATE_UNKNOWN", "unknown"),
 ]
+
+# What a notice may NOT assert: anything about what happened before the read.
+CAUSAL_WORDS = ["dispatched", "finished", "completed", "cancelled", "ended", "already", "meanwhile"]
 
 
 def _move_during_rollback(dispatch_env, monkeypatch, when, status, *, hold_reason=GATE_REASON):
     """Record a deferral that cannot be confirmed (so it is rolled back), and have the
-    task move to ``status`` before the first clear, between two clears, or after
-    the last one."""
+    task move to ``status``:
+
+      before   before the rollback starts;
+      between  after the first clear was written;
+      after    after the last clear was written;
+      landing  RIGHT AFTER the rollback read the task for its first clear and BEFORE
+               that clear is written: the window a read-then-write cannot close.
+    """
     _, _, store = dispatch_env
     n = _RecNotifier()
     store.fail_next_reads = 2  # both read-backs fail: the deferral is not confirmed
     rollback_writes: list[str] = []
-    real_field = apis.set_task_field
+    real_field = apis.set_task_field_if_version
+    real_read = apis.fetch_task_snapshot_and_version
+    state = {"rollback": False, "reads": 0}
 
     def move():
         store.rows["ent_followup_00001"].update(status=status, blocked_reason=hold_reason)
 
-    if when == "before":
-        real_roll = apis._roll_back_deferral
-        monkeypatch.setattr(
-            apis, "_roll_back_deferral", lambda *a, **k: (move(), real_roll(*a, **k))[1]
-        )
-    else:
+    real_roll = apis._roll_back_deferral
+
+    def roll(*a, **k):
+        state["rollback"] = True
+        if when == "before":
+            move()
+        return real_roll(*a, **k)
+
+    monkeypatch.setattr(apis, "_roll_back_deferral", roll)
+
+    if when == "landing":
+        def read(entity_id):
+            result = real_read(entity_id)
+            if state["rollback"]:
+                state["reads"] += 1
+                if state["reads"] == 1:
+                    move()  # lands after the read, before the write
+            return result
+
+        monkeypatch.setattr(apis, "fetch_task_snapshot_and_version", read)
+
+    if when in ("between", "after"):
         trigger = 1 if when == "between" else 3
 
         def field(entity_id, f, v, **kw):
@@ -2135,7 +2197,7 @@ def _move_during_rollback(dispatch_env, monkeypatch, when, status, *, hold_reaso
                     move()
             return result
 
-        monkeypatch.setattr(apis, "set_task_field", field)
+        monkeypatch.setattr(apis, "set_task_field_if_version", field)
 
     async def _go():
         with build_delivery.claim_build(REPO, 1448, "swarm-build-handoff") as claim:
@@ -2146,7 +2208,7 @@ def _move_during_rollback(dispatch_env, monkeypatch, when, status, *, hold_reaso
     return outcome, n, store, rollback_writes
 
 
-@pytest.mark.parametrize("when", ["before", "between", "after"])
+@pytest.mark.parametrize("when", ["before", "between", "after", "landing"])
 @pytest.mark.parametrize("status", ["awaiting_approval", "awaiting_input", "blocked"])
 def test_a_gate_hold_that_arrives_during_the_rollback_is_never_overwritten(dispatch_env, monkeypatch, when, status):
     outcome, n, store, writes = _move_during_rollback(dispatch_env, monkeypatch, when, status)
@@ -2155,12 +2217,22 @@ def test_a_gate_hold_that_arrives_during_the_rollback_is_never_overwritten(dispa
     assert row["status"] == status and row["blocked_reason"] == GATE_REASON, "the hold was overwritten"
     assert outcome is apis.DeferralOutcome.MOVED_TO_GATE
     (msg,) = [m for m in n.sent if "could not record a deferral" in m]
-    assert f"(status: {status}" in msg and "may need your decision" in msg
-    assert GATE_REASON[:20] in msg, "the notice does not name the gate"
-    assert "dispatched" not in msg and "no action needed" not in msg
-    assert "Apis did not change it" in msg
-    if when == "before":
+    assert f"status is now {status}" in msg and "may need your decision" in msg
+    assert "waiting at a gate" in msg and GATE_REASON[:20] in msg
+    assert "no action needed" not in msg and "Apis did not change it" in msg
+    if when in ("before", "landing"):
         assert writes == [], "something was written to a task that had already moved on"
+
+
+def test_a_hold_landing_between_the_read_and_the_clear_is_refused_not_overwritten(dispatch_env, monkeypatch):
+    """The window a read-then-write cannot close: the clear is conditional on the
+    version that was read, so Neotoma refuses it and writes nothing."""
+    outcome, n, store, writes = _move_during_rollback(
+        dispatch_env, monkeypatch, "landing", "awaiting_approval"
+    )
+    assert store.conflicts >= 1, "the clear was not conditional on the version that was read"
+    assert store.rows["ent_followup_00001"]["blocked_reason"] == GATE_REASON
+    assert outcome is apis.DeferralOutcome.MOVED_TO_GATE
 
 
 @pytest.mark.parametrize("when", ["before", "between", "after"])
@@ -2170,27 +2242,61 @@ def test_nothing_is_written_once_the_task_has_moved_on(dispatch_env, monkeypatch
     assert len(writes) == expected, writes
 
 
-@pytest.mark.parametrize("status,outcome_name,must,must_not", MOVES)
-def test_each_status_is_classified_by_what_it_is(dispatch_env, monkeypatch, status, outcome_name, must, must_not):
+@pytest.mark.parametrize("status,outcome_name,kind", MOVES)
+def test_each_status_is_reported_as_observed_and_nothing_more(dispatch_env, monkeypatch, status, outcome_name, kind):
     outcome, n, store, _ = _move_during_rollback(dispatch_env, monkeypatch, "before", status)
 
     assert outcome is getattr(apis.DeferralOutcome, outcome_name), status
     (msg,) = [m for m in n.sent if "could not record a deferral" in m]
-    assert must in msg, (status, msg)
-    assert must_not not in msg, (status, msg)
+    assert re.search(r"\(read at \d\d:\d\d:\d\dZ\)", msg), msg
     assert "NOT held and NOT dispatched" not in msg and "WILL re-dispatch" not in msg
-    if outcome_name == "STATE_UNKNOWN":
-        assert repr(status) in msg and "Apis did not change it" in msg
+    # It states the status read, and no story about how the task got there.
+    observed = msg.replace(f"status is now {status!r}", "").replace(f"status is now {status}", "")
+    assert not [w for w in CAUSAL_WORDS if w in observed.lower()], (status, msg)
+    expectations = {
+        "active": ("Check that it is running as expected", "no action needed"),
+        "failed": ("watchdog may retry", "no action needed"),
+        "terminal": ("deferral marker remains", "no action needed"),
+        "gate": ("may need your decision", "no action needed"),
+        "unknown": ("does not recognise", "no action needed"),
+    }
+    must, must_not = expectations[kind]
+    assert must in msg and must_not not in msg, (status, msg)
+
+
+@pytest.mark.parametrize("status", ["done", "completed", "declined", "cancelled", "superseded"])
+def test_no_action_needed_is_said_only_when_it_is_true_by_construction(dispatch_env, monkeypatch, status):
+    """Terminal AND no marker remains AND nothing queued: after every clear was made."""
+    outcome, n, store, _ = _move_during_rollback(dispatch_env, monkeypatch, "after", status)
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert "no action needed" in msg and "no deferral marker remains" in msg
+    assert "nothing queued" in msg
+
+
+def test_a_terminal_task_apis_still_has_queued_is_not_called_settled(dispatch_env, monkeypatch):
+    apis._recovering.add("ent_followup_00001")
+    outcome, n, store, _ = _move_during_rollback(dispatch_env, monkeypatch, "after", "done")
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert "no action needed" not in msg and "still has it queued" in msg
+
+
+@pytest.mark.parametrize("status", ["done", "declined"])
+def test_a_terminal_task_with_a_marker_left_is_not_called_settled(dispatch_env, monkeypatch, status):
+    outcome, n, store, _ = _move_during_rollback(dispatch_env, monkeypatch, "before", status)
+    (msg,) = [m for m in n.sent if "could not record a deferral" in m]
+    assert "no action needed" not in msg
+    assert "deferral marker remains" in msg and "disposition" in msg
 
 
 def test_a_task_that_cannot_be_read_before_a_clear_is_not_written(dispatch_env, monkeypatch):
     _, _, store = dispatch_env
     store.fail_next_reads = 99
+    store.fail_next_version_reads = 99
     n = _RecNotifier()
     writes: list[str] = []
-    real_field = apis.set_task_field
+    real_field = store.field_if
     monkeypatch.setattr(
-        apis, "set_task_field",
+        apis, "set_task_field_if_version",
         lambda e, f, v, **kw: (writes.append(kw.get("key_suffix", "")), real_field(e, f, v, **kw))[1],
     )
 
@@ -2200,9 +2306,39 @@ def test_a_task_that_cannot_be_read_before_a_clear_is_not_written(dispatch_env, 
             return await apis._record_deferral("ent_followup_00001", _local(), claim, n)
 
     outcome = asyncio.run(_go())
-    assert not any(w.startswith("deferral-rollback") for w in writes)
+    assert writes == [], "something was written to a task nobody could read"
     assert outcome is apis.DeferralOutcome.INTACT_MARKER  # "state unknown", said as such
     assert any("could not verify" in m for m in n.sent)
+
+
+def test_a_write_without_a_version_token_is_never_made(dispatch_env, monkeypatch):
+    _, _, store = dispatch_env
+    monkeypatch.setattr(apis, "fetch_task_snapshot_and_version", lambda e: (dict(store.rows[e]), None))
+    store.put("ent_x", _local())
+    claim = build_delivery.BuildClaim(REPO.lower(), 1448, "swarm-build-handoff", "0123456789abcdef")
+    assert apis._write_deferral("ent_x", claim, 0) == "failed"
+    assert store.rows["ent_x"] == _local(), "an unconditional write was made"
+
+
+def test_a_task_that_changes_under_the_deferral_write_is_not_stamped(dispatch_env, monkeypatch):
+    """The WRITE path is conditional too: a stale version stops the chain."""
+    _, _, store = dispatch_env
+    real_read = apis.fetch_task_snapshot_and_version
+    seen = {"n": 0}
+
+    def read(entity_id):
+        result = real_read(entity_id)
+        seen["n"] += 1
+        if seen["n"] == 1:
+            store.rows[entity_id].update(status="awaiting_approval", blocked_reason=GATE_REASON)
+        return result
+
+    monkeypatch.setattr(apis, "fetch_task_snapshot_and_version", read)
+    store.put("ent_x", _local())
+    claim = build_delivery.BuildClaim(REPO.lower(), 1448, "swarm-build-handoff", "0123456789abcdef")
+    assert apis._write_deferral("ent_x", claim, 0) == "conflict"
+    assert "disposition" not in store.rows["ent_x"]
+    assert store.rows["ent_x"]["blocked_reason"] == GATE_REASON
 
 
 def test_a_value_someone_else_wrote_stops_the_rollback(dispatch_env, monkeypatch):
