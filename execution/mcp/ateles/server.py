@@ -1283,10 +1283,18 @@ async def _resolve_checkpoint(
         )
         task_data = _get(f"/entities/{task_id}") if task_id else None
         task_snap = _snapshot_of(task_data or {})
-        from lib.daemon_runtime.gating import fetch_entity_user_id
+        from lib.daemon_runtime.gating import read_verified_entity_owner
 
-        brief_user_id = fetch_entity_user_id(checkpoint_id)
-        task_user_id = fetch_entity_user_id(task_id) if task_id else None
+        brief_user_id = read_verified_entity_owner(
+            checkpoint_id, consumed_data, expected_user_id=checkpoint_user_id
+        )
+        task_user_id = (
+            read_verified_entity_owner(
+                task_id, task_data, expected_user_id=checkpoint_user_id
+            )
+            if task_id
+            else None
+        )
         same_tenant = bool(
             brief_user_id
             and task_user_id
