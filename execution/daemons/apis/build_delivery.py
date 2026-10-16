@@ -605,6 +605,14 @@ async def _discard_worktree(clone: Path, path: Path, branch: str) -> bool:
     return rc == 0 and rc2 == 0 and not path.exists()
 
 
+def _new_branch(label: str) -> tuple[str, str, str]:
+    """``(branch, slug, stamp)``: the one naming scheme for a builder's branch,
+    local or on Fly: ``cicada/<slug>-<YYYYmmddTHHMMSS>-<6 hex>``."""
+    stamp = f"{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+    slug = _slug(label)
+    return f"cicada/{slug}-{stamp}", slug, stamp
+
+
 def _slug(label: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
     return (slug or "build")[:40]
@@ -650,9 +658,7 @@ async def prepare_build_worktree(repository: str, label: str) -> BuildWorktree:
         )
     base_sha = base_sha.strip()
 
-    stamp = f"{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
-    slug = _slug(label)
-    branch = f"cicada/{slug}-{stamp}"
+    branch, slug, stamp = _new_branch(label)
     parent = clone.parent / f"{clone.name}-worktrees"
     path = parent / f"cicada-{slug}-{stamp}"
     try:
@@ -706,3 +712,225 @@ def worktree_instructions(wt: BuildWorktree) -> str:
         f"{wt.base_sha[:12]}. Work here; do NOT create another worktree and do "
         f"not touch any other checkout.{stale}"
     )
+
+
+
+# ── Delivery on Fly (operator opt-in) ────────────────────────────────────────
+#
+# With the delivery class listed in APIS_FLY_RUNNER_CLASSES, a builder's
+# delivery runs on a Fly machine instead of a local worktree: the job runner
+# clones the repository, runs the CLI in its own checkout, imports the
+# agent's commits, pushes the one branch and opens or updates the pull
+# request with a token minted for that job. Unset, nothing here routes.
+#
+# A launched delivery is never started twice for the same issue: a durable
+# record (``fly-deliveries.json`` beside the Fly ledger) is written BEFORE the
+# launch and kept with its outcome. Every lane that can re-run a builder (the
+# swarm build handoff, the task path, the startup resume sweep that re-runs an
+# interrupted issue pipeline, the task watchdog) reaches the builder through
+# ``run_fly_delivery``, which refuses while that record says the delivery
+# launched and may have pushed. Only an outcome that provably pushed nothing
+# (``clone_failed``, ``not_delivered``, ``no_changes``) allows a new one.
+
+FLY_DELIVERY_BASE_BRANCH = "main"
+FLY_DELIVERY_AUTHOR = ("cicada (ateles swarm)", "cicada@ateles-swarm.invalid")
+FLY_DELIVERY_REGISTRY_ENV = "APIS_FLY_DELIVERY_REGISTRY_FILE"
+# Outcomes that pushed nothing, so a new delivery for the same key is safe.
+FLY_RETRYABLE_STATUSES = frozenset({"clone_failed", "not_delivered", "no_changes"})
+_REGISTRY_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class FlyDeliveryPlan:
+    repository: str
+    branch: str
+    base_branch: str
+    key: str  # "owner/name#123", or "owner/name#task:<id>" for a task with no issue
+    issue_number: int | None
+
+    def spec(self) -> dict:
+        """The job.json delivery spec the Fly job runner accepts."""
+        return {"branch": self.branch, "base_branch": self.base_branch,
+                "author_name": FLY_DELIVERY_AUTHOR[0], "author_email": FLY_DELIVERY_AUTHOR[1]}
+
+
+class FlyDeliveryEnded(RuntimeError):
+    """A Fly delivery ran (or was refused as a repeat) without a pull request
+    to hand on; ``operator_text`` says what the record shows."""
+
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.text = text
+
+
+def plan_fly_delivery(repository: str, label: str, *, key: str,
+                      issue_number: int | None) -> FlyDeliveryPlan | None:  # fmt: skip
+    """A Fly delivery plan when the operator opted deliveries onto Fly, else
+    None (the builder runs locally, exactly as before)."""
+    import fly_runner
+
+    if not fly_runner.delivery_opted_in():
+        return None
+    validate_repository(repository)
+    branch, _, _ = _new_branch(label)
+    return FlyDeliveryPlan(repository=repository, branch=branch,
+                           base_branch=FLY_DELIVERY_BASE_BRANCH, key=key,
+                           issue_number=issue_number)  # fmt: skip
+
+
+def fly_delivery_instructions(plan: FlyDeliveryPlan) -> str:
+    """The Fly variant of the builder's workspace and delivery instructions.
+    The local variant (``worktree_instructions``) is unchanged."""
+    import fly_runner
+
+    closes = (f" Reference the issue in the body with `Closes #{plan.issue_number}`."
+              if plan.issue_number else "")  # fmt: skip
+    return (
+        f"YOUR WORKSPACE: your working directory is a fresh checkout of "
+        f"{plan.repository} on branch `{plan.branch}`, created from origin/"
+        f"{plan.base_branch} for this job. Work only here.\n"
+        "DELIVERY: commit your changes on this branch with `git commit`. Do not push, "
+        "do not open a pull request, and do not create other branches or change the "
+        "remote: when you finish, the runner delivers this branch's new commits and "
+        "opens or updates the pull request.\n"
+        f"PULL REQUEST TEXT: write it to the file {fly_runner.PR_FILE_PLACEHOLDER} as "
+        f"plain UTF-8 text. The first line is the title; the rest is the body.{closes}"
+    )
+
+
+def fly_delivery_key(repository: str, issue: tuple[str, int] | None, task_id: str = "") -> str:
+    if issue:
+        return f"{issue[0]}#{issue[1]}"
+    return f"{repository}#task:{task_id}"
+
+
+def _registry_path() -> Path:
+    configured = os.environ.get(FLY_DELIVERY_REGISTRY_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    import fly_runner
+
+    return fly_runner.FlyConfig.from_env().ledger_path.with_name("fly-deliveries.json")
+
+
+def _read_registry(path: Path) -> dict:
+    """The registry's deliveries; ``ValueError`` when it cannot be trusted."""
+    import json
+
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    deliveries = data.get("deliveries") if isinstance(data, dict) else None
+    if not isinstance(deliveries, dict) or not all(
+            isinstance(v, dict) and isinstance(v.get("status"), str) for v in deliveries.values()):
+        raise ValueError("malformed delivery registry")
+    return deliveries
+
+
+def _write_registry(path: Path, deliveries: dict) -> None:
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"deliveries": deliveries}, indent=1, sort_keys=True),
+                   encoding="utf-8")  # fmt: skip
+    os.replace(tmp, path)
+
+
+def fly_delivery_blocker(key: str) -> str:
+    """Why a new Fly delivery for *key* must not start, or ``""``."""
+    with _REGISTRY_LOCK:
+        try:
+            entry = _read_registry(_registry_path()).get(key)
+        except (OSError, ValueError):
+            return ("the Fly delivery record could not be read, so whether a delivery for "
+                    f"{key} already ran is unknown; not starting another")  # fmt: skip
+    if entry is None or entry["status"] in FLY_RETRYABLE_STATUSES:
+        return ""
+    return (f"a Fly delivery for {key} is already recorded (status {entry['status']}, branch "
+            f"{entry.get('branch', '?')}, run {entry.get('run_id') or 'not known'}); not "
+            "starting another. Check it, then remove its entry from "
+            f"{_registry_path()} to allow a new one")  # fmt: skip
+
+
+def _record(key: str, entry: dict | None) -> None:
+    with _REGISTRY_LOCK:
+        path = _registry_path()
+        deliveries = _read_registry(path)
+        if entry is None:
+            deliveries.pop(key, None)
+        else:
+            deliveries[key] = entry
+        _write_registry(path, deliveries)
+
+
+async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
+    """Run *launch* (the builder's ``run_skill`` call with the delivery spec)
+    under the durable record. Returns the dispatch's SkillResult, ``blocked(
+    reason)`` when a delivery for this key is already recorded, or None when
+    nothing was sent to Fly (not eligible, or the mint was refused): the
+    builder then runs its local path, as it would without Fly."""
+    reason = fly_delivery_blocker(plan.key)
+    if reason:
+        log.warning("[apis] %s", reason)
+        return blocked(reason)
+    try:
+        _record(plan.key, {"status": "launching", "branch": plan.branch, "run_id": "",
+                           "recorded_at": time.time()})  # fmt: skip
+    except (OSError, ValueError):
+        return blocked("the Fly delivery record could not be written; not launching")
+    try:
+        result = await launch()
+    except BaseException:
+        # The launch may have happened: keep it recorded, as unknown.
+        with contextlib.suppress(OSError, ValueError):
+            _record(plan.key, {"status": "unknown", "branch": plan.branch, "run_id": "",
+                               "recorded_at": time.time()})  # fmt: skip
+        raise
+    launched = bool(result.fly_delivery_status or result.remote_run_id)
+    if not launched:
+        # Nothing reached Fly: no record is kept.
+        with contextlib.suppress(OSError, ValueError):
+            _record(plan.key, None)
+        return None if result.fly_ineligible_before_launch else result
+    with contextlib.suppress(OSError, ValueError):
+        _record(plan.key, {"status": result.fly_delivery_status or "unknown",
+                           "branch": plan.branch, "run_id": result.remote_run_id,
+                           "commit": result.fly_delivery_commit,
+                           "pr_url": result.fly_pr_url, "recorded_at": time.time()})  # fmt: skip
+    return result
+
+
+_FLY_STATUS_TEXT = {
+    "opened": "opened pull request {pr}",
+    "updated": "updated pull request {pr}",
+    "no_changes": "finished with no new commits on {branch}; nothing was pushed",
+    "clone_failed": "could not prepare its clone of the repository; the agent did not run",
+    "not_delivered": "pushed nothing",
+    "push_failed": "did not get its push of {branch} accepted; no pull request was opened",
+    "pr_failed": ("pushed {branch} ({commit}), but the pull request step did not complete; "
+                  "the branch is on the remote"),
+    "no_time": "ran out of time",
+    "unknown": ("has an UNKNOWN outcome (run {run}); it may have pushed {branch}. Check before "
+                "dispatching again"),
+    "unreported": ("finished, but its result record carries no delivery status (run {run}); "
+                   "check {branch} on the remote before dispatching again"),
+}
+
+
+def fly_delivery_summary(result) -> str:
+    """Operator-facing text for a Fly delivery's outcome: what the record
+    says, with the reason it gave, and no claim about why."""
+    status = result.fly_delivery_status
+    template = _FLY_STATUS_TEXT.get(status, "ended with status {status}")
+    text = "Fly delivery " + template.format(
+        pr=f"#{result.fly_pr_number} ({result.fly_pr_url})" if result.fly_pr_url else "(none)",
+        branch=result.fly_delivery_branch or "its branch",
+        commit=(result.fly_delivery_commit or "")[:12] or "commit not reported",
+        run=result.remote_run_id or "not known", status=status or "none")
+    if status == "no_time" and result.fly_delivery_commit:
+        text += (f"; {result.fly_delivery_branch} ({result.fly_delivery_commit[:12]}) was "
+                 "pushed and no pull request was opened")  # fmt: skip
+    if result.fly_delivery_reason and status not in ("opened", "updated"):
+        text += f" ({result.fly_delivery_reason})"
+    return text + "."
