@@ -2703,6 +2703,15 @@ async def _run_skill_once(
                 skill, False, None, "", "", error=msg, provider=provider,
                 degraded_load=True, load_error=load_error,
             )
+        if fly_runner.wants_fly(runner, action_class):
+            msg = (
+                f"{provider} launch failed: {DEGRADED_TOOL_FLOOR_UNAVAILABLE}: "
+                "Fly degraded child authority is not bound"
+            )
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                degraded_load=True, load_error=load_error,
+            )
 
     # ── Build provider command ─────────────────────────────────────────────────
     # A dispatch carrying the GitHub contract is one whose task involves
@@ -3089,16 +3098,18 @@ async def _run_skill_once(
         inference_only=inference_only,
     )
     if degraded:
-        # The role read failed, so inherited publisher/record credentials are
-        # not authority for this child. Authentication for the model itself is
-        # retained by _subscription_only_env.
-        for key in tuple(subprocess_env):
-            if key in {
-                "NEOTOMA_BEARER_TOKEN", "GITHUB_TOKEN", "GH_TOKEN",
-                "ATELES_PRIVATE_KEYS_DIR", "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
-                "NEOTOMA_AAUTH_SUB", "NEOTOMA_AAUTH_ISS",
-            } or key.endswith("_NEOTOMA_TOKEN"):
-                subprocess_env.pop(key, None)
+        # A denylist misses the next credential added to launchd. Preserve
+        # only process basics and subscription login for this read-only child;
+        # record, GitHub, signing and plugin credentials never enter its env.
+        degraded_env_keys = {
+            "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
+            "LC_CTYPE", "TERM", "NO_COLOR", "CLAUDE_CODE_OAUTH_TOKEN",
+            "SSL_CERT_FILE", "SSL_CERT_DIR", AGENT_CHILD_MARKER_ENV,
+        }
+        subprocess_env = {
+            key: value for key, value in subprocess_env.items()
+            if key in degraded_env_keys
+        }
     if local_cfg is not None:
         # Local inference: point the CLI at the loopback proxy and strip any
         # frontier OAuth credential so it cannot be sent there.

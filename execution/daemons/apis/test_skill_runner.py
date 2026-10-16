@@ -441,11 +441,12 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_degraded_spawn_keeps_restricted_tools(self, MockLoader, _event) -> None:
+    def test_degraded_spawn_keeps_restricted_tools(self, MockLoader, _event, monkeypatch) -> None:
         """The assembled command must not restore the missing role's authority."""
         stub = _stub_def()
         stub.tool_allowlist = list(STUB_TOOL_ALLOWLIST)
         MockLoader.return_value.load.return_value = stub
+        monkeypatch.setenv("FUTURE_SERVICE_CREDENTIAL", "test-only-value")
         captured: list[str] = []
         captured_env: dict[str, str] = {}
         captured_mcp: dict = {}
@@ -485,6 +486,7 @@ class TestRunSkill:
         assert captured[captured.index("--permission-mode") + 1] == "dontAsk"
         assert "GITHUB_TOKEN" not in captured_env
         assert "NEOTOMA_BEARER_TOKEN" not in captured_env
+        assert "FUTURE_SERVICE_CREDENTIAL" not in captured_env
 
     @pytest.mark.parametrize("provider", ["codex", "cursor"])
     @patch("skill_runner._write_harness_event")
@@ -2252,7 +2254,10 @@ class TestAnthropicAuthPrecedence:
 
     def _spawn_and_capture_env(self, env_overrides: dict) -> dict:
         instance = MagicMock()
-        instance.load.return_value = _stub_def()
+        # These precedence tests concern a configured role. A degraded role
+        # has a separate read-only environment floor that always strips
+        # publication and metered API credentials.
+        instance.load.return_value = _make_def()
         captured: dict = {}
 
         async def fake_exec(*cmd, **kwargs):

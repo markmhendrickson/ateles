@@ -9,6 +9,9 @@ stub load with no prompt.
 
 import neotoma_timeout as nt
 import pytest
+import os
+import subprocess
+import sys
 
 
 @pytest.fixture(autouse=True)
@@ -70,3 +73,15 @@ def test_startup_validator_names_invalid_value(monkeypatch):
     monkeypatch.setenv("ATELES_NEOTOMA_TIMEOUT", "10s")
     with pytest.raises(SystemExit, match="ATELES_NEOTOMA_TIMEOUT='10s'"):
         nt.validate_neotoma_timeout_env()
+
+
+def test_package_import_fails_before_daemon_start_on_invalid_config():
+    env = dict(os.environ)
+    env["ATELES_SKIP_DOTENV"] = "1"
+    env["ATELES_NEOTOMA_TIMEOUT"] = "10s"
+    process = subprocess.run(
+        [sys.executable, "-c", "import lib.daemon_runtime"],
+        env=env, capture_output=True, text=True, timeout=10,
+    )
+    assert process.returncode != 0
+    assert "ATELES_NEOTOMA_TIMEOUT='10s'" in process.stderr

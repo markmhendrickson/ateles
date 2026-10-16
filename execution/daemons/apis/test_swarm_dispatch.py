@@ -1425,6 +1425,12 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch, degraded
     d = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
     )
+    incomplete = []
+
+    async def fake_incomplete(self, *args, **kwargs):
+        incomplete.append(kwargs)
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_incomplete)
     review_head = "a" * 40
 
     async def fake_run_skill_gate_pending(skill, prompt, **kwargs):
@@ -1456,6 +1462,12 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch, degraded
 
     if degraded_load:
         assert not sign_off_calls, "degraded output must not authorize a gate"
+        assert incomplete
+        assert any(
+            "⚠ DEGRADED" in reason
+            for item in incomplete
+            for _, reason in item.get("failed_lenses", ())
+        )
     else:
         assert ("owner/repo", 80, "arch", "waxwing", review_head) in sign_off_calls
 
@@ -7576,6 +7588,30 @@ def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch, degraded_loa
     assert gate == "pm"
     assert lens_agent == "pavo"
     assert head_sha  # a non-empty content-derived surrogate, never blank
+
+
+def test_degraded_spec_section_is_marked_and_cannot_auto_build(monkeypatch):
+    async def fake_run_skill(skill, prompt, **_kwargs):
+        return SkillResult(
+            skill, True, 0,
+            "<<<SPEC_SECTION>>>review content<<<END_SPEC_SECTION>>>", "",
+            degraded_load=skill == "pavo", load_error="timeout" if skill == "pavo" else "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+    handoffs = []
+
+    async def fake_handoff(self, *args, **kwargs):
+        handoffs.append((args, kwargs))
+
+    monkeypatch.setattr(SwarmDispatcher, "_hand_off_to_build", fake_handoff)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_build=True))
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+    pm_text = next(text for key, text in _FakeSpecStore.instances[-1].upserts if key == "pm")
+    assert pm_text.startswith("⚠ DEGRADED — role definition timeout; gate sign-off suppressed.")
+    assert not handoffs
 
 
 def test_pm_section_run_skill_call_carries_owns_pending_gate(monkeypatch):

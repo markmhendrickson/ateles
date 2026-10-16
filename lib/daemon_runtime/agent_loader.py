@@ -203,7 +203,7 @@ def policy_binds_agent_by_edge(
 
 def fetch_governs_edges(
     base_url: str = "",
-    timeout: float = 10.0,
+    timeout: float | None = None,
     *,
     _request: "callable | None" = None,
 ) -> dict[str, frozenset[str]]:
@@ -231,6 +231,7 @@ def fetch_governs_edges(
     request this module makes.
     """
     url = f"{(base_url or NEOTOMA_BASE_URL).rstrip('/')}/list_relationships"
+    timeout = neotoma_timeout() if timeout is None else timeout
     body = {"relationship_type": AGENT_POLICY_GOVERNS_EDGE, "limit": 500}
     if _request is not None:
         data = _request(url, body, timeout)
@@ -254,7 +255,7 @@ def fetch_governs_edges(
 def resolve_agent_definition_id(
     agent_sub: str,
     base_url: str = "",
-    timeout: float = 10.0,
+    timeout: float | None = None,
     *,
     _request: "callable | None" = None,
 ) -> str | None:
@@ -279,6 +280,7 @@ def resolve_agent_definition_id(
     name = agent_sub.split("@", 1)[0].strip().lower()
     if not name:
         return None
+    timeout = neotoma_timeout() if timeout is None else timeout
     url = f"{(base_url or NEOTOMA_BASE_URL).rstrip('/')}/entities/query"
     body = {
         "entity_type": "agent_definition",

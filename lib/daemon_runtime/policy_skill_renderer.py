@@ -127,6 +127,7 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 try:  # package import (normal runtime) with script-import fallback
+    from .neotoma_timeout import neotoma_timeout
     from .agent_loader import (  # type: ignore
         AGENT_POLICY_GOVERNS_EDGE,
         POLICY_QUERY_BODY,
@@ -139,6 +140,7 @@ try:  # package import (normal runtime) with script-import fallback
         unwrap_policy_entities,
     )
 except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
     from agent_loader import (  # type: ignore
         AGENT_POLICY_GOVERNS_EDGE,
         POLICY_QUERY_BODY,
@@ -584,7 +586,7 @@ def _open(req: urllib.request.Request, timeout: float):
 
 
 def _request(
-    url: str, body: dict, timeout: float = 10.0, retries: int = 3
+    url: str, body: dict, timeout: float | None = None, retries: int = 3
 ) -> dict:
     """POST `body` as JSON, stdlib-only (`urllib`) — the hook cannot import
     `httpx`, which is why this stays a second TRANSPORT from `AgentLoader`'s
@@ -604,6 +606,7 @@ def _request(
     Never follows a redirect (`_RefuseRedirect`), so the `Authorization`
     header is only ever sent to `url`'s own host.
     """
+    timeout = neotoma_timeout() if timeout is None else timeout
     headers = {"Content-Type": "application/json"}
     if NEOTOMA_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {NEOTOMA_BEARER_TOKEN}"
@@ -631,7 +634,7 @@ def _request(
 
 
 def fetch_active_policy_rows(
-    base_url: str = NEOTOMA_BASE_URL, timeout: float = 10.0
+    base_url: str = NEOTOMA_BASE_URL, timeout: float | None = None
 ) -> list[dict]:
     """All active/provisional `agent_policy` snapshot dicts, unfiltered by
     scope. Raises on transport failure — the caller decides how to degrade
@@ -645,6 +648,7 @@ def fetch_active_policy_rows(
     agent_policy's response shape, not two that can silently diverge
     (Waxwing, ateles#1268 round 2).
     """
+    timeout = neotoma_timeout() if timeout is None else timeout
     data = _request(f"{base_url}/entities/query", POLICY_QUERY_BODY, timeout=timeout)
     return unwrap_policy_entities(data)
 

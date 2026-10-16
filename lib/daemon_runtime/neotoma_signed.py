@@ -741,7 +741,7 @@ class NeotomaWriter:
         base_url: "str | None" = None,
         bearer: "str | None" = None,
         keys_dir: "str | Path | None" = None,
-        timeout: float = 15.0,
+        timeout: float | None = None,
     ) -> None:
         name = str(agent_name or "").strip().lower()
         if not name:
@@ -755,7 +755,7 @@ class NeotomaWriter:
         ).rstrip("/")
         self._bearer = bearer if bearer is not None else os.environ.get(_BEARER_ENV)
         self._keys_dir = keys_dir
-        self.timeout = timeout
+        self.timeout = neotoma_timeout() if timeout is None else timeout
         self._signer: "HttpSigSigner | None" = None
 
     # ── request construction (shared by the sync and async paths) ──
