@@ -89,7 +89,7 @@ def world(tmp_path, monkeypatch):
         try:
             return real_clear(root)
         except (OSError, ValueError, TypeError, UnicodeError) as exc:
-            cleanup_errors.append({"type": type(exc).__name__, "errno": getattr(exc, "errno", None)})
+            cleanup_errors.append(_cleanup_error(exc))
             raise
 
     def capture_remove(root):
@@ -97,7 +97,7 @@ def world(tmp_path, monkeypatch):
             return real_remove(root)
         except rd.RepoWorkError as exc:
             if not cleanup_errors:
-                cleanup_errors.append({"type": type(exc).__name__, "errno": None})
+                cleanup_errors.append(_cleanup_error(exc))
             raise
 
     monkeypatch.setattr(rd, "_clear", capture_clear)
@@ -183,36 +183,84 @@ def _remote_ref(world, ref=f"refs/heads/{BRANCH}"):
     return done.stdout.decode().strip() or None
 
 
-def _cleanup_details(world):
-    """Test-only failure evidence: no file contents, absolute paths or error text.
+def _cleanup_error(exc):
+    # Exception text, filenames and user-defined class names are untrusted.
+    kinds = (PermissionError, FileNotFoundError, NotADirectoryError, IsADirectoryError,
+             FileExistsError, OSError, ValueError, TypeError, UnicodeError, rd.RepoWorkError)
+    kind = next((kind.__name__ for kind in kinds if type(exc) is kind), "Error")
+    number = getattr(exc, "errno", None)
+    return {"type": kind, "errno": number if type(number) is int else None}
 
-    Unknown path components are redacted, including any filename containing a
-    job credential. Never follow links or print a value supplied by the agent.
+
+def _cleanup_details(world):
+    """Bound every assertion probe and inventory behind value-free evidence.
+
+    Never follow a root link (even a dangling one). Unknown relative components,
+    exception messages and filenames are untrusted; only fixed metadata escapes.
     """
     known = {"job-fly-deliver-1", "origin.git", "checkout", "export", "home", ".git",
              "objects", "pack", "refs", "heads", "hooks", "logs", "info", "HEAD", "config",
              "index", "packed-refs", "description", "exclude", "shallow"}
-    rows = []
+    details = {"errors": world["cleanup_errors"][:64], "leftovers": [],
+               "truncated": len(world["cleanup_errors"]) > 64, "incomplete": False, "root": None}
     root = world["work_root"]
-    if root.is_symlink():
-        return {"errors": world["cleanup_errors"], "leftovers": [
-            {"relative": ".", "mode": f"{stat.S_IMODE(root.lstat().st_mode):04o}", "kind": "link"}
-        ], "truncated": False}
-    for parent, dirs, files in os.walk(root, followlinks=False):
-        for name in sorted(dirs + files):
-            path = Path(parent, name)
-            relative = "/".join(part if part in known else "<entry>"
-                                for part in path.relative_to(root).parts)
-            try:
-                mode = path.lstat().st_mode
-                rows.append({"relative": relative, "mode": f"{stat.S_IMODE(mode):04o}",
-                             "kind": "link" if stat.S_ISLNK(mode) else
-                             "directory" if stat.S_ISDIR(mode) else "file"})
-            except OSError as exc:
-                rows.append({"relative": relative, "type": type(exc).__name__, "errno": exc.errno})
-            if len(rows) == 64:
-                return {"errors": world["cleanup_errors"], "leftovers": rows, "truncated": True}
-    return {"errors": world["cleanup_errors"], "leftovers": rows, "truncated": False}
+    rows = details["leftovers"]
+
+    def failure(exc, relative="<entry>"):
+        details["incomplete"] = True
+        if len(rows) < 64:
+            rows.append({"relative": relative, **_cleanup_error(exc)})
+        else:
+            details["truncated"] = True
+
+    def entry(path, relative):
+        try:
+            mode = path.lstat().st_mode
+        except OSError as exc:
+            failure(exc, relative)
+            return None
+        row = {"relative": relative, "mode": f"{stat.S_IMODE(mode):04o}",
+               "kind": "link" if stat.S_ISLNK(mode) else
+               "directory" if stat.S_ISDIR(mode) else "file"}
+        return row
+
+    try:
+        mode = root.lstat().st_mode
+    except FileNotFoundError:
+        return details  # Existing acceptance: an absent work root is clean.
+    except OSError as exc:
+        failure(exc, ".")
+        return details
+    details["root"] = {"mode": f"{stat.S_IMODE(mode):04o}",
+                       "kind": "link" if stat.S_ISLNK(mode) else
+                       "directory" if stat.S_ISDIR(mode) else "file"}
+    if not stat.S_ISDIR(mode):
+        rows.append({"relative": ".", **details["root"]})
+        return details
+    try:
+        if not os.listdir(root):
+            return details
+        for parent, dirs, files in os.walk(root, followlinks=False, onerror=failure):
+            for name in sorted(dirs + files):
+                if len(rows) == 64:
+                    details["truncated"] = True
+                    return details
+                path = Path(parent, name)
+                relative = "/".join(part if part in known else "<entry>"
+                                    for part in path.relative_to(root).parts)
+                row = entry(path, relative)
+                if row is not None:
+                    rows.append(row)
+    except OSError as exc:
+        failure(exc)
+    return details
+
+
+def _assert_cleanup(world, *, absent=False, present=False):
+    details = _cleanup_details(world)
+    wrong_root = (absent and details["root"] is not None) or (present and details["root"] is None)
+    if details["leftovers"] or details["incomplete"] or wrong_root:
+        pytest.fail("delivery cleanup failed: " + json.dumps(details), pytrace=False)
 
 
 def _no_secret_anywhere(record, world, *, disk=True):
@@ -220,9 +268,7 @@ def _no_secret_anywhere(record, world, *, disk=True):
     assert TOKEN not in text and HEADER not in text
     if disk:
         assert not any(world["api"]["disk"])  # never on disk while delivering
-    root = world["work_root"]
-    if root.exists() and os.listdir(root):
-        pytest.fail("delivery cleanup failed: " + json.dumps(_cleanup_details(world)), pytrace=False)
+    _assert_cleanup(world)
 
 
 # ── No delivery: unchanged ───────────────────────────────────────────────────
@@ -238,7 +284,8 @@ def test_a_job_without_a_delivery_is_unchanged(world):
 
     rc, record = _run(job_dir, runner)
     assert rc == 0 and not any(k.startswith(("delivery_", "pr_")) for k in record)
-    assert not world["work_root"].exists() and world["api"]["calls"] == []
+    _assert_cleanup(world, absent=True)
+    assert world["api"]["calls"] == []
     assert seen["argv"] == ["codex", "exec", "-"]
 
 
@@ -317,7 +364,8 @@ def test_a_deadline_too_short_for_any_cli_refuses_without_cloning(world, monkeyp
     rc, record = _run(_job(world["tmp"], timeout=600),
                       lambda *a, **k: pytest.fail("the CLI must not run"))
     assert record["delivery_status"] == "no_time"
-    assert not world["work_root"].exists() and world["api"]["calls"] == []
+    _assert_cleanup(world, absent=True)
+    assert world["api"]["calls"] == []
     assert _remote_ref(world) is None
 
 
@@ -368,7 +416,7 @@ def test_a_deadline_that_expires_during_the_import_pushes_nothing(world, monkeyp
     assert record["delivery_reason"] == f"no_time: {rd.NO_TIME_REASON}"
     assert after == []  # no git process started after the deadline
     assert world["api"]["calls"] == [] and _remote_ref(world) is None
-    assert os.listdir(world["work_root"]) == []
+    _assert_cleanup(world, present=True)
 
 
 def test_a_deadline_that_expires_after_the_push_opens_no_pull_request(world, monkeypatch):
@@ -388,7 +436,7 @@ def test_a_deadline_spent_before_the_clone_never_starts_the_cli(world, monkeypat
     rc, record = _run(_job(world["tmp"]), lambda *a, **k: pytest.fail("the CLI must not run"))
     assert record["delivery_status"] == "no_time"
     assert rc == run_job.EXIT_DELIVERY_FAILED and world["api"]["calls"] == []
-    assert os.listdir(world["work_root"]) == []
+    _assert_cleanup(world, present=True)
 
 
 # ── Not delivered ────────────────────────────────────────────────────────────
@@ -479,7 +527,7 @@ def test_the_work_directory_is_removed_when_the_cli_raises(world):
     with pytest.raises(RuntimeError):
         run_job.main(_job(world["tmp"]), writer=lambda *a: True, runner=runner,
                      hard_exit=lambda code: None)
-    assert os.listdir(world["work_root"]) == []
+    _assert_cleanup(world, present=True)
 
 
 # ── Job validation ──────────────────────────────────────────────────────────
@@ -495,7 +543,7 @@ def test_an_unacceptable_delivery_is_refused_before_anything_runs(world, change)
     rc, record = _run(_job(world["tmp"], delivery=delivery),
                       lambda *a, **k: pytest.fail("nothing may run"))
     assert rc == run_job.EXIT_JOB_INVALID and record is None
-    assert not world["work_root"].exists()
+    _assert_cleanup(world, absent=True)
 
 
 def test_a_delivery_token_without_a_delivery_is_refused(world):
@@ -595,15 +643,19 @@ def test_cleanup_assertion_never_probes_a_linked_root(world, monkeypatch, target
     monkeypatch.setattr(os, "listdir", listdir)
     details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
     assert probes == []
-    assert details["leftovers"] == [{"relative": ".", "mode": "0777", "kind": "link"}]
+    link_mode = stat.S_IMODE(world["work_root"].lstat().st_mode)
+    assert details["leftovers"] == [{"relative": ".", "mode": f"{link_mode:04o}", "kind": "link"}]
 
 
-@pytest.mark.parametrize("failure_site", ["root_lstat", "listdir", "entry_lstat", "walk"])
+@pytest.mark.parametrize("failure_site", ["root_lstat", "listdir", "entry_lstat", "walk", "walk_raise", "scandir"])
 def test_cleanup_assertion_sanitizes_probe_and_traversal_errors(world, monkeypatch, failure_site):
     root = world["work_root"]
     root.mkdir()
     (root / TOKEN).touch()
-    real_lstat, real_listdir, real_walk = Path.lstat, os.listdir, os.walk
+    real_lstat, real_listdir, real_walk, real_scandir = Path.lstat, os.listdir, os.walk, os.scandir
+    if failure_site == "scandir":
+        (root / TOKEN).unlink()
+        (root / TOKEN).mkdir()
 
     def fail(path):
         raise OSError(errno.EACCES, TOKEN + HEADER + ROLE_TOKEN, str(path))
@@ -620,6 +672,8 @@ def test_cleanup_assertion_sanitizes_probe_and_traversal_errors(world, monkeypat
         return real_listdir(path)
 
     def walk(path, *args, **kwargs):
+        if Path(path) == root and failure_site == "walk_raise":
+            return fail(root / TOKEN)
         if Path(path) == root and failure_site == "walk":
             error = OSError(errno.EACCES, TOKEN, str(root / HEADER))
             if kwargs.get("onerror"):
@@ -627,6 +681,12 @@ def test_cleanup_assertion_sanitizes_probe_and_traversal_errors(world, monkeypat
             return iter(())
         return real_walk(path, *args, **kwargs)
 
+    def scandir(path):
+        if Path(path) == root / TOKEN and failure_site == "scandir":
+            return fail(path)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
     monkeypatch.setattr(Path, "lstat", lstat)
     monkeypatch.setattr(os, "listdir", listdir)
     monkeypatch.setattr(os, "walk", walk)
@@ -663,12 +723,41 @@ def test_all_delivery_cleanup_assertion_sinks_use_safe_evidence(world, monkeypat
     assert details["leftovers"] == [{"relative": "<entry>", "mode": "0644", "kind": "file"}]
 
 
-def test_cleanup_assertion_bounds_and_redacts_more_than_64_rows(world):
+@pytest.mark.parametrize("count", [64, 65, 200])
+def test_cleanup_assertion_bounds_and_redacts_more_than_64_rows(world, count):
     root = world["work_root"]
     root.mkdir()
-    for i in range(65):
+    for i in range(count):
         (root / f"{TOKEN}-{i:03}").touch()
     details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
     assert len(details["leftovers"]) == 64
     assert all(row["relative"] == "<entry>" for row in details["leftovers"])
-    assert details["truncated"] is True
+    assert details["truncated"] is (count > 64)
+
+
+def test_cleanup_assertion_preserves_missing_empty_and_absent_root_contracts(world):
+    _assert_cleanup(world, absent=True)
+    missing = _assert_safe_cleanup_failure(lambda: _assert_cleanup(world, present=True), world)
+    assert missing["root"] is None
+    world["work_root"].mkdir()
+    _assert_cleanup(world)
+    details = _assert_safe_cleanup_failure(lambda: _assert_cleanup(world, absent=True), world)
+    assert details["root"]["kind"] == "directory" and details["leftovers"] == []
+
+
+def test_cleanup_assertion_records_nested_links_without_reading_targets(world, monkeypatch):
+    root = world["work_root"]
+    root.mkdir()
+    outside = world["tmp"] / TOKEN
+    outside.mkdir()
+    (outside / HEADER).write_text(ROLE_TOKEN)
+    (root / "checkout").symlink_to(outside, target_is_directory=True)
+    real_scandir = os.scandir
+    def scandir(path):
+        if Path(path) in (outside, root / "checkout"):
+            pytest.fail("nested target was traversed")
+        return real_scandir(path)
+    monkeypatch.setattr(os, "scandir", scandir)
+    details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
+    assert len(details["leftovers"]) == 1 and details["leftovers"][0]["kind"] == "link"
+    assert details["incomplete"] is False and details["truncated"] is False
