@@ -176,7 +176,7 @@ def _higher_tier(a: str, b: str) -> str:
     return a if _tier_index(a) >= _tier_index(b) else b
 
 
-def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> dict:
+def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> dict | None:
     """Read the selected source, with file priority over environment JSON.
 
     A genuinely missing file allows the environment source (or unconfigured
@@ -197,7 +197,7 @@ def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> di
             refuse()
         raw = os.environ.get(env_var, "").strip()
         if not raw:
-            return {}
+            return None
     except (OSError, UnicodeError, ValueError):
         refuse()
     try:
@@ -239,7 +239,7 @@ def configured_action_policy() -> dict[str, str | dict[str, str]]:
     """
     raw = _read_json_config(
         _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH
-    )
+    ) or {}
     out: dict[str, str | dict[str, str]] = {}
     for action_class, entry in raw.items():
         try:
@@ -269,19 +269,36 @@ def configured_vendor_binding() -> dict[str, dict[str, str]]:
     raw = _read_json_config(
         _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH
     )
+    return {} if raw is None else _normalize_vendor_binding(raw)
+
+
+def _normalize_vendor_binding(raw: object) -> dict[str, dict[str, str]]:
+    """Normalize a selected binding without dropping invalid declarations."""
+    def refuse():
+        raise InvalidTierPolicyError("invalid vendor_binding configuration; dispatch refused") from None
+
+    if not isinstance(raw, dict) or not raw:
+        refuse()
     out: dict[str, dict[str, str]] = {}
     for provider, tiers in raw.items():
-        if not isinstance(tiers, dict):
-            continue
-        provider_name = str(provider).strip().lower()
+        if not isinstance(provider, str) or not provider.strip() or not isinstance(tiers, dict) or not tiers:
+            refuse()
+        provider_name = provider.strip().lower()
+        if provider_name in out:
+            refuse()
         resolved: dict[str, str] = {}
         for tier, model in tiers.items():
-            tier_name = str(tier).strip().lower()
-            model_name = str(model).strip()
-            if tier_name in TIERS and model_name:
-                resolved[tier_name] = model_name
-        if resolved:
-            out[provider_name] = resolved
+            if not isinstance(tier, str) or tier.strip().lower() not in TIERS or not isinstance(model, str):
+                refuse()
+            tier_name = tier.strip().lower()
+            if tier_name in resolved:
+                refuse()
+            try:
+                model_name = validate_model_selector(model.strip())
+            except ValueError:
+                refuse()
+            resolved[tier_name] = model_name
+        out[provider_name] = resolved
     return out
 
 
@@ -575,7 +592,12 @@ def model_for_tier(
     module exists to close (module docstring): selected invalid configuration
     and unresolved bindings must refuse automatic dispatch.
     """
-    active_binding = configured_vendor_binding() if binding is None else binding
+    if binding is None:
+        active_binding = configured_vendor_binding()
+    else:
+        # An explicitly supplied empty snapshot retains the existing API's
+        # unconfigured meaning; selected source objects are validated above.
+        active_binding = {} if isinstance(binding, dict) and not binding else _normalize_vendor_binding(binding)
     if not active_binding:
         return None
     normalized_provider = provider.strip().lower()

@@ -43,6 +43,8 @@ def test_scenarios_are_unique_and_cover_the_required_contract():
     ('invalid_empty_compare', 'no_validation'),
     ('explicit_terra_overrides_class', 'drop_model'),
     ('action_class_resolves_each_comparison_provider', 'drop_action_class'),
+    ('binding_nested_dispatch_cli', 'drop_binding_validation'),
+    ('binding_blank_run_once', 'drop_binding_validation'),
 ])
 def test_eval_checks_detect_removed_contract(scenario_id, mutation, tmp_path):
     scenario = BY_ID[scenario_id]

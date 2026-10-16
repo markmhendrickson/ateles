@@ -80,14 +80,13 @@ def test_action_policy_drops_unrecognized_tier_name(monkeypatch) -> None:
     assert model_tiering.configured_action_policy() == {"build": "top"}
 
 
-def test_vendor_binding_drops_unrecognized_tier_name(monkeypatch) -> None:
+def test_vendor_binding_refuses_unrecognized_tier_name(monkeypatch) -> None:
     monkeypatch.setenv(
         "APIS_VENDOR_BINDING",
         json.dumps({"cursor": {"top": "opus-thing", "bogus": "x"}}),
     )
-    assert model_tiering.configured_vendor_binding() == {
-        "cursor": {"top": "opus-thing"}
-    }
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_vendor_binding()
 
 
 def test_vendor_binding_lowercases_provider_and_tier(monkeypatch) -> None:
@@ -99,9 +98,10 @@ def test_vendor_binding_lowercases_provider_and_tier(monkeypatch) -> None:
     }
 
 
-def test_vendor_binding_drops_provider_whose_value_is_not_an_object(monkeypatch) -> None:
+def test_vendor_binding_refuses_provider_whose_value_is_not_an_object(monkeypatch) -> None:
     monkeypatch.setenv("APIS_VENDOR_BINDING", json.dumps({"cursor": "not-a-map"}))
-    assert model_tiering.configured_vendor_binding() == {}
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_vendor_binding()
 
 
 # ── resolve_tier: policy-driven, fail-closed to the top tier ────────────────
