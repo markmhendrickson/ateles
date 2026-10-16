@@ -135,16 +135,16 @@ def test_run_skill_ends_at_the_first_provider_and_cools_nothing(neotoma):
     assert neotoma["spawned"] == []
 
 
-def test_a_role_with_no_definition_at_all_still_runs_degraded_by_opt_in(neotoma, monkeypatch):
-    """Neotoma answered and has no such definition: this dispatcher's explicit opt-in,
-    unchanged. The dispatch is not refused at the definition stage."""
+def test_a_role_with_no_definition_is_refused(neotoma, monkeypatch):
+    """An available local skill does not authorize a missing canonical role."""
     neotoma["script"] = ["none"]
     monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {})
 
     result = _once()
 
-    assert result.definition_unavailable is False
-    assert "binary unavailable" in result.error, "the dispatch got past the definition stage"
+    assert result.definition_unavailable is True
+    assert not neotoma["spawned"]
+    assert "pavo" not in skill_runner._agent_def_cache
 
 
 def test_a_timeout_then_success_dispatches_on_the_real_definition(neotoma, monkeypatch):
@@ -158,9 +158,8 @@ def test_a_timeout_then_success_dispatches_on_the_real_definition(neotoma, monke
     assert skill_runner._agent_def_cache["pavo"].tools == ["Read"]
 
 
-def test_planted_red_a_stand_in_would_dispatch_with_wildcard_tools(neotoma, monkeypatch):
-    """Reinstate the old behaviour: a failed load becomes a stand-in. The dispatch then
-    gets past the definition stage with an empty prompt and wildcard tools."""
+def test_dispatch_independently_refuses_a_reinstated_stand_in(neotoma, monkeypatch):
+    """A second guard refuses a lower loader that wrongly returns an absence marker."""
     real_load = al.AgentLoader.load
 
     def reinstated(self, *, allow_undefined=False):
@@ -174,9 +173,9 @@ def test_planted_red_a_stand_in_would_dispatch_with_wildcard_tools(neotoma, monk
 
     result = _once()
 
-    assert result.definition_unavailable is False, "the reinstated stand-in lets the dispatch proceed"
-    stand_in = skill_runner._load_agent_def("pavo")
-    assert stand_in.prompt_markdown == "" and stand_in.tools == ["*"]
+    assert result.definition_unavailable is True, "the caller independently refuses a stand-in"
+    assert not neotoma["spawned"]
+    assert "pavo" not in skill_runner._agent_def_cache
 
 
 def test_a_retry_safe_dispatch_does_not_fail_over_or_cool_a_provider(neotoma, monkeypatch):
@@ -212,8 +211,8 @@ def test_only_a_validated_found_definition_is_cached(neotoma):
     registered afterwards is picked up on the next one."""
     neotoma["script"] = ["none", "real"]
 
-    first = skill_runner._load_agent_def("pavo")
-    assert first.is_stub is True
+    with pytest.raises(al.AgentDefinitionUnavailable):
+        skill_runner._load_agent_def("pavo")
     assert "pavo" not in skill_runner._agent_def_cache
 
     second = skill_runner._load_agent_def("pavo")
@@ -223,7 +222,7 @@ def test_only_a_validated_found_definition_is_cached(neotoma):
 
 @pytest.mark.parametrize("malformed", [{"error": "boom"}, {"results": []}, {"entities": "x"}])
 def test_a_malformed_lookup_is_refused_not_degraded(neotoma, monkeypatch, malformed):
-    """The degraded path is for authoritative absence only."""
+    """Malformed lookups supply no authority to dispatch."""
     class _Bad(_Resp):
         pass
 
@@ -280,3 +279,30 @@ def test_a_bad_signed_result_means_zero_dispatch_and_nothing_cached(neotoma, mon
     assert skill_runner._agent_def_cache == {}
     assert neotoma["spawned"] == []
     assert neotoma["calls"] == before, "no bearer fallback after a returned signed result"
+
+
+@pytest.mark.parametrize("overrides", [
+    {"prompt_markdown": ""}, {"tool_allowlist": []}, {"tool_allowlist": None},
+    {"status": "unknown"}, {"status": "retired"}, {"status": "disabled"},
+])
+def test_found_invalid_or_refused_role_never_launches(neotoma, monkeypatch, overrides):
+    snapshot = {**REAL["entities"][0]["snapshot"], **overrides}
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp({
+        "entities": [{"entity_id": "ent_real", "snapshot": snapshot}],
+    }))
+    result = _once()
+    assert result.definition_unavailable is True
+    assert not neotoma["spawned"]
+    assert not skill_runner._agent_def_cache
+
+
+@pytest.mark.parametrize("status", ["active", "planned", "proposed", "draft"])
+def test_declared_legacy_statuses_keep_their_dispatch_contract(neotoma, monkeypatch, status):
+    snapshot = {**REAL["entities"][0]["snapshot"], "status": status}
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp({
+        "entities": [{"entity_id": "ent_real", "snapshot": snapshot}],
+    }))
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {})
+    result = _once()
+    assert result.definition_unavailable is False
+    assert skill_runner._agent_def_cache["pavo"].tools == ["Read"]

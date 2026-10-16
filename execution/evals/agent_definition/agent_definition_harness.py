@@ -159,6 +159,10 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
                 raise httpx.ConnectError("refused (private detail)")
             if outcome == "none":
                 return _Resp({"entities": []})
+            if outcome.startswith("missing:"):
+                payload = json.loads(json.dumps(REAL))
+                payload["entities"][0]["snapshot"].pop(outcome.split(":", 1)[1])
+                return _Resp(payload)
             if outcome == "real":
                 return _Resp(REAL)
             return _Resp(status=int(outcome))
@@ -229,6 +233,15 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         if mutation == "retry_rejected":
             mp.setattr(al, "_RETRYABLE_LOAD_CODES", al._RETRYABLE_LOAD_CODES | {"rejected"})
 
+        # Observe real loader returns independently of the caller's rejection.
+        # A planted fallback must still be detected when a second guard refuses it.
+        observed_load = al.AgentLoader.load
+        def observe_load(self, **kwargs):
+            definition = observed_load(self, **kwargs)
+            if definition.is_stub:
+                obs["stand_in_seen"] = True
+            return definition
+        mp.setattr(al.AgentLoader, "load", observe_load)
         kind = scenario["kind"]
         try:
             if kind == "dispatch":
@@ -290,7 +303,7 @@ def check(scenario: dict, obs: dict) -> list[str]:
         want("cached definition tools", cached.tools if cached else None, exp["loaded_tools"])
     if exp.get("no_stand_in"):
         cached = obs.get("cached")
-        if cached is not None and (cached.is_stub or cached.tools == ["*"] or not cached.prompt_markdown):
+        if obs.get("stand_in_seen") or (cached is not None and (cached.is_stub or not cached.prompt_markdown)):
             bad.append("a stand-in definition (empty prompt / wildcard tools) was used")
     if "signed_requests" in exp:
         want("signed requests", obs.get("signed_requests", 0), exp["signed_requests"])

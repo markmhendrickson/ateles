@@ -13,11 +13,10 @@ dispatched on one would run with an empty ``prompt_markdown`` and a wildcard
 ``tool_allowlist`` (no role instructions, unrestricted tools), and a daemon would
 skip the status check that decides whether it may run at all.
 
-The one narrow exception is explicit. A caller that runs a role with no definition
-ON PURPOSE passes ``allow_undefined=True``; it then receives the "undefined"
-definition (``is_stub=True``) ONLY when Neotoma answered and has no such
-definition (``not_found``). A transport failure, a timeout or a server error can
-never produce it, with or without the opt-in.
+Explicit ``allow_undefined=True`` returns an inert absence marker
+(``is_stub=True``, no tools) ONLY when Neotoma answered and has no such
+definition (``not_found``). It supplies no authority to dispatch. A transport
+failure, a timeout or a server error can never produce it, with or without the opt-in.
 
 Status enforcement (ateles#562). ``agent_definition.status`` used to be read,
 logged, and then ignored — setting an agent to ``retired`` had no runtime
@@ -31,7 +30,7 @@ has a daemon and a live grant while marked ``planned``, and ``lanius`` is the
 swarm's busiest dispatcher while marked ``planned``. Refusing on ``planned``
 would take those down on deploy.
 
-So only statuses that express an operator's intent to STOP the agent refuse:
+Absent and unrecognized statuses refuse. Explicit stop statuses also refuse:
 ``retired`` and ``disabled``. ``planned`` warns loudly and keeps running, which
 surfaces the data problem without acting on data known to be wrong. Correcting
 those entities is tracked separately; once the data is accurate, ``planned``
@@ -521,9 +520,8 @@ def load_failure_code(exc: BaseException) -> str:
 def evaluate_status(status: str) -> tuple[StatusAction, str]:
     """Map an agent_definition.status to an action and a human-readable reason.
 
-    Unrecognised statuses WARN rather than refuse: a status nobody anticipated
-    is missing information, and this function must not invent an outage from a
-    typo or a value added by a future migration.
+    Absent and unrecognized statuses refuse. The known legacy planned, proposed
+    and draft values retain their explicit warning treatment.
     """
     s = (status or "").strip().lower()
     if s in REFUSING_STATUSES:
@@ -535,9 +533,8 @@ def evaluate_status(status: str) -> tuple[StatusAction, str]:
         return StatusAction.RUN, f"status={s}"
     if s == UNDEFINED_STATUS or not s:
         return (
-            StatusAction.WARN,
-            "Neotoma has no agent_definition for this agent (explicit opt-in); the "
-            "agent is unregistered and its tool allowlist is unscoped",
+            StatusAction.REFUSE,
+            "Neotoma has no admitted agent_definition for this agent",
         )
     if s in WARNING_STATUSES:
         return (
@@ -546,7 +543,7 @@ def evaluate_status(status: str) -> tuple[StatusAction, str]:
             "either the entity is stale or the daemon should not be deployed",
         )
     return (
-        StatusAction.WARN,
+        StatusAction.REFUSE,
         f"agent_definition.status is {s!r}, which is not a recognised status",
     )
 
@@ -577,12 +574,11 @@ def load_agent_definition_or_exit(daemon_name: str) -> "AgentDefinition":
     The status check (``enforce_status_or_exit``) is what stops a retired agent
     from running, so a daemon that could not read its definition must not carry on
     as if the check had passed. Exit is non-zero, like the revoked-grant and
-    refusing-status cases, so the service manager restarts it. A daemon that is
-    simply not registered (Neotoma answered, no definition) keeps running with a
-    WARN, as before: that opt-in is narrow and never covers a failed load.
+    refusing-status cases, so the service manager restarts it. An unregistered
+    daemon also refuses: absence supplies no authority to start.
     """
     try:
-        return AgentLoader(daemon_name).load(allow_undefined=True)
+        return AgentLoader(daemon_name).load()
     except AgentDefinitionUnavailable as exc:
         log.error(
             f"[{daemon_name}] Refusing to start: agent_definition unavailable "
@@ -603,7 +599,7 @@ class AgentDefinition:
     genus: str = ""
     status: str = "active"
     prompt_markdown: str = ""
-    tool_allowlist: "str | list[str]" = "*"
+    tool_allowlist: "str | list[str]" = field(default_factory=list)
     agent_grant: str = "service"
     override_policy: str = ""
     aauth_sub: str = ""
@@ -614,7 +610,7 @@ class AgentDefinition:
     last_observation_id: str = ""
     # True only for the "undefined" definition a caller explicitly opted into
     # (``load(allow_undefined=True)``) when Neotoma answered and has no definition
-    # for this agent. It carries prompt_markdown="" and tool_allowlist="*", so
+    # for this agent. It carries an empty prompt and no tools, so
     # such a caller must treat it as "no definition", never as a loaded one. A
     # FAILED load never produces it: that raises ``AgentDefinitionUnavailable``.
     is_stub: bool = False
@@ -626,35 +622,40 @@ class AgentDefinition:
         """Return tool_allowlist as a list. ['*'] means all tools.
 
         Accepts tool_allowlist in any of the shapes Neotoma may store it:
-          - "*" (string) or empty -> all tools
+          - explicit "*" -> all tools; missing/empty/invalid -> no tools
           - a JSON array / Python list (the canonical entity storage shape)
           - a comma-separated string (legacy / hand-authored shape)
         """
         raw = self.tool_allowlist
         if raw is None:
-            return ["*"]
+            return []
         # Array shape (canonical entity storage): list/tuple of tool names.
         if isinstance(raw, (list, tuple)):
-            items = [str(t).strip() for t in raw if str(t).strip()]
-            return items or ["*"]
-        # String shape: "*" / empty -> wildcard.
-        text = str(raw).strip()
-        if not text or text == "*":
+            if not all(isinstance(t, str) for t in raw):
+                return []
+            return [t.strip() for t in raw if t.strip()]
+        # Only an explicit "*" denotes wildcard authority.
+        if not isinstance(raw, str):
+            return []
+        text = raw.strip()
+        if text == "*":
             return ["*"]
+        if not text:
+            return []
         # Neotoma stores tool_allowlist as a JSON-array STRING (e.g.
         # '["Bash", "Bash(gh pr:*)", ...]'). Parse that shape FIRST — a naive
         # comma-split would keep the surrounding brackets/quotes on each token,
         # yielding garbage like '"Bash(gh pr:*)"' that the CLI rejects as a
         # malformed --allowedTools rule and fails the whole dispatch (the
         # Bash(...:*) grammar makes the rejection fatal, not silently ignored).
-        if text.startswith("[") and text.endswith("]"):
+        if text.startswith("["):
             try:
                 parsed = json.loads(text)
-                if isinstance(parsed, (list, tuple)):
-                    items = [str(t).strip() for t in parsed if str(t).strip()]
-                    return items or ["*"]
+                if isinstance(parsed, list) and all(isinstance(t, str) for t in parsed):
+                    return [t.strip() for t in parsed if t.strip()]
             except (ValueError, TypeError):
-                pass  # fall through to comma-split for a non-JSON bracketed string
+                pass
+            return []
         # Legacy / hand-authored comma-separated shape.
         return [t.strip() for t in text.split(",") if t.strip()]
 
@@ -747,10 +748,10 @@ class AgentLoader:
         A transient failure (timeout, transport error, 5xx, 429) is retried with
         the short backoff in ``LOAD_BACKOFFS_S`` under the single deadline
         ``LOAD_TOTAL_CAP_S``; any other failure is final at once.
-        ``allow_undefined=True`` is the explicit, narrow opt-in for a caller that
-        runs this agent without a definition on purpose: it turns ONLY authoritative
-        absence (a well-formed 200 whose ``entities`` list is empty) into the
-        "undefined" definition. A malformed response, a route error, a redirect, a
+        ``allow_undefined=True`` is an introspection opt-in: it turns ONLY
+        authoritative absence (a well-formed 200 whose ``entities`` list is empty)
+        into an inert "undefined" marker with no tools. It cannot authorize a
+        dispatch or daemon startup. A malformed response, a route error, a redirect, a
         timeout: all of those raise, with or without the opt-in.
         """
         if not self.agent_name.strip():
@@ -846,6 +847,11 @@ class AgentLoader:
             except _LoadBusy:
                 raise
             except Exception as exc:
+                if isinstance(exc, ns.SignedRequestError) and exc.response_received:
+                    status = exc.http_status
+                    if isinstance(status, int) and not isinstance(status, bool) and status != SUCCESS_STATUS:
+                        raise _TransportStatus(status) from None
+                    raise self._unavailable("bad_response") from None
                 log.warning(
                     f"[{self.agent_name}] signed request failed ({type(exc).__name__}); "
                     "falling back to bearer"
@@ -937,6 +943,14 @@ class AgentLoader:
             or (isinstance(allow, (list, tuple)) and all(isinstance(t, str) for t in allow))
         ):
             raise self._unavailable("bad_response")
+        if not isinstance(snap.get("prompt_markdown"), str) or not snap["prompt_markdown"].strip():
+            raise self._unavailable("bad_response")
+        if (not isinstance(snap.get("status"), str)
+                or snap["status"].strip().lower() not in
+                (RUNNING_STATUSES | WARNING_STATUSES | REFUSING_STATUSES)):
+            raise self._unavailable("bad_response")
+        if not AgentDefinition(tool_allowlist=allow).tools:
+            raise self._unavailable("bad_response")
         prov = snap.get("provenance")
         if prov is not None and not isinstance(prov, dict):
             raise self._unavailable("bad_response")
@@ -1023,7 +1037,7 @@ class AgentLoader:
             genus=text("genus", ""),
             status=text("status", "active"),
             prompt_markdown=text("prompt_markdown", ""),
-            tool_allowlist="*" if allow is None else allow,
+            tool_allowlist=allow,
             agent_grant=text("agent_grant", "service"),
             override_policy=text("override_policy", ""),
             aauth_sub=text("aauth_sub", f"{self.agent_name}@ateles-swarm"),
@@ -1038,21 +1052,21 @@ class AgentLoader:
 
         Reached only through ``load(allow_undefined=True)`` and only for a definite
         ``not_found``; a failed load raises instead. It has an EMPTY
-        prompt_markdown and a WILDCARD tool_allowlist, so it is logged at ERROR
+        prompt_markdown and NO tools, so it is logged at ERROR
         and marked ``is_stub`` for the caller to branch on.
 
         Its status is UNDEFINED_STATUS, not "active" (ateles#562): an absence of
         information must not look like a configured agent.
         """
         log.error(
-            f"[{self.agent_name}] no agent_definition exists ({reason}) — running "
-            "WITHOUT one by explicit opt-in: empty prompt, wildcard tools."
+            f"[{self.agent_name}] no agent_definition exists ({reason}) — "
+            "returning an inert absence marker with no tools."
         )
         return AgentDefinition(
             name=self.agent_name,
             aauth_sub=f"{self.agent_name}@ateles-swarm",
             agent_grant="service",
-            tool_allowlist="*",
+            tool_allowlist=[],
             status=UNDEFINED_STATUS,
             is_stub=True,
             load_error=reason,

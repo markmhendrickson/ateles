@@ -289,25 +289,18 @@ async def _orchestrate_workflow_for(event) -> None:
         # Pin the exact agent_definition version at dispatch time (ateles#22). A
         # definition that cannot be LOADED right now (a timeout, a server error)
         # refuses this dispatch: the gate stays ready and is dispatched again on a
-        # later pass. The spawn itself runs on the repo's SKILL.md, so a role that
-        # simply has no definition (Neotoma answered "none") is still pinned
-        # empty and spawned, as before; that case never involves a stand-in.
+        # later pass. A local SKILL.md cannot authorize an unregistered role;
+        # authoritative absence refuses this dispatch too.
         try:
             gate_agent_def = await asyncio.to_thread(
                 AgentLoader(gate.owner_agent).load
             )
         except AgentDefinitionUnavailable as exc:
-            if exc.transient:
-                log.error(
-                    f"[{DAEMON_NAME}] gate {gate.gate_name} → {gate.owner_agent} "
-                    f"NOT dispatched on {event.entity_id}: {exc}"
-                )
-                continue
-            log.warning(
-                f"[{DAEMON_NAME}] {gate.owner_agent} has no agent_definition; "
-                "dispatching on its SKILL.md with an empty definition pin"
+            log.error(
+                f"[{DAEMON_NAME}] gate {gate.gate_name} → {gate.owner_agent} "
+                f"NOT dispatched on {event.entity_id}: {exc}"
             )
-            gate_agent_def = None
+            continue
         state[gate.gate_name].status = "dispatched"
         try:
             await participation.record_dispatched(

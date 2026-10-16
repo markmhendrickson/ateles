@@ -57,10 +57,8 @@ def test_json_array_string_with_blanks():
     assert _tools('["a", "", "  ", "b"]') == ["a", "b"]
 
 
-def test_bracketed_non_json_falls_back_to_comma_split():
-    """A bracketed string that isn't valid JSON must not crash; it falls back
-    to the legacy comma-split rather than raising."""
-    assert _tools("[a, b, c]") == ["[a", "b", "c]"]
+def test_bracketed_non_json_grants_no_tools():
+    assert _tools("[a, b, c]") == []
 
 
 def test_wildcard_string():
@@ -68,14 +66,14 @@ def test_wildcard_string():
     assert _tools("  *  ") == ["*"]
 
 
-def test_empty_and_none_default_to_wildcard():
-    assert _tools("") == ["*"]
-    assert _tools(None) == ["*"]
-    assert _tools([]) == ["*"]
+def test_empty_and_none_grant_no_tools():
+    assert _tools("") == []
+    assert _tools(None) == []
+    assert _tools([]) == []
 
 
-def test_default_is_wildcard():
-    assert AgentDefinition(name="t").tools == ["*"]
+def test_default_grants_no_tools():
+    assert AgentDefinition(name="t").tools == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,7 +248,7 @@ def test_successful_load_is_not_a_stub(monkeypatch):
             {
                 "entity_id": "ent_real",
                 "snapshot": {"name": "apis", "prompt_markdown": "# real prompt",
-                             "tool_allowlist": ["Bash"]},
+                             "tool_allowlist": ["Bash"], "status": "active"},
             }
         ]
     }

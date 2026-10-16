@@ -151,7 +151,11 @@ def agent_identity(
 
 
 class SignedRequestError(RuntimeError):
-    """A signed request that failed before any HTTP status came back.
+    """A signed request failure with an explicit response boundary.
+
+    ``response_received`` distinguishes a completed HTTP response from a
+    signing/transport failure before response headers. Once true, callers must
+    not switch identity to the bearer path, even when the body is unreadable.
 
     ``code`` is a short, fixed, non-sensitive reason a caller may log:
 
@@ -165,9 +169,12 @@ class SignedRequestError(RuntimeError):
     body, a header or a filesystem path, and callers must never log it.
     """
 
-    def __init__(self, message: str, code: str):
+    def __init__(self, message: str, code: str, *, response_received: bool = False,
+                 http_status: int | None = None):
         super().__init__(message)
         self.code = code
+        self.response_received = response_received
+        self.http_status = http_status
 
 
 def _helper_error_code(message: object) -> str:
@@ -211,8 +218,9 @@ def signed_request(
 ) -> "tuple[int, dict]":
     """Perform a per-agent AAuth-signed request. Returns (status, parsed_json).
 
-    Raises RuntimeError on signing/transport failure or when the agent has no
-    key — callers should catch and fall back to their existing path. This
+    Raises SignedRequestError for helper/response failures. Only failures without
+    ``response_received`` may use an existing bearer fallback; unreadable responses
+    remain final. This
     function is NOT gated on ``via_cli_enabled()`` — that flag is applied by
     the two existing callers in `agent_loader.py`, which sign a daemon's OWN
     traffic and fall back to the bearer path when the flag is off. A caller
@@ -288,24 +296,69 @@ def signed_request(
     # Preparation has finished and been reaped. This is the transport launch
     # boundary: never reuse the relative allowance computed before preparation.
     allowance = remaining()
-    proc = subprocess.run(
-        [NODE_BIN, str(_HELPER)],
-        input=request_json,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=allowance,
-    )
+
+    def response_boundary(output):
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        first, separator, rest = (output or "").partition("\n")
+        try:
+            header = json.loads(first)
+        except (ValueError, TypeError):
+            return False, None, output
+        if isinstance(header, dict) and header.get("response_received") is True:
+            return True, header.get("status"), rest if separator else ""
+        return False, None, output
+
     try:
-        out = json.loads(proc.stdout or "{}")
+        proc = subprocess.run(
+            [NODE_BIN, str(_HELPER)],
+            input=request_json,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=allowance,
+        )
+    except subprocess.TimeoutExpired as exc:
+        received, status, _ = response_boundary(exc.stdout)
+        if received:
+            raise SignedRequestError("signed response body timed out", "helper_timeout",
+                                     response_received=True, http_status=status) from None
+        raise
+    received, status, output = response_boundary(proc.stdout)
+    try:
+        out = json.loads(output or "{}")
     except json.JSONDecodeError as exc:
         raise SignedRequestError(
-            f"signed_fetch returned non-JSON: {proc.stderr.strip()[:200]}", "helper_non_json"
+            "signed helper returned non-JSON", "helper_non_json",
+            response_received=received, http_status=status,
         ) from exc
+    if received:
+        # The trusted helper emitted headers before it read the body. Preserve
+        # that evidence even if its final envelope was interrupted or malformed.
+        if not isinstance(out, dict) or out.get("status") != status:
+            raise SignedRequestError("signed response envelope is incomplete", "helper_non_json",
+                                     response_received=True, http_status=status)
+    if not isinstance(out, dict):
+        raise SignedRequestError("signed helper returned an invalid envelope", "helper_non_json")
+    # The helper's HTTP status is evidence of a response before body parsing.
+    # Never lose that boundary to JSONDecodeError or a response-stream failure.
+    if "status" in out:
+        status = out["status"]
+        if isinstance(status, bool) or not isinstance(status, int):
+            raise SignedRequestError("signed response status is invalid", "helper_non_json",
+                                     response_received=True)
+        if out.get("error") or out.get("body_error"):
+            raise SignedRequestError("signed response body could not be read", "response_not_json",
+                                     response_received=True, http_status=status)
+        try:
+            data = json.loads(out["body"]) if out.get("body") else {}
+        except (TypeError, ValueError) as exc:
+            raise SignedRequestError("signed response body is not JSON", "response_not_json",
+                                     response_received=True, http_status=status) from exc
+        return status, data
     if out.get("error"):
         raise SignedRequestError(out["error"], _helper_error_code(out["error"]))
-    data = json.loads(out["body"]) if out.get("body") else {}
-    return int(out.get("status", 0)), data
+    raise SignedRequestError("signed helper returned no result", "helper_non_json")
 
 
 # ── Signed write client (ateles#1270 step 2a) ────────────────────────────────

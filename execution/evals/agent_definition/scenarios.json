@@ -47,7 +47,8 @@
         "log_excludes": [
           "private detail",
           "timed out"
-        ]
+        ],
+        "no_stand_in": true
       }
     },
     {
@@ -82,17 +83,19 @@
       }
     },
     {
-      "id": "a_role_with_no_definition_runs_degraded_only_by_the_dispatchers_explicit_opt_in",
-      "why": "Neotoma answered and has no such definition: the dispatcher's existing, explicit degraded path is unchanged and is not mistaken for a failed load",
+      "id": "a_role_with_no_definition_is_refused",
+      "why": "A local skill supplies no canonical authority to dispatch.",
       "kind": "dispatch",
       "stop_after_definition": true,
       "neotoma": [
         "none"
       ],
       "expect": {
-        "past_definition_stage": true,
+        "refused": true,
         "requests": 1,
-        "sleeps": []
+        "sleeps": [],
+        "nothing_spawned": true,
+        "no_stand_in": true
       }
     },
     {
@@ -104,7 +107,8 @@
       ],
       "expect": {
         "exit_code": 1,
-        "requests": 3
+        "requests": 3,
+        "no_stand_in": true
       }
     },
     {
@@ -130,7 +134,10 @@
       "expect": {
         "refused": true,
         "requests": 1,
-        "nothing_spawned": true
+        "nothing_spawned": true,
+        "log_contains": [
+          "bad_response"
+        ]
       }
     },
     {
@@ -143,7 +150,10 @@
       "expect": {
         "refused": true,
         "requests": 1,
-        "nothing_spawned": true
+        "nothing_spawned": true,
+        "log_contains": [
+          "bad_response"
+        ]
       }
     },
     {
@@ -156,7 +166,10 @@
       "expect": {
         "refused": true,
         "requests": 1,
-        "nothing_spawned": true
+        "nothing_spawned": true,
+        "log_contains": [
+          "rejected"
+        ]
       }
     },
     {
@@ -239,6 +252,48 @@
         "signed_requests": 1,
         "requests": 0,
         "nothing_spawned": true
+      }
+    },
+    {
+      "id": "a_found_definition_without_prompt_markdown_refuses",
+      "why": "Found records must declare role instructions and authority.",
+      "kind": "dispatch",
+      "neotoma": [
+        "missing:prompt_markdown"
+      ],
+      "expect": {
+        "refused": true,
+        "requests": 1,
+        "nothing_spawned": true,
+        "no_stand_in": true
+      }
+    },
+    {
+      "id": "a_found_definition_without_tool_allowlist_refuses",
+      "why": "Found records must declare role instructions and authority.",
+      "kind": "dispatch",
+      "neotoma": [
+        "missing:tool_allowlist"
+      ],
+      "expect": {
+        "refused": true,
+        "requests": 1,
+        "nothing_spawned": true,
+        "no_stand_in": true
+      }
+    },
+    {
+      "id": "a_found_definition_without_status_refuses",
+      "why": "Found records must declare role instructions and authority.",
+      "kind": "dispatch",
+      "neotoma": [
+        "missing:status"
+      ],
+      "expect": {
+        "refused": true,
+        "requests": 1,
+        "nothing_spawned": true,
+        "no_stand_in": true
       }
     }
   ]

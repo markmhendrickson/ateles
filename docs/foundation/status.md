@@ -249,10 +249,12 @@ with no verdict written.
    `AgentLoader.load()` retries a transient failure briefly and then raises `AgentDefinitionUnavailable`
    (a fixed reason code, no response text) instead of returning a stand-in with an empty prompt and
    `tool_allowlist="*"`. The dispatcher refuses the dispatch (`SkillResult.definition_unavailable`, no
-   spawn, no provider cooldown, nothing cached); daemons exit at startup. The one remaining way to get
-   an empty-prompt wildcard definition is the explicit `load(allow_undefined=True)` opt-in, and only
-   when Neotoma answered "no such definition" (`not_found`), never for a failed load. A definition that
-   loads but has no `tool_allowlist` field still defaults to `"*"`.
+   spawn, no provider cooldown, nothing cached); daemons exit at startup. Unregistered roles also
+   refuse. A found record must declare a nonempty prompt, status and tool set; missing or malformed
+   authority does not become a wildcard. The library's explicit `allow_undefined=True` returns only
+   an inert absence marker with no tools, never dispatch authority. A signed HTTP response remains
+   final even when its body cannot be parsed; only pre-response helper failures retain bearer
+   fallback. Known legacy planned/proposed/draft status warnings remain (2026-10-16).
 4. **`a2a_gateway.authorize_caller()`, no issue.** Returns `(True, "grant_check_unavailable_advisory")`
    when the checker raises (`a2a_gateway.py:280`).
 5. **`mcp_tool_grant_proxy/proxy.py`, no issue.** `enforce()` returns `(True, "")` when `agent_sub` is

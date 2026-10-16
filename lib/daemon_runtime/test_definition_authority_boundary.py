@@ -65,6 +65,7 @@ def test_real_helper_completed_response_never_uses_bearer(
     {"prompt_markdown": None}, {"prompt_markdown": ""}, {"prompt_markdown": "  "},
     {"tool_allowlist": None}, {"tool_allowlist": []}, {"tool_allowlist": ""},
     {"tool_allowlist": "[]"}, {"tool_allowlist": "[invalid"}, {"status": None},
+    {"status": ""}, {"status": "unrecognized"},
 ])
 def test_found_definition_missing_authority_is_refused(monkeypatch, overrides):
     monkeypatch.setattr(signed, "via_cli_enabled", lambda: False)
@@ -97,3 +98,85 @@ def test_explicit_registered_capabilities_remain_available(monkeypatch):
     definition = loader.AgentLoader("pavo").load()
     assert definition.prompt_markdown == "A defined role"
     assert definition.tools == ["Read"]
+
+
+def test_real_helper_pre_response_failure_preserves_bearer_fallback(real_helper, monkeypatch):
+    real_helper.write_text("export async function cliSignedFetch() { throw new Error('fetch failed'); }\n")
+    bearer = []
+    def unsigned(*args, **kwargs):
+        bearer.append(True)
+        return httpx.Response(200, json={"snapshot": _canonical()},
+                              request=httpx.Request("GET", "https://fixture.invalid"))
+    monkeypatch.setattr(loader.httpx, "get", unsigned)
+    definition = loader.AgentLoader("pavo").load()
+    assert definition.tools == ["Read"]
+    assert len(bearer) == 1
+
+
+@pytest.mark.parametrize("status", [200, 403])
+def test_real_helper_body_timeout_preserves_response_boundary(real_helper, status):
+    real_helper.write_text(
+        "export async function cliSignedFetch() { return {"
+        f"status:{status}, ok:false, async text() {{ "
+        "return new Promise(resolve => setTimeout(() => resolve('{}'), 10000)); } }; }\n"
+    )
+    with pytest.raises(signed.SignedRequestError) as raised:
+        signed.signed_request("GET", "https://fixture.invalid", agent_name="pavo", timeout=1)
+    assert raised.value.response_received is True
+    assert raised.value.http_status == status
+
+
+def test_planted_response_boundary_regression_is_detected(real_helper, monkeypatch, tmp_path):
+    # Restore the former helper's behavior after headers: only an untyped error
+    # survives a stream failure. The real-helper control above must go red.
+    original = signed._HELPER.read_text()
+    marker = '  process.stdout.write(JSON.stringify({ response_received: true, status: resp.status }) + "\\n");\n'
+    mutant = original.replace(marker, "").replace(
+        "{ status: resp.status, ok: resp.ok, body_error: true }",
+        "{ error: 'synthetic stream failure' }",
+    )
+    assert mutant != original and "response_received: true" not in mutant
+    helper = tmp_path / "old-helper.mjs"
+    helper.write_text(mutant)
+    monkeypatch.setattr(signed, "_HELPER", helper)
+    with pytest.raises(pytest.fail.Exception, match="DID NOT RAISE"):
+        test_real_helper_completed_response_never_uses_bearer(
+            real_helper, monkeypatch, 401, True,
+        )
+
+
+@pytest.mark.parametrize("status", [200, 403])
+def test_real_helper_body_timeout_never_retries_as_bearer(real_helper, monkeypatch, status):
+    real_helper.write_text(
+        "export async function cliSignedFetch() { return {"
+        f"status:{status}, ok:false, async text() {{ "
+        "return new Promise(resolve => setTimeout(() => resolve('{}'), 10000)); } }; }\n"
+    )
+    real_signed_request = signed.signed_request
+    def short_request(*args, **kwargs):
+        kwargs["timeout"] = min(kwargs.get("timeout", 1), 1)
+        return real_signed_request(*args, **kwargs)
+    monkeypatch.setattr(signed, "signed_request", short_request)
+    bearer = []
+    def unsigned(*args, **kwargs):
+        bearer.append(True)
+        return httpx.Response(200, json={"snapshot": _canonical()},
+                              request=httpx.Request("GET", "https://fixture.invalid"))
+    monkeypatch.setattr(loader.httpx, "get", unsigned)
+    with pytest.raises(loader.AgentDefinitionUnavailable):
+        loader.AgentLoader("pavo").load()
+    assert not bearer
+
+
+def test_planted_late_status_record_is_detected(real_helper, monkeypatch, tmp_path):
+    import subprocess
+
+    original = signed._HELPER.read_text()
+    marker = '  process.stdout.write(JSON.stringify({ response_received: true, status: resp.status }) + "\\n");\n'
+    mutant = original.replace(marker, "")
+    assert mutant != original
+    helper = tmp_path / "late-status-helper.mjs"
+    helper.write_text(mutant)
+    monkeypatch.setattr(signed, "_HELPER", helper)
+    with pytest.raises(subprocess.TimeoutExpired):
+        test_real_helper_body_timeout_preserves_response_boundary(real_helper, 200)

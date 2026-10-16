@@ -24,7 +24,7 @@ import skill_runner  # noqa: E402
 from lib.daemon_runtime import agent_loader as loader  # noqa: E402
 
 
-@pytest.mark.parametrize("outcome", ["timeout", "malformed"])
+@pytest.mark.parametrize("outcome", ["timeout", "malformed", "none", "missing_prompt", "missing_tools", "missing_status", "real"])
 def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_path, capsys, outcome):
     monkeypatch.setattr(runner, "check_headroom", lambda provider: None)
     monkeypatch.setattr(runner.Worktree, "create", lambda self, **kw: self.path.mkdir(parents=True))
@@ -47,18 +47,32 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
     monkeypatch.setenv("APIS_USAGE_PROBE_ON_DISPATCH", "0")
     skill_runner._agent_def_cache.clear()
-    requests, spawns = [], []
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **k: None)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setattr(skill_runner.model_tiering, "record_dispatch", lambda **k: "synthetic")
+    monkeypatch.setattr(skill_runner.model_tiering, "record_dispatch_usage", lambda **k: None)
+    requests, spawns, inputs = [], [], []
 
     def post(*a, **k):
         requests.append(True)
         if outcome == "timeout":
             raise httpx.ReadTimeout("synthetic")
         payload = {"error": "synthetic"} if outcome == "malformed" else {"entities": []}
+        if outcome == "real" or outcome.startswith("missing_"):
+            snap = {"name": "pavo", "status": "active", "prompt_markdown": "Canonical role", "tool_allowlist": ["Read"]}
+            if outcome != "real":
+                snap.pop({"missing_prompt": "prompt_markdown", "missing_tools": "tool_allowlist", "missing_status": "status"}[outcome])
+            payload = {"entities": [{"entity_id": "ent_synthetic", "snapshot": snap}]}
         return httpx.Response(200, json=payload, request=httpx.Request("POST", "https://fixture.invalid"))
 
     async def spawn(*a, **k):
         spawns.append(a)
-        raise AssertionError("an unavailable canonical role reached a provider")
+        if outcome != "real":
+            raise AssertionError("an unavailable canonical role reached a provider")
+        async def communicate(input=None):
+            inputs.append(input)
+            return b"Synthetic authorized child result", b""
+        return SimpleNamespace(returncode=0, communicate=communicate)
 
     monkeypatch.setattr(loader.httpx, "post", post)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
@@ -67,6 +81,13 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     runner.main(["--repo", "example/project", "--pr", "1", "--head", "a" * 40,
                  "--lens", "pm", "--provider", "codex", "--brief", str(brief), "--json"])
     report = json.loads(capsys.readouterr().out)
+    if outcome == "real":
+        assert spawns, report
+        assert inputs and inputs[0].startswith(b"Canonical role")
+        assert skill_runner._agent_def_cache["pavo"].tools == ["Read"]
+        assert report["posted"] is False
+        skill_runner._agent_def_cache.clear()
+        return
     assert report["ok"] is False and report["posted"] is False
     assert requests, report
     assert "agent_definition unavailable:" in report["reason"], report
@@ -74,7 +95,7 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     assert "pavo" not in skill_runner._agent_def_cache
 
 
-def test_guarded_cli_eval_detects_a_reinstated_failed_load_stub(monkeypatch, tmp_path, capsys):
+def test_guarded_cli_refuses_a_reinstated_failed_load_stub(monkeypatch, tmp_path, capsys):
     real_load = loader.AgentLoader.load
 
     def old_fallback(self, **kwargs):
@@ -84,6 +105,5 @@ def test_guarded_cli_eval_detects_a_reinstated_failed_load_stub(monkeypatch, tmp
             return self._undefined_definition(exc.code)
 
     monkeypatch.setattr(loader.AgentLoader, "load", old_fallback)
-    with pytest.raises(AssertionError):
-        test_guarded_cli_requires_available_canonical_definition(
-            monkeypatch, tmp_path, capsys, "timeout")
+    test_guarded_cli_requires_available_canonical_definition(
+        monkeypatch, tmp_path, capsys, "timeout")

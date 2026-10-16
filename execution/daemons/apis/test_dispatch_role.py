@@ -590,16 +590,13 @@ def test_headroom_note_falls_back_to_env_when_no_file(tmp_path, monkeypatch) -> 
     assert "claude=0.2" in note
 
 
-def test_inconsistent_tool_allowlist_types_all_coerce(monkeypatch) -> None:
-    """tool_allowlist is inconsistently typed across agent_definition entities
-    (arrays, one comma/JSON string, some nulls). Every shape must yield a usable
-    list — a null must mean 'all tools', never a crash or an empty allowlist
-    that would confine the agent to nothing."""
+def test_tool_allowlist_parsing_preserves_only_declared_authority(monkeypatch) -> None:
+    """Legacy arrays and strings remain valid; absent authority grants no tools."""
     from lib.daemon_runtime import AgentDefinition
 
-    assert AgentDefinition(tool_allowlist=None).tools == ["*"]
+    assert AgentDefinition(tool_allowlist=None).tools == []
     assert AgentDefinition(tool_allowlist="*").tools == ["*"]
-    assert AgentDefinition(tool_allowlist="").tools == ["*"]
+    assert AgentDefinition(tool_allowlist="").tools == []
     assert AgentDefinition(tool_allowlist=["Bash", "Read"]).tools == ["Bash", "Read"]
     assert AgentDefinition(tool_allowlist='["Bash", "Read"]').tools == [
         "Bash",

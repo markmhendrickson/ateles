@@ -351,8 +351,8 @@ def test_a_gate_owner_whose_definition_cannot_load_is_not_spawned(monkeypatch, h
     ), "the gate must stay ready so a later pass dispatches it"
 
 
-def test_a_gate_owner_with_no_definition_at_all_is_still_spawned_on_its_skill(monkeypatch, harness):
-    """Neotoma answered and has none: the spawn runs on the repo's SKILL.md, as before."""
+def test_a_gate_owner_with_no_definition_is_not_spawned(monkeypatch, harness):
+    """A local skill supplies no authority for an unregistered gate owner."""
     monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
 
     class _NoDefinition(_UnavailableLoader):
@@ -362,4 +362,4 @@ def test_a_gate_owner_with_no_definition_at_all_is_still_spawned_on_its_skill(mo
 
     _run("issue", "ent_i10", {"repository": REPO, "github_number": 92, "labels": []})
 
-    assert harness["spawned"] == ["ent_i10"]
+    assert harness["spawned"] == []

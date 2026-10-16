@@ -63,7 +63,9 @@ from lib.credential_scrub import (  # noqa: E402
     AGENT_CHILD_MARKER_ENV,
     is_generation_credential,
 )
-from lib.daemon_runtime import AgentDefinition, AgentDefinitionUnavailable, AgentLoader  # noqa: E402
+from lib.daemon_runtime import (  # noqa: E402
+    AgentDefinition, AgentDefinitionUnavailable, AgentLoader, StatusAction, evaluate_status,
+)
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
@@ -565,19 +567,16 @@ def _load_agent_def(role: str) -> AgentDefinition:
     (after the loader's short retry). A failure is never cached and never replaced
     by a stand-in: the next dispatch asks Neotoma again.
 
-    ``allow_undefined=True`` is this dispatcher's explicit opt-in for a ROLE that
-    has no definition at all (Neotoma answered "no such definition"): it runs
-    degraded on its SKILL.md and is reported once per role (see the degraded
-    branch of ``_run_skill_once``). It does not cover a failed load.
+    A local SKILL.md does not supply authority for a missing canonical role.
+    Absence markers are refused even if a lower loader returns one.
     """
     if role in _agent_def_cache:
         return _agent_def_cache[role]
-    agent_def = AgentLoader(role).load(allow_undefined=True)
+    agent_def = AgentLoader(role).load()
     if agent_def.is_stub:
-        # The "no definition" result is returned for this dispatch but never
-        # remembered: only a validated, found definition is cached, so a role
-        # registered later is picked up without a restart.
-        return agent_def
+        raise AgentDefinitionUnavailable(role, "not_found", 1)
+    if evaluate_status(agent_def.status)[0] is StatusAction.REFUSE:
+        raise AgentDefinitionUnavailable(role, "refused_status", 1)
     _agent_def_cache[role] = agent_def
     return agent_def
 

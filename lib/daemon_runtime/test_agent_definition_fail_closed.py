@@ -215,18 +215,18 @@ def test_a_daemon_survives_one_timeout_at_startup(neotoma):
     assert al.load_agent_definition_or_exit("pavo").entity_id == "ent_real"
 
 
-def test_an_unregistered_daemon_still_starts_with_a_warning(neotoma):
+def test_an_unregistered_daemon_refuses_startup(neotoma):
     neotoma["script"] = ["none"]
-    d = al.load_agent_definition_or_exit("ghost")
-    assert d.is_stub is True
+    with pytest.raises(SystemExit) as raised:
+        al.load_agent_definition_or_exit("ghost")
+    assert raised.value.code == 1
 
 
 # ── planted red ──────────────────────────────────────────────────────────────
 
 
-def test_planted_red_reinstating_the_stand_in_is_caught(neotoma, monkeypatch):
-    """If a failed load were turned back into a stand-in, the tests above would not
-    pass: this shows the reinstated behaviour returns an empty prompt and wildcard."""
+def test_even_a_reinstated_absence_marker_has_no_authority(neotoma, monkeypatch):
+    """The library marker has no tools even if a caller wrongly returns it on failure."""
     real_load = AgentLoader.load
     if not hasattr(AgentLoader, "_undefined_definition"):
         pytest.skip("nothing to reinstate")
@@ -242,7 +242,8 @@ def test_planted_red_reinstating_the_stand_in_is_caught(neotoma, monkeypatch):
 
     d = AgentLoader("pavo").load()
 
-    assert d.prompt_markdown == "" and d.tools == ["*"], "the reinstated stand-in is exactly the defect"
+    assert d.is_stub and not d.prompt_markdown and not d.tools
+    assert al.evaluate_status(d.status)[0] is al.StatusAction.REFUSE
 
 
 # ── authoritative absence is narrow: everything else is unavailable ──────────
@@ -385,9 +386,9 @@ def test_positive_control_a_partial_page_that_contains_the_definition_loads(look
 
 def test_positive_control_null_optional_fields_take_their_defaults(lookup):
     lookup["make"] = lambda: _response(
-        200, {"entities": [_entity("pavo", description=None, tool_allowlist=None, status=None)]})
+        200, {"entities": [_entity("pavo", description=None)]})
     d = AgentLoader("pavo").load()
-    assert d.status == "active" and d.tools == ["*"]
+    assert d.description == "" and d.status == "active" and d.tools == ["Read"]
 
 
 def test_planted_red_loosened_classification_accepts_the_negative_controls(lookup, monkeypatch):

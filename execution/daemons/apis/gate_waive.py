@@ -356,7 +356,7 @@ def signed_failure_code(exc: BaseException) -> str:
 # issued by a worker that saw it, and a late one is discarded. Never retried.
 _SIGNED_FAILURE_CODES = frozenset(
     {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error",
-     "expired", "busy"}
+     "expired", "busy", "response_not_json"}
 )
 
 
