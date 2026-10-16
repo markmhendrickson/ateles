@@ -1218,3 +1218,63 @@ def test_binding_entrypoint_preserves_positive_selection_contract(
         assert "--model" not in argv
     else:
         assert argv[argv.index("--model") + 1] == expected
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once", "lookup", "filter"])
+@pytest.mark.parametrize("source", ["env", "file"])
+@pytest.mark.parametrize("broken", ["policy", "binding"])
+def test_ambiguous_config_refuses_at_dispatch_boundary(
+    captured_codex_dispatches, monkeypatch, tmp_path, entrypoint, source, broken,
+):
+    import model_tiering
+
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"selected-model","top":"other-model"}}')
+    prefix = "APIS_ACTION_POLICY" if broken == "policy" else "APIS_VENDOR_BINDING"
+    raw = ('{"task_dispatch":"mid","task_dispatch":"top"}' if broken == "policy"
+           else '{"codex":{"mid":"selected-model","mid":"other-model"}}')
+    if source == "file":
+        path = tmp_path / "selected.json"
+        path.write_text(raw)
+        monkeypatch.setenv(prefix + "_FILE", str(path))
+    else:
+        monkeypatch.setenv(prefix, raw)
+    if entrypoint in {"lookup", "filter"}:
+        with pytest.raises(model_tiering.InvalidTierPolicyError):
+            tier = model_tiering.resolve_tier("task_dispatch")
+            if entrypoint == "lookup":
+                model_tiering.model_for_tier("codex", tier.tier)
+            else:
+                skill_runner._tier_bound_binaries({"codex": "/unused"}, tier, None)
+    elif entrypoint == "cli":
+        assert dispatch_role.main(["--role", "pavo", "--task", "fixture"]) == 1
+    else:
+        if entrypoint == "dispatch":
+            call = dispatch_role.dispatch("pavo", "fixture")
+        else:
+            fn = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+            call = fn("pavo", "fixture", provider="codex", action_class="task_dispatch")
+        assert not asyncio.run(call).ok
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once"])
+def test_explicit_override_keeps_its_config_contract(
+    captured_codex_dispatches, monkeypatch, entrypoint,
+):
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid","task_dispatch":"top"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"first","mid":"second"}}')
+    if entrypoint == "cli":
+        assert dispatch_role.main(["--role", "pavo", "--task", "fixture",
+                                   "--model", "explicit-model"]) == 0
+    else:
+        if entrypoint == "dispatch":
+            call = dispatch_role.dispatch("pavo", "fixture", model="explicit-model")
+        else:
+            fn = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+            call = fn("pavo", "fixture", provider="codex", action_class="task_dispatch",
+                      model="explicit-model")
+        assert asyncio.run(call).ok
+    assert len(captured_codex_dispatches) == 1
+    argv = captured_codex_dispatches[0]["cmd"]
+    assert argv[argv.index("--model") + 1] == "explicit-model"

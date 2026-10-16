@@ -503,3 +503,62 @@ def test_existing_unreadable_source_never_uses_environment(monkeypatch, tmp_path
     monkeypatch.setenv("APIS_ACTION_POLICY", '{"build":"mid"}')
     with pytest.raises(model_tiering.InvalidTierPolicyError):
         model_tiering.configured_action_policy()
+
+
+AMBIGUOUS_CONFIGS = [
+    ("policy", '{"build":"mid","build":"top"}'),
+    ("policy", '{"build":"mid","build":"mid"}'),
+    ("policy", '{"build":"mid","bu\\u0069ld":"top"}'),
+    ("policy", '{"build":{"min_tier":"mid","max_tier":"mid","max_tier":"top"}}'),
+    ("binding", '{"codex":{"mid":"first"},"codex":{"mid":"second"}}'),
+    ("binding", '{"codex":{"mid":"first","mid":"second"}}'),
+    ("binding", '{"codex":{"mid":"first","mid":"first"}}'),
+    ("binding", '{"codex":{"mid":"first","m\\u0069d":"second"}}'),
+]
+
+
+@pytest.mark.parametrize("kind,raw", AMBIGUOUS_CONFIGS)
+@pytest.mark.parametrize("source", ["file", "env"])
+def test_selected_config_requires_unique_members(monkeypatch, tmp_path, kind, raw, source):
+    prefix = "APIS_ACTION_POLICY" if kind == "policy" else "APIS_VENDOR_BINDING"
+    path = tmp_path / "selected.json"
+    monkeypatch.setenv(prefix + "_FILE", str(path))
+    if source == "file":
+        path.write_text(raw)
+        monkeypatch.setenv(prefix, '{"build":"mid"}' if kind == "policy"
+                           else '{"codex":{"mid":"alternate"}}')
+    else:
+        monkeypatch.setenv(prefix, raw)
+    load = (model_tiering.configured_action_policy if kind == "policy"
+            else model_tiering.configured_vendor_binding)
+    with pytest.raises(model_tiering.InvalidTierPolicyError) as raised:
+        load()
+    assert str(path) not in str(raised.value)
+    assert "first" not in str(raised.value)
+
+
+@pytest.mark.parametrize("kind,raw", AMBIGUOUS_CONFIGS)
+def test_preinstall_check_rejects_ambiguous_objects(tmp_path, capsys, kind, raw):
+    path = tmp_path / "selected.json"
+    path.write_text(raw)
+    detected, data, errors, _ = model_tiering.check_config_file(path)
+    assert detected is None and data == {} and errors
+    assert model_tiering.main(["--check", str(path)]) == 1
+    assert "FAIL" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind,raw,expected", [
+    ("policy", '{"bu\\u0069ld":"mid"}', {"build": "mid"}),
+    ("binding", '{"codex":{"m\\u0069d":"selected-model","top":"other-model"}}',
+     {"codex": {"mid": "selected-model", "top": "other-model"}}),
+])
+def test_unique_escaped_members_remain_valid(monkeypatch, tmp_path, capsys, kind, raw, expected):
+    path = tmp_path / "selected.json"
+    path.write_text(raw)
+    prefix = "APIS_ACTION_POLICY" if kind == "policy" else "APIS_VENDOR_BINDING"
+    monkeypatch.setenv(prefix + "_FILE", str(path))
+    load = (model_tiering.configured_action_policy if kind == "policy"
+            else model_tiering.configured_vendor_binding)
+    assert load() == expected
+    assert not model_tiering.check_config_file(path)[2]
+    assert model_tiering.main(["--check", str(path)]) == 0

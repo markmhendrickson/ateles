@@ -60,3 +60,30 @@ def test_producer_entrypoint_only_scores_with_usable_selected_binding(monkeypatc
         assert len(calls) == 1
     else:
         assert attempt.score is None and calls == []
+
+
+@pytest.mark.parametrize("source", ["env", "file"])
+@pytest.mark.parametrize("broken", ["policy", "binding"])
+def test_producer_ambiguous_config_never_reaches_runner(monkeypatch, tmp_path, source, broken):
+    prefix = "APIS_ACTION_POLICY" if broken == "policy" else "APIS_VENDOR_BINDING"
+    raw = ('{"confidence_scoring":"mid","confidence_scoring":"mid"}' if broken == "policy"
+           else '{"codex":{"mid":"first","mid":"second"}}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"selected-model"}}')
+    if source == "file":
+        path = tmp_path / "selected.json"
+        path.write_text(raw)
+        monkeypatch.setenv(prefix + "_FILE", str(path))
+    else:
+        monkeypatch.setenv(prefix, raw)
+    calls = []
+
+    async def runner(*args):
+        calls.append(args)
+        return True, '{"confidence":0.9}', "codex"
+
+    result = asyncio.run(producer.score_unscored_task(
+        {"title": "Synthetic task", "body": "Local edit"},
+        action_type="local_edit", policy=ExecutionPolicy(entity_id="fixture", loaded=False),
+        mechanical_value=0.8, runner=runner,
+    ))
+    assert result.score is None and calls == []
