@@ -185,6 +185,29 @@ def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> di
     return {}
 
 
+def _json_config_source(env_var: str, file_env_var: str, default_path: Path) -> str:
+    """Name the source the matching config reader will try first."""
+    configured_path = os.environ.get(file_env_var, "").strip()
+    path = Path(configured_path).expanduser() if configured_path else default_path
+    if path.is_file():
+        return f"file {path}"
+    if os.environ.get(env_var, "").strip():
+        return env_var
+    return f"missing file {path} and unset {env_var}"
+
+
+def action_policy_source() -> str:
+    return _json_config_source(
+        _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH
+    )
+
+
+def vendor_binding_source() -> str:
+    return _json_config_source(
+        _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH
+    )
+
+
 def configured_action_policy() -> dict[str, str]:
     """Return the action-class -> min_tier map, normalized to known tiers.
 
@@ -476,13 +499,30 @@ def repair_action_class(blocking_lenses: "set[str] | frozenset[str]") -> str:
     """
     return (
         ACTION_SECURITY_FIX
-        if "security" in {str(l).strip().lower() for l in blocking_lenses}
+        if "security" in {str(lens).strip().lower() for lens in blocking_lenses}
         else ACTION_REPAIR_DIAGNOSED
     )
 
 
 class UnboundTierError(ValueError):
     """A resolved tier has no model bound for the target provider."""
+
+
+RESERVED_AUTOMATIC_MODEL_MARKERS: tuple[str, ...] = ("astra", "fable")
+
+
+def automatic_model_refusal(model: str) -> str:
+    """Why *model* is reserved from automatic routing, or an empty string."""
+    normalized = model.strip().lower()
+    marker = next(
+        (name for name in RESERVED_AUTOMATIC_MODEL_MARKERS if name in normalized),
+        "",
+    )
+    return (
+        f"resolved model {model!r} is reserved for explicit operator override ({marker})"
+        if marker
+        else ""
+    )
 
 
 def model_for_tier(

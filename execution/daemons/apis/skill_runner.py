@@ -75,6 +75,7 @@ import fly_runner  # noqa: E402
 from harness_router import (  # noqa: E402
     FRONTIER_PROVIDERS,
     MAC_READING_SOURCES,
+    ProviderAdmission,
     configured_providers,
     cool_down,
     cooled_until_all,
@@ -3753,6 +3754,7 @@ async def run_skill(
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     model: str | None = None,
     resolved_tier: "model_tiering.ResolvedTier | None" = None,
+    provider_admission: ProviderAdmission | None = None,
     inference_only: bool = False,
     runner: str | None = None,
     repository: str = "",
@@ -3768,6 +3770,11 @@ async def run_skill(
     validated is the tier that runs. ``inference_only``: run with no tools
     (see ``INFERENCE_ONLY_PROVIDER``); requires ``local_review`` and a pinned
     ``provider`` of that adapter.
+
+    ``provider_admission`` is a strict decision from
+    ``harness_router.resolve_provider_admission``. Guarded standalone
+    entrypoints pass it through unchanged; this function refuses any mismatch
+    and launches only its resolved provider/tier/model.
 
     ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
     attempt — see that function's docstring. Unrelated to provider selection;
@@ -3844,6 +3851,54 @@ async def run_skill(
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
     deny_correct = owns_pending_gate or seated_reviewer
+
+    if provider_admission is not None:
+        if not provider_admission.admitted:
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=provider_admission.reason,
+                provider=provider_admission.requested_provider,
+            )
+        mismatch = ""
+        if provider not in (None, provider_admission.requested_provider):
+            mismatch = (
+                f"provider admission is for {provider_admission.requested_provider!r}, "
+                f"but dispatch requested {provider!r}"
+            )
+        elif action_class != provider_admission.action_class:
+            mismatch = (
+                f"provider admission is for action_class "
+                f"{provider_admission.action_class!r}, but dispatch requested "
+                f"{action_class!r}"
+            )
+        elif model not in (None, provider_admission.resolved_model):
+            mismatch = (
+                f"provider admission resolved model "
+                f"{provider_admission.resolved_model!r}, but dispatch overrode "
+                f"it with {model!r}"
+            )
+        if mismatch:
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=f"provider admission mismatch: {mismatch}",
+                provider=provider or provider_admission.requested_provider,
+            )
+        provider = provider_admission.requested_provider
+        model = provider_admission.resolved_model
+        resolved_tier = model_tiering.ResolvedTier(
+            tier=provider_admission.resolved_tier,
+            source=provider_admission.tier_source,
+            action_class=provider_admission.action_class,
+            escalation_reasons=provider_admission.escalation_reasons,
+        )
 
     # Refresh the usage snapshot BEFORE anything reads provider selection:
     # `_tier_bound_binaries` below consults the usage gate through

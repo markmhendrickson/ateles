@@ -203,10 +203,12 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from harness_router import (  # noqa: E402
+    ProviderAdmission,
     configured_headroom,
     configured_providers,
     cooling_providers,
     live_headroom,
+    resolve_provider_admission,
 )
 from local_provider import (  # noqa: E402
     LOCAL_PROVIDER,
@@ -262,6 +264,7 @@ async def dispatch(
     github_token: str | None = None,
     action_class: str | None = None,
     model: str | None = None,
+    provider_admission: ProviderAdmission | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     integration_base: str | None = None,
     integration_mode: str = mechanical_first.MODE_REBASE,
@@ -329,12 +332,28 @@ async def dispatch(
     the live action_policy/vendor_binding config; ``model`` overrides that
     resolution outright. Neither is required — an orchestrating session's
     one-off dispatch that names no ``action_class`` runs exactly as before.
+    ``provider_admission`` is the shared router's already-resolved decision for
+    a guarded entrypoint. ``run_skill`` validates and consumes its exact
+    provider/tier/model instead of reconstructing policy from shell prefixes.
 
     ``integration_base`` / ``integration_mode`` (work class ``rebase``) and
     ``regenerate_commands`` (work class ``regenerate_generated_files``) opt the
     dispatch into the deterministic-first path: see ``mechanical_first``. Without
     them every class runs on the model path exactly as before.
     """
+    if (
+        provider_admission is None
+        and provider is not None
+        and action_class is not None
+        and action_class.startswith("lens_review:")
+    ):
+        provider_admission = resolve_provider_admission(
+            provider,
+            action_class=action_class,
+            signals=escalation_signals,
+            required_policy=True,
+        )
+
     run_kwargs = dict(
         role=role,
         task_entity_id=task_entity_id,
@@ -352,6 +371,7 @@ async def dispatch(
         action_class=action_class,
         escalation_signals=escalation_signals,
         model=model,
+        provider_admission=provider_admission,
     )
     if runner is not None:
         run_kwargs["runner"] = runner

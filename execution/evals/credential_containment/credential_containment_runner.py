@@ -171,6 +171,19 @@ def run_launch(scenario: dict, tmp_root: Path, monkeypatch) -> LaunchTrace:
 
     trace = LaunchTrace()
     files = list(scenario["files"])
+    # Admission must succeed before this eval can exercise the worktree guard.
+    # Use a complete synthetic policy rather than inheriting host configuration.
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "")
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_root / "usage.json"))
+    action_policy = tmp_root / "action-policy.json"
+    action_policy.write_text(json.dumps({"lens_review:pm": "mid"}), encoding="utf-8")
+    vendor_binding = tmp_root / "vendor-binding.json"
+    vendor_binding.write_text(
+        json.dumps({"codex": {"mid": "terra-review-eval"}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(action_policy))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(vendor_binding))
 
     def fake_create(self, *, head):
         self._created = True
