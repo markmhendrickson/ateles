@@ -1415,6 +1415,57 @@ def test_degraded_lanius_cannot_clear_inheritance_or_reach_panel(
                    for name, value, *_ in calls)
 
 
+def test_healthy_lanius_missing_both_verdicts_holds_pending_parent(
+    monkeypatch,
+):
+    """A successful gate read cannot turn absent inheritance proof into clear."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+    )
+
+    class PendingGateStore:
+        gate_status = {"arch": "pending"}
+
+        async def load(self, repository, issue_number):
+            calls.append(("gate_read", issue_number))
+            return type("State", (), {
+                "found": True, "read_failed": False,
+                "gate_status": self.gate_status,
+            })()
+
+        async def unverified_signed_off_gates(self, state, owners):
+            return set()
+
+    pending_store = PendingGateStore()
+    monkeypatch.setattr(swarm_dispatch, "IssueGateStore", lambda *args: pending_store)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(("run", skill))
+        if skill == "lanius":
+            calls.append(("lanius_prompt", prompt))
+            return SkillResult(skill, True, 0, "no inheritance verdict", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    async def fake_incomplete(self, trigger, parent, lens, *args, **kwargs):
+        calls.append(("incomplete", lens))
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_incomplete)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert calls.count(("run", "lanius")) == 2
+    assert pending_store.gate_status["arch"] == "pending"
+    assert ("run", "vanellus") not in calls
+    assert not any(kind in {"review", "gate", "route"} for kind, *_ in calls)
+    assert ("incomplete", "lanius") in calls
+    assert "If you cannot verify the gates from here, emit" not in next(
+        value for kind, value in reversed(calls) if kind == "lanius_prompt"
+    )
+
+
 def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(

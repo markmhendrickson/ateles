@@ -2128,9 +2128,8 @@ def merge_authorization_clause(
 
     The defect this closes: on ateles#592 the dispatch asserted
     "AUTONOMY — YOU MAY MERGE" while the parent issue #585 still had
-    `pm: pending` and `impl: pending`. Lanius's fail-open-for-review path is
-    correct and was not the bug; the bug is that a fail-open REVIEW state
-    propagated into merge AUTHORIZATION language. Nothing stood between that
+    `pm: pending` and `impl: pending`. At the time, Lanius's fail-open REVIEW
+    state propagated into merge AUTHORIZATION language. Nothing stood between that
     clause and a bad merge except the steward re-deriving the gate itself.
 
     This is ateles#332 inverted: there the prompt forbade a merge the flag
@@ -3266,7 +3265,7 @@ def gate_owner_tool_deny(
     an unreadable `gate_status`), which fails closed. *reported_pending*
     (Lanius's `GATE_PENDING:` line) can only widen the deny, never narrow it:
     Lanius's stdout was the sole input before, and it silently omitted the
-    line on its documented fail-open-to-clear path (Falco's second security
+    line on its former fail-open-to-clear path (Falco's second security
     run, non-blocking finding, PR #1181). An absent gate reads as pending, the
     same default `_refresh_pending_gates` applies.
     """
@@ -6999,17 +6998,19 @@ class SwarmDispatcher:
                 reason="role definition unavailable; gate inheritance unverified",
             )
             return
-        verdict = parse_gate_verdict(lanius.stdout)
+        verdict = (
+            parse_gate_verdict(lanius.stdout)
+            if lanius.ok and not getattr(lanius, "remote_outcome_unknown", False)
+            else None
+        )
         # A remote run with an unknown outcome is never re-dispatched
-        # (ateles#1456): it fails open into review below, like any other
-        # missing verdict, instead of being retried.
+        # (ateles#1456). Without a verified result, review must remain held.
         if verdict is None and not getattr(lanius, "remote_outcome_unknown", False):
             # PR-87 self-dogfood finding: Lanius sometimes replies without the
-            # mandatory verdict line. One sharper retry before failing open.
+            # mandatory verdict line. One sharper retry before holding.
             # Applies whether the skill run reported ok (verdict line simply
             # missing) or not (e.g. it crashed) — either way there has been no
-            # verdict yet, and the retry is the one chance to get one before
-            # the fail-open path below kicks in.
+            # verdict yet, and the retry is the one chance to verify it.
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: Lanius produced no verdict "
                 f"(lanius.ok={lanius.ok}) — retrying once with an explicit "
@@ -7020,10 +7021,10 @@ class SwarmDispatcher:
                 self._lanius_pr_prompt(trigger, parent)
                 + (
                     "\n\nREMINDER: your previous attempt omitted the mandatory "
-                    "final line. End with exactly `GATE_INHERITANCE: clear` or "
-                    "`GATE_INHERITANCE: blocked`. If you cannot verify the "
-                    "gates from here, emit `GATE_INHERITANCE: clear` — review "
-                    "proceeds and merge stays operator-gated regardless."
+                    "final line. Emit `GATE_INHERITANCE: clear` or "
+                    "`GATE_INHERITANCE: blocked` only after verifying the "
+                    "parent gate record. If it cannot be verified, say so "
+                    "without claiming either verdict; review will remain held."
                 ),
                 github_token=_lanius_token,
                 include_github_contract=True,
@@ -7042,39 +7043,30 @@ class SwarmDispatcher:
                     reason="role definition unavailable; gate inheritance unverified",
                 )
                 return
-            verdict = parse_gate_verdict(lanius.stdout)
+            verdict = (
+                parse_gate_verdict(lanius.stdout)
+                if lanius.ok and not getattr(lanius, "remote_outcome_unknown", False)
+                else None
+            )
 
         if verdict is None:
-            # The retry above promised "one sharper retry before failing open"
-            # but nothing actually failed open: a still-missing verdict fell
-            # through to `if verdict == "blocked"`, which None fails, so the PR
-            # proceeded without gate inheritance ever resolving — and, in the
-            # observed case, without a formal review ever being posted. With
-            # auto-merge keyed on that formal review, the PR then sits
-            # indefinitely with nothing reporting a problem.
-            #
-            # Observed 2026-08-09 on ateles#408: Lanius omitted the verdict, the
-            # retry ran while Neotoma writes were failing (neotoma#2141), and no
-            # verdict came back. The PR stayed open for two days with 0 formal
-            # approvals while every check was green. A human eventually noticed.
-            #
-            # Fail OPEN, deliberately. `clear` means "gate inheritance did not
-            # block this" — it does not approve anything. The review panel still
-            # runs, the lenses still reach their own verdicts, and merge still
-            # requires a formal approval. The alternative (fail closed) would
-            # wedge every PR whenever the gate agent is flaky or Neotoma is
-            # briefly unwell, which is a worse failure than proceeding to a
-            # review that can still say no. This mirrors the guidance already
-            # given to Lanius in the retry prompt.
+            # A missing or failed result says nothing about the parent's live
+            # gates. In particular, _reprove_signed_off_gates only detects
+            # unproven sign-offs; it does not add ordinary pending gates when
+            # Lanius reported none. Do not fabricate `clear` or seat a panel
+            # that might omit the pending gate owner.
             reason = (
                 "skill run failed" if not lanius.ok else "no verdict line after retry"
             )
             log.error(
                 f"[{DAEMON_NAME}] {ref}: gate inheritance unresolved ({reason}) — "
-                "failing OPEN to `clear` so the review panel still runs. Merge "
-                "remains gated on a formal approval."
+                "holding review until the parent gate record is verified"
             )
-            verdict = "clear"
+            await self._handle_panel_session_limit(
+                trigger, parent, "lanius", "", "",
+                reason="gate inheritance unverified",
+            )
+            return
 
         # Gates Lanius reports as still-pending (from its GATE_PENDING: line on a
         # blocked verdict). Fed to select_panel so the owning lens is guaranteed
@@ -7147,13 +7139,6 @@ class SwarmDispatcher:
                     handler=DAEMON_NAME,
                 )
                 return
-        if not verdict:
-            log.warning(
-                f"[{DAEMON_NAME}] {ref}: Lanius emitted no GATE_INHERITANCE "
-                "verdict — proceeding to panel (fail-open for review, "
-                "merge stays gated)"
-            )
-
         review_head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
         if not review_head:
             await self._handle_panel_session_limit(
@@ -7222,7 +7207,7 @@ class SwarmDispatcher:
         failed_sign_offs: list[tuple[str, str, str, str]] = []
         # The record, read live, for the `correct` deny (Falco's second
         # security run, non-blocking finding, PR #1181): `pending_gates` is
-        # Lanius's prose, which is empty on its fail-open-to-clear path, so it
+        # Lanius's prose, which was empty on its former fail-open-to-clear path, so it
         # alone left the always-seated pm owner running undenied. A failed or
         # unreadable read denies every pre-impl gate owner.
         live_gates = await self._live_gate_status(trigger.repository, parent)
