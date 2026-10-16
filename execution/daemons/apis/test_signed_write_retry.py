@@ -940,3 +940,45 @@ def test_a_permit_is_released_when_the_worker_finishes_even_if_the_caller_gave_u
 
     held, free = _run(go())
     assert held and free
+
+
+def _delayed_preparation_identity(agent_name, *, sub=None, keys_dir=None):
+    """Picklable synthetic resolver: exercise real preparation without credentials."""
+    from pathlib import Path
+    import time
+    marker = Path(keys_dir or gate_waive._ns.AAUTH_KEYS_DIR) / "preparation-started"
+    marker.write_text("started")
+    time.sleep(2)
+    return {"key": "synthetic-unused", "sub": sub or "synthetic", "kid": "synthetic"}
+
+
+def test_real_signing_preparation_cannot_outlive_or_launch_after_deadline(monkeypatch, tmp_path):
+    """Keep signed_request intact; reclaim the permit even if preparation stalls."""
+    from types import SimpleNamespace
+    _tiny_real_deadline(monkeypatch)
+    monkeypatch.setattr(gate_waive, "SIGNED_WRITE_TOTAL_CAP_S", 0.8)
+    monkeypatch.setattr(gate_waive, "SIGNED_ATTEMPT_TIMEOUT_S", 5)
+    monkeypatch.setattr(gate_waive._ns, "AAUTH_KEYS_DIR", str(tmp_path))
+    monkeypatch.setattr(gate_waive._ns, "agent_identity", _delayed_preparation_identity)
+    launches = []
+    monkeypatch.setattr(gate_waive._ns.subprocess, "run", lambda *a, **k: (
+        launches.append(k) or SimpleNamespace(stdout='{"status":200,"body":"{}"}')
+    ))
+    permits = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(gate_waive, "_signed_permits", permits)
+
+    async def exercise():
+        started = _real_time.monotonic()
+        failure = await IssueGateStore("http://unused.invalid", "")._sign_off_write(
+            "synthetic", "gate_status", {}, "synthetic-key", lens_agent="synthetic",
+            lens_sub="synthetic", context=("synthetic", 1, "pm"))
+        elapsed = _real_time.monotonic() - started
+        assert failure and elapsed < 1.2
+        assert (tmp_path / "preparation-started").exists(), "resolver was never exercised"
+        # A kill-and-reap allowance, not the resolver's two-second lifetime.
+        await asyncio.sleep(0.3)
+        assert permits.acquire(blocking=False), "preparation retained the worker permit"
+        permits.release()
+        assert launches == [], "an expired attempt launched a helper"
+
+    _run(exercise())
