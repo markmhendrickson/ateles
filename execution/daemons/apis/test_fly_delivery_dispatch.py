@@ -540,3 +540,11 @@ def test_retry_and_deferred_task_entrances_read_the_durable_ledger(
     )
     assert store.rows[eid]["status"] == "blocked"
     assert "already recorded" in store.rows[eid]["blocked_reason"]
+
+
+def test_remote_unknown_flag_alone_never_clears_the_delivery_binding():
+    plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
+    async def lost():
+        return SkillResult("cicada", False, 1, "", "", remote_outcome_unknown=True)
+    asyncio.run(delivery.run_fly_delivery(plan, lost, lambda reason: reason))
+    assert "already recorded" in delivery.fly_delivery_blocker(plan.key)
