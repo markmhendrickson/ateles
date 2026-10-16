@@ -824,3 +824,28 @@ def test_a_request_that_would_begin_after_the_deadline_is_never_sent(monkeypatch
     _time_mod.sleep(0.5)
     assert sent == [], "a request that began after the deadline was sent"
     assert held < 0.6
+
+
+def test_signed_identity_preparation_cannot_hold_the_loader_past_its_deadline(monkeypatch):
+    """The signed preparation boundary owns key I/O; no synchronous preflight."""
+    import time
+
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
+    monkeypatch.setattr(al, "LOAD_TOTAL_CAP_S", 0.08)
+    monkeypatch.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(al, "LOAD_BACKOFFS_S", ())
+    monkeypatch.setattr(al, "_monotonic", time.monotonic)
+    identity_calls = []
+
+    def stalled_identity(*args, **kwargs):
+        identity_calls.append(True)
+        time.sleep(0.35)
+        return {"key": "synthetic"}
+
+    monkeypatch.setattr(al.ns, "agent_identity", stalled_identity)
+    monkeypatch.setattr(al.ns, "signed_request", lambda *a, **k: (200, REAL))
+    started = time.monotonic()
+    definition = AgentLoader("pavo").load()
+    assert time.monotonic() - started < 0.25
+    assert definition.entity_id == "ent_real"
+    assert identity_calls == [], "identity preparation must be inside signed_request's bounded mechanism"
