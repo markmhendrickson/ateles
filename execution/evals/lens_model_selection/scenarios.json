@@ -1141,6 +1141,94 @@
           "gpt-6-sol"
         ]
       }
+    },
+    {
+      "id": "reader_unavailable_codex",
+      "why": "A real missing canonical-reader dependency refuses before review preparation or provider effects, including the existing dry-run exit convention.",
+      "reader_dependency": "missing_aiohttp",
+      "args": [
+        "--provider",
+        "codex"
+      ],
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "dispatches": 0,
+        "worktrees": 0,
+        "sandboxes": 0,
+        "reader_refusal": true
+      }
+    },
+    {
+      "id": "reader_unavailable_cursor",
+      "why": "A real missing canonical-reader dependency refuses before review preparation or provider effects, including the existing dry-run exit convention.",
+      "reader_dependency": "missing_aiohttp",
+      "args": [
+        "--provider",
+        "cursor"
+      ],
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "dispatches": 0,
+        "worktrees": 0,
+        "sandboxes": 0,
+        "reader_refusal": true
+      }
+    },
+    {
+      "id": "reader_unavailable_compare",
+      "why": "A real missing canonical-reader dependency refuses before review preparation or provider effects, including the existing dry-run exit convention.",
+      "reader_dependency": "missing_aiohttp",
+      "args": [
+        "--compare",
+        "codex,cursor"
+      ],
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "dispatches": 0,
+        "worktrees": 0,
+        "sandboxes": 0,
+        "reader_refusal": true
+      }
+    },
+    {
+      "id": "reader_unavailable_dry_run",
+      "why": "A real missing canonical-reader dependency refuses before review preparation or provider effects, including the existing dry-run exit convention.",
+      "reader_dependency": "missing_aiohttp",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 0,
+        "dispatches": 0,
+        "worktrees": 0,
+        "sandboxes": 0,
+        "reader_refusal": true
+      }
+    },
+    {
+      "id": "reader_available_exact_head_positive",
+      "why": "The matched healthy real reader retains canonical verdict validation after one inert provider effect.",
+      "reader_dependency": "available",
+      "args": [
+        "--provider",
+        "codex"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "dispatches": 1,
+        "worktrees": 1,
+        "sandboxes": 1,
+        "models": [
+          null
+        ]
+      }
     }
   ]
 }
