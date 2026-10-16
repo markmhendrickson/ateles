@@ -1439,5 +1439,27 @@ def test_calls_are_bounded_by_the_deadline(monkeypatch):
     assert rd._call_timeout(300) == 300
     with rd.bounded_by(time.time() + 5):
         assert rd._call_timeout(300) <= 5
-    with rd.bounded_by(time.time() - 5):
-        assert rd._call_timeout(300) == 0.1
+    for spent in (-5, 0, rd.MIN_CALL_SECONDS / 2):
+        with rd.bounded_by(time.time() + spent):
+            assert rd._call_timeout(300) is None  # never a fresh minimum allowance
+
+
+def test_an_exhausted_deadline_starts_no_git_and_no_api_call(world, monkeypatch):
+    started = []
+    monkeypatch.setattr(rd.subprocess, "run", lambda *a, **k: started.append(a) or pytest.fail("ran"))
+    monkeypatch.setattr(rd.urllib.request, "urlopen", lambda *a, **k: pytest.fail("called"))
+    with rd.bounded_by(time.time() - 1):
+        assert rd._run(["status"], env={}) == rd.NO_TIME
+        for call in (
+            lambda: rd.import_agent_work(world["work"], branch=BRANCH, base=world["base"]),
+            lambda: rd.export_agent_work(world["work"], branch=BRANCH, base=world["base"], ident=None),
+            lambda: rd.push_branch(world["work"], repository=REPO, branch=BRANCH,
+                                   default_branch="main", head=world["base"], token=TOKEN),
+            lambda: rd.open_or_update_pr(repository=REPO, branch=BRANCH, default_branch="main",
+                                         token=TOKEN, title="t", body="b"),
+            lambda: rd._api("GET", "/x", TOKEN),
+        ):
+            with pytest.raises(rd.RepoWorkError) as exc:
+                call()
+            assert exc.value.category == rd.NO_TIME
+    assert started == []

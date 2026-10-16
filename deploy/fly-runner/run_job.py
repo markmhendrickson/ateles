@@ -1079,13 +1079,18 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             ident, identity_problem = None, str(exc)
         argv, child_env = prepare_child(job, home, os.environ, ident)
         remaining = deadline - time.time()
-        cli_budget = min(float(job.timeout_seconds),
-                         remaining - min(RECORD_RESERVE_SECONDS, remaining / 4))  # fmt: skip
         delivery = None
-        if job.delivery is not None:
+        if job.delivery is None:
+            cli_budget = min(float(job.timeout_seconds),
+                             remaining - min(RECORD_RESERVE_SECONDS, remaining / 4))  # fmt: skip
+        else:
+            # The reserves come out of the time left before the deadline, and
+            # only then is the CLI capped at its requested timeout: Apis's
+            # deadline already allows timeout + delivery reserve + grace.
             delivery = DeliveryRun(spec=job.delivery, status="not_delivered",
                                    reason="the job did not reach the CLI")  # fmt: skip
-            cli_budget -= DELIVERY_RESERVE_SECONDS
+            cli_budget = min(float(job.timeout_seconds),
+                             remaining - RECORD_RESERVE_SECONDS - DELIVERY_RESERVE_SECONDS)
         if deadline_problem:
             delete_job_dir(job_dir)
             refused = deadline_problem
@@ -1114,6 +1119,8 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             elif not cli_budget >= 1:
                 refused = "no time left before the run's deadline"
                 rc, out, err, timed_out = EXIT_TIMEOUT, b"", refused.encode(), True
+                if delivery is not None:
+                    delivery.status, delivery.reason = "no_time", "no time was left for the CLI"
             elif delivery is not None:
                 rc, out, err, timed_out, refused = _run_delivering_job(
                     job, delivery, runner, argv, child_env, cli_budget, ident, deadline)
@@ -1171,7 +1178,7 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
     spec = delivery.spec
     token = job.secrets[DELIVERY_TOKEN_NAME]
     work_by = deadline - RECORD_RESERVE_SECONDS
-    failure = None
+    failure = failed_category = None
     with rd.bounded_by(work_by):
         try:
             delivery.work = rd.prepare_work(WORK_ROOT, run_id=job.run_id)
@@ -1182,9 +1189,10 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
                              repository=job.repository, ident=ident,
                              author=(spec.author_name, spec.author_email))  # fmt: skip
         except rd.RepoWorkError as exc:
-            failure = str(exc)
+            failure, failed_category = str(exc), exc.category
     if failure is not None:
-        delivery.status, delivery.reason = "clone_failed", failure
+        delivery.status = "no_time" if failed_category == rd.NO_TIME else "clone_failed"
+        delivery.reason = failure
         refused = "the delivery could not be prepared: " + failure
         return EXIT_DELIVERY_FAILED, b"", refused.encode(), False, refused
     checkout = str(delivery.work.checkout)
@@ -1216,7 +1224,8 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
         delivery.status, delivery.reason = "no_time", "no time was left to deliver"
         return
     token = job.secrets[DELIVERY_TOKEN_NAME]
-    failure = None
+    failure = failed_category = None
+    pushed = False
     with rd.bounded_by(work_by):
         step = "not_delivered"
         try:
@@ -1228,13 +1237,21 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
             step = "push_failed"
             rd.push_branch(work, repository=job.repository, branch=spec.branch,
                            default_branch=spec.base_branch, head=imported.head, token=token)
+            pushed = True
             step = "pr_failed"
             title, body = _pr_text(rd, work, job.secrets)
             pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
                                       default_branch=spec.base_branch, token=token,
                                       title=title, body=body)  # fmt: skip
         except rd.RepoWorkError as exc:
-            failure = str(exc)
+            failure, failed_category = str(exc), exc.category
+    if failure is not None and failed_category == rd.NO_TIME:
+        # Nothing further was started. A completed push stays on the remote:
+        # the record keeps its branch and commit, with no pull request.
+        delivery.status = "no_time"
+        delivery.reason = ("the branch was pushed; no time was left for the pull request"
+                           if pushed else failure)  # fmt: skip
+        return
     if failure is not None:
         delivery.status, delivery.reason = step, failure
         return

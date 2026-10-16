@@ -104,13 +104,13 @@ def _pr(number):
             "head": {"ref": BRANCH, "repo": {"full_name": REPO}}, "base": {"ref": "main"}}
 
 
-def _job(tmp_path, *, delivery=DELIVERY, secrets=None, argv=None, stdin=None):
+def _job(tmp_path, *, delivery=DELIVERY, secrets=None, argv=None, stdin=None, timeout=600):
     job_dir = tmp_path / "job"
     (job_dir / "secrets").mkdir(parents=True)
     secrets = {"LANIUS_NEOTOMA_TOKEN": ROLE_TOKEN, run_job.DELIVERY_TOKEN_NAME: TOKEN} \
         if secrets is None else secrets
     spec = {"run_id": "fly-deliver-1", "role": "lanius", "provider": "codex",
-            "repository": REPO, "timeout_seconds": 600, "credential_names": sorted(secrets),
+            "repository": REPO, "timeout_seconds": timeout, "credential_names": sorted(secrets),
             "child_credential_names": [], "neotoma_token_name": "LANIUS_NEOTOMA_TOKEN",
             "neotoma_jwk_name": "", "neotoma_base_url": "https://neotoma.example.test",
             "probe_env_names": [], "probe_paths": [], "child_user": ""}
@@ -217,10 +217,122 @@ def test_an_open_pull_request_for_the_branch_is_updated_not_duplicated(world):
     assert [c[0] for c in world["api"]["calls"]] == ["GET", "PATCH"]
 
 
-def test_the_cli_budget_keeps_the_delivery_and_record_reserves(world):
+RESERVES = run_job.DELIVERY_RESERVE_SECONDS + run_job.RECORD_RESERVE_SECONDS
+APIS_GRACE = 120  # fly_runner.APIS_DEADLINE_GRACE_SECONDS
+
+
+class _Clock:
+    """The time module for one module under test, with a movable offset."""
+
+    def __init__(self):
+        import time as real
+
+        self._real, self.offset = real, 0.0
+
+    def time(self):
+        return self._real.time() + self.offset
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize("timeout", [60, 300, 600])
+def test_with_ample_headroom_the_cli_gets_exactly_its_timeout(world, monkeypatch, timeout):
+    # The deadline Apis sets for a delivering job: timeout + delivery reserve + grace.
+    monkeypatch.setenv(run_job.DEADLINE_ENV,
+                       _deadline_in(timeout + run_job.DELIVERY_RESERVE_SECONDS + APIS_GRACE))
     seen = {}
-    _run(_job(world["tmp"]), _agent(world, seen=seen))
-    assert seen["timeout"] <= 900 - run_job.DELIVERY_RESERVE_SECONDS - run_job.RECORD_RESERVE_SECONDS
+    rc, record = _run(_job(world["tmp"], timeout=timeout), _agent(world, seen=seen))
+    assert seen["timeout"] == timeout
+    assert record["delivery_status"] == "opened"
+    assert _remote_ref(world) == record["delivery_commit"]
+
+
+def test_a_tight_deadline_reduces_the_cli_budget_instead_of_refusing(world, monkeypatch):
+    monkeypatch.setenv(run_job.DEADLINE_ENV, _deadline_in(600 + RESERVES - 100))
+    seen = {}
+    rc, record = _run(_job(world["tmp"], timeout=600), _agent(world, seen=seen))
+    assert 495 <= seen["timeout"] <= 500
+    assert record["delivery_status"] == "opened"
+
+
+def test_a_deadline_too_short_for_any_cli_refuses_without_cloning(world, monkeypatch):
+    monkeypatch.setenv(run_job.DEADLINE_ENV, _deadline_in(RESERVES + 0.5))
+    rc, record = _run(_job(world["tmp"], timeout=600),
+                      lambda *a, **k: pytest.fail("the CLI must not run"))
+    assert record["delivery_status"] == "no_time"
+    assert not world["work_root"].exists() and world["api"]["calls"] == []
+    assert _remote_ref(world) is None
+
+
+def test_a_slow_clone_shrinks_the_cli_budget(world, monkeypatch):
+    monkeypatch.setenv(run_job.DEADLINE_ENV, _deadline_in(600 + RESERVES + 50))
+    clock = _Clock()
+    monkeypatch.setattr(run_job, "time", clock)
+    real_clone = rd.clone_origin
+
+    def slow_clone(*a, **k):
+        clock.offset += 200  # the clone took 200 s
+        return real_clone(*a, **k)
+
+    monkeypatch.setattr(rd, "clone_origin", slow_clone)
+    seen = {}
+    rc, record = _run(_job(world["tmp"], timeout=600), _agent(world, seen=seen))
+    assert 445 <= seen["timeout"] <= 450
+    assert record["delivery_status"] == "opened"
+
+
+# ── An exhausted deadline starts nothing further ─────────────────────────────
+
+
+def _expire_after(monkeypatch, word):
+    """Move repo_delivery's clock past every deadline right after the first
+    git call whose argv holds *word*; record every git call started after."""
+    clock = _Clock()
+    monkeypatch.setattr(rd, "time", clock)
+    real = subprocess.run
+    after = []
+
+    def spy(args, *a, **k):
+        if clock.offset and args[0] == rd.GIT:  # only the runner's own git calls
+            after.append(args)
+        done = real(args, *a, **k)
+        if word in args and not clock.offset:
+            clock.offset = 10_000.0
+        return done
+
+    monkeypatch.setattr(rd.subprocess, "run", spy)
+    return after
+
+
+def test_a_deadline_that_expires_during_the_import_pushes_nothing(world, monkeypatch):
+    after = _expire_after(monkeypatch, "list-heads")
+    rc, record = _run(_job(world["tmp"]), _agent(world))
+    assert record["delivery_status"] == "no_time"
+    assert record["delivery_reason"] == f"no_time: {rd.NO_TIME_REASON}"
+    assert after == []  # no git process started after the deadline
+    assert world["api"]["calls"] == [] and _remote_ref(world) is None
+    assert os.listdir(world["work_root"]) == []
+
+
+def test_a_deadline_that_expires_after_the_push_opens_no_pull_request(world, monkeypatch):
+    after = _expire_after(monkeypatch, "push")
+    rc, record = _run(_job(world["tmp"]), _agent(world))
+    assert record["delivery_status"] == "no_time"
+    assert record["delivery_reason"] == "the branch was pushed; no time was left for the pull request"
+    assert _remote_ref(world) == record["delivery_commit"]  # the pushed branch stays visible
+    assert "pr_number" not in record and record["pr_url"] == ""
+    assert world["api"]["calls"] == [] and after == []
+
+
+def test_a_deadline_spent_before_the_clone_never_starts_the_cli(world, monkeypatch):
+    clock = _Clock()
+    clock.offset = 10_000.0
+    monkeypatch.setattr(rd, "time", clock)
+    rc, record = _run(_job(world["tmp"]), lambda *a, **k: pytest.fail("the CLI must not run"))
+    assert record["delivery_status"] == "no_time"
+    assert rc == run_job.EXIT_DELIVERY_FAILED and world["api"]["calls"] == []
+    assert os.listdir(world["work_root"]) == []
 
 
 # ── Not delivered ────────────────────────────────────────────────────────────

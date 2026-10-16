@@ -134,6 +134,10 @@ QUARANTINE_FAILED = "quarantine_failed"
 PUSH_REFUSED = "push_refused"
 PUSH_FAILED = "push_failed"
 PR_FAILED = "pr_failed"
+NO_TIME = "no_time"
+NO_TIME_REASON = "the delivery deadline has passed; the step was not started"
+# A git or API call is started only with at least this much time left.
+MIN_CALL_SECONDS = 1.0
 
 # Delivery to GitHub: the push target and API. Fixed in code; a job cannot
 # name another host. Tests replace them with local stand-ins.
@@ -357,26 +361,42 @@ def bounded_by(deadline: float):
         _DEADLINE.pop()
 
 
-def _call_timeout(limit: float) -> float:
+def _call_timeout(limit: float) -> float | None:
+    """How long the next git or API call may take, or None when the active
+    deadline leaves less than ``MIN_CALL_SECONDS``: the call is then not
+    started at all (never a fresh minimum allowance)."""
     if not _DEADLINE:
         return limit
-    return max(0.1, min(limit, _DEADLINE[-1] - time.time()))
+    left = _DEADLINE[-1] - time.time()
+    if left < MIN_CALL_SECONDS:
+        return None
+    return min(limit, left)
 
 
 def _run(args: list[str], *, env: dict[str, str], ident: tuple[int, int] | None = None,
          stdin: bytes | None = None) -> subprocess.CompletedProcess | str:  # fmt: skip
-    """Run git; the completed process, or the class of why it did not finish."""
+    """Run git; the completed process, or the class of why it did not run or
+    finish (``no_time`` when the deadline leaves no time to start it)."""
     drop = {} if ident is None else {"user": ident[0], "group": ident[1], "extra_groups": []}
+    limit = _call_timeout(GIT_TIMEOUT_SECONDS)
+    if limit is None:
+        return NO_TIME
     outcome: subprocess.CompletedProcess | str = "not_started"
     try:
         outcome = subprocess.run([GIT, *args], env=env, capture_output=True, input=stdin,
-                                 timeout=_call_timeout(GIT_TIMEOUT_SECONDS), check=False,
+                                 timeout=limit, check=False,
                                  **drop)  # fmt: skip
     except subprocess.TimeoutExpired:
         outcome = "timed_out"
     except (OSError, subprocess.SubprocessError):
         outcome = "not_started"
     return outcome
+
+
+def _require_time() -> None:
+    """Refuse to start an external step once the active deadline is spent."""
+    if _call_timeout(GIT_TIMEOUT_SECONDS) is None:
+        raise RepoWorkError(NO_TIME, NO_TIME_REASON)
 
 
 def _status_class(done: subprocess.CompletedProcess | str) -> str:
@@ -390,6 +410,8 @@ def _git(args: list[str], *, env: dict[str, str], category: str, reason: str,
     """Run git and return its raw output; on failure raise *category*/*reason*
     with only the class of the exit status. Git's stderr is discarded."""
     done = _run(args, env=env, ident=ident, stdin=stdin)
+    if done == NO_TIME:
+        raise RepoWorkError(NO_TIME, NO_TIME_REASON)
     if isinstance(done, str) or done.returncode != 0:
         raise RepoWorkError(category, reason, _status_class(done))
     return done.stdout
@@ -431,6 +453,7 @@ def clone_origin(work: Work, *, url: str, base_branch: str, token: str,
     if not isinstance(base_branch, str) or not BASE_BRANCH_RE.fullmatch(base_branch) \
             or ".." in base_branch:  # fmt: skip
         raise RepoWorkError(CLONE_REFUSED, "the base branch name is not acceptable")
+    _require_time()
     plain = git_env(work.home, allow=allow)
     origin = ["-C", str(work.origin)]
     _git(["init", "-q", "--bare", str(work.origin)], env=plain, category=CLONE_FAILED,
@@ -459,6 +482,7 @@ def make_checkout(work: Work, *, branch: str, base_branch: str, repository: str,
     check_branch(branch)
     env = git_env(work.home, allow="file")
     checkout = ["-C", str(work.checkout)]
+    _require_time()
     _git(["clone", "-q", "--no-hardlinks", "--branch", base_branch, str(work.origin),
           str(work.checkout)], env=env, category=CHECKOUT_FAILED,
          reason="cloning the origin repository")  # fmt: skip
@@ -497,6 +521,7 @@ def export_agent_work(work: Work, *, branch: str, base: str,
     env = git_env(work.home, allow="file")
     env["HOME"] = str(work.export)
     checkout = ["-C", str(work.checkout)]
+    _require_time()
     head = _oid(_git([*checkout, "rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}"],
                      env=env, ident=ident, category=EXPORT_FAILED,
                      reason="reading the assigned branch"),
@@ -635,6 +660,7 @@ def import_agent_work(work: Work, *, branch: str, base: str,
     check_branch(branch)
     if not isinstance(base, str) or not _OID_RE.fullmatch(base.encode("ascii", "replace")):
         raise RepoWorkError(IMPORT_REFUSED, "the base is not an object id")
+    _require_time()
     env = git_env(work.home, allow="file")
     origin = ["-C", str(work.origin)]
     copy = work.job / IMPORT_COPY_NAME
@@ -690,6 +716,8 @@ def _validate_and_record(origin: list[str], env: dict[str, str], bundle: Path, b
     if head != listed_head:
         raise RepoWorkError(IMPORT_REFUSED, "the imported head is not the bundle's head")
     descends = _run([*origin, "merge-base", "--is-ancestor", base, head], env=env)
+    if descends == NO_TIME:
+        raise RepoWorkError(NO_TIME, NO_TIME_REASON)
     if isinstance(descends, str) or descends.returncode != 0:
         raise RepoWorkError(IMPORT_REFUSED, "the branch does not descend from the base")
     commits = _git([*origin, "rev-list", f"{base}..{head}"], env=env, category=IMPORT_FAILED,
@@ -803,6 +831,7 @@ def push_branch(work: Work, *, repository: str, branch: str, default_branch: str
     check_push_branch(branch, default_branch)
     if not isinstance(head, str) or not _OID_RE.fullmatch(head.encode("ascii", "replace")):
         raise RepoWorkError(PUSH_REFUSED, "the head is not an object id")
+    _require_time()
     plain = git_env(work.home, allow="file")
     origin = ["-C", str(work.origin)]
     if _ref_present(origin, plain, QUARANTINE_REF) is not False:
@@ -819,6 +848,8 @@ def push_branch(work: Work, *, repository: str, branch: str, default_branch: str
             f"refs/heads/{branch}:refs/heads/{branch}"]  # fmt: skip
     for attempt in range(2):
         done = _run(args, env=env)
+        if done == NO_TIME:
+            raise RepoWorkError(NO_TIME, NO_TIME_REASON)
         if not isinstance(done, str) and done.returncode == 0:
             return
         if attempt or isinstance(done, str) or done.returncode != 128:
@@ -846,9 +877,12 @@ def _api(method: str, path: str, token: str, body: dict | None = None) -> tuple[
                  "User-Agent": "ateles-fly-runner/1.0", "X-GitHub-Api-Version": "2022-11-28",
                  **({"Content-Type": "application/json"} if data else {})},
     )  # fmt: skip
+    limit = _call_timeout(API_TIMEOUT_SECONDS)
+    if limit is None:
+        raise RepoWorkError(NO_TIME, NO_TIME_REASON)
     status, payload = 0, None
     try:
-        with urllib.request.urlopen(request, timeout=_call_timeout(API_TIMEOUT_SECONDS)) as resp:
+        with urllib.request.urlopen(request, timeout=limit) as resp:
             status, raw = resp.status, resp.read(1024 * 1024)
         payload = json.loads(raw or b"null")
     except urllib.error.HTTPError as exc:
@@ -889,6 +923,7 @@ def open_or_update_pr(*, repository: str, branch: str, default_branch: str, toke
     check_repository(repository)
     check_push_branch(branch, default_branch)
     owner = repository.split("/", 1)[0]
+    _require_time()
     head = urllib.parse.quote(f"{owner}:{branch}", safe="")
     status, found = _api("GET", f"/repos/{repository}/pulls?head={head}&state=open", token)
     if status != 200 or not isinstance(found, list):
