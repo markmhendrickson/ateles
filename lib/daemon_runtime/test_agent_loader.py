@@ -7,7 +7,9 @@ The .tools property must accept array, comma-string, and wildcard shapes.
 """
 
 import httpx
+import pytest
 
+import agent_loader
 import agent_loader as al
 from agent_loader import AgentDefinition
 
@@ -332,10 +334,6 @@ def test_no_matching_definition_is_also_a_stub(monkeypatch):
 # tool_allowlist="*", which made a NETWORK CONDITION widen an agent's authority:
 # `tools` returned ["*"], skill_runner then skipped --allowed-tools entirely,
 # and the child ran unrestricted.
-
-import agent_loader
-import httpx
-import pytest
 
 _ORIGINAL_POST_DEGRADED_ESCALATION = agent_loader.AgentLoader._post_degraded_escalation
 
