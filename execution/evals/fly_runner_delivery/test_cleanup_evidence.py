@@ -69,6 +69,13 @@ def test_actual_eval(tmp_path, monkeypatch):
     run_scenario = target.runner.run_scenario
     def capture(*args, **kwargs):
         trace = run_scenario(*args, **kwargs)
+        branch = "refs/heads/" + target.runner.BRANCH
+        assert trace.rc == 0
+        assert trace.record["delivery_status"] == "opened"
+        assert trace.record["pr_number"] == 7
+        assert trace.remote_after[branch] == trace.record["delivery_commit"]
+        assert trace.remote_after[branch] != trace.remote_before.get(branch)
+        assert [call["method"] for call in trace.api_calls] == ["GET", "POST"]
         Path(EVIDENCE).write_text(json.dumps(trace.cleanup))
         return trace
     monkeypatch.setattr(target.runner, "run_scenario", capture)
