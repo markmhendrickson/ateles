@@ -80,8 +80,6 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         launches.append((prompt, kw))
         root = tmp_path / f"job-{len(launches)}"
         root.mkdir()
-        jt = job_eval.run_scenario(JOBS[scenario["job"]], root, monkeypatch)
-        traces.append(jt)
         # Exercise executor launch, per-repository token mint ownership, result
         # validation and revocation around the real job-entrypoint artifact.
         monkeypatch.setenv("APIS_FLY_APP", "runner-app")
@@ -101,6 +99,11 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         executor._mint_delivery = mint
 
         async def read(run_id):
+            # The stand-in job runs only after the real executor has minted,
+            # reserved and launched; a refused mint cannot create effects.
+            jt = job_eval.run_scenario(JOBS[scenario["job"]], root, monkeypatch)
+            traces.append(jt)
+            assert jt.record["run_id"] == run_id
             if scenario["status"] == "unknown":
                 raise fly_runner.FlyResultUnreadable(
                     "eval lost the result after the job ran"
@@ -109,7 +112,7 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
 
         executor._read_result = read
         job = fly_runner.FlyJob(
-            run_id=jt.record["run_id"],
+            run_id="fly-eval-delivery",
             role=skill,
             provider="claude",
             repository=job_eval.REPO,
