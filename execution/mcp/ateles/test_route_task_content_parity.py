@@ -4,7 +4,7 @@ caller-supplied `action_type` (ateles#682).
 Before, omitting `action_type` returned no classification at all, so the
 preview could not tell a filing agent that a report-only task and a PR task
 differ, and could not say what the dispatcher's gate would do. It now resolves
-the SAME way the gate does (declared -> agent prior -> task text), and the
+the SAME way the gate does (declared -> agent prior -> escalation by task text, under the effective policy), and the
 shared case table in `lib.daemon_runtime.action_type_parity_cases` is also run
 through the dispatcher's resolver in
 `execution/daemons/apis/test_gate_action_type_parity.py`.
@@ -79,7 +79,49 @@ def test_a_declared_value_is_echoed_exactly_as_written():
     assert _route("implement the change", "  Open_Or_Merge_PR ")["action_type"] == "  Open_Or_Merge_PR "
 
 
-def test_read_only_report_is_low_and_an_explicit_pr_is_high():
-    low = _route("Review the code path. Write NOTHING - this job's only output is a divergence report.")
-    high = _route("implement the issue", "open_or_merge_pr")
-    assert (low["action_blast_radius"], high["action_blast_radius"]) == ("low", "high")
+def test_report_only_language_does_not_make_the_preview_less_strict():
+    report = _route("Review the code path. Write NOTHING - this job's only output is a divergence report.")
+    explicit_pr = _route("implement the issue", "open_or_merge_pr")
+    assert (report["action_blast_radius"], explicit_pr["action_blast_radius"]) == ("high", "high")
+
+
+def test_the_description_can_escalate_an_agent_with_no_prior():
+    result = _route("something completely unrelated, but open a PR for it")
+    assert (result["action_type"], result["action_type_source"]) == ("open_or_merge_pr", "content")
+
+
+def _route_with_policy(description, policy_snapshot):
+    with (
+        patch("server._get_swarm_roster", return_value=_ROSTER),
+        patch("server._retrieve_entities", return_value=[]),
+        patch("server._get", return_value={"snapshot": policy_snapshot}),
+    ):
+        return srv._route_task(description)
+
+
+def test_escalation_follows_the_effective_policy_not_the_default_vocabulary():
+    # open_or_merge_pr is unclassified here, so Cicada's prior is "never"; the
+    # description names a payment, which this policy classifies HIGH. Replacing
+    # never with high would make the preview (and the gate) less strict.
+    policy = {
+        "title": "t",
+        "blast_radius_default": "low",
+        "high_blast_action_types": ["payment"],
+        "low_blast_action_types": ["compute_only_analysis"],
+    }
+    result = _route_with_policy("implement it and pay the invoice for the rent", policy)
+    assert result["matched_agent"] == "cicada"
+    assert (result["action_type"], result["action_type_source"]) == (
+        "open_or_merge_pr", "agent_prior",
+    )
+    assert result["action_blast_radius"] == "never"
+
+
+def test_no_policy_means_no_escalation_only_the_prior():
+    with (
+        patch("server._get_swarm_roster", return_value=_ROSTER),
+        patch("server._retrieve_entities", return_value=[]),
+        patch("server._get", return_value=None),
+    ):
+        result = srv._route_task("something completely unrelated, but open a PR for it")
+    assert "action_type" not in result

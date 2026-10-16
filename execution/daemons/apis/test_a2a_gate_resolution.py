@@ -5,9 +5,8 @@ nothing about the work, written by someone outside it. Two things are pinned:
 
   * The task declares no `action_type` and no `confidence` (characterization of
     the payload today), so the gate scores it like any other unscored task.
-  * Its prose may TIGHTEN its own gate but never loosen it: the entity carries
-    `source: "a2a"`, and a report-only statement in the request does not lower
-    the Cicada prior the way it would for an operator-filed task.
+  * Its prose may TIGHTEN its own gate but never loosen it. (No text anywhere
+    lowers a reading any more, so provenance does not affect the resolver.)
 """
 
 from __future__ import annotations
@@ -23,10 +22,10 @@ for _p in (str(_DAEMON_DIR), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 import a2a_executor as ax  # noqa: E402
-from lib.daemon_runtime.action_type import (  # noqa: E402
-    infer_action_type_from_text,
-    resolve_gate_action_type,
-)
+from lib.daemon_runtime.action_type import resolve_gate_action_type  # noqa: E402
+from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
+
+FALLBACK = ExecutionPolicy(entity_id="fallback", loaded=False)
 
 # Placeholder, written so secret scanners do not flag it.
 FAKE_BEARER = "fake.not-a-real-token.for-tests-only"
@@ -58,6 +57,7 @@ def _resolved(result, entity):
             "description": entity["description"],
             "source": entity.get("source"),
         },
+        verdict=lambda at: FALLBACK.blast_radius_for(at).value,
     )
 
 
@@ -81,17 +81,11 @@ def test_a2a_request_that_asks_for_a_pr_is_high_blast():
 
 
 def test_a2a_prose_cannot_lower_the_gate():
+    """Nothing in a request's text lowers its reading, report-only language
+    included; text from outside the swarm can only make its own gate stricter."""
     result, entity = _submit(
         "Look over the pipeline code\nPURE REPORTING. Write NOTHING - the only output is a report."
     )
     assert result.skill == "cicada"
-    # Operator-filed, the same text WOULD lower the prior (the control).
-    assert infer_action_type_from_text(entity["title"], entity["description"]) == (
-        "compute_only_analysis"
-    )
-    operator_filed = resolve_gate_action_type(
-        "cicada", {"title": entity["title"], "description": entity["description"]}
-    )
-    assert operator_filed.value == "compute_only_analysis"
     resolved = _resolved(result, entity)
     assert (resolved.value, resolved.source) == ("open_or_merge_pr", "agent_prior")

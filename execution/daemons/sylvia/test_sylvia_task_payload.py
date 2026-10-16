@@ -18,6 +18,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import sylvia  # noqa: E402
 from lib.daemon_runtime.action_type import resolve_gate_action_type  # noqa: E402
+from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
+
+_POLICY = ExecutionPolicy(entity_id="fallback", loaded=False)
+
+
+def _verdict(action_type):
+    return _POLICY.blast_radius_for(action_type).value
 
 
 def _import(summary, routed_to):
@@ -36,6 +43,7 @@ def _resolved(payload):
     return resolve_gate_action_type(
         payload.get("assigned_to"),
         {"title": payload["title"], "description": payload.get("notes", "")},
+        verdict=_verdict,
     )
 
 

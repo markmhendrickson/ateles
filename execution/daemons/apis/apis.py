@@ -256,6 +256,7 @@ from lib.daemon_runtime.action_type import (  # noqa: E402
     resolve_gate_action_type,
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
+    ExecutionPolicy,
     checkpoint_already_dispatched,
     checkpoints_for_task,
     close_checkpoint_without_release,
@@ -386,21 +387,33 @@ def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
     return None
 
 
-def _resolve_gate_action_type(skill: str | None, snapshot: dict) -> ResolvedActionType:
+def _resolve_gate_action_type(
+    skill: str | None, snapshot: dict, policy: ExecutionPolicy
+) -> ResolvedActionType:
     """The action_type the GATE classifies blast radius from (ateles#682).
 
-    Declared value (passed through untouched) -> per-agent prior -> what the
-    task's own text says it does, which may escalate a LOW or absent prior to
-    the high-blast type the text names, and may lower the generalist's HIGH
-    prior only on an explicit report-only statement. See
-    lib.daemon_runtime.action_type for the exact, narrow rules.
+    Declared value (passed through untouched) -> per-agent prior -> escalation by
+    what the task's own text says it does, and ONLY escalation: the text's
+    high-blast type replaces the prior only when it is strictly stricter than the
+    prior under `policy`, the effective policy the gate will evaluate with, and a
+    never-auto-executable prior is never replaced. Task text can never lower
+    anything. See lib.daemon_runtime.action_type.
+
+    The policy is a required argument so the dispatch gate, the checkpoint
+    re-issue path and the release re-check cannot each quietly compare under a
+    different one.
 
     Deliberately NOT what `_infer_action_type` returns, and deliberately not
     used where that one is: model-tier selection (`_dispatch_action_class`) and
     the build-delivery grant key on the agent's class and must not move when the
     gate's reading of a task's text does.
     """
-    return resolve_gate_action_type(skill, snapshot, _AGENT_ACTION_TYPE)
+    return resolve_gate_action_type(
+        skill,
+        snapshot,
+        _AGENT_ACTION_TYPE,
+        verdict=lambda at: policy.blast_radius_for(at).value,
+    )
 
 
 def _dispatch_action_class(skill: str | None, snapshot: dict) -> str:
@@ -1978,7 +1991,7 @@ async def dispatch_task(
     # Skipped when re-dispatching an operator-approved checkpoint.
     if not gate_override:
         policy = resolve_policy_for_agent(skill)
-        resolved_action = _resolve_gate_action_type(skill, snapshot)
+        resolved_action = _resolve_gate_action_type(skill, snapshot, policy)
         action_type = resolved_action.value
         # ateles#902: populate confidence ahead of the read. When no producer
         # scored this task, this mechanically scores it (per confidence_rubric
@@ -3033,8 +3046,8 @@ def _task_gate_context(task_snapshot: dict):
             except (ValueError, TypeError):
                 tags = []
         skill = _resolve_skill(tags, assigned_to=assigned_to)
-    action_type = _resolve_gate_action_type(skill or "", task_snapshot).value
     policy = resolve_policy_for_agent(skill)
+    action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
     decision = evaluate_gate(
         confidence=_read_confidence(task_snapshot),
         action_type=action_type,
@@ -3763,8 +3776,9 @@ async def handle_checkpoint_brief(
                 task_tags = []
         safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
 
+    current_policy = resolve_policy_for_agent(safety_skill)
     current_action_type = _resolve_gate_action_type(
-        safety_skill or "", task_snapshot
+        safety_skill or "", task_snapshot, current_policy
     ).value
     if current_action_type == "operator_only":
         log.warning(
@@ -3811,7 +3825,6 @@ async def handle_checkpoint_brief(
         return False
 
     auth_action_type = str(authorization.get("action_type") or "").strip().lower()
-    current_policy = resolve_policy_for_agent(safety_skill)
     if not current_policy.loaded:
         _require_fresh_release_authority(
             entity_id,

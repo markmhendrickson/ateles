@@ -20,6 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import cotinga  # noqa: E402
 from lib.daemon_runtime.action_type import resolve_gate_action_type  # noqa: E402
+from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
+
+_POLICY = ExecutionPolicy(entity_id="fallback", loaded=False)
+
+
+def _verdict(action_type):
+    return _POLICY.blast_radius_for(action_type).value
 
 
 # The attribute name is assembled so a secret scanner that matches on the
@@ -71,6 +78,7 @@ def test_prep_task_with_no_signal_resolves_to_nothing_for_the_gate():
     resolved = resolve_gate_action_type(
         entity.get("assigned_to"),
         {"title": entity["name"], "description": entity["description"]},
+        verdict=_verdict,
     )
     assert (resolved.value, resolved.source) == (None, "none")
 
@@ -80,5 +88,6 @@ def test_prep_task_that_asks_for_an_outbound_send_is_read_as_high_blast():
     resolved = resolve_gate_action_type(
         entity.get("assigned_to"),
         {"title": entity["name"], "description": entity["description"]},
+        verdict=_verdict,
     )
     assert (resolved.value, resolved.source) == ("send_external_comms", "content")

@@ -6,6 +6,12 @@ natural call shape, so a change to either that makes them disagree fails in CI
 instead of being discovered when an operator is told "low" by the preview and
 held by the gate.
 
+Provenance: the resolver reads no `source` or other provenance field, so NO case
+below depends on it; the MCP preview taking no `source` argument cannot make it
+differ from the dispatcher on any case here. What the preview cannot see is the
+task's body and description fields (it is given one description string); every
+case below puts its text in the title/description the preview does receive.
+
 Data only, stdlib only, so the MCP server's test environment can import it.
 Each case: (id, task description, declared action_type or None, agent the
 description routes to under the standard roster, expected action_type,
@@ -29,9 +35,9 @@ PARITY_POLICY = {
 
 PARITY_CASES = [
     (
-        "report_only_is_low",
+        "report_only_language_does_not_lower_the_prior",
         "Review the code path. Write NOTHING - this job's only output is a divergence report.",
-        None, "cicada", "compute_only_analysis", "content", "low",
+        None, "cicada", "open_or_merge_pr", "agent_prior", "high",
     ),
     (
         "explicit_pr_is_high",

@@ -930,15 +930,30 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     if policy:
         result["execution_policy"] = policy
     # Same resolution the dispatcher's gate applies (ateles#682): a declared
-    # action_type is taken as given; otherwise the matched agent's prior, then
-    # what the task description itself says it does. Before this, a caller who
-    # omitted `action_type` got no blast classification at all, so the preview
-    # could not tell a filing agent that a report-only task and a PR task
-    # differ. `action_type_source` says which of those the verdict rests on.
+    # action_type is taken as given; otherwise the matched agent's prior, which
+    # the task description can only ESCALATE, and only where that is strictly
+    # stricter under THIS policy. Before this, a caller who omitted
+    # `action_type` got no blast classification at all. `action_type_source` says
+    # which of declared / content / agent_prior the verdict rests on. With no
+    # policy to compare under there is no escalation, only the prior.
+    #
+    # Limit: the preview reads the description only. The dispatcher reads the
+    # task's title, body and description fields, so a phrase in a field this
+    # call cannot see can make the gate stricter than the preview says.
+    verdict = None
+    if policy:
+
+        def verdict(at: str | None) -> str:
+            if at is None:
+                default = str(policy.get("blast_radius_default") or "low").strip().lower()
+                return default if default in ("low", "high", "never") else "never"
+            return _action_blast_radius(at, policy)
+
     resolved = resolve_gate_action_type(
         best_agent,
         {"action_type": action_type, "title": task_description},
         AGENT_ACTION_TYPE_PRIOR,
+        verdict=verdict,
     )
     if resolved.value:
         # A declared value is echoed exactly as the caller wrote it, as before.
@@ -3381,8 +3396,10 @@ TOOLS = [
             "tool allowlist), and the applicable execution_policy. Returns the "
             "complete dispatch context in one call. Returns the blast radius the "
             "dispatcher's gate would assign: from action_type when passed, else "
-            "from the matched agent and what the description says it does "
-            "(action_type_source says which)."
+            "from the matched agent, which the description can only make "
+            "stricter (action_type_source says which). A preview, not the "
+            "decision: it reads only this description, while the dispatcher "
+            "reads the task's title, body and description."
         ),
         inputSchema={
             "type": "object",

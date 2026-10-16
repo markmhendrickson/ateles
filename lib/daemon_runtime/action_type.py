@@ -3,14 +3,6 @@ lib/daemon_runtime/action_type.py — resolve the action_type the execution gate
 classifies blast radius from, using what a task SAYS it does as well as who
 would handle it (ateles#682).
 
-Why this exists
----------------
-``apis._AGENT_ACTION_TYPE["cicada"] = "open_or_merge_pr"`` makes blast radius a
-property of the assignee. Cicada is the generalist, so a task whose entire
-output is a written report is gated as if it merged a PR, and a task routed to
-an agent with a LOW prior that says "send the email to the client" is gated as
-if it were a local edit.
-
 What this module does — and, deliberately, does not do
 ------------------------------------------------------
 It resolves one value for the GATE and the MCP ``route_task`` preview. It is
@@ -25,26 +17,26 @@ Resolution order (``resolve_gate_action_type``):
    treats it as never-auto-executable and says so by name (ateles#715). This
    module never discards, normalizes, or aliases a declared value.
 2. Otherwise the per-agent prior (``AGENT_ACTION_TYPE_PRIOR``), exactly as before.
-3. Text inference may then change that prior in exactly two ways, and no other:
+3. Task text may then **escalate** that prior, and nothing else:
 
-   * **Escalate.** A high-blast signal in the task text ("open a PR", "send the
-     email to the client", "pay the invoice") replaces an absent or LOW prior
-     with the high-blast type the text names. It never replaces a HIGH prior
-     and never touches an unrecognized one.
-   * **Lower, narrowly.** For the agents in ``LOWERABLE_PRIOR_AGENTS`` (the
-     generalist whose single prior mislabels most of its work), an explicit
-     report-only statement ("Write NOTHING", "pure reporting", "the only output
-     is a report") replaces the HIGH prior with ``compute_only_analysis`` — and
-     only when the text carries NO high-blast signal and no implementation verb,
-     and the task carries no ``source`` marker. A task that arrived from outside
-     the swarm (the A2A gateway stamps ``source: "a2a"``) is written by someone
-     who can put any sentence in it, so its prose may tighten its own gate but
-     never loosen it.
+   A high-blast phrase in the task's text ("open a PR", "send the email to the
+   client", "pay the invoice") replaces the prior with the high-blast type it
+   names — but ONLY when that is strictly stricter than the prior under the
+   EFFECTIVE execution policy, which the caller supplies as ``verdict``. The
+   comparison is made on the policy's own classification, never on this
+   module's idea of the vocabulary, so an escalation cannot make the gate
+   less strict under a policy whose sets differ from the defaults, and a
+   never-auto-executable prior is never replaced.
 
-   Text never supplies a LOW value where there is no prior: with nothing to
-   lower, a LOW reading would only be able to move a task from the policy
-   default to LOW, which is exactly the "silence is a licence" step this module
-   refuses to take. A task with no signal resolves exactly as it does today.
+   Text NEVER lowers anything. There is no path from a task's prose to a
+   less-strict reading than the prior gives. A report-only statement in a task
+   ("write nothing", "pure reporting") is deliberately ignored here: telling an
+   affirmative report-only contract from negated, scoped, mixed or spoofed
+   language needs independently labelled negative cases, and until that exists
+   the safe reading of silence and of ambiguity is the prior. (So #682's
+   report-only symptom is NOT fixed by this module.)
+
+   A task with no high-blast phrase resolves exactly as it does today.
 
 Every value this module can emit is a member of the policy's action-type
 vocabulary (``test_action_type.py`` holds that against ``gating``); it emits no
@@ -57,16 +49,16 @@ without pulling in the daemon runtime's HTTP stack.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Callable, Mapping
 
 # ── Vocabulary ───────────────────────────────────────────────────────────────
 # A stdlib-only mirror of the classification in ``lib.daemon_runtime.gating``
 # (``_FALLBACK_LOW_BLAST`` / ``_FALLBACK_HIGH_BLAST`` / ``NEVER_AUTO_EXECUTE``),
 # kept honest by ``test_action_type.py::test_vocabulary_mirrors_gating``. It
-# exists only so this module can say which tier a PRIOR sits in; the policy
-# entity, evaluated by ``ExecutionPolicy.blast_radius_for``, stays authoritative
-# for the actual verdict.
+# describes the vocabulary; it is NOT consulted to decide a verdict. Every
+# comparison of tiers is made under the effective policy the caller supplies.
 LOW_BLAST_ACTION_TYPES = frozenset(
     {
         "local_edit",
@@ -120,22 +112,10 @@ AGENT_ACTION_TYPE_PRIOR: dict[str, str] = {
     "corvus": "send_external_comms",
 }
 
-# Agents whose prior may be LOWERED by an explicit report-only statement.
-# Cicada only: it is the generalist whose one prior mislabels the majority of
-# its work. Every specialist's prior is a statement about what it is for
-# (Monedula moves money, Struthio publishes), so text can add to it but never
-# take it away. Adding an agent here loosens the gate for that agent.
-LOWERABLE_PRIOR_AGENTS = frozenset({"cicada"})
-
 SOURCE_DECLARED = "declared"
 SOURCE_CONTENT = "content"
 SOURCE_AGENT_PRIOR = "agent_prior"
 SOURCE_NONE = "none"
-
-_TIER_LOW = "low"
-_TIER_HIGH = "high"
-_TIER_NEVER = "never"
-
 
 def normalize_action_type(raw: object) -> str | None:
     """A declared action_type, stripped and lowercased — and nothing else.
@@ -152,25 +132,6 @@ def normalize_action_type(raw: object) -> str | None:
     return value or None
 
 
-def tier_of(action_type: str | None) -> str | None:
-    """Coarse tier of an action type, ``None`` when nothing was declared.
-
-    Anything classified by neither set — including ``operator_only`` — is
-    ``never``, the same fail-closed reading ``ExecutionPolicy.blast_radius_for``
-    gives it.
-    """
-    if not action_type:
-        return None
-    at = action_type.strip().lower()
-    if at in NEVER_ACTION_TYPES:
-        return _TIER_NEVER
-    if at in LOW_BLAST_ACTION_TYPES:
-        return _TIER_LOW
-    if at in HIGH_BLAST_ACTION_TYPES:
-        return _TIER_HIGH
-    return _TIER_NEVER
-
-
 @dataclass(frozen=True)
 class ResolvedActionType:
     """The resolved value and where it came from.
@@ -185,7 +146,7 @@ class ResolvedActionType:
 
 
 # ── HIGH-blast signals ───────────────────────────────────────────────────────
-# Scanned first; the first match wins, ordered most-consequential first so a
+# The first match wins, ordered most-consequential first so a
 # task that both pays someone and opens a PR is classified by the payment.
 # Narrow multi-word phrases on purpose (see execution/daemons/apis/routing.py):
 # a bare common word is how a silent misclassification is born.
@@ -256,65 +217,56 @@ _HIGH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
-# ── Report-only signals ──────────────────────────────────────────────────────
-# Each is an explicit statement that the work produces a report and writes
-# nothing — never the mere absence of a high-blast verb, and never a bare
-# "read-only" / "do not modify X" (those usually constrain one part of a task
-# that still changes something else).
-_REPORT_ONLY = re.compile(
-    r"\bwrites? nothing\b|\bpure reporting\b|\breporting only\b|\breport[- ]only\b|"
-    r"\bonly output is (a |an |the )?([\w-]+ ){0,2}report\b|"
-    r"\bnothing gated on the result\b",
-    re.I,
-)
-# A task that also says it will change something is not report-only, whatever
-# else it says. Conservative by construction: a false hit only keeps the task
-# at its prior, which is today's behaviour.
-_IMPLEMENTATION = re.compile(
-    r"\b(implement(s|ed|ing)?|refactor(s|ed|ing)?|migrat(e|es|ed|ing)|rewrite|"
-    r"patch(es|ed|ing)?|fix(es|ed|ing)?|build(s|ing)?|deploy(s|ed|ing)?)\b",
-    re.I,
-)
-
-REPORT_ONLY_ACTION_TYPE = "compute_only_analysis"
+# Zero-width and other format characters are removed and every run of
+# whitespace (NBSP and Unicode spaces included) becomes one space before the
+# patterns run, so a phrase is not missed because of how it is spaced.
+_FORMAT_CHARS = re.compile(r"[\u200b-\u200f\u2060\ufeff\u00ad]")
+_WHITESPACE = re.compile(r"\s+")
 
 
-def infer_action_type_from_text(title: object, body: object = None) -> str | None:
-    """What the task's own text says it does, or ``None`` for no decisive signal.
+def _normalize_text(*parts: object) -> str:
+    joined = " ".join(str(p) for p in parts if p)
+    folded = unicodedata.normalize("NFKC", joined)
+    return _WHITESPACE.sub(" ", _FORMAT_CHARS.sub("", folded)).strip()
 
-    Returns a high-blast type when any high-blast pattern matches (the whole
-    text is scanned — nothing is truncated, because a signal missed late in a
-    long body would be a missed escalation), ``compute_only_analysis`` only for
-    an explicit report-only statement with no implementation verb, else
-    ``None``. Never returns an alias or ``operator_only``.
+
+def infer_action_type_from_text(*fields: object) -> str | None:
+    """The high-blast type the task's own text names, or ``None``.
+
+    Every text field the caller passes (title, body AND description) is read, in
+    full — nothing is truncated and no field is ignored because another is
+    present, because a phrase missed in a late or secondary field is a missed
+    escalation. Returns ``None`` when no high-blast phrase matches. Never returns
+    a LOW type, an alias, or ``operator_only``.
     """
-    text = " ".join(str(p) for p in (title, body) if p).strip()
+    text = _normalize_text(*fields)
     if not text:
         return None
     for pattern, action in _HIGH_PATTERNS:
         if pattern.search(text):
             return action
-    if _REPORT_ONLY.search(text) and not _IMPLEMENTATION.search(text):
-        return REPORT_ONLY_ACTION_TYPE
     return None
 
 
-def _has_source_marker(snapshot: Mapping[str, object]) -> bool:
-    """True when the task names where it came from. Unknown markers count: a
-    provenance this module has not vetted is not one whose prose may loosen a
-    gate."""
-    return bool(str(snapshot.get("source") or "").strip())
+#: ``action_type | None -> "low" | "high" | "never"`` under the EFFECTIVE policy;
+#: ``None`` maps to the policy's ``blast_radius_default``.
+Verdict = Callable[["str | None"], str]
+_RANK = {"low": 0, "high": 1, "never": 2}
 
 
 def resolve_gate_action_type(
     skill: str | None,
     snapshot: Mapping[str, object],
     agent_priors: Mapping[str, str] | None = None,
+    *,
+    verdict: Verdict | None = None,
 ) -> ResolvedActionType:
     """Resolve the action_type for the gate and the MCP preview.
 
-    ``agent_priors`` defaults to ``AGENT_ACTION_TYPE_PRIOR``; ``apis`` passes its
-    own alias so a test that patches the prior is seen by both.
+    ``verdict`` is the effective policy's classification (see ``Verdict``). With
+    no ``verdict`` there is no escalation: without a policy to compare under, the
+    only safe move is to keep the prior. ``agent_priors`` defaults to
+    ``AGENT_ACTION_TYPE_PRIOR``; ``apis`` passes its own alias.
     """
     priors = AGENT_ACTION_TYPE_PRIOR if agent_priors is None else agent_priors
 
@@ -324,25 +276,17 @@ def resolve_gate_action_type(
 
     skill_key = skill.lower() if skill else ""
     prior = priors.get(skill_key) if skill_key else None
-    prior_tier = tier_of(prior)
 
-    text_type = infer_action_type_from_text(
-        snapshot.get("title"), snapshot.get("body") or snapshot.get("description")
-    )
-
-    if text_type is not None:
-        if text_type != REPORT_ONLY_ACTION_TYPE:
-            # Escalate: only where the prior is absent or LOW.
-            if prior is None or prior_tier == _TIER_LOW:
+    if verdict is not None:
+        text_type = infer_action_type_from_text(
+            snapshot.get("title"), snapshot.get("body"), snapshot.get("description")
+        )
+        if text_type is not None:
+            current = verdict(prior)
+            candidate = verdict(text_type)
+            # Strictly stricter under the effective policy, and never from NEVER.
+            if current != "never" and _RANK[candidate] > _RANK[current]:
                 return ResolvedActionType(text_type, SOURCE_CONTENT)
-        elif (
-            prior_tier == _TIER_HIGH
-            and skill_key in LOWERABLE_PRIOR_AGENTS
-            and not _has_source_marker(snapshot)
-        ):
-            # Lower: only a HIGH prior, only a lowerable agent, only a task with
-            # no provenance marker (see module docstring).
-            return ResolvedActionType(text_type, SOURCE_CONTENT)
 
     if prior is not None:
         return ResolvedActionType(prior, SOURCE_AGENT_PRIOR)

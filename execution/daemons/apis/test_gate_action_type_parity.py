@@ -40,7 +40,7 @@ def test_dispatch_gate_matches_the_shared_parity_table(
     snapshot = {"title": description}
     if declared is not None:
         snapshot["action_type"] = declared
-    resolved = apis._resolve_gate_action_type(agent, snapshot)
+    resolved = apis._resolve_gate_action_type(agent, snapshot, _POLICY)
     assert resolved.value == expected_type
     assert resolved.source == expected_source
     if expected_blast is not None:
