@@ -1060,3 +1060,61 @@ def test_a_cooled_result_envelope_carries_cooled_until(
     env = _envelope(capsys)
     assert env["cooled_until"] == "2026-09-29T12:30+02:00"
     assert "cooled until" in env["reason"]
+
+
+@pytest.mark.parametrize("failure", ["file_json", "file_read", "file_utf8", "file_empty", "file_shape", "env_json"])
+def test_cli_selected_policy_failure_refuses_before_child(
+    captured_codex_dispatches, monkeypatch, tmp_path, failure,
+):
+    path = tmp_path / "declared-policy.json"
+    path.write_text('{"panel_aggregation":{"min_tier":"mid","max_tier":"mid"}}')
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(path))
+    # A valid alternate source must not replace the selected declared file.
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"panel_aggregation":"top"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"mid-model","top":"top-model"}}')
+    if failure == "file_read":
+        real = Path.read_text
+        def read(p, *args, **kwargs):
+            if p == path:
+                raise PermissionError("synthetic private config failure")
+            return real(p, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", read)
+    elif failure == "file_utf8":
+        path.write_bytes(b"\xff")
+    elif failure == "env_json":
+        path.unlink()
+        monkeypatch.setenv("APIS_ACTION_POLICY", "{invalid")
+    else:
+        path.write_text({"file_json": "{invalid", "file_empty": "", "file_shape": "[]"}[failure])
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "review", "--action-class", "panel_aggregation",
+        "--review-round", "3", "--prior-blocking-finding", "--json",
+    ]) == 1
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("action,model", [
+    ("lens_review:content", "gpt-5.6-terra"), ("panel_aggregation", "gpt-5.6-terra"),
+    ("lens_review:eng", "gpt-5.6-terra"), ("lens_review:legal", "gpt-5.6-terra"),
+    ("task_dispatch", "gpt-5.6-terra"), ("lens_review:security", "gpt-6-sol"),
+    ("lens_review:arch", "gpt-6-sol"),
+])
+def test_cli_committed_reference_policy_reaches_distinct_models(
+    captured_codex_dispatches, monkeypatch, action, model,
+):
+    examples = Path(__file__).resolve().parents[3] / "docs/examples/model-tiering"
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(examples / "action-policy.json"))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(examples / "vendor-binding.json"))
+    assert dispatch_role.main(["--role", "pavo", "--task", "review", "--action-class", action]) == 0
+    argv = captured_codex_dispatches[0]["cmd"]
+    assert argv[argv.index("--model") + 1] == model
+
+
+def test_cli_help_describes_default_tier_resolution_and_override(capsys):
+    with pytest.raises(SystemExit) as caught:
+        dispatch_role.main(["--help"])
+    assert caught.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "task_dispatch" in help_text and "minimum tier" in help_text
+    assert "measured signals" in help_text and "--model" in help_text
+    assert "provider's ambient default" not in help_text

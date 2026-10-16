@@ -60,14 +60,16 @@ def test_vendor_binding_file_beats_env(monkeypatch, tmp_path) -> None:
     }
 
 
-def test_malformed_action_policy_json_degrades_to_empty(monkeypatch) -> None:
+def test_malformed_action_policy_json_refuses(monkeypatch) -> None:
     monkeypatch.setenv("APIS_ACTION_POLICY", "{not json")
-    assert model_tiering.configured_action_policy() == {}
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_action_policy()
 
 
-def test_malformed_vendor_binding_json_degrades_to_empty(monkeypatch) -> None:
+def test_malformed_vendor_binding_json_refuses(monkeypatch) -> None:
     monkeypatch.setenv("APIS_VENDOR_BINDING", "{not json")
-    assert model_tiering.configured_vendor_binding() == {}
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_vendor_binding()
 
 
 def test_action_policy_drops_unrecognized_tier_name(monkeypatch) -> None:
