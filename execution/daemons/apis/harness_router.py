@@ -250,13 +250,12 @@ def provider_policy(*, required: bool = False) -> ProviderPolicy:
             # only APIS_HARNESS_PROVIDERS. Guarded entrypoints use
             # required=True and reject this partial shape.
             source = "legacy partial process environment"
+            active_raw = os.environ.get(
+                "APIS_HARNESS_PROVIDERS", ",".join(DEFAULT_PROVIDER_ORDER)
+            )
             return _policy_from_values(
-                os.environ.get(
-                    "APIS_HARNESS_PROVIDERS", ",".join(DEFAULT_PROVIDER_ORDER)
-                ),
-                os.environ.get(
-                    "APIS_USAGE_GATED_PROVIDERS", ",".join(DEFAULT_PROVIDER_ORDER)
-                ),
+                active_raw,
+                os.environ.get("APIS_USAGE_GATED_PROVIDERS", active_raw),
                 source,
                 strict=False,
             )
