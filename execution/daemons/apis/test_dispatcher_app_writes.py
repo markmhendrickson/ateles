@@ -467,10 +467,12 @@ async def test_app_only_gate_notices_are_delivered_and_deduped_under_the_bot(
     seen = _recorder(monkeypatch, responder)
     d = _dispatcher()
     if method == "_surface_unverified_signed_off_gates":
-        call = lambda: d._surface_unverified_signed_off_gates(_trigger(), None, {"ux"}, head)
+        def call():
+            return d._surface_unverified_signed_off_gates(_trigger(), None, {"ux"}, head)
     else:
         entry = ("ux", "accipiter", "**🤖 Accipiter — Ateles swarm, ux review**", "no verdict line")
-        call = lambda: d._surface_unreadable_gate_verdicts(_trigger(), None, [entry], head)
+        def call():
+            return d._surface_unreadable_gate_verdicts(_trigger(), None, [entry], head)
     await call()
     posts = [x for x in seen if x[0] == "POST"]
     assert len(posts) == 1, "the notice must be delivered with no PAT configured"
