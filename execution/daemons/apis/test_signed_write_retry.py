@@ -712,6 +712,21 @@ def _counting_fake(monkeypatch, *, block=0.0):
     return calls
 
 
+class _DelayedPool:
+    """A busy pool: each submitted call starts only after `delay` seconds."""
+
+    def __init__(self, delay, workers=8):
+        self._real = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        self.delay = delay
+
+    def submit(self, fn, *args, **kwargs):
+        def late():
+            _real_time.sleep(self.delay)
+            return fn(*args, **kwargs)
+
+        return self._real.submit(late)
+
+
 async def _with_executor(workers, occupy_for=0.0):
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
     asyncio.get_running_loop().set_default_executor(ex)
@@ -727,10 +742,10 @@ def test_a_queued_attempt_that_starts_after_the_deadline_issues_no_write(monkeyp
     caller is not held past the deadline."""
     _tiny_real_deadline(monkeypatch)
     calls = _counting_fake(monkeypatch)
+    monkeypatch.setattr(gate_waive, "_signed_pool", _DelayedPool(0.15))
     store = _store()
 
     async def go():
-        await _with_executor(1, occupy_for=0.15)
         t0 = _real_time.monotonic()
         out = await store._sign_off_write(
             "ent_1", GATE_STATUS_FIELD, "v", "key-1",
@@ -750,9 +765,9 @@ def test_a_queued_attempt_that_starts_after_the_deadline_issues_no_write(monkeyp
 def test_the_expired_outcome_is_the_fail_closed_reason_and_is_not_retried(monkeypatch, caplog):
     _tiny_real_deadline(monkeypatch)
     _counting_fake(monkeypatch)
+    monkeypatch.setattr(gate_waive, "_signed_pool", _DelayedPool(0.15))
 
     async def go():
-        await _with_executor(1, occupy_for=0.15)
         with caplog.at_level(logging.INFO, logger="apis.gate_waive"):
             return await _store()._sign_off_write(
                 "ent_1", GATE_STATUS_FIELD, "v", "key-1",
@@ -769,7 +784,6 @@ def test_a_worker_that_is_mid_flight_when_the_await_gives_up_has_its_result_disc
     calls = _counting_fake(monkeypatch, block=0.15)  # a stuck helper that ignores its timeout
 
     async def go():
-        await _with_executor(2)
         out = await _store()._sign_off_write(
             "ent_1", GATE_STATUS_FIELD, "v", "key-1",
             lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
@@ -787,10 +801,13 @@ def test_repeated_expirations_do_not_grow_the_worker_pool(monkeypatch):
     _tiny_real_deadline(monkeypatch)
     _counting_fake(monkeypatch, block=0.06)
     store = _store()
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    monkeypatch.setattr(gate_waive, "_signed_pool", pool)
+    monkeypatch.setattr(gate_waive, "_signed_permits", threading.BoundedSemaphore(3))
     before = threading.active_count()
 
     async def go():
-        ex = await _with_executor(3)
+        ex = pool
         for i in range(50):
             await store._sign_off_write(
                 "ent_1", GATE_STATUS_FIELD, "v", f"key-{i}",
@@ -825,7 +842,6 @@ def test_a_write_that_landed_after_the_caller_gave_up_is_not_applied_twice(monke
     monkeypatch.setattr(gate_waive._ns, "signed_request", lands_then_stalls)
 
     async def go():
-        await _with_executor(4)
         outcome = await store.sign_off("o/r", 795, "pm", "pavo", HEAD)
         await asyncio.sleep(0.4)
         return outcome
@@ -882,3 +898,45 @@ def test_planted_red_computing_the_timeout_before_the_thread_only_issues_the_lat
     out = _run(go())
     assert out == "", "the old design returned SUCCESS after the deadline, having issued the write"
     assert len(calls) == 1
+
+
+def test_with_every_signing_worker_busy_the_attempt_fails_at_once_and_issues_no_write(monkeypatch):
+    """A fixed pool with one permit per worker: nothing queues. An exhausted pool is the
+    retryable reason `busy`, never a call waiting for a thread."""
+    _tiny_real_deadline(monkeypatch)
+    calls = _counting_fake(monkeypatch)
+    permits = threading.BoundedSemaphore(2)
+    assert permits.acquire(blocking=False) and permits.acquire(blocking=False)
+    monkeypatch.setattr(gate_waive, "_signed_permits", permits)
+    t0 = _real_time.monotonic()
+
+    out = _run(_store()._sign_off_write(
+        "ent_1", GATE_STATUS_FIELD, "v", "key-1",
+        lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+    ))
+
+    assert out == SIGN_OFF_SIGNING_FAILED and calls == []
+    assert _real_time.monotonic() - t0 < 0.2
+
+
+def test_a_permit_is_released_when_the_worker_finishes_even_if_the_caller_gave_up(monkeypatch):
+    _tiny_real_deadline(monkeypatch)
+    _counting_fake(monkeypatch, block=0.15)
+    permits = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(gate_waive, "_signed_permits", permits)
+    monkeypatch.setattr(
+        gate_waive, "_signed_pool", concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    )
+
+    async def go():
+        await _store()._sign_off_write(
+            "ent_1", GATE_STATUS_FIELD, "v", "key-1",
+            lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+        )
+        held = not permits.acquire(blocking=False)  # worker still running: permit held
+        await asyncio.sleep(0.3)
+        free = permits.acquire(blocking=False)  # worker done: permit back
+        return held, free
+
+    held, free = _run(go())
+    assert held and free

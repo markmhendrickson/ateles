@@ -155,7 +155,7 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         async def _go():
             delay = scenario.get("queue_delay_s", 0)
             if delay:
-                # Every attempt waits in the executor queue for `delay` seconds of the
+                # Every attempt waits in the worker pool's queue for `delay` seconds of the
                 # virtual clock before a worker begins it.
                 class _Queueing(concurrent.futures.ThreadPoolExecutor):
                     def submit(self, fn, *args, **kwargs):
@@ -165,7 +165,7 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
 
                         return super().submit(late, *args, **kwargs)
 
-                asyncio.get_running_loop().set_default_executor(_Queueing(max_workers=2))
+                mp.setattr(gate_waive, "_signed_pool", _Queueing(max_workers=2))
             for step in scenario["steps"]:
                 gate = step["gate"]
                 store.fail_fields = {GATE_STATUS_FIELD} if step.get("fail_gate") else set()

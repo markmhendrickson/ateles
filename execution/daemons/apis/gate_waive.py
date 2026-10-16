@@ -36,6 +36,7 @@ Shape notes learned from the live prod entity (``ent_4c1f77bc5fc86a2bad2025d6``)
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import hashlib
 import json
@@ -287,7 +288,7 @@ SIGNED_WRITE_TOTAL_CAP_S = 45.0
 SIGNED_ATTEMPT_TIMEOUT_S = 20.0  # the signing helper's own default timeout
 BEARER_ATTEMPT_TIMEOUT_S = 30.0  # the bearer path's default HTTP timeout
 MIN_ATTEMPT_TIMEOUT_S = 2.0  # a retry is not started with less than this left
-_RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout"})
+_RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout", "busy"})
 _monotonic = time.monotonic
 
 
@@ -303,6 +304,21 @@ def _retry_fits(started: float, retries_done: int) -> bool:
 
 
 _retry_sleep = asyncio.sleep
+
+# Signing workers: a small, FIXED pool owned by this module, with one permit per
+# worker so a call is never queued behind another. A call that finds no free permit
+# fails at once with the retryable reason "busy" (it is retried inside the deadline
+# like any transient failure). A permit is released when the WORKER finishes, not when
+# the caller gives up, so the number of live workers can never exceed the pool size,
+# and every worker ends by the deadline because the helper process it runs is killed
+# at its timeout. The same approach (fixed pool, permit per worker, deadline re-read
+# when the work begins, abandon flag, bounded await) is used by the agent-definition
+# loader.
+SIGNED_WORKERS = 8
+_signed_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=SIGNED_WORKERS, thread_name_prefix="signed-write"
+)
+_signed_permits = threading.BoundedSemaphore(SIGNED_WORKERS)
 
 
 def retries_for_reason(code: str) -> int:
@@ -340,7 +356,7 @@ def signed_failure_code(exc: BaseException) -> str:
 # issued by a worker that saw it, and a late one is discarded. Never retried.
 _SIGNED_FAILURE_CODES = frozenset(
     {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error",
-     "expired"}
+     "expired", "busy"}
 )
 
 
@@ -2196,15 +2212,28 @@ class IssueGateStore:
                 sub=lens_sub,
             )
 
-        future = asyncio.get_running_loop().run_in_executor(None, run)
+        if not _signed_permits.acquire(blocking=False):
+            raise _ns.SignedRequestError("no free signing worker", "busy")
+
+        def release(_done):
+            _signed_permits.release()
+
+        try:
+            concurrent_future = _signed_pool.submit(run)
+        except BaseException:
+            _signed_permits.release()
+            raise
+        concurrent_future.add_done_callback(release)
+        future = asyncio.wrap_future(concurrent_future)
         try:
             result = await asyncio.wait_for(future, timeout=max(deadline - _monotonic(), 0.0))
             if inspect.isawaitable(result):
                 result = await asyncio.wait_for(result, timeout=max(deadline - _monotonic(), 0.0))
         except asyncio.TimeoutError:
             abandoned.set()
-            if future.done() and not future.cancelled() and future.exception() is not None:
-                raise future.exception()  # a genuine timeout raised by the call itself
+            if concurrent_future.done() and not concurrent_future.cancelled() \
+                    and concurrent_future.exception() is not None:
+                raise concurrent_future.exception()  # a timeout raised by the call itself
             raise _ns.SignedRequestError("attempt outlasted the deadline", "expired") from None
         except BaseException:
             abandoned.set()
