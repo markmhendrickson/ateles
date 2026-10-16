@@ -596,8 +596,10 @@ def test_failed_cleanup_diagnostics_are_bound_to_the_real_entrypoint_and_value_f
     assert message.startswith("delivery cleanup failed: ")
     details = json.loads(message.removeprefix("delivery cleanup failed: "))
     assert details["errors"] == [{"type": "OSError", "errno": errno.ENOTEMPTY}]
-    assert any(row["relative"] == "job-fly-deliver-1" and row["mode"] == "0711"
-               for row in details["leftovers"])
+    # prepare_work respects the caller's umask; verify the actual planted mode.
+    job_mode = stat.S_IMODE((world["work_root"] / "job-fly-deliver-1").lstat().st_mode)
+    assert any(row["relative"] == "job-fly-deliver-1" and row["mode"] == f"{job_mode:04o}"
+               and row["kind"] == "directory" for row in details["leftovers"])
     assert any("<entry>" in row["relative"] for row in details["leftovers"])
     assert all(secret not in message for secret in (TOKEN, HEADER, ROLE_TOKEN, str(world["tmp"])))
 
@@ -720,7 +722,8 @@ def test_all_delivery_cleanup_assertion_sinks_use_safe_evidence(world, monkeypat
         else:
             test(world)
     details = _assert_safe_cleanup_failure(call, world)
-    assert details["leftovers"] == [{"relative": "<entry>", "mode": "0644", "kind": "file"}]
+    planted_mode = stat.S_IMODE((world["work_root"] / TOKEN).lstat().st_mode)
+    assert details["leftovers"] == [{"relative": "<entry>", "mode": f"{planted_mode:04o}", "kind": "file"}]
 
 
 @pytest.mark.parametrize("count", [64, 65, 200])
