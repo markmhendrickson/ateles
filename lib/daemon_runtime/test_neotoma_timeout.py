@@ -54,12 +54,12 @@ def test_env_is_read_at_call_time_not_import_time(monkeypatch):
     assert nt.neotoma_timeout() == 88.0
 
 
-@pytest.mark.parametrize("bad", ["", "   ", "abc", "10s", "None", "0", "-5", "nan_x"])
-def test_malformed_or_nonpositive_env_falls_back_to_default(monkeypatch, bad):
-    """A malformed env var must not raise — that would take the swarm down on
-    startup, which is a worse failure than the one being guarded against."""
+@pytest.mark.parametrize("bad", ["", "   ", "abc", "10s", "None", "0", "-5", "nan_x", "nan", "inf"])
+def test_invalid_config_fails_loudly(monkeypatch, bad):
+    """An explicit invalid timeout must not silently change the read budget."""
     monkeypatch.setenv("ATELES_NEOTOMA_TIMEOUT", bad)
-    assert nt.neotoma_timeout() == nt.DEFAULT_NEOTOMA_TIMEOUT
+    with pytest.raises(ValueError, match="ATELES_NEOTOMA_TIMEOUT"):
+        nt.neotoma_timeout()
 
 
 def test_explicit_default_argument_respected(monkeypatch):

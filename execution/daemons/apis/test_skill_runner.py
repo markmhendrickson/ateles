@@ -32,6 +32,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib.daemon_runtime import AgentDefinition  # noqa: E402
+from lib.daemon_runtime.agent_loader import STUB_TOOL_ALLOWLIST  # noqa: E402
 
 # Import module-level objects so we can patch them in-place
 import skill_runner  # noqa: E402
@@ -437,6 +438,64 @@ class TestRunSkill:
         assert len(degraded_calls) >= 1, (
             "Expected at least one harness_event with output_summary='degraded_generic_subagent'"
         )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_spawn_keeps_restricted_tools(self, MockLoader, _event) -> None:
+        """The assembled command must not restore the missing role's authority."""
+        stub = _stub_def()
+        stub.tool_allowlist = list(STUB_TOOL_ALLOWLIST)
+        MockLoader.return_value.load.return_value = stub
+        captured: list[str] = []
+
+        async def fake_exec(*cmd, **_kwargs):
+            captured.extend(cmd)
+            proc = MagicMock(returncode=0)
+
+            async def communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(skill_runner.run_skill("gryllus", "work", role="gryllus"))
+
+        assert result.ok
+        assert result.degraded_load
+        allowed = captured[captured.index("--allowed-tools") + 1].split(",")
+        assert "mcp__mcpsrv_neotoma__*" not in allowed
+        assert "*" not in allowed
+        assert "Read" in allowed
+
+    @pytest.mark.parametrize("provider", ["codex", "cursor"])
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_unbound_adapter_refuses_before_spawn(
+        self, MockLoader, _event, monkeypatch, provider
+    ) -> None:
+        MockLoader.return_value.load.return_value = _stub_def()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", provider)
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM", f'{{"{provider}": 1.0}}')
+        harness_router.reset_state()
+        with (
+            patch.object(skill_runner, f"{provider.upper()}_BIN", f"/usr/bin/{provider}"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec") as spawn,
+        ):
+            result = self._run(
+                skill_runner.run_skill("gryllus", "work", role="gryllus", provider=provider)
+            )
+        assert not result.ok
+        assert result.degraded_load
+        assert "fallback tool floor" in result.error
+        spawn.assert_not_called()
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")

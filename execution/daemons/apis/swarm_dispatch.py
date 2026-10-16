@@ -5990,7 +5990,7 @@ class SwarmDispatcher:
             # as pm's is. A failed sign_off does not fail the pipeline: the
             # review itself succeeded, so this is surfaced, never swallowed.
             signs_gate = section.lens in PRE_IMPL_GATES
-            if signs_gate and result.ok:
+            if signs_gate and result.ok and not result.degraded_load:
                 if not sign_off_is_warranted(result.stdout, lens_agent=section.agent):
                     log.info(
                         f"[{DAEMON_NAME}] {ref}: {section.lens} verdict is "
@@ -7302,7 +7302,7 @@ class SwarmDispatcher:
                 # gate simply stays pending for the next round, which is the
                 # pre-existing degraded state (never a NEW failure mode) — but
                 # it IS surfaced, never swallowed silently.
-                if signs_gate:
+                if signs_gate and not result.degraded_load:
                     if not sign_off_is_warranted(
                         result.stdout, lens_agent=lens.agent
                     ):

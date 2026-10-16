@@ -1391,7 +1391,8 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     assert not any(c[0] == "route" for c in calls)
 
 
-def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
+@pytest.mark.parametrize("degraded_load", [False, True])
+def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch, degraded_load):
     """Phoenicurus's QA review, PR #1181 (NON-BLOCKING coverage gap): the
     panel-loop `sign_off` branch in `_handle_pr` — CLEAN verdict for a gate a
     lens owns -> `IssueGateStore.sign_off` called with `(repo, parent, gate,
@@ -1445,6 +1446,7 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
                 "**🤖 Waxwing — Ateles swarm, arch lens panelist**\n"
                 "**SIGNED_OFF**\nno concerns",
                 "",
+                degraded_load=degraded_load,
             )
         return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
 
@@ -1452,8 +1454,10 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
 
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha=review_head)))
 
-    assert sign_off_calls, "sign_off was never called for the arch lens"
-    assert ("owner/repo", 80, "arch", "waxwing", review_head) in sign_off_calls
+    if degraded_load:
+        assert not sign_off_calls, "degraded output must not authorize a gate"
+    else:
+        assert ("owner/repo", 80, "arch", "waxwing", review_head) in sign_off_calls
 
 
 def test_handle_pr_panel_loop_blocking_verdict_does_not_call_sign_off(monkeypatch):
@@ -7514,7 +7518,8 @@ def test_issue_pipeline_sections_persist_additively(monkeypatch):
 # panel's own pattern.
 
 
-def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch):
+@pytest.mark.parametrize("degraded_load", [False, True])
+def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch, degraded_load):
     """A clean (non-blocking) pm verdict must call the dispatcher's
     lens-signed `IssueGateStore.sign_off` — never the lens's own `correct()`,
     which no longer exists as an instructed path after this fix."""
@@ -7531,6 +7536,7 @@ def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch):
                 "pm gate passes — intent, acceptance criteria, and scope are "
                 "all clear.",
                 "",
+                degraded_load=degraded_load,
             )
         return SkillResult(
             skill, True, 0,
@@ -7560,6 +7566,9 @@ def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch):
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
     asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
 
+    if degraded_load:
+        assert not calls, "degraded output must not authorize a gate"
+        return
     assert len(calls) == 1
     repo, issue_number, gate, lens_agent, head_sha = calls[0]
     assert repo == "owner/repo"

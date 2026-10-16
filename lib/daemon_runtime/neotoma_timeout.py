@@ -20,17 +20,14 @@ This is a CEILING, not a target. A healthy instance answers in under a second
 and the timeout is never reached; raising it costs nothing when the server is
 fast and prevents a self-inflicted outage when it is slow.
 
-Override with ``ATELES_NEOTOMA_TIMEOUT`` (seconds). A non-numeric or
-non-positive value falls back to the default rather than raising — a malformed
-env var must not take the swarm down on startup.
+Override with ``ATELES_NEOTOMA_TIMEOUT`` (seconds). An explicitly configured
+invalid value raises at startup rather than silently changing the read budget.
 """
 
 from __future__ import annotations
 
-import logging
+import math
 import os
-
-log = logging.getLogger(__name__)
 
 # Seconds. See the module docstring for how this number was chosen.
 DEFAULT_NEOTOMA_TIMEOUT = 45.0
@@ -45,19 +42,14 @@ def neotoma_timeout(default: float = DEFAULT_NEOTOMA_TIMEOUT) -> float:
     that loads its environment after import — and the tests — see the current
     value rather than whatever was set when the module first loaded.
     """
-    raw = os.environ.get(_ENV_VAR, "").strip()
-    if not raw:
+    configured = os.environ.get(_ENV_VAR)
+    if configured is None:
         return default
+    raw = configured.strip()
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        log.warning(
-            f"{_ENV_VAR}={raw!r} is not a number — using default {default}s"
-        )
-        return default
-    if value <= 0:
-        log.warning(
-            f"{_ENV_VAR}={raw!r} is not positive — using default {default}s"
-        )
-        return default
+        raise ValueError(f"{_ENV_VAR} must be a finite positive number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{_ENV_VAR} must be a finite positive number")
     return value

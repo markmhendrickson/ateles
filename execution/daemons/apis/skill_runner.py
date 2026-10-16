@@ -1390,6 +1390,9 @@ class SkillResult:
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
     provider: str = ""
     attempted_providers: tuple[str, ...] = ()
+    # True only when this attempt ran without a loaded role definition. Callers
+    # must never turn such output into an attributed gate sign-off.
+    degraded_load: bool = False
     # Set only when the runner independently established that a zero-exit
     # child encountered one canonical delivery denial and no provider
     # capacity/auth/launch diagnostic.  Callers must not infer this from the
@@ -1434,6 +1437,9 @@ class SkillResult:
 
 class _LocalSpawnError(Exception):
     """The local CLI could not be started (an OSError from the spawn)."""
+
+
+DEGRADED_TOOL_FLOOR_UNAVAILABLE = "degraded_tool_floor_unavailable"
 
 
 # ── Harness adapters + capacity detection ─────────────────────────────────────
@@ -2674,6 +2680,21 @@ async def _run_skill_once(
         except Exception as exc:
             log.debug(f"[apis] degraded harness_event write failed: {exc}")
 
+        # These adapters have no per-dispatch tool allowlist that binds a
+        # degraded child. Keep healthy dispatches unchanged; refuse only the
+        # child whose role authority could not be loaded.
+        if provider != "claude":
+            msg = (
+                f"{provider} launch failed: {DEGRADED_TOOL_FLOOR_UNAVAILABLE}: "
+                "role definition unavailable "
+                "and this adapter cannot bind the fallback tool floor"
+            )
+            log.error("[apis] %s", msg)
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                degraded_load=True,
+            )
+
     # ── Build provider command ─────────────────────────────────────────────────
     # A dispatch carrying the GitHub contract is one whose task involves
     # commit/push/PR — the delivery path #590 is about. Everything else runs
@@ -2795,6 +2816,16 @@ async def _run_skill_once(
         # tokens alone. The parent process retains its own MCP/GitHub authority.
         fd, _mcp_tmp_path = tempfile.mkstemp(
             suffix=".json", prefix="apis_local_review_mcp_"
+        )
+        os.chmod(_mcp_tmp_path, 0o600)
+        with os.fdopen(fd, "w") as _f:
+            json.dump({"mcpServers": {}}, _f)
+        cmd += ["--mcp-config", _mcp_tmp_path, "--strict-mcp-config"]
+    elif provider == "claude" and degraded:
+        # The definition read failed: no Neotoma MCP server is needed for the
+        # read-only fallback and no inherited server may restore authority.
+        fd, _mcp_tmp_path = tempfile.mkstemp(
+            suffix=".json", prefix="apis_degraded_mcp_"
         )
         os.chmod(_mcp_tmp_path, 0o600)
         with os.fdopen(fd, "w") as _f:
@@ -2936,7 +2967,7 @@ async def _run_skill_once(
         allowed_list = [
             tool for tool in tools if not (local_review and tool.startswith("mcp__"))
         ]
-        if not local_review and "mcp__mcpsrv_neotoma__*" not in allowed_list:
+        if not local_review and not degraded and "mcp__mcpsrv_neotoma__*" not in allowed_list:
             allowed_list.append("mcp__mcpsrv_neotoma__*")
         # ateles#795: name the two read-only gate tools explicitly even though
         # the `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them —
@@ -2947,7 +2978,7 @@ async def _run_skill_once(
         # `correct()` of `gate_status` must NOT be pre-approved — and, for a
         # gate-owning run, is additionally on the deny list below regardless
         # of the wildcard.
-        if not local_review:
+        if not local_review and not degraded:
             allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
@@ -3495,6 +3526,7 @@ async def _run_skill_once(
             stdout=_stdout_text,
             stderr=_stderr_text,
             provider=provider,
+            degraded_load=degraded,
             error=(
                 _delivery_denial
                 if (_delivery_denial and returncode == 0)
@@ -4304,10 +4336,13 @@ async def _run_provider_attempts(
         gate_preflight_refusal = (
             launch_failure and GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
         )
+        degraded_floor_refusal = (
+            launch_failure and DEGRADED_TOOL_FLOOR_UNAVAILABLE in result.error
+        )
 
         if result.ok and failure_kind is None:
             return result
-        if gate_preflight_refusal:
+        if gate_preflight_refusal or degraded_floor_refusal:
             # No child started, so an unpinned review may safely try the next
             # deny-capable adapter without cooling Codex for unrelated work.
             # A pinned run, or one with no alternative, retains the precise
@@ -4316,8 +4351,8 @@ async def _run_provider_attempts(
                 return result
             last_result = result
             log.warning(
-                f"[apis] {skill}: {selected} gate-owner preflight refused; "
-                "trying next deny-capable provider without cooldown"
+                f"[apis] {skill}: {selected} tool preflight refused; "
+                "trying next eligible provider without cooldown"
             )
             continue
         if selected == local_provider.LOCAL_PROVIDER:
