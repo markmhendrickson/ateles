@@ -107,3 +107,17 @@ def test_guarded_cli_refuses_a_reinstated_failed_load_stub(monkeypatch, tmp_path
     monkeypatch.setattr(loader.AgentLoader, "load", old_fallback)
     test_guarded_cli_requires_available_canonical_definition(
         monkeypatch, tmp_path, capsys, "timeout")
+
+
+@pytest.mark.parametrize("outcome", ["real", "none", "missing_tools"])
+def test_guarded_cli_uses_checkout_without_ambient_skills(monkeypatch, tmp_path, capsys, outcome):
+    """An imported home-checkout default must not decide this offline eval."""
+    absent = tmp_path / "absent-ambient-checkout"
+    assert not absent.exists()
+    monkeypatch.setenv("ATELES_REPO_PATH", str(absent))
+    monkeypatch.setattr(skill_runner, "ATELES_REPO", absent)
+    # dispatch_role imports the path by value, separately from skill_runner.
+    monkeypatch.setattr(runner.dispatch_role, "ATELES_REPO", absent)
+    test_guarded_cli_requires_available_canonical_definition(
+        monkeypatch, tmp_path, capsys, outcome,
+    )
