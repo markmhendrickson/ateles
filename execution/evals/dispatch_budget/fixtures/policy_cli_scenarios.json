@@ -1,0 +1,12 @@
+[
+  {"id":"capped-content","action":"lens_review:content","escalate":true,"model":"gpt-5.6-terra"},
+  {"id":"capped-aggregation","action":"panel_aggregation","escalate":true,"model":"gpt-5.6-terra"},
+  {"id":"engineering-mid","action":"lens_review:eng","model":"gpt-5.6-terra"},
+  {"id":"legal-mid","action":"lens_review:legal","model":"gpt-5.6-terra"},
+  {"id":"generic-mid","model":"gpt-5.6-terra"},
+  {"id":"protected-security","action":"lens_review:security","escalate":true,"model":"gpt-6-sol"},
+  {"id":"protected-architecture","action":"lens_review:arch","model":"gpt-6-sol"},
+  {"id":"blocking-product","action":"lens_review:pm","escalate":true,"model":"gpt-6-sol"},
+  {"id":"invalid-selected-json","action":"panel_aggregation","failure":"json"},
+  {"id":"unreadable-selected-policy","action":"panel_aggregation","failure":"unreadable"}
+]

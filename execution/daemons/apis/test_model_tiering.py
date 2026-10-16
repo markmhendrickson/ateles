@@ -476,3 +476,30 @@ def test_tier_counts_reasons_tolerate_rows_without_them(tmp_path, monkeypatch):
                       "action_class": "build", "escalation_reasons": "oops"}) + "\n"
     )
     assert model_tiering.tier_counts(with_reasons=True)["by_reason"] == {}
+
+
+def test_missing_policy_file_still_uses_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build":"top"}')
+    assert model_tiering.configured_action_policy() == {"build": "top"}
+
+
+def test_present_empty_object_policy_keeps_file_priority(monkeypatch, tmp_path):
+    path = tmp_path / "policy.json"
+    path.write_text("{}")
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(path))
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build":"mid"}')
+    assert model_tiering.configured_action_policy() == {}
+
+
+@pytest.mark.parametrize("source", ["directory", "dangling_link"])
+def test_existing_unreadable_source_never_uses_environment(monkeypatch, tmp_path, source):
+    path = tmp_path / "policy.json"
+    if source == "directory":
+        path.mkdir()
+    else:
+        path.symlink_to(tmp_path / "missing-target")
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(path))
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build":"mid"}')
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_action_policy()

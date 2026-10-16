@@ -5569,6 +5569,17 @@ class TestModelTieringProviderCommandParity:
         assert "--model" not in cmd
 
 
+_REAL_PATH_READ_TEXT = Path.read_text
+
+
+def _read_only_skill_md(path, *args, **kwargs):
+    # These command-shape fixtures supply only skill text. Config and ledger
+    # reads must retain their real missing-file / content semantics.
+    if path.name == "SKILL.md":
+        return "skill md"
+    return _REAL_PATH_READ_TEXT(path, *args, **kwargs)
+
+
 class TestModelTieringDispatch:
     """Effect tests: the resolved model reaches the child argv AND the
     persisted harness_event — not merely that model_tiering resolves a tier
@@ -5611,7 +5622,7 @@ class TestModelTieringDispatch:
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing(captured),
@@ -5655,7 +5666,7 @@ class TestModelTieringDispatch:
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing(captured),
@@ -5691,7 +5702,7 @@ class TestModelTieringDispatch:
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing(captured),
@@ -5734,7 +5745,7 @@ class TestModelTieringDispatch:
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
             patch("os.path.exists", return_value=False),
             patch("skill_runner._write_harness_event") as mock_write,
@@ -5781,7 +5792,7 @@ class TestModelTieringDispatch:
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing({}),
@@ -5829,7 +5840,7 @@ class TestModelTieringDispatch:
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing({}),
@@ -5874,7 +5885,7 @@ class TestModelTieringDispatch:
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing({}),
@@ -5937,7 +5948,7 @@ class TestModelTieringDispatch:
             patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
             patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing({}),
@@ -5992,7 +6003,7 @@ class TestModelTieringDispatch:
             patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
             patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing(captured),
@@ -6034,7 +6045,7 @@ class TestModelTieringDispatch:
             patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
             patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
             patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
+            patch.object(Path, "read_text", autospec=True, side_effect=_read_only_skill_md),
             patch(
                 "asyncio.create_subprocess_exec",
                 side_effect=self._fake_exec_capturing(spawned),

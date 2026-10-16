@@ -734,8 +734,9 @@ def main(argv: list[str] | None = None) -> int:
             "'carry_forward_check'. Resolves a minimum tier from the live "
             "action_policy config, escalated by measured signals, then a "
             "model from the live vendor_binding config for the chosen "
-            "provider. Omit to leave model selection exactly as before "
-            "(the provider's ambient default)."
+            "provider. Omit to use 'task_dispatch': its scalar minimum tier "
+            "still escalates on measured signals. --model explicitly overrides "
+            "automatic tier resolution."
         ),
     )
     parser.add_argument(

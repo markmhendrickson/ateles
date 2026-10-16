@@ -27,3 +27,10 @@ Validate both files with `model_tiering.py --check` before installation. Install
 bounded entries only after the runtime supports them. The scalar mappings and
 the cap implementation are separate rollout steps; changing a scalar minimum
 alone does not prevent escalation.
+
+The example Codex binding uses `gpt-5.6-terra` for mid and `gpt-6-sol`
+for top. Omitting `dispatch_role --action-class` selects `task_dispatch`, whose
+scalar minimum can still escalate. An explicit `--model` retains its override.
+Selected configuration must be readable JSON object data; invalid input refuses
+dispatch. A genuinely missing file still allows environment configuration, and
+an entirely unconfigured installation retains the existing defaults.

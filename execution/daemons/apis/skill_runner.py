@@ -2449,7 +2449,7 @@ async def _run_skill_once(
                 raise model_tiering.UnboundTierError(
                     "explicit tier cap requires a bound model; ambient model refused"
                 )
-        except model_tiering.UnboundTierError as exc:
+        except (model_tiering.UnboundTierError, model_tiering.InvalidTierPolicyError) as exc:
             msg = str(exc)
             log.error(f"[apis] {skill} dispatch refused — {msg}")
             try:
@@ -3932,16 +3932,20 @@ async def run_skill(
         and not local_review
         and local_provider.is_eligible(work_class, local_provider.load_config())
     )
+    try:
+        tier_binaries = _tier_bound_binaries(
+            _provider_binaries(), precomputed_tier, provider,
+            fly_bound=fly_bound, fly_extra=fly_extra,
+        )
+    except model_tiering.InvalidTierPolicyError as exc:
+        return SkillResult(skill, False, None, "", "", error=str(exc), provider=provider)
     return await _run_provider_attempts(
         skill,
         attempt,
         fallback_models_for=(
             (lambda names: {name: model for name in names}) if model else None
         ),
-        binaries=_tier_bound_binaries(
-            _provider_binaries(), precomputed_tier, provider,
-            fly_bound=fly_bound, fly_extra=fly_extra,
-        ),
+        binaries=tier_binaries,
         provider=provider,
         role=role,
         task_entity_id=task_entity_id,
@@ -4014,7 +4018,7 @@ def _local_fallback_models(providers: list[str]) -> dict[str, str]:
     for name in providers:
         try:
             model = model_tiering.model_for_tier(name, LOCAL_FALLBACK_TIER)
-        except model_tiering.UnboundTierError:
+        except (model_tiering.UnboundTierError, model_tiering.InvalidTierPolicyError):
             continue
         if model:
             models[name] = model

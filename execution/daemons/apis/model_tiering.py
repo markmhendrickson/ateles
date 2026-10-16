@@ -31,11 +31,9 @@ daemon restart, matching ``harness_router.configured_headroom`` and
 
 Fail-closed, deliberately asymmetric from ``harness_router``/``local_provider``
 (which fail closed to "provider ineligible"): here, an unreadable policy or
-binding fails UP to the strongest tier, never to the provider's ambient
-default and never to silence. The operator's ruling is that dispatch must
-never again run un-tiered by accident (that is the incident this policy
-exists to close), so "config is missing" and "config says be careful" resolve
-to the same runner behaviour.
+binding is refused before dispatch. Genuinely absent configuration remains
+unresolved and retains the strongest-tier fallback for unmapped classes.
+Selected configuration must validate before its policy is used.
 
 Example config: ``docs/examples/model-tiering/`` holds a committed,
 operator-neutral ``action-policy.json`` (kept equal to
@@ -149,45 +147,40 @@ def _higher_tier(a: str, b: str) -> str:
 
 
 def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> dict:
-    """File-then-env JSON read, matching ``harness_router.configured_headroom``
-    and ``local_provider``'s config precedence exactly: an operator can change
-    either without restarting Apis, and a stale file always wins over env so a
-    forgotten export cannot silently override a maintained file.
+    """Read the selected source, with file priority over environment JSON.
 
-    Malformed or unreadable input degrades to ``{}`` (unresolved), never
-    raises — same posture as every other Apis policy reader. Unlike headroom,
-    an empty result here does NOT mean "permissive default": callers resolve
-    an unresolved class to ``DEFAULT_TIER``, not to "no floor".
+    A genuinely missing file allows the environment source (or unconfigured
+    defaults). Once a source exists, it must be readable UTF-8 JSON object
+    data. Refusal never includes its path, contents or raw exception text.
     """
+    def refuse():
+        raise InvalidTierPolicyError(
+            f"invalid model tiering configuration ({env_var}); dispatch refused"
+        ) from None
+
     configured_path = os.environ.get(file_env_var, "").strip()
     path = Path(configured_path).expanduser() if configured_path else default_path
-    file_raw = ""
-    if path.is_file():
-        try:
-            file_raw = path.read_text(encoding="utf-8").strip()
-        except OSError:
-            pass
-    env_raw = os.environ.get(env_var, "").strip()
-    # Labelled explicitly (not inferred by comparing values) so identical
-    # malformed content in the file and the env var still names the file
-    # first, correctly, rather than misattributing based on a value match.
-    for raw, label in ((file_raw, f"file {path}"), (env_raw, env_var)):
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if path.is_symlink():
+            refuse()
+        raw = os.environ.get(env_var, "").strip()
         if not raw:
-            continue
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError):
-            log.warning(
-                f"[apis] model_tiering: malformed JSON in {label}; ignoring"
-            )
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return {}
+            return {}
+    except (OSError, UnicodeError, ValueError):
+        refuse()
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        refuse()
+    if not isinstance(parsed, dict):
+        refuse()
+    return parsed
 
 
 class InvalidTierPolicyError(ValueError):
-    """An explicit tier bound cannot be honored; dispatch must be refused."""
+    """Selected tiering configuration or an explicit bound cannot be honored."""
 
 
 def _policy_bounds(entry: object) -> tuple[str, str | None]:
@@ -549,8 +542,8 @@ def model_for_tier(
     providers — silently run an unconfigured provider un-tiered while the
     dispatch's own ``harness_event`` still records ``tier_source="policy"``
     as though the floor were honored. That is exactly the incident this
-    module exists to close (module docstring): unreadable/unresolved must
-    fail to the strongest tier, never to silence.
+    module exists to close (module docstring): selected invalid configuration
+    and unresolved bindings must refuse automatic dispatch.
     """
     active_binding = configured_vendor_binding() if binding is None else binding
     if not active_binding:

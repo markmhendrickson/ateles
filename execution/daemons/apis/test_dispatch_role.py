@@ -1064,7 +1064,7 @@ def test_a_cooled_result_envelope_carries_cooled_until(
 
 @pytest.mark.parametrize("failure", ["file_json", "file_read", "file_utf8", "file_empty", "file_shape", "env_json"])
 def test_cli_selected_policy_failure_refuses_before_child(
-    captured_codex_dispatches, monkeypatch, tmp_path, failure,
+    captured_codex_dispatches, monkeypatch, tmp_path, capsys, failure,
 ):
     path = tmp_path / "declared-policy.json"
     path.write_text('{"panel_aggregation":{"min_tier":"mid","max_tier":"mid"}}')
@@ -1091,6 +1091,9 @@ def test_cli_selected_policy_failure_refuses_before_child(
         "--review-round", "3", "--prior-blocking-finding", "--json",
     ]) == 1
     assert captured_codex_dispatches == []
+    envelope = _envelope(capsys)
+    assert "model tiering configuration" in envelope["reason"]
+    assert "synthetic private" not in envelope["reason"]
 
 
 @pytest.mark.parametrize("action,model", [
@@ -1111,10 +1114,29 @@ def test_cli_committed_reference_policy_reaches_distinct_models(
 
 
 def test_cli_help_describes_default_tier_resolution_and_override(capsys):
-    with pytest.raises(SystemExit) as caught:
-        dispatch_role.main(["--help"])
-    assert caught.value.code == 0
+    assert dispatch_role.main(["--help"]) == 0
     help_text = " ".join(capsys.readouterr().out.split())
     assert "task_dispatch" in help_text and "minimum tier" in help_text
     assert "measured signals" in help_text and "--model" in help_text
     assert "provider's ambient default" not in help_text
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once"])
+@pytest.mark.parametrize("broken", ["policy", "binding"])
+def test_policy_source_failure_returns_refusal_across_real_entrances(
+    captured_codex_dispatches, monkeypatch, entrypoint, broken,
+):
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"panel_aggregation":{"min_tier":"mid","max_tier":"mid"}}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"mid-model","top":"top-model"}}')
+    monkeypatch.setenv("APIS_ACTION_POLICY" if broken == "policy" else "APIS_VENDOR_BINDING", "{invalid")
+    if entrypoint == "cli":
+        assert dispatch_role.main(["--role", "pavo", "--task", "review",
+                                   "--action-class", "panel_aggregation"]) == 1
+    elif entrypoint == "dispatch":
+        result = asyncio.run(dispatch_role.dispatch("pavo", "review", action_class="panel_aggregation"))
+        assert result.ok is False and "model tiering configuration" in result.error
+    else:
+        call = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+        result = asyncio.run(call("pavo", "review", provider="codex", action_class="panel_aggregation"))
+        assert result.ok is False and "model tiering configuration" in result.error
+    assert captured_codex_dispatches == []
