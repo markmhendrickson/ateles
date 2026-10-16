@@ -162,6 +162,7 @@ class SignedRequestError(RuntimeError):
     ``helper_non_json``       the signing helper printed something that is not JSON;
     ``helper_signer_missing`` the helper could not load the signer it wraps;
     ``transport_error``       the helper could not reach the server (or timed out);
+    ``helper_timeout``        the local helper exceeded its attempt timeout;
     ``helper_error``          any other error the helper reported.
 
     The message of the underlying failure is NOT part of ``code``: it can carry a
@@ -274,9 +275,10 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
             return
         data = json.loads(out["body"]) if out.get("body") else {}
         sender.send(("result", int(out.get("status", 0)), data))
-    except BaseException:
+    except BaseException as exc:
         try:
-            sender.send(("error", "helper_error"))
+            code = "helper_timeout" if isinstance(exc, subprocess.TimeoutExpired) else "helper_error"
+            sender.send(("error", code))
         except (BrokenPipeError, EOFError, OSError):
             pass
     finally:

@@ -350,7 +350,7 @@ def signed_failure_code(exc: BaseException) -> str:
 # "expired" = the attempt's deadline passed before (or while) it ran; no write was
 # issued by a worker that saw it, and a late one is discarded. Never retried.
 _SIGNED_FAILURE_CODES = frozenset(
-    {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error",
+    {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error", "helper_timeout",
      "expired", "busy"}
 )
 
