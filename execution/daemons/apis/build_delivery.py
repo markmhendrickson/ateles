@@ -882,7 +882,8 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
             _record(plan.key, {"status": "unknown", "branch": plan.branch, "run_id": "",
                                "recorded_at": time.time()})  # fmt: skip
         raise
-    launched = bool(result.fly_delivery_status or result.remote_run_id)
+    launched = bool(result.fly_delivery_status or result.remote_run_id
+                    or result.remote_outcome_unknown)
     if not launched:
         # Nothing reached Fly: no record is kept.
         with contextlib.suppress(OSError, ValueError):
