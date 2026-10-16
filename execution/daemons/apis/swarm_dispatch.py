@@ -12049,13 +12049,21 @@ class SwarmDispatcher:
             f"  4. Open a PR whose body references the issue with `Closes #{t.number}` "
             "so gate inheritance links back to it.\n\n"
         )
+        implementation_request = (
+            "specification below, commit the implementation and prepare the pull request text. "
+            "The runner opens the PR so the swarm's PR gate pipeline takes over.\n\n"
+            if delivery else
+            "specification below and OPEN AN IMPLEMENTATION PULL REQUEST so the "
+            "swarm's PR gate pipeline takes over.\n\n"
+        )
+        finish_action = "PREPARE THE PR TEXT" if delivery else "OPEN THE PR"
+        end_boundary = "Writing the PR text" if delivery else "Opening the PR"
         return (
             "Invoke the cicada agent per your appended system prompt.\n\n"
             f"The Ateles swarm has assembled a full additive specification for "
             f"GitHub issue {t.repository}#{t.number}: {t.title}\n{t.html_url}\n\n"
             "Auto-build is ON and the pre-impl gates are green. Implement the "
-            "specification below and OPEN AN IMPLEMENTATION PULL REQUEST so the "
-            "swarm's PR gate pipeline takes over.\n\n"
+            f"{implementation_request}"
             "----- ASSEMBLED SPECIFICATION -----\n"
             f"{spec_md}\n"
             "----- END ASSEMBLED SPECIFICATION -----\n\n"
@@ -12071,7 +12079,7 @@ class SwarmDispatcher:
             "forward-looking notes unless the condition holds today. The "
             "pre-impl gates are already green — a marker in the spec is not an "
             "open gate. Satisfy what you can within scope, note in the PR body "
-            "anything you deliberately deferred and why, and OPEN THE PR. Raise "
+            f"anything you deliberately deferred and why, and {finish_action}. Raise "
             "a checkpoint instead of opening a PR only if you cannot produce a "
             "working implementation at all — never merely because the spec "
             "contains the word 'blocking'.\n\n"
@@ -12083,7 +12091,7 @@ class SwarmDispatcher:
             "definition-of-done.\n"
             "  3. Add/extend tests per the QA section and run them.\n"
             f"{delivery_step}"
-            "HARD GUARDRAIL — DO NOT MERGE. Opening the PR is the end of your "
+            f"HARD GUARDRAIL — DO NOT MERGE. {end_boundary} is the end of your "
             "handoff: the PR gate pipeline reviews it and the merge stays "
             "operator-gated. Never merge, and never force-push over main.\n\n"
             f"{_agent_prompt_instruction('cicada', 'implementation build')}"

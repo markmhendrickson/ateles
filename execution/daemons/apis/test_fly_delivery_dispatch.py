@@ -148,6 +148,10 @@ def test_both_entries_pass_the_delivery_spec_without_local_grants(monkeypatch, e
     assert fly_runner.PR_FILE_PLACEHOLDER in prompt
     assert "TOKEN" not in prompt and "credential" not in prompt.lower()
     assert "Do not push" in prompt
+    if entry == "pipeline":
+        assert "OPEN THE PR" not in prompt
+        assert "OPEN AN IMPLEMENTATION PULL REQUEST" not in prompt
+        assert "PREPARE THE PR TEXT" in prompt
     assert delivery.active_build(REPO, 123) is None
 
 
