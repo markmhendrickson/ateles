@@ -11,8 +11,10 @@ machine.
 from __future__ import annotations
 
 import importlib.util
+import errno
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -80,6 +82,26 @@ def world(tmp_path, monkeypatch):
                         lambda: (str(tmp_path / "operator.env"),))
     monkeypatch.setenv(run_job.DEADLINE_ENV, _deadline_in(900))
     api = {"calls": [], "open": [], "fail": {}, "disk": []}
+    cleanup_errors = []
+    real_clear, real_remove = rd._clear, rd.remove_work
+
+    def capture_clear(root):
+        try:
+            return real_clear(root)
+        except (OSError, ValueError, TypeError, UnicodeError) as exc:
+            cleanup_errors.append({"type": type(exc).__name__, "errno": getattr(exc, "errno", None)})
+            raise
+
+    def capture_remove(root):
+        try:
+            return real_remove(root)
+        except rd.RepoWorkError as exc:
+            if not cleanup_errors:
+                cleanup_errors.append({"type": type(exc).__name__, "errno": None})
+            raise
+
+    monkeypatch.setattr(rd, "_clear", capture_clear)
+    monkeypatch.setattr(rd, "remove_work", capture_remove)
 
     def fake_api(method, path, token, body=None):
         api["calls"].append((method, path, token, body))
@@ -96,7 +118,7 @@ def world(tmp_path, monkeypatch):
         return (201 if method == "POST" else 200), _pr(number)
 
     monkeypatch.setattr(rd, "_api", fake_api)
-    return {"home": home, "remote": remote, "work_root": work_root, "api": api, "tmp": tmp_path}
+    return {"home": home, "remote": remote, "work_root": work_root, "api": api, "tmp": tmp_path, "cleanup_errors": cleanup_errors}
 
 
 def _pr(number):
@@ -161,12 +183,42 @@ def _remote_ref(world, ref=f"refs/heads/{BRANCH}"):
     return done.stdout.decode().strip() or None
 
 
+def _cleanup_details(world):
+    """Test-only failure evidence: no file contents, absolute paths or error text.
+
+    Unknown path components are redacted, including any filename containing a
+    job credential. Never follow links or print a value supplied by the agent.
+    """
+    known = {"job-fly-deliver-1", "origin.git", "checkout", "export", "home", ".git",
+             "objects", "pack", "refs", "heads", "hooks", "logs", "info", "HEAD", "config",
+             "index", "packed-refs", "description", "exclude", "shallow"}
+    rows = []
+    root = world["work_root"]
+    for parent, dirs, files in os.walk(root, followlinks=False):
+        for name in sorted(dirs + files):
+            path = Path(parent, name)
+            relative = "/".join(part if part in known else "<entry>"
+                                for part in path.relative_to(root).parts)
+            try:
+                mode = path.lstat().st_mode
+                rows.append({"relative": relative, "mode": f"{stat.S_IMODE(mode):04o}",
+                             "kind": "link" if stat.S_ISLNK(mode) else
+                             "directory" if stat.S_ISDIR(mode) else "file"})
+            except OSError as exc:
+                rows.append({"relative": relative, "type": type(exc).__name__, "errno": exc.errno})
+            if len(rows) == 64:
+                return {"errors": world["cleanup_errors"], "leftovers": rows, "truncated": True}
+    return {"errors": world["cleanup_errors"], "leftovers": rows, "truncated": False}
+
+
 def _no_secret_anywhere(record, world, *, disk=True):
     text = json.dumps(record)
     assert TOKEN not in text and HEADER not in text
     if disk:
         assert not any(world["api"]["disk"])  # never on disk while delivering
-    assert not world["work_root"].exists() or os.listdir(world["work_root"]) == []
+    root = world["work_root"]
+    if root.exists() and os.listdir(root):
+        pytest.fail("delivery cleanup failed: " + json.dumps(_cleanup_details(world)), pytrace=False)
 
 
 # ── No delivery: unchanged ───────────────────────────────────────────────────
@@ -472,3 +524,27 @@ def test_the_header_form_of_the_token_is_a_job_secret(world):
     job = run_job.load_job(_job(world["tmp"]))
     assert job.secrets[run_job.DELIVERY_HEADER_SECRET_NAME] == HEADER
     assert run_job.DELIVERY_TOKEN_NAME not in job.child_credential_names
+
+
+def test_failed_cleanup_diagnostics_are_bound_to_the_real_entrypoint_and_value_free(world, monkeypatch):
+    real_remove = rd.shutil.rmtree
+
+    def cannot_remove(path, *args, **kwargs):
+        if Path(path) == world["work_root"] / "job-fly-deliver-1":
+            (Path(path) / TOKEN).mkdir(exist_ok=True)
+            raise OSError(errno.ENOTEMPTY, f"sensitive error {TOKEN}", str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(rd.shutil, "rmtree", cannot_remove)
+    rc, record = _run(_job(world["tmp"]), _agent(world))
+    assert rc == 0 and record["delivery_status"] == "opened"
+    with pytest.raises((AssertionError, pytest.fail.Exception)) as caught:
+        _no_secret_anywhere(record, world)
+    message = str(caught.value)
+    assert message.startswith("delivery cleanup failed: ")
+    details = json.loads(message.removeprefix("delivery cleanup failed: "))
+    assert details["errors"] == [{"type": "OSError", "errno": errno.ENOTEMPTY}]
+    assert any(row["relative"] == "job-fly-deliver-1" and row["mode"] == "0711"
+               for row in details["leftovers"])
+    assert any("<entry>" in row["relative"] for row in details["leftovers"])
+    assert all(secret not in message for secret in (TOKEN, HEADER, ROLE_TOKEN, str(world["tmp"])))
