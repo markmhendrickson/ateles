@@ -48,3 +48,12 @@ def test_eval_checks_detect_removed_contract(scenario_id, mutation, tmp_path):
     scenario = BY_ID[scenario_id]
     obs = harness.run_scenario(scenario, tmp_path, mutation=mutation)
     assert harness.check(scenario, obs), 'the eval cannot detect this mutation'
+
+
+@pytest.mark.parametrize('scenario_id', ['dispatch_cli_omitted', 'dispatch_cli_explicit'])
+def test_direct_cli_uses_fixture_checkout_without_ambient_skills(monkeypatch, tmp_path, scenario_id):
+    """CI has no developer checkout at the dispatch module's import-time path."""
+    monkeypatch.setattr(harness.runner.dispatch_role, 'ATELES_REPO', tmp_path / 'absent-ambient-checkout')
+    scenario = BY_ID[scenario_id]
+    obs = harness.run_scenario(scenario, tmp_path)
+    assert harness.check(scenario, obs) == [], obs
