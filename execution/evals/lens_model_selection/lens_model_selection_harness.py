@@ -105,6 +105,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(skill_runner, "CODEX_BIN", str(child))
         mp.setattr(skill_runner, "CURSOR_BIN", str(child))
         mp.setattr(skill_runner, "ATELES_REPO", ROOT)
+        mp.setattr(runner.dispatch_role, "ATELES_REPO", ROOT)
         mp.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         mp.setattr(runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         def definition(role):
