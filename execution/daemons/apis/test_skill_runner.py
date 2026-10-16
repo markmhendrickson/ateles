@@ -184,6 +184,27 @@ class TestAgentDefCache:
             # AgentLoader should only have been instantiated once
             assert MockLoader.call_count == 1
 
+    def test_failed_load_revalidates_after_cooldown_and_caches_recovery(
+        self, monkeypatch
+    ) -> None:
+        clock = [100.0]
+        monkeypatch.setattr(skill_runner, "_agent_def_clock", lambda: clock[0], raising=False)
+        stub = _stub_def("monedula")
+        healthy = _make_def(name="monedula")
+        with patch("skill_runner.AgentLoader") as MockLoader:
+            MockLoader.return_value.load.side_effect = [stub, stub, healthy]
+            assert skill_runner._load_agent_def("monedula") is stub
+            assert skill_runner._load_agent_def("monedula") is stub
+            assert MockLoader.call_count == 1  # outage does not cause a read storm
+            clock[0] += 61.0
+            assert skill_runner._load_agent_def("monedula") is stub
+            assert skill_runner._load_agent_def("monedula") is stub
+            assert MockLoader.call_count == 2  # prolonged outage is still bounded
+            clock[0] += 61.0
+            assert skill_runner._load_agent_def("monedula") is healthy
+            assert skill_runner._load_agent_def("monedula") is healthy
+            assert MockLoader.call_count == 3
+
 
 class TestActivePolicyCarrier:
     def test_policy_is_rendered_fresh_for_every_dispatch(self) -> None:
@@ -511,6 +532,53 @@ class TestRunSkill:
         assert result.degraded_load
         assert "fallback tool floor" in result.error
         spawn.assert_not_called()
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_codex_dispatch_recovers_after_transient_definition_timeout(
+        self, MockLoader, _event, monkeypatch
+    ) -> None:
+        """One failed role read cannot require a daemon restart to dispatch."""
+        clock = [100.0]
+        monkeypatch.setattr(skill_runner, "_agent_def_clock", lambda: clock[0], raising=False)
+        MockLoader.return_value.load.side_effect = [
+            _stub_def(),
+            _make_def(prompt_markdown="Recovered canonical role."),
+        ]
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"codex": 1.0}')
+        harness_router.reset_state()
+        spawned = []
+
+        async def fake_exec(*cmd, **kwargs):
+            spawned.append(cmd)
+            proc = MagicMock(returncode=0)
+
+            async def communicate(input=None):
+                return b"review complete", b""
+
+            proc.communicate = communicate
+            return proc
+
+        with (
+            patch.object(skill_runner, "CODEX_BIN", "/usr/bin/codex"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            first = self._run(
+                skill_runner.run_skill("gryllus", "work", role="gryllus", provider="codex")
+            )
+            assert not first.ok and first.degraded_load
+            assert spawned == []
+            clock[0] += 61.0
+            second = self._run(
+                skill_runner.run_skill("gryllus", "work", role="gryllus", provider="codex")
+            )
+
+        assert second.ok and not second.degraded_load
+        assert len(spawned) == 1
+        assert MockLoader.return_value.load.call_count == 2
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")

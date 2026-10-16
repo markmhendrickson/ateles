@@ -44,6 +44,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import urllib.request
@@ -557,17 +558,50 @@ def _notify_dropped_allowlist_rules(
 
 
 # ── Agent-definition cache ─────────────────────────────────────────────────────
-# Per-role cache within the process lifetime. AgentLoader.load() makes a
-# synchronous HTTP call to Neotoma; caching avoids refetching on every task
-# dispatch for the same role.
+# Keep healthy definitions for the process lifetime. A failed load may be a
+# transient Neotoma timeout, so its stub gets a bounded revalidation window.
 _agent_def_cache: dict[str, AgentDefinition] = {}
+_agent_def_retry_after: dict[str, float] = {}
+_agent_def_role_locks: dict[str, threading.Lock] = {}
+_agent_def_locks_guard = threading.Lock()
+_AGENT_DEF_STUB_RETRY_SECONDS = 60.0
+_agent_def_clock = time.monotonic
+
+
+def _agent_def_role_lock(role: str) -> threading.Lock:
+    with _agent_def_locks_guard:
+        return _agent_def_role_locks.setdefault(role, threading.Lock())
 
 
 def _load_agent_def(role: str) -> AgentDefinition:
-    """Load (and cache) an AgentDefinition for the given role name."""
-    if role not in _agent_def_cache:
-        _agent_def_cache[role] = AgentLoader(role).load()
-    return _agent_def_cache[role]
+    """Cache healthy roles; retry a degraded role at most once per minute."""
+    with _agent_def_role_lock(role):
+        cached = _agent_def_cache.get(role)
+        degraded = cached is not None and (
+            cached.is_stub or not (cached.prompt_markdown or "").strip()
+        )
+        if cached is not None and not degraded:
+            return cached
+        if degraded and _agent_def_clock() < _agent_def_retry_after.get(role, 0):
+            return cached
+        try:
+            loaded = AgentLoader(role).load()
+        except Exception as exc:
+            if cached is None:
+                raise
+            log.warning("[apis] role %r revalidation failed: %s", role, exc)
+            _agent_def_retry_after[role] = (
+                _agent_def_clock() + _AGENT_DEF_STUB_RETRY_SECONDS
+            )
+            return cached
+        _agent_def_cache[role] = loaded
+        if loaded.is_stub or not (loaded.prompt_markdown or "").strip():
+            _agent_def_retry_after[role] = (
+                _agent_def_clock() + _AGENT_DEF_STUB_RETRY_SECONDS
+            )
+        else:
+            _agent_def_retry_after.pop(role, None)
+        return loaded
 
 
 def _load_active_policy_prompt(role: str) -> str:
