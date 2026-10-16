@@ -71,11 +71,14 @@ comes from ``NEOTOMA_OPERATOR_ATTESTED_SUBS``, and swarm identities stay at
 from __future__ import annotations
 
 import json
+import concurrent.futures
 import logging
 import multiprocessing
 import os
 import re
+import signal
 import subprocess
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -180,9 +183,54 @@ def _helper_error_code(message: object) -> str:
     return "helper_error"
 
 
-def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method, url, body):
-    """Killable preparation: resolve key metadata and encode the request."""
+SIGNED_WORKERS = 8
+_signed_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=SIGNED_WORKERS, thread_name_prefix="signed-write"
+)
+_signed_permits = threading.BoundedSemaphore(SIGNED_WORKERS)
+_signed_worker = threading.local()
+
+
+class _SignedCancellation(threading.Event):
+    """Abandonment also revokes the currently owned process session."""
+
+    def __init__(self):
+        super().__init__()
+        self._callback_lock = threading.Lock()
+        self._stop = None
+
+    def bind(self, stop):
+        with self._callback_lock:
+            self._stop = stop
+        if self.is_set():
+            stop()
+
+    def set(self):
+        super().set()
+        with self._callback_lock:
+            stop = self._stop
+        if stop is not None:
+            stop()
+
+
+def _run_in_signing_worker(call):
+    """The existing fixed worker also owns process creation and cleanup."""
+    previous = getattr(_signed_worker, "active", False)
+    _signed_worker.active = True
     try:
+        return call()
+    finally:
+        _signed_worker.active = previous
+
+
+def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method, url, body,
+                            real_deadline, node, helper, rc_dir, environment, popen):
+    """One owned process contains preparation, helper startup and transport."""
+    try:
+        os.setsid()
+        sender.send(("ready",))
+        if time.monotonic() >= real_deadline:
+            return
         ident = resolver(agent_name, sub=sub, keys_dir=keys_dir)
         if ident is None:
             sender.send(("error", "no_key"))
@@ -190,9 +238,47 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
         spec = {"url": url, "method": method.upper(), "headers": {"content-type": "application/json"}}
         if body is not None:
             spec["body"] = json.dumps(body)
-        sender.send(("ok", ident, json.dumps(spec)))
+        request_json = json.dumps(spec)
+        sender.send(("prepared",))
+        # A child created after its caller abandoned startup receives no permit
+        # to transport. It can also exit without the creator returning from start.
+        if not sender.poll(max(0.0, real_deadline - time.monotonic())):
+            return
+        authorization = sender.recv()
+        if authorization[0] != "run":
+            return
+        real_deadline = min(real_deadline, authorization[1])
+        env = dict(environment, NEOTOMA_RC_DIR=rc_dir,
+                   NEOTOMA_AAUTH_PRIVATE_JWK_PATH=ident["key"],
+                   NEOTOMA_AAUTH_SUB=ident["sub"], NEOTOMA_AAUTH_KID=ident["kid"])
+        if time.monotonic() >= real_deadline:
+            return
+        # Popen itself is not bounded by communicate(timeout). It belongs in
+        # this killable session, and no request input is delivered until it
+        # returns and the common deadline has been checked again.
+        with popen([node, helper], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, env=env) as proc:
+            remaining = real_deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                proc.communicate()
+                return
+            stdout, stderr = proc.communicate(input=request_json, timeout=remaining)
+        try:
+            out = json.loads(stdout or "{}")
+        except json.JSONDecodeError:
+            sender.send(("error", "helper_non_json"))
+            return
+        if out.get("error"):
+            sender.send(("error", _helper_error_code(out["error"])))
+            return
+        data = json.loads(out["body"]) if out.get("body") else {}
+        sender.send(("result", int(out.get("status", 0)), data))
     except BaseException:
-        sender.send(("error", "helper_error"))
+        try:
+            sender.send(("error", "helper_error"))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
     finally:
         sender.close()
 
@@ -225,16 +311,15 @@ def signed_request(
     ambient ``NEOTOMA_AAUTH_SUB`` when signing on behalf of a principal other
     than the calling process's own identity.
 
-    ``timeout`` covers preparation plus transport, including for the loader.
+    ``timeout`` covers preparation, startup, transport and parsing, including
+    for the loader. Creation and cleanup retain a fixed worker permit until
+    they actually finish, even when the caller has abandoned the attempt.
     ``deadline`` is an optional absolute monotonic limit supplied by a retry
-    caller; ``cancelled`` is its abandonment event. The worker reaps the
-    preparer before returning or launching the helper. The launch recomputes
-    its allowance after preparation and refuses expiry or abandonment.
+    caller; ``cancelled`` is its abandonment event. The owned session receives
+    transport authorization only after startup and a fresh budget check; the
+    helper receives request input only after its own startup check.
     ``clock`` must use the same monotonic domain as ``deadline``.
     """
-    # All callers, including the loader, get a bounded preparation phase. Spawn
-    # instead of forking a daemon's multithreaded process. Key-file I/O and JSON
-    # encoding run in the child, which performs no network I/O.
     clock = clock or time.monotonic
     operation_deadline = min(deadline if deadline is not None else float("inf"), clock() + timeout)
 
@@ -249,63 +334,108 @@ def signed_request(
             raise subprocess.TimeoutExpired("signed_request", timeout)
         return allowance
 
-    remaining()
-    context = multiprocessing.get_context("spawn")
-    receiver, sender = context.Pipe(duplex=False)
-    preparer = context.Process(
-        target=_prepare_signed_request,
-        args=(sender, agent_identity, agent_name, sub or os.environ.get("NEOTOMA_AAUTH_SUB"),
-              AAUTH_KEYS_DIR, method, url, body),
-        daemon=True,
-    )
-    try:
-        preparer.start()
-        sender.close()
-        while not receiver.poll(min(remaining(), 0.01)):
-            if not preparer.is_alive():
-                raise SignedRequestError("signing preparation failed", "helper_error")
-        prepared = receiver.recv()
-    finally:
-        sender.close()
-        if preparer.pid is not None:
-            if preparer.is_alive():
-                preparer.kill()
-            preparer.join()  # reap before the signing worker releases its permit
-        receiver.close()
-    if prepared[0] != "ok":
-        raise SignedRequestError(
-            "no AAuth key" if prepared[1] == "no_key" else "signing preparation failed",
-            prepared[1],
-        )
-    _, ident, request_json = prepared
-    env = dict(
-        os.environ,
-        NEOTOMA_RC_DIR=NEOTOMA_RC_DIR,
-        NEOTOMA_AAUTH_PRIVATE_JWK_PATH=ident["key"],
-        NEOTOMA_AAUTH_SUB=ident["sub"],
-        NEOTOMA_AAUTH_KID=ident["kid"],
-    )
-    # Preparation has finished and been reaped. This is the transport launch
-    # boundary: never reuse the relative allowance computed before preparation.
-    allowance = remaining()
-    proc = subprocess.run(
-        [NODE_BIN, str(_HELPER)],
-        input=request_json,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=allowance,
-    )
-    try:
-        out = json.loads(proc.stdout or "{}")
-    except json.JSONDecodeError as exc:
-        raise SignedRequestError(
-            f"signed_fetch returned non-JSON: {proc.stderr.strip()[:200]}", "helper_non_json"
-        ) from exc
-    if out.get("error"):
-        raise SignedRequestError(out["error"], _helper_error_code(out["error"]))
-    data = json.loads(out["body"]) if out.get("body") else {}
-    return int(out.get("status", 0)), data
+    real_deadline = time.monotonic() + remaining()
+    environment = dict(os.environ)
+    resolver, keys_dir = agent_identity, AAUTH_KEYS_DIR
+    subject = sub or environment.get("NEOTOMA_AAUTH_SUB")
+    node, helper, rc_dir = NODE_BIN, str(_HELPER), NEOTOMA_RC_DIR
+    popen = subprocess.Popen
+    stopped = threading.Event()
+    owned = []
+    stop_lock = threading.Lock()
+    terminated = False
+
+    def stop():
+        nonlocal terminated
+        stopped.set()
+        with stop_lock:
+            if not terminated and owned and owned[0].pid is not None:
+                child = owned[0]
+                # The exact child establishes this session before it can receive
+                # transport authorization. Before then it cannot launch a helper.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if child.is_alive():
+                    child.kill()
+                terminated = True
+
+    def check():
+        if stopped.is_set():
+            raise SignedRequestError("attempt abandoned", "expired")
+        return remaining()
+
+    if isinstance(cancelled, _SignedCancellation):
+        cancelled.bind(stop)
+
+    def perform():
+        check()
+        context = multiprocessing.get_context("spawn")
+        receiver, sender = context.Pipe(duplex=True)
+        child = context.Process(target=_prepare_signed_request,
+                                args=(sender, resolver, agent_name, subject, keys_dir,
+                                      method, url, body, real_deadline, node, helper, rc_dir,
+                                      environment, popen), daemon=True)
+        owned.append(child)
+        try:
+            check()
+            child.start()
+            sender.close()
+            while True:
+                allowance = check()
+                if not receiver.poll(min(allowance, 0.01)):
+                    if not child.is_alive():
+                        raise SignedRequestError("signing helper failed", "helper_error")
+                    continue
+                message = receiver.recv()
+                if message[0] == "ready":
+                    continue
+                if message[0] == "prepared":
+                    receiver.send(("run", time.monotonic() + check()))
+                    continue
+                if message[0] == "error":
+                    raise SignedRequestError("no AAuth key" if message[1] == "no_key"
+                                             else "signing request failed", message[1])
+                if message[0] != "result":
+                    raise SignedRequestError("signing helper failed", "helper_error")
+                check()
+                return message[1], message[2]
+        except EOFError:
+            check()
+            raise SignedRequestError("signing helper failed", "helper_error") from None
+        finally:
+            stop()
+            sender.close()
+            receiver.close()
+            if child.pid is not None:
+                child.join()  # the permit remains owned until actual cleanup
+
+    if getattr(_signed_worker, "active", False):
+        result = perform()
+    else:
+        permits = _signed_permits
+        if not permits.acquire(blocking=False):
+            raise SignedRequestError("no free signing worker", "busy")
+        try:
+            future = _signed_pool.submit(_run_in_signing_worker, perform)
+        except BaseException:
+            permits.release()
+            raise
+        future.add_done_callback(lambda done: permits.release())
+        try:
+            while True:
+                try:
+                    result = future.result(timeout=min(remaining(), 0.01))
+                    break
+                except concurrent.futures.TimeoutError:
+                    if future.done():
+                        raise
+        except BaseException:
+            stop()
+            future.cancel()
+            raise
+    return result
 
 
 # ── Signed write client (ateles#1270 step 2a) ────────────────────────────────

@@ -67,3 +67,45 @@ def test_real_preparation_eval_rejects_detached_budget_planted_control(tmp_path)
     assert observation["helper_launches"] == 1, observation
     assert not observation["permit_reclaimed"], observation
     assert harness.check_preparation_boundary(observation), observation
+
+
+@pytest.mark.parametrize("caller", ["direct", "gate"])
+@pytest.mark.parametrize("cancel", [False, True], ids=["expiry", "cancellation"])
+def test_complete_real_helper_creation_eval(tmp_path, caller, cancel):
+    observation = harness.run_complete_boundary(tmp_path, caller=caller, cancel=cancel)
+    assert harness.check_complete_boundary(observation) == [], observation
+
+
+@pytest.mark.parametrize("caller", ["direct", "gate"])
+def test_complete_real_descendant_custody_eval(tmp_path, caller):
+    observation = harness.run_complete_boundary(tmp_path, caller=caller, cancel=True, descendant=True)
+    assert observation.get("owned_pids"), observation
+    assert harness.check_complete_boundary(observation) == [], observation
+
+
+def test_complete_boundary_eval_rejects_detached_lifetime_control(tmp_path):
+    observation = harness.run_complete_boundary(tmp_path, mutation=True)
+    assert observation["boundary_reached"] and observation["late_effect"], observation
+    assert harness.check_complete_boundary(observation), observation
+
+
+@pytest.mark.parametrize("caller", ["direct", "gate"])
+def test_complete_real_first_start_eval(tmp_path, caller):
+    observation = harness.run_complete_boundary(tmp_path, caller=caller, start=True)
+    assert observation["actual_created_pids"], observation
+    assert harness.check_complete_boundary(observation) == [], observation
+
+
+def test_first_start_eval_rejects_unbound_caller_control(tmp_path):
+    observation = harness.run_complete_boundary(tmp_path, caller="direct", start=True,
+                                                 mutation="unbound_start")
+    assert observation["actual_created_pids"] and not observation["caller_bounded"], observation
+    assert harness.check_complete_boundary(observation), observation
+
+
+def test_descendant_eval_rejects_direct_child_only_control(tmp_path):
+    observation = harness.run_complete_boundary(tmp_path, descendant=True, cancel=True,
+                                                 mutation="no_group")
+    assert observation["late_effect"], observation
+    assert not observation["owned_pids_terminal_at_return"], observation
+    assert harness.check_complete_boundary(observation), observation

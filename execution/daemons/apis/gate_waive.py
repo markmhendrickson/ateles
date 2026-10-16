@@ -36,12 +36,10 @@ Shape notes learned from the live prod entity (``ent_4c1f77bc5fc86a2bad2025d6``)
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import inspect
 import hashlib
 import json
 import subprocess
-import threading
 import time
 import logging
 import os
@@ -305,20 +303,17 @@ def _retry_fits(started: float, retries_done: int) -> bool:
 
 _retry_sleep = asyncio.sleep
 
-# Signing workers: a small, FIXED pool owned by this module, with one permit per
+# Signing workers: the shared, FIXED signing pool, with one permit per
 # worker so a call is never queued behind another. A call that finds no free permit
 # fails at once with the retryable reason "busy" (it is retried inside the deadline
 # like any transient failure). A permit is released when the WORKER finishes, not when
 # the caller gives up, so the number of live workers can never exceed the pool size,
-# and both signing preparation and the helper process are killed and reaped when
-# their shared allowance expires (with OS kill/reap latency). The same approach
-# (fixed pool, permit per worker, deadline re-read when work begins, abandon flag,
-# bounded await) is used by the agent-definition loader.
-SIGNED_WORKERS = 8
-_signed_pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=SIGNED_WORKERS, thread_name_prefix="signed-write"
-)
-_signed_permits = threading.BoundedSemaphore(SIGNED_WORKERS)
+# and preparation/helper sessions are terminated on abandonment. Cleanup retains
+# its permit through actual worker completion. Direct signed requests (including
+# the loader) use this same pool; there is no nested executor or queued replay.
+SIGNED_WORKERS = _ns.SIGNED_WORKERS
+_signed_pool = _ns._signed_pool
+_signed_permits = _ns._signed_permits
 
 
 def retries_for_reason(code: str) -> int:
@@ -2189,7 +2184,7 @@ class IssueGateStore:
         )
         if deadline is None:
             deadline = _monotonic() + SIGNED_WRITE_TOTAL_CAP_S
-        abandoned = threading.Event()
+        abandoned = _ns._SignedCancellation()
         url = f"{self.base_url}/correct"
         body = {
             "entity_id": entity_id,
@@ -2226,7 +2221,7 @@ class IssueGateStore:
             permits.release()
 
         try:
-            concurrent_future = _signed_pool.submit(run)
+            concurrent_future = _signed_pool.submit(_ns._run_in_signing_worker, run)
         except BaseException:
             permits.release()
             raise

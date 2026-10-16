@@ -241,8 +241,7 @@ def run_preparation_boundary(directory, *, mutation=False, cancel=False):
     """
     import threading
     import time
-    from types import SimpleNamespace
-    launches = []
+    _write_helper_fixture(directory)
     permits = threading.BoundedSemaphore(1)
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     observation = {}
@@ -255,10 +254,9 @@ def run_preparation_boundary(directory, *, mutation=False, cancel=False):
         mp.setattr(gate_waive, "MIN_ATTEMPT_TIMEOUT_S", 0.01)
         mp.setattr(gate_waive, "SIGNED_ATTEMPT_TIMEOUT_S", 5)
         mp.setattr(ns, "AAUTH_KEYS_DIR", str(directory))
+        mp.setattr(ns, "NEOTOMA_RC_DIR", str(directory))
         mp.setattr(ns, "agent_identity", delayed_preparation_identity)
-        mp.setattr(ns.subprocess, "run", lambda *a, **k: (
-            launches.append(time.monotonic()) or SimpleNamespace(stdout='{"status":200,"body":"{}"}')
-        ))
+        mp.setenv("ATELES_SIGNED_EVAL_EFFECT", str(directory / "effect"))
         if mutation:
             def detached(*args, **kwargs):
                 kwargs.pop("deadline", None)
@@ -292,7 +290,7 @@ def run_preparation_boundary(directory, *, mutation=False, cancel=False):
         finally:
             # Join while all patches still hold, including in the planted control.
             pool.shutdown(wait=True)
-    observation["helper_launches"] = len(launches)
+    observation["helper_launches"] = int((directory / "effect").exists())
     return observation
 
 
@@ -303,4 +301,244 @@ def check_preparation_boundary(observation):
            if observation.get(key) != value]
     if observation["caller_seconds"] > 1.2:
         bad.append("caller exceeded deadline allowance")
+    return bad
+
+
+_REAL_POPEN = subprocess.Popen
+
+
+def _helper_creation_barrier(*args, **kwargs):
+    """Spawn-safe seam: release leads to the actual original helper process."""
+    import os
+    ready = os.open(os.environ["ATELES_SIGNED_EVAL_READY"], os.O_WRONLY)
+    os.write(ready, str(os.getpid()).encode())
+    os.close(ready)
+    release = os.open(os.environ["ATELES_SIGNED_EVAL_RELEASE"], os.O_RDONLY)
+    try:
+        os.read(release, 1)
+    finally:
+        os.close(release)
+    return _REAL_POPEN(*args, **kwargs)
+
+
+def _write_helper_fixture(directory):
+    module = directory / "dist" / "cli" / "aauth_signer.js"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text('{"type":"module"}')
+    module.write_text('''import fs from "node:fs";
+import {spawn} from "node:child_process";
+export async function cliSignedFetch(url, options) {
+  if (process.env.ATELES_SIGNED_EVAL_DESCENDANT === "1") {
+    const script = `const fs=require("node:fs");
+      const ready=fs.openSync(process.env.ATELES_SIGNED_EVAL_READY,"w");
+      fs.writeSync(ready,String(process.pid));fs.closeSync(ready);
+      const release=fs.openSync(process.env.ATELES_SIGNED_EVAL_RELEASE,"r");
+      fs.readSync(release,Buffer.alloc(1),0,1,null);fs.closeSync(release);
+      fs.writeFileSync(process.env.ATELES_SIGNED_EVAL_EFFECT,"late");
+      const done=fs.openSync(process.env.ATELES_SIGNED_EVAL_READY,"w");
+      fs.writeSync(done,"effect");fs.closeSync(done);`;
+    const child=spawn(process.execPath,["-e",script],{stdio:["ignore","inherit","inherit"]});
+    fs.writeFileSync(process.env.ATELES_SIGNED_EVAL_PIDS,JSON.stringify({helper:process.pid,descendant:child.pid}));
+    await new Promise(resolve=>child.on("exit",resolve));
+  } else {
+    fs.writeFileSync(process.env.ATELES_SIGNED_EVAL_EFFECT,JSON.stringify({pid:process.pid,body:options.body}));
+  }
+  return {status:200,ok:true,text:async()=>"{}"};
+}
+''')
+
+
+def _terminal_pid(pid):
+    with _REAL_POPEN(["ps", "-p", str(pid), "-o", "stat="],
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+        stdout, _ = proc.communicate(timeout=2)
+    return proc.returncode == 1 or stdout.strip().startswith("Z")
+
+
+def run_complete_boundary(directory, *, caller="gate", cancel=False,
+                          descendant=False, mutation=False, start=False):
+    """Synthetic agent request -> actual gate/shared call -> original Node helper.
+
+    External key metadata and signer effects are synthetic. Real OS startup,
+    pipes, cancellation, descendants and the SAME worker permit are observed.
+    """
+    import os
+    import contextlib
+    import select
+    import threading
+    import time
+    _write_helper_fixture(directory)
+    (directory / "synthetic.jwk.json").write_text('{"kid":"synthetic"}')
+    ready, release = directory / "ready", directory / "release"
+    os.mkfifo(ready)
+    os.mkfifo(release)
+    ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
+    release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    permits = threading.BoundedSemaphore(1)
+    abandoned = threading.Event()
+    state, control = {}, {}
+    real_request = ns.signed_request
+    original_killpg = os.killpg
+    context = ns.multiprocessing.get_context("spawn")
+    real_process = context.Process
+    created = []
+
+    def controlled_process(*args, **kwargs):
+        child = real_process(*args, **kwargs)
+        launch = child.start
+
+        def controlled_start():
+            os.write(ready_fd, str(os.getpid()).encode())
+            # A real OS barrier before the original Process.start; releasing
+            # it still creates the actual child, even after caller abandonment.
+            import select
+            select.select([release_fd], [], [], 6)
+            os.read(release_fd, 1)
+            del child.start
+            launch()
+            created.append(child.pid)
+
+        child.start = controlled_start
+        return child
+    # This is the synthetic agent's selected request, including a fresh key.
+    request = {"entity_id": "synthetic", "field": "gate_status", "value": {},
+               "idempotency_key": "synthetic-unique-attempt"}
+
+    def detached(*args, **kwargs):
+        kwargs.pop("deadline", None)
+        kwargs.pop("cancelled", None)
+        kwargs["timeout"] = 5
+        return real_request(*args, **kwargs)
+
+    def run():
+        began = time.monotonic()
+        try:
+            if caller == "direct":
+                def call():
+                    return ns.signed_request("POST", "http://fixture.invalid", request,
+                                             agent_name="synthetic", timeout=0.8, cancelled=abandoned)
+                if mutation == "unbound_start":
+                    ns._run_in_signing_worker(call)
+                else:
+                    call()
+            else:
+                async def call():
+                    control["loop"] = asyncio.get_running_loop()
+                    control["task"] = asyncio.current_task()
+                    return await gate_waive.IssueGateStore("http://fixture.invalid", "")._signed_correct(
+                        "synthetic", "gate_status", {}, request["idempotency_key"],
+                        lens_agent="synthetic", lens_sub="synthetic@ateles-swarm",
+                        deadline=time.monotonic() + 0.8)
+                asyncio.run(call())
+            state["failed"] = False
+        except (ns.SignedRequestError, subprocess.TimeoutExpired, asyncio.CancelledError):
+            state["failed"] = True
+        finally:
+            state["caller_seconds"] = time.monotonic() - began
+
+    cleanup = contextlib.ExitStack()
+    cleanup.callback(os.close, ready_fd)
+    cleanup.callback(os.close, release_fd)
+    cleanup.callback(pool.shutdown, wait=True)
+
+    def stop_control_group():
+        if mutation == "no_group" and state.get("owned_group"):
+            try:
+                original_killpg(state["owned_group"], __import__("signal").SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    cleanup.callback(stop_control_group)
+    with cleanup, pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ns, "AAUTH_KEYS_DIR", str(directory))
+        mp.setattr(ns, "NEOTOMA_RC_DIR", str(directory))
+        mp.setattr(ns, "_signed_pool", pool)
+        mp.setattr(ns, "_signed_permits", permits)
+        mp.setattr(gate_waive, "_signed_pool", pool)
+        mp.setattr(gate_waive, "_signed_permits", permits)
+        mp.setattr(gate_waive, "_monotonic", time.monotonic)
+        mp.setattr(gate_waive, "MIN_ATTEMPT_TIMEOUT_S", 0.01)
+        mp.setenv("ATELES_SIGNED_EVAL_EFFECT", str(directory / "effect"))
+        mp.setenv("ATELES_SIGNED_EVAL_READY", str(ready))
+        mp.setenv("ATELES_SIGNED_EVAL_RELEASE", str(release))
+        mp.setenv("ATELES_SIGNED_EVAL_PIDS", str(directory / "pids"))
+        mp.setenv("ATELES_SIGNED_EVAL_DESCENDANT", "1" if descendant else "0")
+        if start:
+            mp.setattr(context, "Process", controlled_process)
+            mp.setattr(ns.multiprocessing, "get_context", lambda method: context)
+        elif not descendant:
+            mp.setattr(ns.subprocess, "Popen", _helper_creation_barrier)
+        if mutation is True:
+            mp.setattr(ns, "signed_request", detached)
+        if mutation == "no_group":
+            mp.setattr(ns.os, "killpg", lambda pid, sig: None)
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            state["boundary_reached"] = bool(select.select([ready_fd], [], [], 2)[0])
+            if state["boundary_reached"]:
+                state["boundary_pid"] = int(os.read(ready_fd, 100))
+            if descendant and (directory / "pids").exists():
+                owned = json.loads((directory / "pids").read_text())
+                state["owned_group"] = os.getpgid(owned["helper"])
+                assert state["owned_group"] == os.getpgid(owned["descendant"])
+            if cancel:
+                abandoned.set()
+                if caller == "gate" and "task" in control:
+                    control["loop"].call_soon_threadsafe(control["task"].cancel)
+            thread.join(1.5)
+            state["caller_bounded"] = not thread.is_alive()
+            if start:
+                state["permit_held_during_start"] = not permits.acquire(blocking=False)
+                if not state["permit_held_during_start"]:
+                    permits.release()
+            if (directory / "pids").exists():
+                state["owned_pids"] = json.loads((directory / "pids").read_text())
+                state["owned_pids_terminal_at_return"] = all(
+                    _terminal_pid(pid) for pid in state["owned_pids"].values())
+        finally:
+            os.write(release_fd, b"1")
+            thread.join(6)
+            # Drain actual work without replacing either the pool or permit.
+            pool.submit(lambda: None).result(timeout=6)
+        if mutation == "no_group":
+            state["effect_signal"] = bool(select.select([ready_fd], [], [], 2)[0])
+            if state["effect_signal"]:
+                assert os.read(ready_fd, 100) == b"effect"
+        state["late_effect"] = (directory / "effect").exists()
+        if start:
+            state["actual_created_pids"] = created
+            state["created_pids_terminal"] = bool(created) and all(_terminal_pid(pid) for pid in created)
+        state["permit_recovered"] = permits.acquire(blocking=False)
+        if state["permit_recovered"]:
+            permits.release()
+        mp.setattr(ns.subprocess, "Popen", _REAL_POPEN)
+        mp.setattr(context, "Process", real_process)
+        mp.setattr(ns.os, "killpg", original_killpg)
+        mp.setattr(ns, "signed_request", real_request)
+        mp.setenv("ATELES_SIGNED_EVAL_DESCENDANT", "0")
+        if (directory / "pids").exists():
+            state["owned_pids"] = json.loads((directory / "pids").read_text())
+            state["owned_pids_terminal"] = all(_terminal_pid(pid) for pid in state["owned_pids"].values())
+        state["healthy_result"] = real_request("POST", "http://fixture.invalid", request,
+                                                agent_name="synthetic", timeout=3) == (200, {})
+        state["healthy_effect"] = (directory / "effect").exists()
+    return state
+
+
+def check_complete_boundary(observation):
+    expected = {"boundary_reached": True, "caller_bounded": True, "failed": True,
+                "late_effect": False, "permit_recovered": True,
+                "healthy_result": True, "healthy_effect": True}
+    if "owned_pids" in observation:
+        expected["owned_pids_terminal"] = True
+        expected["owned_pids_terminal_at_return"] = True
+    if "actual_created_pids" in observation:
+        expected["created_pids_terminal"] = True
+        expected["permit_held_during_start"] = True
+    bad = [f"{key}: {observation.get(key)!r}" for key, value in expected.items()
+           if observation.get(key) != value]
+    if observation.get("caller_seconds", float("inf")) > 1.2:
+        bad.append("caller exceeded complete-attempt allowance")
     return bad
