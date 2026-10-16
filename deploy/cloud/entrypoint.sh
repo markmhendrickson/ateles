@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Ateles cloud daemon entrypoint (task #5, plan ent_aff87747b49e338790568af6).
+# Superseded Bucket-A VM scaffold only. Bucket-C Fly jobs use
+# deploy/fly-runner/run_job.py and must never invoke this full-snapshot loader.
 #
 # Materializes secrets OFFLINE (SOPS+age) into the dotenv the daemons read, then
 # exec's the per-daemon command. Plaintext lives only in the container's process

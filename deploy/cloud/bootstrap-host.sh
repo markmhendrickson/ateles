@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Superseded VM scaffold, retained for historical Bucket-A use. Do not run this
+# for the current Fly target; see docs/cloud_hosting.md and deploy/fly-runner/.
 # Bootstrap a cloud host for the Ateles Bucket-A swarm (task #5, plan
 # ent_aff87747b49e338790568af6). Target: a small EU VM (recommended: Hetzner
 # CAX11, Ubuntu/Debian arm64). Idempotent; safe to re-run.

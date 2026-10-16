@@ -93,6 +93,19 @@ def _tracked_files() -> list[str]:
 
 
 class TestImageContext:
+    def test_legacy_daemon_runbook_stops_before_historical_provisioning(self):
+        """The superseded host must be visible before its accepted runbook (#1008)."""
+        readme = (_REPO_ROOT / "deploy/cloud/README.md").read_text()
+        notice, _history = readme.split("## Accepted decisions (2026-06-23)", 1)
+        assert "Superseded VM runbook" in notice
+        assert "no longer\n> current; Fly is the current cloud-runner target" in notice
+        assert "Do not provision the current" in notice
+        assert "target using M1 or `bootstrap-host.sh`" in notice
+        assert "../fly-runner/fly.toml" in notice
+        assert "../../docs/cloud_hosting.md" in notice
+        # The new stop has no instance binding or credential value.
+        assert not re.search(r"https?://|/Users/|/home/|\.fly\.dev", notice)
+
     def test_dockerfile_and_fly_toml_carry_no_secret_tooling(self):
         for name in ("Dockerfile", "fly.toml"):
             for line in _instruction_lines(_RUNNER_DIR / name):

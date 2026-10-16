@@ -16,6 +16,9 @@ on:
       # The Fly runner's own modules are tested from execution/daemons/apis/,
       # so a change to them alone must re-run this lane.
       - "deploy/fly-runner/**"
+      # The runner-image suite also checks the superseded daemon runbook's
+      # provisioning stop (#1008); removing it must trigger the blocking lane.
+      - "deploy/cloud/**"
       - "execution/local_llm/**"
       - "execution/daemons/test_*.py"
       - "execution/daemons/cotinga/**"
