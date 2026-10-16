@@ -1351,6 +1351,70 @@ def _async_return(value):
     return _coro()
 
 
+def test_degraded_vanellus_cannot_publish_or_approve(monkeypatch):
+    """A successful restricted child has no aggregation authority."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+    )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(("run", skill))
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(
+                skill, True, 0, "**APPROVE**", "", degraded_load=True
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    async def fake_fallback(self, *args, **kwargs):
+        calls.append(("fallback", None))
+
+    async def fake_incomplete(self, trigger, parent, lens, *args, **kwargs):
+        calls.append(("incomplete", lens))
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_vanellus_comment", fake_fallback)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_incomplete)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert ("run", "vanellus") in calls
+    assert ("incomplete", "vanellus") in calls
+    assert not any(name in {"fallback", "review", "gate", "route"} for name, *_ in calls)
+
+
+@pytest.mark.parametrize("stdout", ["GATE_INHERITANCE: clear", ""])
+def test_degraded_lanius_cannot_clear_inheritance_or_reach_panel(
+    monkeypatch, stdout
+):
+    """Even an explicit clear from a stub cannot prove inherited gates."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+    )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(("run", skill))
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, stdout, "", degraded_load=True)
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    async def fake_incomplete(self, trigger, parent, lens, *args, **kwargs):
+        calls.append(("incomplete", lens))
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_incomplete)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert calls.count(("run", "lanius")) == 1
+    assert ("incomplete", "lanius") in calls
+    assert not any(name in {"run", "review", "gate", "route"} and value != "lanius"
+                   for name, value, *_ in calls)
+
+
 def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(

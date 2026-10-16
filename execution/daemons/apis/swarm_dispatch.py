@@ -6990,6 +6990,15 @@ class SwarmDispatcher:
             # on the local executor.
             repository=trigger.repository,
         )
+        if getattr(lanius, "degraded_load", False):
+            # A restricted fallback can report what it saw, but it cannot
+            # attest to the parent issue's gate record. Never parse its clear
+            # token or retry it into the legacy missing-verdict fail-open path.
+            await self._handle_panel_session_limit(
+                trigger, parent, "lanius", "", "",
+                reason="role definition unavailable; gate inheritance unverified",
+            )
+            return
         verdict = parse_gate_verdict(lanius.stdout)
         # A remote run with an unknown outcome is never re-dispatched
         # (ateles#1456): it fails open into review below, like any other
@@ -7027,6 +7036,12 @@ class SwarmDispatcher:
                     lanius_signals, prior_attempt_failed=True
                 ),
             )
+            if getattr(lanius, "degraded_load", False):
+                await self._handle_panel_session_limit(
+                    trigger, parent, "lanius", "", "",
+                    reason="role definition unavailable; gate inheritance unverified",
+                )
+                return
             verdict = parse_gate_verdict(lanius.stdout)
 
         if verdict is None:
@@ -7595,6 +7610,14 @@ class SwarmDispatcher:
             action_class=model_tiering.ACTION_PANEL_AGGREGATION,
             escalation_signals=panel_signals,
         )
+        if getattr(vanellus_result, "degraded_load", False):
+            # The fallback role has no authority to aggregate or publish a
+            # panel verdict, even when its restricted child exits successfully.
+            await self._handle_panel_session_limit(
+                trigger, parent, "vanellus", "", "",
+                reason="role definition unavailable; aggregation unverified",
+            )
+            return
 
         # 4a-0. Session/usage-limit guard (checked BEFORE auth, since a limit
         #     message can co-occur with auth-ish prose): the aggregation's claude
