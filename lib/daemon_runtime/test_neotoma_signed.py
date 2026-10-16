@@ -18,6 +18,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import neotoma_signed as ns  # noqa: E402
 
 
+def _identity_after_virtual_second(agent_name, *, sub=None, keys_dir=None):
+    (Path(keys_dir) / "prepared").write_text("prepared")
+    return {"key": "synthetic-unused", "sub": sub or "synthetic", "kid": "synthetic"}
+
+
 class NeotomaSignedTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -96,6 +101,20 @@ class NeotomaSignedTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             ns.signed_request("GET", "http://x", agent_name="ghost")
         self.assertIn("no AAuth key", str(cm.exception))
+
+    def test_launch_timeout_is_recomputed_after_preparation(self):
+        ns.AAUTH_KEYS_DIR = str(self.keys)
+
+        def clock():
+            return 101.0 if (self.keys / "prepared").exists() else 100.0
+
+        with mock.patch.object(ns, "agent_identity", _identity_after_virtual_second), mock.patch.object(
+            ns.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0, stdout='{"status":200,"body":"{}"}'),
+        ) as launch:
+            ns.signed_request("POST", "http://unused.invalid", {}, timeout=10,
+                              deadline=110.0, clock=clock)
+        self.assertEqual(launch.call_args.kwargs["timeout"], 9.0)
 
     def test_expired_request_never_starts_preparation_or_transport(self):
         with mock.patch.object(ns.multiprocessing, "get_context") as context:
