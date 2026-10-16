@@ -2,13 +2,15 @@
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 import package_rule_inventory_inputs as inputs
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "evals" / "credential_containment"))
+import credential_containment_runner as packet_eval  # noqa: E402
 
 
 def canonical_source(root):
@@ -459,58 +461,11 @@ def test_canonical_packager_budgets_precede_content(tmp_path, monkeypatch, limit
     assert reads == []
 
 
-_CLI_OBSERVER = '''import json,os,runpy,sys
-from pathlib import Path
-context=json.loads(Path(sys.argv[1]).read_text())
-external=Path(context["external"])
-identity=(external.stat().st_dev, external.stat().st_ino)
-reads=[];swaps=[];owned=set()
-original_read,original_open,original_close=os.read,os.open,os.close
-original_path_read=Path.read_bytes
-def read_fd(fd,size):
-    info=os.fstat(fd)
-    if (info.st_dev,info.st_ino)==identity: reads.append("descriptor")
-    return original_read(fd,size)
-def read_path(path):
-    info=path.stat()
-    if (info.st_dev,info.st_ino)==identity: reads.append("path")
-    return original_path_read(path)
-def open_fd(path,flags,*args,**kwargs):
-    if context.get("swap") and path=="a.txt" and kwargs.get("dir_fd") is not None and not swaps:
-        leaf=Path(context["root"])/"a.txt"
-        leaf.unlink();leaf.symlink_to(external);swaps.append(True)
-    fd=original_open(path,flags,*args,**kwargs);owned.add(fd);return fd
-def close_fd(fd):
-    owned.discard(fd);return original_close(fd)
-os.read=read_fd;os.open=open_fd;os.close=close_fd;Path.read_bytes=read_path
-if context.get("wrong_owner"):
-    current=os.geteuid();os.geteuid=lambda: current+1
-sys.argv=[context["script"],*context["args"]]
-rc=0
-try:
-    runpy.run_path(context["script"],run_name="__main__")
-except SystemExit as exc:
-    rc=exc.code
-finally:
-    Path(context["observation"]).write_text(json.dumps({"external_reads":reads,"swaps":swaps,"owned_fds_remaining":len(owned)}))
-raise SystemExit(rc)
-'''
-
-
 def observed_cli_process(root, tmp_path, outside, operation, *, swap=False, wrong_owner=False):
-    script = Path(inputs.__file__).resolve()
-    observation = tmp_path / "observation.json"
-    context = tmp_path / "context.json"
-    context.write_text(json.dumps({
-        "script": str(script), "root": str(root), "external": str(outside),
-        "swap": swap, "wrong_owner": wrong_owner, "observation": str(observation),
-        "args": ["--inventory-root", str(root), "--inventory", "inputs.json",
-                 "--" + operation + "-manifest", "manifest.json"],
-    }))
-    result = subprocess.run([sys.executable, "-I", "-c", _CLI_OBSERVER, str(context)],
-                            capture_output=True, text=True, timeout=10,
-                            env={"PATH": os.defpath, "HOME": str(tmp_path)})
-    evidence = json.loads(observation.read_text())
+    result, evidence = packet_eval.run_packet_cli(
+        root, tmp_path, outside, operation, swap=swap, wrong_owner=wrong_owner,
+        script=Path(inputs.__file__).resolve(),
+    )
     assert evidence["external_reads"] == []
     assert evidence["owned_fds_remaining"] == 0
     return result, evidence

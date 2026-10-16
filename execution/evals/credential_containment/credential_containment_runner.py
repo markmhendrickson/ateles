@@ -1,6 +1,6 @@
 """Agent-facing credential containment evals: offline, deterministic, no model call.
 
-Two entrypoints are exercised exactly as an agent meets them:
+Three entrypoints are exercised exactly as an agent meets them:
 
 * the PreToolUse read guard (``.claude/hooks/credential_read_guard.py``), run
   as a subprocess with a Claude Code tool-call payload on stdin. A denied call
@@ -14,6 +14,8 @@ Two entrypoints are exercised exactly as an agent meets them:
   any model dispatch starts, with a structured report, and the worktree must
   be cleaned up either way. A clean worktree (or one holding only placeholder
   templates) must reach dispatch exactly once.
+* the input packager's collection and verification CLI. Only declared synthetic
+  files may be read, and observed external content reads must remain zero.
 
 Every credential here is a synthetic fake in a throwaway workspace; ``HOME``
 points at that workspace so home-relative credential directories resolve
@@ -33,6 +35,7 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 HOOK = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
 SCENARIOS = HERE / "fixtures" / "scenarios.json"
+PACKAGER = REPO_ROOT / "execution/scripts/package_rule_inventory_inputs.py"
 
 # Fake secret values planted in the workspace. They must never appear in any
 # output the guard produces, allowed or denied.
@@ -268,6 +271,133 @@ def judge_launch(scenario: dict, trace: LaunchTrace) -> list[str]:
     return problems
 
 
+_PACKET_CLI_OBSERVER = '''import json,os,runpy,sys
+from pathlib import Path
+context=json.loads(Path(sys.argv[1]).read_text())
+external=Path(context["external"])
+identity=(external.stat().st_dev, external.stat().st_ino)
+reads=[];swaps=[];owned=set()
+original_read,original_open,original_close=os.read,os.open,os.close
+original_path_read=Path.read_bytes
+def read_fd(fd,size):
+    info=os.fstat(fd)
+    if (info.st_dev,info.st_ino)==identity: reads.append("descriptor")
+    return original_read(fd,size)
+def read_path(path):
+    info=path.stat()
+    if (info.st_dev,info.st_ino)==identity: reads.append("path")
+    return original_path_read(path)
+def open_fd(path,flags,*args,**kwargs):
+    if context.get("swap") and path=="a.txt" and kwargs.get("dir_fd") is not None and not swaps:
+        leaf=Path(context["root"])/"a.txt"
+        leaf.unlink();leaf.symlink_to(external);swaps.append(True)
+    fd=original_open(path,flags,*args,**kwargs);owned.add(fd);return fd
+def close_fd(fd):
+    owned.discard(fd);return original_close(fd)
+os.read=read_fd;os.open=open_fd;os.close=close_fd;Path.read_bytes=read_path
+if context.get("wrong_owner"):
+    current=os.geteuid();os.geteuid=lambda: current+1
+sys.argv=[context["script"],*context["args"]]
+rc=0
+try:
+    runpy.run_path(context["script"],run_name="__main__")
+except SystemExit as exc:
+    rc=exc.code
+finally:
+    Path(context["observation"]).write_text(json.dumps({"external_reads":reads,"swaps":swaps,"owned_fds_remaining":len(owned)}))
+raise SystemExit(rc)
+'''
+
+
+def run_packet_cli(root, tmp_path, outside, operation, *, swap=False, wrong_owner=False, script=None):
+    script = PACKAGER if script is None else script
+    observation = tmp_path / "observation.json"
+    context = tmp_path / "context.json"
+    context.write_text(json.dumps({
+        "script": str(script), "root": str(root), "external": str(outside),
+        "swap": swap, "wrong_owner": wrong_owner, "observation": str(observation),
+        "args": ["--inventory-root", str(root), "--inventory", "inputs.json",
+                 "--" + operation + "-manifest", "manifest.json"],
+    }))
+    result = subprocess.run([sys.executable, "-I", "-c", _PACKET_CLI_OBSERVER, str(context)],
+                            capture_output=True, text=True, timeout=10,
+                            env={"PATH": os.defpath, "HOME": str(tmp_path)})
+    evidence = json.loads(observation.read_text())
+    return result, evidence
+
+
+
+def run_packet(scenario: dict, tmp_root: Path, script: Path = PACKAGER) -> dict:
+    """Execute a declared CLI action and judge observable IO, without a model."""
+    tmp_root.mkdir(parents=True)
+    root, source = tmp_root / "packet", tmp_root / "source"
+    root.mkdir()
+    source.mkdir()
+    (root / "a.txt").write_text("ordinary declared fixture")
+    (source / "b.txt").write_text("ordinary second-root fixture")
+    outside = tmp_root / "outside.txt"
+    outside.write_text("synthetic outside sentinel")
+    inventory = {"roots": {"packet": str(root), "source": str(source)},
+                 "files": [{"root": "packet", "path": "a.txt"},
+                           {"root": "source", "path": "b.txt"}]}
+    if scenario["plant"] == "parent":
+        (root / "nested").mkdir()
+        (root / "a.txt").rename(root / "nested/a.txt")
+        inventory["files"][0]["path"] = "nested/a.txt"
+    (root / "inputs.json").write_text(json.dumps(inventory))
+    operation, plant = scenario["operation"], scenario["plant"]
+    preparation = None
+    if operation == "verify":
+        prepared, observation = run_packet_cli(root, tmp_root, outside, "collect", script=script)
+        preparation = {"exit_code": prepared.returncode, **observation}
+    if plant == "leaf":
+        (root / "a.txt").unlink()
+        (root / "a.txt").symlink_to(outside)
+    elif plant == "parent":
+        (source / "a.txt").write_bytes(outside.read_bytes())
+        outside = source / "a.txt"
+        (root / "nested").rename(root / "saved")
+        (root / "nested").symlink_to(source, target_is_directory=True)
+    elif plant == "hardlink":
+        (root / "a.txt").unlink()
+        os.link(outside, root / "a.txt")
+    elif plant == "fifo":
+        (root / "a.txt").unlink()
+        os.mkfifo(root / "a.txt")
+        outside = root / "a.txt"
+    elif plant == "manifest_scope":
+        manifest = root / "manifest.json"
+        value = json.loads(manifest.read_text())
+        value["files"][0]["path"] = str(outside)
+        manifest.write_text(json.dumps(value))
+    result, observation = run_packet_cli(root, tmp_root, outside, operation,
+                                        swap=plant == "swap", wrong_owner=plant == "ownership", script=script)
+    return {"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
+            "preparation": preparation, "root": str(root), **observation}
+
+
+def judge_packet(scenario: dict, trace: dict) -> list[str]:
+    problems = []
+    expected = 0 if scenario["expect"] == "allow" else 2
+    if trace["exit_code"] != expected:
+        problems.append(f"expected exit {expected}, got {trace['exit_code']}")
+    if trace["external_reads"]:
+        problems.append("content outside the declared inventory was read")
+    if trace["owned_fds_remaining"]:
+        problems.append("input descriptors remained open")
+    prepared = trace["preparation"]
+    if prepared and (prepared["exit_code"] or prepared["external_reads"] or prepared["owned_fds_remaining"]):
+        problems.append("ordinary preparation did not complete safely")
+    if scenario["expect"] == "allow":
+        if "explicit input boundary verified" not in trace["stdout"]:
+            problems.append("no successful CLI verification evidence")
+    elif "verified" in trace["stdout"] or trace["root"] in trace["stderr"]:
+        problems.append("a refused CLI action reported success or exposed its root")
+    if scenario["plant"] == "swap" and trace["swaps"] != [True]:
+        problems.append("the controlled file swap was not reached")
+    return problems
+
+
 def main() -> int:
     """Run every hook scenario and print the result (launch scenarios need pytest)."""
     import tempfile
@@ -278,6 +408,10 @@ def main() -> int:
         ws = build_workspace(Path(tmp))
         for scenario in scenarios["hook"]:
             problems = judge_hook(scenario, run_hook(scenario, ws))
+            print(("FAIL " if problems else "ok   ") + scenario["id"], *problems)
+            failed += bool(problems)
+        for scenario in scenarios["packet"]:
+            problems = judge_packet(scenario, run_packet(scenario, Path(tmp).resolve() / scenario["id"]))
             print(("FAIL " if problems else "ok   ") + scenario["id"], *problems)
             failed += bool(problems)
     return 1 if failed else 0
