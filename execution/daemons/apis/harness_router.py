@@ -1395,7 +1395,7 @@ def _provider_exclusion_reason(
     provider: str,
     available: Mapping[str, str | None],
     *,
-    headroom: Mapping[str, float],
+    headroom: Mapping[str, tuple[float, str]],
     minimum: float,
     moment: float,
     moment_wall: float | None = None,
@@ -1412,8 +1412,12 @@ def _provider_exclusion_reason(
     gate = None if provider in fly_bound else usage_gate(provider, now_wall=moment_wall)
     if gate is not None and not gate.allowed:
         return gate.message
-    if headroom[provider] <= minimum:
-        return f"headroom={headroom[provider]:.3f} is at or below minimum={minimum:.3f}"
+    value, source = headroom[provider]
+    if value <= minimum:
+        # An ungated provider's usage reading is advisory. Operator overrides
+        # and a provider-reported cooling window still refuse dispatch.
+        if provider in usage_gated_providers() or source not in MAC_READING_SOURCES:
+            return f"headroom={value:.3f} is at or below minimum={minimum:.3f}"
     cooling = persisted_cooling(provider, now_wall=moment_wall)
     if cooling is not None:
         return f"{COOLED_UNTIL} {render_wall(float(cooling['until']))} ({cooling['reason']})"
@@ -1437,7 +1441,9 @@ def provider_exclusion_reason(
     return _provider_exclusion_reason(
         normalized,
         available,
-        headroom=_headroom_for(fly_bound, now_wall=now_wall),
+        headroom=headroom_resolution(
+            now_wall=now_wall, without_mac_readings=fly_bound
+        ),
         minimum=minimum_headroom(),
         moment=time.monotonic() if now is None else now,
         moment_wall=now_wall,
@@ -1616,7 +1622,13 @@ def resolve_provider_admission(
         )
 
     headroom, headroom_source = headroom_resolution(now_wall=moment_wall)[normalized]
-    if headroom <= minimum_headroom():
+    # Usage-derived headroom is advisory for an active provider outside the
+    # usage gate. Explicit operator overrides still apply to every provider.
+    floor_applies = (
+        normalized in policy.usage_gated_providers
+        or headroom_source not in MAC_READING_SOURCES
+    )
+    if floor_applies and headroom <= minimum_headroom():
         code = (
             "provider_limit"
             if headroom_source == HEADROOM_SOURCE_LIVE_USAGE
@@ -1655,7 +1667,9 @@ def usable_provider_names(
     """Return configured providers passing the router's eligibility predicate
     (plus *fly_extra*, the providers selectable only on Fly)."""
     moment = time.monotonic() if now is None else now
-    headroom = _headroom_for(fly_bound, now_wall=now_wall)
+    headroom = headroom_resolution(
+        now_wall=now_wall, without_mac_readings=fly_bound
+    )
     minimum = minimum_headroom()
     return {
         provider
@@ -1728,7 +1742,9 @@ def provider_candidates(
         normalized = preferred.strip().lower()
         order = [normalized] if normalized in PROVIDERS else []
 
-    headroom = _headroom_for(fly_bound, now_wall=now_wall)
+    headroom = headroom_resolution(
+        now_wall=now_wall, without_mac_readings=fly_bound
+    )
     minimum = minimum_headroom()
 
     eligible = [
@@ -1766,10 +1782,10 @@ def provider_candidates(
     for provider in list(_current_weights):
         if provider not in eligible:
             _current_weights.pop(provider, None)
-    total = sum(headroom[provider] for provider in eligible)
+    total = sum(headroom[provider][0] for provider in eligible)
     for provider in eligible:
         _current_weights[provider] = (
-            _current_weights.get(provider, 0.0) + headroom[provider]
+            _current_weights.get(provider, 0.0) + headroom[provider][0]
         )
 
     order_index = {provider: index for index, provider in enumerate(order)}
@@ -1784,7 +1800,7 @@ def provider_candidates(
 
     remaining = sorted(
         (provider for provider in eligible if provider != first),
-        key=lambda provider: (-headroom[provider], order_index[provider]),
+        key=lambda provider: (-headroom[provider][0], order_index[provider]),
     )
     return [*local, first, *remaining]
 

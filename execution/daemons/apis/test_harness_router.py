@@ -230,6 +230,46 @@ def test_ungated_codex_above_weekly_pace_line_is_admitted_with_bound_qa_model(
     assert admission.usage_gated_providers == ("claude",)
 
 
+def test_ungated_codex_at_zero_usage_headroom_still_admits_until_provider_limit(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    now = time.time()
+    harness_router.record_usage(
+        "codex",
+        [
+            {
+                "name": "weekly_all",
+                "used_percent": 100,
+                "resets_at": _iso(now + 6 * 86400),
+            }
+        ],
+        observed_at=now,
+    )
+    assert harness_router.headroom_resolution(now_wall=now)["codex"] == (
+        0.0,
+        harness_router.HEADROOM_SOURCE_LIVE_USAGE,
+    )
+
+    admitted = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa", now_wall=now
+    )
+    assert admitted.admitted is True
+    assert admitted.resolved_model == "terra-review"
+
+    harness_router.record_cooling(
+        "codex", now + 3600, reason="provider reported plan limit", observed_at=now
+    )
+    cooled = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa", now_wall=now
+    )
+    assert cooled.admitted is False
+    assert cooled.reason_code == "provider_limit"
+    assert "reported a limit" in cooled.reason
+
+
 def test_launchd_standalone_and_daemon_environment_resolve_identical_admission(
     monkeypatch, tmp_path
 ) -> None:

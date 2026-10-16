@@ -12,17 +12,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import plistlib
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 _DAEMON_DIR = Path(__file__).resolve().parent
-if str(_DAEMON_DIR) not in sys.path:
-    sys.path.insert(0, str(_DAEMON_DIR))
+_SCRIPTS_DIR = _DAEMON_DIR.parent.parent / "scripts"
+for _path in (_DAEMON_DIR, _SCRIPTS_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 import dispatch_role  # noqa: E402
 import harness_router  # noqa: E402
+import harness_lens_runner as hlr  # noqa: E402
 import skill_runner  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
@@ -378,6 +383,107 @@ def test_cli_qa_admission_pins_the_vendor_bound_model_on_the_real_child_argv(
     assert rc == 0
     cmd = captured_codex_dispatches[0]["cmd"]
     assert cmd[cmd.index("--model") + 1] == "terra-review"
+
+
+def test_standalone_plist_and_zero_usage_headroom_reach_bound_child_argv(
+    captured_codex_dispatches, fake_repo, monkeypatch, tmp_path
+) -> None:
+    """The standalone entrypoint launches the vendor-bound child at zero usage headroom."""
+    policy_path = tmp_path / "apis.plist"
+    with policy_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "EnvironmentVariables": {
+                    "APIS_HARNESS_PROVIDERS": "codex,cursor",
+                    "APIS_USAGE_GATED_PROVIDERS": "claude",
+                }
+            },
+            handle,
+        )
+    monkeypatch.delenv("APIS_HARNESS_PROVIDERS")
+    monkeypatch.delenv("APIS_USAGE_GATED_PROVIDERS")
+    monkeypatch.delenv("APIS_HARNESS_HEADROOM")
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(policy_path))
+    action_policy = tmp_path / "action-policy.json"
+    action_policy.write_text('{"lens_review:qa": "mid"}', encoding="utf-8")
+    vendor_binding = tmp_path / "vendor-binding.json"
+    vendor_binding.write_text(
+        '{"codex": {"mid": "terra-review"}}', encoding="utf-8"
+    )
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(action_policy))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(vendor_binding))
+    now = time.time()
+    harness_router.record_usage(
+        "codex",
+        [{"name": "weekly_all", "used_percent": 100,
+          "resets_at": harness_router._iso_from_wall(now + 6 * 86400)}],
+        observed_at=now,
+    )
+    assert harness_router.headroom_resolution(now_wall=now)["codex"] == (
+        0.0, harness_router.HEADROOM_SOURCE_LIVE_USAGE
+    )
+
+    (fake_repo / ".claude" / "skills" / "phoenicurus").mkdir()
+    (fake_repo / ".claude" / "skills" / "phoenicurus" / "SKILL.md").write_text(
+        "# synthetic qa skill\n", encoding="utf-8"
+    )
+    target = hlr.LensTarget(
+        repo="example/ateles", pr=42, head="a" * 40,
+        lens="qa", agent="phoenicurus"
+    )
+
+    def fake_create(self, *, head):
+        assert head == target.head
+        self._created = True
+        self.path.mkdir(parents=True)
+        agents = self.path / "docs" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "phoenicurus.md").write_text("# synthetic qa prompt\n")
+
+    monkeypatch.setattr(hlr.Worktree, "create", fake_create)
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
+    root = tmp_path / "sandbox"
+    root.mkdir()
+    profile = root / "profile.sb"
+    profile.write_text("synthetic profile\n")
+    sandbox = hlr.HarnessSandbox(
+        provider="codex", root=root,
+        env_extra={"CODEX_HOME": str(root), "ATELES_LOCAL_REVIEW_HOME": str(root)},
+        command_wrapper=["/usr/bin/sandbox-exec", "-f", str(profile)],
+        credential_read_denied=True, credential_binding_protected=True,
+        user_config_write_denied=True, git_stash_denied=True,
+        authentication_ready=True, unavailable_guards=(),
+        review_write_confined=True,
+    )
+    monkeypatch.setattr(
+        hlr.HarnessSandbox, "build", classmethod(lambda cls, *a, **k: sandbox)
+    )
+    monkeypatch.setattr(
+        hlr, "capture_stash_ref_state",
+        lambda path: hlr.StashRefState(resolved_oid=None, packed_oid=None),
+    )
+    monkeypatch.setattr(
+        hlr, "verify_stash_ref_unchanged_after_dispatch", lambda *a, **k: None
+    )
+    brief = tmp_path / "brief.md"
+    brief.write_text("Review this head.\n", encoding="utf-8")
+
+    report = asyncio.run(
+        hlr.run_one(
+            target, provider="codex", post=False, dry_run=False,
+            repo_worktree_name="ateles", scratch_root=tmp_path,
+            brief_path=brief, timeout=None,
+        )
+    )
+
+    assert len(captured_codex_dispatches) == 1, report
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[:3] == sandbox.command_wrapper
+    assert cmd[cmd.index("--model") + 1] == "terra-review"
+    assert report["provider_admission"]["policy_source"].startswith(
+        f"launchd plist {policy_path}"
+    )
+    assert report["provider_admission"]["usage_gated_providers"] == ["claude"]
 
 
 def test_cli_explicit_model_overrides_action_class(
