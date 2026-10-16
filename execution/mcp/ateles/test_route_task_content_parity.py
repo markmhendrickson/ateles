@@ -20,7 +20,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "daemons" / "apis"))
 
 import server as srv  # noqa: E402
 from lib.daemon_runtime.action_type_parity_cases import (  # noqa: E402
@@ -150,7 +149,6 @@ def test_no_policy_means_no_escalation_only_the_prior():
 def test_same_raw_record_agrees_with_dispatcher_effective_policy(raw_policy, description, declared):
     # Exercise the actual production parser and dispatcher resolver, not a
     # pre-populated ExecutionPolicy that hides default/normalization drift.
-    import apis
     from lib.daemon_runtime.gating import _parse_policy
 
     record = {"snapshot": {"snapshot": raw_policy}}
@@ -161,9 +159,14 @@ def test_same_raw_record_agrees_with_dispatcher_effective_policy(raw_policy, des
     ):
         preview = srv._route_task(description, declared)
     effective = _parse_policy("raw-policy", record)
-    resolved = apis._resolve_gate_action_type(
-        preview["matched_agent"], {"title": description, "action_type": declared}, effective
+    from lib.daemon_runtime.action_type import AGENT_ACTION_TYPE_PRIOR, resolve_gate_action_type
+    resolved = resolve_gate_action_type(
+        preview["matched_agent"], {"title": description, "action_type": declared},
+        AGENT_ACTION_TYPE_PRIOR, verdict=lambda at: effective.blast_radius_for(at).value,
     )
     assert preview.get("action_type") == resolved.value
-    assert preview.get("action_type_source") == resolved.source
-    assert preview.get("action_blast_radius") == effective.blast_radius_for(resolved.value).value
+    assert preview.get("action_type_source", "none") == resolved.source
+    if resolved.value is None:
+        assert "action_blast_radius" not in preview
+    else:
+        assert preview["action_blast_radius"] == effective.blast_radius_for(resolved.value).value
