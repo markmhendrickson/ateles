@@ -54,7 +54,7 @@ whose absence has a concrete blast radius, and PROBES each one — against a
 fixture, never a real credential file or the real shared git dir — before
 ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
 ``probe_sandbox_exec_denies_read/write``,
-``probe_stash_effect_denied_across_git_binaries``):
+``probe_stash_ref_effects_denied``):
 
   * **Credential-file reads, binding integrity, and user-config writes** — a macOS
     ``sandbox-exec`` profile (``build_sandbox_exec_profile``) denies
@@ -139,13 +139,10 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
       tomorrow), the sandbox-exec deny above still stops the write.
 
     ``HarnessSandbox.git_stash_denied`` is set from
-    ``probe_stash_effect_denied_across_git_binaries``, which exercises this
-    deny against every real git invocation this host happens to offer
-    (``PATH``-resolved ``git``, ``/usr/bin/git`` by absolute path, ``xcrun
-    git``, and Xcode's bundled binary by its own absolute path — see
-    ``discover_probe_git_invocations``) — building empirical confidence
-    across several real binaries, but the deny's CORRECTNESS never depended
-    on that list being exhaustive, unlike round 3's mechanism.
+    ``probe_stash_ref_effects_denied``, which exercises protected-path
+    read/create/overwrite/rename effects with matching ordinary-path positive
+    controls. The fixed file-operation instrument never invokes a prohibited
+    Git subcommand; it tests the same binary-independent filesystem boundary.
 
     **Residual, stated rather than hidden**: once ``refs/stash`` has been
     folded into the shared ``packed-refs`` file, this profile cannot deny
@@ -167,9 +164,9 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
   ``HarnessSandbox.build()`` before any real dispatch: the credential/
   user-config denies are tested with a real ``cat``/``touch`` against a
   fixture file this script creates (never the operator's own files), and the
-  stash-ref deny is tested with a real ``git stash push`` — via several real
-  git invocations this host offers — inside a scratch repo this script
-  ``git init``s for the probe (never the shared clone or its stash ref). The
+  stash-ref deny is tested with real read/create/overwrite/rename operations
+  on disposable protected-path fixtures and same-operation ordinary controls.
+  No stash subcommand or real repository is used by that instrument. The
   resulting booleans (``credential_read_denied``,
   ``credential_binding_protected``, ``user_config_write_denied``, and
   ``git_stash_denied``) are what ``HarnessSandbox.fully_guarded`` and
@@ -1395,145 +1392,127 @@ def probe_sandbox_exec_preserves_credential_binding(
     )
 
 
-@dataclass(frozen=True)
-class StashListRead:
-    """One attempt to observe the real stash stack."""
-
-    succeeded: bool
-    listing: str | None
-
-
-def _real_stash_list(scratch_git_dir: Path) -> StashListRead:
-    """Read the REAL stash stack directly via the unmodified system git — the
-    verification instrument, never the mechanism under test. Every probe
-    below refuses to trust its own subject's exit code alone (a shim or
-    sandbox that silently swallows the mutation while reporting failure
-    would otherwise look identical to one that genuinely blocked it); this
-    reads the ACTUAL on-disk ref state after each attempt.
-    """
-    real_git = shutil.which("git") or "git"
-    listing = subprocess.run(
-        [real_git, "-C", str(scratch_git_dir), "stash", "list"],
-        capture_output=True,
-        text=True,
-    )
-    if listing.returncode != 0:
-        return StashListRead(succeeded=False, listing=None)
-    return StashListRead(succeeded=True, listing=listing.stdout)
+_REF_EFFECT_PROGRAM = """from pathlib import Path
+import sys
+operation, source, target = sys.argv[1:]
+source, target = Path(source), Path(target)
+if operation == "read":
+    sys.stdout.buffer.write(source.read_bytes())
+elif operation == "create":
+    with source.open("xb") as stream:
+        stream.write(b"probe replacement\\n")
+elif operation == "overwrite":
+    source.write_bytes(b"probe replacement\\n")
+elif operation in ("rename_into", "rename_out"):
+    source.rename(target)
+else:
+    raise SystemExit(2)
+"""
+_REF_EFFECT_OPERATIONS = ("read", "create", "overwrite", "rename_into", "rename_out")
+_REF_EFFECT_PATHS = (
+    ".git/refs/stash",
+    ".git/logs/refs/stash",
+    ".git/worktrees/probe/refs/stash",
+    ".git/worktrees/probe/logs/refs/stash",
+)
 
 
-def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> bool:
-    """Return True iff invoking `git stash push` THROUGH THE SHIM (PATH-first,
-    the normal resolution path) in a SCRATCH git repo (never the shared
-    clone) exits non-zero AND leaves the real stash stack untouched.
-
-    ADVISORY-ONLY as of PR #1308 round 4 (ent_9e88db1882c668e6c5c32be9's own
-    round-4 follow-up): this probe verifies the shim's friendly early-refusal
-    message still works for the common PATH-resolved case, but
-    `HarnessSandbox.git_stash_denied` no longer depends on this probe's
-    result — the actual control is
-    `probe_stash_effect_denied_across_git_binaries`, which tests the
-    sandbox-exec deny on the stash ref itself rather than the shim. Kept as
-    a standalone, separately testable diagnostic for the shim's own
-    behaviour rather than removed outright, since the shim itself is kept
-    (as advisory UX, not enforcement) rather than removed.
-
-    *scratch_git_dir* must already contain at least one commit — otherwise a
-    real, unshimmed `git stash push` would ALSO fail (with "You do not have
-    the initial commit yet"), which would make this probe pass for the wrong
-    reason on a broken shim that never actually refuses anything.
-    """
-    env = {**os.environ, "PATH": f"{shim_path.parent}:{os.environ.get('PATH', '')}"}
-    before = _real_stash_list(scratch_git_dir)
-    if not before.succeeded:
-        return False
-    push = subprocess.run(
-        ["git", "-C", str(scratch_git_dir), "stash", "push"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if push.returncode == 0:
-        return False
-    after = _real_stash_list(scratch_git_dir)
-    return after.succeeded and after.listing == before.listing
+def _ref_effect_command(operation: str, source: Path, target: Path) -> list[str]:
+    return [
+        sys.executable, "-I", "-c", _REF_EFFECT_PROGRAM,
+        operation, str(source), str(target),
+    ]
 
 
-def discover_probe_git_invocations(scratch_git_dir: Path) -> list[list[str]]:
-    """Return several DISTINCT ways to invoke `git stash push` against
-    *scratch_git_dir*, covering every git binary this host happens to have —
-    used ONLY to build confidence in the probe below across several real
-    binaries, never as the deny mechanism itself (round 3 tried enumerating
-    binaries as the mechanism; round 4 replaces that with a deny on the
-    EFFECT, which does not need enumeration to be correct — see
-    build_sandbox_exec_profile). Distinct invocations tried, whichever exist
-    on this host: the `git` resolved via PATH, `/usr/bin/git` by absolute
-    path, `xcrun git` (Xcode's own resolution mechanism, which the previous
-    round's PATH-only enumeration missed entirely), and Xcode's bundled git
-    binary by its own absolute path (`xcrun -f git`'s answer). Each is
-    returned as an argv PREFIX (before `-C <repo> stash push`); a binary this
-    host does not have is simply omitted, never fabricated.
-    """
-    invocations: list[list[str]] = []
-    on_path = shutil.which("git")
-    if on_path:
-        invocations.append(["git"])
-    if Path("/usr/bin/git").is_file():
-        invocations.append(["/usr/bin/git"])
-    if shutil.which("xcrun"):
-        xcrun_result = subprocess.run(
-            ["xcrun", "-f", "git"], capture_output=True, text=True
+def _run_ref_effect_probe(
+    command_wrapper: list[str], operation: str, source: Path, target: Path
+) -> subprocess.CompletedProcess | None:
+    """Run only the fixed file-operation instrument, never a Git command plan."""
+    sandbox_exec = trusted_sandbox_exec_path()
+    if (
+        operation not in _REF_EFFECT_OPERATIONS
+        or sandbox_exec is None
+        or len(command_wrapper) != 3
+        or command_wrapper[:2] != [sandbox_exec, "-f"]
+        or not Path(command_wrapper[2]).is_absolute()
+    ):
+        return None
+    command = _ref_effect_command(operation, source, target)
+    expected = [
+        sys.executable, "-I", "-c", _REF_EFFECT_PROGRAM,
+        operation, str(source), str(target),
+    ]
+    if command != expected:
+        return None
+    try:
+        return subprocess.run(
+            [*command_wrapper, *command], capture_output=True, text=True,
+            timeout=10, env={"PATH": os.defpath},
         )
-        if xcrun_result.returncode == 0 and xcrun_result.stdout.strip():
-            xcode_git = xcrun_result.stdout.strip()
-            invocations.append(["xcrun", "git"])
-            if xcode_git not in (on_path, "/usr/bin/git"):
-                invocations.append([xcode_git])
-    return invocations
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        return None
 
 
-def probe_stash_effect_denied_across_git_binaries(
-    command_wrapper: list[str], scratch_git_dir: Path
-) -> bool:
-    """Return True iff `git stash push` is refused AND leaves the real stash
-    stack untouched, for EVERY git invocation `discover_probe_git_invocations`
-    finds on this host — proving the deny is binary-agnostic rather than
-    merely re-testing one binary, without the probe ITSELF depending on
-    enumeration being exhaustive (unlike round 3's mechanism, this round's
-    deny targets the ref path, so any binary this probe happens to miss would
-    still be denied in production — this function only builds empirical
-    confidence across as many real binaries as this host happens to offer).
+def probe_stash_ref_effects_denied(command_wrapper: list[str], fixture_root: Path) -> bool:
+    """Probe actual read/create/overwrite/rename effects without stash commands.
 
-    An empty *command_wrapper* (no sandbox-exec available) always returns
-    False. If NO git invocation is discovered at all, also returns False —
-    that would mean the probe proved nothing, which must not be misread as a
-    pass.
+    The parent creates disposable pathname fixtures, not a repository. Every
+    denied operation must leave their bytes and existence unchanged, and the
+    identical operation on an ordinary pathname must succeed. Failed or
+    unreadable observations never count as unchanged state.
     """
-    if not command_wrapper:
+    seed = b"synthetic ref probe\n"
+    replacement = b"probe replacement\n"
+
+    def state(paths: tuple[Path, Path]) -> tuple[bytes | None, ...]:
+        return tuple(path.read_bytes() if path.exists() else None for path in paths)
+
+    try:
+        fixture_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="ref-effects-", dir=fixture_root) as raw:
+            root = Path(raw)
+            for number, relative in enumerate(_REF_EFFECT_PATHS):
+                for operation in _REF_EFFECT_OPERATIONS:
+                    case = root / str(number) / operation
+                    protected = case / relative
+                    ordinary = case / "ordinary" / "ref"
+                    protected.parent.mkdir(parents=True)
+                    ordinary.parent.mkdir(parents=True)
+                    source, target = protected, case / "ordinary" / "moved"
+                    control_source = case / "ordinary" / "control"
+                    control_target = case / "ordinary" / "control-moved"
+                    if operation == "rename_into":
+                        source, target = ordinary, protected
+                    if operation != "create":
+                        source.write_bytes(seed)
+                        control_source.write_bytes(seed)
+                    observed = (source, target)
+                    before = state(observed)
+                    denied = _run_ref_effect_probe(command_wrapper, operation, source, target)
+                    if (
+                        denied is None or denied.returncode == 0
+                        or seed.decode() in denied.stdout or seed.decode() in denied.stderr
+                        or state(observed) != before
+                    ):
+                        return False
+                    control = _run_ref_effect_probe(
+                        command_wrapper, operation, control_source, control_target
+                    )
+                    if control is None or control.returncode != 0:
+                        return False
+                    expected_state = (
+                        (None, seed) if operation.startswith("rename_") else
+                        (replacement, None) if operation in ("create", "overwrite") else
+                        (seed, None)
+                    )
+                    if state((control_source, control_target)) != expected_state:
+                        return False
+                    if operation == "read" and control.stdout != seed.decode():
+                        return False
+        return True
+    except OSError:
         return False
-    invocations = discover_probe_git_invocations(scratch_git_dir)
-    if not invocations:
-        return False
-    before = _real_stash_list(scratch_git_dir)
-    if not before.succeeded:
-        return False
-    for prefix in invocations:
-        attempt = subprocess.run(
-            [*command_wrapper, *prefix, "-C", str(scratch_git_dir), "stash", "push"],
-            capture_output=True,
-            text=True,
-        )
-        # Seatbelt's read/write deny on refs/stash makes the WRITE attempt
-        # fail outright (nonzero exit) in every case observed — but the
-        # verification is the real stash list, not the exit code, per this
-        # module's own standing practice of never trusting a subject's own
-        # report of its result.
-        if attempt.returncode == 0:
-            return False
-        after = _real_stash_list(scratch_git_dir)
-        if not after.succeeded or after.listing != before.listing:
-            return False
-    return True
+
 
 
 @dataclass
@@ -1741,15 +1720,9 @@ class HarnessSandbox:
             if "mcp_fixture" in locals():
                 mcp_fixture.unlink(missing_ok=True)
 
-        # ── git-stash: the shim is advisory-only (a friendly early message
-        # for the common PATH-resolved case); the REAL control is the
-        # sandbox-exec profile's deny on refs/stash, already built above.
-        # This probe exercises the sandbox effect across every real git
-        # invocation this host happens to offer (see
-        # discover_probe_git_invocations) to build confidence the deny is
-        # genuinely binary-agnostic — it does NOT need to be exhaustive for
-        # production correctness, unlike round 3's enumeration-as-mechanism,
-        # because production denies the ref path, not a list of binaries.
+        # Keep the advisory shim, but qualify the actual filesystem deny using
+        # fixed file operations. The verification instrument obeys the same
+        # command policy as the reviewed child; no repository is initialized.
         shim_dir = sandbox_home / "shim-bin"
         shim_dir.mkdir(parents=True, exist_ok=True)
         shim_path = shim_dir / "git"
@@ -1761,53 +1734,10 @@ class HarnessSandbox:
                 encoding="utf-8",
             )
             shim_path.chmod(0o755)
-            scratch_repo = sandbox_home / "stash-probe-repo"
-            scratch_repo.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
-                ["git", "init", "-q", str(scratch_repo)],
-                check=True,
-                capture_output=True,
+            git_stash_denied = probe_stash_ref_effects_denied(
+                command_wrapper, sandbox_home / "ref-probe-fixtures"
             )
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(scratch_repo),
-                    "config",
-                    "user.email",
-                    "probe@example.com",
-                ],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(scratch_repo), "config", "user.name", "probe"],
-                check=True,
-                capture_output=True,
-            )
-            (scratch_repo / "probe.txt").write_text("probe\n", encoding="utf-8")
-            subprocess.run(
-                ["git", "-C", str(scratch_repo), "add", "-A"],
-                check=True,
-                capture_output=True,
-            )
-            # A REAL commit — required so a real, unsandboxed `git stash
-            # push` would actually succeed, which is what makes the probe
-            # below meaningful: on a broken guard, this commit is what lets
-            # the bypass produce a real stash entry for the probe to catch,
-            # rather than failing on its own with "no initial commit" for an
-            # unrelated reason. See probe_stash_effect_denied_across_git_
-            # binaries's docstring.
-            subprocess.run(
-                ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"],
-                check=True,
-                capture_output=True,
-            )
-            (scratch_repo / "probe.txt").write_text("probe changed\n", encoding="utf-8")
-            git_stash_denied = probe_stash_effect_denied_across_git_binaries(
-                command_wrapper, scratch_repo
-            )
-        except (RuntimeError, subprocess.CalledProcessError, OSError):
+        except (RuntimeError, OSError):
             git_stash_denied = False
         env_extra["PATH"] = f"{shim_dir}:{os.environ.get('PATH', '')}"
 
@@ -1815,8 +1745,8 @@ class HarnessSandbox:
         if not git_stash_denied:
             unavailable.append(
                 "git_stash_guard (sandbox-exec unavailable, or its "
-                "refs/stash deny did not probe as denying a real stash "
-                "push across the git binaries this host offers — see the "
+                "refs/stash deny did not probe as denying file read/create/"
+                "overwrite/rename effects with ordinary positive controls — see the "
                 "sandbox's own probe result, not asserted)"
             )
         if not credential_read_denied:
