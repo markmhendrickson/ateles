@@ -240,3 +240,98 @@ def test_dispatch_scenario(scenario, tmp_path, monkeypatch):
 def test_the_judge_goes_red_when_a_delivery_can_repeat(tmp_path, monkeypatch, mutation):
     trace = run_scenario(SCENARIOS[0], tmp_path, monkeypatch, mutation=mutation)
     assert judge(SCENARIOS[0], trace)
+
+
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+@pytest.mark.parametrize("mode", ["default_off", "ineligible", "refused_mint"])
+def test_prelaunch_modes_keep_the_existing_local_delivery(
+    tmp_path, monkeypatch, entry, mode
+):
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "ledger.json"))
+    monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+    if mode != "default_off":
+        monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    local = []
+    calls = []
+    mint_calls = []
+    remote = FakeFly()
+    monkeypatch.setattr(fly_runner, "LOGIN_PROVIDERS", frozenset({"codex", "cursor"}))
+
+    async def prepare(repo, label):
+        local.append(repo)
+        return delivery.BuildWorktree(
+            str(tmp_path / "checkout"),
+            "cicada/local",
+            "a" * 40,
+            str(tmp_path / "clone"),
+            True,
+        )
+
+    def mint(repo, **kw):
+        mint_calls.append(repo)
+        raise fly_runner.FlyIneligible("stand-in App refused the requested scope")
+
+    async def run(skill, prompt, **kw):
+        calls.append(kw)
+        if kw.get("fly_delivery"):
+            if mode == "refused_mint":
+                executor, _, _ = make_executor(remote, clock=time.time)
+                executor._mint_delivery = mint
+                job = fly_runner.FlyJob(
+                    "eval-prelaunch",
+                    skill,
+                    "claude",
+                    job_eval.REPO,
+                    [],
+                    b"",
+                    60,
+                    False,
+                    delivery=kw["fly_delivery"],
+                )
+                try:
+                    await executor.run(job)
+                except fly_runner.FlyIneligible:
+                    pass
+            return skill_runner.SkillResult(
+                skill, False, None, "", "", fly_ineligible_before_launch=True
+            )
+        assert kw["include_github_contract"] and kw["cwd"]
+        assert "YOUR WORKTREE" in prompt
+        return skill_runner.SkillResult(
+            skill, True, 0, f"https://github.com/{job_eval.REPO}/pull/7", ""
+        )
+
+    monkeypatch.setattr(delivery, "prepare_build_worktree", prepare)
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    monkeypatch.setenv("CICADA_AGENT_PAT", "eval-local-placeholder-token")
+    if entry == "task":
+        snap = dict(
+            title="Build",
+            assigned_to="cicada",
+            repository=job_eval.REPO,
+            issue_number=123,
+            action_type="open_or_merge_pr",
+        )
+        assert asyncio.run(
+            apis._spawn_harness_skill(
+                "cicada", "ent_eval_prelaunch", snap, "created", _StubNotifier()
+            )
+        ).ok
+    else:
+        trig = dataclasses.replace(
+            _issue_trigger(), repository=job_eval.REPO, number=123
+        )
+        assert (
+            asyncio.run(
+                SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
+                    trig, _empty_spec_state()
+                )
+            )
+            == f"https://github.com/{job_eval.REPO}/pull/7"
+        )
+    assert local == [job_eval.REPO]
+    assert len(calls) == (1 if mode == "default_off" else 2)
+    assert mint_calls == ([job_eval.REPO] if mode == "refused_mint" else [])
+    assert not remote.requests
+    assert delivery.fly_delivery_blocker("owner/repo#123") == ""

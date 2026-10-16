@@ -28,6 +28,8 @@ from test_swarm_dispatch import (
     _issue_trigger,
 )
 
+_REAL_SPAWN = apis._spawn_harness_skill
+
 REPO = "owner/repo"
 BRANCH = "cicada/delivery-123456"
 COMMIT = "a" * 40
@@ -470,12 +472,19 @@ def test_accounting_settlement_and_month_rollover_preserve_delivery_binding(
     assert ledger.delivery_receipts()[key] == entry
 
 
-from test_build_delivery import dispatch_env  # noqa: E402,F401 -- fixture
+from test_build_delivery import dispatch_env as _dispatch_env  # noqa: E402,F401 -- fixture
+
+
+@pytest.fixture(name="dispatch_env")
+def _load_dispatch_env(request):
+    return request.getfixturevalue("_dispatch_env")
 
 
 @pytest.mark.parametrize("status", ["unknown", "no_time", "pr_failed"])
 def test_failed_fly_task_is_blocked_with_verified_result(
-    monkeypatch, dispatch_env, status
+    monkeypatch,
+    dispatch_env,
+    status,  # noqa: F811
 ):
     writes, _, store = dispatch_env
     eid = "ent_eval_terminal_task"
@@ -502,3 +511,32 @@ def test_failed_fly_task_is_blocked_with_verified_result(
         "run-123" in store.rows[eid]["result"] and COMMIT in store.rows[eid]["result"]
     )
     assert notice.sent
+
+
+@pytest.mark.parametrize("entry", ["watchdog_retry", "build_released"])
+@pytest.mark.parametrize("status", ["unknown", "no_time"])
+def test_retry_and_deferred_task_entrances_read_the_durable_ledger(
+    monkeypatch,
+    dispatch_env,
+    entry,
+    status,  # noqa: F811
+):
+    _, _, store = dispatch_env
+    eid = "ent_eval_retry_task"
+    snapshot = task_snapshot()
+    store.rows[eid] = snapshot.copy()
+    delivery._record(
+        REPO + "#123", {"status": status, "branch": BRANCH, "run_id": "run-123"}
+    )
+
+    async def never(*a, **kw):
+        raise AssertionError("retry launched a second delivery")
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
+    monkeypatch.setattr(apis, "run_skill", never)
+    monkeypatch.setattr(delivery, "prepare_build_worktree", never)
+    asyncio.run(
+        apis.dispatch_task(eid, snapshot, entry, _StubNotifier(), gate_override=True)
+    )
+    assert store.rows[eid]["status"] == "blocked"
+    assert "already recorded" in store.rows[eid]["blocked_reason"]

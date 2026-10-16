@@ -892,6 +892,7 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
         _record(plan.key, {"status": result.fly_delivery_status or "unknown",
                            "branch": plan.branch, "run_id": result.remote_run_id,
                            "commit": result.fly_delivery_commit,
+                           "reason": result.fly_delivery_reason, "pr_number": result.fly_pr_number,
                            "pr_url": result.fly_pr_url, "recorded_at": time.time()})  # fmt: skip
     return result
 
