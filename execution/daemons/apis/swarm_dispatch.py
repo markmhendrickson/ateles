@@ -98,6 +98,7 @@ from review_panel import (
     select_expectation_agents,
     select_panel,
 )
+import build_delivery
 import model_tiering
 import lens_authors
 import review_carry
@@ -2341,8 +2342,13 @@ def is_provisioned(agent: str) -> bool:
 
 
 def _token_for_agent_on_repo(agent: str, repo: str) -> str:
-    """Three-tier GitHub token resolution for a specific agent + repo.
+    """Four-tier GitHub token resolution for a specific agent + repo.
 
+    Tier 0 — the agent's own GitHub App (operator ruling 2026-10-14): the
+              PR-opener App for the builder, ``reviewer_<lens>``'s App for a
+              review lens, whenever that App is declared in the environment
+              (``lib/github_app_token.py``). A declared App that cannot mint
+              answers ``""``; it never falls through to another identity.
     Tier 1 — ``<AGENT>_AGENT_PAT`` (e.g. ``PAVO_AGENT_PAT``): the agent's own
               account.  Present only when the machine account has been created
               and the PAT stored.
@@ -2358,11 +2364,58 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
         agent: lowercase agent genus name (e.g. "pavo").
         repo:  full repo slug (e.g. "markmhendrickson/ateles").
     """
+    identity = _app_identity_for_agent(agent)
+    if identity and identity.startswith(_github_app_token.REVIEWER_IDENTITY_PREFIX):
+        lens_key = identity[len(_github_app_token.REVIEWER_IDENTITY_PREFIX):]
+        if lens_key in _github_app_token.missing_expected_lens_apps():
+            # The roster (ATELES_EXPECTED_LENS_APPS) says this lens has an App on
+            # this host, but THIS process has none of its variables. Falling back
+            # to a shared token would post as the wrong identity, so refuse.
+            roster_problem = _github_app_token.expected_roster_problem()
+            log.error(
+                f"[{DAEMON_NAME}] the {lens_key} lens is expected to have an App "
+                f"({_github_app_token.reviewer_prefix(lens_key)}_*) but this process "
+                f"has none of its variables; the {agent} agent has no GitHub "
+                "credential this turn"
+                + (f" ({roster_problem})" if roster_problem else "")
+            )
+            return ""
+    if identity and _github_app_token.identity_declared(identity):
+        # Tier 0 (operator ruling 2026-10-14): the agent's own GitHub App. A
+        # declared App that cannot mint answers "" — never a silent fall back
+        # to another identity, which would put the wrong author on the record
+        # (a lens verdict from the shared account is not read for a lens that
+        # has an App of its own, see `lens_authors`).
+        try:
+            return _github_app_token.identity_token(identity, repo)
+        except _github_app_token.AppTokenError as exc:
+            log.error(
+                f"[{DAEMON_NAME}] the {identity} App is declared but cannot mint a "
+                f"token ({exc}); the {agent} agent has no GitHub credential this turn"
+            )
+            return ""
     agent_pat = os.environ.get(f"{agent.upper()}_AGENT_PAT", "")
     if agent_pat:
         return agent_pat
     # Tier 2 → 3 already implemented by _token_for_repo.
     return _token_for_repo(repo)
+
+
+# Agents that open pull requests act as the PR-opener App (when configured).
+# The opener must differ from every approving App: an App cannot approve a PR
+# it opened, and each reviewer approves as its own App.
+_PR_OPENER_AGENTS = frozenset({"cicada"})
+
+
+def _app_identity_for_agent(agent: str) -> str:
+    """The per-identity App an agent acts as, or "" when it has none by role."""
+    name = (agent or "").strip().lower()
+    if name in _PR_OPENER_AGENTS:
+        return _github_app_token.PR_OPENER_IDENTITY
+    for lens in LENSES:
+        if lens.agent == name:
+            return _github_app_token.reviewer_identity(lens.lens)
+    return ""
 
 
 def lens_comment_authors_resolution() -> lens_authors.Resolution:
@@ -6289,28 +6342,13 @@ class SwarmDispatcher:
             "the build manually once gates are green."
         )
         if self.config.auto_build and gates_green:
-            pr_url = await self._open_implementation_pr(trigger, state)
-            if pr_url:
-                self.notifier.clear_dedupe(spec_ready_key)
-                self.notifier.send(
-                    f"Issue {ref}: additive spec assembled ("
-                    f"{', '.join(completed) or 'none'}); "
-                    f"auto-build ON — implementation PR opened ({pr_url}); the "
-                    "PR gate pipeline now owns it (merge stays operator-gated).",
-                    priority=Priority.INFO,
-                    handler=DAEMON_NAME,
-                )
-            else:
-                self.notifier.send(
-                    f"Issue {ref}: additive spec assembled ("
-                    f"{', '.join(completed) or 'none'}); "
-                    "auto-build ON, but the Cicada build handoff opened NO PR "
-                    "(spec may be incomplete or the build produced nothing). "
-                    f"{spec_action}",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
-                    dedupe_key=spec_ready_key,
-                )
+            await self._hand_off_to_build(
+                trigger,
+                state,
+                completed=completed,
+                spec_action=spec_action,
+                spec_ready_key=spec_ready_key,
+            )
         else:
             reason = (
                 "auto-build OFF"
@@ -6323,6 +6361,58 @@ class SwarmDispatcher:
                 f"{'✓' if lanius.ok else '✗'}. "
                 f"Spec is ready and awaiting `build` approval ({reason}). "
                 f"{spec_action} No PR opened; nothing auto-merged.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=spec_ready_key,
+            )
+
+    async def _hand_off_to_build(
+        self,
+        trigger: SwarmTrigger,
+        state: SpecState,
+        *,
+        completed: list[str],
+        spec_action: str,
+        spec_ready_key: str,
+    ) -> None:
+        """Run the auto-build handoff and tell the operator what actually happened.
+
+        Three outcomes, three messages: a PR opened; the build ran and produced no
+        PR (the spec may be at fault); and the build was never started (a
+        prerequisite is missing, which no amount of spec work or re-approval will
+        fix). Conflating the last two sends the operator after the wrong thing.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        done = ", ".join(completed) or "none"
+        try:
+            pr_url = await self._open_implementation_pr(trigger, state)
+        except build_delivery.BuildNotStarted as exc:
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ({done}); auto-build ON, but "
+                f"{exc.operator_text()} The spec and the gates are not in question.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+                dedupe_key=f"build-not-started:{ref}",
+            )
+            return
+        if pr_url:
+            self.notifier.clear_dedupe(spec_ready_key)
+            self.notifier.clear_dedupe(f"build-not-started:{ref}")
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ("
+                f"{done}); "
+                f"auto-build ON — implementation PR opened ({pr_url}); the "
+                "PR gate pipeline now owns it (merge stays operator-gated).",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+        else:
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ("
+                f"{done}); "
+                "auto-build ON, but the Cicada build handoff opened NO PR "
+                "(spec may be incomplete or the build produced nothing). "
+                f"{spec_action}",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
                 dedupe_key=spec_ready_key,
@@ -6819,6 +6909,11 @@ class SwarmDispatcher:
         issue (`Closes #<n>`) so the existing ``_handle_pr`` gate pipeline takes
         over.  This method NEVER merges anything.
 
+        Raises ``build_delivery.BuildNotStarted`` when the build could not be
+        launched at all (no worktree could be provisioned): distinct from a build
+        that ran, so the caller can name the prerequisite instead of suggesting
+        the spec is at fault.
+
         Returns the opened PR URL when a PR was ACTUALLY opened, else None.
         A successful dispatch (exit 0) is NOT sufficient: on #1882 Cicada
         returned ok in ~30s with no PR (it had a narration-only Engineering
@@ -6827,14 +6922,41 @@ class SwarmDispatcher:
         referencing this issue — so the caller can notify honestly instead of a
         false "PR gate pipeline now owns it".
         """
-        result = await run_skill(
-            "cicada",
-            self._cicada_build_prompt(trigger, state),
-            github_token=_token_for_agent_on_repo("cicada", trigger.repository),
-            include_github_contract=True,
-            notifier=self.notifier,
-            action_class=model_tiering.ACTION_BUILD,
-        )
+        # A build that is meant to open a PR gets everything delivery needs, from
+        # one place (build_delivery): a dedicated worktree as the child's cwd —
+        # from which skill_runner derives the git-root grants on Codex — plus
+        # network via include_github_contract. The worktree is provisioned
+        # BEFORE the dispatch so a missing clone fails here, in seconds and by
+        # name, rather than after a build that cannot deliver.
+        try:
+            worktree = await build_delivery.prepare_build_worktree(
+                trigger.repository, f"issue-{trigger.number}"
+            )
+        except build_delivery.BuildWorktreeError as exc:
+            log.error(
+                f"[{DAEMON_NAME}] Cicada build handoff for "
+                f"{trigger.repository}#{trigger.number} not started: {exc}"
+            )
+            # Not "no PR": nothing ran. The caller tells the operator so.
+            raise build_delivery.BuildNotStarted(
+                trigger.repository, trigger.number, exc
+            ) from exc
+        # Registered for the whole run so a task the build files to track its own
+        # work is recognised as this build, not dispatched as a second one.
+        with build_delivery.claim_build(
+            trigger.repository, trigger.number, "swarm-build-handoff"
+        ) as claim:
+            result = await run_skill(
+                "cicada",
+                self._cicada_build_prompt(
+                    trigger, state, worktree=worktree, claim=claim
+                ),
+                github_token=_token_for_agent_on_repo("cicada", trigger.repository),
+                include_github_contract=True,
+                notifier=self.notifier,
+                action_class=model_tiering.ACTION_BUILD,
+                cwd=worktree.path,
+            )
         if not result.ok:
             log.error(
                 f"[{DAEMON_NAME}] Cicada build handoff failed for "
@@ -7092,9 +7214,15 @@ class SwarmDispatcher:
             notifier=self.notifier,
             action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
             escalation_signals=lanius_signals,
+            # Scopes a Fly job's per-job GitHub App token (ateles#1456); unused
+            # on the local executor.
+            repository=trigger.repository,
         )
         verdict = parse_gate_verdict(lanius.stdout)
-        if verdict is None:
+        # A remote run with an unknown outcome is never re-dispatched
+        # (ateles#1456): it fails open into review below, like any other
+        # missing verdict, instead of being retried.
+        if verdict is None and not getattr(lanius, "remote_outcome_unknown", False):
             # PR-87 self-dogfood finding: Lanius sometimes replies without the
             # mandatory verdict line. One sharper retry before failing open.
             # Applies whether the skill run reported ok (verdict line simply
@@ -7120,6 +7248,7 @@ class SwarmDispatcher:
                 include_github_contract=True,
                 notifier=self.notifier,
                 action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
+                repository=trigger.repository,
                 # The retry exists because the first attempt failed to produce
                 # a verdict: that is the "failed prior attempt" signal.
                 escalation_signals=dataclasses.replace(
@@ -12085,7 +12214,12 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _cicada_build_prompt(t: SwarmTrigger, state: SpecState) -> str:
+    def _cicada_build_prompt(
+        t: SwarmTrigger,
+        state: SpecState,
+        worktree: "build_delivery.BuildWorktree | None" = None,
+        claim: "build_delivery.BuildClaim | None" = None,
+    ) -> str:
         """Auto-build handoff prompt: Cicada opens an implementation PR.
 
         Only used when ``ATELES_SWARM_AUTO_BUILD`` is ON.  Cicada branches off
@@ -12094,6 +12228,20 @@ class SwarmDispatcher:
         takes over.  NEVER merges — the merge boundary stays operator-gated.
         """
         spec_md = assemble_spec_markdown(state.sections or {})
+        if worktree:
+            wt_block = f"{build_delivery.worktree_instructions(worktree)}\n\n"
+            if claim:
+                wt_block += f"{build_delivery.tracking_instructions(claim)}\n\n"
+            step_one = (
+                "  1. Build on the worktree branch above, which is already off "
+                "fresh origin/main — never off a feature branch.\n"
+            )
+        else:
+            wt_block = ""
+            step_one = (
+                "  1. Branch off FRESH origin/main (fetch first) in an isolated "
+                "git worktree — never off a feature branch.\n"
+            )
         return (
             "Invoke the cicada agent per your appended system prompt.\n\n"
             f"The Ateles swarm has assembled a full additive specification for "
@@ -12120,9 +12268,9 @@ class SwarmDispatcher:
             "a checkpoint instead of opening a PR only if you cannot produce a "
             "working implementation at all — never merely because the spec "
             "contains the word 'blocking'.\n\n"
+            f"{wt_block}"
             "BUILD PROTOCOL:\n"
-            "  1. Branch off FRESH origin/main (fetch first) in an isolated git "
-            "worktree — never off a feature branch.\n"
+            f"{step_one}"
             "  2. Implement the spec, following the Engineering section's plan "
             "and honoring the QA/Security/Legal requirements as "
             "definition-of-done.\n"
@@ -14098,6 +14246,18 @@ class SwarmDispatcher:
                 for lens in lenses_missing_comments(
                     bodies, list(captured), head_sha=head_sha
                 ):
+                    if _github_app_token.lens_has_own_app(lens):
+                        # A comment posted with the dispatcher's shared token is
+                        # never read as this lens's verdict (the lens is read only
+                        # from its own App), so reposting it every cycle would be
+                        # noise that clears nothing. The lens stays visibly pending
+                        # until its own App posts.
+                        log.warning(
+                            f"[{DAEMON_NAME}] {lens} has an App of its own: no "
+                            f"fallback review comment posted on {t.repository}"
+                            f"#{t.number}; the lens stays pending until its App posts"
+                        )
+                        continue
                     body = compose_fallback_comment(
                         lens, agents.get(lens, "unknown panelist"), captured[lens],
                         head_sha,

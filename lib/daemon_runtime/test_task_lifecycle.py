@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from lib.daemon_runtime import task_lifecycle as tl
 from lib.daemon_runtime.task_lifecycle import (
     MAX_ATTEMPTS,
@@ -104,6 +106,34 @@ def test_set_status_remediation(monkeypatch):
     tl.set_task_status("ent_t", TaskStatus.ROUTED, handler="apis", remediation_id="ent_fix")
     fields = {c["json"]["field"] for c in calls}
     assert fields == {"status", "remediation_id"}
+
+
+def test_a_failed_companion_write_is_a_failed_status_write(monkeypatch):
+    """The status lands but its reason does not: not reported as complete."""
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    def post(url, headers=None, json=None, timeout=None):
+        if json["field"] == "blocked_reason":
+            raise RuntimeError("write rejected")
+        return _Resp()
+
+    monkeypatch.setattr(tl.httpx, "post", post)
+    assert tl.set_task_status("ent_t", TaskStatus.PENDING, handler="apis", reason="why") is False
+    assert tl.set_task_status("ent_t", TaskStatus.PENDING, handler="apis") is True
+
+
+def test_set_task_field_writes_one_field_and_reports_failure(monkeypatch):
+    calls = _capture(monkeypatch)
+    assert tl.set_task_field("ent_t", "disposition", "x", handler="apis", key_suffix="k")
+    (call,) = calls
+    assert call["json"]["field"] == "disposition" and call["json"]["value"] == "x"
+    assert call["json"]["idempotency_key"] == "taskfield-apis-ent_t-disposition-k"
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "")
+    assert tl.set_task_field("ent_t", "disposition", "x", handler="apis") is False
 
 
 def test_set_status_fail_open_without_token(monkeypatch):
@@ -280,3 +310,81 @@ def test_complete_is_not_ok_when_the_result_changes_after_the_status_write(monke
     )
     assert not outcome and outcome.stage == "status_readback"
     assert store.fields["status"] == "done"
+
+
+# ── conditional writes (/correct with expected_version) ─────────────────────
+
+
+class _VersionedResp:
+    def __init__(self, status=200, body=None):
+        self.status_code = status
+        self._body = body if body is not None else {}
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def _versioned(monkeypatch, response):
+    calls: list[dict] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "json": json})
+        return response
+
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tl.httpx, "post", fake_post)
+    return calls
+
+
+def test_a_conditional_write_sends_the_version_and_returns_the_fresh_one(monkeypatch):
+    calls = _versioned(monkeypatch, _VersionedResp(200, {"entity_version": "b" * 64}))
+    write = tl.set_task_field_if_version(
+        "ent_t", "disposition", "x", expected_version="a" * 64, handler="apis", key_suffix="k"
+    )
+    assert write.ok and not write.conflict and write.version == "b" * 64
+    (call,) = calls
+    assert call["url"].endswith("/correct")
+    assert call["json"]["expected_version"] == "a" * 64
+    assert "overwrite" not in call["json"], "a stale-version refusal must not be overridable"
+    assert call["json"]["field"] == "disposition" and call["json"]["entity_type"] == "task"
+
+
+def test_a_stale_version_is_a_conflict_and_not_a_failure_to_retry_blindly(monkeypatch):
+    _versioned(monkeypatch, _VersionedResp(409, {"error_code": "ERR_FIELD_VERSION_CONFLICT"}))
+    write = tl.set_task_field_if_version(
+        "ent_t", "disposition", "x", expected_version="a" * 64, handler="apis"
+    )
+    assert write.conflict and not write.ok and write.version is None
+
+
+def test_other_errors_are_failures_not_conflicts(monkeypatch):
+    _versioned(monkeypatch, _VersionedResp(409, {"error_code": "ERR_SOMETHING_ELSE"}))
+    write = tl.set_task_field_if_version("ent_t", "f", "x", expected_version="a" * 64, handler="apis")
+    assert not write.ok and not write.conflict
+    _versioned(monkeypatch, _VersionedResp(500, {}))
+    write = tl.set_task_field_if_version("ent_t", "f", "x", expected_version="a" * 64, handler="apis")
+    assert not write.ok and not write.conflict
+
+
+@pytest.mark.parametrize("token", [None, ""])
+def test_without_a_version_nothing_is_written_at_all(monkeypatch, token):
+    calls = _versioned(monkeypatch, _VersionedResp(200, {}))
+    write = tl.set_task_field_if_version("ent_t", "f", "x", expected_version=token, handler="apis")
+    assert not write.ok and calls == []
+
+
+def test_the_snapshot_and_its_version_come_from_one_read(monkeypatch):
+    from lib.daemon_runtime import gating
+
+    monkeypatch.setattr(
+        gating, "fetch_task_record",
+        lambda tid: {"entity_type": "task", "entity_version": "c" * 64, "snapshot": {"snapshot": {"status": "pending"}}},
+    )
+    snap, version = gating.fetch_task_snapshot_and_version("ent_t")
+    assert snap["status"] == "pending" and version == "c" * 64
+    monkeypatch.setattr(gating, "fetch_task_record", lambda tid: None)
+    assert gating.fetch_task_snapshot_and_version("ent_t") == (None, None)

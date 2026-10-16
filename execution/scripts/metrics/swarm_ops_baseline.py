@@ -24,10 +24,8 @@ the earliest observation in the caches (``--first-week YYYY-MM-DD`` overrides).
 Absence is not zero. A week with no source rows has no reading. The caches carry a fetch time
 (``meta.json``): windows end at the last complete week before the OLDEST fetch, readings are stamped with
 the fetch time of their own stream, and a cache older than ``--max-cache-age-days`` is refused unless
-``--allow-stale``, which stores every reading as partial. A clean rerun after such a run rewrites status
-and coverage but does not clear its ``coverage_note`` (an absent field is not written, so the old note
-would stay on the stored reading); treat a note beginning "cache older than" on a reading with status ok as
-left over from that run.
+``--allow-stale``, which stores every reading as partial. Every reading carries its ``coverage_note``
+(empty when nothing is missing), so a clean rerun overwrites the "cache older than" note instead of leaving it.
 
 Needs NEOTOMA_BASE_URL / NEOTOMA_BEARER_TOKEN in the process for ``fetch`` and
 ``store`` (never printed). ``fetch --only reviews`` reads pull-request reviews

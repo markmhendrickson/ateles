@@ -135,6 +135,25 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "APIS_DEFERRED_REVIEW_SWEEP_SECONDS",
         "APIS_DISPATCH_TIMEOUT",
         "APIS_DRY_RUN",
+        "APIS_FLY_API_BASE",
+        "APIS_FLY_APP",
+        "APIS_FLY_CLAUDE_MACHINE_ID",
+        "APIS_FLY_CODEX_MACHINE_ID",
+        "APIS_FLY_CURSOR_LOGIN_DIRS",
+        "APIS_FLY_CURSOR_MACHINE_ID",
+        "APIS_FLY_GITHUB_APP_PREFIX",
+        "APIS_FLY_IMAGE",
+        "APIS_FLY_LEDGER_FILE",
+        "APIS_FLY_LOCAL_FALLBACK",
+        "APIS_FLY_MAX_CONCURRENT",
+        "APIS_FLY_MAX_MACHINES_PER_DAY",
+        "APIS_FLY_MONTHLY_BUDGET_USD",
+        "APIS_FLY_PROBE_ENV_NAMES",
+        "APIS_FLY_QUEUE_MAX_WAIT_SECONDS",
+        "APIS_FLY_RATE_PER_HOUR_USD",
+        "APIS_FLY_REGION",
+        "APIS_FLY_RUNNER_CLASSES",
+        "APIS_FLY_STORAGE_GB_MONTH_USD",
         "APIS_GITHUB_WEBHOOK_PORT",
         "APIS_HARNESS_COOLDOWN_SECONDS",
         "APIS_HARNESS_HEADROOM",
@@ -189,12 +208,29 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "ATELES_AAUTH_KEYS_DIR",
         "ATELES_AGENT_GIT_EMAIL",
         "ATELES_AGENT_GIT_NAME",
+        "ATELES_APP_PR_OPENER_ID",
+        "ATELES_APP_PR_OPENER_INSTALLATION_ID",
+        "ATELES_APP_REVIEWER_ARCH_ID",
+        "ATELES_APP_REVIEWER_ARCH_INSTALLATION_ID",
+        "ATELES_APP_REVIEWER_CONTENT_ID",
+        "ATELES_APP_REVIEWER_CONTENT_INSTALLATION_ID",
+        "ATELES_APP_REVIEWER_LEGAL_ID",
+        "ATELES_APP_REVIEWER_LEGAL_INSTALLATION_ID",
+        "ATELES_APP_REVIEWER_PM_ID",
+        "ATELES_APP_REVIEWER_PM_INSTALLATION_ID",
+        "ATELES_APP_REVIEWER_QA_ID",
+        "ATELES_APP_REVIEWER_QA_INSTALLATION_ID",
+        "ATELES_APP_REVIEWER_SECURITY_ID",
+        "ATELES_APP_REVIEWER_SECURITY_INSTALLATION_ID",
+        "ATELES_APP_REVIEWER_UX_ID",
+        "ATELES_APP_REVIEWER_UX_INSTALLATION_ID",
         "ATELES_DEDUPE_JOURNAL_PATH",
         "ATELES_DIGEST_QUEUE_PATH",
         "ATELES_DISPATCH_FAILURE_LOG_DIR",
         "ATELES_DISPATCH_FAILURE_NOTIFY_WINDOW",
         "ATELES_DOTENV_FILE",
         "ATELES_EMAIL_DOMAIN",
+        "ATELES_EXPECTED_LENS_APPS",
         "ATELES_FOUNDATION_ROOT",
         "ATELES_GMAIL_SEND_CMD",
         "ATELES_LOG_BACKUP_COUNT",
@@ -339,6 +375,88 @@ ALLOWED_ENVIRONMENT_NAMES: frozenset[str] = (
 def is_allowed_environment_name(name: str) -> bool:
     """True when *name* is declared here and is not credential-named."""
     return name in ALLOWED_ENVIRONMENT_NAMES and not is_credential_env_name(name)
+
+
+# ---------------------------------------------------------------------------
+# Fly runner subset (ateles#1456).
+#
+# A dispatched CLI that runs on a Fly Machine gets an environment built from
+# scratch by ``deploy/fly-runner/run_job.py``: only names on
+# ``RUNNER_ENVIRONMENT_NAMES`` (each of which must ALSO pass
+# ``is_allowed_environment_name``, so the subset can never widen the shared
+# list) plus the job's own declared credentials, and those only when they are
+# on ``RUNNER_CHILD_CREDENTIAL_NAMES``. Nothing reaches the child by
+# inheritance. A daemon setting is not on the subset: the runner holds one
+# job, not a daemon, so it has no use for one.
+# ---------------------------------------------------------------------------
+
+RUNNER_ENVIRONMENT_NAMES: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TERM",
+        "NO_COLOR",
+        "PYTHONUNBUFFERED",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "CODEX_HOME",
+        "NEOTOMA_BASE_URL",
+        "NEOTOMA_AAUTH_SUB",
+        "NEOTOMA_AAUTH_ISS",
+    }
+)
+
+# The only credential names a job may hand to its CLI child. The role's own
+# Neotoma bearer is deliberately NOT here: ``run_job.py`` uses it itself (for
+# the Claude MCP config file and the result record) and never exports it.
+RUNNER_CHILD_CREDENTIAL_NAMES: frozenset[str] = frozenset(
+    {"GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
+)
+
+
+def is_runner_environment_name(name: str) -> bool:
+    """True when *name* may pass from the runner's own environment into the
+    CLI child: on the runner subset AND on the shared allowlist."""
+    return name in RUNNER_ENVIRONMENT_NAMES and is_allowed_environment_name(name)
+
+
+def runner_child_environment(
+    base,
+    credentials: dict[str, str],
+    *,
+    overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a Fly runner CLI child's environment from scratch.
+
+    ``base`` is the runner process's own environment; only runner-subset
+    names survive. ``overrides`` (non-secret, e.g. a RAM-backed ``HOME``) are
+    applied next and must themselves be runner-subset names. ``credentials``
+    are added last and must be on ``RUNNER_CHILD_CREDENTIAL_NAMES``; any other
+    name raises ``ValueError`` naming the key, never the value.
+    """
+    child = {
+        name: value for name, value in dict(base).items() if is_runner_environment_name(name)
+    }
+    for name, value in (overrides or {}).items():
+        if not is_runner_environment_name(name):
+            raise ValueError(f"runner override {name!r} is not on the runner subset")
+        child[name] = value
+    for name, value in credentials.items():
+        if name not in RUNNER_CHILD_CREDENTIAL_NAMES:
+            raise ValueError(f"credential {name!r} may not reach a runner child")
+        child[name] = value
+    return child
 
 
 def plan_env_scrub(environ) -> tuple[list[str], dict[str, str]]:

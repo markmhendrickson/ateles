@@ -523,6 +523,40 @@ def test_a_fresh_cache_is_read_and_stamped_with_its_fetch_time(tmp_path, monkeyp
     assert ops.stale_streams(ops.stream_fetched_at(tmp_path), NOW, 7) == []
 
 
+def test_stream_fetched_at_prefers_the_sidecar_stamp_over_the_file_mtime(tmp_path):
+    # Both clocks are pinned, so the outcome never depends on today's date: the sidecar says 2026-10-13,
+    # the file says 2020-01-01. Reversing the precedence returns 2020-01-01 and fails here.
+    _write_cache_dir(tmp_path, "2026-10-13T10:00:00Z")
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()
+    for path in tmp_path.glob("*.jsonl"):
+        os.utime(path, (old, old))
+    stamps = ops.stream_fetched_at(tmp_path)
+    assert stamps and set(stamps.values()) == {datetime(2026, 10, 13, 10, tzinfo=timezone.utc)}
+
+
+def test_stream_fetched_at_falls_back_to_the_file_mtime_without_a_sidecar_entry(tmp_path):
+    _write_cache_dir(tmp_path, "2026-10-13T10:00:00Z")
+    (tmp_path / "meta.json").unlink()
+    when = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    for path in tmp_path.glob("*.jsonl"):
+        os.utime(path, (when.timestamp(), when.timestamp()))
+    stamps = ops.stream_fetched_at(tmp_path)
+    assert stamps and set(stamps.values()) == {when}
+
+
+def test_every_reading_carries_a_coverage_note_so_a_clean_rerun_clears_a_stale_one():
+    # An absent field is not written, so a clean rerun that omitted the note would leave the stale run's
+    # "cache older than" note on the stored reading. The clean record must hold an explicit empty note.
+    base = dict(subprocess_rows=[], task_rows=[], checkpoint_rows=[cp("c1", "2026-10-06T10:00:00Z", "approved")],
+                shape_rows=[], review_prs=[], now=NOW, swarm_artifact=SWARM,
+                first_week=datetime(2026, 10, 5, tzinfo=timezone.utc))
+    clean = ops.build_readings(**base)
+    stale = ops.mark_stale(clean, "cache older than 7 days: checkpoints")
+    assert clean and all(r["coverage_note"] == "" for r in clean)
+    assert {r["reading_key"] for r in clean} == {r["reading_key"] for r in stale}  # same stored entity
+    assert all("cache older than" in r["coverage_note"] for r in stale)
+
+
 def test_swarm_artifact_is_required_not_defaulted(tmp_path, monkeypatch):
     monkeypatch.delenv("METRICS_SWARM_ARTIFACT", raising=False)
     _write_cache_dir(tmp_path, "2026-10-13T10:00:00Z")

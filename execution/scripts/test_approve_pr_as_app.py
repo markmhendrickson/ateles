@@ -19,6 +19,7 @@ Run: pytest execution/scripts/test_approve_pr_as_app.py -v
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -2858,3 +2859,1053 @@ class TestOnlySwarmAuthoredLensCommentsAreRead:
         assert out.count("review:arch by stranger-") == 5
         assert "(+3 more)" in out
         assert code == 0
+
+
+# ── Per-lens Apps (operator ruling 2026-10-14) ──────────────────────────────
+#
+# Each review role approves as its own GitHub App, so the host's record of who
+# approved matches who reviewed. Every GitHub and token call is faked; the
+# credentials are placeholders that are never used to sign anything.
+
+
+def _lens_app_login(lens: str) -> str:
+    return f"ateles-reviewer-{lens}[bot]"
+
+
+class _PerLensClient(_FakeClient):
+    """Remembers which App's token posted each review and reads it back as that
+    App's bot login, the way GitHub's own read-back would."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._review_logins: dict[int, str] = {}
+        self.review_head = HEAD
+
+    async def post(self, url, json=None, headers=None):
+        assert url.endswith(f"/pulls/{PR}/reviews")
+        self.posted.append({"json": json, "headers": headers})
+        review_id = 1000 + len(self.posted)
+        token = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
+        self._review_logins[review_id] = _LOGIN_FOR_TOKEN.get(token, "unknown[bot]")
+        return _FakeResponse({"id": review_id, "state": "APPROVED"})
+
+    async def get(self, url, headers=None, params=None):
+        if "/reviews/" in url:
+            review_id = int(url.rsplit("/", 1)[1])
+            return _FakeResponse(
+                {
+                    "id": review_id,
+                    "state": "APPROVED",
+                    "commit_id": self.review_head,
+                    "user": {"login": self._review_logins[review_id], "type": "Bot"},
+                }
+            )
+        return await super().get(url, headers=headers, params=params)
+
+
+_LOGIN_FOR_TOKEN: dict[str, str] = {}
+
+
+SHARED_APP_LOGIN = "ateles-agents[bot]"
+OPENER_APP_LOGIN = "ateles-pr-opener[bot]"
+
+
+def _install_lens_apps(
+    monkeypatch,
+    lenses: list[str],
+    *,
+    unusable: list[str] = (),
+    no_token=(),
+    opener: str | None = None,
+    opener_unreadable: bool = False,
+    logins: dict[str, str] | None = None,
+):
+    """Give each lens in *lenses* an App: configured env, a distinct token, a
+    distinct bot login. *unusable* lenses are declared with no key; *no_token*
+    lenses are configured but cannot mint. *opener* declares the PR-opener App
+    acting as that login (*opener_unreadable*: its login cannot be read).
+    *logins* overrides a lens's bot login (to stage a collision). The swarm
+    App's own login is `SHARED_APP_LOGIN`."""
+    _LOGIN_FOR_TOKEN.clear()
+    from lib import github_app_token as gat
+
+    login_of = {lens: _lens_app_login(lens) for lens in lenses}
+    login_of.update(logins or {})
+    for lens in [*lenses, *no_token]:
+        prefix = gat.reviewer_prefix(lens)
+        monkeypatch.setenv(f"{prefix}_ID", "1")
+        monkeypatch.setenv(f"{prefix}_PRIVATE_KEY", "placeholder-not-a-key")
+        _LOGIN_FOR_TOKEN[f"tok-{lens}"] = login_of.get(lens, _lens_app_login(lens))
+    for lens in unusable:
+        monkeypatch.setenv(f"{gat.reviewer_prefix(lens)}_ID", "1")
+    if opener is not None:
+        monkeypatch.setenv(f"{gat.pr_opener_prefix()}_ID", "2")
+        monkeypatch.setenv(f"{gat.pr_opener_prefix()}_PRIVATE_KEY", "placeholder-not-a-key")
+
+    def fake_token(repo=None, *, prefix=gat.DEFAULT_APP_ENV_PREFIX):
+        for lens in [*lenses, *no_token]:
+            if prefix == gat.reviewer_prefix(lens):
+                if lens in no_token:
+                    raise gat.AppTokenError("HTTP 401")
+                return f"tok-{lens}"
+        # The default App (read-only calls) is not faked: callers fall back.
+        raise gat.AppTokenError(f"no fake token for {prefix}")
+
+    for lens in no_token:
+        login_of.setdefault(lens, _lens_app_login(lens))  # readable; only the mint fails
+
+    def fake_login(prefix=gat.DEFAULT_APP_ENV_PREFIX):
+        for lens in [*lenses, *no_token]:
+            if prefix == gat.reviewer_prefix(lens):
+                return login_of[lens]
+        if opener is not None and prefix == gat.pr_opener_prefix():
+            if opener_unreadable:
+                raise gat.AppTokenError("HTTP 401")
+            return opener
+        if prefix == gat.DEFAULT_APP_ENV_PREFIX:
+            return SHARED_APP_LOGIN
+        raise gat.AppTokenError("no login")
+
+    monkeypatch.setattr(gat, "installation_token", fake_token)
+    monkeypatch.setattr(gat, "bot_login", fake_login)
+    monkeypatch.setattr(
+        gat, "identity_bot_login", lambda identity: fake_login(gat.identity_env_prefix(identity))
+    )
+
+
+def _own_app_comments(lenses: list[str], *, apps_for: list[str]) -> list[dict]:
+    """A clearing verdict per lens, written by that lens's App when it has one
+    and by the shared swarm account otherwise."""
+    return [
+        _comment(
+            i,
+            _lens_comment_body(lens, target.LENS_AGENTS[lens]),
+            author=_lens_app_login(lens) if lens in apps_for else SWARM_LOGIN,
+        )
+        for i, lens in enumerate(lenses)
+    ]
+
+
+def _bodies(client) -> dict[str, str]:
+    return {
+        p["headers"]["Authorization"].removeprefix("Bearer "): p["json"]["body"]
+        for p in client.posted
+    }
+
+
+@pytest.mark.asyncio
+class TestPerLensApprovals:
+    async def test_each_lens_approves_as_its_own_app(self, monkeypatch, capsys):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=ALL_FOUR), check_runs=_green_checks()
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        bodies = _bodies(client)
+        assert sorted(bodies) == sorted(f"tok-{lens}" for lens in ALL_FOUR)
+        for lens in ALL_FOUR:
+            body = bodies[f"tok-{lens}"]
+            assert f"**{lens}**" in body
+            for other in set(ALL_FOUR) - {lens}:
+                assert f"**{other}**" not in body  # a review speaks for one lens only
+        assert all(p["json"]["event"] == "APPROVE" and p["json"]["commit_id"] == HEAD for p in client.posted)
+        out = capsys.readouterr().out
+        for lens in ALL_FOUR:
+            assert f"APPROVED as {_lens_app_login(lens)}" in out
+
+    async def test_with_no_per_lens_apps_it_is_todays_single_review_and_says_so(
+        self, monkeypatch, capsys
+    ):
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        assert len(client.posted) == 1
+        out = capsys.readouterr().out
+        assert "none configured" in out and "approving in one review as the swarm App" in out
+        assert "APPROVED as the swarm App" in out
+
+    async def test_a_partial_rollout_approves_each_configured_lens_itself_and_the_rest_together(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, ["pm", "arch"])
+        # The shared App still approves the lenses that have no App yet.
+        _LOGIN_FOR_TOKEN["shared-app-token"] = SHARED_APP_LOGIN
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=["pm", "arch"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 0
+        bodies = _bodies(client)
+        assert sorted(bodies) == ["shared-app-token", "tok-arch", "tok-pm"]
+        assert "**qa**" in bodies["shared-app-token"] and "**security**" in bodies["shared-app-token"]
+        assert "**pm**" not in bodies["shared-app-token"]
+        assert "have no App of their own" in capsys.readouterr().out
+
+    async def test_a_declared_but_unusable_lens_app_refuses_and_submits_nothing(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, ["arch", "qa", "security"], unusable=["pm"])
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=["arch", "qa", "security"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+        minted = []
+
+        async def _spy(repo, client):  # the swarm App must not stand in for pm
+            minted.append(repo)
+            return "shared-app-token"
+
+        _install_app_mint(monkeypatch)
+        monkeypatch.setattr(target, "_mint_reviewer_app_installation_token", _spy)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == []
+        # Refused for the reason the test names, not merely because pm's verdict
+        # went unread: the planner names the declared-but-unusable App, and the
+        # swarm App's credential was never even requested.
+        assert "approvers: UNUSABLE" in out and "pm lens's App is declared" in out
+        assert minted == []
+
+    async def test_a_lens_app_that_cannot_mint_submits_nothing_for_any_lens(
+        self, monkeypatch, capsys
+    ):
+        # Every lens App is READABLE (its login resolves, its verdict is read),
+        # so the run reaches the submit phase, where the last lens's mint fails.
+        _install_lens_apps(monkeypatch, ["pm", "arch", "qa"], no_token=["security"])
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=ALL_FOUR), check_runs=_green_checks()
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == []  # minted first, so the others never landed
+        assert "could not mint the security lens's App token" in out
+        assert "submitting nothing" in out
+
+    async def test_a_readback_by_a_different_app_than_the_lens_refuses(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+
+        class _WrongAuthor(_PerLensClient):
+            async def post(self, url, json=None, headers=None):
+                resp = await super().post(url, json=json, headers=headers)
+                self._review_logins[1000 + len(self.posted)] = "someone-else[bot]"
+                return resp
+
+        client = _WrongAuthor(
+            comments=_own_app_comments(ALL_FOUR, apps_for=ALL_FOUR), check_runs=_green_checks()
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+
+    async def test_a_failure_after_some_landed_names_the_approvals_that_did(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, ["pm", "qa"])
+
+        class _SecondFails(_PerLensClient):
+            async def post(self, url, json=None, headers=None):
+                if len(self.posted) == 1:
+                    return _FakeResponse({"message": "boom"}, status_code=500, text="boom")
+                return await super().post(url, json=json, headers=headers)
+
+        client = _SecondFails(
+            comments=_own_app_comments(["pm", "qa"], apps_for=["pm", "qa"]),
+            check_runs=_green_checks(),
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, [], apply=True)
+
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "approvals already landed: pm as ateles-reviewer-pm[bot] (review 1001)" in out
+        assert "not landed: qa" in out
+
+    async def test_dry_run_reports_the_approvers_and_submits_nothing(self, monkeypatch, capsys):
+        _install_lens_apps(monkeypatch, ["pm"])
+        client = _PerLensClient(
+            comments=_own_app_comments(ALL_FOUR, apps_for=["pm"]), check_runs=_green_checks()
+        )
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=False)
+
+        assert code == 0
+        assert client.posted == []
+        assert "approvers: mixed (own App: pm)" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+class TestLensVerdictsAreReadOnlyFromTheLensOwnApp:
+    async def test_a_verdict_from_the_shared_account_does_not_clear_a_lens_with_its_own_app(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        # pm's verdict was written by the shared account, not pm's App.
+        comments = _own_app_comments(ALL_FOUR, apps_for=["arch", "qa", "security"])
+        client = _PerLensClient(comments=comments, check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.posted == []
+        assert "read only from that App" in capsys.readouterr().out
+
+    async def test_one_lens_apps_comment_cannot_stand_in_for_another_lens(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        # arch's verdict was written by pm's App.
+        comments = _own_app_comments(ALL_FOUR, apps_for=ALL_FOUR)
+        comments[ALL_FOUR.index("arch")]["user"] = {"login": _lens_app_login("pm")}
+        client = _PerLensClient(comments=comments, check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.posted == []
+
+    async def test_a_blocking_verdict_from_the_wrong_account_still_holds_approval(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        comments = _own_app_comments(ALL_FOUR, apps_for=ALL_FOUR)
+        comments.append(
+            _comment(
+                90,
+                _lens_comment_body("arch", "waxwing", verdict="REQUEST_CHANGES"),
+                author=SWARM_LOGIN,
+            )
+        )
+        client = _PerLensClient(comments=comments, check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1  # an objection can only delay, never vanish
+        assert client.posted == []
+
+
+# ── Fail-closed pins for the per-identity approval path ─────────────────────
+#
+# Each test below reaches the branch it names FOR THAT REASON: it asserts the
+# specific refusal text (and that nothing was posted), never just a non-zero exit,
+# because the reader refuses first in several of these setups and a bare exit
+# code would pass without the branch under test ever running.
+
+
+def _lo(lens: str) -> "target.LensOutcome":
+    return target.LensOutcome(
+        lens, agent=target.LENS_AGENTS[lens], head_matched=True, verdict="SIGNED_OFF", passed=True
+    )
+
+
+def _per_lens_client(lenses: list[str], *, apps_for: list[str]) -> _PerLensClient:
+    return _PerLensClient(
+        comments=_own_app_comments(lenses, apps_for=apps_for), check_runs=_green_checks()
+    )
+
+
+class TestThePlannerRefusesAnUnusableLensAppOnItsOwn:
+    """`plan_approvals` is the second line behind the reader. Called directly, so
+    the reader cannot be what refuses."""
+
+    def test_a_declared_but_unusable_lens_app_is_not_replaced_by_the_swarm_app(self, monkeypatch):
+        monkeypatch.setenv("ATELES_REVIEWER_APP_ID", "12345")  # the swarm App is fine
+        monkeypatch.setenv("ATELES_REVIEWER_APP_PRIVATE_KEY", "fake")
+        monkeypatch.setenv("ATELES_APP_REVIEWER_PM_ID", "1")  # an id, no key
+        with pytest.raises(RuntimeError, match="pm lens's App is declared"):
+            target.plan_approvals([_lo("pm"), _lo("qa")])
+
+    def test_control_with_no_declaration_the_lens_goes_to_the_swarm_app(self, monkeypatch):
+        plan = target.plan_approvals([_lo("pm"), _lo("qa")])
+        assert plan.mode == "single-app" and [o.lens for o in plan.shared] == ["pm", "qa"]
+
+    def test_a_lens_the_roster_expects_to_have_an_app_is_not_replaced_either(self, monkeypatch):
+        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", "pm")
+        with pytest.raises(RuntimeError, match="pm lens is expected to have an App"):
+            target.plan_approvals([_lo("pm"), _lo("qa")])
+
+    def test_a_lens_not_on_the_roster_is_unaffected(self, monkeypatch):
+        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", "pm")
+        assert target.plan_approvals([_lo("qa")]).mode == "single-app"
+
+
+@pytest.mark.asyncio
+class TestEveryCredentialIsMintedBeforeTheFirstReviewLands:
+    async def test_a_mint_failure_on_the_last_lens_submits_nothing(self, monkeypatch, capsys):
+        # Every lens App is readable (so the reader lets the run reach the submit
+        # phase); the LAST lens's mint fails. Were mints done inside the submit
+        # loop, the first three approvals would land and could not be retracted.
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        from lib import github_app_token as gat
+
+        real = gat.installation_token
+
+        def fail_security(repo=None, *, prefix=gat.DEFAULT_APP_ENV_PREFIX):
+            if prefix == gat.reviewer_prefix("security"):
+                raise gat.AppTokenError("HTTP 401")
+            return real(repo, prefix=prefix)
+
+        monkeypatch.setattr(gat, "installation_token", fail_security)
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == []
+        assert "could not mint the security lens's App token" in out
+        assert "submitting nothing" in out
+
+    async def test_a_failed_swarm_app_mint_in_a_mixed_rollout_submits_nothing(
+        self, monkeypatch, capsys
+    ):
+        # pm and arch approve as themselves; qa and security need the swarm App,
+        # whose mint fails. The two lens approvals must not land first.
+        _install_lens_apps(monkeypatch, ["pm", "arch"])
+        _install_app_mint(monkeypatch, token=None)
+        client = _per_lens_client(ALL_FOUR, apps_for=["pm", "arch"])
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == []
+        assert "could not mint the swarm App token" in out
+
+    async def test_control_the_same_rollout_with_a_working_swarm_app_lands_everything(
+        self, monkeypatch
+    ):
+        _install_lens_apps(monkeypatch, ["pm", "arch"])
+        _LOGIN_FOR_TOKEN["shared-app-token"] = SHARED_APP_LOGIN
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        client = _per_lens_client(ALL_FOUR, apps_for=["pm", "arch"])
+        _install_client(monkeypatch, client)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 0
+        assert len(client.posted) == 3
+
+
+@pytest.mark.asyncio
+class TestTheDryRunSaysWhenAnApproverIsUnusable:
+    async def test_it_exits_non_zero_and_names_the_cause(self, monkeypatch, capsys):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+
+        def refuse(outcomes):
+            raise RuntimeError("an approver cannot be used")
+
+        monkeypatch.setattr(target, "plan_approvals", refuse)
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=False)
+
+        assert code == 1
+        assert "approvers: UNUSABLE — an approver cannot be used" in capsys.readouterr().out
+
+    async def test_control_with_usable_approvers_the_dry_run_exits_zero(self, monkeypatch, capsys):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=False) == 0
+        assert "approvers: per-lens" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+class TestNoTokenOrKeyReachesOutputOrLogs:
+    async def test_a_full_per_lens_approval_prints_no_minted_token(self, monkeypatch, capsys, caplog):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+        with caplog.at_level(logging.DEBUG):
+            assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 0
+        seen = capsys.readouterr()
+        everything = seen.out + seen.err + caplog.text
+        assert not any(f"tok-{lens}" in everything for lens in ALL_FOUR)
+        assert len(client.posted) == 4  # control: the tokens were in fact used
+
+    async def test_a_failed_mint_prints_no_key_material(self, monkeypatch, capsys, caplog):
+        _install_lens_apps(monkeypatch, ["pm", "arch", "qa"], no_token=["security"])
+        monkeypatch.setenv("ATELES_APP_REVIEWER_SECURITY_PRIVATE_KEY", "SENTINEL-KEY-MATERIAL")
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+        with caplog.at_level(logging.DEBUG):
+            assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 1
+        seen = capsys.readouterr()
+        assert "SENTINEL-KEY-MATERIAL" not in seen.out + seen.err + caplog.text
+
+
+@pytest.mark.asyncio
+class TestTheBuilderNeverSignsItsOwnReview:
+    """Decision 143, made mechanical: no approval may be authored by the PR-opener
+    App's login, whichever way that login comes to be an approver."""
+
+    async def _approve(self, monkeypatch, lenses, *, pr_author="some-human-author", **install):
+        _install_lens_apps(monkeypatch, lenses, **install)
+        client = _per_lens_client(lenses, apps_for=lenses)
+        await_result = None
+        try:
+            await_result = await target.submit_approvals(
+                client,
+                repo=REPO,
+                pr=PR,
+                head_sha=HEAD,
+                lens_outcomes=[_lo(lens) for lens in lenses],
+                check_outcomes=[],
+                pr_author=pr_author,
+            )
+        except RuntimeError as exc:
+            return client, exc
+        return client, await_result
+
+    async def test_control_a_distinct_opener_app_leaves_the_lens_approvals_alone(self, monkeypatch):
+        client, result = await self._approve(monkeypatch, ["pm", "arch"], opener=OPENER_APP_LOGIN)
+        assert not isinstance(result, Exception), result
+        assert len(client.posted) == 2
+
+    async def test_a_lens_app_that_is_the_opener_app_approves_nothing(self, monkeypatch):
+        client, err = await self._approve(
+            monkeypatch, ["pm", "arch"], opener=_lens_app_login("pm")
+        )
+        assert isinstance(err, RuntimeError)
+        assert "PR-opener App's login" in str(err)
+        assert client.posted == []
+
+    async def test_the_swarm_app_that_is_the_opener_app_approves_nothing(self, monkeypatch):
+        # No lens has an App yet, but the opener is declared and shares the swarm
+        # App's login: the single review would be signed by the builder.
+        _install_lens_apps(monkeypatch, [], opener=SHARED_APP_LOGIN)
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        client = _per_lens_client(["pm", "qa"], apps_for=[])
+        with pytest.raises(RuntimeError, match="PR-opener App's login"):
+            await target.submit_approvals(
+                client, repo=REPO, pr=PR, head_sha=HEAD,
+                lens_outcomes=[_lo("pm"), _lo("qa")], check_outcomes=[],
+            )
+        assert client.posted == []
+
+    async def test_an_unreadable_opener_login_approves_nothing(self, monkeypatch):
+        client, err = await self._approve(
+            monkeypatch, ["pm", "arch"], opener=OPENER_APP_LOGIN, opener_unreadable=True
+        )
+        assert isinstance(err, RuntimeError)
+        assert "PR-opener App is declared but its login cannot be read" in str(err)
+        assert client.posted == []
+
+    async def test_a_readback_showing_the_opener_as_the_author_is_not_a_landed_approval(
+        self, monkeypatch
+    ):
+        # Even if every earlier check were bypassed, the review that GitHub shows
+        # as written by the opener's login is refused at read-back.
+        _install_lens_apps(monkeypatch, ["pm"])
+        _LOGIN_FOR_TOKEN["tok-pm"] = OPENER_APP_LOGIN
+        client = _per_lens_client(["pm"], apps_for=["pm"])
+        with pytest.raises(RuntimeError, match="read-back did not match"):
+            await target.submit_app_approval(
+                client, repo=REPO, pr=PR, head_sha=HEAD, lens_outcomes=[_lo("pm")],
+                token="tok-pm", expected_login=OPENER_APP_LOGIN,
+                forbidden_logins=frozenset({OPENER_APP_LOGIN}),
+            )
+
+    async def test_control_the_same_readback_passes_when_the_login_is_not_forbidden(
+        self, monkeypatch
+    ):
+        _install_lens_apps(monkeypatch, ["pm"])
+        client = _per_lens_client(["pm"], apps_for=["pm"])
+        review = await target.submit_app_approval(
+            client, repo=REPO, pr=PR, head_sha=HEAD, lens_outcomes=[_lo("pm")],
+            token="tok-pm", expected_login=_lens_app_login("pm"),
+            forbidden_logins=frozenset({OPENER_APP_LOGIN}),
+        )
+        assert review["state"] == "APPROVED"
+
+
+@pytest.mark.asyncio
+class TestTwoApproversThatAreOneLoginSubmitNothing:
+    async def _submit(self, monkeypatch, lenses, *, pr_author="some-human-author", **install):
+        _install_lens_apps(monkeypatch, lenses, **install)
+        client = _per_lens_client(lenses, apps_for=lenses)
+        with pytest.raises(RuntimeError) as err:
+            await target.submit_approvals(
+                client, repo=REPO, pr=PR, head_sha=HEAD,
+                lens_outcomes=[_lo(lens) for lens in lenses], check_outcomes=[],
+                pr_author=pr_author,
+            )
+        return client, str(err.value)
+
+    async def test_two_lens_apps_on_one_login(self, monkeypatch):
+        client, msg = await self._submit(
+            monkeypatch, ["pm", "arch"], logins={"arch": _lens_app_login("pm")}
+        )
+        assert "same bot login" in msg and "Submitting nothing" in msg
+        assert client.posted == []
+
+    async def test_a_lens_app_on_the_swarm_apps_login(self, monkeypatch):
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        _install_lens_apps(monkeypatch, ["pm"], logins={"pm": SHARED_APP_LOGIN})
+        client = _per_lens_client(["pm", "qa"], apps_for=["pm"])
+        with pytest.raises(RuntimeError, match="same bot login"):
+            await target.submit_approvals(
+                client, repo=REPO, pr=PR, head_sha=HEAD,
+                lens_outcomes=[_lo("pm"), _lo("qa")], check_outcomes=[],
+            )
+        assert client.posted == []
+
+    async def test_an_approver_that_is_the_prs_author(self, monkeypatch):
+        client, msg = await self._submit(
+            monkeypatch, ["pm", "arch"], pr_author=_lens_app_login("arch").upper()
+        )
+        assert "PR's author" in msg
+        assert client.posted == []
+
+    async def test_control_distinct_logins_and_author_submit(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ["pm", "arch"])
+        client = _per_lens_client(["pm", "arch"], apps_for=["pm", "arch"])
+        reviews = await target.submit_approvals(
+            client, repo=REPO, pr=PR, head_sha=HEAD,
+            lens_outcomes=[_lo("pm"), _lo("arch")], check_outcomes=[], pr_author="a-human",
+        )
+        assert len(reviews) == 2
+
+    async def test_a_token_supplied_without_the_login_it_must_act_as_is_refused(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ["pm"])
+        client = _per_lens_client(["pm"], apps_for=["pm"])
+        with pytest.raises(RuntimeError, match="without the login it must act as"):
+            await target.submit_app_approval(
+                client, repo=REPO, pr=PR, head_sha=HEAD, lens_outcomes=[_lo("pm")], token="tok-pm"
+            )
+        assert client.posted == []
+
+    async def test_a_collision_at_read_time_leaves_the_gate_unclear(self, monkeypatch, capsys):
+        # The reader-side half: two lens Apps on one login means neither lens's
+        # verdict is read, so the run refuses before any approval is planned.
+        _install_lens_apps(monkeypatch, ALL_FOUR, logins={"arch": _lens_app_login("pm")})
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert "approvers: UNUSABLE" in out or "lenses: FAIL" in out
+        assert "cannot be used" in out  # the pm and arch rows say why, not "wait"
+
+
+@pytest.mark.asyncio
+class TestTheFailureReadsAsTheCauseNotAsAWait:
+    """UX: an unusable lens App is named first, in terms the operator can fix."""
+
+    @staticmethod
+    def _setup(monkeypatch):
+        # pm's App is declared with no key; pm's verdict was written by the shared
+        # account. Every other lens is fine.
+        _install_lens_apps(monkeypatch, ["arch", "qa", "security"], unusable=["pm"])
+        client = _per_lens_client(ALL_FOUR, apps_for=["arch", "qa", "security"])
+        return client
+
+    @pytest.mark.parametrize("apply", [True, False])
+    async def test_the_cause_is_printed_before_any_generic_refusal(self, monkeypatch, capsys, apply):
+        client = self._setup(monkeypatch)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=apply)
+
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert "approvers: UNUSABLE" in out
+        assert "ATELES_APP_REVIEWER_PM_" in out  # the variable prefix to fix
+        assert "python3 lib/github_app_token.py status" in out
+        assert "refusing to approve: gate is not clear" not in out
+        # the table row says waiting will not help, instead of "wait for it"
+        assert "waiting will not clear it" in out
+        assert "Wait for it to review" not in out
+
+    async def test_an_unusable_app_is_not_listed_as_configured_or_given_the_setting_advice(
+        self, monkeypatch, capsys
+    ):
+        client = self._setup(monkeypatch)
+        _install_client(monkeypatch, client)
+
+        await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert "configured for: " not in out
+        assert "App ready for: arch, qa, security" in out
+        assert "so NO verdict is read for: pm" in out
+        # the shared account's pm verdict is ignored because pm has an App; the
+        # setting cannot admit it, so the advice would send the operator nowhere
+        assert "If one of these accounts is the swarm's" not in out
+
+    async def test_the_setting_advice_is_still_given_for_a_lens_with_no_app(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, ["pm"])
+        comments = _own_app_comments(ALL_FOUR, apps_for=["pm"]) + [
+            _comment(50, _lens_comment_body("qa", "phoenicurus"), author=OTHER_LOGIN)
+        ]
+        client = _PerLensClient(comments=comments, check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+
+        await target.run(REPO, PR, ALL_FOUR, apply=False)
+
+        out = capsys.readouterr().out
+        assert "If one of these accounts is the swarm's" in out
+        assert "App ready for: pm" in out
+
+    async def test_a_dry_run_in_single_app_mode_says_why(self, monkeypatch, capsys):
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        assert await target.run(REPO, PR, ALL_FOUR, apply=False) == 0
+        out = capsys.readouterr().out
+        assert "approvers: single-app (the swarm App: pm, qa, arch, security" in out
+        assert "no ATELES_APP_REVIEWER_<LENS>_* variables set" in out
+
+
+class TestTheExpectedLensRosterRefusesInPlaceOfFallingBack:
+    @pytest.mark.asyncio
+    async def test_a_process_without_the_variables_does_not_approve_as_the_swarm_app(
+        self, monkeypatch, capsys
+    ):
+        # pm is on the roster but this process has none of pm's variables; the
+        # swarm App is configured and every verdict (read from the shared
+        # account, as it would be before any App existed) is present.
+        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", "pm")
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert "pm" in out and "expected" in out
+        assert "approvers: UNUSABLE" in out
+
+
+@pytest.mark.asyncio
+class TestEveryApprovalGuardHoldsWhenReachedThroughRun:
+    """Each guard below is also tested by calling its own function. A function can
+    be correct while `run` fails to hand it the input it needs, so these go through
+    `target.run(apply=True)`, the way the operator reaches them. Each was shown red
+    by removing the guard (or the wiring that feeds it) and green with it restored."""
+
+    async def test_run_hands_the_pr_author_to_the_approver_check(self, monkeypatch, capsys):
+        # pm and arch have Apps; qa and security go in the swarm App's review,
+        # and the swarm App opened this PR.
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        _install_lens_apps(monkeypatch, ["pm", "arch"])
+        client = _per_lens_client(ALL_FOUR, apps_for=["pm", "arch"])
+        client.pr_author = SHARED_APP_LOGIN
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == [], client.posted
+        assert "resolves to this PR's author" in out
+
+    async def test_control_the_same_run_with_another_author_lands_every_review(
+        self, monkeypatch
+    ):
+        _install_lens_apps(monkeypatch, ["pm", "arch"])
+        _LOGIN_FOR_TOKEN["shared-app-token"] = SHARED_APP_LOGIN
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        client = _per_lens_client(ALL_FOUR, apps_for=["pm", "arch"])
+        client.pr_author = AUTHOR
+        _install_client(monkeypatch, client)
+
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 0
+        assert len(client.posted) == 3
+
+    async def test_run_refuses_when_the_swarm_app_is_also_the_pr_opener_app(
+        self, monkeypatch, capsys
+    ):
+        # No lens has an App, so this would be the one review from the swarm App;
+        # the opener App is declared and acts as that same login.
+        _install_lens_apps(monkeypatch, [], opener=SHARED_APP_LOGIN)
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        client = _per_lens_client(ALL_FOUR, apps_for=[])
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == [], client.posted
+        assert "PR-opener App's login" in out
+
+    async def test_run_refuses_when_the_opener_apps_login_cannot_be_read(
+        self, monkeypatch, capsys
+    ):
+        _install_lens_apps(monkeypatch, [], opener=OPENER_APP_LOGIN, opener_unreadable=True)
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        client = _per_lens_client(ALL_FOUR, apps_for=[])
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == [], client.posted
+        assert "its login cannot be read" in out
+
+    async def test_run_refuses_when_the_swarm_apps_login_cannot_be_read(
+        self, monkeypatch, capsys
+    ):
+        # pm and arch have Apps; qa and security need the swarm App, which mints
+        # but whose login cannot be read. The two lens reviews would land first.
+        _install_lens_apps(monkeypatch, ["pm", "arch"])
+        _install_app_mint(monkeypatch, token="shared-app-token")
+        from lib import github_app_token as gat
+
+        real_login = gat.bot_login
+
+        def swarm_login_unreadable(prefix=gat.DEFAULT_APP_ENV_PREFIX):
+            if prefix == gat.DEFAULT_APP_ENV_PREFIX:
+                raise gat.AppTokenError("HTTP 401")
+            return real_login(prefix)
+
+        monkeypatch.setattr(gat, "bot_login", swarm_login_unreadable)
+        client = _per_lens_client(ALL_FOUR, apps_for=["pm", "arch"])
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == [], client.posted
+        assert "could not read the swarm App's login" in out
+
+    async def test_run_refuses_when_the_pre_submit_refetch_names_no_author(
+        self, monkeypatch, capsys
+    ):
+        # The first PR read names the author (so the run reaches the submit phase);
+        # the re-fetch immediately before posting does not.
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        real_pr_payload = client._pr_payload
+
+        def _authorless_after_first():
+            payload = real_pr_payload()
+            if client.pr_get_count > 1:
+                payload["user"] = {}
+            return payload
+
+        client._pr_payload = _authorless_after_first
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == [], client.posted
+        assert "could not resolve PR author" in out
+
+    async def test_run_does_not_count_a_review_that_reads_back_as_another_review(
+        self, monkeypatch, capsys
+    ):
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=_green_checks(),
+            review_readback={
+                "id": 31337,  # the POST answered with id 999
+                "state": "APPROVED",
+                "commit_id": HEAD,
+                "user": {"login": "ateles-agents[bot]", "type": "Bot"},
+            },
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "read-back did not match" in out
+
+    async def test_run_does_not_count_a_review_the_pr_author_wrote_in_the_one_review_path(
+        self, monkeypatch, capsys
+    ):
+        # No lens App and no opener App: the one review from the swarm App has no
+        # pre-submit login check, so the read-back is the guard. The PR was opened
+        # by the account the read-back shows as the reviewer.
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=_green_checks(),
+            pr_author="ateles-agents[bot]",
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "read-back did not match" in out
+
+    async def test_run_stops_when_the_pr_head_cannot_be_resolved(self, monkeypatch, capsys):
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        real_pr_payload = client._pr_payload
+
+        def _headless():
+            payload = real_pr_payload()
+            payload["head"] = {}
+            return payload
+
+        client._pr_payload = _headless
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == [], client.posted
+        assert "could not resolve a full 40-char head SHA" in out
+
+    async def test_run_reads_the_checks_of_the_head_it_is_approving(self, monkeypatch):
+        client = _FakeClient(comments=_all_clear_comments(ALL_FOUR), check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 0
+
+        commit_reads = [u for u in client.get_urls if "/commits/" in u]
+        assert commit_reads, "the checks were never read"
+        assert all(f"/commits/{HEAD}/" in u for u in commit_reads), commit_reads
+
+
+@pytest.mark.asyncio
+class TestAMalformedExpectedLensRosterRefusesApproval:
+    """`ATELES_EXPECTED_LENS_APPS="pm;qa"` is one entry that is not a lens name. It
+    must refuse, naming the entry, not be dropped as though nothing were expected."""
+
+    @pytest.mark.parametrize("value, shown", [("pm;qa", "'pm;qa'"), ("secuirty", "did you mean 'security'?")])
+    async def test_the_planner_refuses_even_when_every_cleared_lens_has_its_app(
+        self, monkeypatch, value, shown
+    ):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", value)
+        with pytest.raises(RuntimeError, match="not a known lens name") as err:
+            target.plan_approvals([_lo(lens) for lens in ALL_FOUR])
+        assert shown in str(err.value)
+
+    @pytest.mark.parametrize("value, shown", [("pm;qa", "'pm;qa'"), ("secuirty", "'secuirty'")])
+    async def test_run_refuses_and_submits_nothing(self, monkeypatch, capsys, value, shown):
+        # Every cleared lens has its own App and its own verdict, so only the
+        # roster stands in the way. Without the refusal this run approves.
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", value)
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert client.posted == [], client.posted
+        assert "approvers: UNUSABLE" in out
+        assert shown in out and "not a known lens name" in out
+
+    async def test_control_the_same_run_with_a_sound_roster_approves(self, monkeypatch):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        monkeypatch.setenv("ATELES_EXPECTED_LENS_APPS", "pm, qa")
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+
+        assert await target.run(REPO, PR, ALL_FOUR, apply=True) == 0
+        assert len(client.posted) == 4
+
+
+@pytest.mark.asyncio
+class TestAnUnusableLensAppIsNeverListedAsAnApprover:
+    """A lens App with an id and a key but no readable login, or a login another
+    identity also claims, is read as unusable. The approvers line must say so
+    instead of listing it under `per-lens (own App ...)`."""
+
+    @staticmethod
+    def _unreadable_pm(monkeypatch):
+        from lib import github_app_token as gat
+
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        real = gat.identity_bot_login
+
+        def pm_unreadable(identity):
+            if identity == gat.reviewer_identity("pm"):
+                raise gat.AppTokenError("HTTP 401")
+            return real(identity)
+
+        monkeypatch.setattr(gat, "identity_bot_login", pm_unreadable)
+        real_login = gat.bot_login
+
+        def pm_login_unreadable(prefix=gat.DEFAULT_APP_ENV_PREFIX):
+            if prefix == gat.reviewer_prefix("pm"):
+                raise gat.AppTokenError("HTTP 401")
+            return real_login(prefix)
+
+        monkeypatch.setattr(gat, "bot_login", pm_login_unreadable)
+
+    @pytest.mark.parametrize("apply", [False, True])
+    async def test_an_unreadable_login_is_shown_as_unusable(self, monkeypatch, capsys, apply):
+        self._unreadable_pm(monkeypatch)
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=apply)
+
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert "approvers: UNUSABLE" in out
+        assert "the pm lens's App is configured but its login cannot be read" in out
+        assert f"check --identity reviewer_pm --repo {REPO}" in out
+        assert "per-lens (own App" not in out
+
+    @pytest.mark.parametrize("apply", [False, True])
+    async def test_a_login_shared_with_another_identity_is_shown_as_unusable(
+        self, monkeypatch, capsys, apply
+    ):
+        _install_lens_apps(monkeypatch, ALL_FOUR, logins={"arch": _lens_app_login("pm")})
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=apply)
+
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert "approvers: UNUSABLE" in out
+        assert "check --identity reviewer_pm" in out and "check --identity reviewer_arch" in out
+        assert "per-lens (own App" not in out
+
+    async def test_control_usable_apps_are_still_listed(self, monkeypatch, capsys):
+        _install_lens_apps(monkeypatch, ALL_FOUR)
+        client = _per_lens_client(ALL_FOUR, apps_for=ALL_FOUR)
+        _install_client(monkeypatch, client)
+
+        assert await target.run(REPO, PR, ALL_FOUR, apply=False) == 0
+        out = capsys.readouterr().out
+        assert "approvers: per-lens (own App: pm, qa, arch, security)" in out
+        assert "UNUSABLE" not in out

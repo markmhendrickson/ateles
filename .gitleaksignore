@@ -12,3 +12,7 @@ cfa8234cff32be66f29e04027911674b06fb1e1c:lib/capabilities/credentials.py:protect
 # an EARLIER commit of the PR. The later commit builds it from fragments; the PR-range
 # scan reads history.
 356f5d6009d52034a5fce632241be860fdca74d8:execution/scripts/test_render_daemon_plist.py:generic-api-key:164
+# ateles PR #1462: a synthetic credentialed-remote URL with a placeholder user and
+# value in a clone-identity test, flagged in an EARLIER commit of the PR. The later
+# commit builds it from fragments; the PR-range scan reads history.
+6d23fbed06b640d484854db5b2d54fb10004090c:execution/daemons/apis/test_build_delivery.py:pii-email:740

@@ -272,6 +272,109 @@ def _correct(entity_id: str, field: str, value, idempotency_key: str) -> bool:
         return False
 
 
+def set_task_field(
+    task_entity_id: str,
+    field: str,
+    value,
+    *,
+    handler: str,
+    key_suffix: str = "",
+) -> bool:
+    """Write one task field to Neotoma; True only if the write succeeded.
+
+    For companions of a lifecycle write that `set_task_status` has no parameter
+    for. Same best-effort contract as `set_task_status`: never raises, and a False
+    return is the caller's to act on.
+    """
+    suffix = f"-{key_suffix}" if key_suffix else ""
+    return _correct(
+        task_entity_id, field, value,
+        idempotency_key=f"taskfield-{handler}-{task_entity_id}-{field}{suffix}",
+    )
+
+
+@dataclass(frozen=True)
+class FieldWrite:
+    """Result of a CONDITIONAL field write.
+
+    ``ok``        the correction was committed.
+    ``conflict``  Neotoma refused it because the entity changed since the caller's
+                  read (409 ERR_FIELD_VERSION_CONFLICT): NOTHING was written, and
+                  the caller must re-read and decide again, never overwrite.
+    ``version``   the entity's fresh version token after a committed write, to
+                  condition the next write of a sequence on. It may be None for a
+                  committed write; a caller must then STOP the sequence and
+                  re-read from the beginning, never fetch a replacement token and
+                  continue (that token belongs to a state it did not validate).
+    """
+
+    ok: bool
+    conflict: bool = False
+    version: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def set_task_field_if_version(
+    task_entity_id: str,
+    field: str,
+    value,
+    *,
+    expected_version: str | None,
+    handler: str,
+    key_suffix: str = "",
+) -> FieldWrite:
+    """Write one task field ONLY IF the task is still at ``expected_version``.
+
+    Uses `POST /correct` with `expected_version` (an entity-level
+    optimistic-concurrency token: the `entity_version` a `GET /entities/{id}`
+    returns, and that each committed `/correct` returns afresh). A stale token is
+    refused with 409 `ERR_FIELD_VERSION_CONFLICT` and writes nothing; `overwrite`
+    is never sent. Without a token nothing is written at all: an unconditional
+    write is not a degraded form of this one, it is the thing this exists to avoid.
+    Best-effort and fail-open like the other writers: never raises.
+    """
+    if not expected_version:
+        log.warning("[lifecycle] no version token — not writing %s on %s", field, task_entity_id)
+        return FieldWrite(False)
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning("[lifecycle] no bearer token — cannot write %s=%r", field, value)
+        return FieldWrite(False)
+    suffix = f"-{key_suffix}" if key_suffix else ""
+    body = {
+        "entity_id": task_entity_id,
+        "entity_type": "task",
+        "field": field,
+        "value": value,
+        "idempotency_key": f"taskfield-{handler}-{task_entity_id}-{field}{suffix}",
+        "expected_version": expected_version,
+    }
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/correct",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=15,
+        )
+        if resp.status_code == 409:
+            try:
+                code = (resp.json() or {}).get("error_code")
+            except ValueError:
+                code = None
+            if code == "ERR_FIELD_VERSION_CONFLICT":
+                return FieldWrite(False, conflict=True)
+        resp.raise_for_status()
+        try:
+            version = (resp.json() or {}).get("entity_version")
+        except ValueError:
+            version = None
+        return FieldWrite(True, version=version if isinstance(version, str) else None)
+    except Exception as exc:  # noqa: BLE001 — fail open, never crash dispatch
+        log.warning("[lifecycle] failed to write task %s %s: %s", task_entity_id, field, exc)
+        return FieldWrite(False)
+
+
 def set_task_status(
     task_entity_id: str,
     status: "TaskStatus | str",
@@ -285,7 +388,9 @@ def set_task_status(
 ) -> bool:
     """Write a task's lifecycle status (plus optional companions) to Neotoma.
 
-    Best-effort and fail-open: returns True only if the status write succeeded.
+    Best-effort and fail-open: returns True only if the status write AND every
+    companion write that was supplied succeeded. A True is an HTTP-level success,
+    not proof the value persisted: a caller that must rely on it reads it back.
     Logs (but does not refuse) a transition the graph considers illegal, so an
     unexpected status value is still recorded rather than dropped.
 
@@ -311,21 +416,24 @@ def set_task_status(
         task_entity_id, "status", value,
         idempotency_key=f"taskstatus-{handler}-{task_entity_id}-{value}{suffix}",
     )
+    # A companion write that fails is a failed write: this returns True only if
+    # EVERY write that was asked for succeeded, so a caller is never told the
+    # lifecycle record is complete when its reason, result or link is missing.
     if reason is not None:
-        _correct(
+        ok = _correct(
             task_entity_id, "blocked_reason", reason,
             idempotency_key=f"taskreason-{handler}-{task_entity_id}-{value}{suffix}",
-        )
+        ) and ok
     if result is not None:
-        _correct(
+        ok = _correct(
             task_entity_id, "result", result,
             idempotency_key=f"taskresult-{handler}-{task_entity_id}-{value}{suffix}",
-        )
+        ) and ok
     if remediation_id is not None:
-        _correct(
+        ok = _correct(
             task_entity_id, "remediation_id", remediation_id,
             idempotency_key=f"taskremediation-{handler}-{task_entity_id}{suffix}",
-        )
+        ) and ok
     return ok
 
 

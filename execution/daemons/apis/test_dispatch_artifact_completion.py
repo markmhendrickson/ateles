@@ -1674,3 +1674,43 @@ def test_alert_never_carries_a_partial_recovery_command(writes, spawn, monkeypat
         )
     else:
         assert "recovery commands omitted" in message
+
+
+# ── ateles#1456: an unknown remote outcome is held, never auto-retried ───────
+
+
+@dataclass
+class _RemoteUnknownResult(_SpawnResult):
+    remote_outcome_unknown: bool = True
+    remote_run_id: str = "fly-run-under-review"
+    remote_machine_state: str = "unconfirmed"
+
+
+@pytest.mark.parametrize("machine_state", ["terminated", "unconfirmed"])
+def test_unknown_remote_outcome_is_blocked_with_recovery_details(writes, spawn, machine_state):
+    from task_watchdog import TaskWatchdog, WatchdogAction
+
+    notifier = _Notifier()
+    spawn.result = _RemoteUnknownResult(
+        ok=False, returncode=None, error="remote run outcome unknown",
+        remote_machine_state=machine_state,
+    )  # fmt: skip
+    _dispatch("ent_remote_unknown", _cicada_task(), notifier=notifier)
+    _assert_not_done(writes, "an unknown remote outcome was recorded as done")
+    assert not _with_status(writes, "failed")  # FAILED is what the watchdog retries
+    blocked = _with_status(writes, "blocked")
+    assert blocked, writes
+    reason = blocked[-1]["reason"]
+    assert "fly-run-under-review" in reason and machine_state in reason
+    assert "reconcile" in reason and "not retried automatically" in reason
+    assert any("fly-run-under-review" in m for m in notifier.sent)
+    # The watchdog leaves BLOCKED to the operator; FAILED would be retried.
+    dog = TaskWatchdog()
+    assert dog.classify("ent_remote_unknown", "blocked", 10_000) == WatchdogAction.NONE
+    assert dog.classify("ent_remote_unknown", "failed", 10_000) == WatchdogAction.RETRY
+
+
+def test_an_ordinary_failure_still_takes_the_retry_lane(writes, spawn):
+    spawn.result = _SpawnResult(ok=False, returncode=1, error="boom")
+    _dispatch("ent_plain_fail", _cicada_task())
+    assert _with_status(writes, "failed") and not _with_status(writes, "blocked")

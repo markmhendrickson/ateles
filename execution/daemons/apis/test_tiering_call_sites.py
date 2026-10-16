@@ -1522,3 +1522,25 @@ def test_handle_pr_skips_the_aggregator_when_every_lens_is_carried(monkeypatch, 
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert "skill:vanellus" not in w.events
     assert any("narrowed" in p for p in w.posts), "the note still says what carried"
+
+
+def test_lanius_is_not_retried_after_an_unknown_remote_outcome(monkeypatch, world):
+    """ateles#1456: a remote run with an unknown outcome may have done its
+    work; it is never re-dispatched. The missing verdict fails open into
+    review instead, exactly as after a retry that also produced nothing."""
+    d = _pr_dispatcher(monkeypatch, world)
+    calls: list[str] = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(skill)
+        if skill == "lanius":
+            return SkillResult(
+                skill, False, None, "", "", error="remote outcome unknown",
+                remote_outcome_unknown=True, remote_run_id="fly-run-x",
+                remote_machine_state="unconfirmed",
+            )
+        return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert calls.count("lanius") == 1

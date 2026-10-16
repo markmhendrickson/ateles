@@ -266,8 +266,16 @@ async def dispatch(
     integration_base: str | None = None,
     integration_mode: str = mechanical_first.MODE_REBASE,
     regenerate_commands: list[str] | None = None,
+    runner: str | None = None,
+    repository: str = "",
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
+
+    ``runner`` / ``repository`` (ateles#1456): ``runner="fly"`` forces the
+    run onto a Fly Machine holding only this job's credentials (refused, with
+    the reason, when the role is not eligible); ``"local"`` forces the local
+    executor; ``None`` follows ``APIS_FLY_RUNNER_CLASSES``. ``repository``
+    scopes the Fly job's per-job GitHub App token.
 
     ``role`` names both the agent_definition to load AND the SKILL.md to run —
     they are the same string throughout this codebase, which is why run_skill's
@@ -345,6 +353,10 @@ async def dispatch(
         escalation_signals=escalation_signals,
         model=model,
     )
+    if runner is not None:
+        run_kwargs["runner"] = runner
+    if repository:
+        run_kwargs["repository"] = repository
     if work_class == "rebase" and integration_base:
         return await _integrate_then_model(
             role,
@@ -835,6 +847,24 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--runner",
+        choices=["local", "fly"],
+        help=(
+            "Executor for the CLI (ateles#1456). 'fly' forces a Fly Machine "
+            "that holds only this job's credentials, and refuses with the "
+            "reason when the role is not eligible; 'local' forces this "
+            "machine. Omit to follow APIS_FLY_RUNNER_CLASSES."
+        ),
+    )
+    parser.add_argument(
+        "--repository",
+        default="",
+        help=(
+            "owner/name the job touches. With --runner fly and "
+            "--github-delivery, the job's GitHub App token is scoped to it."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the full result as JSON on stdout instead of raw agent output.",
@@ -934,6 +964,13 @@ def main(argv: list[str] | None = None) -> int:
                 emitter, "--github-token-env must name a valid environment variable"
             )
         github_token = os.environ.get(args.github_token_env, "")
+    elif args.github_delivery and args.runner == "fly":
+        # A Fly job's GitHub credential is a per-job App installation token
+        # minted at launch and scoped to --repository; no token on this side.
+        if not args.repository:
+            return _usage_failure(
+                emitter, "--runner fly with --github-delivery requires --repository"
+            )
     elif args.github_delivery:
         # Caught here as a fast, structured usage error — same shape as every
         # other CLI misuse below — rather than left to surface deep inside
@@ -1002,6 +1039,8 @@ def main(argv: list[str] | None = None) -> int:
                 integration_base=args.rebase_onto,
                 integration_mode=args.integration or mechanical_first.MODE_REBASE,
                 regenerate_commands=args.regenerate_cmd,
+                runner=args.runner,
+                repository=args.repository,
             )
         )
     except BaseException as exc:  # noqa: BLE001 — see above
@@ -1025,6 +1064,22 @@ def main(argv: list[str] | None = None) -> int:
             "stdout": result.stdout,
             "stderr": result.stderr,
             **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
+            **({"output_truncated": True} if getattr(result, "output_truncated", False) else {}),
+            # Every Fly run reports its identity and machine state, whether
+            # its outcome is known or not: cleanup and outcome are separate.
+            **(
+                {
+                    "remote_outcome_unknown": bool(result.remote_outcome_unknown),
+                    "remote_run_id": result.remote_run_id,
+                    "remote_machine_state": result.remote_machine_state,
+                    # What the Mac's usage reading would have said against
+                    # this provider; a Fly run is not gated by it.
+                    **({"usage_gate_exempted": result.usage_gate_exempted}
+                       if getattr(result, "usage_gate_exempted", "") else {}),
+                }
+                if getattr(result, "remote_run_id", "")
+                else {}
+            ),
         }
     )
     if not args.json and result.stdout:
@@ -1036,6 +1091,20 @@ def main(argv: list[str] | None = None) -> int:
         f"rc={result.returncode}",
         file=sys.stderr,
     )
+    if getattr(result, "remote_run_id", ""):
+        if result.remote_outcome_unknown:
+            print(
+                f"dispatch_role: remote run {result.remote_run_id} has an UNKNOWN outcome "
+                f"(machine {result.remote_machine_state or 'unconfirmed'}); check what it did "
+                "before dispatching it again",
+                file=sys.stderr,
+            )
+        elif result.remote_machine_state == "unconfirmed":
+            print(
+                f"dispatch_role: warning: remote run {result.remote_run_id} finished, but its "
+                "machine is not confirmed terminated; its reservation is kept for the reaper",
+                file=sys.stderr,
+            )
     if result.local_failure:
         print(
             f"dispatch_role: claude-local failed ({result.local_failure})"
