@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "daemons" / "apis"))
 
 import server as srv  # noqa: E402
 from lib.daemon_runtime.action_type_parity_cases import (  # noqa: E402
@@ -125,3 +126,44 @@ def test_no_policy_means_no_escalation_only_the_prior():
     ):
         result = srv._route_task("something completely unrelated, but open a PR for it")
     assert "action_type" not in result
+
+
+@pytest.mark.parametrize("raw_policy", [
+    {"title": "omitted sets"},
+    {"title": "empty sets", "high_blast_action_types": [], "low_blast_action_types": []},
+    {"title": "encoded empty sets", "high_blast_action_types": "[]", "low_blast_action_types": "[]"},
+    {"title": "malformed sets", "high_blast_action_types": "bad", "low_blast_action_types": None},
+    {"title": "normalized default", "blast_radius_default": " HIGH "},
+    {"title": "invalid default", "blast_radius_default": "invalid"},
+    {"title": "null default", "blast_radius_default": None},
+    {"title": "custom sets", "high_blast_action_types": '[" PAYMENT "]',
+     "low_blast_action_types": [" COMPUTE_ONLY_ANALYSIS "]},
+])
+@pytest.mark.parametrize("description,declared", [
+    ("implement a new feature", None),
+    ("something unrelated but open a PR for it", None),
+    ("something unrelated but pay the invoice", None),
+    ("implement a new feature", "local_edit"),
+    ("implement a new feature", "operator_only"),
+    ("implement a new feature", "unknown_action"),
+])
+def test_same_raw_record_agrees_with_dispatcher_effective_policy(raw_policy, description, declared):
+    # Exercise the actual production parser and dispatcher resolver, not a
+    # pre-populated ExecutionPolicy that hides default/normalization drift.
+    import apis
+    from lib.daemon_runtime.gating import _parse_policy
+
+    record = {"snapshot": {"snapshot": raw_policy}}
+    with (
+        patch("server._get_swarm_roster", return_value=_ROSTER),
+        patch("server._retrieve_entities", return_value=[]),
+        patch("server._get", return_value=record),
+    ):
+        preview = srv._route_task(description, declared)
+    effective = _parse_policy("raw-policy", record)
+    resolved = apis._resolve_gate_action_type(
+        preview["matched_agent"], {"title": description, "action_type": declared}, effective
+    )
+    assert preview.get("action_type") == resolved.value
+    assert preview.get("action_type_source") == resolved.source
+    assert preview.get("action_blast_radius") == effective.blast_radius_for(resolved.value).value
