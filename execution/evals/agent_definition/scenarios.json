@@ -171,6 +171,75 @@
         "requests": 3,
         "max_seconds": 25
       }
+    },
+    {
+      "id": "a_201_with_a_definition_shaped_body_is_not_accepted",
+      "why": "only exactly 200 is accepted: another 2xx carrying a body that would load is refused before the body is read",
+      "kind": "dispatch",
+      "neotoma": [
+        "found_status:201"
+      ],
+      "expect": {
+        "refused": true,
+        "requests": 1,
+        "nothing_spawned": true
+      }
+    },
+    {
+      "id": "a_redirect_with_a_definition_shaped_body_is_not_accepted",
+      "why": "a 3xx is not a success even when its body looks like a definition",
+      "kind": "dispatch",
+      "neotoma": [
+        "found_status:302"
+      ],
+      "expect": {
+        "refused": true,
+        "requests": 1,
+        "nothing_spawned": true
+      }
+    },
+    {
+      "id": "a_200_that_is_not_json_by_content_type_is_not_accepted",
+      "why": "a 200 whose content type says it is not JSON is refused",
+      "kind": "dispatch",
+      "neotoma": [
+        "html"
+      ],
+      "expect": {
+        "refused": true,
+        "requests": 1,
+        "nothing_spawned": true
+      }
+    },
+    {
+      "id": "a_signed_201_is_refused_and_does_not_fall_back_to_bearer",
+      "why": "the signed path's returned status must be exactly 200; a 201 is refused and no bearer request is made",
+      "kind": "dispatch",
+      "path": "signed",
+      "neotoma": [
+        "201"
+      ],
+      "expect": {
+        "refused": true,
+        "signed_requests": 1,
+        "requests": 0,
+        "nothing_spawned": true
+      }
+    },
+    {
+      "id": "a_signed_redirect_is_refused_and_does_not_fall_back_to_bearer",
+      "why": "a signed 302 is refused the same way",
+      "kind": "dispatch",
+      "path": "signed",
+      "neotoma": [
+        "302"
+      ],
+      "expect": {
+        "refused": true,
+        "signed_requests": 1,
+        "requests": 0,
+        "nothing_spawned": true
+      }
     }
   ]
 }

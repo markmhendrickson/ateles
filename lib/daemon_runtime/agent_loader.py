@@ -40,6 +40,7 @@ can be promoted into ``REFUSING_STATUSES`` in one line.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -443,8 +444,20 @@ SIGNED_REQUEST_TIMEOUT_S = 20.0  # the signing helper's own default
 BEARER_REQUEST_TIMEOUT_S = 10.0
 MIN_ATTEMPT_TIMEOUT_S = 2.0
 _RETRYABLE_LOAD_CODES = frozenset(
-    {"timeout", "transport_error", "server_error", "throttled"}
+    {"timeout", "transport_error", "server_error", "throttled", "busy"}
 )
+# The only HTTP status the lookup accepts. 201, 204, a redirect, a 4xx, a 5xx: all
+# are refused before any body is read (see ``AgentLoader._neotoma``).
+SUCCESS_STATUS = 200
+
+# Request workers: a small FIXED pool owned by this module, one permit per worker, so
+# a request is never queued behind another. With no free permit the load fails at once
+# with the retryable reason "busy". A permit comes back when the WORKER finishes, not
+# when the caller gives up, so live workers can never exceed LOAD_WORKERS however many
+# loads time out. Each request's own timeouts come from the remaining budget, and a
+# signed helper is killed and reaped at its timeout. (gate_waive's signing workers use
+# the same approach.)
+LOAD_WORKERS = 4
 # Authoritative absence: a well-formed success response that positively says there
 # is no definition. NOTHING else is absence (see ``_validated_entities``).
 NOT_FOUND = "not_found"
@@ -479,8 +492,16 @@ class AgentDefinitionUnavailable(RuntimeError):
 
 def load_failure_code(exc: BaseException) -> str:
     """Map a load exception to a fixed reason code. Never includes exception text."""
+    if isinstance(exc, _LoadBusy):
+        return "busy"
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
+    if isinstance(exc, _TransportStatus):
+        if exc.status == 429:
+            return "throttled"
+        if exc.status >= 500:
+            return "server_error"
+        return "rejected"
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         # A 404 (or any other 4xx or 3xx) on the lookup route is a ROUTE answer, not
@@ -646,29 +667,61 @@ class AgentDefinition:
         return self.agent_grant == "service"
 
 
-def _bounded(call, timeout: float):
-    """Run a blocking request and give up on it after ``timeout`` seconds in total.
+_load_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=LOAD_WORKERS, thread_name_prefix="agent-def-load"
+)
+_load_permits = threading.BoundedSemaphore(LOAD_WORKERS)
 
-    httpx applies its timeout to each socket operation, so a server that trickles
-    bytes can outlast it. The request runs in a daemon thread and is abandoned at
-    the limit (the thread ends on its own when httpx's per-operation timeout fires).
+
+class _LoadBusy(Exception):
+    """Every request worker is in use; nothing was started."""
+
+
+class _TransportStatus(Exception):
+    """The transport returned a status other than the one accepted."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"status {status}")
+        self.status = status
+
+
+def _on_worker(fn, deadline: float):
+    """Run ``fn(remaining_seconds)`` on an owned worker, bounded by ``deadline``.
+
+    The worker re-reads the clock when it actually BEGINS: if the deadline has passed,
+    or the caller has already given up, it does nothing. The caller waits no longer
+    than the deadline; when it gives up it marks the work abandoned and the worker's
+    late result is discarded. The permit is released by the worker's completion.
     """
-    box: dict = {}
+    if not _load_permits.acquire(blocking=False):
+        raise _LoadBusy()
+    abandoned = threading.Event()
 
-    def run() -> None:
-        try:
-            box["value"] = call()
-        except BaseException as exc:  # noqa: BLE001 — re-raised in the caller
-            box["error"] = exc
+    def run():
+        if abandoned.is_set():
+            raise httpx.ReadTimeout("abandoned before it began")
+        remaining = deadline - _monotonic()
+        if remaining < MIN_ATTEMPT_TIMEOUT_S - 1e-9:
+            raise httpx.ReadTimeout("deadline passed before the request began")
+        return fn(remaining)
 
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
-        raise httpx.ReadTimeout("request exceeded its time budget")
-    if "error" in box:
-        raise box["error"]
-    return box["value"]
+    try:
+        future = _load_pool.submit(run)
+    except BaseException:
+        _load_permits.release()
+        raise
+    future.add_done_callback(lambda _f: _load_permits.release())
+    try:
+        return future.result(timeout=max(deadline - _monotonic(), 0.0))
+    except concurrent.futures.TimeoutError:
+        if future.done() and not future.cancelled() and future.exception() is not None:
+            raise future.exception()
+        abandoned.set()
+        future.cancel()
+        raise httpx.ReadTimeout("request exceeded its time budget") from None
+    except BaseException:
+        abandoned.set()
+        raise
 
 
 class AgentLoader:
@@ -757,52 +810,79 @@ class AgentLoader:
             return self._load_by_id(explicit_id, deadline)
         return self._load_by_name(deadline)
 
-    def _budget(self, default: float, deadline: float) -> float:
-        """The timeout for the next request: its default, never more than is left."""
-        left = deadline - _monotonic()
-        if left < MIN_ATTEMPT_TIMEOUT_S - 1e-9:
-            raise httpx.ReadTimeout("deadline reached")
-        return min(default, left)
-
     def _neotoma(
         self, method: str, url: str, body: "dict | None" = None, deadline: "float | None" = None
     ) -> object:
-        """Fetch JSON from Neotoma, returning the parsed body (unvalidated).
+        """Fetch JSON from Neotoma and return the parsed body (shape not yet validated).
 
         Per-agent AAuth-signed when ``NEOTOMA_AAUTH_VIA_CLI`` is on and this agent
-        has a key; otherwise the unsigned/bearer httpx path (behavior unchanged).
-        Falls back to bearer on any signing failure or non-2xx, so enabling
-        signing can never reduce availability. Raises on transport error — callers
-        already handle that. Every request gets min(its default timeout, time left
-        before ``deadline``), the bearer fallback included.
+        has a key; otherwise the unsigned/bearer httpx path. If the signing helper
+        itself FAILS (raises: no key, helper error, timeout) the bearer path is tried;
+        a signed request that RETURNS a result is final either way.
+
+        The transport RESULT is validated before any body is read, identically on both
+        paths: it must be a well-formed result whose status is exactly
+        ``SUCCESS_STATUS``. Any other status (another 2xx, a redirect, a 4xx, a 5xx),
+        a missing or non-integer status, a result of the wrong shape, or a body that
+        is not JSON is refused: ``AgentDefinitionUnavailable``, never found, never
+        absent. Every request runs on an owned worker with min(its default timeout,
+        time left before ``deadline``).
         """
         if deadline is None:
             deadline = _monotonic() + LOAD_TOTAL_CAP_S
         if ns.via_cli_enabled() and ns.agent_identity(self.agent_name):
             try:
-                status, data = ns.signed_request(
-                    method, url, body, agent_name=self.agent_name,
-                    timeout=self._budget(SIGNED_REQUEST_TIMEOUT_S, deadline),
+                result = _on_worker(
+                    lambda remaining: ns.signed_request(
+                        method, url, body, agent_name=self.agent_name,
+                        timeout=min(SIGNED_REQUEST_TIMEOUT_S, remaining),
+                    ),
+                    deadline,
                 )
-                if 200 <= status < 300:
-                    return data
-                log.warning(
-                    f"[{self.agent_name}] signed {method} -> {status}; falling back to bearer"
-                )
+            except _LoadBusy:
+                raise
             except Exception as exc:
                 log.warning(
                     f"[{self.agent_name}] signed request failed ({type(exc).__name__}); "
                     "falling back to bearer"
                 )
-        timeout = self._budget(BEARER_REQUEST_TIMEOUT_S, deadline)
-        resp = _bounded(
-            (lambda: httpx.get(url, headers=_auth_headers(), timeout=timeout))
-            if method.upper() == "GET"
-            else (lambda: httpx.post(url, json=body, headers=_auth_headers(), timeout=timeout)),
-            timeout,
-        )
-        resp.raise_for_status()  # any non-2xx, redirects included, raises
-        return resp.json()
+            else:
+                return self._accept_signed(result)
+        return self._accept_bearer(self._bearer_request(method, url, body, deadline))
+
+    def _accept_signed(self, result: object) -> object:
+        """Validate a signed request's ``(status, body)`` result, then return the body."""
+        if not isinstance(result, (tuple, list)) or len(result) != 2:
+            raise self._unavailable("bad_response")
+        status, data = result
+        if isinstance(status, bool) or not isinstance(status, int):
+            raise self._unavailable("bad_response")
+        if status != SUCCESS_STATUS:
+            raise _TransportStatus(status)
+        return data
+
+    def _bearer_request(self, method: str, url: str, body: "dict | None", deadline: float):
+        def send(remaining: float):
+            timeout = min(BEARER_REQUEST_TIMEOUT_S, remaining)
+            budget = httpx.Timeout(timeout)
+            if method.upper() == "GET":
+                return httpx.get(url, headers=_auth_headers(), timeout=budget)
+            return httpx.post(url, json=body, headers=_auth_headers(), timeout=budget)
+
+        return _on_worker(send, deadline)
+
+    def _accept_bearer(self, resp: object) -> object:
+        """Validate the bearer response object, then return its parsed body."""
+        status = getattr(resp, "status_code", None)
+        if isinstance(status, bool) or not isinstance(status, int):
+            raise self._unavailable("bad_response")
+        if status != SUCCESS_STATUS:
+            raise _TransportStatus(status)
+        headers = getattr(resp, "headers", None)
+        content_type = headers.get("content-type") if hasattr(headers, "get") else None
+        if isinstance(content_type, str) and content_type and "json" not in content_type.lower():
+            raise self._unavailable("bad_response")
+        return resp.json()  # a non-JSON body raises ValueError: bad_response
 
     def _unavailable(self, code: str) -> AgentDefinitionUnavailable:
         return AgentDefinitionUnavailable(self.agent_name, code, 1)

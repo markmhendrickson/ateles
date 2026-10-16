@@ -54,6 +54,11 @@ def neotoma(monkeypatch):
     monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
     monkeypatch.setattr(al, "_sleep", lambda s: None, raising=False)
     skill_runner._agent_def_cache.clear()
+    import concurrent.futures
+    import threading
+
+    monkeypatch.setattr(al, "_load_pool", concurrent.futures.ThreadPoolExecutor(max_workers=4))
+    monkeypatch.setattr(al, "_load_permits", threading.BoundedSemaphore(4))
 
     def post(url, **kwargs):
         state["calls"] += 1
@@ -229,3 +234,49 @@ def test_a_malformed_lookup_is_refused_not_degraded(neotoma, monkeypatch, malfor
 
     assert result.definition_unavailable is True
     assert skill_runner._agent_def_cache == {}
+
+
+class _Transport:
+    """A response-like object: a definition-shaped body behind a chosen status."""
+
+    def __init__(self, status_code, content_type=None):
+        self.status_code = status_code
+        self.headers = {"content-type": content_type} if content_type else {}
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return REAL
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [_Transport(201), _Transport(204), _Transport(302), _Transport(404), _Transport(500),
+     _Transport("200"), _Transport(200, "text/html")],
+    ids=["201", "204", "302", "404", "500", "status-string", "html"],
+)
+def test_a_bad_bearer_result_means_zero_dispatch_and_nothing_cached(neotoma, monkeypatch, answer):
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: answer)
+
+    result = _once()
+
+    assert result.definition_unavailable is True
+    assert skill_runner._agent_def_cache == {}
+    assert neotoma["spawned"] == []
+
+
+@pytest.mark.parametrize("answer", [(201, REAL), (302, REAL), ("200", REAL), (200,), None],
+                         ids=["201", "302", "status-string", "one-element", "none"])
+def test_a_bad_signed_result_means_zero_dispatch_and_nothing_cached(neotoma, monkeypatch, answer):
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
+    monkeypatch.setattr(al.ns, "agent_identity", lambda name, sub=None: {"key": "k"})
+    monkeypatch.setattr(al.ns, "signed_request", lambda *a, **k: answer)
+    before = neotoma["calls"]
+
+    result = _once()
+
+    assert result.definition_unavailable is True
+    assert skill_runner._agent_def_cache == {}
+    assert neotoma["spawned"] == []
+    assert neotoma["calls"] == before, "no bearer fallback after a returned signed result"

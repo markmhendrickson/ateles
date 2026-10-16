@@ -449,6 +449,7 @@ def _virtual(monkeypatch, clock, durations, *, signed=False):
         return durations[i] >= timeout
 
     def post(url, json=None, headers=None, timeout=None):
+        timeout = timeout.read if isinstance(timeout, httpx.Timeout) else timeout
         if take(timeout):
             raise httpx.ReadTimeout("timed out")
         return _response(200, {"entities": []})
@@ -541,7 +542,7 @@ def test_a_request_that_trickles_is_cut_at_its_budget_in_real_time(monkeypatch):
     monkeypatch.setattr(al, "_sleep", _time.sleep, raising=False)
     monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
     monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
-    monkeypatch.setattr(al.httpx, "post", lambda *a, **k: _time.sleep(5))
+    monkeypatch.setattr(al.httpx, "post", lambda *a, **k: _time.sleep(0.6))
     t0 = _time.monotonic()
 
     with pytest.raises(AgentDefinitionUnavailable):
@@ -554,10 +555,272 @@ def test_planted_red_the_old_check_overruns_the_cap(monkeypatch):
     """The previous rule: full default timeouts, and a retry check of elapsed + wait only."""
     clock = _VClock()
     _virtual(monkeypatch, clock, [HANG])
-    monkeypatch.setattr(AgentLoader, "_budget", lambda self, default, deadline: default)
+    monkeypatch.setattr(al, "_on_worker", lambda fn, deadline: fn(10_000.0))
     monkeypatch.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.0)
 
     with pytest.raises(AgentDefinitionUnavailable):
         AgentLoader("pavo").load()
 
     assert clock.elapsed > CAP, "the old rule is the defect: three 10 s failures took 32 s"
+
+
+# ── the TRANSPORT RESULT contract: both request paths, before any body is read ─
+
+SUCCESS = {"entities": [_entity("pavo")]}  # a body that WOULD load if it were accepted
+
+
+class _Obj:
+    """A response-like object with whatever fields a test sets."""
+
+    def __init__(self, status_code=200, body=None, content_type=None):
+        self.status_code = status_code
+        self._body = SUCCESS if body is None else body
+        self.headers = {"content-type": content_type} if content_type else {}
+
+    def raise_for_status(self):
+        return None  # a lenient transport that never raises: the status must still be checked
+
+    def json(self):
+        return self._body
+
+
+BEARER_RESULT_CONTROLS = {
+    "201": lambda: _Obj(201),
+    "202": lambda: _Obj(202),
+    "204": lambda: _Obj(204),
+    "206": lambda: _Obj(206),
+    "301": lambda: _Obj(301),
+    "302": lambda: _Obj(302),
+    "304": lambda: _Obj(304),
+    "400": lambda: _Obj(400),
+    "401": lambda: _Obj(401),
+    "403": lambda: _Obj(403),
+    "404": lambda: _Obj(404),
+    "410": lambda: _Obj(410),
+    "429": lambda: _Obj(429),
+    "500": lambda: _Obj(500),
+    "503": lambda: _Obj(503),
+    "status is a string": lambda: _Obj("200"),
+    "status is a float": lambda: _Obj(200.0),
+    "status is a bool": lambda: _Obj(True),
+    "status is None": lambda: _Obj(None),
+    "no status at all": lambda: object(),
+    "html content type": lambda: _Obj(200, content_type="text/html"),
+    "plain content type": lambda: _Obj(200, content_type="text/plain; charset=utf-8"),
+    "an error object": lambda: {"error": "boom"},
+    "a tuple": lambda: (200, SUCCESS),
+    "None": lambda: None,
+}
+
+SIGNED_RESULT_CONTROLS = {
+    "201": lambda: (201, SUCCESS),
+    "202": lambda: (202, SUCCESS),
+    "204": lambda: (204, {}),
+    "302": lambda: (302, SUCCESS),
+    "400": lambda: (400, SUCCESS),
+    "401": lambda: (401, SUCCESS),
+    "404": lambda: (404, SUCCESS),
+    "429": lambda: (429, SUCCESS),
+    "500": lambda: (500, SUCCESS),
+    "status is a string": lambda: ("200", SUCCESS),
+    "status is a float": lambda: (200.0, SUCCESS),
+    "status is a bool": lambda: (True, SUCCESS),
+    "status is None": lambda: (None, SUCCESS),
+    "status 0": lambda: (0, SUCCESS),
+    "one element": lambda: (200,),
+    "three elements": lambda: (200, SUCCESS, "x"),
+    "a dict": lambda: {"status": 200, "body": SUCCESS},
+    "an error object": lambda: {"error": "boom"},
+    "a string": lambda: "ok",
+    "None": lambda: None,
+    "a list body": lambda: (200, []),
+    "a string body": lambda: (200, "ok"),
+    "a null body": lambda: (200, None),
+}
+
+
+@pytest.fixture
+def transport(monkeypatch):
+    state = {"bearer": None, "signed": None, "bearer_calls": 0, "signed_calls": 0}
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(al, "_sleep", lambda s: None, raising=False)
+
+    def post(url, **kwargs):
+        state["bearer_calls"] += 1
+        return state["bearer"]()
+
+    def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        state["signed_calls"] += 1
+        return state["signed"]()
+
+    monkeypatch.setattr(al.httpx, "post", post)
+    monkeypatch.setattr(al.ns, "signed_request", signed_request)
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+    monkeypatch.setattr(al.ns, "agent_identity", lambda name, sub=None: {"key": "k"})
+    return state
+
+
+@pytest.mark.parametrize("name", sorted(BEARER_RESULT_CONTROLS))
+def test_a_bad_bearer_result_is_unavailable_even_when_its_body_would_load(transport, name):
+    transport["bearer"] = BEARER_RESULT_CONTROLS[name]
+    for opt_in in (False, True):
+        with pytest.raises(AgentDefinitionUnavailable) as raised:
+            AgentLoader("pavo").load(allow_undefined=opt_in)
+        assert raised.value.code != "not_found"
+
+
+@pytest.mark.parametrize("name", sorted(SIGNED_RESULT_CONTROLS))
+def test_a_bad_signed_result_is_unavailable_and_does_not_fall_back_to_bearer(
+    transport, monkeypatch, name
+):
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
+    transport["signed"] = SIGNED_RESULT_CONTROLS[name]
+    transport["bearer"] = lambda: _Obj(200)  # would load, if it were ever asked
+    for opt_in in (False, True):
+        with pytest.raises(AgentDefinitionUnavailable) as raised:
+            AgentLoader("pavo").load(allow_undefined=opt_in)
+        assert raised.value.code != "not_found"
+    assert transport["bearer_calls"] == 0, "a returned signed result is final: no bearer fallback"
+
+
+def test_a_signed_helper_that_raises_still_falls_back_to_the_bearer_path(transport, monkeypatch):
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
+
+    def broken():
+        raise RuntimeError("helper crashed")
+
+    transport["signed"] = broken
+    transport["bearer"] = lambda: _Obj(200)
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+    assert transport["signed_calls"] == 1 and transport["bearer_calls"] == 1
+
+
+def test_positive_controls_exactly_200_with_a_json_body_loads_on_both_paths(transport, monkeypatch):
+    transport["bearer"] = lambda: _Obj(200, content_type="application/json")
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+    transport["bearer"] = lambda: _Obj(200)  # no content-type header: no assumption is made
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
+    transport["signed"] = lambda: (200, SUCCESS)
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+    transport["signed"] = lambda: [200, SUCCESS]
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+
+
+def test_a_transient_returned_status_is_still_retried(transport, monkeypatch):
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
+    answers = [(503, {}), (200, SUCCESS)]
+    transport["signed"] = lambda: answers.pop(0)
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+    assert transport["signed_calls"] == 2
+
+
+def test_planted_red_accepting_any_2xx_lets_an_unvalidated_result_load(transport, monkeypatch):
+    """Not checking the status exactly: a 201 or 204 carrying a definition-shaped body
+    would be accepted as found."""
+    monkeypatch.setattr(al, "SUCCESS_STATUS", 200)
+    lenient_signed = lambda self, result: result[1] if 200 <= result[0] < 300 else self._raise(result[0])  # noqa: E731
+    monkeypatch.setattr(AgentLoader, "_raise", lambda self, s: (_ for _ in ()).throw(al._TransportStatus(s)), raising=False)
+    monkeypatch.setattr(AgentLoader, "_accept_signed", lenient_signed)
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
+    transport["signed"] = lambda: (201, SUCCESS)
+
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo", "the lenient rule accepts a 201"
+
+
+# ── request workers: fixed in number, reclaimed, and idle before the deadline ─
+
+
+def _slow_post(seconds):
+    def post(url, **kwargs):
+        _time_mod.sleep(seconds)
+        return _response(200, {"entities": []})
+
+    return post
+
+
+import threading as _threading  # noqa: E402
+import time as _time_mod  # noqa: E402
+import concurrent.futures as _cf  # noqa: E402
+
+
+def test_repeated_expirations_do_not_grow_the_workers_and_they_are_reclaimed(monkeypatch):
+    """50 loads that each outlast their deadline: live threads stay inside the fixed pool
+    and return to the baseline once the stuck requests finish."""
+    monkeypatch.setattr(al, "LOAD_TOTAL_CAP_S", 0.12)
+    monkeypatch.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(al, "LOAD_BACKOFFS_S", (0.0, 0.0))
+    monkeypatch.setattr(al, "_monotonic", _time_mod.monotonic)
+    monkeypatch.setattr(al, "_sleep", lambda s: None, raising=False)
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    pool = _cf.ThreadPoolExecutor(max_workers=3)
+    monkeypatch.setattr(al, "_load_pool", pool)
+    permits = _threading.BoundedSemaphore(3)
+    monkeypatch.setattr(al, "_load_permits", permits)
+    monkeypatch.setattr(al.httpx, "post", _slow_post(0.3))  # a request that outlasts the deadline
+    before = _threading.active_count()
+    peak = 0
+
+    for _ in range(50):
+        with pytest.raises(AgentDefinitionUnavailable):
+            AgentLoader("pavo").load()
+        peak = max(peak, _threading.active_count())
+
+    assert peak <= before + 3, (before, peak)
+    _time_mod.sleep(0.6)  # the stuck requests finish
+    free = [permits.acquire(blocking=False) for _ in range(3)]
+    assert all(free), "a permit was not returned when its worker finished"
+    pool.shutdown(wait=True)
+    assert _threading.active_count() <= before, "worker threads were not reclaimed"
+
+
+def test_with_every_worker_busy_a_load_fails_at_once_without_a_request(monkeypatch):
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(al, "_sleep", lambda s: None, raising=False)
+    permits = _threading.BoundedSemaphore(1)
+    assert permits.acquire(blocking=False)
+    monkeypatch.setattr(al, "_load_permits", permits)
+    sent = []
+    monkeypatch.setattr(al.httpx, "post", lambda *a, **k: sent.append(1))
+
+    with pytest.raises(AgentDefinitionUnavailable) as raised:
+        AgentLoader("pavo").load()
+
+    assert raised.value.code == "busy" and sent == []
+
+
+def test_a_request_that_would_begin_after_the_deadline_is_never_sent(monkeypatch):
+    class _LatePool:
+        def __init__(self):
+            self.real = _cf.ThreadPoolExecutor(max_workers=2)
+
+        def submit(self, fn):
+            def late():
+                _time_mod.sleep(0.2)
+                return fn()
+
+            return self.real.submit(late)
+
+    monkeypatch.setattr(al, "LOAD_TOTAL_CAP_S", 0.1)
+    monkeypatch.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(al, "LOAD_BACKOFFS_S", (0.0, 0.0))
+    monkeypatch.setattr(al, "_monotonic", _time_mod.monotonic)
+    monkeypatch.setattr(al, "_sleep", lambda s: None, raising=False)
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(al, "_load_pool", _LatePool())
+    monkeypatch.setattr(al, "_load_permits", _threading.BoundedSemaphore(2))
+    sent = []
+    monkeypatch.setattr(al.httpx, "post", lambda *a, **k: sent.append(1) or _response(200, {"entities": []}))
+    t0 = _time_mod.monotonic()
+
+    with pytest.raises(AgentDefinitionUnavailable):
+        AgentLoader("pavo").load()
+
+    held = _time_mod.monotonic() - t0
+    _time_mod.sleep(0.5)
+    assert sent == [], "a request that began after the deadline was sent"
+    assert held < 0.6

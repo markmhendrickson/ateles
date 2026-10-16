@@ -44,6 +44,8 @@ RED = [
     ("loose_absence", "a_malformed_answer_is_not_absence"),
     ("loose_absence", "a_result_for_another_agent_is_not_absence"),
     ("loose_absence", "a_route_error_is_not_absence"),
+    ("accept_any_2xx", "a_201_with_a_definition_shaped_body_is_not_accepted"),
+    ("accept_any_2xx", "a_signed_201_is_refused_and_does_not_fall_back_to_bearer"),
     ("old_deadline", "a_load_whose_every_request_hangs_ends_inside_the_deadline_counting_the_requests"),
 ]
 

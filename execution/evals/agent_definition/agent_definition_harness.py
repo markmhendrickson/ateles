@@ -16,11 +16,17 @@ advances with request duration and with waits), ``malformed`` (a 200 whose body 
 error-shaped envelope), ``other_name`` (a 200 holding only another agent's
 definition).
 
+Transport-result outcomes: ``found_status:<n>`` (the bearer path answers status n with a
+body that WOULD load), ``html`` (a 200 with a non-JSON content type), and, when a
+scenario sets ``"path": "signed"``, the signed request returns ``(n, body)`` for each
+numeric outcome instead.
+
 ``mutation`` reinstates a defect so a test can show the checks go red:
 ``reinstate_stub`` (a failed load becomes a stand-in again), ``no_retry`` (no
 retry), ``retry_rejected`` (a 4xx is retried), ``loose_absence`` (a malformed answer
 or a route error counts as "no such definition"), ``old_deadline`` (full default
-timeouts, and a retry check of elapsed + wait only).
+timeouts, and a retry check of elapsed + wait only), ``accept_any_2xx`` (the transport
+status is not checked exactly).
 
 Synthetic and public-safe: no key, no token, no operator data.
 """
@@ -46,7 +52,7 @@ for _p in (str(REPO_ROOT), str(APIS_DIR)):
 import skill_runner  # noqa: E402
 from lib.daemon_runtime import agent_loader as al  # noqa: E402
 
-MUTATIONS = ("none", "reinstate_stub", "no_retry", "retry_rejected", "loose_absence", "old_deadline")
+MUTATIONS = ("none", "reinstate_stub", "no_retry", "retry_rejected", "loose_absence", "old_deadline", "accept_any_2xx")
 REAL_PROMPT = "# the real role prompt"
 REAL = {
     "entities": [
@@ -69,9 +75,10 @@ def load() -> dict:
 
 
 class _Resp:
-    def __init__(self, payload=None, status=200):
+    def __init__(self, payload=None, status=200, content_type=None):
         self._payload = payload if payload is not None else {}
         self.status_code = status
+        self.headers = {"content-type": content_type} if content_type else {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -124,13 +131,24 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         mp.setattr(al, "_sleep", _sleep, raising=False)
         mp.setattr(al, "_monotonic", lambda: vclock["now"], raising=False)
         skill_runner._agent_def_cache.clear()
+        import concurrent.futures
+        import threading as _threading
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=al.LOAD_WORKERS)
+        mp.setattr(al, "_load_pool", pool)
+        mp.setattr(al, "_load_permits", _threading.BoundedSemaphore(al.LOAD_WORKERS))
 
         def post(url, **kwargs):
             obs["requests"] += 1
             outcome = str(script.pop(0) if len(script) > 1 else script[0])
             if outcome == "hang":
-                vclock["now"] += kwargs.get("timeout") or 0
+                t = kwargs.get("timeout")
+                vclock["now"] += (t.read if isinstance(t, httpx.Timeout) else t) or 0
                 raise httpx.ReadTimeout("timed out (private detail)")
+            if outcome.startswith("found_status:"):
+                return _Resp(REAL, status=int(outcome.split(":")[1]))
+            if outcome == "html":
+                return _Resp(REAL, content_type="text/html")
             if outcome == "malformed":
                 return _Resp({"error": "boom", "entities": []})
             if outcome == "other_name":
@@ -146,6 +164,17 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
             return _Resp(status=int(outcome))
 
         mp.setattr(httpx, "post", post)
+        if scenario.get("path") == "signed":
+            signed_script = list(scenario["neotoma"])
+
+            def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+                obs["signed_requests"] = obs.get("signed_requests", 0) + 1
+                outcome = str(signed_script.pop(0) if len(signed_script) > 1 else signed_script[0])
+                return int(outcome), REAL
+
+            mp.setattr(al.ns, "via_cli_enabled", lambda: True)
+            mp.setattr(al.ns, "agent_identity", lambda name, sub=None: {"key": "k"})
+            mp.setattr(al.ns, "signed_request", signed_request)
 
         async def no_spawn(*args, **kwargs):
             obs["spawned"].append(1)
@@ -179,8 +208,22 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
 
             mp.setattr(al.AgentLoader, "_load_by_name", loose)
         if mutation == "old_deadline":
-            mp.setattr(al.AgentLoader, "_budget", lambda self, default, deadline: default)
+            mp.setattr(al, "_on_worker", lambda fn, deadline: fn(10_000.0))
             mp.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.0)
+        if mutation == "accept_any_2xx":
+            def lenient_signed(self, result):
+                status, data = result
+                if 200 <= status < 300:
+                    return data
+                raise al._TransportStatus(status)
+
+            def lenient_bearer(self, resp):
+                if 200 <= resp.status_code < 300:
+                    return resp.json()
+                raise al._TransportStatus(resp.status_code)
+
+            mp.setattr(al.AgentLoader, "_accept_signed", lenient_signed)
+            mp.setattr(al.AgentLoader, "_accept_bearer", lenient_bearer)
         if mutation == "no_retry":
             mp.setattr(al, "LOAD_BACKOFFS_S", ())
         if mutation == "retry_rejected":
@@ -249,6 +292,8 @@ def check(scenario: dict, obs: dict) -> list[str]:
         cached = obs.get("cached")
         if cached is not None and (cached.is_stub or cached.tools == ["*"] or not cached.prompt_markdown):
             bad.append("a stand-in definition (empty prompt / wildcard tools) was used")
+    if "signed_requests" in exp:
+        want("signed requests", obs.get("signed_requests", 0), exp["signed_requests"])
     if "requests" in exp:
         want("requests to Neotoma", obs["requests"], exp["requests"])
     if "max_seconds" in exp:
