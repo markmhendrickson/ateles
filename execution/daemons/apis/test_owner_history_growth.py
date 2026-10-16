@@ -423,17 +423,68 @@ def test_signed_failure_code_ignores_a_message_that_looks_like_a_code():
 # ── signed_request raises coded errors, with no live signing ─────────────────
 
 
-class _Proc:
-    def __init__(self, stdout="", stderr=""):
-        self.stdout, self.stderr, self.returncode = stdout, stderr, 0
+def _synthetic_signed_helper(monkeypatch, directory):
+    """The actual Node helper, with an inert signer and non-sensitive metadata."""
+    module = directory / "dist" / "cli" / "aauth_signer.js"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text('{"type":"module"}')
+    module.write_text('''import fs from "node:fs";
+import path from "node:path";
+export async function cliSignedFetch(url, options) {
+  const marker="synthetic-body-sentinel";
+  fs.writeFileSync(process.env.ATELES_TEST_HELPER_TRACE,JSON.stringify({
+    pid:process.pid,helper:path.basename(process.argv[1]),received_body:options.body,
+    argv_lengths:process.argv.map(value=>value.length),
+    argv_contains_body:process.argv.some(value=>value.includes(marker)),
+    env_max_length:Math.max(...Object.values(process.env).map(value=>value.length)),
+    env_contains_body:Object.values(process.env).some(value=>value.includes(marker))
+  }));
+  process.stdout.write(process.env.ATELES_TEST_HELPER_OUTPUT);
+  process.exit(0);
+}
+''')
+    trace = directory / "helper-observation.json"
+    monkeypatch.setattr(ns, "NEOTOMA_RC_DIR", str(directory))
+    monkeypatch.setattr(ns, "AAUTH_KEYS_DIR", str(directory))
+    monkeypatch.setenv("ATELES_TEST_HELPER_TRACE", str(trace))
+    monkeypatch.setenv("ATELES_TEST_HELPER_OUTPUT", '{"status":200,"ok":true,"body":"{}"}')
+    return trace
+
+
+def _stdin_contract_problems(observed, expected_body):
+    problems = []
+    if observed["helper"] != "signed_fetch.mjs" or json.loads(observed["received_body"]) != expected_body:
+        problems.append("body did not reach the original helper")
+    if len(observed["received_body"]) <= 250_000:
+        problems.append("large-body positive was not exercised")
+    if any(length >= 1000 for length in observed["argv_lengths"]) or observed["argv_contains_body"]:
+        problems.append("argv exposes body")
+    if observed["env_max_length"] >= 100_000 or observed["env_contains_body"]:
+        problems.append("environment exposes body")
+    return problems
+
+
+_REAL_POPEN = subprocess.Popen
+
+
+def _popen_with_planted_body_exposure(command, **kwargs):
+    """Real child negative control; no fake CompletedProcess or real signer."""
+    import os
+    target = os.environ["ATELES_TEST_EXPOSURE_TARGET"]
+    if target == "argv":
+        command = [*command, "synthetic-body-sentinel"]
+    else:
+        kwargs["env"] = dict(kwargs["env"], ATELES_TEST_PLANTED_BODY="synthetic-body-sentinel")
+    return _REAL_POPEN(command, **kwargs)
 
 
 def test_signed_request_codes_each_failure_without_signing_anything(monkeypatch, tmp_path):
-    # Real identity lookup and spawned preparation, with synthetic key metadata only.
-    monkeypatch.setattr(ns, "AAUTH_KEYS_DIR", str(tmp_path))
+    # Real lookup, owned process and original helper; no key material/network.
+    trace = _synthetic_signed_helper(monkeypatch, tmp_path)
     with pytest.raises(ns.SignedRequestError) as raised:
         ns.signed_request("POST", "http://x/correct", {"a": 1}, agent_name="waxwing")
     assert raised.value.code == "no_key"
+    assert not trace.exists(), "a missing key must not reach the helper"
 
     (tmp_path / "waxwing.jwk.json").write_text('{"kid":"synthetic"}')
     for stdout, code in (
@@ -442,27 +493,33 @@ def test_signed_request_codes_each_failure_without_signing_anything(monkeypatch,
         ('{"error": "cliSignedFetch not found under /x/dist"}', "helper_signer_missing"),
         ('{"error": "something else entirely"}', "helper_error"),
     ):
-        monkeypatch.setattr(ns.subprocess, "run", lambda *a, _o=stdout, **k: _Proc(_o))
+        trace.unlink(missing_ok=True)
+        monkeypatch.setenv("ATELES_TEST_HELPER_OUTPUT", stdout)
         with pytest.raises(ns.SignedRequestError) as raised:
             ns.signed_request("POST", "http://x/correct", {"a": 1}, agent_name="waxwing")
         assert raised.value.code == code, (stdout, raised.value.code)
         assert isinstance(raised.value, RuntimeError), "callers that catch RuntimeError must still work"
+        assert json.loads(trace.read_text())["helper"] == "signed_fetch.mjs"
 
 
 def test_the_body_goes_to_the_helper_on_stdin_not_argv_or_the_environment(monkeypatch, tmp_path):
     """So its size cannot meet an argv or environment limit."""
-    monkeypatch.setattr(ns, "AAUTH_KEYS_DIR", str(tmp_path))
+    trace = _synthetic_signed_helper(monkeypatch, tmp_path)
     (tmp_path / "waxwing.jwk.json").write_text('{"kid":"synthetic"}')
-    seen: dict = {}
-
-    def run(cmd, input=None, env=None, **k):
-        seen.update(cmd=cmd, input=input, env=env)
-        return _Proc('{"status": 200, "ok": true, "body": "{}"}')
-
-    monkeypatch.setattr(ns.subprocess, "run", run)
-    big = {"value": ["x" * 100] * 3000}  # about 300 KB
+    big = {"value": ["synthetic-body-sentinel" + "x" * 100] * 3000}
     status, _ = ns.signed_request("POST", "http://x/correct", big, agent_name="waxwing")
     assert status == 200
-    assert len(seen["input"]) > 250_000
-    assert all(len(part) < 1000 for part in seen["cmd"])
-    assert not any(len(str(v)) > 100_000 for v in seen["env"].values())
+    assert _stdin_contract_problems(json.loads(trace.read_text()), big) == []
+
+
+@pytest.mark.parametrize("target", ["argv", "environment"])
+def test_stdin_contract_detects_real_partial_body_exposure(monkeypatch, tmp_path, target):
+    trace = _synthetic_signed_helper(monkeypatch, tmp_path)
+    (tmp_path / "waxwing.jwk.json").write_text('{"kid":"synthetic"}')
+    monkeypatch.setenv("ATELES_TEST_EXPOSURE_TARGET", target)
+    monkeypatch.setattr(ns.subprocess, "Popen", _popen_with_planted_body_exposure)
+    big = {"value": ["synthetic-body-sentinel" + "x" * 100] * 3000}
+    status, _ = ns.signed_request("POST", "http://fixture.invalid", big, agent_name="waxwing")
+    assert status == 200  # the negative actually reached a real child
+    problems = _stdin_contract_problems(json.loads(trace.read_text()), big)
+    assert ("argv exposes body" if target == "argv" else "environment exposes body") in problems
