@@ -217,7 +217,7 @@ def judge(scenario, trace):
         problems.append("a replay/fallback ran another builder")
     if trace.task_replay_ok or not trace.pipeline_replay_refused:
         problems.append("a restart forgot the delivery receipt")
-    if trace.receipt_status != scenario["status"]:
+    if trace.receipt_status != scenario.get("accepted_status", scenario["status"]):
         problems.append("receipt lost the delivery outcome")
     for prompt, kw in trace.launches:
         if kw.get("runner") != "fly" or not kw.get("fly_delivery"):
@@ -226,7 +226,7 @@ def judge(scenario, trace):
             problems.append("Fly dispatch widened local grants")
         if "TOKEN" in prompt or job_eval.TOKEN in prompt:
             problems.append("credential mentioned in prompt")
-    if scenario["status"] == "opened":
+    if scenario.get("accepted_status", scenario["status"]) == "opened":
         if not trace.first_url:
             problems.append("runner PR missing from dispatcher result")
         if (
@@ -234,6 +234,9 @@ def judge(scenario, trace):
             and "[cicada] pull_request_link:" not in trace.first_stdout
         ):
             problems.append("task has no runner artifact header")
+    if scenario.get("accepted_status") == "unknown" and (
+            trace.first_url or "[cicada] pull_request_link:" in trace.first_stdout):
+        problems.append("unattributed result became a completion artifact")
     return problems
 
 

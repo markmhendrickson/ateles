@@ -286,7 +286,6 @@ from lib.daemon_runtime.artifact_contract import (  # noqa: E402
     artifact_gate_reason,
     body_shape_for_dispatch,
     classify_artifact_body,
-    classify_gh_ref_failure,
     complete_reference_url,
     eng_spec_has_content,
     pr_url,
@@ -632,60 +631,12 @@ def _text_identity(text: str) -> str:
 
 
 def resolve_artifact_ref(parsed: ParsedRef, *, repo: str | None = None) -> str:
-    """Ask GitHub whether a parsed PR/commit exists, via argv ``gh``.
+    # Keep the existing injectable Apis seam; delivery callers share the same
+    # resolver with an exact remote PR expectation before reporting completion.
+    from lib.daemon_runtime.artifact_resolver import resolve_artifact_ref as resolve
 
-    Never ``shell=True`` and never an HTTP probe. Returns a TRI-STATE string:
-    ``"exists"``, ``"absent"`` (GitHub answered that it is not there), or
-    ``"unavailable"`` (a rate limit, 5xx, auth error, timeout, OSError or any
-    non-zero exit that is not a clear not-found). "Unavailable" is not "absent":
-    it says nothing about the ref, and calling it absent would mark a task that
-    has a real PR FAILED, which the stall watchdog re-runs (a second PR).
-
-    Injectable: tests monkeypatch this to avoid live GitHub calls; a bool return
-    from a stub is read as exists / absent (see `_normalize_ref_check`).
-    """
-    import subprocess
-
-    owner = parsed.owner or ""
-    name = parsed.repo or ""
-    if repo and "/" in repo and (not owner or not name):
-        owner, name = repo.split("/", 1)
-    if parsed.kind == "pr":
-        if not owner or not name or parsed.number is None:
-            return "unavailable"
-        cmd = [
-            "gh", "pr", "view", str(parsed.number),
-            "--repo", f"{owner}/{name}", "--json", "number",
-        ]
-    elif parsed.kind == "sha":
-        if not owner or not name or not parsed.sha:
-            return "unavailable"
-        cmd = [
-            "gh", "api", f"repos/{owner}/{name}/commits/{parsed.sha}",
-            "--jq", ".sha",
-        ]
-    else:
-        return "unavailable"
-    verdict = "unavailable"
-    for attempt in range(_RESOLVE_ATTEMPTS):
-        stderr = ""
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, check=False
-            )
-            stderr = proc.stderr or ""
-            verdict = classify_gh_ref_failure(proc.returncode, stderr)
-        except (OSError, subprocess.TimeoutExpired):
-            verdict = "unavailable"
-        if verdict != "unavailable":
-            break
-        # A 404 means the repository is missing or not visible to this identity;
-        # asking again a second later cannot change that.
-        if "http 404" in stderr.lower():
-            break
-        if attempt + 1 < _RESOLVE_ATTEMPTS:
-            time.sleep(_RESOLVE_RETRY_DELAY_SECONDS)
-    return verdict
+    return resolve(parsed, repo=repo, attempts=_RESOLVE_ATTEMPTS,
+                   retry_delay=_RESOLVE_RETRY_DELAY_SECONDS)
 
 
 def _normalize_ref_check(value) -> str:
@@ -897,7 +848,7 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
     if result is not None and result.fly_delivery_status:
         summary = build_delivery.fly_delivery_summary(result)
         log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
-        if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
+        if result.ok and not result.remote_outcome_unknown and result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
             # The runner opens the PR after the model exits. Its read-back
             # supplies the artifact header the existing resolving gate verifies.
             result.stdout = (

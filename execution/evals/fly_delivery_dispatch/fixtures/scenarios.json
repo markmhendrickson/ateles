@@ -1,10 +1,60 @@
-{"scenarios":[
- {"id":"task-delivers","entry":"task","job":"delivery_pushes_and_opens_a_pull_request","status":"opened"},
- {"id":"pipeline-delivers","entry":"pipeline","job":"delivery_pushes_and_opens_a_pull_request","status":"opened"},
- {"id":"task-unknown-replay","entry":"task","job":"delivery_pushes_and_opens_a_pull_request","status":"unknown"},
- {"id":"pipeline-unknown-replay","entry":"pipeline","job":"delivery_pushes_and_opens_a_pull_request","status":"unknown"},
- {"id":"task-no-time","entry":"task","job":"no_time_pushes_nothing","status":"no_time"},
- {"id":"pipeline-no-time","entry":"pipeline","job":"no_time_pushes_nothing","status":"no_time"},
- {"id":"task-pr-failure","entry":"task","job":"pull_request_failure_keeps_the_pushed_commit","status":"pr_failed"},
- {"id":"pipeline-pr-failure","entry":"pipeline","job":"pull_request_failure_keeps_the_pushed_commit","status":"pr_failed"}
-]}
+{
+  "scenarios": [
+    {
+      "id": "task-delivers",
+      "entry": "task",
+      "job": "delivery_pushes_and_opens_a_pull_request",
+      "status": "opened",
+      "accepted_status": "unknown"
+    },
+    {
+      "id": "pipeline-delivers",
+      "entry": "pipeline",
+      "job": "delivery_pushes_and_opens_a_pull_request",
+      "status": "opened",
+      "accepted_status": "unknown"
+    },
+    {
+      "id": "task-unknown-replay",
+      "entry": "task",
+      "job": "delivery_pushes_and_opens_a_pull_request",
+      "status": "unknown",
+      "accepted_status": "unknown"
+    },
+    {
+      "id": "pipeline-unknown-replay",
+      "entry": "pipeline",
+      "job": "delivery_pushes_and_opens_a_pull_request",
+      "status": "unknown",
+      "accepted_status": "unknown"
+    },
+    {
+      "id": "task-no-time",
+      "entry": "task",
+      "job": "no_time_pushes_nothing",
+      "status": "no_time",
+      "accepted_status": "unknown"
+    },
+    {
+      "id": "pipeline-no-time",
+      "entry": "pipeline",
+      "job": "no_time_pushes_nothing",
+      "status": "no_time",
+      "accepted_status": "unknown"
+    },
+    {
+      "id": "task-pr-failure",
+      "entry": "task",
+      "job": "pull_request_failure_keeps_the_pushed_commit",
+      "status": "pr_failed",
+      "accepted_status": "unknown"
+    },
+    {
+      "id": "pipeline-pr-failure",
+      "entry": "pipeline",
+      "job": "pull_request_failure_keeps_the_pushed_commit",
+      "status": "pr_failed",
+      "accepted_status": "unknown"
+    }
+  ]
+}

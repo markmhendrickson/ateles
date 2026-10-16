@@ -14,6 +14,20 @@ from test_fly_delivery_dispatch import isolated_receipt as isolated_receipt
 from test_fly_runner import complete_record
 
 
+@pytest.mark.parametrize("rows", [
+    [{"snapshot": {"run_id": "run-123"}}, {"snapshot": {"run_id": "run-123"}}],
+    [{"snapshot": {"run_id": "other-run"}}],
+    [{"snapshot": {"run_id": "run-123"}}, {"snapshot": {"run_id": "other-run"}}],
+])
+def test_result_query_requires_one_unambiguous_matching_record(monkeypatch, rows):
+    import httpx
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://memory.example.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-parent-token")
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"entities": rows}))
+    with pytest.raises(fly_runner.FlyResultUnreadable):
+        asyncio.run(fly_runner.read_result_record("run-123", transport=transport, attempts=1))
+
+
 def receipt(status="unknown", **over):
     return {"status": status, "branch": BRANCH, "run_id": "run-123",
             "recorded_at": time.time(), "commit": "", "reason": "",
@@ -87,3 +101,46 @@ def test_result_job_and_execution_bindings_precede_delivery_acceptance(changes):
     record.update(changes)
     with pytest.raises(fly_runner.FlyResultUnreadable, match="job identity|credential probe|execution outcome"):
         fly_runner.FlyExecutor._result_from_record(None, job, record)
+
+
+@pytest.mark.parametrize("entrypoint", ["task", "pipeline"])
+@pytest.mark.parametrize("mismatch", ["base", "branch", "commit", "repository", "unavailable"])
+def test_remote_delivery_mismatch_is_unconfirmed_and_cannot_replay(
+    isolated_receipt, monkeypatch, entrypoint, mismatch,
+):
+    import subprocess
+    import apis
+    from test_fly_delivery_dispatch import run_task, dispatcher, trigger, remote_pr
+    from test_swarm_dispatch import _empty_spec_state
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    launches = []
+
+    async def launch(*args, **kwargs):
+        launches.append(True)
+        return result()
+
+    answer = remote_pr()
+    if mismatch == "base":
+        answer["baseRefName"] = "other-base"
+    elif mismatch == "branch":
+        answer["headRefName"] = "other-branch"
+    elif mismatch == "commit":
+        answer["headRefOid"] = "b" * 40
+    elif mismatch == "repository":
+        answer["headRepository"] = {"nameWithOwner": "other/repo"}
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(
+        argv, 1 if mismatch == "unavailable" else 0, json.dumps(answer), "unavailable"))
+    monkeypatch.setattr(apis, "run_skill", launch)
+    monkeypatch.setattr("swarm_dispatch.run_skill", launch)
+    if entrypoint == "task":
+        got = asyncio.run(run_task())
+        assert not got.ok and "pull_request_link:" not in got.stdout
+    else:
+        with pytest.raises(delivery.FlyDeliveryEnded):
+            asyncio.run(dispatcher()._open_implementation_pr(trigger(), _empty_spec_state()))
+    assert delivery._delivery_ledger().delivery_receipts()[REPO + "#123"]["status"] == "unknown"
+    monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES")
+    assert not asyncio.run(run_task()).ok
+    with pytest.raises(delivery.FlyDeliveryEnded):
+        asyncio.run(dispatcher()._open_implementation_pr(trigger(), _empty_spec_state()))
+    assert launches == [True]

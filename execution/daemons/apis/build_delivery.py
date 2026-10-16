@@ -898,6 +898,31 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
         except (OSError, ValueError):
             return blocked("delivery receipt release was not confirmed; not falling back")
         return None if result.fly_ineligible_before_launch else result
+    if result.fly_delivery_status in {"opened", "updated"}:
+        from lib.daemon_runtime.artifact_contract import ParsedRef
+        from lib.daemon_runtime.artifact_resolver import resolve_artifact_ref
+
+        valid = (result.ok and result.returncode == 0 and not result.remote_outcome_unknown
+                 and result.fly_delivery_branch == plan.branch
+                 and isinstance(result.fly_delivery_commit, str)
+                 and re.fullmatch(r"[0-9a-f]{40}", result.fly_delivery_commit) is not None
+                 and type(result.fly_pr_number) is int and result.fly_pr_number > 0
+                 and result.fly_pr_url == f"https://github.com/{plan.repository}/pull/{result.fly_pr_number}")
+        if valid:
+            owner, repo = plan.repository.split("/")
+            parsed = ParsedRef(kind="pr", owner=owner, repo=repo, number=result.fly_pr_number)
+            valid = await asyncio.to_thread(
+                resolve_artifact_ref, parsed,
+                expected_pr={"base": plan.base_branch, "branch": plan.branch,
+                             "commit": result.fly_delivery_commit},
+            ) == "exists"
+        if not valid:
+            result.ok = False
+            result.remote_outcome_unknown = True
+            result.fly_delivery_status = "unknown"
+            result.fly_delivery_reason = "delivery artifact could not be confirmed"
+            result.fly_pr_number = None
+            result.fly_pr_url = ""
     try:
         _record(plan.key, {"status": result.fly_delivery_status or "unknown",
                            "branch": plan.branch, "run_id": result.remote_run_id,

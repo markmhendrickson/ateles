@@ -41,6 +41,22 @@ def isolated_receipt(monkeypatch, tmp_path):
         delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "receipts.json")
     )
     monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+    monkeypatch.setattr(delivery, "_new_branch", lambda label: (BRANCH, "test", "test"))
+    import subprocess
+    real_run = subprocess.run
+
+    def remote_read(argv, *args, **kwargs):
+        if argv[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(argv, 0, json.dumps(remote_pr()), "")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", remote_read)
+
+
+def remote_pr():
+    return {"number": 99, "url": f"https://github.com/{REPO}/pull/99",
+            "baseRefName": "main", "headRefName": BRANCH, "headRefOid": COMMIT,
+            "headRepository": {"nameWithOwner": REPO}}
 
 
 def result(status="opened", **over):

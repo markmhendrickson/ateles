@@ -6727,7 +6727,7 @@ class SwarmDispatcher:
                 result = await build_delivery.run_fly_delivery(plan, launch, blocked)
             if result is not None:
                 summary = build_delivery.fly_delivery_summary(result)
-                if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
+                if result.ok and not result.remote_outcome_unknown and result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
                     self.notifier.send(summary, priority=Priority.INFO, handler=DAEMON_NAME)
                     return result.fly_pr_url
                 # A launched run is terminal, including success with no changes.
