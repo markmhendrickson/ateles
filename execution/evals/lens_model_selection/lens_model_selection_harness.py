@@ -17,6 +17,7 @@ from pathlib import Path
 import sys
 import textwrap
 
+import httpx
 import pytest
 
 HERE = Path(__file__).resolve().parent
@@ -64,7 +65,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         path = re.search(r"It must only write the verdict to (.+?) using", prompt).group(1)
         verdict = "<!-- review:pm commit={HEAD} -->\\n**🤖 Pavo — Ateles swarm, pm review**\\n**SIGNED_OFF**\\n\\nSynthetic eval verdict.\\n"
         Path(path).write_text(verdict)
-        print(verdict, end="")
+        print("Verdict: APPROVE\\n" if "--ignore-user-config" in argv else verdict, end="")
     ''')
     wrapper = _executable(tmp_path / "fixture-sandbox", '''
         import os, sys
@@ -73,10 +74,18 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
     ''')
     brief = tmp_path / "brief.md"
     brief.write_text("Review this synthetic fixture; write only the requested verdict.\n")
-    obs = {"dispatch_calls": [], "events": [], "provider_calls": []}
+    obs = {"dispatch_calls": [], "events": [], "provider_calls": [], "definition_loads": []}
     stdout, stderr = io.StringIO(), io.StringIO()
 
     with pytest.MonkeyPatch.context() as mp:
+        def no_http(*args, **kwargs):
+            raise AssertionError("unexpected external HTTP in an offline eval")
+
+        async def no_async_http(*args, **kwargs):
+            raise AssertionError("unexpected external HTTP in an offline eval")
+
+        mp.setattr(httpx.Client, "request", no_http)
+        mp.setattr(httpx.AsyncClient, "request", no_async_http)
         # Isolated fixture configuration; never consult operator capacity/files.
         for key, value in {
             "APIS_HARNESS_PROVIDERS": "codex,cursor",
@@ -98,9 +107,12 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(skill_runner, "ATELES_REPO", ROOT)
         mp.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         mp.setattr(runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
-        mp.setattr(skill_runner, "_load_agent_def", lambda role: AgentDefinition(
-            name=role, prompt_markdown="Synthetic review role.", tool_allowlist=[]
-        ))
+        def definition(role):
+            obs["definition_loads"].append(role)
+            return AgentDefinition(name=role, prompt_markdown="Synthetic review role.", tool_allowlist=[])
+
+        mp.setattr(skill_runner, "_load_agent_def", definition)
+        mp.setattr(runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
         mp.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
         mp.setattr(skill_runner, "_write_harness_event", lambda **kw: obs["events"].append(kw))
         mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top"})
@@ -155,6 +167,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(runner.dispatch_role, "dispatch", dispatch)
         if mutation == "no_validation":
             mp.setattr(runner, "validate_model_selector", lambda model: model)
+            mp.setattr(model_tiering, "validate_model_selector", lambda model: model)
         argv = [
             "--repo", "eval-owner/eval-repo", "--pr", "1", "--head", HEAD,
             "--lens", "pm", "--brief", str(brief), "--timeout", "5", "--json",
@@ -174,10 +187,15 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                     if entry == "dispatch_cli":
                         direct_args = ["--role", "pavo", "--task", task,
                                        "--provider", provider, "--cwd", str(tmp_path),
-                                       "--action-class", action_class, "--json"]
+                                       "--action-class", action_class, "--task-entity-id", "ent_eval_task", "--json"]
                         if "model" in scenario:
-                            direct_args += ["--model", model]
+                            direct_args += ["--model=" + model]
                         obs["exit_code"] = runner.dispatch_role.main(direct_args)
+                    elif entry == "review_prompt":
+                        mp.setenv("APIS_REVIEW_MODELS", json.dumps({provider: model}))
+                        result = asyncio.run(skill_runner.run_review_prompt(role="pavo", prompt=task, timeout=5))
+                        obs["exit_code"] = 0 if result.ok else 1
+                        print(json.dumps({"ok": result.ok, "reason": result.error}))
                     elif entry == "provider_command":
                         async def sink():
                             cmd, payload = skill_runner._provider_command(
@@ -240,10 +258,10 @@ def check(scenario, obs):
         if scenario.get("entrypoint", "lens_cli") == "lens_cli" and call["task_entity_id"] != "ent_eval_task":
             failures.append("dispatch lost task attribution")
     for event in obs["events"]:
-        if event["task_entity_id"] != "ent_eval_task":
+        if scenario.get("entrypoint") != "review_prompt" and event["task_entity_id"] != "ent_eval_task":
             failures.append("event lost task attribution")
     for call in obs["provider_calls"]:
-        if scenario.get("entrypoint", "lens_cli") not in {"dispatch_cli", "provider_command"} and (not call["local_review"] or call["github_credential_present"]):
+        if scenario.get("entrypoint", "lens_cli") not in {"dispatch_cli", "provider_command", "review_prompt"} and (not call["local_review"] or call["github_credential_present"]):
             failures.append("review child lost its publication boundary")
     report = obs["report"]
     reports = list(report["results"].values()) if report and report.get("compare") else [report]
@@ -260,6 +278,8 @@ def check(scenario, obs):
             failures.append("dry-run command model differs")
         elif exp["dry_model"] is None and "--model" in result["example_command"]:
             failures.append("dry-run introduced a model flag for omission")
+    if exp.get("refusal") and (obs["definition_loads"] or obs["events"]):
+        failures.append("invalid model reached definition loading or dispatch events")
     if exp.get("refusal") and "model must be" not in obs["stderr"]:
         failures.append("missing actionable model refusal")
     return failures

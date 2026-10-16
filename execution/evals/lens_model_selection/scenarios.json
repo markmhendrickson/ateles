@@ -506,7 +506,7 @@
       "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
       "entrypoint": "dispatch_cli",
       "args": [],
-      "model": "bad\\nmodel",
+      "model": "bad\nmodel",
       "expect": {
         "exit_code": 2,
         "launches": 0,
@@ -581,7 +581,7 @@
       "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
       "entrypoint": "dispatch",
       "args": [],
-      "model": "bad\\nmodel",
+      "model": "bad\nmodel",
       "expect": {
         "exit_code": 2,
         "launches": 0,
@@ -656,7 +656,7 @@
       "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
       "entrypoint": "run_skill",
       "args": [],
-      "model": "bad\\nmodel",
+      "model": "bad\nmodel",
       "expect": {
         "exit_code": 2,
         "launches": 0,
@@ -731,7 +731,7 @@
       "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
       "entrypoint": "run_once",
       "args": [],
-      "model": "bad\\nmodel",
+      "model": "bad\nmodel",
       "expect": {
         "exit_code": 2,
         "launches": 0,
@@ -806,7 +806,7 @@
       "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
       "entrypoint": "provider_command",
       "args": [],
-      "model": "bad\\nmodel",
+      "model": "bad\nmodel",
       "expect": {
         "exit_code": 2,
         "launches": 0,
@@ -864,6 +864,282 @@
         "exit_code": 2,
         "launches": 0,
         "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_invalid_number",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "model": 0,
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_invalid_boolean",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "model": false,
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_invalid_mapping",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "model": {},
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_invalid_list",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "model": [],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_skill_invalid_number",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "model": 0,
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_skill_invalid_boolean",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "model": false,
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_skill_invalid_mapping",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "model": {},
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_skill_invalid_list",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "model": [],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_once_invalid_number",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "run_once",
+      "args": [],
+      "model": 0,
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_once_invalid_boolean",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "run_once",
+      "args": [],
+      "model": false,
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_once_invalid_mapping",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "run_once",
+      "args": [],
+      "model": {},
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_once_invalid_list",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "run_once",
+      "args": [],
+      "model": [],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_invalid_number",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "model": 0,
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_invalid_boolean",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "model": false,
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_invalid_mapping",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "model": {},
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_invalid_list",
+      "why": "Programmatic explicit selectors preserve the same restrictive model contract before any child.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "model": [],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_claude_omitted",
+      "why": "Provider-specific argv preserves omission and arbitrary valid explicit identifiers.",
+      "entrypoint": "provider_command",
+      "provider": "claude",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          null
+        ]
+      }
+    },
+    {
+      "id": "provider_command_claude_explicit",
+      "why": "Provider-specific argv preserves omission and arbitrary valid explicit identifiers.",
+      "entrypoint": "provider_command",
+      "provider": "claude",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "provider/custom-v1:latest"
+        ]
+      },
+      "model": "provider/custom-v1:latest"
+    },
+    {
+      "id": "provider_command_cursor_omitted",
+      "why": "Provider-specific argv preserves omission and arbitrary valid explicit identifiers.",
+      "entrypoint": "provider_command",
+      "provider": "cursor",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          null
+        ]
+      }
+    },
+    {
+      "id": "provider_command_cursor_explicit",
+      "why": "Provider-specific argv preserves omission and arbitrary valid explicit identifiers.",
+      "entrypoint": "provider_command",
+      "provider": "cursor",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "provider/custom-v1:latest"
+        ]
+      },
+      "model": "provider/custom-v1:latest"
+    },
+    {
+      "id": "review_prompt_invalid_control",
+      "why": "The separate inference-only provider command path uses the same selector contract before child launch.",
+      "entrypoint": "review_prompt",
+      "model": "bad\nmodel",
+      "args": [],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "review_prompt_valid_explicit",
+      "why": "The inference-only command retains an explicitly configured valid model.",
+      "entrypoint": "review_prompt",
+      "model": "gpt-6-sol",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ]
       }
     }
   ]

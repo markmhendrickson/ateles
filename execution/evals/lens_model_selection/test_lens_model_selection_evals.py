@@ -33,6 +33,12 @@ def test_scenarios_are_unique_and_cover_the_required_contract():
 
 @pytest.mark.parametrize('scenario_id,mutation', [
     ('invalid_empty_live', 'no_validation'),
+    ('dispatch_cli_invalid_empty', 'no_validation'),
+    ('dispatch_invalid_empty', 'no_validation'),
+    ('run_skill_invalid_empty', 'no_validation'),
+    ('run_once_invalid_empty', 'no_validation'),
+    ('provider_command_invalid_empty', 'no_validation'),
+    ('review_prompt_invalid_control', 'no_validation'),
     ('invalid_empty_dry', 'no_validation'),
     ('invalid_empty_compare', 'no_validation'),
     ('explicit_terra_overrides_class', 'drop_model'),
