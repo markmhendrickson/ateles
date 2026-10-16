@@ -194,6 +194,10 @@ def _cleanup_details(world):
              "index", "packed-refs", "description", "exclude", "shallow"}
     rows = []
     root = world["work_root"]
+    if root.is_symlink():
+        return {"errors": world["cleanup_errors"], "leftovers": [
+            {"relative": ".", "mode": f"{stat.S_IMODE(root.lstat().st_mode):04o}", "kind": "link"}
+        ], "truncated": False}
     for parent, dirs, files in os.walk(root, followlinks=False):
         for name in sorted(dirs + files):
             path = Path(parent, name)
@@ -548,3 +552,13 @@ def test_failed_cleanup_diagnostics_are_bound_to_the_real_entrypoint_and_value_f
                for row in details["leftovers"])
     assert any("<entry>" in row["relative"] for row in details["leftovers"])
     assert all(secret not in message for secret in (TOKEN, HEADER, ROLE_TOKEN, str(world["tmp"])))
+
+
+def test_cleanup_diagnostics_do_not_follow_a_link_at_the_work_root(world):
+    outside = world["tmp"] / "outside"
+    outside.mkdir()
+    (outside / TOKEN).write_text(ROLE_TOKEN)
+    world["work_root"].symlink_to(outside, target_is_directory=True)
+    details = _cleanup_details(world)
+    link_mode = stat.S_IMODE(world["work_root"].lstat().st_mode)
+    assert details["leftovers"] == [{"relative": ".", "mode": f"{link_mode:04o}", "kind": "link"}]
