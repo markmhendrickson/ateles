@@ -59,6 +59,11 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib import github_app_token as _github_app_token  # noqa: E402
+from lib.daemon_runtime.degraded_load import (  # noqa: E402
+    DEGRADED_CLAUDE_BUILTINS,
+    MINIMAL_READ_ALLOWLIST,
+    classify_load_failure,
+)
 from lib.credential_scrub import (  # noqa: E402
     AGENT_CHILD_MARKER_ENV,
     is_generation_credential,
@@ -1393,6 +1398,7 @@ class SkillResult:
     # True only when this attempt ran without a loaded role definition. Callers
     # must never turn such output into an attributed gate sign-off.
     degraded_load: bool = False
+    load_error: str = ""  # safe failure class, never a raw transport exception
     # Set only when the runner independently established that a zero-exit
     # child encountered one canonical delivery denial and no provider
     # capacity/auth/launch diagnostic.  Callers must not infer this from the
@@ -2613,7 +2619,7 @@ async def _run_skill_once(
         # wrong would silently skip the undefined-role alerting AND let a
         # stub's synthesized aauth_sub receive AAuth signing-key injection
         # further down (`if not degraded and agent_def.aauth_sub:`).
-        degraded = not (agent_def.prompt_markdown or "").strip()
+        degraded = agent_def.is_stub or not (agent_def.prompt_markdown or "").strip()
     else:
         # Fetch policy at dispatch time: unlike the stable agent definition,
         # active rules may change between tasks and must not inherit the
@@ -2627,11 +2633,13 @@ async def _run_skill_once(
         )
 
     if degraded:
+        load_error = classify_load_failure(agent_def.load_error)
         _title_hint = prompt[:80].replace("\n", " ")
         warn_msg = (
-            f"Role {_role!r} ran DEGRADED (no agent_definition loaded) "
+            f"⚠ DEGRADED role {_role!r}: definition {load_error}; "
             f"for task {task_entity_id or '(unknown)'!r}. "
-            "Dispatching with SKILL.md and any available live policy."
+            "Dispatching with minimal read-only tools; output is unverified. "
+            "Check Neotoma availability and ATELES_NEOTOMA_TIMEOUT."
         )
         log.warning(f"[apis] {warn_msg}")
         # A role with no agent_definition is ONE fact about that ROLE, not one
@@ -2655,8 +2663,9 @@ async def _run_skill_once(
 
                 notifier.send(
                     f"Role {_role!r} has no agent_definition — every task routed "
-                    "to it runs DEGRADED (SKILL.md only). Reported once per role.",
-                    priority=Priority.WARN,
+                    "to it runs DEGRADED with minimal read-only tools; "
+                    "check Neotoma and ATELES_NEOTOMA_TIMEOUT. Reported once per role.",
+                    priority=Priority.BLOCKER,
                     handler="apis",
                 )
             except Exception as exc:
@@ -2674,7 +2683,7 @@ async def _run_skill_once(
                 tool_name=f"{provider}:{skill}",
                 success="partial",
                 input_summary=_title_hint,
-                output_summary="degraded_generic_subagent",
+                output_summary=f"degraded_generic_subagent ⚠ DEGRADED {load_error}",
                 resolved_tier=resolved_tier,
             )
         except Exception as exc:
@@ -2692,7 +2701,7 @@ async def _run_skill_once(
             log.error("[apis] %s", msg)
             return SkillResult(
                 skill, False, None, "", "", error=msg, provider=provider,
-                degraded_load=True,
+                degraded_load=True, load_error=load_error,
             )
 
     # ── Build provider command ─────────────────────────────────────────────────
@@ -2935,7 +2944,7 @@ async def _run_skill_once(
             list(CODEX_GATE_REQUIRED_READ_TOOLS),
         )
 
-    tools = agent_def.tools  # property: list[str]; ['*'] means all
+    tools = list(MINIMAL_READ_ALLOWLIST) if degraded else agent_def.tools
     # ateles#795, Falco's REQUEST_CHANGES on PR #1181: for a gate-owning run,
     # `correct` goes on the CLI's DENY list, never relying on the additive
     # allowlist alone. `--disallowed-tools` takes precedence over
@@ -2982,6 +2991,15 @@ async def _run_skill_once(
             allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
+        if degraded:
+            # --allowed-tools is an additive permission grant, not a tool
+            # availability boundary. The actual floor is the restricted CLI
+            # mode plus an explicit built-in set and strict empty MCP config.
+            cmd += [
+                "--restricted", "--tools", ",".join(DEGRADED_CLAUDE_BUILTINS),
+                "--permission-mode", "dontAsk", "--permission-prompts", "none",
+                "--setting-sources", "",
+            ]
         log.info(
             f"[apis] Spawning via {provider}: "
             f"<{_role}:agent_def+{skill}.SKILL.md> "
@@ -3070,6 +3088,17 @@ async def _run_skill_once(
         local_review_home=local_review_home or None,
         inference_only=inference_only,
     )
+    if degraded:
+        # The role read failed, so inherited publisher/record credentials are
+        # not authority for this child. Authentication for the model itself is
+        # retained by _subscription_only_env.
+        for key in tuple(subprocess_env):
+            if key in {
+                "NEOTOMA_BEARER_TOKEN", "GITHUB_TOKEN", "GH_TOKEN",
+                "ATELES_PRIVATE_KEYS_DIR", "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",
+                "NEOTOMA_AAUTH_SUB", "NEOTOMA_AAUTH_ISS",
+            } or key.endswith("_NEOTOMA_TOKEN"):
+                subprocess_env.pop(key, None)
     if local_cfg is not None:
         # Local inference: point the CLI at the loopback proxy and strip any
         # frontier OAuth credential so it cannot be sent there.
@@ -3094,7 +3123,7 @@ async def _run_skill_once(
     if include_github_contract:
         subprocess_env.pop("GITHUB_TOKEN", None)
         subprocess_env.pop("GH_TOKEN", None)
-    if github_token:
+    if github_token and not degraded:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 
@@ -3527,6 +3556,7 @@ async def _run_skill_once(
             stderr=_stderr_text,
             provider=provider,
             degraded_load=degraded,
+            load_error=classify_load_failure(agent_def.load_error) if degraded else "",
             error=(
                 _delivery_denial
                 if (_delivery_denial and returncode == 0)
@@ -3585,7 +3615,7 @@ async def _run_skill_once(
                     tool_name=f"{provider}:{skill}",
                     success="true",
                     output_summary=(
-                        f"provider={provider} {len(result.stdout)}B stdout rc=0"
+                        f"{'⚠ DEGRADED ' if degraded else ''}provider={provider} {len(result.stdout)}B stdout rc=0"
                         f" {_usage.summary()}{_fly_note}"
                     ),
                     duration_ms=duration_ms,

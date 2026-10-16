@@ -89,6 +89,10 @@ _NEOTOMA_ENV_FILE = _dotenv_path()
 if _dotenv_should_load():
     _load_dotenv_into_environ(_NEOTOMA_ENV_FILE, _os.environ)
 
+from .neotoma_timeout import validate_neotoma_timeout_env  # noqa: E402
+
+validate_neotoma_timeout_env()
+
 from .aauth_signer import AAuthSigner
 from .agent_loader import (
     REFUSING_STATUSES,

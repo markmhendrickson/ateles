@@ -307,7 +307,7 @@ def test_failed_load_is_logged_at_error(monkeypatch, caplog):
         al.AgentLoader("apis").load()
 
     msgs = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
-    assert any("FAILED" in m for m in msgs), msgs
+    assert any("DEGRADED" in m for m in msgs), msgs
 
 
 def test_no_matching_definition_is_also_a_stub(monkeypatch):
@@ -337,11 +337,14 @@ import agent_loader
 import httpx
 import pytest
 
+_ORIGINAL_POST_DEGRADED_ESCALATION = agent_loader.AgentLoader._post_degraded_escalation
+
 
 @pytest.fixture(autouse=True)
 def _no_env(monkeypatch):
     monkeypatch.delenv("ATELES_NEOTOMA_TIMEOUT", raising=False)
     monkeypatch.setattr(agent_loader, "_escalate", lambda *a, **k: None)
+    monkeypatch.setattr(agent_loader.AgentLoader, "_post_degraded_escalation", lambda *a, **k: None)
 
 
 def _stub_for(name="pavo", reason="ReadTimeout"):
@@ -369,9 +372,18 @@ def test_stub_tools_are_read_only():
         assert not any(f in low for f in forbidden), f"stub grants a mutating tool: {tool}"
 
 
-def test_stub_grants_no_neotoma_mcp_tools():
-    """A stub must not self-authorize against the store it could not reach."""
-    assert not [t for t in _stub_for().tools if "neotoma" in t.lower()]
+def test_stub_neotoma_names_are_explicit_reads_only():
+    """The accepted ceiling lists read tools, never a server wildcard."""
+    tools = [t for t in _stub_for().tools if "neotoma" in t.lower()]
+    assert tools
+    assert all("*" not in t for t in tools)
+    assert not any("store" in t or "correct" in t for t in tools)
+
+
+def test_stub_tools_property_rejects_legacy_empty_fallback():
+    stub = _stub_for()
+    stub.tool_allowlist = []
+    assert stub.tools == list(agent_loader.MINIMAL_READ_ALLOWLIST)
 
 
 def test_stub_bash_grants_are_scoped_never_bare():
@@ -397,6 +409,29 @@ def test_stub_escalates_not_just_logs(monkeypatch):
     agent_loader.AgentLoader("pavo")._stub("ReadTimeout")
     assert len(seen) == 1
     assert "pavo" in seen[0]
+
+
+def test_degraded_escalation_store_has_idempotent_schema_envelope(monkeypatch):
+    loader = agent_loader.AgentLoader("pavo")
+    calls = []
+
+    def fake_neotoma(method, url, body=None):
+        calls.append((method, url, body))
+        return {"success": True}
+
+    monkeypatch.setattr(loader, "_neotoma", fake_neotoma)
+    # Override the default test isolation for this one effect test.
+    monkeypatch.setattr(agent_loader.AgentLoader, "_post_degraded_escalation", _ORIGINAL_POST_DEGRADED_ESCALATION)
+    loader._stub("ReadTimeout")
+    assert len(calls) == 1
+    method, url, body = calls[0]
+    assert method == "POST" and url.endswith("/store")
+    assert body["idempotency_key"].startswith("agent-loader-degraded-pavo-")
+    assert body["observation_source"] == "workflow_state"
+    entity = body["entities"][0]
+    assert set(entity) == {"entity_type", "title", "body", "severity", "source_agent", "status", "tags"}
+    assert entity["entity_type"] == "escalation"
+    assert "ReadTimeout" not in entity["body"] or "timed out" in entity["body"]
 
 
 def test_escalate_swallows_notifier_failure(monkeypatch):

@@ -447,9 +447,14 @@ class TestRunSkill:
         stub.tool_allowlist = list(STUB_TOOL_ALLOWLIST)
         MockLoader.return_value.load.return_value = stub
         captured: list[str] = []
+        captured_env: dict[str, str] = {}
+        captured_mcp: dict = {}
 
         async def fake_exec(*cmd, **_kwargs):
             captured.extend(cmd)
+            captured_env.update(_kwargs["env"])
+            with open(cmd[cmd.index("--mcp-config") + 1], encoding="utf-8") as cfg:
+                captured_mcp.update(json.load(cfg))
             proc = MagicMock(returncode=0)
 
             async def communicate(input=None):
@@ -472,6 +477,14 @@ class TestRunSkill:
         assert "mcp__mcpsrv_neotoma__*" not in allowed
         assert "*" not in allowed
         assert "Read" in allowed
+        assert "Bash" not in allowed
+        assert "--restricted" in captured
+        assert captured[captured.index("--tools") + 1] == ",".join(skill_runner.DEGRADED_CLAUDE_BUILTINS)
+        assert "--strict-mcp-config" in captured
+        assert captured_mcp == {"mcpServers": {}}
+        assert captured[captured.index("--permission-mode") + 1] == "dontAsk"
+        assert "GITHUB_TOKEN" not in captured_env
+        assert "NEOTOMA_BEARER_TOKEN" not in captured_env
 
     @pytest.mark.parametrize("provider", ["codex", "cursor"])
     @patch("skill_runner._write_harness_event")

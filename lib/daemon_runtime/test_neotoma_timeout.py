@@ -64,3 +64,9 @@ def test_invalid_config_fails_loudly(monkeypatch, bad):
 
 def test_explicit_default_argument_respected(monkeypatch):
     assert nt.neotoma_timeout(default=5.0) == 5.0
+
+
+def test_startup_validator_names_invalid_value(monkeypatch):
+    monkeypatch.setenv("ATELES_NEOTOMA_TIMEOUT", "10s")
+    with pytest.raises(SystemExit, match="ATELES_NEOTOMA_TIMEOUT='10s'"):
+        nt.validate_neotoma_timeout_env()

@@ -313,7 +313,7 @@ def _entity_readback_matches(
         response = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{entity_id}",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         response.raise_for_status()
         data = response.json()
@@ -343,7 +343,7 @@ def _relationship_readback_matches(
         response = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{source_entity_id}/relationships",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         response.raise_for_status()
         return any(
@@ -439,7 +439,7 @@ def _query_entity_rows(
                 "limit": 25,
                 "include_snapshots": True,
             },
-            timeout=20,
+            timeout=neotoma_timeout(),
         )
         response.raise_for_status()
         return response.json().get("entities", [])

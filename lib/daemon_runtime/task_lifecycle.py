@@ -360,7 +360,7 @@ def set_task_field_if_version(
             f"{NEOTOMA_BASE_URL}/correct",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         if resp.status_code == 409:
             try:

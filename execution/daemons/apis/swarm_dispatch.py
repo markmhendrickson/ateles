@@ -5826,7 +5826,7 @@ class SwarmDispatcher:
             notifier=self.notifier,
             action_class=model_tiering.ACTION_ISSUE_TRIAGE,
         )
-        if not lanius.ok:
+        if not lanius.ok or lanius.degraded_load:
             self.notifier.send(
                 f"Lanius failed on new issue {ref} — gate init incomplete",
                 priority=Priority.BLOCKER,
@@ -5867,6 +5867,7 @@ class SwarmDispatcher:
         )
 
         completed: list[str] = []
+        degraded_sections: list[str] = []
         # (lens, agent, error_class, observed_state) per failed sign_off.
         failed_sign_offs: list[tuple[str, str, str, str]] = []
         # (gate, agent, header, observed) when the pm reply is refused only
@@ -5920,6 +5921,12 @@ class SwarmDispatcher:
                 action_class=model_tiering.lens_review_class(section.lens),
             )
             section_text = self._extract_section_text(result.stdout, section)
+            if result.degraded_load:
+                degraded_sections.append(section.key)
+                section_text = (
+                    f"⚠ DEGRADED — role definition {result.load_error or 'unavailable'}; "
+                    "gate sign-off suppressed.\n\n" + section_text
+                )
             # Persist ADDITIVELY: correct only this section's field. Even when
             # extraction yields nothing usable we still record the turn ran so
             # the sequence_state and mirror reflect progress.
@@ -6090,6 +6097,12 @@ class SwarmDispatcher:
                 [trigger.repository, trigger.number, trigger.title, trigger.body]
             ),
         )
+        if lanius.degraded_load or degraded_sections:
+            log.error(
+                "[%s] %s: degraded role output cannot advance the issue gate",
+                DAEMON_NAME, ref,
+            )
+            gates_green = False
         if gates_green and failed_sign_offs:
             # A failed sign_off is NOT a cleared gate, whatever the re-read
             # above shows (Falco's second security run, BLOCKING B2, PR
@@ -7287,6 +7300,14 @@ class SwarmDispatcher:
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
+            if result.degraded_load:
+                # A process can exit zero and print SIGNED_OFF without a role
+                # definition. Keep its output out of durable panel reviews and
+                # surface an incomplete-review notice instead.
+                failed_lenses.append(
+                    (lens.lens, f"⚠ DEGRADED — role definition {result.load_error or 'unavailable'}")
+                )
+                continue
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
                 # ateles#795 amended ADR: the dispatcher — not the lens's own
@@ -12849,7 +12870,7 @@ class SwarmDispatcher:
                 action_class=model_tiering.lens_review_class(first.lens),
                 escalation_signals=signals,
             )
-            if not result.ok:
+            if not result.ok or result.degraded_load:
                 return {}
             blocks = review_carry.split_combined_reply(
                 result.stdout, [item.lens for item in combinable]

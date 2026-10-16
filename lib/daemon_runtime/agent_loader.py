@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -56,9 +57,11 @@ import httpx
 try:  # package import (normal daemon runtime) with script-import fallback
     from . import neotoma_signed as ns
     from .neotoma_timeout import neotoma_timeout
+    from .degraded_load import MINIMAL_READ_ALLOWLIST, format_escalation_message
 except ImportError:  # pragma: no cover
     import neotoma_signed as ns  # type: ignore
     from neotoma_timeout import neotoma_timeout  # type: ignore
+    from degraded_load import MINIMAL_READ_ALLOWLIST, format_escalation_message  # type: ignore
 
 log = logging.getLogger(__name__)
 
@@ -447,15 +450,7 @@ UNDEFINED_STATUS = "undefined"
 # Neotoma's own MCP tools are NOT included: the read that would authorize them
 # is the read that just failed, and a stub must not self-authorize against the
 # store it could not reach.
-STUB_TOOL_ALLOWLIST: tuple[str, ...] = (
-    "Read",
-    "Grep",
-    "Glob",
-    "Bash(git status:*)",
-    "Bash(git log:*)",
-    "Bash(git diff:*)",
-    "Bash(git show:*)",
-)
+STUB_TOOL_ALLOWLIST = MINIMAL_READ_ALLOWLIST
 
 
 def _escalate(message: str) -> None:
@@ -474,9 +469,9 @@ def _escalate(message: str) -> None:
     try:
         from lib.notify import Notifier, Priority
 
-        Notifier().send(message, priority=Priority.WARN, handler="agent_loader")
+        Notifier().send(message, priority=Priority.BLOCKER, handler="agent_loader")
     except Exception as exc:  # noqa: BLE001 — best-effort by design
-        log.debug(f"agent_definition stub escalation failed: {exc}")
+        log.error("degraded_load notifier escalation failed: %s", type(exc).__name__)
 
 
 def evaluate_status(status: str) -> tuple[StatusAction, str]:
@@ -574,6 +569,10 @@ class AgentDefinition:
           - a comma-separated string (legacy / hand-authored shape)
         """
         raw = self.tool_allowlist
+        if self.is_stub:
+            # A failed definition read never inherits the healthy legacy
+            # empty-or-unknown -> wildcard coercion.
+            return list(MINIMAL_READ_ALLOWLIST)
         if raw is None:
             return ["*"]
         # Array shape (canonical entity storage): list/tuple of tool names.
@@ -767,14 +766,12 @@ class AgentLoader:
         downstream status check. UNDEFINED_STATUS WARNs rather than refusing, so
         a transient Neotoma outage still cannot invent an outage of its own.
         """
-        msg = (
-            f"[{self.agent_name}] agent_definition load FAILED ({reason}) — "
-            "falling back to a STUB with an EMPTY prompt and a read-only "
-            "tool allowlist. Any agent dispatched on this definition has no "
-            "role instructions and cannot write, push, or send."
+        msg = format_escalation_message(
+            self.agent_name, reason, neotoma_timeout()
         )
         log.error(msg)
         _escalate(msg)
+        self._post_degraded_escalation(msg)
         return AgentDefinition(
             name=self.agent_name,
             aauth_sub=f"{self.agent_name}@ateles-swarm",
@@ -784,6 +781,32 @@ class AgentLoader:
             is_stub=True,
             load_error=reason,
         )
+
+    def _post_degraded_escalation(self, message: str) -> None:
+        """Record one operator escalation per role/day through the usual auth path."""
+        day = datetime.now(timezone.utc).date().isoformat()
+        body = {
+            "entities": [{
+                "entity_type": "escalation",
+                "title": f"agent_loader degraded_load: {self.agent_name}",
+                "body": message,
+                "severity": "error",
+                "source_agent": f"{self.agent_name}@ateles-swarm",
+                "status": "open",
+                "tags": ["agent_loader", "degraded_load", self.agent_name],
+            }],
+            "idempotency_key": f"agent-loader-degraded-{self.agent_name}-{day}",
+            "observation_source": "workflow_state",
+        }
+        try:
+            result = self._neotoma("POST", f"{NEOTOMA_BASE_URL}/store", body)
+            if not isinstance(result, dict) or not result.get("success"):
+                raise RuntimeError("escalation store did not confirm success")
+        except Exception as exc:  # best effort, never widen the fallback grant
+            log.error(
+                "[%s] degraded_load escalation store failed: %s",
+                self.agent_name, type(exc).__name__,
+            )
 
     def load_active_policies(self) -> list[dict]:
         """

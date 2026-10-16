@@ -31,6 +31,7 @@ import os
 
 # Seconds. See the module docstring for how this number was chosen.
 DEFAULT_NEOTOMA_TIMEOUT = 45.0
+DEFAULT_NEOTOMA_TIMEOUT_SECONDS = DEFAULT_NEOTOMA_TIMEOUT
 
 _ENV_VAR = "ATELES_NEOTOMA_TIMEOUT"
 
@@ -53,3 +54,18 @@ def neotoma_timeout(default: float = DEFAULT_NEOTOMA_TIMEOUT) -> float:
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{_ENV_VAR} must be a finite positive number")
     return value
+
+
+def neotoma_timeout_seconds() -> float:
+    """Canonical timeout accessor for new callers."""
+    return neotoma_timeout()
+
+
+def validate_neotoma_timeout_env() -> None:
+    """Fail daemon startup when an explicitly configured timeout is invalid."""
+    try:
+        neotoma_timeout_seconds()
+    except ValueError as exc:
+        raise SystemExit(
+            f"Invalid {_ENV_VAR}={os.environ.get(_ENV_VAR)!r}: {exc}"
+        ) from exc
