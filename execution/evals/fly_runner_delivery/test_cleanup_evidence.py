@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.parametrize("scenario", ["delivery_pushes_and_opens_a_pull_request",
+                                      "refused_import_pushes_nothing"])
 @pytest.mark.parametrize("case", ["residual", "overflow", "root_link", "dangling_link", "root_file",
                                   "root_lstat", "listdir", "entry_lstat", "walk"])
-def test_actual_eval_cleanup_failure_keeps_only_bounded_evidence(tmp_path, case):
+def test_actual_eval_cleanup_failure_keeps_only_bounded_evidence(tmp_path, case, scenario):
     here = Path(__file__).parent
     script = tmp_path / "test_eval_output.py"
     evidence = tmp_path / "evidence.json"
@@ -71,21 +73,27 @@ def test_actual_eval(tmp_path, monkeypatch):
         trace = run_scenario(*args, **kwargs)
         branch = "refs/heads/" + target.runner.BRANCH
         assert trace.rc == 0
-        assert trace.record["delivery_status"] == "opened"
-        assert trace.record["pr_number"] == 7
-        assert trace.remote_after[branch] == trace.record["delivery_commit"]
-        assert trace.remote_after[branch] != trace.remote_before.get(branch)
-        assert [call["method"] for call in trace.api_calls] == ["GET", "POST"]
+        if SCENARIO == "delivery_pushes_and_opens_a_pull_request":
+            assert trace.record["delivery_status"] == "opened"
+            assert trace.record["pr_number"] == 7
+            assert trace.record["pr_url"] == target.runner._pr(7)["html_url"]
+            assert trace.remote_after[branch] == trace.record["delivery_commit"]
+            assert trace.remote_after[branch] != trace.remote_before.get(branch)
+            assert [call["method"] for call in trace.api_calls] == ["GET", "POST"]
+        else:
+            assert trace.record["delivery_status"] == "not_delivered"
+            assert trace.remote_after.get(branch) == trace.remote_before.get(branch)
+            assert trace.api_calls == []
         Path(EVIDENCE).write_text(json.dumps(trace.cleanup))
         return trace
     monkeypatch.setattr(target.runner, "run_scenario", capture)
-    target.test_scenario(target._by_id("refused_import_pushes_nothing"), tmp_path, monkeypatch)
+    target.test_scenario(target._by_id(SCENARIO), tmp_path, monkeypatch)
 '''.replace("HERE", repr(str(here))).replace("CASE", repr(case))
-       .replace("EVIDENCE", repr(str(evidence))))
+       .replace("EVIDENCE", repr(str(evidence))).replace("SCENARIO", repr(scenario)))
     runtime = tmp_path / "runtime"
     done = subprocess.run([sys.executable, "-m", "pytest", str(script), "-vv", "--tb=short",
                            "--no-header", "--basetemp", str(runtime), "-p", "no:cacheprovider"],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=60, check=False)
     output = done.stdout + done.stderr
     assert done.returncode == 1 and "1 failed" in output
     assert "the work directory was left behind" in output
