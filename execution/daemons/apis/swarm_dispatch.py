@@ -5207,6 +5207,21 @@ class SwarmDispatcher:
         finally:
             await cleanup_pr_worktree(worktree)
 
+        if result.degraded_load:
+            # A restricted diagnostic child can exit zero, but its text is
+            # not a recovered exact-head lens verdict. Keep it outside both
+            # the durable review record and GitHub's lens comment.
+            await self._handle_panel_session_limit(
+                trigger, None, lens.agent, "", "",
+                reason=(
+                    f"role definition {result.load_error or 'unavailable'}; "
+                    f"recovered {lens_name} review unverified"
+                ),
+                retry_scheduled=True,
+            )
+            raise RuntimeError(
+                f"lens '{lens_name}' degraded role definition; review incomplete"
+            )
         if not result.ok:
             raise RuntimeError(
                 f"lens '{lens_name}' run failed: "
@@ -5929,7 +5944,12 @@ class SwarmDispatcher:
                 )
                 self.notifier.send(
                     f"{ref}: {section.agent} spec section incomplete after "
-                    "role-definition load failure; prior verified spec preserved",
+                    "role-definition load failure; "
+                    + (
+                        "prior verified section preserved"
+                        if (state.sections or {}).get(section.field)
+                        else "no prior verified section exists"
+                    ),
                     priority=Priority.BLOCKER,
                     handler=DAEMON_NAME,
                 )
@@ -7003,7 +7023,10 @@ class SwarmDispatcher:
             # token or retry it into the legacy missing-verdict fail-open path.
             await self._handle_panel_session_limit(
                 trigger, parent, "lanius", "", "",
-                reason="role definition unavailable; gate inheritance unverified",
+                reason=(
+                    f"role definition {lanius.load_error or 'unavailable'}; "
+                    "gate inheritance unverified"
+                ),
             )
             return
         verdict = (
@@ -7608,7 +7631,10 @@ class SwarmDispatcher:
             # panel verdict, even when its restricted child exits successfully.
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", "",
-                reason="role definition unavailable; aggregation unverified",
+                reason=(
+                    f"role definition {vanellus_result.load_error or 'unavailable'}; "
+                    "aggregation unverified"
+                ),
             )
             return
 
@@ -14577,6 +14603,7 @@ class SwarmDispatcher:
         reason: str = "usage limit",
         completed_lenses: tuple[str, ...] = (),
         failed_lenses: tuple[tuple[str, str], ...] = (),
+        retry_scheduled: bool = False,
     ) -> None:
         """Surface an incomplete review without fabricating a verdict.
 
@@ -14645,6 +14672,19 @@ class SwarmDispatcher:
                 f"to return (scheduled ~`{iso}`); no operator action is required."
             )
             marker = self._REVIEW_DEFERRED_MARKER.format(iso=iso) + "\n"
+        elif reason.startswith("role definition "):
+            status_copy = (
+                f"Check the role-definition load diagnostic for `{agent}` and "
+                "Neotoma availability. Retry after healthy role-definition reload "
+                "with a new PR push (synchronize event) or by reopening the PR. "
+                + (
+                    "The bounded missing-lens sweep may retry this review; "
+                    "it cannot publish until the role definition is healthy."
+                    if retry_scheduled else
+                    "No retry is scheduled for this failure."
+                )
+            )
+            marker = ""
         else:
             status_copy = (
                 "Operator attention is required before a current-head review is "

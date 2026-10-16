@@ -2672,7 +2672,7 @@ async def _run_skill_once(
         warn_msg = (
             f"⚠ DEGRADED role {_role!r}: definition {load_error}; "
             f"for task {task_entity_id or '(unknown)'!r}. "
-            "Dispatching with minimal read-only tools; output is unverified. "
+            "Provider outcome pending; no role output established. "
             "Check Neotoma availability and ATELES_NEOTOMA_TIMEOUT."
         )
         log.warning(f"[apis] {warn_msg}")
@@ -2691,14 +2691,22 @@ async def _run_skill_once(
             _should_notify = shared_ledger().note_undefined_role(str(_role))
         except Exception as exc:  # noqa: BLE001 — dedup must never block the warning
             log.debug(f"[apis] undefined-role dedup unavailable: {exc}")
-        if notifier is not None and _should_notify:
+        def _report_degraded_outcome(outcome: str, *, output_exists: bool) -> None:
+            message = (
+                f"Role {_role!r} definition {load_error}; {provider} {skill} "
+                f"for task {task_entity_id or '(unknown)'}: {outcome}; "
+                f"output exists: {'yes' if output_exists else 'no'}. "
+                "Check Neotoma availability; retry after a healthy "
+                "role-definition reload."
+            )
+            log.warning("[apis] %s", message)
+            if notifier is None or not _should_notify:
+                return
             try:
                 from lib.notify import Priority
 
                 notifier.send(
-                    f"Role {_role!r} has no agent_definition — every task routed "
-                    "to it runs DEGRADED with minimal read-only tools; "
-                    "check Neotoma and ATELES_NEOTOMA_TIMEOUT. Reported once per role.",
+                    message,
                     priority=Priority.BLOCKER,
                     handler="apis",
                 )
@@ -2733,6 +2741,7 @@ async def _run_skill_once(
                 "and this adapter cannot bind the fallback tool floor"
             )
             log.error("[apis] %s", msg)
+            _report_degraded_outcome("refused before launch; no role output", output_exists=False)
             return SkillResult(
                 skill, False, None, "", "", error=msg, provider=provider,
                 degraded_load=True, load_error=load_error,
@@ -2742,6 +2751,7 @@ async def _run_skill_once(
                 f"{provider} launch failed: {DEGRADED_TOOL_FLOOR_UNAVAILABLE}: "
                 "Fly degraded child authority is not bound"
             )
+            _report_degraded_outcome("Fly refused before launch; no role output", output_exists=False)
             return SkillResult(
                 skill, False, None, "", "", error=msg, provider=provider,
                 degraded_load=True, load_error=load_error,
@@ -3620,6 +3630,10 @@ async def _run_skill_once(
             remote_run_id=_fly_job.run_id if _fly_job is not None else "",
             remote_machine_state=_fly_job.remote_state if _fly_job is not None else "",
         )
+        if degraded:
+            _report_degraded_outcome(
+                "restricted child ran", output_exists=bool(result.stdout or result.stderr)
+            )
         if _fly_job is not None and _fly_job.remote_state == "unconfirmed":
             log.warning(
                 f"[apis] {skill}: remote run {_fly_job.run_id} finished and its result was "

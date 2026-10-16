@@ -345,6 +345,7 @@ async def test_a_redispatched_verdict_is_persisted_and_posted(monkeypatch):
 
     class _Ok:
         ok = True
+        degraded_load = False
         stdout = "**APPROVE**"
         error = None
         returncode = 0
@@ -375,6 +376,45 @@ async def test_a_redispatched_verdict_is_persisted_and_posted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_degraded_redispatch_cannot_publish_recovered_review(monkeypatch):
+    """Zero-exit diagnostic text never fills a missing exact-head lens."""
+    d = _dispatcher()
+    effects = []
+
+    async def degraded(*args, **kwargs):
+        return sd.SkillResult(
+            "falco", True, 0, "**SIGNED_OFF**", "",
+            degraded_load=True, load_error="timeout",
+        )
+
+    async def record_persist(*args, **kwargs):
+        effects.append("persist")
+
+    async def record_post(*args, **kwargs):
+        effects.append("post")
+
+    async def record_incomplete(*args, **kwargs):
+        effects.append(("incomplete", kwargs.get("reason"), kwargs.get("retry_scheduled")))
+
+    async def no_files(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(sd, "run_skill", degraded)
+    monkeypatch.setattr(d, "_changed_files", no_files)
+    monkeypatch.setattr(d, "_review_signals", no_files)
+    monkeypatch.setattr(d, "_persist_panel_reviews", record_persist)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", record_post)
+    monkeypatch.setattr(d, "_handle_panel_session_limit", record_incomplete)
+
+    with pytest.raises(RuntimeError, match="degraded role definition"):
+        await d._redispatch_missing_lens("o/r", _pr(), "security")
+
+    assert effects == [
+        ("incomplete", "role definition timeout; recovered security review unverified", True)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_zero_headroom_lens_preference_uses_remaining_provider(
     monkeypatch, tmp_path
 ):
@@ -396,6 +436,7 @@ async def test_zero_headroom_lens_preference_uses_remaining_provider(
 
     class _Ok:
         ok = True
+        degraded_load = False
         stdout = "**APPROVE**"
         error = None
         returncode = 0

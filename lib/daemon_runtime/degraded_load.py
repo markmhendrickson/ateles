@@ -52,9 +52,9 @@ def format_escalation_message(role: str, reason: str, timeout_seconds: float) ->
         hint = "the definition or Neotoma response is unavailable"
     return (
         f"[ESCALATION] agent_loader: role {role!r} loaded DEGRADED — {cause}\n"
-        "  → dispatched with a minimal read-only allowlist; no write or command tools\n"
+        "  → dispatch outcome pending provider selection; no role output established\n"
         f"  → likely cause: {hint}\n"
         f"  → fix: check Neotoma availability or raise ATELES_NEOTOMA_TIMEOUT "
         f"(current: {timeout_seconds:g}s) after checking latency\n"
-        "  → this role's output is unverified until it reloads successfully"
+        "  → any later restricted output is unverified until the role reloads successfully"
     )

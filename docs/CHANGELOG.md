@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Security: on a Neotoma definition timeout, agents now dispatch with a
-  minimal read-only allowlist instead of `*` when the harness can bind that
-  floor. A harness that cannot bind it refuses the degraded child. Degraded
-  output cannot sign review gates.
+- Security: on a Neotoma definition timeout, a local Claude child may run
+  with a restricted tool floor instead of `*`; Codex, Cursor, and Fly
+  degraded children refuse before launch. Notices distinguish no output
+  from a restricted child run. Degraded output cannot sign review gates.

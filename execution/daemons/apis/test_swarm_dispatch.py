@@ -7705,7 +7705,10 @@ def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch, degraded_loa
     assert head_sha  # a non-empty content-derived surrogate, never blank
 
 
-def test_degraded_spec_section_keeps_verified_state_and_stops_pipeline(monkeypatch):
+@pytest.mark.parametrize("prior_section", ["", "verified prior PM"])
+def test_degraded_spec_section_keeps_verified_state_and_stops_pipeline(
+    monkeypatch, prior_section
+):
     calls = []
 
     async def fake_run_skill(skill, prompt, **_kwargs):
@@ -7721,8 +7724,9 @@ def test_degraded_spec_section_keeps_verified_state_and_stops_pipeline(monkeypat
     )
     prior_state = SpecState(
         repo="owner/repo", issue_number=100, title="A new feature",
-        entity_id="ent_fake", sections={"pm_section": "verified prior PM"},
-        sequence_state=["pm"],
+        entity_id="ent_fake",
+        sections={"pm_section": prior_section} if prior_section else {},
+        sequence_state=["pm"] if prior_section else [],
     )
 
     async def load_prior(self, repo, issue_number, title):
@@ -7745,13 +7749,18 @@ def test_degraded_spec_section_keeps_verified_state_and_stops_pipeline(monkeypat
     asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
     store = _FakeSpecStore.instances[-1]
     assert store.upserts == []
-    assert prior_state.sections == {"pm_section": "verified prior PM"}
-    assert prior_state.sequence_state == ["pm"]
+    assert prior_state.sections == ({"pm_section": prior_section} if prior_section else {})
+    assert prior_state.sequence_state == (["pm"] if prior_section else [])
     assert not store.mirrored
     assert not mirrors
     assert [skill for skill, _ in calls] == ["lanius", "pavo"]
     assert not handoffs
     assert any("pavo" in message.lower() for message in notifier.sent)
+    assert any(
+        ("prior verified section preserved" if prior_section else
+         "no prior verified section exists") in message.lower()
+        for message in notifier.sent
+    )
 
 
 def test_pm_section_run_skill_call_carries_owns_pending_gate(monkeypatch):
@@ -9756,6 +9765,50 @@ def test_non_capacity_review_failure_requires_action(monkeypatch):
     assert "automatically after the limit resets" not in comment_bodies[0].lower()
     assert d._REVIEW_DEFERRED_RE.search(comment_bodies[0]) is None
     assert "operator attention is required" in comment_bodies[0].lower()
+
+
+@pytest.mark.parametrize("agent,reason,retry_scheduled", [
+    ("lanius", "role definition timeout; gate inheritance unverified", False),
+    ("vanellus", "role definition unavailable; aggregation unverified", False),
+    ("falco", "role definition timeout; recovered security review unverified", True),
+])
+def test_degraded_review_notice_names_recovery_and_manual_retry(
+    monkeypatch, agent, reason, retry_scheduled
+):
+    comment_bodies = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs): return _FakeListResp([])
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(
+        notifier, DispatchConfig(neotoma_token="", github_token="x")
+    )
+    asyncio.run(dispatcher._handle_panel_session_limit(
+        _trigger(number=264, repository="owner/repo"), None, agent,
+        "", "", reason=reason, retry_scheduled=retry_scheduled,
+    ))
+
+    assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    assert len(comment_bodies) == 1
+    body = comment_bodies[0]
+    assert agent in body and reason in body
+    assert "retry after healthy role-definition reload" in body.lower()
+    assert "synchronize" in body.lower() and "reopen" in body.lower()
+    if retry_scheduled:
+        assert "bounded missing-lens sweep may retry" in body.lower()
+        assert "no retry is scheduled" not in body.lower()
+    else:
+        assert "no retry is scheduled" in body.lower()
+    assert dispatcher._REVIEW_DEFERRED_RE.search(body) is None
 
 
 def test_provider_capacity_failure_auto_resumes_with_partial_panel_detail(monkeypatch):

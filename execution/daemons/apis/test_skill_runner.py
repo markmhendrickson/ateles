@@ -33,6 +33,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 from lib.daemon_runtime import AgentDefinition  # noqa: E402
 from lib.daemon_runtime.agent_loader import STUB_TOOL_ALLOWLIST  # noqa: E402
+from lib.daemon_runtime.degraded_load import format_escalation_message  # noqa: E402
 
 # Import module-level objects so we can patch them in-place
 import skill_runner  # noqa: E402
@@ -245,6 +246,12 @@ class TestRunSkill:
 
     def _run(self, coro):
         return asyncio.run(coro)
+
+    def test_definition_load_alert_does_not_claim_a_child_ran(self) -> None:
+        message = format_escalation_message("gryllus", "timed out", 45)
+        assert "dispatch outcome pending provider selection" in message
+        assert "no role output established" in message
+        assert "dispatched with" not in message
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -471,6 +478,7 @@ class TestRunSkill:
         captured: list[str] = []
         captured_env: dict[str, str] = {}
         captured_mcp: dict = {}
+        notifier = MagicMock()
 
         async def fake_exec(*cmd, **_kwargs):
             captured.extend(cmd)
@@ -490,8 +498,13 @@ class TestRunSkill:
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill content"),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("unroutable_ledger.shared_ledger") as ledger,
         ):
-            result = self._run(skill_runner.run_skill("gryllus", "work", role="gryllus"))
+            ledger.return_value.note_undefined_role.return_value = True
+            result = self._run(skill_runner.run_skill(
+                "gryllus", "work", role="gryllus", task_entity_id="ent_test",
+                notifier=notifier,
+            ))
 
         assert result.ok
         assert result.degraded_load
@@ -508,6 +521,9 @@ class TestRunSkill:
         assert "GITHUB_TOKEN" not in captured_env
         assert "NEOTOMA_BEARER_TOKEN" not in captured_env
         assert "FUTURE_SERVICE_CREDENTIAL" not in captured_env
+        notices = [str(call.args[0]) for call in notifier.send.call_args_list]
+        assert any("restricted child ran" in msg and "output exists: yes" in msg
+                   and "gryllus" in msg and "ent_test" in msg for msg in notices)
 
     @pytest.mark.parametrize("provider", ["codex", "cursor"])
     @patch("skill_runner._write_harness_event")
@@ -519,19 +535,55 @@ class TestRunSkill:
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", provider)
         monkeypatch.setenv("APIS_HARNESS_HEADROOM", f'{{"{provider}": 1.0}}')
         harness_router.reset_state()
+        notifier = MagicMock()
         with (
             patch.object(skill_runner, f"{provider.upper()}_BIN", f"/usr/bin/{provider}"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill content"),
             patch("asyncio.create_subprocess_exec") as spawn,
+            patch("unroutable_ledger.shared_ledger") as ledger,
         ):
+            ledger.return_value.note_undefined_role.return_value = True
             result = self._run(
-                skill_runner.run_skill("gryllus", "work", role="gryllus", provider=provider)
+                skill_runner.run_skill(
+                    "gryllus", "work", role="gryllus", provider=provider,
+                    task_entity_id="ent_test", notifier=notifier,
+                )
             )
         assert not result.ok
         assert result.degraded_load
         assert "fallback tool floor" in result.error
         spawn.assert_not_called()
+        notices = [str(call.args[0]) for call in notifier.send.call_args_list]
+        assert any("refused before launch" in msg and "no role output" in msg
+                   and provider in msg and "ent_test" in msg for msg in notices)
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_fly_child_reports_refusal_before_launch(
+        self, MockLoader, _event, monkeypatch
+    ) -> None:
+        MockLoader.return_value.load.return_value = _stub_def()
+        notifier = MagicMock()
+        monkeypatch.setattr(skill_runner.fly_runner, "wants_fly", lambda *a: True)
+        with (
+            patch.object(skill_runner, "CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec") as spawn,
+            patch("unroutable_ledger.shared_ledger") as ledger,
+        ):
+            ledger.return_value.note_undefined_role.return_value = True
+            result = self._run(skill_runner.run_skill(
+                "gryllus", "work", role="gryllus", provider="claude",
+                runner="fly", task_entity_id="ent_test", notifier=notifier,
+            ))
+        assert not result.ok and result.degraded_load
+        spawn.assert_not_called()
+        notices = [str(call.args[0]) for call in notifier.send.call_args_list]
+        assert any("Fly" in msg and "refused before launch" in msg
+                   and "no role output" in msg and "ent_test" in msg
+                   for msg in notices)
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
