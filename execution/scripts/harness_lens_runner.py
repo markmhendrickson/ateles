@@ -1978,6 +1978,7 @@ def dry_run_report(
     target: LensTarget,
     *,
     provider: str,
+    admission: harness_router.ProviderAdmission,
     sandbox: HarnessSandbox,
     task_text: str,
     worktree_path: Path,
@@ -2010,6 +2011,8 @@ def dry_run_report(
             "--skip-git-repo-check",
             "--color",
             "never",
+            "--model",
+            admission.resolved_model,
             "--cd",
             str(worktree_path),
             "-",
@@ -2023,12 +2026,21 @@ def dry_run_report(
             "--approve-mcps",
             "--output-format",
             "text",
+            "--model",
+            admission.resolved_model,
             "--workspace",
             str(worktree_path),
             "<prompt omitted — see prompt_chars>",
         ]
     else:
-        example_cmd = ["claude", "--print", "--append-system-prompt", "<system prompt>"]
+        example_cmd = [
+            "claude",
+            "--print",
+            "--model",
+            admission.resolved_model,
+            "--append-system-prompt",
+            "<system prompt>",
+        ]
 
     # command_wrapper is prepended to the REAL argv by skill_runner
     # (see _run_skill_once's command_wrapper param) — shown here too so the
@@ -2042,6 +2054,10 @@ def dry_run_report(
         "ok": refusal is None,
         "dry_run": True,
         "provider": provider,
+        "provider_admission": admission.as_dict(),
+        "action_class": admission.action_class,
+        "resolved_tier": admission.resolved_tier,
+        "resolved_model": admission.resolved_model,
         "repo": target.repo,
         "pr": target.pr,
         "head": target.head,
@@ -2566,13 +2582,32 @@ async def run_one(
     brief_path: Path,
     timeout: int | None,
 ) -> dict:
-    """Run the lens once on one provider. Returns a JSON-serializable report.
-
-    Raises HeadroomExhausted before anything else (no worktree, no dispatch)
-    when the provider's configured headroom is exactly 0 — the operator-reset
-    gate named in the task.
-    """
-    check_headroom(provider)
+    """Run the lens once on one provider. Returns a JSON-serializable report."""
+    action_class = f"lens_review:{target.lens.strip().lower()}"
+    admission = harness_router.resolve_provider_admission(
+        provider,
+        action_class=action_class,
+        required_policy=True,
+    )
+    if not admission.admitted:
+        # Preserve the existing operator-reset exception contract for exact
+        # zero headroom, but derive it only after the shared resolver refused.
+        value, source = headroom_resolution().get(
+            provider, (1.0, harness_router.HEADROOM_SOURCE_DEFAULT)
+        )
+        if value <= 0.0 and admission.reason_code in {
+            "policy_refusal",
+            "provider_limit",
+        }:
+            raise HeadroomExhausted(_headroom_refusal(provider, value, source))
+        return {
+            "ok": False,
+            "provider": provider,
+            "reason": admission.reason,
+            "refusal_reason": admission.reason,
+            "provider_admission": admission.as_dict(),
+            "posted": False,
+        }
 
     worktree_path = (
         scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
@@ -2609,6 +2644,7 @@ async def run_one(
             report = dry_run_report(
                 target,
                 provider=provider,
+                admission=admission,
                 sandbox=sandbox,
                 task_text=task_text,
                 worktree_path=worktree.path,
@@ -2679,6 +2715,8 @@ async def run_one(
                 command_wrapper=sandbox.command_wrapper,
                 codex_outer_sandboxed=sandbox.codex_outer_sandbox_probed,
                 local_review=True,
+                action_class=action_class,
+                provider_admission=admission,
             )
         except Exception as dispatch_error:
             stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
@@ -2768,6 +2806,7 @@ async def run_one(
         report = {
             "ok": check.ok,
             "provider": provider,
+            "provider_admission": admission.as_dict(),
             "lens": target.lens,
             "agent": target.agent,
             "lens_verdict": check.lens_verdict,

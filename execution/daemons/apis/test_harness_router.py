@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import sys
 import time
 from pathlib import Path
@@ -19,13 +20,18 @@ import harness_router  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _reset_router(monkeypatch, tmp_path):
-    monkeypatch.delenv("APIS_HARNESS_PROVIDERS", raising=False)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude,codex,cursor")
+    monkeypatch.setenv(
+        "APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "missing-apis.plist")
+    )
     monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
     monkeypatch.delenv("APIS_HARNESS_MIN_HEADROOM", raising=False)
     monkeypatch.delenv("APIS_HARNESS_COOLDOWN_SECONDS", raising=False)
     monkeypatch.setenv(
         "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing-headroom.json")
     )
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "missing-usage.json"))
     harness_router.reset_state()
     yield
     harness_router.reset_state()
@@ -37,6 +43,20 @@ def _available() -> dict[str, str]:
         "codex": "/bin/codex",
         "cursor": "/bin/cursor-agent",
     }
+
+
+def _strict_model_policy(monkeypatch, tmp_path, *, model: str = "terra-review") -> None:
+    action_policy = tmp_path / "action-policy.json"
+    action_policy.write_text(json.dumps({"lens_review:qa": "mid"}), encoding="utf-8")
+    vendor_binding = tmp_path / "vendor-binding.json"
+    vendor_binding.write_text(
+        json.dumps({"codex": {"mid": model}, "claude": {"mid": "sonnet-review"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(action_policy))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(vendor_binding))
+    monkeypatch.delenv("APIS_ACTION_POLICY", raising=False)
+    monkeypatch.delenv("APIS_VENDOR_BINDING", raising=False)
 
 
 def test_equal_headroom_round_robins_across_three_providers() -> None:
@@ -122,6 +142,230 @@ def test_operator_order_is_respected_and_deduplicated(monkeypatch) -> None:
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,claude,cursor,unknown")
     assert harness_router.configured_providers() == ["cursor", "claude"]
     assert harness_router.provider_candidates(_available(), now=100.0)[0] == "cursor"
+
+
+def test_provider_policy_allows_no_usage_gated_providers(monkeypatch) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "")
+
+    policy = harness_router.provider_policy(required=True)
+
+    assert policy.error == ""
+    assert policy.active_providers == ("codex", "cursor")
+    assert policy.usage_gated_providers == ()
+
+
+@pytest.mark.parametrize(
+    ("active", "gated", "expected"),
+    [
+        ("codex,,cursor", "claude", "empty provider name"),
+        ("codex,gemini", "claude", "unsupported providers"),
+        ("codex,cursor", "gemini", "unsupported providers"),
+        ("codex,codex", "claude", "duplicate provider names"),
+    ],
+)
+def test_strict_provider_policy_refuses_malformed_lists(
+    monkeypatch, tmp_path, active, gated, expected
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", active)
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", gated)
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert admission.admitted is False
+    assert admission.reason_code == "configuration_error"
+    assert "provider=codex" in admission.reason
+    assert "policy_source=process environment" in admission.reason
+    assert expected in admission.reason
+
+
+def test_strict_provider_policy_refuses_a_partial_environment(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.delenv("APIS_USAGE_GATED_PROVIDERS")
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert admission.reason_code == "configuration_error"
+    assert "partial" in admission.reason
+    assert "APIS_USAGE_GATED_PROVIDERS" in admission.reason
+
+
+def test_ungated_codex_above_weekly_pace_line_is_admitted_with_bound_qa_model(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    now = time.time()
+    harness_router.record_usage(
+        "codex",
+        [
+            {
+                "name": "weekly_all",
+                "used_percent": 80,
+                "resets_at": _iso(now + 6 * 86400),
+            }
+        ],
+        observed_at=now,
+    )
+
+    admission = harness_router.resolve_provider_admission(
+        "codex",
+        action_class="lens_review:qa",
+        now_wall=now,
+    )
+
+    assert admission.admitted is True
+    assert admission.reason_code == "admitted"
+    assert admission.resolved_tier == "mid"
+    assert admission.resolved_model == "terra-review"
+    assert admission.usage_gated_providers == ("claude",)
+
+
+def test_launchd_standalone_and_daemon_environment_resolve_identical_admission(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    policy_path = tmp_path / "apis.plist"
+    with policy_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "EnvironmentVariables": {
+                    "APIS_HARNESS_PROVIDERS": "codex,cursor",
+                    "APIS_USAGE_GATED_PROVIDERS": "claude",
+                }
+            },
+            handle,
+        )
+    monkeypatch.delenv("APIS_HARNESS_PROVIDERS")
+    monkeypatch.delenv("APIS_USAGE_GATED_PROVIDERS")
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(policy_path))
+
+    standalone = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    daemon = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert standalone.policy_source.startswith(f"launchd plist {policy_path};")
+    assert daemon.policy_source.startswith("process environment;")
+    for field in (
+        "active_providers",
+        "usage_gated_providers",
+        "requested_provider",
+        "admitted",
+        "reason_code",
+        "action_class",
+        "resolved_tier",
+        "tier_source",
+        "resolved_model",
+        "escalation_reasons",
+    ):
+        assert getattr(standalone, field) == getattr(daemon, field)
+
+
+def test_usage_gated_claude_above_weekly_pace_line_is_distinctly_refused(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    now = time.time()
+    harness_router.record_usage(
+        "claude",
+        [
+            {
+                "name": "weekly_all",
+                "used_percent": 80,
+                "resets_at": _iso(now + 6 * 86400),
+            }
+        ],
+        observed_at=now,
+    )
+
+    admission = harness_router.resolve_provider_admission(
+        "claude",
+        action_class="lens_review:qa",
+        now_wall=now,
+    )
+
+    assert admission.admitted is False
+    assert admission.reason_code == "usage_policy_refusal"
+    assert admission.resolved_model == "sonnet-review"
+
+
+def test_actual_provider_limit_is_not_reported_as_configuration_failure(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    now = time.time()
+    harness_router.record_cooling(
+        "codex",
+        now + 3600,
+        reason="provider reported plan limit",
+        observed_at=now,
+    )
+
+    admission = harness_router.resolve_provider_admission(
+        "codex",
+        action_class="lens_review:qa",
+        now_wall=now,
+    )
+
+    assert admission.admitted is False
+    assert admission.reason_code == "provider_limit"
+    assert admission.resolved_model == "terra-review"
+    assert "reported a limit" in admission.reason
+
+
+def test_missing_vendor_binding_fails_before_ambient_model_fallback(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    Path(os.environ["APIS_VENDOR_BINDING_FILE"]).unlink()
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert admission.reason_code == "configuration_error"
+    assert admission.resolved_tier == "mid"
+    assert admission.resolved_model == ""
+    assert "required vendor binding" in admission.reason
+
+
+def test_reserved_automatic_model_is_refused_with_resolved_diagnostics(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path, model="fable-review")
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert admission.reason_code == "configuration_error"
+    assert admission.resolved_tier == "mid"
+    assert admission.resolved_model == "fable-review"
+    assert "reserved" in admission.reason
 
 
 def test_invalid_headroom_json_fails_open_to_equal_weights(monkeypatch) -> None:

@@ -27,6 +27,16 @@ import skill_runner  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolated_provider_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude,codex,cursor")
+    monkeypatch.setenv(
+        "APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "missing-apis.plist")
+    )
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "missing-usage.json"))
+
+
 @pytest.fixture
 def fake_repo(tmp_path, monkeypatch):
     """An ATELES_REPO whose .claude/skills holds two roles."""
@@ -143,6 +153,58 @@ def test_dispatch_forwards_action_class_and_model(monkeypatch) -> None:
     assert seen["model"] == "claude-opus-5-thinking-high"
 
 
+def test_lens_dispatch_resolves_the_same_strict_admission_before_run_skill(
+    monkeypatch, tmp_path
+) -> None:
+    """The daemon-facing dispatch entrypoint owns no parallel lens policy.
+
+    A pinned lens dispatch resolves the shared admission contract and hands the
+    exact provider/tier/model decision to run_skill.
+    """
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        json.dumps({"claude": 1.0, "codex": 1.0, "cursor": 1.0}),
+    )
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing-headroom.json")
+    )
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "missing-usage.json"))
+    action_policy = tmp_path / "action-policy.json"
+    action_policy.write_text('{"lens_review:qa": "mid"}', encoding="utf-8")
+    vendor_binding = tmp_path / "vendor-binding.json"
+    vendor_binding.write_text('{"codex": {"mid": "terra-review"}}', encoding="utf-8")
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(action_policy))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(vendor_binding))
+    seen = {}
+
+    async def _capture(skill, prompt, **kwargs):
+        seen.update(kwargs)
+        return SkillResult(skill, True, 0, "out", "", provider="codex")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "phoenicurus",
+            "review",
+            provider="codex",
+            action_class="lens_review:qa",
+        )
+    )
+
+    admission = seen["provider_admission"]
+    assert result.ok is True
+    assert admission.admitted is True
+    assert admission.policy_source.startswith("process environment;")
+    assert admission.active_providers == ("codex", "cursor")
+    assert admission.usage_gated_providers == ("claude",)
+    assert admission.requested_provider == "codex"
+    assert admission.resolved_tier == "mid"
+    assert admission.resolved_model == "terra-review"
+
+
 def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
     """A caller naming neither must leave run_skill's tiering inputs at their
     no-op defaults — exact prior CLI behaviour, no regression."""
@@ -207,10 +269,12 @@ def captured_codex_dispatches(fake_repo, monkeypatch):
     agent_def = _stub_def()
 
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"codex": 1.0}')
     monkeypatch.setenv(
         "APIS_HARNESS_HEADROOM_FILE", str(fake_repo / "missing-headroom.json")
     )
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(fake_repo / "missing-usage.json"))
     monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: agent_def)
     monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: agent_def)
     monkeypatch.setattr(skill_runner, "ATELES_REPO", fake_repo)
@@ -288,6 +352,32 @@ def test_cli_action_class_reaches_real_child_argv(
     cmd = captured_codex_dispatches[0]["cmd"]
     assert "--model" in cmd
     assert cmd[cmd.index("--model") + 1] == "gpt-5.6-sol-xhigh"
+
+
+def test_cli_qa_admission_pins_the_vendor_bound_model_on_the_real_child_argv(
+    captured_codex_dispatches, monkeypatch
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:qa": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "terra-review"}}')
+
+    rc = dispatch_role.main(
+        [
+            "--role",
+            "pavo",
+            "--task",
+            "review",
+            "--provider",
+            "codex",
+            "--action-class",
+            "lens_review:qa",
+        ]
+    )
+
+    assert rc == 0
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "terra-review"
 
 
 def test_cli_explicit_model_overrides_action_class(

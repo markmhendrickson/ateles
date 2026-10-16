@@ -78,12 +78,18 @@ import fcntl
 import json
 import math
 import os
+import plistlib
+import sys
 import tempfile
 import time
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import model_tiering
 
 FRONTIER_PROVIDERS = ("claude", "codex", "cursor")
 LOCAL_PROVIDERS = ("claude-local",)
@@ -94,15 +100,231 @@ _current_weights: dict[str, float] = {}
 _cooldown_until: dict[str, float] = {}
 
 
+@dataclass(frozen=True)
+class ProviderPolicy:
+    """The active provider-admission policy and where it was read from."""
+
+    active_providers: tuple[str, ...]
+    usage_gated_providers: tuple[str, ...]
+    source: str
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class ProviderAdmission:
+    """One provider's complete admission and model-resolution decision."""
+
+    policy_source: str
+    active_providers: tuple[str, ...]
+    usage_gated_providers: tuple[str, ...]
+    requested_provider: str
+    admitted: bool
+    reason_code: str
+    reason: str
+    action_class: str
+    resolved_tier: str = ""
+    tier_source: str = ""
+    resolved_model: str = ""
+    escalation_reasons: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "policy_source": self.policy_source,
+            "active_providers": list(self.active_providers),
+            "usage_gated_providers": list(self.usage_gated_providers),
+            "requested_provider": self.requested_provider,
+            "admitted": self.admitted,
+            "reason_code": self.reason_code,
+            "reason": self.reason,
+            "action_class": self.action_class,
+            "resolved_tier": self.resolved_tier,
+            "tier_source": self.tier_source,
+            "resolved_model": self.resolved_model,
+            "escalation_reasons": list(self.escalation_reasons),
+        }
+
+
+_PROVIDER_POLICY_PLIST_ENV = "APIS_PROVIDER_POLICY_PLIST"
+_DEFAULT_PROVIDER_POLICY_PLIST = (
+    Path.home() / "Library" / "LaunchAgents" / "com.ateles.apis.plist"
+)
+
+
+def _provider_csv(
+    raw: object, *, field: str, allow_empty: bool = False
+) -> tuple[tuple[str, ...], str]:
+    if not isinstance(raw, str):
+        return (), f"{field} is not a string"
+    if allow_empty and not raw.strip():
+        return (), ""
+    parts = [item.strip().lower() for item in raw.split(",")]
+    if any(not item for item in parts):
+        return (), f"{field} contains an empty provider name"
+    unknown = sorted({item for item in parts if item not in FRONTIER_PROVIDERS})
+    if unknown:
+        return (), f"{field} names unsupported providers: {', '.join(unknown)}"
+    if len(set(parts)) != len(parts):
+        return (), f"{field} contains duplicate provider names"
+    return tuple(parts), ""
+
+
+def _provider_csv_legacy(raw: object) -> tuple[str, ...]:
+    """Historical generic-router parsing: ignore unknowns and duplicates."""
+    if not isinstance(raw, str):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            item.strip().lower()
+            for item in raw.split(",")
+            if item.strip().lower() in FRONTIER_PROVIDERS
+        )
+    )
+
+
+def _policy_from_values(
+    active_raw: object,
+    gated_raw: object,
+    source: str,
+    *,
+    strict: bool = True,
+) -> ProviderPolicy:
+    if not strict:
+        return ProviderPolicy(
+            _provider_csv_legacy(active_raw),
+            _provider_csv_legacy(gated_raw),
+            source,
+        )
+    active, active_error = _provider_csv(active_raw, field="APIS_HARNESS_PROVIDERS")
+    gated, gated_error = _provider_csv(
+        gated_raw, field="APIS_USAGE_GATED_PROVIDERS", allow_empty=True
+    )
+    error = active_error or gated_error
+    if not error and not active:
+        error = "APIS_HARNESS_PROVIDERS resolves to no active provider"
+    return ProviderPolicy(active, gated, source, error)
+
+
+def _provider_policy_plist_path() -> Path | None:
+    explicit = os.environ.get(_PROVIDER_POLICY_PLIST_ENV)
+    if explicit is not None:
+        return Path(explicit).expanduser() if explicit.strip() else None
+    # Unit tests must never inherit the developer host's live launchd policy.
+    # Tests that exercise this source opt in through APIS_PROVIDER_POLICY_PLIST.
+    if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return None
+    return _DEFAULT_PROVIDER_POLICY_PLIST
+
+
+def provider_policy(*, required: bool = False) -> ProviderPolicy:
+    """Resolve provider activation and usage gating from one runtime policy.
+
+    A daemon process receives both values in its environment. A standalone
+    process does not inherit launchd's environment, so it reads the exact same
+    two values from the active daemon plist. The optional plist override makes
+    that source explicit on non-default installations and in tests.
+
+    ``required=True`` is the standalone/guarded posture: an absent, partial,
+    or malformed policy is returned as an error and callers refuse dispatch.
+    Legacy generic routing keeps its historical defaults only when no source
+    exists at all; an explicit malformed source never becomes a permissive
+    default.
+    """
+    active_present = "APIS_HARNESS_PROVIDERS" in os.environ
+    gated_present = "APIS_USAGE_GATED_PROVIDERS" in os.environ
+    if active_present or gated_present:
+        source = "process environment"
+        if not (active_present and gated_present):
+            missing = (
+                "APIS_USAGE_GATED_PROVIDERS"
+                if active_present
+                else "APIS_HARNESS_PROVIDERS"
+            )
+            if required:
+                return ProviderPolicy(
+                    (),
+                    (),
+                    source,
+                    f"runtime provider policy is partial: missing {missing}",
+                )
+            # Compatibility for generic router callers that historically set
+            # only APIS_HARNESS_PROVIDERS. Guarded entrypoints use
+            # required=True and reject this partial shape.
+            source = "legacy partial process environment"
+            return _policy_from_values(
+                os.environ.get(
+                    "APIS_HARNESS_PROVIDERS", ",".join(DEFAULT_PROVIDER_ORDER)
+                ),
+                os.environ.get(
+                    "APIS_USAGE_GATED_PROVIDERS", ",".join(DEFAULT_PROVIDER_ORDER)
+                ),
+                source,
+                strict=False,
+            )
+        return _policy_from_values(
+            os.environ["APIS_HARNESS_PROVIDERS"],
+            os.environ["APIS_USAGE_GATED_PROVIDERS"],
+            source,
+            strict=required,
+        )
+
+    path = _provider_policy_plist_path()
+    if path is not None and path.is_file():
+        source = f"launchd plist {path}"
+        try:
+            with path.open("rb") as handle:
+                parsed = plistlib.load(handle)
+            env = parsed.get("EnvironmentVariables")
+            if not isinstance(env, dict):
+                return ProviderPolicy(
+                    (), (), source, "launchd plist has no EnvironmentVariables map"
+                )
+            missing = [
+                key
+                for key in (
+                    "APIS_HARNESS_PROVIDERS",
+                    "APIS_USAGE_GATED_PROVIDERS",
+                )
+                if key not in env
+            ]
+            if missing:
+                return ProviderPolicy(
+                    (),
+                    (),
+                    source,
+                    "runtime provider policy is partial: missing " + ", ".join(missing),
+                )
+            return _policy_from_values(
+                env["APIS_HARNESS_PROVIDERS"],
+                env["APIS_USAGE_GATED_PROVIDERS"],
+                source,
+                strict=required,
+            )
+        except (OSError, plistlib.InvalidFileException, TypeError, ValueError) as exc:
+            return ProviderPolicy(
+                (),
+                (),
+                source,
+                f"runtime provider policy is unreadable: {type(exc).__name__}",
+            )
+
+    source = (
+        f"launchd plist {path}"
+        if path is not None
+        else "runtime provider policy (no source configured)"
+    )
+    if required:
+        return ProviderPolicy((), (), source, "runtime provider policy is missing")
+    return ProviderPolicy(
+        DEFAULT_PROVIDER_ORDER,
+        DEFAULT_PROVIDER_ORDER,
+        "legacy defaults (no runtime provider policy source)",
+    )
+
+
 def configured_providers() -> list[str]:
     """Return the de-duplicated, recognized frontier provider order."""
-    raw = os.environ.get("APIS_HARNESS_PROVIDERS", ",".join(DEFAULT_PROVIDER_ORDER))
-    ordered: list[str] = []
-    for item in raw.split(","):
-        provider = item.strip().lower()
-        if provider in FRONTIER_PROVIDERS and provider not in ordered:
-            ordered.append(provider)
-    return ordered
+    policy = provider_policy()
+    return [] if policy.error else list(policy.active_providers)
 
 
 def _headroom_path() -> Path:
@@ -916,13 +1138,8 @@ def usage_gate_enabled() -> bool:
 
 
 def usage_gated_providers() -> tuple[str, ...]:
-    raw = os.environ.get(
-        "APIS_USAGE_GATED_PROVIDERS", ",".join(configured_providers())
-    )
-    return tuple(
-        p for p in (item.strip().lower() for item in raw.split(","))
-        if p in FRONTIER_PROVIDERS
-    )
+    policy = provider_policy()
+    return () if policy.error else policy.usage_gated_providers
 
 
 def usage_stale_seconds() -> float:
@@ -1226,6 +1443,205 @@ def provider_exclusion_reason(
         moment=time.monotonic() if now is None else now,
         moment_wall=now_wall,
         fly_bound=fly_bound,
+    )
+
+
+def resolve_provider_admission(
+    provider: str,
+    *,
+    action_class: str,
+    signals: "model_tiering.EscalationSignals | None" = None,
+    required_policy: bool = True,
+    now: float | None = None,
+    now_wall: float | None = None,
+) -> ProviderAdmission:
+    """Resolve strict provider admission and model selection in one result.
+
+    The standalone lens runner passes this result through ``dispatch_role`` to
+    ``skill_runner``. Daemon routing reads the same ``provider_policy`` through
+    ``configured_providers`` and ``usage_gated_providers``. A configuration
+    refusal is therefore distinct from a provider-reported cooldown/exhaustion,
+    and a successful result carries the exact tier/model that the child must
+    launch with.
+    """
+    import model_tiering  # Local import avoids widening harness_router's base deps.
+
+    normalized = provider.strip().lower()
+    policy = provider_policy(required=required_policy)
+    policy_source = (
+        f"{policy.source}; action_policy={model_tiering.action_policy_source()}; "
+        f"vendor_binding={model_tiering.vendor_binding_source()}"
+    )
+
+    def decision(
+        admitted: bool,
+        code: str,
+        reason: str,
+        *,
+        tier: str = "",
+        tier_source: str = "",
+        model: str = "",
+        escalation_reasons: tuple[str, ...] = (),
+    ) -> ProviderAdmission:
+        return ProviderAdmission(
+            policy_source=policy_source,
+            active_providers=policy.active_providers,
+            usage_gated_providers=policy.usage_gated_providers,
+            requested_provider=normalized,
+            admitted=admitted,
+            reason_code=code,
+            reason=reason,
+            action_class=action_class,
+            resolved_tier=tier,
+            tier_source=tier_source,
+            resolved_model=model,
+            escalation_reasons=escalation_reasons,
+        )
+
+    if policy.error:
+        return decision(
+            False,
+            "configuration_error",
+            f"{policy.error}; provider={normalized}; policy_source={policy.source}",
+        )
+    if normalized not in FRONTIER_PROVIDERS:
+        return decision(
+            False,
+            "configuration_error",
+            f"unsupported provider {normalized!r}; policy_source={policy.source}",
+        )
+    if normalized not in policy.active_providers:
+        return decision(
+            False,
+            "provider_inactive",
+            f"provider {normalized!r} is not active in {policy.source}",
+        )
+
+    action_policy = model_tiering.configured_action_policy()
+    if action_class not in action_policy:
+        return decision(
+            False,
+            "configuration_error",
+            f"required action class {action_class!r} is absent or malformed in "
+            f"{model_tiering.action_policy_source()}; provider={normalized}",
+        )
+    resolved_tier = model_tiering.resolve_tier(
+        action_class, policy=action_policy, signals=signals
+    )
+    binding = model_tiering.configured_vendor_binding()
+    if not binding:
+        return decision(
+            False,
+            "configuration_error",
+            f"required vendor binding is absent or malformed in "
+            f"{model_tiering.vendor_binding_source()}; provider={normalized}; "
+            f"tier={resolved_tier.tier}",
+            tier=resolved_tier.tier,
+            tier_source=resolved_tier.source,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
+    try:
+        resolved_model = model_tiering.model_for_tier(
+            normalized, resolved_tier.tier, binding=binding
+        )
+    except model_tiering.UnboundTierError as exc:
+        return decision(
+            False,
+            "configuration_error",
+            f"{exc}; policy_source={model_tiering.vendor_binding_source()}; "
+            f"provider={normalized}; tier={resolved_tier.tier}",
+            tier=resolved_tier.tier,
+            tier_source=resolved_tier.source,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
+    if not resolved_model:
+        return decision(
+            False,
+            "configuration_error",
+            f"vendor binding resolved no model; provider={normalized}; "
+            f"tier={resolved_tier.tier}; "
+            f"policy_source={model_tiering.vendor_binding_source()}",
+            tier=resolved_tier.tier,
+            tier_source=resolved_tier.source,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
+    reserved = model_tiering.automatic_model_refusal(resolved_model)
+    if reserved:
+        return decision(
+            False,
+            "configuration_error",
+            f"{reserved}; provider={normalized}; tier={resolved_tier.tier}; "
+            f"policy_source={model_tiering.vendor_binding_source()}",
+            tier=resolved_tier.tier,
+            tier_source=resolved_tier.source,
+            model=resolved_model,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
+
+    moment_wall = time.time() if now_wall is None else now_wall
+    if normalized in policy.usage_gated_providers:
+        gate = usage_gate(normalized, now_wall=moment_wall)
+        if gate is not None and not gate.allowed:
+            return decision(
+                False,
+                "usage_policy_refusal",
+                f"{gate.message}; provider={normalized}; policy_source={policy.source}",
+                tier=resolved_tier.tier,
+                tier_source=resolved_tier.source,
+                model=resolved_model,
+                escalation_reasons=resolved_tier.escalation_reasons,
+            )
+
+    cooling = persisted_cooling(normalized, now_wall=moment_wall)
+    if cooling is not None:
+        return decision(
+            False,
+            "provider_limit",
+            f"provider {normalized!r} reported a limit and is cooled until "
+            f"{render_wall(float(cooling['until']))} ({cooling['reason']})",
+            tier=resolved_tier.tier,
+            tier_source=resolved_tier.source,
+            model=resolved_model,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
+    moment = time.monotonic() if now is None else now
+    if _cooldown_until.get(normalized, 0.0) > moment:
+        return decision(
+            False,
+            "provider_limit",
+            f"provider {normalized!r} is cooling down after a provider refusal",
+            tier=resolved_tier.tier,
+            tier_source=resolved_tier.source,
+            model=resolved_model,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
+
+    headroom, headroom_source = headroom_resolution(now_wall=moment_wall)[normalized]
+    if headroom <= minimum_headroom():
+        code = (
+            "provider_limit"
+            if headroom_source == HEADROOM_SOURCE_LIVE_USAGE
+            else "policy_refusal"
+        )
+        return decision(
+            False,
+            code,
+            f"provider {normalized!r} has headroom={headroom:.3f} from "
+            f"{headroom_source}, at or below minimum={minimum_headroom():.3f}",
+            tier=resolved_tier.tier,
+            tier_source=resolved_tier.source,
+            model=resolved_model,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
+
+    return decision(
+        True,
+        "admitted",
+        f"provider {normalized!r} admitted by {policy.source}",
+        tier=resolved_tier.tier,
+        tier_source=resolved_tier.source,
+        model=resolved_model,
+        escalation_reasons=resolved_tier.escalation_reasons,
     )
 
 
