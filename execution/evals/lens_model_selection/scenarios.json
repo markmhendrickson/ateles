@@ -403,7 +403,7 @@
       "args": [
         "--provider",
         "codex",
-        "--model=​",
+        "--model=\u200b",
         "--action-class",
         "lens_review:arch"
       ],
@@ -421,7 +421,7 @@
         "--provider",
         "codex",
         "--dry-run",
-        "--model=​",
+        "--model=\u200b",
         "--action-class",
         "lens_review:arch"
       ],
@@ -438,7 +438,7 @@
       "args": [
         "--compare",
         "codex,cursor",
-        "--model=​",
+        "--model=\u200b",
         "--action-class",
         "lens_review:arch"
       ],
@@ -464,6 +464,407 @@
         "dispatches": 0
       },
       "guard_refuses": true
+    },
+    {
+      "id": "dispatch_cli_invalid_empty",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "dispatch_cli",
+      "args": [],
+      "model": "",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_cli_invalid_space",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "dispatch_cli",
+      "args": [],
+      "model": " ",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_cli_invalid_option",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "dispatch_cli",
+      "args": [],
+      "model": "--other",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_cli_invalid_control",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "dispatch_cli",
+      "args": [],
+      "model": "bad\\nmodel",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_cli_omitted",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "dispatch_cli",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ]
+      }
+    },
+    {
+      "id": "dispatch_cli_explicit",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "dispatch_cli",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-5.6-terra"
+        ]
+      },
+      "model": "gpt-5.6-terra"
+    },
+    {
+      "id": "dispatch_invalid_empty",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "model": "",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_invalid_space",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "model": " ",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_invalid_option",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "model": "--other",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_invalid_control",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "model": "bad\\nmodel",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "dispatch_omitted",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ]
+      }
+    },
+    {
+      "id": "dispatch_explicit",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "dispatch",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-5.6-terra"
+        ]
+      },
+      "model": "gpt-5.6-terra"
+    },
+    {
+      "id": "run_skill_invalid_empty",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "model": "",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_skill_invalid_space",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "model": " ",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_skill_invalid_option",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "model": "--other",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_skill_invalid_control",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "model": "bad\\nmodel",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_skill_omitted",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ]
+      }
+    },
+    {
+      "id": "run_skill_explicit",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "run_skill",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-5.6-terra"
+        ]
+      },
+      "model": "gpt-5.6-terra"
+    },
+    {
+      "id": "run_once_invalid_empty",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "run_once",
+      "args": [],
+      "model": "",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_once_invalid_space",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "run_once",
+      "args": [],
+      "model": " ",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_once_invalid_option",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "run_once",
+      "args": [],
+      "model": "--other",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_once_invalid_control",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "run_once",
+      "args": [],
+      "model": "bad\\nmodel",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "run_once_omitted",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "run_once",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ]
+      }
+    },
+    {
+      "id": "run_once_explicit",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "run_once",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-5.6-terra"
+        ]
+      },
+      "model": "gpt-5.6-terra"
+    },
+    {
+      "id": "provider_command_invalid_empty",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "model": "",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_invalid_space",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "model": " ",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_invalid_option",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "model": "--other",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_invalid_control",
+      "why": "Every model-selection entrance refuses invalid explicit identifiers before a provider child.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "model": "bad\\nmodel",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_omitted",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          null
+        ]
+      }
+    },
+    {
+      "id": "provider_command_explicit",
+      "why": "Valid explicit selections and omitted-selector policy behavior reach the actual provider child unchanged.",
+      "entrypoint": "provider_command",
+      "args": [],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-5.6-terra"
+        ]
+      },
+      "model": "gpt-5.6-terra"
+    },
+    {
+      "id": "provider_command_claude_invalid_empty",
+      "why": "All provider argv builders refuse invalid explicit identifiers before launching a child.",
+      "entrypoint": "provider_command",
+      "provider": "claude",
+      "args": [],
+      "model": "",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "provider_command_cursor_invalid_empty",
+      "why": "All provider argv builders refuse invalid explicit identifiers before launching a child.",
+      "entrypoint": "provider_command",
+      "provider": "cursor",
+      "args": [],
+      "model": "",
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "refusal": true
+      }
     }
   ]
 }

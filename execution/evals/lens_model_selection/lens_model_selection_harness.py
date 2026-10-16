@@ -9,6 +9,7 @@ network service is contacted, and no GitHub publication path is enabled.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import json
@@ -162,9 +163,57 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         ]
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             try:
-                obs["exit_code"] = runner.main(argv)
+                entry = scenario.get("entrypoint", "lens_cli")
+                if entry == "lens_cli":
+                    obs["exit_code"] = runner.main(argv)
+                else:
+                    provider = scenario.get("provider", "codex")
+                    task = runner.final_child_instruction(tmp_path / "verdict.md")
+                    model = scenario.get("model")
+                    action_class = scenario.get("action_class", "lens_review:arch")
+                    if entry == "dispatch_cli":
+                        direct_args = ["--role", "pavo", "--task", task,
+                                       "--provider", provider, "--cwd", str(tmp_path),
+                                       "--action-class", action_class, "--json"]
+                        if "model" in scenario:
+                            direct_args += ["--model", model]
+                        obs["exit_code"] = runner.dispatch_role.main(direct_args)
+                    elif entry == "provider_command":
+                        async def sink():
+                            cmd, payload = skill_runner._provider_command(
+                                provider, str(child), "Synthetic role", task,
+                                cwd=str(tmp_path), model=model)
+                            proc = await asyncio.create_subprocess_exec(
+                                *cmd, stdin=asyncio.subprocess.PIPE,
+                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                            await proc.communicate(payload or task.encode())
+                            return proc.returncode
+                        rc = asyncio.run(sink())
+                        obs["exit_code"] = rc
+                        print(json.dumps({"ok": rc == 0}))
+                    else:
+                        ready = sandbox(runner.HarnessSandbox, provider, tmp_path)
+                        kwargs = dict(provider=provider, model=model, action_class=action_class,
+                                      cwd=str(tmp_path), timeout=5, task_entity_id="ent_eval_task",
+                                      local_review=True, env_extra=ready.env_extra,
+                                      command_wrapper=ready.command_wrapper,
+                                      codex_outer_sandboxed=provider == "codex")
+                        if entry == "dispatch":
+                            call = runner.dispatch_role.dispatch("pavo", task, **kwargs)
+                        elif entry in {"run_skill", "run_once"}:
+                            fn = skill_runner.run_skill if entry == "run_skill" else skill_runner._run_skill_once
+                            call = fn("pavo", task, role="pavo", **kwargs)
+                        else:
+                            raise AssertionError(f"unknown eval entrypoint: {entry}")
+                        result = asyncio.run(call)
+                        obs["exit_code"] = 0 if result.ok else 1
+                        print(json.dumps({"ok": result.ok, "reason": result.error}))
             except SystemExit as exc:
                 obs["exit_code"] = exc.code
+            except ValueError as exc:
+                obs["exit_code"] = 2
+                print(str(exc), file=sys.stderr)
+                print(json.dumps({"ok": False, "reason": str(exc)}))
         if trace.exists():
             obs["provider_calls"] = [json.loads(line) for line in trace.read_text().splitlines()]
     obs["stderr"] = stderr.getvalue()
@@ -186,15 +235,15 @@ def check(scenario, obs):
     if "models" in exp and [c["model"] for c in obs["provider_calls"]] != exp["models"]:
         failures.append("actual provider model argv differs")
     for call in obs["dispatch_calls"]:
-        if not call["local_review"] or call["seated_reviewer"]:
+        if scenario.get("entrypoint", "lens_cli") == "lens_cli" and (not call["local_review"] or call["seated_reviewer"]):
             failures.append("dispatch lost its local review boundary")
-        if call["task_entity_id"] != "ent_eval_task":
+        if scenario.get("entrypoint", "lens_cli") == "lens_cli" and call["task_entity_id"] != "ent_eval_task":
             failures.append("dispatch lost task attribution")
     for event in obs["events"]:
         if event["task_entity_id"] != "ent_eval_task":
             failures.append("event lost task attribution")
     for call in obs["provider_calls"]:
-        if not call["local_review"] or call["github_credential_present"]:
+        if scenario.get("entrypoint", "lens_cli") not in {"dispatch_cli", "provider_command"} and (not call["local_review"] or call["github_credential_present"]):
             failures.append("review child lost its publication boundary")
     report = obs["report"]
     reports = list(report["results"].values()) if report and report.get("compare") else [report]
