@@ -1530,10 +1530,15 @@ def test_dry_run_makes_no_model_call_and_reports_command(
             scratch_root=tmp_path,
             brief_path=brief_file,
             timeout=None,
+            model="preview-model",
+            action_class="lens_review:pm",
         )
     )
 
     assert dispatch_called is False
+    assert report["model"] == "preview-model"
+    assert report["action_class"] == "lens_review:pm"
+    assert report["example_command"][report["example_command"].index("--model") + 1] == "preview-model"
     assert report["dry_run"] is True
     assert report["ok"] is (report["would_refuse"] is None)
     assert report["no_model_call_made"] is True
@@ -4504,4 +4509,53 @@ def test_dry_run_model_selection_uses_dispatch_resolver(
     assert ("--model" in command) == bool(want)
     if want:
         assert command[command.index("--model") + 1] == want
+    assert report["no_model_call_made"] is True
+
+
+@pytest.mark.parametrize("mode,providers", [
+    (["--provider", "codex"], ["codex"]),
+    (["--compare", "codex,cursor"], ["codex", "cursor"]),
+])
+@pytest.mark.parametrize("selectors,model,action_class", [
+    ([], None, None),
+    (["--model", "explicit-review", "--action-class", "lens_review:arch"],
+     "explicit-review", "lens_review:arch"),
+])
+def test_cli_forwards_model_selectors_to_every_provider(
+    monkeypatch, brief_file, mode, providers, selectors, model, action_class
+):
+    seen = []
+
+    async def capture(target, **kwargs):
+        seen.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(hlr, "run_one", capture)
+    assert hlr.main([
+        "--repo", "owner/repository", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--brief", str(brief_file), *mode, *selectors,
+    ]) == 0
+    assert [call["provider"] for call in seen] == providers
+    assert all(call["model"] == model for call in seen)
+    assert all(call["action_class"] == action_class for call in seen)
+
+
+def test_dry_run_reports_unbound_model_as_refusal(
+    monkeypatch, tmp_path, target, mock_ready_sandbox
+):
+    tiering = hlr.dispatch_role.model_tiering
+    real_resolve = tiering.resolve_tier
+    monkeypatch.setattr(tiering, "resolve_tier", lambda action: real_resolve(action, policy={}))
+
+    def unbound(*args):
+        raise tiering.UnboundTierError("no model bound for review")
+
+    monkeypatch.setattr(tiering, "model_for_tier", unbound)
+    report = hlr.dry_run_report(
+        target, provider="codex", sandbox=hlr.HarnessSandbox.build("codex", tmp_path),
+        task_text="review", worktree_path=tmp_path, action_class="lens_review:arch",
+    )
+    assert report["ok"] is False
+    assert report["would_refuse"] == "no model bound for review"
+    assert "--model" not in report["example_command"]
     assert report["no_model_call_made"] is True
