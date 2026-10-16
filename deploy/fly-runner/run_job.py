@@ -99,6 +99,28 @@ EXIT_ABORTED = 99
 EXIT_PROBE_FAILED = 97
 EXIT_JOB_INVALID = 96
 EXIT_RECORD_FAILED = 95
+# A delivering job whose clone could not be prepared: the CLI did not run.
+EXIT_DELIVERY_FAILED = 94
+
+# Repository delivery (a job whose job.json carries "delivery"). Without that
+# key nothing below runs. The token is the job's GitHub App token for one
+# repository; it is never a child credential and lives only in this process
+# and the environment of the runner's own git and API calls.
+DELIVERY_TOKEN_NAME = "ATELES_DELIVERY_GITHUB_TOKEN"
+# The token's Authorization header form, registered as a job secret so every
+# output is scrubbed of it too.
+DELIVERY_HEADER_SECRET_NAME = "ATELES_DELIVERY_GITHUB_AUTH_HEADER"
+DELIVERY_KEYS = frozenset({"branch", "base_branch", "author_name", "author_email"})
+# Time kept back from the CLI for export, import, push and the pull request
+# (fly_runner.DELIVERY_RESERVE_SECONDS on the Mac).
+DELIVERY_RESERVE_SECONDS = 300.0
+# Below this much time before the record reserve, nothing is pushed.
+DELIVERY_MIN_SECONDS = 60.0
+WORK_ROOT = Path("/work")
+# argv placeholder for the agent's checkout, and stdin placeholder for the
+# path of its pull request text file.
+WORKSPACE_PLACEHOLDER = "@@ATELES_JOB_WORKSPACE@@"
+PR_FILE_PLACEHOLDER = b"@@ATELES_JOB_PR_FILE@@"
 
 # The whole entrypoint's deadline, set by Apis in the machine environment.
 DEADLINE_ENV = "ATELES_RUN_DEADLINE"
@@ -179,6 +201,64 @@ class Job:
     child_user: str = "agent"
     system_prompt: str | None = None
     claude_token_file: str = ""
+    delivery: "DeliverySpec | None" = None
+
+
+@dataclass(frozen=True)
+class DeliverySpec:
+    branch: str
+    base_branch: str
+    author_name: str
+    author_email: str
+
+
+@dataclass
+class DeliveryRun:
+    """What a delivering job did; becomes the record's delivery fields."""
+    spec: DeliverySpec
+    status: str = ""
+    reason: str = ""
+    commit: str = ""
+    pr_number: int | None = None
+    pr_url: str = ""
+    work: Any = None
+    base: str = ""
+
+
+def _repo_delivery():
+    """The delivery module, imported only by a delivering job."""
+    if str(_HERE) not in sys.path:
+        sys.path.insert(0, str(_HERE))
+    import repo_delivery
+
+    return repo_delivery
+
+
+def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
+                   child_names: tuple[str, ...]) -> DeliverySpec:  # fmt: skip
+    """The job's delivery spec, or ``JobError`` naming what is wrong."""
+    rd = _repo_delivery()
+    if not isinstance(raw, dict) or set(raw) != DELIVERY_KEYS:
+        raise JobError("delivery must be an object with exactly "
+                       + ", ".join(sorted(DELIVERY_KEYS)))  # fmt: skip
+    if not all(isinstance(raw[k], str) and raw[k] for k in DELIVERY_KEYS):
+        raise JobError("every delivery field must be a non-empty string")
+    if DELIVERY_TOKEN_NAME not in secrets:
+        raise JobError("a delivery needs its GitHub token")
+    if DELIVERY_TOKEN_NAME in child_names:
+        raise JobError("the delivery token may never reach the CLI")
+    for name in ("author_name", "author_email"):
+        if len(raw[name]) > 100 or any(c in raw[name] for c in "\n\r\0<>"):
+            raise JobError(f"delivery {name} is not acceptable")
+    if not rd.BASE_BRANCH_RE.fullmatch(raw["base_branch"]) or ".." in raw["base_branch"]:
+        raise JobError("delivery base_branch is not acceptable")
+    try:
+        rd.check_repository(repository)
+        rd.check_push_branch(raw["branch"], raw["base_branch"])
+    except rd.RepoWorkError as exc:
+        raise JobError(f"delivery refused: {exc.reason}") from None
+    return DeliverySpec(branch=raw["branch"], base_branch=raw["base_branch"],
+                        author_name=raw["author_name"], author_email=raw["author_email"])  # fmt: skip
 
 
 def load_job(job_dir: Path) -> Job:
@@ -251,6 +331,16 @@ def load_job(job_dir: Path) -> Job:
                    "child_credential_names"):  # fmt: skip
         if listed in spec and not isinstance(spec[listed], list):
             raise JobError(f"{listed} is not a list")
+    delivery = None
+    if "delivery" in spec:
+        delivery = _load_delivery(spec["delivery"], str(spec["repository"]) if "repository" in spec
+                                  else "", secrets, child_names)  # fmt: skip
+        secrets[DELIVERY_HEADER_SECRET_NAME] = _repo_delivery().auth_config(
+            secrets[DELIVERY_TOKEN_NAME])[0][1]
+    elif DELIVERY_TOKEN_NAME in secrets:
+        raise JobError("a delivery token was shipped without a delivery")
+    if (WORKSPACE_PLACEHOLDER in argv) != (delivery is not None):
+        raise JobError("the workspace placeholder and the delivery must come together")
     return Job(
         run_id=run_id,
         role=spec["role"],
@@ -272,6 +362,7 @@ def load_job(job_dir: Path) -> Job:
         codex_home=str(spec.get("codex_home") or ""),
         machine_id=str(spec.get("machine_id") or os.environ.get("FLY_MACHINE_ID", "")),
         child_user=str(spec.get("child_user") or "agent"),
+        delivery=delivery,
     )
 
 
@@ -814,11 +905,12 @@ def build_record(
     probe: dict,
     timed_out: bool,
     refused: str = "",
+    delivery: DeliveryRun | None = None,
 ) -> dict:
     # Sanitize job output before recording it, and only then cap it.
     out_text, truncated = sanitize_and_cap(stdout, STDOUT_CAP_BYTES, job.secrets)
     err_text, _ = sanitize_and_cap(stderr, STDERR_TAIL_BYTES, job.secrets)
-    return {
+    record = {
         "entity_type": RESULT_ENTITY_TYPE,
         "run_id": job.run_id,
         "role": job.role,
@@ -836,6 +928,19 @@ def build_record(
         "probe_report": json.dumps(probe, sort_keys=True),
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if delivery is not None:
+        # Only a delivering job's record carries these; every other record
+        # keeps its existing shape.
+        record.update({
+            "delivery_status": delivery.status,
+            "delivery_reason": scrub(delivery.reason, job.secrets),
+            "delivery_branch": delivery.spec.branch,
+            "delivery_commit": delivery.commit,
+            "pr_url": delivery.pr_url,
+        })  # fmt: skip
+        if delivery.pr_number is not None:
+            record["pr_number"] = delivery.pr_number
+    return record
 
 
 def _load_httpsig_module():
@@ -974,8 +1079,18 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             ident, identity_problem = None, str(exc)
         argv, child_env = prepare_child(job, home, os.environ, ident)
         remaining = deadline - time.time()
-        cli_budget = min(float(job.timeout_seconds),
-                         remaining - min(RECORD_RESERVE_SECONDS, remaining / 4))  # fmt: skip
+        delivery = None
+        if job.delivery is None:
+            cli_budget = min(float(job.timeout_seconds),
+                             remaining - min(RECORD_RESERVE_SECONDS, remaining / 4))  # fmt: skip
+        else:
+            # The reserves come out of the time left before the deadline, and
+            # only then is the CLI capped at its requested timeout: Apis's
+            # deadline already allows timeout + delivery reserve + grace.
+            delivery = DeliveryRun(spec=job.delivery, status="not_delivered",
+                                   reason="the job did not reach the CLI")  # fmt: skip
+            cli_budget = min(float(job.timeout_seconds),
+                             remaining - RECORD_RESERVE_SECONDS - DELIVERY_RESERVE_SECONDS)
         if deadline_problem:
             delete_job_dir(job_dir)
             refused = deadline_problem
@@ -1004,6 +1119,11 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             elif not cli_budget >= 1:
                 refused = "no time left before the run's deadline"
                 rc, out, err, timed_out = EXIT_TIMEOUT, b"", refused.encode(), True
+                if delivery is not None:
+                    delivery.status, delivery.reason = "no_time", "no time was left for the CLI"
+            elif delivery is not None:
+                rc, out, err, timed_out, refused = _run_delivering_job(
+                    job, delivery, runner, argv, child_env, cli_budget, ident, deadline)
             else:
                 rc, out, err, timed_out = runner(
                     argv,
@@ -1023,6 +1143,7 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             probe=probe,
             timed_out=timed_out,
             refused=refused,
+            delivery=delivery,
         )
         try:
             auth = auth_headers_for(job)
@@ -1039,7 +1160,122 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
         return rc if stored else EXIT_RECORD_FAILED
     finally:
         shutil.rmtree(home, ignore_errors=True)
+        if job.delivery is not None:
+            _end_delivery()
         job.secrets.clear()
+
+
+# ── Repository delivery (only for a job whose job.json carries "delivery") ───
+
+
+def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str],
+                        child_env: dict[str, str], cli_budget: float,
+                        ident: tuple[int, int] | None,
+                        deadline: float) -> tuple[int, bytes, bytes, bool, str]:  # fmt: skip
+    """Clone, run the CLI in the agent's checkout, then deliver its work.
+    ``(rc, stdout, stderr, timed_out, refused)``; *delivery* is filled in."""
+    rd = _repo_delivery()
+    spec = delivery.spec
+    token = job.secrets[DELIVERY_TOKEN_NAME]
+    work_by = deadline - RECORD_RESERVE_SECONDS
+    failure = failed_category = None
+    with rd.bounded_by(work_by):
+        try:
+            delivery.work = rd.prepare_work(WORK_ROOT, run_id=job.run_id)
+            delivery.base = rd.clone_origin(
+                delivery.work, url=rd.GITHUB_REMOTE.format(repository=job.repository),
+                base_branch=spec.base_branch, token=token, allow=rd.GITHUB_REMOTE_TRANSPORT)
+            rd.make_checkout(delivery.work, branch=spec.branch, base_branch=spec.base_branch,
+                             repository=job.repository, ident=ident,
+                             author=(spec.author_name, spec.author_email))  # fmt: skip
+        except rd.RepoWorkError as exc:
+            failure, failed_category = str(exc), exc.category
+    if failure is not None:
+        delivery.status = "no_time" if failed_category == rd.NO_TIME else "clone_failed"
+        delivery.reason = failure
+        refused = "the delivery could not be prepared: " + failure
+        return EXIT_DELIVERY_FAILED, b"", refused.encode(), False, refused
+    checkout = str(delivery.work.checkout)
+    pr_file = str(delivery.work.export / rd.PR_TEXT_NAME).encode()
+    run_argv = [checkout if a == WORKSPACE_PLACEHOLDER else a for a in argv]
+    run_stdin = job.stdin.replace(PR_FILE_PLACEHOLDER, pr_file) if job.stdin is not None else None
+    budget = min(cli_budget, deadline - time.time() - RECORD_RESERVE_SECONDS
+                 - DELIVERY_RESERVE_SECONDS)  # fmt: skip
+    if not budget >= 1:
+        delivery.status, delivery.reason = "no_time", "no time was left for the CLI"
+        return EXIT_TIMEOUT, b"", delivery.reason.encode(), True, delivery.reason
+    rc, out, err, timed_out = runner(run_argv, child_env, run_stdin, budget, checkout, ident,
+                                     deadline)  # fmt: skip
+    _deliver(job, delivery, rc, timed_out, ident, deadline)
+    return rc, out, err, timed_out, ""
+
+
+def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
+             ident: tuple[int, int] | None, deadline: float) -> None:  # fmt: skip
+    """After the CLI: export, import, push, then find or open the pull
+    request. Each failure is a status and a fixed, value-free reason."""
+    rd = _repo_delivery()
+    spec, work = delivery.spec, delivery.work
+    if rc != 0 or timed_out:
+        delivery.status, delivery.reason = "not_delivered", "the CLI did not finish successfully"
+        return
+    work_by = deadline - RECORD_RESERVE_SECONDS
+    if work_by - time.time() < DELIVERY_MIN_SECONDS:
+        delivery.status, delivery.reason = "no_time", "no time was left to deliver"
+        return
+    token = job.secrets[DELIVERY_TOKEN_NAME]
+    failure = failed_category = None
+    pushed = False
+    with rd.bounded_by(work_by):
+        step = "not_delivered"
+        try:
+            if not rd.export_agent_work(work, branch=spec.branch, base=delivery.base, ident=ident):
+                delivery.status, delivery.reason = "no_changes", "the branch adds no commits"
+                return
+            imported = rd.import_agent_work(work, branch=spec.branch, base=delivery.base)
+            delivery.commit = imported.head
+            step = "push_failed"
+            rd.push_branch(work, repository=job.repository, branch=spec.branch,
+                           default_branch=spec.base_branch, head=imported.head, token=token)
+            pushed = True
+            step = "pr_failed"
+            title, body = _pr_text(rd, work, job.secrets)
+            pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
+                                      default_branch=spec.base_branch, token=token,
+                                      title=title, body=body)  # fmt: skip
+        except rd.RepoWorkError as exc:
+            failure, failed_category = str(exc), exc.category
+    if failure is not None and failed_category == rd.NO_TIME:
+        # Nothing further was started. A completed push stays on the remote:
+        # the record keeps its branch and commit, with no pull request.
+        delivery.status = "no_time"
+        delivery.reason = ("the branch was pushed; no time was left for the pull request"
+                           if pushed else failure)  # fmt: skip
+        return
+    if failure is not None:
+        delivery.status, delivery.reason = step, failure
+        return
+    delivery.status, delivery.reason = pr.action, ""
+    delivery.pr_number, delivery.pr_url = pr.number, pr.url
+
+
+def _pr_text(rd, work, secrets: dict[str, str]) -> tuple[str, str]:
+    """The agent's pull request text, scrubbed of every job secret; empty
+    when it gave none or it could not be read."""
+    try:
+        title, body = rd.read_pr_text(work)
+    except rd.RepoWorkError:
+        title, body = "", ""
+    return scrub(title, secrets), scrub(body, secrets)
+
+
+def _end_delivery() -> None:
+    """Remove the clone and the agent's checkout: nothing outlives the job."""
+    rd = _repo_delivery()
+    try:
+        rd.remove_work(WORK_ROOT)
+    except rd.RepoWorkError:
+        print("fly-runner: the delivery work directory could not be removed", flush=True)
 
 
 def _flush_bounded(seconds: float) -> None:

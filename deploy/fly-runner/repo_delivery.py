@@ -76,12 +76,18 @@ the copy with everything else.
 from __future__ import annotations
 
 import base64
+import contextlib
 import functools
+import json
 import os
 import re
 import shutil
 import stat
 import subprocess
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -125,6 +131,29 @@ EXPORT_FAILED = "export_failed"
 IMPORT_FAILED = "import_failed"
 IMPORT_REFUSED = "import_refused"
 QUARANTINE_FAILED = "quarantine_failed"
+PUSH_REFUSED = "push_refused"
+PUSH_FAILED = "push_failed"
+PR_FAILED = "pr_failed"
+NO_TIME = "no_time"
+NO_TIME_REASON = "the delivery deadline has passed; the step was not started"
+# A git or API call is started only with at least this much time left.
+MIN_CALL_SECONDS = 1.0
+
+# Delivery to GitHub: the push target and API. Fixed in code; a job cannot
+# name another host. Tests replace them with local stand-ins.
+GITHUB_REMOTE = "https://github.com/{repository}.git"
+GITHUB_REMOTE_TRANSPORT = "https"
+GITHUB_API = "https://api.github.com"
+# A release-looking or default-looking branch is never pushed, whatever the
+# builder pattern says.
+_PROTECTED_BRANCH_RE = re.compile(r"(?i)(?:main|master|trunk|develop|release[/_-].*|releases/.*"
+                                  r"|hotfix/.*|v?[0-9]+(?:\.[0-9]+)*)")  # fmt: skip
+_REPOSITORY_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}", re.ASCII)
+# The agent's pull request text: <export>/pull_request.md, first line the title.
+PR_TEXT_NAME = "pull_request.md"
+MAX_PR_TEXT_BYTES = 64 * 1024
+MAX_PR_TITLE_CHARS = 256
+API_TIMEOUT_SECONDS = 30
 
 WITHDRAWAL_CONFIRMED = ("the quarantine ref could not be removed; the branch record was withdrawn "
                         "and read back absent; nothing may be pushed")  # fmt: skip
@@ -317,19 +346,57 @@ def git_env(home: Path, *, allow: str, config: list[tuple[str, str]] = ()) -> di
     return env
 
 
+# The wall-clock time by which every git and API call must have finished,
+# while a ``bounded_by`` block is active; None outside one.
+_DEADLINE: list[float] = []
+
+
+@contextlib.contextmanager
+def bounded_by(deadline: float):
+    """Bound every git and API call made inside the block by *deadline*."""
+    _DEADLINE.append(deadline)
+    try:
+        yield
+    finally:
+        _DEADLINE.pop()
+
+
+def _call_timeout(limit: float) -> float | None:
+    """How long the next git or API call may take, or None when the active
+    deadline leaves less than ``MIN_CALL_SECONDS``: the call is then not
+    started at all (never a fresh minimum allowance)."""
+    if not _DEADLINE:
+        return limit
+    left = _DEADLINE[-1] - time.time()
+    if left < MIN_CALL_SECONDS:
+        return None
+    return min(limit, left)
+
+
 def _run(args: list[str], *, env: dict[str, str], ident: tuple[int, int] | None = None,
          stdin: bytes | None = None) -> subprocess.CompletedProcess | str:  # fmt: skip
-    """Run git; the completed process, or the class of why it did not finish."""
+    """Run git; the completed process, or the class of why it did not run or
+    finish (``no_time`` when the deadline leaves no time to start it)."""
     drop = {} if ident is None else {"user": ident[0], "group": ident[1], "extra_groups": []}
+    limit = _call_timeout(GIT_TIMEOUT_SECONDS)
+    if limit is None:
+        return NO_TIME
     outcome: subprocess.CompletedProcess | str = "not_started"
     try:
         outcome = subprocess.run([GIT, *args], env=env, capture_output=True, input=stdin,
-                                 timeout=GIT_TIMEOUT_SECONDS, check=False, **drop)  # fmt: skip
+                                 timeout=limit, check=False,
+                                 **drop)  # fmt: skip
     except subprocess.TimeoutExpired:
         outcome = "timed_out"
     except (OSError, subprocess.SubprocessError):
         outcome = "not_started"
     return outcome
+
+
+def _require_time() -> None:
+    """Refuse to start an external step once the active deadline is spent."""
+    if _call_timeout(GIT_TIMEOUT_SECONDS) is None:
+        raise RepoWorkError(NO_TIME, NO_TIME_REASON)
 
 
 def _status_class(done: subprocess.CompletedProcess | str) -> str:
@@ -343,6 +410,8 @@ def _git(args: list[str], *, env: dict[str, str], category: str, reason: str,
     """Run git and return its raw output; on failure raise *category*/*reason*
     with only the class of the exit status. Git's stderr is discarded."""
     done = _run(args, env=env, ident=ident, stdin=stdin)
+    if done == NO_TIME:
+        raise RepoWorkError(NO_TIME, NO_TIME_REASON)
     if isinstance(done, str) or done.returncode != 0:
         raise RepoWorkError(category, reason, _status_class(done))
     return done.stdout
@@ -384,6 +453,7 @@ def clone_origin(work: Work, *, url: str, base_branch: str, token: str,
     if not isinstance(base_branch, str) or not BASE_BRANCH_RE.fullmatch(base_branch) \
             or ".." in base_branch:  # fmt: skip
         raise RepoWorkError(CLONE_REFUSED, "the base branch name is not acceptable")
+    _require_time()
     plain = git_env(work.home, allow=allow)
     origin = ["-C", str(work.origin)]
     _git(["init", "-q", "--bare", str(work.origin)], env=plain, category=CLONE_FAILED,
@@ -412,6 +482,7 @@ def make_checkout(work: Work, *, branch: str, base_branch: str, repository: str,
     check_branch(branch)
     env = git_env(work.home, allow="file")
     checkout = ["-C", str(work.checkout)]
+    _require_time()
     _git(["clone", "-q", "--no-hardlinks", "--branch", base_branch, str(work.origin),
           str(work.checkout)], env=env, category=CHECKOUT_FAILED,
          reason="cloning the origin repository")  # fmt: skip
@@ -450,6 +521,7 @@ def export_agent_work(work: Work, *, branch: str, base: str,
     env = git_env(work.home, allow="file")
     env["HOME"] = str(work.export)
     checkout = ["-C", str(work.checkout)]
+    _require_time()
     head = _oid(_git([*checkout, "rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}"],
                      env=env, ident=ident, category=EXPORT_FAILED,
                      reason="reading the assigned branch"),
@@ -588,6 +660,7 @@ def import_agent_work(work: Work, *, branch: str, base: str,
     check_branch(branch)
     if not isinstance(base, str) or not _OID_RE.fullmatch(base.encode("ascii", "replace")):
         raise RepoWorkError(IMPORT_REFUSED, "the base is not an object id")
+    _require_time()
     env = git_env(work.home, allow="file")
     origin = ["-C", str(work.origin)]
     copy = work.job / IMPORT_COPY_NAME
@@ -643,6 +716,8 @@ def _validate_and_record(origin: list[str], env: dict[str, str], bundle: Path, b
     if head != listed_head:
         raise RepoWorkError(IMPORT_REFUSED, "the imported head is not the bundle's head")
     descends = _run([*origin, "merge-base", "--is-ancestor", base, head], env=env)
+    if descends == NO_TIME:
+        raise RepoWorkError(NO_TIME, NO_TIME_REASON)
     if isinstance(descends, str) or descends.returncode != 0:
         raise RepoWorkError(IMPORT_REFUSED, "the branch does not descend from the base")
     commits = _git([*origin, "rev-list", f"{base}..{head}"], env=env, category=IMPORT_FAILED,
@@ -721,3 +796,194 @@ def _check_objects(origin: list[str], env: dict[str, str], base: str, head: str,
             raise RepoWorkError(IMPORT_FAILED, "sizing the new objects")
         if kind == b"blob" and int(size) > max_blob_bytes:
             raise RepoWorkError(IMPORT_REFUSED, "a file is larger than accepted")
+
+
+# ── Push: one explicit refspec, from origin.git only ─────────────────────────
+
+
+def check_repository(repository: str) -> str:
+    if not isinstance(repository, str) or not _REPOSITORY_RE.fullmatch(repository) \
+            or repository.split("/", 1)[1] in (".", ".."):  # fmt: skip
+        raise RepoWorkError(PUSH_REFUSED, "the repository is not one owner/name")
+    return repository
+
+
+def check_push_branch(branch: str, default_branch: str) -> str:
+    """The branch a delivery may push: the builder pattern, never the
+    repository's default branch, never a release-looking name."""
+    check_branch(branch)
+    leaf = branch.split("/", 1)[1]
+    if branch == default_branch or _PROTECTED_BRANCH_RE.fullmatch(branch) \
+            or _PROTECTED_BRANCH_RE.fullmatch(leaf):  # fmt: skip
+        raise RepoWorkError(PUSH_REFUSED, "the branch is a default or release branch")
+    return branch
+
+
+@_boundary(PUSH_FAILED)
+def push_branch(work: Work, *, repository: str, branch: str, default_branch: str,
+                head: str, token: str) -> None:  # fmt: skip
+    """Push exactly ``refs/heads/<branch>`` from ``origin.git`` to GitHub: no
+    force, so only a new branch or a fast-forward lands; no tags, no other
+    ref. Refused while the quarantine ref exists or when the branch does not
+    point at *head*. One retry when git reports a connection-level failure."""
+    _check_work(work)
+    check_repository(repository)
+    check_push_branch(branch, default_branch)
+    if not isinstance(head, str) or not _OID_RE.fullmatch(head.encode("ascii", "replace")):
+        raise RepoWorkError(PUSH_REFUSED, "the head is not an object id")
+    _require_time()
+    plain = git_env(work.home, allow="file")
+    origin = ["-C", str(work.origin)]
+    if _ref_present(origin, plain, QUARANTINE_REF) is not False:
+        raise RepoWorkError(PUSH_REFUSED, "the quarantine ref is not confirmed gone")
+    recorded = _git([*origin, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"],
+                    env=plain, category=PUSH_REFUSED, reason="the branch is not recorded")  # fmt: skip
+    if _oid(recorded, PUSH_REFUSED, "the branch is not recorded") != head:
+        raise RepoWorkError(PUSH_REFUSED, "the recorded branch is not the imported head")
+    env = git_env(work.home, allow=GITHUB_REMOTE_TRANSPORT,
+                  config=[("push.followTags", "false"), ("push.recurseSubmodules", "no"),
+                          *auth_config(token)])  # fmt: skip
+    url = GITHUB_REMOTE.format(repository=repository)
+    args = [*origin, "push", "--no-verify", "--quiet", url,
+            f"refs/heads/{branch}:refs/heads/{branch}"]  # fmt: skip
+    for attempt in range(2):
+        done = _run(args, env=env)
+        if done == NO_TIME:
+            raise RepoWorkError(NO_TIME, NO_TIME_REASON)
+        if not isinstance(done, str) and done.returncode == 0:
+            return
+        if attempt or isinstance(done, str) or done.returncode != 128:
+            break
+    raise RepoWorkError(PUSH_FAILED, "the push was not accepted", _status_class(done))
+
+
+# ── The pull request: found by its head branch, else opened ──────────────────
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    number: int
+    url: str
+    action: str  # "opened" or "updated"
+
+
+def _api(method: str, path: str, token: str, body: dict | None = None) -> tuple[int, object]:
+    """One GitHub API call: ``(status, parsed JSON or None)``. Never raises
+    for an HTTP or network failure, and never returns a response body as text."""
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request(
+        f"{GITHUB_API}{path}", data=data, method=method,
+        headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+                 "User-Agent": "ateles-fly-runner/1.0", "X-GitHub-Api-Version": "2022-11-28",
+                 **({"Content-Type": "application/json"} if data else {})},
+    )  # fmt: skip
+    limit = _call_timeout(API_TIMEOUT_SECONDS)
+    if limit is None:
+        raise RepoWorkError(NO_TIME, NO_TIME_REASON)
+    status, payload = 0, None
+    try:
+        with urllib.request.urlopen(request, timeout=limit) as resp:
+            status, raw = resp.status, resp.read(1024 * 1024)
+        payload = json.loads(raw or b"null")
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    except (urllib.error.URLError, OSError, ValueError):
+        status = 0
+    return status, payload
+
+
+def _status_word(status: int) -> str:
+    return f"http_{status}" if status else "unreachable"
+
+
+def _pr_from(payload: object, repository: str, branch: str, default_branch: str) -> PullRequest | None:
+    if not isinstance(payload, dict):
+        return None
+    number, url = payload.get("number"), payload.get("html_url")
+    head, base = payload.get("head"), payload.get("base")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        return None
+    if not isinstance(url, str) or url != f"https://github.com/{repository}/pull/{number}":
+        return None
+    if not isinstance(head, dict) or head.get("ref") != branch:
+        return None
+    repo = head.get("repo")
+    if not isinstance(repo, dict) or str(repo.get("full_name", "")).lower() != repository.lower():
+        return None
+    if not isinstance(base, dict) or base.get("ref") != default_branch:
+        return None
+    return PullRequest(number=number, url=url, action="")
+
+
+@_boundary(PR_FAILED)
+def open_or_update_pr(*, repository: str, branch: str, default_branch: str, token: str,
+                      title: str, body: str) -> PullRequest:  # fmt: skip
+    """The open pull request whose head is *branch* (updated with the agent's
+    text when it gave one), or a new one against the default branch."""
+    check_repository(repository)
+    check_push_branch(branch, default_branch)
+    owner = repository.split("/", 1)[0]
+    _require_time()
+    head = urllib.parse.quote(f"{owner}:{branch}", safe="")
+    status, found = _api("GET", f"/repos/{repository}/pulls?head={head}&state=open", token)
+    if status != 200 or not isinstance(found, list):
+        raise RepoWorkError(PR_FAILED, "the open pull requests could not be read",
+                            _status_word(status))  # fmt: skip
+    if len(found) > 1:
+        raise RepoWorkError(PR_FAILED, "more than one open pull request has this head")
+    if found:
+        existing = _pr_from(found[0], repository, branch, default_branch)
+        if existing is None:
+            raise RepoWorkError(PR_FAILED, "the open pull request is not this branch's")
+        if title:
+            status, _ = _api("PATCH", f"/repos/{repository}/pulls/{existing.number}", token,
+                             {"title": title, "body": body})  # fmt: skip
+            if status != 200:
+                raise RepoWorkError(PR_FAILED, "the pull request could not be updated",
+                                    _status_word(status))  # fmt: skip
+        return PullRequest(number=existing.number, url=existing.url, action="updated")
+    status, made = _api("POST", f"/repos/{repository}/pulls", token,
+                        {"title": title or f"Changes on {branch}", "head": branch,
+                         "base": default_branch, "body": body})  # fmt: skip
+    created = _pr_from(made, repository, branch, default_branch) if status == 201 else None
+    if created is None:
+        raise RepoWorkError(PR_FAILED, "the pull request could not be opened", _status_word(status))
+    return PullRequest(number=created.number, url=created.url, action="opened")
+
+
+@_boundary(PR_FAILED)
+def read_pr_text(work: Work) -> tuple[str, str]:
+    """The agent's pull request text from ``<export>/pull_request.md``: the
+    first line (``# `` stripped) is the title, the rest the body. Read without
+    following a link and size-capped. Missing, oversized, not UTF-8, or
+    unreadable text gives ``("", "")``: the delivery goes ahead with a
+    default title."""
+    _check_work(work)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        dfd = os.open(work.export, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+        try:
+            fd = os.open(PR_TEXT_NAME, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0),
+                         dir_fd=dfd)  # fmt: skip
+        finally:
+            os.close(dfd)
+    except OSError:
+        fd = -1
+    if fd < 0:
+        return "", ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "", ""
+        raw = os.read(fd, MAX_PR_TEXT_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_PR_TEXT_BYTES:
+        return "", ""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "", ""
+    first, _, rest = text.strip().partition("\n")
+    title = first.lstrip("#").strip()[:MAX_PR_TITLE_CHARS]
+    return title, rest.strip()
