@@ -143,9 +143,8 @@ def test_dispatch_forwards_action_class_and_model(monkeypatch) -> None:
     assert seen["model"] == "claude-opus-5-thinking-high"
 
 
-def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
-    """A caller naming neither must leave run_skill's tiering inputs at their
-    no-op defaults — exact prior CLI behaviour, no regression."""
+def test_dispatch_defaults_to_canonical_task_class(monkeypatch) -> None:
+    """An omitted class must be tiered rather than inherit the ambient model."""
     seen: dict = {}
 
     async def _capture(skill, prompt, **kwargs):
@@ -155,7 +154,7 @@ def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
     monkeypatch.setattr(dispatch_role, "run_skill", _capture)
 
     asyncio.run(dispatch_role.dispatch("cicada", "do the thing"))
-    assert seen["action_class"] is None
+    assert seen["action_class"] == "task_dispatch"
     assert seen["model"] is None
 
 
@@ -312,16 +311,47 @@ def test_cli_explicit_model_overrides_action_class(
     assert cmd[cmd.index("--model") + 1] == "explicit-override"
 
 
-def test_cli_no_action_class_leaves_argv_without_model_flag(
-    captured_codex_dispatches,
-) -> None:
-    """No --action-class and no --model: exact prior behaviour, no --model
-    flag at all — the no-op default this whole feature must preserve."""
-    rc = dispatch_role.main(["--role", "cicada", "--task", "do the thing"])
-
-    assert rc == 0
+def test_cli_omitted_class_uses_mid_binding(captured_codex_dispatches, monkeypatch):
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "mid-model"}}')
+    assert dispatch_role.main(["--role", "cicada", "--task", "do the thing"]) == 0
     cmd = captured_codex_dispatches[0]["cmd"]
-    assert "--model" not in cmd
+    assert cmd[cmd.index("--model") + 1] == "mid-model"
+
+
+@pytest.mark.parametrize("action,expected", [
+    ("lens_review:content", "mid-model"), ("panel_aggregation", "mid-model"),
+    ("lens_review:security", "top-model"), ("lens_review:arch", "top-model"),
+    ("lens_review:pm", "top-model"),
+])
+def test_cli_capped_and_protected_dispatch_effects(captured_codex_dispatches, monkeypatch, action, expected):
+    import model_tiering
+    monkeypatch.setenv("APIS_ACTION_POLICY", json.dumps(model_tiering.DEFAULT_ACTION_POLICY_HINT))
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "mid-model", "top": "top-model"}}')
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "review", "--action-class", action,
+        "--review-round", "3", "--prior-blocking-finding", "--new-blocking-finding",
+        "--changed-file", "lib/auth/check.py", "--diff-lines", "900",
+        "--prior-attempt-failed",
+    ]) == 0
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == expected
+
+
+@pytest.mark.parametrize("policy,binding", [
+    ({"min_tier": "mid", "max_tier": "bogus"}, {}),
+    ({"min_tier": "top", "max_tier": "mid"}, {}),
+    ({"min_tier": "mid", "max_tier": "mid"}, {}),
+    ({"min_tier": "mid", "max_tier": "mid"}, {"codex": {"top": "top-model"}}),
+    ({"min_tier": "mid", "max_tier": "mid"}, {"codex": {"mid": "gpt-6-astra"}}),
+])
+def test_cli_refuses_unhonorable_cap_before_child(captured_codex_dispatches, monkeypatch, policy, binding):
+    monkeypatch.setenv("APIS_ACTION_POLICY", json.dumps({"panel_aggregation": policy}))
+    monkeypatch.setenv("APIS_VENDOR_BINDING", json.dumps(binding))
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "review", "--action-class", "panel_aggregation",
+    ]) != 0
+    assert not captured_codex_dispatches
 
 
 @pytest.mark.parametrize("github_token", [None, ""])

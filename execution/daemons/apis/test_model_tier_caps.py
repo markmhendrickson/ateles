@@ -66,8 +66,9 @@ def test_blocking_pm_still_escalates():
     {"max_tier": "mid"},
     {"min_tier": "mid", "max_tire": "mid"},
 ])
-def test_malformed_cap_fails_up_to_top(entry):
-    assert tiers.resolve_tier("panel_aggregation", policy={"panel_aggregation": entry}).tier == "top"
+def test_malformed_cap_refuses_dispatch(entry):
+    with pytest.raises(tiers.InvalidTierPolicyError):
+        tiers.resolve_tier("panel_aggregation", policy={"panel_aggregation": entry})
 
 
 def test_config_reader_and_validator_preserve_cap(monkeypatch, tmp_path):

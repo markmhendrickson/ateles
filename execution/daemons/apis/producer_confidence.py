@@ -319,7 +319,11 @@ def _eligible(
         return None  # nothing declared: not vouched for, not scored
     if policy.blast_radius_for(action_type) != BlastRadius.LOW:
         return None  # high blast / never / unrecognized: gated as today
-    resolved = model_tiering.resolve_tier(model_tiering.ACTION_CONFIDENCE_SCORING)
+    try:
+        resolved = model_tiering.resolve_tier(model_tiering.ACTION_CONFIDENCE_SCORING)
+    except model_tiering.InvalidTierPolicyError:
+        log.warning("producer score skipped: invalid explicit tier bounds")
+        return None
     if resolved.tier not in ALLOWED_TIERS:
         log.info(
             "producer score skipped: tier %s (%s) is above the scorer's ceiling",

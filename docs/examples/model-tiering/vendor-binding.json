@@ -5,7 +5,7 @@
     "mechanical": "haiku"
   },
   "codex": {
-    "top": "gpt-6-astra",
+    "top": "gpt-6-sol",
     "mid": "gpt-6-sol",
     "mechanical": "gpt-6-luna"
   }

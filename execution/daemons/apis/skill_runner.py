@@ -2427,9 +2427,12 @@ async def _run_skill_once(
     resolved_model = model
     if resolved_model is None and (action_class is not None or resolved_tier is not None):
         if resolved_tier is None:
-            resolved_tier = model_tiering.resolve_tier(
-                action_class, signals=escalation_signals
-            )
+            try:
+                resolved_tier = model_tiering.resolve_tier(
+                    action_class, signals=escalation_signals
+                )
+            except model_tiering.InvalidTierPolicyError as exc:
+                return SkillResult(skill, False, None, "", "", error=str(exc), provider=provider)
     # claude-local runs the model its own local_provider config names (its
     # command is built separately and takes no --model), so vendor_binding
     # has nothing to resolve for it: the tier is still recorded on its events,
@@ -2442,6 +2445,10 @@ async def _run_skill_once(
     ):
         try:
             resolved_model = model_tiering.model_for_tier(provider, resolved_tier.tier)
+            if resolved_tier.max_tier and not resolved_model:
+                raise model_tiering.UnboundTierError(
+                    "explicit tier cap requires a bound model; ambient model refused"
+                )
         except model_tiering.UnboundTierError as exc:
             msg = str(exc)
             log.error(f"[apis] {skill} dispatch refused — {msg}")
@@ -3855,9 +3862,12 @@ async def run_skill(
 
     precomputed_tier: model_tiering.ResolvedTier | None = resolved_tier
     if precomputed_tier is None and model is None and action_class is not None:
-        precomputed_tier = model_tiering.resolve_tier(
-            action_class, signals=escalation_signals
-        )
+        try:
+            precomputed_tier = model_tiering.resolve_tier(
+                action_class, signals=escalation_signals
+            )
+        except model_tiering.InvalidTierPolicyError as exc:
+            return SkillResult(skill, False, None, "", "", error=str(exc), provider=provider)
     fly_bound, fly_extra = _fly_routing(runner, action_class)
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
