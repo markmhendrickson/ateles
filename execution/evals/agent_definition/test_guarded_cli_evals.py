@@ -26,6 +26,11 @@ from lib.daemon_runtime import agent_loader as loader  # noqa: E402
 
 @pytest.mark.parametrize("outcome", ["timeout", "malformed", "none", "missing_prompt", "missing_tools", "missing_status", "real"])
 def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_path, capsys, outcome):
+    # Both modules hold import-time path values. Use this fixture checkout,
+    # never an optional developer checkout under the test process home.
+    monkeypatch.setattr(skill_runner, "ATELES_REPO", ROOT)
+    monkeypatch.setattr(runner.dispatch_role, "ATELES_REPO", ROOT)
+    monkeypatch.setenv("ATELES_REPO_PATH", str(ROOT))
     monkeypatch.setattr(runner, "check_headroom", lambda provider: None)
     monkeypatch.setattr(runner.Worktree, "create", lambda self, **kw: self.path.mkdir(parents=True))
     monkeypatch.setattr(runner.Worktree, "remove", lambda self: None)
