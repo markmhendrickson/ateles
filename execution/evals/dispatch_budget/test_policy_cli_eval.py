@@ -44,6 +44,9 @@ raise SystemExit(dispatch_role.main(context["argv"]))
 
 @pytest.mark.parametrize("case", SCENARIOS, ids=lambda case: case["id"])
 def test_agent_policy_cli_scenario(tmp_path, case):
+    if case.get("entrypoint") == "check":
+        _check_configuration_cli(tmp_path, case)
+        return
     skill = tmp_path / ".claude/skills/pavo"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("# Synthetic offline role\n")
@@ -91,7 +94,39 @@ def test_agent_policy_cli_scenario(tmp_path, case):
         assert done.returncode == 1 and envelope["ok"] is False
         assert "model tiering configuration" in envelope["reason"]
         assert not invocation.exists(), "refused policy reached provider child"
+        assert str(policy) not in done.stdout and str(binding) not in done.stdout
+        assert "synthetic private configuration data" not in done.stdout
     else:
         assert done.returncode == 0 and envelope["ok"] is True, envelope
         argv = json.loads(invocation.read_text())
         assert argv[argv.index("--model") + 1] == case["model"]
+
+
+
+def _check_configuration_cli(tmp_path, case):
+    """The actual pre-install checker CLI; no role/provider collaborator needed."""
+    selected = tmp_path / "selected-path-marker.json"
+    if case.get("directory"):
+        selected.mkdir()
+    elif "check_raw" in case:
+        selected.write_text(case["check_raw"])
+    paths = [selected]
+    if "extra_raw" in case:
+        extra = tmp_path / "other-path-marker.json"
+        extra.write_text(case["extra_raw"])
+        paths.append(extra)
+    done = subprocess.run([sys.executable, str(ROOT / "execution/daemons/apis/model_tiering.py"),
+                           "--check", *map(str, paths)], capture_output=True, text=True, timeout=10,
+                          env={"PATH": os.defpath, "HOME": str(tmp_path)})
+    output = done.stdout + done.stderr
+    assert not any(value in output for value in ("selected-path-marker", "other-path-marker",
+                                                 "member-marker", "value-marker", "tier-marker"))
+    if case["expect"] == "invalid":
+        assert done.returncode == 1
+        assert "invalid configuration" in output and "correct" in output and "--check" in output
+        assert "ERROR configuration 1" in output and "FAIL  configuration 1" in output
+    else:
+        assert done.returncode == 0
+        assert "ok    configuration 1" in output
+        if len(paths) > 1:
+            assert "ok    configuration 2" in output

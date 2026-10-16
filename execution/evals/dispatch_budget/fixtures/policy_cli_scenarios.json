@@ -15,5 +15,16 @@
   {"id":"binding-tier-validation","failure":"ambiguous","binding_raw":"{\"codex\":{\"mid\":\"first-model\",\"mid\":\"other-model\"}}"},
   {"id":"binding-escaped-member-validation","failure":"ambiguous","binding_raw":"{\"codex\":{\"mid\":\"first-model\",\"m\\u0069d\":\"other-model\"}}"},
   {"id":"unique-escaped-member","model":"gpt-5.6-terra","binding_raw":"{\"codex\":{\"m\\u0069d\":\"gpt-5.6-terra\",\"top\":\"gpt-6-sol\"}}"},
-  {"id":"explicit-model-contract","model":"explicit-model","model_override":"explicit-model","policy_raw":"{\"task_dispatch\":\"mid\",\"task_dispatch\":\"top\"}","binding_raw":"{\"codex\":{\"mid\":\"first-model\",\"mid\":\"other-model\"}}"}
+  {"id":"explicit-model-contract","model":"explicit-model","model_override":"explicit-model","policy_raw":"{\"task_dispatch\":\"mid\",\"task_dispatch\":\"top\"}","binding_raw":"{\"codex\":{\"mid\":\"first-model\",\"mid\":\"other-model\"}}"},
+  {"id":"checker-duplicate-policy","entrypoint":"check","check_raw":"{\"member-marker\":\"value-marker\",\"member-marker\":\"other\"}","expect":"invalid"},
+  {"id":"checker-duplicate-binding","entrypoint":"check","check_raw":"{\"codex\":{\"top\":\"value-marker\",\"top\":\"other\"}}","expect":"invalid"},
+  {"id":"checker-duplicate-escaped","entrypoint":"check","check_raw":"{\"member-marker\":\"value-marker\",\"member-ma\\u0072ker\":\"other\"}","expect":"invalid"},
+  {"id":"checker-malformed-json","entrypoint":"check","check_raw":"{\"member-marker\":\"value-marker\"","expect":"invalid"},
+  {"id":"checker-missing-file","entrypoint":"check","expect":"invalid"},
+  {"id":"checker-unreadable-directory","entrypoint":"check","directory":true,"expect":"invalid"},
+  {"id":"checker-invalid-shape","entrypoint":"check","check_raw":"[\"value-marker\"]","expect":"invalid"},
+  {"id":"checker-invalid-policy","entrypoint":"check","check_raw":"{\"member-marker\":\"tier-marker\"}","expect":"invalid"},
+  {"id":"checker-invalid-binding","entrypoint":"check","check_raw":"{\"member-marker\":{\"tier-marker\":\"value-marker\"}}","expect":"invalid"},
+  {"id":"checker-valid-stale-warning","entrypoint":"check","check_raw":"{\"member-marker\":\"mid\"}","expect":"valid"},
+  {"id":"checker-valid-escaped-pair","entrypoint":"check","check_raw":"{\"bu\\u0069ld\":\"top\"}","extra_raw":"{\"codex\":{\"to\\u0070\":\"value-marker\"}}","expect":"valid"}
 ]

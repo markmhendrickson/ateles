@@ -562,3 +562,58 @@ def test_unique_escaped_members_remain_valid(monkeypatch, tmp_path, capsys, kind
     assert load() == expected
     assert not model_tiering.check_config_file(path)[2]
     assert model_tiering.main(["--check", str(path)]) == 0
+
+
+CHECKER_PRIVATE_MARKERS = ("selected-path-marker", "member-marker", "value-marker", "tier-marker")
+CHECKER_INVALID_INPUTS = [
+    None,
+    '{"member-marker":"value-marker","member-marker":"other"}',
+    '{"member-marker":"value-marker"',
+    '["value-marker"]',
+    '{}',
+    '{"member-marker":"tier-marker"}',
+    '{"member-marker":{"tier-marker":"value-marker"}}',
+    '{"codex":{"top":"value-marker","top":"other"}}',
+]
+
+
+@pytest.mark.parametrize("raw", CHECKER_INVALID_INPUTS)
+def test_checker_diagnostics_are_value_free_and_actionable(tmp_path, capsys, raw):
+    path = tmp_path / "selected-path-marker.json"
+    if raw is not None:
+        path.write_text(raw)
+    _, _, errors, warnings = model_tiering.check_config_file(path)
+    assert errors
+    returned = "\n".join(errors + warnings)
+    assert not any(value in returned for value in CHECKER_PRIVATE_MARKERS)
+    assert all("invalid configuration" in value and "correct" in value and "--check" in value
+               for value in errors)
+    assert model_tiering.main(["--check", str(path)]) == 1
+    output = capsys.readouterr().out
+    assert not any(value in output for value in (*CHECKER_PRIVATE_MARKERS, str(path)))
+    assert "ERROR configuration 1" in output and "FAIL  configuration 1" in output
+    assert "invalid configuration" in output and "correct" in output and "--check" in output
+
+
+def test_checker_valid_warning_retains_data_without_reprinting_members(tmp_path, capsys):
+    path = tmp_path / "selected-path-marker.json"
+    path.write_text('{"member-marker":"mid"}')
+    kind, data, errors, warnings = model_tiering.check_config_file(path)
+    assert kind == "action-policy" and data == {"member-marker": "mid"}
+    assert not errors and warnings
+    assert "member-marker" not in "\n".join(warnings)
+    assert model_tiering.main(["--check", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "selected-path-marker" not in output and "member-marker" not in output
+    assert "ok    configuration 1 (action-policy, 1 entries)" in output
+
+
+def test_checker_multiple_inputs_use_stable_indices_and_keep_kinds(tmp_path, capsys):
+    policy, binding = tmp_path / "selected-path-marker.json", tmp_path / "other-path-marker.json"
+    policy.write_text('{"build":"top"}')
+    binding.write_text('{"codex":{"top":"value-marker"}}')
+    assert model_tiering.main(["--check", str(policy), str(binding)]) == 0
+    output = capsys.readouterr().out
+    assert "ok    configuration 1 (action-policy, 1 entries)" in output
+    assert "ok    configuration 2 (vendor-binding, 1 entries)" in output
+    assert not any(value in output for value in (*CHECKER_PRIVATE_MARKERS, "other-path-marker"))
