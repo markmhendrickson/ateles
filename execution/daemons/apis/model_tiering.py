@@ -951,42 +951,47 @@ def _classify_config(data: object) -> str | None:
     return None
 
 
+def _config_error(reason: str) -> str:
+    return (
+        f"invalid configuration: {reason}; correct the selected configuration "
+        "and rerun --check"
+    )
+
+
 def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str]]:
     """Validate one config file strictly. Returns ``(kind, data, errors, warnings)``.
 
-    Stricter than the runtime loaders on purpose: the loaders drop a bad entry
-    and carry on (so a typo can never crash a daemon), which means a typo only
-    shows up as a class quietly running at ``top``. This is where a typo is
-    caught before the file is installed.
+    Catch invalid input before installation; the runtime loaders also refuse
+    invalid selected configuration. Diagnostics describe the problem without
+    repeating selected paths, members, values or raw exceptions.
     """
     errors: list[str] = []
     warnings: list[str] = []
     try:
         data = _decode_config(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        return None, {}, [f"cannot read {path}: {exc}"], warnings
-    except ValueError as exc:
-        return None, {}, [f"{path}: not valid JSON ({exc})"], warnings
+    except OSError:
+        return None, {}, [_config_error("selected file cannot be read")], warnings
+    except ValueError:
+        return None, {}, [_config_error("selected file is not valid JSON")], warnings
     kind = _classify_config(data)
     if kind is None:
         return None, {}, [
-            f"{path}: neither an action_policy ({{class: tier}}) nor a "
-            "vendor_binding ({provider: {tier: model}}) object, or empty"
+            _config_error("expected a nonempty action_policy or vendor_binding object")
         ], warnings
 
     if kind == "action-policy":
         for klass, tier in data.items():
             if not str(klass).strip():
-                errors.append("action_policy has an empty class name")
+                errors.append(_config_error("action_policy has an empty class name"))
             try:
                 _policy_bounds(tier)
             except ValueError:
-                errors.append(f"action_policy class {klass!r} names unknown tier or invalid bounds; dispatch refused")
+                errors.append(_config_error("action_policy has an unknown tier or invalid bounds; dispatch refused"))
         unmapped = [c for c in DISPATCH_ACTION_CLASSES if c not in data]
         if unmapped:
             warnings.append(
-                "classes with no entry resolve to "
-                f"{DEFAULT_TIER!r} (fail-closed): {', '.join(unmapped)}"
+                f"{len(unmapped)} classes with no entry resolve to "
+                f"{DEFAULT_TIER!r} (fail-closed)"
             )
         stale = [
             c for c in data
@@ -994,8 +999,7 @@ def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str
         ]
         if stale:
             warnings.append(
-                "classes no Apis call site passes (harmless, but dead): "
-                + ", ".join(stale)
+                f"{len(stale)} classes are unused by Apis call sites (harmless, but dead)"
             )
     else:
         from harness_router import FRONTIER_PROVIDERS as PROVIDERS  # lazy: import-light
@@ -1004,23 +1008,23 @@ def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str
             name = str(provider).strip().lower()
             if name not in PROVIDERS:
                 errors.append(
-                    f"vendor_binding provider {provider!r} is not a frontier "
-                    f"harness provider ({', '.join(PROVIDERS)})"
+                    _config_error("vendor_binding names an unsupported harness provider")
                 )
             for tier, model in tiers.items():
                 if str(tier).strip().lower() not in TIERS:
                     errors.append(
-                        f"vendor_binding {provider!r} names unknown tier {tier!r}"
+                        _config_error("vendor_binding names an unknown tier")
                     )
                 if not str(model).strip():
                     errors.append(
-                        f"vendor_binding {provider!r} tier {tier!r} has an empty model"
+                        _config_error("vendor_binding has an empty model")
                     )
             if DEFAULT_TIER not in {str(t).strip().lower() for t in tiers}:
                 errors.append(
-                    f"vendor_binding {provider!r} binds no {DEFAULT_TIER!r} "
-                    "model, but every escalation and every unmapped class "
-                    "resolves there — the provider could run nothing"
+                    _config_error(
+                        f"vendor_binding binds no {DEFAULT_TIER!r} model; "
+                        "escalations and unmapped classes cannot run"
+                    )
                 )
     return kind, data, errors, warnings
 
@@ -1074,22 +1078,23 @@ def main(argv: list[str] | None = None) -> int:
 
     exit_code = 0
     loaded: dict[str, dict] = {}
-    for raw in args.check:
+    for index, raw in enumerate(args.check, 1):
+        label = f"configuration {index}"
         path = Path(raw).expanduser()
         kind, data, errors, warnings = check_config_file(path)
         for msg in errors:
-            print(f"ERROR {path}: {msg}")
+            print(f"ERROR {label}: {msg}")
         for msg in warnings:
-            print(f"warn  {path}: {msg}")
+            print(f"warn  {label}: {msg}")
         if errors or kind is None:
             exit_code = 1
-            print(f"FAIL  {path}")
+            print(f"FAIL  {label}")
             continue
         loaded[kind] = data
-        print(f"ok    {path} ({kind}, {len(data)} entries)")
+        print(f"ok    {label} ({kind}, {len(data)} entries)")
     if "action-policy" in loaded and "vendor-binding" in loaded:
         for msg in check_cross(loaded["action-policy"], loaded["vendor-binding"]):
-            print(f"ERROR cross-check: {msg}")
+            print(f"ERROR cross-check: {_config_error(msg)}")
             exit_code = 1
     return exit_code
 
