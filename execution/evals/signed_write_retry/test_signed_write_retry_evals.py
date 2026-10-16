@@ -53,3 +53,17 @@ def test_the_scenario_goes_red_when_the_defect_is_reinstated(mutation, scenario_
     assert harness.check(scenario, harness.run_scenario(scenario)) == []
     problems = harness.check(scenario, harness.run_scenario(scenario, mutation=mutation))
     assert problems, f"{mutation} passed: the eval cannot tell the designs apart"
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["expiry", "cancellation"])
+def test_real_preparation_boundary_eval(tmp_path, cancel):
+    observation = harness.run_preparation_boundary(tmp_path, cancel=cancel)
+    assert harness.check_preparation_boundary(observation) == [], observation
+
+
+def test_real_preparation_eval_rejects_detached_budget_planted_control(tmp_path):
+    observation = harness.run_preparation_boundary(tmp_path, mutation=True)
+    assert observation["preparation_started"]
+    assert observation["helper_launches"] == 1, observation
+    assert not observation["permit_reclaimed"], observation
+    assert harness.check_preparation_boundary(observation), observation

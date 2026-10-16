@@ -399,7 +399,7 @@ def _signed_fake(clock, durations):
     """Each call takes durations[i] (the last repeats) or its timeout, then fails."""
     calls = {"n": 0}
 
-    def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+    def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
         i = min(calls["n"], len(durations) - 1)
         calls["n"] += 1
         clock.launched.append((clock.elapsed, timeout, CAP - clock.elapsed))
@@ -702,7 +702,7 @@ def _tiny_real_deadline(monkeypatch):
 def _counting_fake(monkeypatch, *, block=0.0):
     calls = []
 
-    def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+    def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
         calls.append(timeout)
         if block:
             _real_time.sleep(block)
@@ -833,7 +833,7 @@ def test_a_write_that_landed_after_the_caller_gave_up_is_not_applied_twice(monke
     store = _wire(monkeypatch, rec)
     landed = gate_waive._ns.signed_request
 
-    async def lands_then_stalls(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+    async def lands_then_stalls(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
         out = await landed(method, url, body, agent_name, timeout, sub=sub)
         if body and body.get("field") == GATE_STATUS_FIELD:
             await asyncio.sleep(0.15)  # the response is still in flight at the deadline

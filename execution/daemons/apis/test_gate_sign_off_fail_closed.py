@@ -220,12 +220,12 @@ class _Record:
         return 200, {}
 
     async def signed_request_async(
-        self, method, url, body=None, agent_name="", timeout=20, *, sub=None
+        self, method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options
     ):
         return self.apply(body, sub)
 
     def signed_request_sync(
-        self, method, url, body=None, agent_name="", timeout=20, *, sub=None
+        self, method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options
     ):
         """The REAL `neotoma_signed.signed_request` signature: synchronous."""
         return self.apply(body, sub)

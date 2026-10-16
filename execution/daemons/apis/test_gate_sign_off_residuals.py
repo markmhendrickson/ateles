@@ -449,7 +449,7 @@ class TestConcurrentSignOffsAreSerialised:
         )
         store = _wire(monkeypatch, rec)
 
-        async def paced(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        async def paced(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             result = rec.apply(body, sub)
             if sub == "accipiter@ateles-swarm" and body["field"] == GATE_STATUS_FIELD:
                 await asyncio.sleep(0.05)  # B's window: A loads here
@@ -507,7 +507,7 @@ class TestNextRunReprovesSignedOff:
         landed = threading.Event()
         release = threading.Event()
 
-        def slow(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        def slow(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             result = rec.apply(body, sub)
             if body["field"] == GATE_STATUS_FIELD:
                 landed.set()

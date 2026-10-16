@@ -108,7 +108,7 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
     with pytest.MonkeyPatch.context() as mp:
         issue_store = base._wire(mp, store, signer_fails=None)
 
-        def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             return store.transport(body, sub, timeout, clock)
 
         mp.setattr(gate_waive._ns, "signed_request", signed)
@@ -222,4 +222,85 @@ def check(scenario: dict, obs: dict) -> list[str]:
     for needle in exp.get("log_excludes", []):
         if needle in log:
             bad.append(f"the log leaks {needle!r}")
+    return bad
+
+
+def delayed_preparation_identity(agent_name, *, sub=None, keys_dir=None):
+    """Synthetic, spawn-safe resolver used only by the offline timing eval."""
+    import time
+    (Path(keys_dir) / "started").write_text("started")
+    time.sleep(2)
+    return {"key": "synthetic-unused", "sub": sub or "synthetic", "kid": "synthetic"}
+
+
+def run_preparation_boundary(directory, *, mutation=False, cancel=False):
+    """Exercise real signed_request preparation, expiry/cancellation and cleanup.
+
+    The planted control drops the caller's budget/cancellation at the wrapper
+    boundary. The helper remains a recorder: no signer, credentials or network.
+    """
+    import threading
+    import time
+    from types import SimpleNamespace
+    launches = []
+    permits = threading.BoundedSemaphore(1)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    observation = {}
+    real_request = ns.signed_request
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(gate_waive, "_signed_pool", pool)
+        mp.setattr(gate_waive, "_signed_permits", permits)
+        mp.setattr(gate_waive, "_monotonic", time.monotonic)
+        mp.setattr(gate_waive, "SIGNED_WRITE_TOTAL_CAP_S", 0.8)
+        mp.setattr(gate_waive, "MIN_ATTEMPT_TIMEOUT_S", 0.01)
+        mp.setattr(gate_waive, "SIGNED_ATTEMPT_TIMEOUT_S", 5)
+        mp.setattr(ns, "AAUTH_KEYS_DIR", str(directory))
+        mp.setattr(ns, "agent_identity", delayed_preparation_identity)
+        mp.setattr(ns.subprocess, "run", lambda *a, **k: (
+            launches.append(time.monotonic()) or SimpleNamespace(stdout='{"status":200,"body":"{}"}')
+        ))
+        if mutation:
+            def detached(*args, **kwargs):
+                kwargs.pop("deadline", None)
+                kwargs.pop("cancelled", None)
+                kwargs["timeout"] = 5
+                return real_request(*args, **kwargs)
+            mp.setattr(ns, "signed_request", detached)
+
+        async def exercise():
+            started = time.monotonic()
+            call = asyncio.create_task(gate_waive.IssueGateStore("http://unused.invalid", "")._sign_off_write(
+                "synthetic", "gate_status", {}, "synthetic-key", lens_agent="synthetic",
+                lens_sub="synthetic", context=("synthetic", 1, "pm")))
+            if cancel:
+                while not (directory / "started").exists() and time.monotonic() - started < 0.6:
+                    await asyncio.sleep(0.01)
+                call.cancel()
+            try:
+                observation["failed"] = bool(await call)
+            except asyncio.CancelledError:
+                observation["failed"] = True
+            observation["caller_seconds"] = time.monotonic() - started
+            observation["preparation_started"] = (directory / "started").exists()
+            await asyncio.sleep(0.3)
+            observation["permit_reclaimed"] = permits.acquire(blocking=False)
+            if observation["permit_reclaimed"]:
+                permits.release()
+
+        try:
+            asyncio.run(exercise())
+        finally:
+            # Join while all patches still hold, including in the planted control.
+            pool.shutdown(wait=True)
+    observation["helper_launches"] = len(launches)
+    return observation
+
+
+def check_preparation_boundary(observation):
+    expected = {"failed": True, "preparation_started": True,
+                "permit_reclaimed": True, "helper_launches": 0}
+    bad = [f"{key}: {observation.get(key)!r}" for key, value in expected.items()
+           if observation.get(key) != value]
+    if observation["caller_seconds"] > 1.2:
+        bad.append("caller exceeded deadline allowance")
     return bad

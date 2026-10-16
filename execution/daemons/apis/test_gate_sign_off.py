@@ -207,7 +207,7 @@ class TestExplicitSubjectNeverAmbient:
         )
         seen_subs: list[str | None] = []
 
-        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             seen_subs.append(sub)
             return 200, {}
 
@@ -247,7 +247,7 @@ class TestOnlyDeclaredFieldsWritten:
         )
         sent_fields: list[str] = []
 
-        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             sent_fields.append(body["field"])
             return 200, {}
 
@@ -288,7 +288,7 @@ class TestCurrentOwnerAdvance:
         )
         sent: list[tuple[str, object]] = []
 
-        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             sent.append((body["field"], body["value"]))
             return 200, {}
 
@@ -328,7 +328,7 @@ class TestCurrentOwnerAdvance:
         )
         sent_fields: list[str] = []
 
-        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        async def _capture(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             sent_fields.append(body["field"])
             return 200, {}
 

@@ -310,10 +310,10 @@ _retry_sleep = asyncio.sleep
 # fails at once with the retryable reason "busy" (it is retried inside the deadline
 # like any transient failure). A permit is released when the WORKER finishes, not when
 # the caller gives up, so the number of live workers can never exceed the pool size,
-# and every worker ends by the deadline because the helper process it runs is killed
-# at its timeout. The same approach (fixed pool, permit per worker, deadline re-read
-# when the work begins, abandon flag, bounded await) is used by the agent-definition
-# loader.
+# and both signing preparation and the helper process are killed and reaped when
+# their shared allowance expires (with OS kill/reap latency). The same approach
+# (fixed pool, permit per worker, deadline re-read when work begins, abandon flag,
+# bounded await) is used by the agent-definition loader.
 SIGNED_WORKERS = 8
 _signed_pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=SIGNED_WORKERS, thread_name_prefix="signed-write"
@@ -2161,8 +2161,11 @@ class IssueGateStore:
         * the worker re-reads the clock at the moment it actually BEGINS; if the
           deadline has passed (it waited in the executor queue) or the caller has
           already given up, it raises ``expired`` WITHOUT issuing the write;
-        * the signing helper gets min(default, time left at that moment), and
-          ``subprocess.run(timeout=)`` kills and reaps the child at the limit;
+        * signed_request receives the absolute deadline and abandonment flag;
+          identity reads and request encoding run in a killable spawned preparer;
+        * after reaping preparation, the helper launch rechecks abandonment and
+          computes min(default, time left), then subprocess.run kills and reaps
+          the helper at that limit;
         * the await itself is bounded by the same deadline, so the caller is never
           held past it; when it gives up it marks the attempt abandoned, so a queued
           worker never starts and a mid-flight worker's late result is discarded
@@ -2210,18 +2213,22 @@ class IssueGateStore:
                 agent_name=lens_agent,
                 timeout=min(SIGNED_ATTEMPT_TIMEOUT_S, remaining),
                 sub=lens_sub,
+                deadline=deadline,
+                cancelled=abandoned,
+                clock=_monotonic,
             )
 
-        if not _signed_permits.acquire(blocking=False):
+        permits = _signed_permits
+        if not permits.acquire(blocking=False):
             raise _ns.SignedRequestError("no free signing worker", "busy")
 
         def release(_done):
-            _signed_permits.release()
+            permits.release()
 
         try:
             concurrent_future = _signed_pool.submit(run)
         except BaseException:
-            _signed_permits.release()
+            permits.release()
             raise
         concurrent_future.add_done_callback(release)
         future = asyncio.wrap_future(concurrent_future)

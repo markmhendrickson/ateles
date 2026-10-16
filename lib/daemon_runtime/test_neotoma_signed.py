@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -67,6 +69,8 @@ class NeotomaSignedTest(unittest.TestCase):
         def fake_run(cmd, **kw):
             self.assertTrue(kw["env"]["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"].endswith("apus.jwk.json"))
             self.assertEqual(kw["env"]["NEOTOMA_AAUTH_SUB"], "apus@ateles-swarm")
+            self.assertGreater(kw["timeout"], 0)
+            self.assertLess(kw["timeout"], 20, "preparation must consume the transport budget")
             return subprocess.CompletedProcess(cmd, 0, stdout=helper_out, stderr="")
 
         with mock.patch.object(ns.subprocess, "run", side_effect=fake_run):
@@ -92,6 +96,23 @@ class NeotomaSignedTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             ns.signed_request("GET", "http://x", agent_name="ghost")
         self.assertIn("no AAuth key", str(cm.exception))
+
+    def test_expired_request_never_starts_preparation_or_transport(self):
+        with mock.patch.object(ns.multiprocessing, "get_context") as context:
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://unused.invalid", {},
+                                  deadline=time.monotonic() - 1)
+        self.assertEqual(caught.exception.code, "expired")
+        context.assert_not_called()
+
+    def test_abandoned_request_never_starts_preparation_or_transport(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        with mock.patch.object(ns.multiprocessing, "get_context") as context:
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://unused.invalid", {}, cancelled=cancelled)
+        self.assertEqual(caught.exception.code, "expired")
+        context.assert_not_called()
 
     # ── ateles#795 constraint 2: explicit subject, never ambient ──────────────
 
