@@ -992,6 +992,24 @@ def test_parse_gate_verdict_none_when_absent():
     assert parse_gate_verdict(None) is None
 
 
+@pytest.mark.parametrize("stdout", [
+    "I could not verify the record; the example is `GATE_INHERITANCE: clear`.",
+    "> GATE_INHERITANCE: clear",
+    "NOT GATE_INHERITANCE: clear; the parent remains pending",
+    "GATE_INHERITANCE: clear\nGATE_INHERITANCE: blocked",
+    "GATE_INHERITANCE: clear\nGATE_PENDING: arch",
+    "GATE_INHERITANCE: clear\nI could not verify the parent record",
+])
+def test_parse_gate_verdict_rejects_prose_quotes_and_conflicts(stdout):
+    assert parse_gate_verdict(stdout) is None
+
+
+def test_parse_gate_verdict_accepts_final_standalone_blocked_with_pending():
+    assert parse_gate_verdict(
+        "Parent record read.\nGATE_INHERITANCE: blocked\nGATE_PENDING: arch,ux"
+    ) == "blocked"
+
+
 # ── parse_pending_gates (ateles#230 panel-assembly fix) ─────────────────────
 
 
@@ -1415,8 +1433,13 @@ def test_degraded_lanius_cannot_clear_inheritance_or_reach_panel(
                    for name, value, *_ in calls)
 
 
+@pytest.mark.parametrize("stdout", [
+    "no inheritance verdict",
+    "I could not verify; the example is `GATE_INHERITANCE: clear`.",
+    "GATE_INHERITANCE: clear\nGATE_INHERITANCE: blocked",
+])
 def test_healthy_lanius_missing_both_verdicts_holds_pending_parent(
-    monkeypatch,
+    monkeypatch, stdout,
 ):
     """A successful gate read cannot turn absent inheritance proof into clear."""
     calls = []
@@ -1444,7 +1467,7 @@ def test_healthy_lanius_missing_both_verdicts_holds_pending_parent(
         calls.append(("run", skill))
         if skill == "lanius":
             calls.append(("lanius_prompt", prompt))
-            return SkillResult(skill, True, 0, "no inheritance verdict", "")
+            return SkillResult(skill, True, 0, stdout, "")
         if skill == "vanellus":
             return SkillResult(skill, True, 0, "**APPROVE**", "")
         return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
@@ -7706,17 +7729,20 @@ def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch, degraded_loa
 
 
 @pytest.mark.parametrize("prior_section", ["", "verified prior PM"])
+@pytest.mark.parametrize("failure_kind", ["degraded", "failed"])
 def test_degraded_spec_section_keeps_verified_state_and_stops_pipeline(
-    monkeypatch, prior_section
+    monkeypatch, prior_section, failure_kind
 ):
     calls = []
 
     async def fake_run_skill(skill, prompt, **_kwargs):
         calls.append((skill, prompt))
         return SkillResult(
-            skill, True, 0,
+            skill, not (skill == "pavo" and failure_kind == "failed"),
+            1 if skill == "pavo" and failure_kind == "failed" else 0,
             "<<<SPEC_SECTION>>>review content<<<END_SPEC_SECTION>>>", "",
-            degraded_load=skill == "pavo", load_error="timeout" if skill == "pavo" else "",
+            degraded_load=skill == "pavo" and failure_kind == "degraded",
+            load_error="timeout" if skill == "pavo" and failure_kind == "degraded" else "",
         )
 
     _install_pipeline_stubs(
@@ -7756,6 +7782,11 @@ def test_degraded_spec_section_keeps_verified_state_and_stops_pipeline(
     assert [skill for skill, _ in calls] == ["lanius", "pavo"]
     assert not handoffs
     assert any("pavo" in message.lower() for message in notifier.sent)
+    assert any(
+        ("role-definition load failure" if failure_kind == "degraded" else
+         "role run failed") in message.lower()
+        for message in notifier.sent
+    )
     assert any(
         ("prior verified section preserved" if prior_section else
          "no prior verified section exists") in message.lower()

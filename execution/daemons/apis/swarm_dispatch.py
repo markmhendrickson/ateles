@@ -171,7 +171,8 @@ _PARENT_LINK = _label_gate.PARENT_LINK
 # names the parentage superset, which is what every one of its call sites
 # actually wanted.
 _PARENT_ISSUE = _PARENT_LINK
-_GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
+_GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)\s*", re.I)
+_GATE_VERDICT_MENTION = re.compile(r"GATE_INHERITANCE\s*:", re.I)
 
 # ateles#232 QA finding: `reopened` (github_gateway.py maps it to kind
 # "pr_reopened", distinct from "pr_synchronize") re-enters the pipeline the
@@ -517,9 +518,23 @@ def _sanitize_section_body(text: str, section: SpecSection) -> str:
 
 
 def parse_gate_verdict(stdout: str) -> str | None:
-    """Extract Lanius's GATE_INHERITANCE verdict; None when absent."""
-    m = _GATE_VERDICT.search(stdout or "")
-    return m.group(1).lower() if m else None
+    """Accept one standalone final Lanius verdict, never quoted prose."""
+    lines = [line for line in (stdout or "").splitlines() if line.strip()]
+    mentioned = [i for i, line in enumerate(lines) if _GATE_VERDICT_MENTION.search(line)]
+    if len(mentioned) != 1:
+        return None
+    index = mentioned[0]
+    match = _GATE_VERDICT.fullmatch(lines[index])
+    if match is None:
+        return None
+    verdict = match.group(1).lower()
+    if verdict == "clear":
+        return verdict if index == len(lines) - 1 and not _GATE_PENDING.search(stdout) else None
+    if index == len(lines) - 1:
+        return verdict
+    if index == len(lines) - 2 and _GATE_PENDING.fullmatch(lines[-1]):
+        return verdict
+    return None
 
 
 # Lanius names the still-unsigned pre-impl gates on a `blocked` verdict, e.g.
@@ -5934,17 +5949,20 @@ class SwarmDispatcher:
                 action_class=model_tiering.lens_review_class(section.lens),
             )
             section_text = self._extract_section_text(result.stdout, section)
-            if result.degraded_load:
+            if result.degraded_load or not result.ok:
                 # A degraded role has no authority to replace a verified
                 # section. Leave this step incomplete and do not pass its
                 # output to later lenses or the issue-body mirror.
                 log.error(
-                    "[%s] %s: degraded %s spec section held; canonical spec unchanged",
+                    "[%s] %s: untrusted %s spec section held; canonical spec unchanged",
                     DAEMON_NAME, ref, section.agent,
                 )
                 self.notifier.send(
                     f"{ref}: {section.agent} spec section incomplete after "
-                    "role-definition load failure; "
+                    + (
+                        "role-definition load failure; "
+                        if result.degraded_load else "role run failed; "
+                    )
                     + (
                         "prior verified section preserved"
                         if (state.sections or {}).get(section.field)
