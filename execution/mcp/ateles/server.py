@@ -84,6 +84,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from lib.daemon_runtime.action_type import (  # noqa: E402
+    AGENT_ACTION_TYPE_PRIOR,
+    resolve_gate_action_type,
+)
+
 log = logging.getLogger("ateles")
 
 # Keep release-acceptance work alive if the MCP caller times out or cancels.
@@ -924,10 +929,25 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
         result["agent_definition"] = agent_def
     if policy:
         result["execution_policy"] = policy
-    if action_type:
-        result["action_type"] = action_type
+    # Same resolution the dispatcher's gate applies (ateles#682): a declared
+    # action_type is taken as given; otherwise the matched agent's prior, then
+    # what the task description itself says it does. Before this, a caller who
+    # omitted `action_type` got no blast classification at all, so the preview
+    # could not tell a filing agent that a report-only task and a PR task
+    # differ. `action_type_source` says which of those the verdict rests on.
+    resolved = resolve_gate_action_type(
+        best_agent,
+        {"action_type": action_type, "title": task_description},
+        AGENT_ACTION_TYPE_PRIOR,
+    )
+    if resolved.value:
+        # A declared value is echoed exactly as the caller wrote it, as before.
+        result["action_type"] = action_type if action_type else resolved.value
+        result["action_type_source"] = resolved.source
         if policy:
-            result["action_blast_radius"] = _action_blast_radius(action_type, policy)
+            result["action_blast_radius"] = _action_blast_radius(
+                resolved.value, policy
+            )
     return result
 
 
@@ -3359,8 +3379,10 @@ TOOLS = [
             "Given a task description, resolves the owning agent from the swarm "
             "roster by role, fetches its agent_definition (prompt, context types, "
             "tool allowlist), and the applicable execution_policy. Returns the "
-            "complete dispatch context in one call. Optionally pass action_type to "
-            "get the blast radius classification for that action."
+            "complete dispatch context in one call. Returns the blast radius the "
+            "dispatcher's gate would assign: from action_type when passed, else "
+            "from the matched agent and what the description says it does "
+            "(action_type_source says which)."
         ),
         inputSchema={
             "type": "object",
