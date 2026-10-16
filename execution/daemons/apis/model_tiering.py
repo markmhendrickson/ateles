@@ -176,6 +176,20 @@ def _higher_tier(a: str, b: str) -> str:
     return a if _tier_index(a) >= _tier_index(b) else b
 
 
+def reject_duplicate_members(pairs):
+    """Build one JSON object without silently replacing an earlier member."""
+    out: dict = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate JSON member")
+        out[key] = value
+    return out
+
+
+def _decode_config(raw: str) -> object:
+    return json.loads(raw, object_pairs_hook=reject_duplicate_members)
+
+
 def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> dict | None:
     """Read the selected source, with file priority over environment JSON.
 
@@ -201,7 +215,7 @@ def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> di
     except (OSError, UnicodeError, ValueError):
         refuse()
     try:
-        parsed = json.loads(raw)
+        parsed = _decode_config(raw)
     except (TypeError, ValueError):
         refuse()
     if not isinstance(parsed, dict):
@@ -948,7 +962,7 @@ def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = _decode_config(path.read_text(encoding="utf-8"))
     except OSError as exc:
         return None, {}, [f"cannot read {path}: {exc}"], warnings
     except ValueError as exc:

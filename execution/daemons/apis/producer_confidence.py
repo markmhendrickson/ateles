@@ -191,13 +191,7 @@ class _InvalidReply(ValueError):
     pass
 
 
-def _no_duplicates(pairs):
-    out: dict = {}
-    for key, value in pairs:
-        if key in out:
-            raise _InvalidReply("duplicate key")
-        out[key] = value
-    return out
+_no_duplicates = model_tiering.reject_duplicate_members
 
 
 def _no_constants(name):

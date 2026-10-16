@@ -55,13 +55,22 @@ def test_agent_policy_cli_scenario(tmp_path, case):
     binary.chmod(0o700)
     example = ROOT / "docs/examples/model-tiering"
     policy = example / "action-policy.json"
+    binding = example / "vendor-binding.json"
     failure = case.get("failure", "")
-    if failure:
+    if "policy_raw" in case:
+        policy = tmp_path / "policy.json"
+        policy.write_text(case["policy_raw"])
+    elif failure and "binding_raw" not in case:
         policy = tmp_path / "policy.json"
         policy.write_text("{invalid" if failure == "json" else "{}")
+    if "binding_raw" in case:
+        binding = tmp_path / "binding.json"
+        binding.write_text(case["binding_raw"])
     args = ["--role", "pavo", "--task", "offline policy eval", "--provider", "codex", "--json"]
     if case.get("action"):
         args += ["--action-class", case["action"]]
+    if case.get("model_override"):
+        args += ["--model", case["model_override"]]
     if case.get("escalate"):
         args += ["--review-round", "3", "--new-blocking-finding", "--diff-lines", "900"]
     context = tmp_path / "context.json"
@@ -73,7 +82,7 @@ def test_agent_policy_cli_scenario(tmp_path, case):
            "PYTHONPATH": str(ROOT), "APIS_HARNESS_PROVIDERS": "codex",
            "APIS_HARNESS_HEADROOM": '{"codex":1.0}', "APIS_USAGE_GATE": "off",
            "APIS_USAGE_PROBE": "off", "APIS_ACTION_POLICY_FILE": str(policy),
-           "APIS_VENDOR_BINDING_FILE": str(example / "vendor-binding.json"),
+           "APIS_VENDOR_BINDING_FILE": str(binding),
            "APIS_TIER_LEDGER_FILE": str(tmp_path / "ledger.jsonl")}
     done = subprocess.run([sys.executable, str(driver), str(ROOT / "execution/daemons/apis"), str(context)],
                           env=env, capture_output=True, text=True, timeout=30)

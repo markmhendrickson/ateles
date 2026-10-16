@@ -8,5 +8,12 @@
   {"id":"protected-architecture","action":"lens_review:arch","model":"gpt-6-sol"},
   {"id":"blocking-product","action":"lens_review:pm","escalate":true,"model":"gpt-6-sol"},
   {"id":"invalid-selected-json","action":"panel_aggregation","failure":"json"},
-  {"id":"unreadable-selected-policy","action":"panel_aggregation","failure":"unreadable"}
+  {"id":"unreadable-selected-policy","action":"panel_aggregation","failure":"unreadable"},
+  {"id":"policy-member-validation","failure":"ambiguous","policy_raw":"{\"task_dispatch\":\"mid\",\"task_dispatch\":\"top\"}"},
+  {"id":"policy-bound-validation","action":"panel_aggregation","failure":"ambiguous","escalate":true,"policy_raw":"{\"panel_aggregation\":{\"min_tier\":\"mid\",\"max_tier\":\"mid\",\"max_tier\":\"top\"}}"},
+  {"id":"binding-provider-validation","failure":"ambiguous","binding_raw":"{\"codex\":{\"mid\":\"first-model\"},\"codex\":{\"mid\":\"other-model\"}}"},
+  {"id":"binding-tier-validation","failure":"ambiguous","binding_raw":"{\"codex\":{\"mid\":\"first-model\",\"mid\":\"other-model\"}}"},
+  {"id":"binding-escaped-member-validation","failure":"ambiguous","binding_raw":"{\"codex\":{\"mid\":\"first-model\",\"m\\u0069d\":\"other-model\"}}"},
+  {"id":"unique-escaped-member","model":"gpt-5.6-terra","binding_raw":"{\"codex\":{\"m\\u0069d\":\"gpt-5.6-terra\",\"top\":\"gpt-6-sol\"}}"},
+  {"id":"explicit-model-contract","model":"explicit-model","model_override":"explicit-model","policy_raw":"{\"task_dispatch\":\"mid\",\"task_dispatch\":\"top\"}","binding_raw":"{\"codex\":{\"mid\":\"first-model\",\"mid\":\"other-model\"}}"}
 ]
