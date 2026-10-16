@@ -40,6 +40,7 @@ RED = [
     ("no_retry", "a_timeout_then_a_503_then_success_uses_both_retries_with_the_stated_backoff"),
     ("no_retry", "a_gate_write_that_landed_with_a_lost_response_is_replayed_not_applied_twice"),
     ("retry_4xx", "a_refused_4xx_is_never_retried"),
+    ("timeout_before_thread_only", "an_attempt_queued_past_the_deadline_issues_no_write"),
     ("old_cap", "a_write_whose_every_attempt_hangs_ends_inside_the_cap_counting_the_attempts"),
     ("fresh_key_per_attempt", "a_gate_write_that_landed_with_a_lost_response_is_replayed_not_applied_twice"),
     ("fresh_key_per_attempt", "a_history_entry_that_landed_with_a_lost_response_is_not_doubled"),

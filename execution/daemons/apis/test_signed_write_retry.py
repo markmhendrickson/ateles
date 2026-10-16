@@ -491,7 +491,8 @@ def test_a_retry_that_cannot_fit_is_not_started(monkeypatch):
 
 def _passthrough(signed):
     async def _signed_correct(self, entity_id, field_name, value, key, *, lens_agent, lens_sub,
-                              timeout=20.0):
+                              deadline=None):
+        timeout = min(gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, deadline - gate_waive._monotonic())
         return signed("POST", "u", {}, agent_name=lens_agent, timeout=timeout, sub=lens_sub)
 
     return _signed_correct
@@ -633,7 +634,23 @@ def _old_rule(monkeypatch):
                                <= gate_waive.SIGNED_WRITE_TOTAL_CAP_S),
         raising=False,
     )
-    monkeypatch.setattr(gate_waive, "_attempt_timeout", lambda default, started: default, raising=False)
+
+    async def old_signed_correct(self, entity_id, field_name, value, key, *, lens_agent,
+                                 lens_sub, deadline=None):
+        return gate_waive._ns.signed_request(
+            "POST", "u", {}, agent_name=lens_agent,
+            timeout=gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, sub=lens_sub)
+
+    async def old_post_once(self, path, payload, deadline):
+        async with httpx.AsyncClient(timeout=gate_waive.BEARER_ATTEMPT_TIMEOUT_S) as client:
+            return await client.post(f"{self.base_url}/{path}", json=payload, headers={})
+
+    async def unbounded(awaitable, timeout=None):
+        return await awaitable
+
+    monkeypatch.setattr(IssueGateStore, "_signed_correct", old_signed_correct)
+    monkeypatch.setattr(IssueGateStore, "_post_once", old_post_once)
+    monkeypatch.setattr(asyncio, "wait_for", unbounded)
 
 
 def test_planted_red_the_old_check_lets_a_signed_write_run_past_the_cap(monkeypatch):
@@ -658,3 +675,210 @@ def test_planted_red_the_old_check_lets_a_waive_write_run_past_the_cap(monkeypat
     _run(IssueGateStore("http://x", "tok")._post("correct", {"k": 1}))
 
     assert clock.elapsed > CAP
+
+
+# ── the deadline holds through executor queueing and mid-flight abandonment ──
+#
+# The per-attempt timeout bounds the helper process only once a worker THREAD runs
+# it. A busy shared executor can delay that start past the deadline; the attempt
+# must then issue no write at all. These tests use the real clock and a real,
+# saturated executor, with the deadline scaled down so they take a fraction of a
+# second.
+
+import concurrent.futures
+import threading
+import time as _real_time
+
+
+def _tiny_real_deadline(monkeypatch):
+    monkeypatch.setattr(gate_waive, "SIGNED_WRITE_TOTAL_CAP_S", 0.05)
+    monkeypatch.setattr(gate_waive, "MIN_ATTEMPT_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(gate_waive, "SIGNED_ATTEMPT_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(gate_waive, "SIGNED_WRITE_BACKOFFS_S", (0.01, 0.01))
+    monkeypatch.setattr(gate_waive, "_monotonic", _real_time.monotonic, raising=False)
+    monkeypatch.setattr(gate_waive, "_retry_sleep", asyncio.sleep, raising=False)
+
+
+def _counting_fake(monkeypatch, *, block=0.0):
+    calls = []
+
+    def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        calls.append(timeout)
+        if block:
+            _real_time.sleep(block)
+        return 200, {}
+
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+    return calls
+
+
+async def _with_executor(workers, occupy_for=0.0):
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    asyncio.get_running_loop().set_default_executor(ex)
+    if occupy_for:
+        for _ in range(workers):
+            ex.submit(_real_time.sleep, occupy_for)
+    return ex
+
+
+def test_a_queued_attempt_that_starts_after_the_deadline_issues_no_write(monkeypatch):
+    """Arch's reproduction: the sole worker is busy for 0.15 s, the deadline is 0.05 s,
+    and the transport would answer 200 at once. No write may be issued, and the
+    caller is not held past the deadline."""
+    _tiny_real_deadline(monkeypatch)
+    calls = _counting_fake(monkeypatch)
+    store = _store()
+
+    async def go():
+        await _with_executor(1, occupy_for=0.15)
+        t0 = _real_time.monotonic()
+        out = await store._sign_off_write(
+            "ent_1", GATE_STATUS_FIELD, "v", "key-1",
+            lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+        )
+        held = _real_time.monotonic() - t0
+        await asyncio.sleep(0.3)  # the queued worker now gets its turn
+        return out, held
+
+    out, held = _run(go())
+
+    assert out == SIGN_OFF_SIGNING_FAILED
+    assert held < 0.12, f"the caller was held {held}s past a 0.05 s deadline"
+    assert calls == [], "an expired queued attempt issued a write"
+
+
+def test_the_expired_outcome_is_the_fail_closed_reason_and_is_not_retried(monkeypatch, caplog):
+    _tiny_real_deadline(monkeypatch)
+    _counting_fake(monkeypatch)
+
+    async def go():
+        await _with_executor(1, occupy_for=0.15)
+        with caplog.at_level(logging.INFO, logger="apis.gate_waive"):
+            return await _store()._sign_off_write(
+                "ent_1", GATE_STATUS_FIELD, "v", "key-1",
+                lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+            )
+
+    assert _run(go()) == SIGN_OFF_SIGNING_FAILED
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reason=expired" in text and "attempt=1/1" in text, text
+
+
+def test_a_worker_that_is_mid_flight_when_the_await_gives_up_has_its_result_discarded(monkeypatch):
+    _tiny_real_deadline(monkeypatch)
+    calls = _counting_fake(monkeypatch, block=0.15)  # a stuck helper that ignores its timeout
+
+    async def go():
+        await _with_executor(2)
+        out = await _store()._sign_off_write(
+            "ent_1", GATE_STATUS_FIELD, "v", "key-1",
+            lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+        )
+        await asyncio.sleep(0.3)  # the worker finishes and tries to report 200
+        return out
+
+    assert _run(go()) == SIGN_OFF_SIGNING_FAILED, "a late 200 was treated as success"
+    assert len(calls) == 1
+
+
+def test_repeated_expirations_do_not_grow_the_worker_pool(monkeypatch):
+    """50 attempts that each outlast the deadline leave no more live threads than the
+    executor's fixed size, and every one of them is reclaimed once it finishes."""
+    _tiny_real_deadline(monkeypatch)
+    _counting_fake(monkeypatch, block=0.06)
+    store = _store()
+    before = threading.active_count()
+
+    async def go():
+        ex = await _with_executor(3)
+        for i in range(50):
+            await store._sign_off_write(
+                "ent_1", GATE_STATUS_FIELD, "v", f"key-{i}",
+                lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+            )
+        peak = threading.active_count()
+        await asyncio.sleep(0.5)
+        settled = threading.active_count()
+        ex.shutdown(wait=True)
+        return peak, settled
+
+    peak, settled = _run(go())
+    assert peak <= before + 3, (before, peak)
+    assert settled <= before + 3
+    assert threading.active_count() <= before + 1, "worker threads were not reclaimed"
+
+
+def test_a_write_that_landed_after_the_caller_gave_up_is_not_applied_twice(monkeypatch):
+    """Landed-but-lost under expiry: the gate write reaches the store, then the helper
+    stalls past the deadline. The caller fails closed; nothing is written a second time."""
+    _tiny_real_deadline(monkeypatch)
+    rec = _Record({"pm": "pending"}, idempotent=True)
+    store = _wire(monkeypatch, rec)
+    landed = gate_waive._ns.signed_request
+
+    async def lands_then_stalls(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        out = await landed(method, url, body, agent_name, timeout, sub=sub)
+        if body and body.get("field") == GATE_STATUS_FIELD:
+            await asyncio.sleep(0.15)  # the response is still in flight at the deadline
+        return out
+
+    monkeypatch.setattr(gate_waive._ns, "signed_request", lands_then_stalls)
+
+    async def go():
+        await _with_executor(4)
+        outcome = await store.sign_off("o/r", 795, "pm", "pavo", HEAD)
+        await asyncio.sleep(0.4)
+        return outcome
+
+    outcome = _run(go())
+
+    assert not outcome.ok, "a response that missed the deadline must not count as success"
+    signed_off = [w for w in rec.gate_writes() if w[0].get("pm") == "signed_off"]
+    assert len(signed_off) == 1, "the stalled write must not be repeated into a second apply"
+
+
+def test_a_waive_write_whose_deadline_passed_before_it_began_sends_nothing(monkeypatch):
+    _tiny_real_deadline(monkeypatch)
+    sent = []
+
+    class _Client(_TimedClient):
+        async def post(self, url, json=None, headers=None):
+            sent.append(json)
+            return _Resp()
+
+    monkeypatch.setattr(gate_waive.httpx, "AsyncClient", _Client)
+    store = IssueGateStore("http://x", "tok")
+
+    async def go():
+        # the deadline has passed by the time the request would start
+        return await store._post_once("correct", {"k": 1}, gate_waive._monotonic() - 1.0)
+
+    with pytest.raises(asyncio.TimeoutError):
+        _run(go())
+    assert sent == []
+
+
+def test_planted_red_computing_the_timeout_before_the_thread_only_issues_the_late_write(monkeypatch):
+    """The previous design: compute the helper timeout, hand the call to the executor
+    and await it with no deadline of its own."""
+    _tiny_real_deadline(monkeypatch)
+    calls = _counting_fake(monkeypatch)
+
+    async def old(self, entity_id, field_name, value, key, *, lens_agent, lens_sub, deadline=None):
+        timeout = min(gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, deadline - gate_waive._monotonic())
+        return await asyncio.to_thread(
+            gate_waive._ns.signed_request, "POST", "u", {}, agent_name=lens_agent,
+            timeout=timeout, sub=lens_sub)
+
+    monkeypatch.setattr(IssueGateStore, "_signed_correct", old)
+
+    async def go():
+        await _with_executor(1, occupy_for=0.15)
+        return await _store()._sign_off_write(
+            "ent_1", GATE_STATUS_FIELD, "v", "key-1",
+            lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+        )
+
+    out = _run(go())
+    assert out == "", "the old design returned SUCCESS after the deadline, having issued the write"
+    assert len(calls) == 1

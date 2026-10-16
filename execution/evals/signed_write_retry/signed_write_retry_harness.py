@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import concurrent.futures
 import subprocess
 import sys
 from pathlib import Path
@@ -41,7 +42,7 @@ gate_waive = base.gate_waive
 ns = base.ns
 GATE_STATUS_FIELD = base.GATE_STATUS_FIELD
 
-MUTATIONS = ("none", "no_retry", "retry_4xx", "fresh_key_per_attempt", "old_cap")
+MUTATIONS = ("none", "no_retry", "retry_4xx", "fresh_key_per_attempt", "old_cap", "timeout_before_thread_only")
 
 
 def load() -> dict:
@@ -125,6 +126,16 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
                 raising=False,
             )
             mp.setattr(gate_waive, "_attempt_timeout", lambda default, started: default, raising=False)
+        if mutation == "timeout_before_thread_only":
+            # The previous design: compute the helper timeout, hand the call to the
+            # executor and await it with no deadline of its own.
+            async def old(self, entity_id, field_name, value, key, *, lens_agent, lens_sub, deadline=None):
+                timeout = min(gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, deadline - gate_waive._monotonic())
+                return await asyncio.to_thread(
+                    gate_waive._ns.signed_request, "POST", "u", {"field": field_name, "value": value,
+                    "idempotency_key": key}, agent_name=lens_agent, timeout=timeout, sub=lens_sub)
+
+            mp.setattr(gate_waive.IssueGateStore, "_signed_correct", old)
         if mutation == "no_retry":
             mp.setattr(gate_waive, "retries_for_reason", lambda code: 0)
             mp.setattr(gate_waive, "retries_for_status", lambda status: 0)
@@ -142,6 +153,19 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
             mp.setattr(IssueGateStore, "_signed_correct", _fresh)
 
         async def _go():
+            delay = scenario.get("queue_delay_s", 0)
+            if delay:
+                # Every attempt waits in the executor queue for `delay` seconds of the
+                # virtual clock before a worker begins it.
+                class _Queueing(concurrent.futures.ThreadPoolExecutor):
+                    def submit(self, fn, *args, **kwargs):
+                        def late(*a, **k):
+                            clock["now"] += delay
+                            return fn(*a, **k)
+
+                        return super().submit(late, *args, **kwargs)
+
+                asyncio.get_running_loop().set_default_executor(_Queueing(max_workers=2))
             for step in scenario["steps"]:
                 gate = step["gate"]
                 store.fail_fields = {GATE_STATUS_FIELD} if step.get("fail_gate") else set()
@@ -181,6 +205,8 @@ def check(scenario: dict, obs: dict) -> list[str]:
                 bad.append(f"{field}: retries changed the idempotency key: {len(set(keys))} keys")
     if "delays" in exp:
         want("backoff delays", obs["delays"], exp["delays"])
+    if "writes_issued" in exp:
+        want("writes issued to the store", len(store.writes), exp["writes_issued"])
     if "gate_writes_applied" in exp:
         want("gate writes applied", sum(1 for f, _ in store.writes if f == GATE_STATUS_FIELD),
              exp["gate_writes_applied"])

@@ -316,6 +316,36 @@
           "deadline reached, no further attempt fits"
         ]
       }
+    },
+    {
+      "id": "an_attempt_queued_past_the_deadline_issues_no_write",
+      "why": "a busy executor delays the worker start by 46 s, past the 45 s deadline. The worker re-reads the clock when it begins and issues no write; the sign-off fails closed with the expired reason and nothing reaches the store",
+      "gates": {
+        "pm": "pending"
+      },
+      "queue_delay_s": 46,
+      "script": {},
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
+      "expect": {
+        "ok": [
+          false
+        ],
+        "verified": [
+          false
+        ],
+        "gates": {
+          "pm": "pending"
+        },
+        "writes_issued": 0,
+        "attempts": {},
+        "log_contains": [
+          "reason=expired"
+        ]
+      }
     }
   ]
 }
