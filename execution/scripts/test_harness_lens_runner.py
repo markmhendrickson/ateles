@@ -4607,3 +4607,8 @@ def test_cli_model_selector_contract_refuses_invalid_inputs_before_dispatch(
             "--model=" + model,
         ])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("model", [None, "gpt-6-sol", "gpt-5.6-terra", "provider/custom-v1:latest"])
+def test_model_selector_contract_preserves_omission_and_valid_identifiers(model):
+    assert hlr.validate_model_selector(model) == model

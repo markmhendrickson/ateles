@@ -1975,6 +1975,34 @@ def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
 # ── dry-run rendering -------------------------------------------------------------
 
 
+def validate_model_selector(model: str | None) -> str | None:
+    """Preserve omission; require an explicit selection to be one identifier.
+
+    This validates syntax, not provider availability or tier policy. Providers
+    remain responsible for recognizing model ids, including explicit overrides.
+    """
+    if model is None:
+        return None
+    if (
+        not isinstance(model, str)
+        or not model
+        or model.startswith("-")
+        or any(char.isspace() or not char.isprintable() for char in model)
+    ):
+        raise ValueError(
+            "model must be a non-empty identifier without whitespace/control "
+            "characters or a leading '-'; omit --model for policy/default selection"
+        )
+    return model
+
+
+def _cli_model_selector(value: str) -> str:
+    try:
+        return validate_model_selector(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def dry_run_report(
     target: LensTarget,
     *,
@@ -1993,6 +2021,7 @@ def dry_run_report(
     drift between this preview and the real dispatch is visible as a diff
     against `_provider_command` in review, not a silent divergence.
     """
+    model = validate_model_selector(model)
     # Use the same live tier and vendor-binding resolvers as run_skill.
     # An explicit model wins; omitting both selectors keeps the provider default.
     selected_model = model
@@ -2599,6 +2628,7 @@ async def run_one(
     when the provider's configured headroom is exactly 0 — the operator-reset
     gate named in the task.
     """
+    model = validate_model_selector(model)
     check_headroom(provider)
 
     worktree_path = (
@@ -2927,6 +2957,7 @@ async def run_compare(
     providers' verdicts posted runs that provider again, alone, via
     ``run_one``/``--provider`` after inspecting the comparison.
     """
+    model = validate_model_selector(model)
     results = {}
     for provider in providers:
         results[provider] = await run_one(
@@ -3000,8 +3031,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument(
-        "--model", default=None,
-        help="Explicit provider model; overrides --action-class tier selection. "
+        "--model", default=None, type=_cli_model_selector,
+        help="Explicit provider model identifier without whitespace/control characters; "
+        "overrides --action-class tier selection. "
         "Omit both selectors to retain the provider's existing default.",
     )
     parser.add_argument(

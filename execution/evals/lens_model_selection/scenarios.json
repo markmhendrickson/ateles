@@ -1,0 +1,469 @@
+{
+  "_comment": "Public-safe offline agent CLI scenarios; real dispatch/provider argv with synthetic external edges.",
+  "scenarios": [
+    {
+      "id": "omitted_selectors_preserve_default",
+      "why": "Omission retains existing provider-default behavior.",
+      "args": [
+        "--provider",
+        "codex"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          null
+        ]
+      }
+    },
+    {
+      "id": "explicit_sol_reaches_guarded_child",
+      "why": "An explicit valid model reaches the real provider argv.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-6-sol"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ]
+      }
+    },
+    {
+      "id": "explicit_terra_overrides_class",
+      "why": "Explicit selection retains precedence over the existing action-class resolver.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-5.6-terra",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-5.6-terra"
+        ]
+      }
+    },
+    {
+      "id": "action_class_resolves_each_comparison_provider",
+      "why": "Comparison uses the existing binding independently for each provider.",
+      "args": [
+        "--compare",
+        "codex,cursor",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 2,
+        "models": [
+          "gpt-6-sol",
+          "gpt-5.6-sol-high"
+        ]
+      }
+    },
+    {
+      "id": "omitted_selectors_comparison_preserves_defaults",
+      "why": "Comparison retains default selection for each provider when selectors are omitted.",
+      "args": [
+        "--compare",
+        "codex,cursor"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 2,
+        "models": [
+          null,
+          null
+        ]
+      }
+    },
+    {
+      "id": "dry_run_default",
+      "why": "The agent sees the same selection in native guarded dry-run output.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 0,
+        "dry_model": null,
+        "dispatches": 0
+      }
+    },
+    {
+      "id": "dry_run_class",
+      "why": "The agent sees the same selection in native guarded dry-run output.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 0,
+        "dry_model": "gpt-6-sol",
+        "dispatches": 0
+      }
+    },
+    {
+      "id": "dry_run_explicit",
+      "why": "The agent sees the same selection in native guarded dry-run output.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run",
+        "--model",
+        "gpt-5.6-terra",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 0,
+        "dry_model": "gpt-5.6-terra",
+        "dispatches": 0
+      }
+    },
+    {
+      "id": "invalid_empty_live",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model=",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_empty_dry",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run",
+        "--model=",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_empty_compare",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--compare",
+        "codex,cursor",
+        "--model=",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_whitespace_live",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model=   ",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_whitespace_dry",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run",
+        "--model=   ",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_whitespace_compare",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--compare",
+        "codex,cursor",
+        "--model=   ",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_embedded_space_live",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model=gpt 6",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_embedded_space_dry",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run",
+        "--model=gpt 6",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_embedded_space_compare",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--compare",
+        "codex,cursor",
+        "--model=gpt 6",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_control_live",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model=gpt-6-sol\n",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_control_dry",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run",
+        "--model=gpt-6-sol\n",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_control_compare",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--compare",
+        "codex,cursor",
+        "--model=gpt-6-sol\n",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_option_live",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model=--help",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_option_dry",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run",
+        "--model=--help",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_option_compare",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--compare",
+        "codex,cursor",
+        "--model=--help",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_format_live",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model=​",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_format_dry",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--provider",
+        "codex",
+        "--dry-run",
+        "--model=​",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "invalid_format_compare",
+      "why": "Invalid explicit input is refused at the agent CLI boundary before guarded dispatch.",
+      "args": [
+        "--compare",
+        "codex,cursor",
+        "--model=​",
+        "--action-class",
+        "lens_review:arch"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "dispatches": 0,
+        "refusal": true
+      }
+    },
+    {
+      "id": "guard_refusal_still_prevents_child",
+      "why": "Valid selection never weakens the existing guarded-run preflight.",
+      "args": [
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-6-sol"
+      ],
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "dispatches": 0
+      },
+      "guard_refuses": true
+    }
+  ]
+}

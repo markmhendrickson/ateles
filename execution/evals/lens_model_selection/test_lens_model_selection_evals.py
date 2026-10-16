@@ -1,0 +1,44 @@
+"""Agent-invoked lens CLI eval; collected by the existing execution/evals CI lane."""
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lens_model_selection_harness as harness  # noqa: E402
+
+SCENARIOS = harness.load()['scenarios']
+BY_ID = {scenario['id']: scenario for scenario in SCENARIOS}
+
+
+@pytest.mark.parametrize('scenario', SCENARIOS, ids=lambda s: s['id'])
+def test_scenario(scenario, tmp_path):
+    obs = harness.run_scenario(scenario, tmp_path)
+    assert harness.check(scenario, obs) == [], (scenario['why'], obs)
+
+
+def test_scenarios_are_unique_and_cover_the_required_contract():
+    assert len(BY_ID) == len(SCENARIOS)
+    assert all(s['why'] and s['expect'] for s in SCENARIOS)
+    assert {
+        'omitted_selectors_preserve_default', 'explicit_sol_reaches_guarded_child',
+        'explicit_terra_overrides_class', 'action_class_resolves_each_comparison_provider',
+        'dry_run_default', 'dry_run_class', 'dry_run_explicit',
+        'invalid_empty_live', 'invalid_empty_dry', 'invalid_empty_compare',
+        'guard_refusal_still_prevents_child',
+    } <= BY_ID.keys()
+
+
+@pytest.mark.parametrize('scenario_id,mutation', [
+    ('invalid_empty_live', 'no_validation'),
+    ('invalid_empty_dry', 'no_validation'),
+    ('invalid_empty_compare', 'no_validation'),
+    ('explicit_terra_overrides_class', 'drop_model'),
+    ('action_class_resolves_each_comparison_provider', 'drop_action_class'),
+])
+def test_eval_checks_detect_removed_contract(scenario_id, mutation, tmp_path):
+    scenario = BY_ID[scenario_id]
+    obs = harness.run_scenario(scenario, tmp_path, mutation=mutation)
+    assert harness.check(scenario, obs), 'the eval cannot detect this mutation'
