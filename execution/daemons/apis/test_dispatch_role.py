@@ -1140,3 +1140,81 @@ def test_policy_source_failure_returns_refusal_across_real_entrances(
         result = asyncio.run(call("pavo", "review", provider="codex", action_class="panel_aggregation"))
         assert result.ok is False and "model tiering configuration" in result.error
     assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once", "lookup", "filter"])
+@pytest.mark.parametrize("binding", [
+    {}, {"codex": "invalid"}, {"codex": None}, {"codex": {}},
+    {"codex": {"mid": " "}}, {"codex": {"mid": None}},
+    {"codex": {"unknown": "model"}}, {" ": {"mid": "model"}},
+])
+@pytest.mark.parametrize("source", ["env", "file"])
+def test_selected_binding_requires_valid_model_before_entrypoint(
+    captured_codex_dispatches, monkeypatch, tmp_path, entrypoint, binding, source,
+):
+    import model_tiering
+
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    path = tmp_path / "binding.json"
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(path))
+    if source == "file":
+        path.write_text(json.dumps(binding))
+        monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"alternate"}}')
+    else:
+        monkeypatch.setenv("APIS_VENDOR_BINDING", json.dumps(binding))
+
+    if entrypoint == "lookup":
+        with pytest.raises(model_tiering.InvalidTierPolicyError):
+            model_tiering.model_for_tier("codex", "mid")
+    elif entrypoint == "filter":
+        with pytest.raises(model_tiering.InvalidTierPolicyError):
+            skill_runner._tier_bound_binaries(
+                {"codex": "/unused"}, model_tiering.resolve_tier("task_dispatch"), None,
+            )
+    elif entrypoint == "cli":
+        assert dispatch_role.main(["--role", "pavo", "--task", "review"]) == 1
+    else:
+        if entrypoint == "dispatch":
+            call = dispatch_role.dispatch("pavo", "review")
+        else:
+            fn = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+            call = fn("pavo", "review", provider="codex", action_class="task_dispatch")
+        result = asyncio.run(call)
+        assert not result.ok and "configuration" in result.error
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once"])
+@pytest.mark.parametrize("configuration,expected", [
+    ("absent", None), ("valid", "selected-model"), ("override", "explicit-model"),
+])
+def test_binding_entrypoint_preserves_positive_selection_contract(
+    captured_codex_dispatches, monkeypatch, tmp_path, entrypoint, configuration, expected,
+):
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "missing.json"))
+    monkeypatch.delenv("APIS_VENDOR_BINDING", raising=False)
+    kwargs = {}
+    if configuration == "valid":
+        monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"selected-model"}}')
+    elif configuration == "override":
+        monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":" "}}')
+        kwargs["model"] = expected
+    if entrypoint == "cli":
+        argv = ["--role", "pavo", "--task", "review"]
+        if kwargs:
+            argv += ["--model", expected]
+        assert dispatch_role.main(argv) == 0
+    else:
+        if entrypoint == "dispatch":
+            call = dispatch_role.dispatch("pavo", "review", **kwargs)
+        else:
+            fn = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+            call = fn("pavo", "review", provider="codex", action_class="task_dispatch", **kwargs)
+        assert asyncio.run(call).ok
+    assert len(captured_codex_dispatches) == 1
+    argv = captured_codex_dispatches[0]["cmd"]
+    if expected is None:
+        assert "--model" not in argv
+    else:
+        assert argv[argv.index("--model") + 1] == expected
