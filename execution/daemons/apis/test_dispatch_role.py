@@ -10,6 +10,8 @@ file-beats-env precedence visible.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -20,6 +22,8 @@ if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
 import dispatch_role  # noqa: E402
+import harness_router  # noqa: E402
+import skill_runner  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
 
@@ -114,6 +118,397 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
     assert seen["prompt"] == "do the thing"
 
 
+def test_dispatch_forwards_action_class_and_model(monkeypatch) -> None:
+    """CLI surface (operator ruling 2026-09-29, model_tiering.py): --action-class
+    and --model reach run_skill unchanged, the same way --provider/--cwd do
+    above. This is the programmatic half of cross-surface parity; the argv
+    effect test below (test_cli_action_class_reaches_real_child_argv) is the
+    CLI-driven half."""
+    seen: dict = {}
+
+    async def _capture(skill, prompt, **kwargs):
+        seen.update(kwargs)
+        return SkillResult(skill, True, 0, "out", "", provider="claude")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada", "do the thing",
+            action_class="lens_review:security", model="claude-opus-5-thinking-high",
+        )
+    )
+    assert result.ok
+    assert seen["action_class"] == "lens_review:security"
+    assert seen["model"] == "claude-opus-5-thinking-high"
+
+
+def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
+    """A caller naming neither must leave run_skill's tiering inputs at their
+    no-op defaults — exact prior CLI behaviour, no regression."""
+    seen: dict = {}
+
+    async def _capture(skill, prompt, **kwargs):
+        seen.update(kwargs)
+        return SkillResult(skill, True, 0, "out", "", provider="claude")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+
+    asyncio.run(dispatch_role.dispatch("cicada", "do the thing"))
+    assert seen["action_class"] is None
+    assert seen["model"] is None
+
+
+def test_cli_escalation_flags_reach_run_skill_and_raise_the_tier(
+    monkeypatch, tmp_path
+) -> None:
+    """The bootstrap review runner passes measured facts as flags; they must
+    arrive as `EscalationSignals` on run_skill and resolve as the ruling says:
+    a small pm re-review stays mid, anything else measured raises it to top."""
+    import model_tiering
+
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"lens_review:pm": "mid", "lens_review:arch": "top"}')
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(policy))
+    seen: list[dict] = []
+
+    async def _capture(skill, prompt, **kwargs):
+        seen.append(kwargs)
+        return SkillResult(skill, True, 0, "out", "", provider="claude")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _capture)
+    monkeypatch.setattr(dispatch_role, "_preflight", lambda *a, **k: None)
+
+    def tier(klass, *flags):
+        dispatch_role.main(["--role", "r", "--task", "review", "--action-class", klass, *flags])
+        return model_tiering.resolve_tier(klass, signals=seen[-1]["escalation_signals"])
+
+    pm = "lens_review:pm"
+    dispatch_role.main(["--role", "r", "--task", "t", "--action-class", pm])
+    assert seen[-1]["escalation_signals"] is None
+    assert tier(pm).tier == "mid"
+    # Ruling `small_rereview_rounds_run_mid`: a small pm re-review stays mid,
+    # even after an earlier blocking finding.
+    assert tier(pm, "--review-round", "2", "--prior-blocking-finding").tier == "mid"
+    # arch re-rounds stay top.
+    assert tier("lens_review:arch", "--review-round", "2").tier == "top"
+    # Everything else measured raises it.
+    assert tier(pm, "--review-round", "2", "--new-blocking-finding").tier == "top"
+    assert tier(pm, "--review-round", "2", "--diff-lines", "900").tier == "top"
+    resolved = tier(pm, "--review-round", "2", "--changed-file", "execution/hooks/x.py")
+    assert "touches_security_sensitive_path" in resolved.escalation_reasons
+    assert tier(pm, "--prior-attempt-failed").tier == "top"
+
+
+@pytest.fixture
+def captured_codex_dispatches(fake_repo, monkeypatch):
+    """Capture real ``run_skill`` subprocess boundaries without launching Codex."""
+    captured: list[dict] = []
+    agent_def = _stub_def()
+
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"codex": 1.0}')
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM_FILE", str(fake_repo / "missing-headroom.json")
+    )
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: agent_def)
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: agent_def)
+    monkeypatch.setattr(skill_runner, "ATELES_REPO", fake_repo)
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": None, "codex": "/bin/codex", "cursor": None},
+    )
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kwargs: None)
+    harness_router.reset_state()
+
+    async def _capture_subprocess(*cmd, **kwargs):
+        invocation = {"cmd": list(cmd), "kwargs": kwargs}
+        captured.append(invocation)
+
+        class _Process:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                invocation["stdin"] = input
+                return b"done", b""
+
+        return _Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _capture_subprocess)
+    yield captured
+    harness_router.reset_state()
+
+
+def _assert_delivery_scope(invocation: dict, *, enabled: bool) -> None:
+    command = invocation["cmd"]
+    stdin = invocation["stdin"]
+    network_flag = "sandbox_workspace_write.network_access=true"
+    contract = skill_runner.SWARM_GITHUB_CONTRACT.encode()
+    assert (network_flag in command) is enabled
+    assert (contract in stdin) is enabled
+
+
+def _assert_github_identity(invocation: dict, *, token: str | None) -> None:
+    """``token=None`` asserts the AMBIENT value survived unchanged — not
+    merely that it differs from the scoped-delivery sentinel, which a bug
+    that wiped ambient identity entirely would also satisfy."""
+    env = invocation["kwargs"]["env"]
+    if token is None:
+        assert env.get("GITHUB_TOKEN") == "ambient-github-token"
+        assert env.get("GH_TOKEN") == "ambient-gh-token"
+    else:
+        assert env["GITHUB_TOKEN"] == token
+        assert env["GH_TOKEN"] == token
+
+
+def test_cli_action_class_reaches_real_child_argv(
+    captured_codex_dispatches, monkeypatch
+) -> None:
+    """Effect test, CLI surface: `dispatch_role.py --action-class ... `
+    resolves a tier via the live action_policy/vendor_binding config and the
+    resolved model reaches the REAL child argv — not merely that
+    model_tiering resolves a tier in isolation (policy
+    `fixed_means_behavior_verified_not_contract_accepted`,
+    ent_db0b7855d47012084477fb00). Companion to
+    test_dispatch_forwards_action_class_and_model above, which covers the
+    programmatic surface with a mocked run_skill; this one runs the real
+    subprocess-boundary path via `captured_codex_dispatches`."""
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "top"}')
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING", '{"codex": {"top": "gpt-5.6-sol-xhigh"}}'
+    )
+
+    rc = dispatch_role.main(
+        ["--role", "cicada", "--task", "do the thing", "--action-class", "build"]
+    )
+
+    assert rc == 0
+    assert len(captured_codex_dispatches) == 1
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-sol-xhigh"
+
+
+def test_cli_explicit_model_overrides_action_class(
+    captured_codex_dispatches, monkeypatch
+) -> None:
+    """--model wins outright over --action-class tier resolution, matching
+    run_skill's own override-beats-config precedence."""
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "top"}')
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING", '{"codex": {"top": "from-tiering"}}'
+    )
+
+    rc = dispatch_role.main(
+        [
+            "--role", "cicada", "--task", "do the thing",
+            "--action-class", "build", "--model", "explicit-override",
+        ]
+    )
+
+    assert rc == 0
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "explicit-override"
+
+
+def test_cli_no_action_class_leaves_argv_without_model_flag(
+    captured_codex_dispatches,
+) -> None:
+    """No --action-class and no --model: exact prior behaviour, no --model
+    flag at all — the no-op default this whole feature must preserve."""
+    rc = dispatch_role.main(["--role", "cicada", "--task", "do the thing"])
+
+    assert rc == 0
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert "--model" not in cmd
+
+
+@pytest.mark.parametrize("github_token", [None, ""])
+def test_programmatic_github_delivery_refuses_missing_credential_binding(
+    captured_codex_dispatches,
+    monkeypatch,
+    github_token,
+) -> None:
+    """Delivery must not fall through to the daemon's ambient GitHub identity.
+
+    The refusal is a failed SkillResult, never a raised exception — every
+    caller of run_skill/_run_skill_once (including _run_provider_attempts's
+    unguarded `await attempt(selected)`) expects failures to come back as a
+    SkillResult it can classify, cool down, and fail over on, not as an
+    unhandled exception.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+
+    result = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Commit, push, and open the pull request.",
+            provider="codex",
+            github_delivery=True,
+            github_token=github_token,
+        )
+    )
+
+    assert result.ok is False
+    assert "explicit GitHub credential binding" in (result.error or "")
+    assert captured_codex_dispatches == []
+
+
+def test_programmatic_github_delivery_reaches_real_runner_only_when_opted_in(
+    captured_codex_dispatches,
+    monkeypatch,
+) -> None:
+    """Programmatic intent must reach `_run_skill_once` without leaking state."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    delivery = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Commit, push, and open the pull request.",
+            provider="codex",
+            github_delivery=True,
+            github_token="scoped-delivery-token",
+        )
+    )
+    explicit_false = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Inspect local files.",
+            provider="codex",
+            github_delivery=False,
+        )
+    )
+    ordinary_after_delivery = asyncio.run(
+        dispatch_role.dispatch(
+            "cicada",
+            "Inspect another local file.",
+            provider="codex",
+        )
+    )
+
+    assert delivery.ok and explicit_false.ok and ordinary_after_delivery.ok
+    assert len(captured_codex_dispatches) == 3
+    _assert_delivery_scope(captured_codex_dispatches[0], enabled=True)
+    _assert_delivery_scope(captured_codex_dispatches[1], enabled=False)
+    _assert_delivery_scope(captured_codex_dispatches[2], enabled=False)
+    _assert_github_identity(
+        captured_codex_dispatches[0], token="scoped-delivery-token"
+    )
+    _assert_github_identity(captured_codex_dispatches[1], token=None)
+    _assert_github_identity(captured_codex_dispatches[2], token=None)
+
+
+def test_cli_github_delivery_without_token_env_fails_fast_as_usage_error(
+    captured_codex_dispatches,
+    monkeypatch,
+    capsys,
+) -> None:
+    """--github-delivery with no --github-token-env at all is knowable from
+    parsed arguments alone: it must fail through the same fast, structured
+    usage-error path as every other CLI misuse (missing --role, missing
+    --task), rather than reaching the deeper runtime credential-boundary
+    refusal in skill_runner."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    argv = [
+        "--role",
+        "cicada",
+        "--task",
+        "Commit, push, and open the pull request.",
+        "--provider",
+        "codex",
+        "--github-delivery",
+        "--json",
+    ]
+
+    rc = dispatch_role.main(argv)
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured_codex_dispatches == []
+    assert "--github-token-env" in captured.out
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
+
+
+def test_cli_github_delivery_with_empty_token_env_refuses_without_leakage(
+    captured_codex_dispatches,
+    monkeypatch,
+    capsys,
+) -> None:
+    """--github-token-env naming a variable that resolves EMPTY must still
+    reach the deeper runtime credential-boundary refusal (the caller DID try
+    to bind a credential; it just failed to resolve one) — this is the case
+    a fast argv-only usage check cannot catch, since the env var's value is
+    only known once main() reads it."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    monkeypatch.setenv("SCOPED_GITHUB_TOKEN", "")
+    argv = [
+        "--role",
+        "cicada",
+        "--task",
+        "Commit, push, and open the pull request.",
+        "--provider",
+        "codex",
+        "--github-delivery",
+        "--github-token-env",
+        "SCOPED_GITHUB_TOKEN",
+        "--json",
+    ]
+
+    rc = dispatch_role.main(argv)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured_codex_dispatches == []
+    assert "explicit GitHub credential binding" in captured.out
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
+
+
+def test_cli_github_delivery_reaches_real_runner_without_leaking_to_next_run(
+    captured_codex_dispatches,
+    monkeypatch,
+    capsys,
+) -> None:
+    """The CLI flag must drive the same command and stdin effects as the API."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
+    monkeypatch.setenv("GH_TOKEN", "ambient-gh-token")
+    monkeypatch.setenv("SCOPED_GITHUB_TOKEN", "scoped-delivery-token")
+    delivery_rc = dispatch_role.main(
+        [
+            "--role",
+            "cicada",
+            "--task",
+            "Commit, push, and open the pull request.",
+            "--provider",
+            "codex",
+            "--github-delivery",
+            "--github-token-env",
+            "SCOPED_GITHUB_TOKEN",
+        ]
+    )
+    ordinary_rc = dispatch_role.main(
+        ["--role", "cicada", "--task", "Inspect local files.", "--provider", "codex"]
+    )
+
+    assert delivery_rc == 0 and ordinary_rc == 0
+    assert len(captured_codex_dispatches) == 2
+    _assert_delivery_scope(captured_codex_dispatches[0], enabled=True)
+    _assert_delivery_scope(captured_codex_dispatches[1], enabled=False)
+    _assert_github_identity(
+        captured_codex_dispatches[0], token="scoped-delivery-token"
+    )
+    _assert_github_identity(captured_codex_dispatches[1], token=None)
+    captured = capsys.readouterr()
+    assert "scoped-delivery-token" not in captured.out + captured.err
+    assert "ambient-github-token" not in captured.out + captured.err
+    assert "ambient-gh-token" not in captured.out + captured.err
+
+
 def test_dispatch_without_override_leaves_provider_to_the_router(
     monkeypatch,
 ) -> None:
@@ -130,6 +525,7 @@ def test_dispatch_without_override_leaves_provider_to_the_router(
     asyncio.run(dispatch_role.dispatch("cicada", "work"))
     # None, not a default string: run_skill treats None as "route normally".
     assert seen["provider"] is None
+    assert seen["include_github_contract"] is False
 
 
 def test_failed_run_exits_nonzero(fake_repo, monkeypatch) -> None:
@@ -210,3 +606,427 @@ def test_inconsistent_tool_allowlist_types_all_coerce(monkeypatch) -> None:
         "Read",
     ]
     assert AgentDefinition(tool_allowlist="Bash,Read").tools == ["Bash", "Read"]
+
+
+# ── ateles#585: the envelope must be unconditional ────────────────────────────
+#
+# The defect these cover: dispatch_role wrote its JSON envelope only after
+# asyncio.run() returned, so anything killing the process mid-dispatch left a
+# 0-byte output file, three healthy-looking banner lines on stderr, and no
+# other trace. The caller could not tell "still working" from "died", and read
+# the silence as success.
+#
+# The pre-existing suite passed throughout, because it only ever exercised the
+# success path and refusals that return before dispatch. These tests exercise
+# what was actually broken: every route by which the process can stop WITHOUT
+# a clean SkillResult.
+
+
+def _envelope(capsys) -> dict:
+    """Parse the single JSON envelope from captured stdout.
+
+    Asserts on the count as well as the content: two envelopes in one stream is
+    a parse error for the caller, which is as unusable as zero. This is what
+    pins the _Emitter idempotency latch.
+    """
+    out = capsys.readouterr().out.strip()
+    assert out, "no envelope was written at all — this is the #585 defect"
+    decoder = json.JSONDecoder()
+    obj, end = decoder.raw_decode(out)
+    assert not out[end:].strip(), f"more than one envelope written: {out!r}"
+    return obj
+
+
+def test_unhandled_exception_in_dispatch_still_writes_a_failure_envelope(
+    fake_repo, monkeypatch, capsys
+) -> None:
+    """An exception escaping run_skill must become ok:false, not a traceback
+    over an empty file. run_skill is documented to return a SkillResult for
+    every failure it anticipates — this covers the ones it does not."""
+
+    async def _explode(*a, **k):
+        raise RuntimeError("provider adapter blew up")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _explode)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(
+        ["--role", "cicada", "--task", "x", "--provider", "codex", "--json"]
+    )
+
+    assert rc == 1, "a crashed dispatch must exit non-zero"
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert "RuntimeError" in env["reason"]
+    assert "provider adapter blew up" in env["reason"]
+
+
+def test_a_failed_run_envelope_carries_a_reason(fake_repo, monkeypatch, capsys) -> None:
+    """ok:false must always be accompanied by a reason. An envelope saying only
+    'false' sends the caller back to the stderr they already could not read."""
+
+    async def _fail(skill, prompt, **kwargs):
+        return SkillResult(
+            skill, False, 1, "", "boom", error="provider exploded", provider="codex"
+        )
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _fail)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(
+        ["--role", "cicada", "--task", "x", "--provider", "codex", "--json"]
+    )
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert env["reason"] == "provider exploded"
+    assert env["returncode"] == 1
+
+
+def test_successful_run_envelope_has_no_spurious_reason(
+    fake_repo, monkeypatch, capsys
+) -> None:
+    """The reason key belongs only to failures — a caller keying on its
+    presence must not be misled by a successful run."""
+
+    async def _ok(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "branch-name", "", provider="codex")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _ok)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(
+        ["--role", "cicada", "--task", "x", "--provider", "codex", "--json"]
+    )
+
+    assert rc == 0
+    env = _envelope(capsys)
+    assert env["ok"] is True
+    assert "reason" not in env
+    assert env["stdout"] == "branch-name"
+
+
+def test_refused_role_writes_a_failure_envelope(fake_repo, monkeypatch, capsys) -> None:
+    """A refusal is still a dispatch that produced no work. Under --json it
+    owes the caller an envelope, not just a stderr line."""
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(["--role", "nosuchrole", "--task", "x", "--json"])
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert "nosuchrole" in env["reason"]
+
+
+def test_unreadable_task_file_writes_a_failure_envelope(
+    fake_repo, monkeypatch, capsys, tmp_path
+) -> None:
+    """A missing --task-file used to raise straight out of main() as a
+    traceback with an empty envelope."""
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(
+        [
+            "--role",
+            "cicada",
+            "--task-file",
+            str(tmp_path / "does-not-exist.md"),
+            "--json",
+        ]
+    )
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert "does-not-exist.md" in env["reason"]
+
+
+def test_unreadable_stdin_writes_a_failure_envelope(
+    fake_repo, monkeypatch, capsys
+) -> None:
+    """`--task -` reads stdin outside the try in an earlier revision (ateles#592
+    review); a closed or blocked stdin raised straight out of main() as a
+    traceback with an empty envelope, mirroring the --task-file case above."""
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    def _raise():
+        raise OSError("stdin is closed")
+
+    monkeypatch.setattr(sys.stdin, "read", _raise)
+
+    rc = dispatch_role.main(["--role", "cicada", "--task", "-", "--json"])
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert "stdin" in env["reason"]
+
+
+def test_empty_task_writes_a_failure_envelope(fake_repo, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(["--role", "cicada", "--task", "   \n  ", "--json"])
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert "empty" in env["reason"]
+
+
+@pytest.mark.parametrize(
+    "argv, expected_fragment",
+    [
+        (["--json"], "--role is required"),
+        (["--role", "cicada", "--json"], "one of --task, --task-file is required"),
+    ],
+    ids=["missing_role", "missing_task"],
+)
+def test_usage_error_writes_a_failure_envelope(
+    fake_repo, monkeypatch, capsys, argv, expected_fragment
+) -> None:
+    """A usage error owes the --json caller an envelope too (ateles#592 review).
+
+    `parser.error` raises SystemExit(2) straight past the emitter, so these two
+    paths produced exit 2 with 0 bytes on stdout — the exact ateles#585
+    signature the module's own docstring calls unreachable. Reproduced before
+    the fix by running the entrypoint as a subprocess.
+
+    Exit 2 is deliberately preserved: it is the conventional usage status and a
+    caller may already branch on it. What changes is that stdout is no longer
+    empty.
+    """
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(argv)
+
+    assert rc == 2, "usage errors keep argparse's conventional exit status"
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert expected_fragment in env["reason"]
+    assert env["error"] == "usage error"
+
+
+def test_usage_error_is_silent_on_stdout_without_json(fake_repo, monkeypatch, capsys) -> None:
+    """Without --json the human-readable mode keeps a clean stdout; the usage
+    message still reaches stderr, as argparse always did."""
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(["--role", "cicada"])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "one of --task, --task-file is required" in captured.err
+
+
+@pytest.mark.parametrize(
+    "argv, expected_fragment",
+    [
+        (["--role", "cicada", "--task", "x", "--json", "--timeout", "nope"], "timeout"),
+        (["--role", "cicada", "--task", "x", "--json", "--bogus-flag"], "bogus-flag"),
+    ],
+    ids=["invalid_timeout_type", "unknown_flag"],
+)
+def test_argparse_validation_error_writes_a_failure_envelope(
+    fake_repo, monkeypatch, capsys, argv, expected_fragment
+) -> None:
+    """``parse_args`` failures must not bypass the emitter (ateles#592 review).
+
+    Unknown flags and bad types call ``parser.error`` during parsing, before
+    ``args.json`` is available — the emitter must be armed from a raw ``--json``
+    peek instead.
+    """
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(argv)
+
+    assert rc == 2
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert expected_fragment in env["reason"]
+    assert env["error"] == "usage error"
+
+
+def test_invalid_utf8_task_file_writes_a_failure_envelope(
+    fake_repo, monkeypatch, capsys, tmp_path
+) -> None:
+    """``read_text(encoding='utf-8')`` raises ``UnicodeDecodeError``, not
+    ``OSError`` — it must be caught like the stdin path."""
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+    bad = tmp_path / "bad.md"
+    bad.write_bytes(b"\xff\xfe not utf-8")
+
+    rc = dispatch_role.main(
+        ["--role", "cicada", "--task-file", str(bad), "--json"]
+    )
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert "bad.md" in env["reason"]
+
+
+def test_emitter_writes_at_most_one_envelope(capsys) -> None:
+    """The signal path and the normal path race: a SIGTERM can arrive while the
+    result is being written. Two concatenated JSON objects are a parse error
+    for the caller — as unusable as zero.
+
+    Asserted on STDOUT, not on the private `_done` flag: the flag is an
+    implementation detail, and a version that latched it while still writing
+    every time passed the old assertion (ateles#592 review, demonstrated). What
+    the caller is owed is one parseable document.
+    """
+    emitter = dispatch_role._Emitter(enabled=True, role="cicada")
+    emitter.emit({"ok": True})
+    emitter.emit_failure("a later signal")
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)  # raises if a second envelope was appended
+    assert parsed["ok"] is True, "the first envelope wins; the later one is dropped"
+    assert out.count('"role"') == 1, out
+
+
+def test_emitter_stays_silent_without_json(capsys) -> None:
+    """Human-readable mode keeps its plain-text output; the envelope is a
+    --json affordance and must not corrupt a piped agent transcript."""
+    emitter = dispatch_role._Emitter(enabled=False, role="cicada")
+    emitter.emit_failure("something failed")
+    assert capsys.readouterr().out == ""
+
+
+def test_emitter_survives_a_closed_stdout(monkeypatch) -> None:
+    """A broken pipe while writing the envelope must not replace the reported
+    failure with a traceback about the reporting itself."""
+
+    class _Broken:
+        def write(self, _):
+            raise BrokenPipeError("closed")
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(sys, "stdout", _Broken())
+    dispatch_role._Emitter(enabled=True, role="cicada").emit_failure("boom")
+
+
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP", "SIGINT"])
+def test_fatal_signal_writes_an_envelope_and_dies_by_that_signal(
+    signame, tmp_path
+) -> None:
+    """The #585 reproduction, end to end, as a real subprocess.
+
+    A unit test cannot cover this: the defect was that the process DIED, and
+    only a real signal to a real process exercises the disposition that killed
+    it. SIGTERM and SIGHUP are the two observed killers — a harness that
+    backgrounds or times out its shell call delivers one of them. SIGINT is
+    included at this subprocess level too (ateles#592 review, non-blocking):
+    it was registered by `_install_signal_envelope` alongside the other two
+    but only exercised by name in an earlier revision, not proven end-to-end
+    the way SIGTERM/SIGHUP were — it is the operator's Ctrl-C path and worth
+    the same proof.
+
+    run_skill is stubbed to sleep so the signal lands mid-dispatch, in exactly
+    the window that previously produced a 0-byte file.
+    """
+    import json as _json
+    import os
+    import select
+    import signal as _signal
+    import subprocess
+    import time
+
+    skills = tmp_path / ".claude" / "skills" / "cicada"
+    skills.mkdir(parents=True)
+    (skills / "SKILL.md").write_text("# cicada\n", encoding="utf-8")
+
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import asyncio, sys\n"
+        f"sys.path.insert(0, {str(_DAEMON_DIR)!r})\n"
+        "import dispatch_role\n"
+        "from lib.daemon_runtime import AgentDefinition\n"
+        "async def _slow(*a, **k):\n"
+        "    await asyncio.sleep(120)\n"
+        "dispatch_role.run_skill = _slow\n"
+        "dispatch_role._load_agent_def = lambda r: AgentDefinition(\n"
+        "    name='cicada', aauth_sub='cicada@ateles-swarm', tier='T4',\n"
+        "    prompt_markdown='# cicada', tool_allowlist=['Bash'])\n"
+        f"dispatch_role.ATELES_REPO = {str(tmp_path)!r}\n"
+        "import pathlib\n"
+        f"dispatch_role.ATELES_REPO = pathlib.Path({str(tmp_path)!r})\n"
+        "raise SystemExit(dispatch_role.main(\n"
+        "    ['--role', 'cicada', '--task', 'x', '--provider', 'codex', '--json']))\n",
+        encoding="utf-8",
+    )
+
+    env = {**os.environ, "PYTHONPATH": str(_DAEMON_DIR.parent.parent.parent)}
+    proc = subprocess.Popen(
+        [sys.executable, str(driver)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    # Wait until the dispatch banner reaches stderr so the signal lands inside
+    # the previously-fatal window, not before handlers are installed.
+    deadline = time.time() + 15
+    ready = False
+    while time.time() < deadline and proc.poll() is None:
+        rlist, _, _ = select.select([proc.stderr], [], [], 0.1)
+        if rlist:
+            line = proc.stderr.readline()
+            if "dispatch_role: role=" in line:
+                ready = True
+                break
+    assert ready, "dispatch never reached the in-flight window before timeout"
+    proc.send_signal(getattr(_signal, signame))
+    stdout, _stderr = proc.communicate(timeout=30)
+
+    # Popen reports a signal death as -signum; a shell renders the same status
+    # as 128+signum. Either way the caller sees a non-zero, non-laundered exit:
+    # the handler must re-raise through SIG_DFL rather than return 0, or a
+    # caller checking only the exit code would be told a killed dispatch
+    # succeeded — the precise misreading that #585 caused.
+    expected_signum = getattr(_signal, signame).value
+    assert proc.returncode == -expected_signum, (
+        f"expected death by {signame} (-{expected_signum}), "
+        f"got {proc.returncode}"
+    )
+    assert stdout.strip(), "0-byte output on a killed dispatch — the #585 defect"
+    env_obj = _json.loads(stdout)
+    assert env_obj["ok"] is False
+    assert signame in env_obj["reason"]
+
+
+def test_headroom_note_names_a_persisted_cooling_window(tmp_path, monkeypatch) -> None:
+    """The 2026-09-29 log said "cooling: none" while claude's session was spent."""
+    import time
+
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "absent.json"))
+    harness_router.reset_state()
+    harness_router.record_cooling("claude", time.time() + 3600, reason="session_limit")
+    assert "cooling: claude" in dispatch_role._headroom_note()
+
+
+def test_a_cooled_result_envelope_carries_cooled_until(
+    fake_repo, monkeypatch, capsys
+) -> None:
+    async def _cooled(skill, prompt, **kwargs):
+        return SkillResult(
+            skill, False, None, "", "",
+            error="all eligible subscription-backed harness providers are cooled until 2026-09-29T12:30+02:00",
+            cooled_until="2026-09-29T12:30+02:00",
+        )
+
+    monkeypatch.setattr(dispatch_role, "run_skill", _cooled)
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda r: _stub_def())
+
+    rc = dispatch_role.main(["--role", "cicada", "--task", "x", "--json"])
+
+    assert rc == 1
+    env = _envelope(capsys)
+    assert env["cooled_until"] == "2026-09-29T12:30+02:00"
+    assert "cooled until" in env["reason"]

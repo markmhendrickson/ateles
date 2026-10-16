@@ -1,0 +1,260 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * THEME — Neotoma's Inspector design system, adopted so the two apps read as
+ * one product.
+ * ---------------------------------------------------------------------------
+ * Source of truth: `inspector/src/index.css` in the neotoma repo, whose token
+ * registry is documented at `docs/ui/design_system/color_palette.md` and
+ * enforced by `scripts/validate_design_system.js`. Both apps are shadcn/ui on
+ * the same CSS-variable contract, so adoption is a value swap, not a rewrite —
+ * every primitive in `components/ui` picks the new palette up untouched.
+ *
+ * WHAT CAME ACROSS: the warm-cream light surfaces and deep-slate dark
+ * surfaces, the professional-blue action colour, the amber/green status pair,
+ * the Inter/JetBrains Mono families, the `--radius: 0.5rem` corner, and the
+ * `--inset` / `--skeleton` surface tokens the Inspector uses for table headers
+ * and loading wells.
+ *
+ * WHAT DID NOT: the Inspector's spacing scale and its 14px/1.5 body. This app
+ * is scanned, not read — see the density baseline below — and Neotoma's
+ * comfortable 40px-row scale would cost roughly a third of the rows on screen.
+ * Colour, type family, and radii are shared; density stays this app's own.
+ *
+ * Light is now the default, matching the Inspector; `.dark` and the OS
+ * preference both select the slate palette.
+ */
+@layer base {
+  :root {
+    /* Surfaces — warm cream. Depth ladder: body → card / popover (elevated). */
+    --background: 38 14% 98%;
+    --foreground: 28 22% 18%;
+
+    --card: 38 10% 100%;
+    --card-foreground: 28 22% 18%;
+
+    --popover: 38 8% 100%;
+    --popover-foreground: 28 22% 18%;
+
+    /* Action — professional blue. Red stays reserved for destructive states. */
+    --primary: 211 100% 40%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 38 12% 99%;
+    --secondary-foreground: 28 22% 18%;
+
+    --muted: 38 12% 99%;
+    --muted-foreground: 28 14% 44%;
+
+    --accent: 35 12% 94%;
+    --accent-foreground: 28 22% 18%;
+
+    --destructive: 0 65% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Inspector surface tokens: recessed bands and loading placeholders. */
+    --inset: 32 12% 90%;
+    --skeleton: 32 14% 84%;
+
+    --border: 32 10% 93%;
+    --input: 32 10% 93%;
+    --ring: 211 100% 40%;
+
+    /*
+     * SWARM-SEMANTIC COLOURS — meaning-bearing, and the reason this block is
+     * not simply Neotoma's file verbatim. Each maps onto its nearest Inspector
+     * equivalent rather than being dropped:
+     *
+     *   --warn  <- Inspector --warning   (amber): an agent RECOMMENDATION, the
+     *                                    undispatched flag, the "declared but
+     *                                    not executed" banner, inferred values.
+     *   --ok    <- Inspector --success   (green): a STORED ANSWER, the operator's
+     *                                    own decision. Never a suggestion.
+     *   --bad   <- Inspector --destructive
+     *   --live  <- Inspector --primary   (blue): dispatch / accent.
+     *
+     * Amber vs green is the suggestion-vs-decision distinction and must stay
+     * legible as two different things in both themes.
+     */
+    --warn: 32 80% 38%;
+    --bad: 0 65% 50%;
+    --ok: 142 56% 32%;
+    --live: 211 100% 40%;
+
+    --radius: 0.5rem;
+    color-scheme: light;
+
+    /* Legacy aliases, so untouched plain-CSS rules keep resolving. */
+    --bg: hsl(var(--background));
+    --panel: hsl(var(--card));
+    --line: hsl(var(--border));
+    --fg: hsl(var(--foreground));
+    --dim: hsl(var(--muted-foreground));
+  }
+
+  /* Deep slate, lifted from the Inspector's `.dark` block. Applied by the OS
+     preference and by an explicit `.dark` class, so a manual toggle works. */
+  @media (prefers-color-scheme: dark) {
+    :root:not(.light) {
+      --background: 222 36% 16%;
+      --foreground: 210 36% 97%;
+      --card: 217 24% 22%;
+      --card-foreground: 210 36% 97%;
+      --popover: 217 22% 26%;
+      --popover-foreground: 210 40% 95%;
+      --primary: 217 91% 60%;
+      --primary-foreground: 0 0% 100%;
+      --secondary: 217 24% 29%;
+      --secondary-foreground: 210 36% 97%;
+      --muted: 217 24% 29%;
+      --muted-foreground: 215 16% 70%;
+      --accent: 217 24% 29%;
+      --accent-foreground: 210 36% 97%;
+      --destructive: 0 72% 51%;
+      --destructive-foreground: 0 0% 100%;
+      --inset: 217 24% 24%;
+      --skeleton: 217 26% 36%;
+      --border: 217 22% 30%;
+      --input: 217 22% 30%;
+      --ring: 217 91% 60%;
+      /* Brightened so the amber/green split holds against deep slate. */
+      --warn: 32 90% 60%;
+      --bad: 0 72% 51%;
+      --ok: 142 70% 60%;
+      --live: 217 91% 60%;
+      color-scheme: dark;
+    }
+  }
+
+  :root.dark {
+    --background: 222 36% 16%;
+    --foreground: 210 36% 97%;
+    --card: 217 24% 22%;
+    --card-foreground: 210 36% 97%;
+    --popover: 217 22% 26%;
+    --popover-foreground: 210 40% 95%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 24% 29%;
+    --secondary-foreground: 210 36% 97%;
+    --muted: 217 24% 29%;
+    --muted-foreground: 215 16% 70%;
+    --accent: 217 24% 29%;
+    --accent-foreground: 210 36% 97%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --inset: 217 24% 24%;
+    --skeleton: 217 26% 36%;
+    --border: 217 22% 30%;
+    --input: 217 22% 30%;
+    --ring: 217 91% 60%;
+    --warn: 32 90% 60%;
+    --bad: 0 72% 51%;
+    --ok: 142 70% 60%;
+    --live: 217 91% 60%;
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+
+  /*
+   * DENSITY BASELINE — DELIBERATELY NOT NEOTOMA'S. 13px/1.4 rather than the
+   * Inspector's 14px/1.5: this is an operations dashboard the operator SCANS,
+   * and the comfortable-reading scale cost roughly a third of the rows on
+   * screen. 13px stays comfortably legible at a normal viewing distance while
+   * 12px would start to fight the scan, so the compression is taken out of
+   * leading and padding rather than out of glyph size — and never out of
+   * information. The FAMILY is Neotoma's (Inter); only the scale is ours.
+   */
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    font: 13px/1.4 Inter, ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+}
+
+/**
+ * TWO HAND-ROLLED REGIONS remain as plain CSS, deliberately.
+ *
+ * `.md` renders `prompt_markdown` through React elements produced by
+ * Markdown.tsx. Styling it by element selector keeps that renderer free of
+ * per-tag className plumbing, and preserves its safety property: it still
+ * builds elements and never touches dangerouslySetInnerHTML.
+ *
+ * `.qrail` is a vertical writing-mode label with no Tailwind equivalent.
+ */
+@layer components {
+  /* Prose stays a touch looser than chrome — it is read, not scanned — but the
+     leading and the block margins both come down from the reading-page values. */
+  .md {
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .md h3,
+  .md h4,
+  .md h5,
+  .md h6 {
+    margin: 12px 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .md h3 { font-size: 14px; }
+  .md h4 { font-size: 13px; }
+  .md h5,
+  .md h6 {
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+  }
+  .md p { margin: 0 0 7px; }
+  .md ul,
+  .md ol {
+    margin: 0 0 7px;
+    padding-left: 18px;
+  }
+  .md li { margin: 1px 0; }
+  .md hr {
+    border: none;
+    border-top: 1px solid hsl(var(--border));
+    margin: 10px 0;
+  }
+  .md code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: hsl(var(--background));
+    border: 1px solid hsl(var(--border));
+  }
+  .md pre {
+    margin: 0 0 10px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    background: hsl(var(--background));
+    border: 1px solid hsl(var(--border));
+    border-radius: 8px;
+  }
+  .md pre code {
+    padding: 0;
+    border: none;
+    background: none;
+  }
+  .md a { color: hsl(var(--live)); }
+
+  /* Collapsed sidebar rail label — vertical text has no utility equivalent. */
+  .qrail {
+    writing-mode: vertical-rl;
+    letter-spacing: 0.14em;
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+  @media (max-width: 860px) {
+    .qrail {
+      writing-mode: horizontal-tb;
+      margin: 0;
+    }
+  }
+}

@@ -55,8 +55,11 @@ class _Notifier:
     def __init__(self) -> None:
         self.sent: list[tuple[str, object]] = []
 
-    def send(self, msg: str, priority=None, handler=None) -> None:  # noqa: ANN001
+    def send(self, msg: str, priority=None, handler=None, **kwargs) -> None:  # noqa: ANN001
         self.sent.append((msg, priority))
+
+    def clear_dedupe(self, key: str) -> None:
+        return None
 
     def at(self, priority) -> list[str]:  # noqa: ANN001
         return [m for m, p in self.sent if p == priority]

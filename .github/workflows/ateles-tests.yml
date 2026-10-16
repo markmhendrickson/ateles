@@ -1,11 +1,11 @@
 name: ateles package tests
 
 # Enforces the W0/W1+ package test suite plus the Claude Code hook tests, the
-# phoenicurus-release daemon's regression tests, the shared approval lib tests,
-# and the ateles MCP server tests on every PR that touches any of them — the
-# regression lane the QA gate asked for. The daemon/lib paths are included so
-# changes there actually get their tests run in CI, rather than silently
-# skipping the lane.
+# daemon regression tests already assigned here, top-level shared daemon tests,
+# the shared approval lib tests, and the ateles MCP server tests on every PR that
+# touches any of them — the regression lane the QA gate asked for. The daemon/lib
+# paths are included so changes there actually get their tests run in CI, rather
+# than silently skipping the lane.
 
 on:
   pull_request:
@@ -13,16 +13,64 @@ on:
       - "ateles/**"
       - ".claude/hooks/**"
       - "execution/daemons/apis/**"
+      # The Fly runner's own modules are tested from execution/daemons/apis/,
+      # so a change to them alone must re-run this lane.
+      - "deploy/fly-runner/**"
+      # The runner-image suite also checks the superseded daemon runbook's
+      # provisioning stop (#1008); removing it must trigger the blocking lane.
+      - "deploy/cloud/**"
+      - "execution/local_llm/**"
+      - "execution/daemons/test_*.py"
+      - "execution/daemons/cotinga/**"
+      - "execution/daemons/cyphorhinus/**"
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      # Formica and neotoma-agent are gated by ATELES_SWARM_REQUIRE_LABEL; their
+      # tests live in execution/daemons/test_triage_lane_label_gate.py (shared
+      # step below) and the Apis entry-path scan, so edits to either daemon must
+      # trigger this lane.
+      - "execution/daemons/formica/**"
+      - "execution/daemons/neotoma-agent/**"
+      - "execution/daemons/piculet/**"
+      - "execution/daemons/sylvia/**"
+      - "execution/daemons/tyto/**"
+      - "execution/daemons/turdus/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
+      - "lib/capabilities/**"
+      - "lib/transcript_clarity.py"
+      - "lib/test_transcript_clarity.py"
+      - "lib/github_app_token.py"
+      - "lib/test_github_app_token.py"
       - "execution/scripts/**"
+      # The scripts fixture imports the complete-profile preparation core.
+      - "execution/lib/instance_profile_guard.py"
+      - "execution/lib/instance_auth_profile_guard.py"
+      - "execution/lib/instance_auth_profile_adapter.py"
+      - "execution/lib/instance_auth_profile_preflight.py"
+      # Rule-delivery evals: the offline harness tests import the real
+      # policy_skill_renderer (already covered by lib/daemon_runtime/**), so a
+      # renderer change that alters what a channel delivers re-runs them.
+      - "execution/evals/**"
       - "pyproject.toml"
       - "uv.lock"
-      - ".github/workflows/ateles-tests.yml"
+      - "scripts/linters/check_agent_roster.py"
+      # ateles#944 (qa lens): the python3 CLI regression eval
+      # (execution/scripts/test_lint_sh_python3_invocations.py) reads
+      # scripts/lint.sh's own text — without this entry, a change to
+      # lint.sh alone (not the test file) would not re-run the lane that
+      # collects that eval.
+      - "scripts/lint.sh"
+      - "CLAUDE.md"
+      - "scripts/linters/test_claude_verification_discipline.py"
+      - "scripts/linters/test_*.py"
+      - "docs/agents/**"
+      # Any workflow edit: execution/scripts/test_public_rule_sources.py
+      # fails on a PR-triggered job that needs a self-hosted runner (ateles#1333),
+      # so adding such a job must re-run this lane.
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:
@@ -36,8 +84,18 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
+      # ateles#320: retired agent names in runtime routing code. This linter
+      # lives in scripts/lint.sh, which NO workflow invokes — so it never ran in
+      # CI. Wired here as a blocking step because the failure it catches is
+      # silent: `DEFAULT_OWNER = "gryllus"` filed 107 review findings to an
+      # agent that does not exist, for seven weeks, with every test green.
+      - name: Check agent roster (no retired agent names)
+        run: python3 scripts/linters/check_agent_roster.py
+
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
+      - name: Run daemon runtime tests
+        run: uv run --extra dev python -m pytest lib/daemon_runtime/ -q
       # Swarm daemon tests (qa #254 finding): test_swarm_dispatch.py and the
       # rest of the Apis daemon suite never ran in CI — the lane above is scoped
       # to ateles/**, so a daemon regression (e.g. a dangling call from a stale
@@ -46,10 +104,46 @@ jobs:
       # execution/daemons/apis/** changes.
       - name: Run swarm daemon (apis) tests
         run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
+      # The Fly runner's repository delivery, run for real as root with the
+      # agent as uid 10001, in a container from the runner image's base (the
+      # same Python and git). Skipped in the step above, which is not root.
+      - name: Run Fly runner repository-delivery container test
+        run: |
+          docker run --rm \
+            -v "$PWD/deploy/fly-runner/repo_delivery.py:/r/deploy/fly-runner/repo_delivery.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_repo_delivery_container.py:/r/execution/daemons/apis/test_fly_repo_delivery_container.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_repo_delivery.py:/r/execution/daemons/apis/test_fly_repo_delivery.py:ro" \
+            -v "$PWD/execution/daemons/apis/fly_cleanup_test_support.py:/r/execution/daemons/apis/fly_cleanup_test_support.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_cleanup_assertion_output.py:/r/execution/daemons/apis/test_fly_cleanup_assertion_output.py:ro" \
+            -w /r python:3.12-slim-bookworm sh -c '
+              set -e
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq --no-install-recommends git >/dev/null
+              pip install -q pytest==8.3.3
+              out=$(python -m pytest -p no:cacheprovider -c /dev/null --rootdir /r -q -rs \
+                execution/daemons/apis/test_fly_repo_delivery_container.py \
+                execution/daemons/apis/test_fly_cleanup_assertion_output.py)
+              echo "$out"
+              echo "$out" | grep -q "3 passed"'
+      # The claude-local provider's loopback normalizer (ollama_shim.py). Its
+      # own step so a shim regression is attributable, and added with the suite
+      # so it is not another committed-but-uncollected lane (#584, #524, #727).
+      - name: Run local LLM shim tests
+        run: uv run --extra dev python -m pytest execution/local_llm/ -q
       - name: Run phoenicurus-release daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
       - name: Run monedula daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/monedula/ -q
+      # ateles#515 (pr_review): the checkout guard and lossless cutover effects
+      # live in top-level execution/daemons/test_*.py, while cyphorhinus has a
+      # directory-local suite. None was collected by a required lane. Keep them
+      # in the existing daemon-owning job; cotinga/sylvia paths are included so
+      # edits to those guarded entrypoints also trigger the shared effect tests.
+      - name: Run shared and remaining deploy-bound daemon tests
+        run: >-
+          uv run --extra dev python -m pytest execution/daemons/test_*.py
+          execution/daemons/cotinga/ execution/daemons/cyphorhinus/
+          execution/daemons/sylvia/ -q
       # ateles#584 (qa lens, PR #596 round 1): the anthus orchestrator suite
       # (test_participation_state.py, test_dispatch_wiring.py,
       # test_orchestrator.py) was committed but collected by no lane. Its own
@@ -59,13 +153,46 @@ jobs:
       # ship a same-named top-level module today.
       - name: Run anthus daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
+      # Tyto's RecordingWatcher tests (Voice Memos support). Its own step for
+      # the same attributability reason as the apis and anthus steps above, and
+      # added with the suite itself so this does not become another
+      # committed-but-uncollected lane gap (#584, #524, #727).
+      - name: Run tyto daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/tyto/ -q
+      # ateles#198 (qa lens): test_turdus_approval.py and
+      # test_turdus_self_guard.py were committed but collected by no lane —
+      # same defect class as anthus (#584/#596) and tyto above. Its own step
+      # for the same attributability reason.
+      - name: Run turdus daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/turdus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      # ateles#1189: the media-generation capability client (fail-closed spend
+      # cap, credential isolation). Its own step so the effect tests that guard
+      # the billing boundary are attributable and never an uncollected lane.
+      - name: Run capability client lib tests
+        run: uv run --extra dev python -m pytest lib/capabilities/ -q
+      - name: Run transcript clarity lib tests
+        run: uv run --extra dev python -m pytest lib/test_transcript_clarity.py -q
+      - name: Run GitHub App token helper tests
+        run: uv run --extra dev python -m pytest lib/test_github_app_token.py -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
-      # transcription) but no lane ran them — this closes that gap.
+      # transcription) but no lane ran them — this closes that gap. Also
+      # collects test_lint_sh_python3_invocations.py (ateles#944), the
+      # scripts/lint.sh bare-python regression eval.
       - name: Run execution/scripts tests
         run: uv run --extra dev python -m pytest execution/scripts/ -q
+      # Rule-delivery eval harness, offline half (no model calls): channel
+      # payloads, fixture Neotoma, sandbox guard, and that every outcome check
+      # can go red. The live matrix runs on demand (runner.py), not in CI.
+      - name: Run rule-delivery eval harness tests
+        run: uv run --extra dev python -m pytest execution/evals/ -q
+      # ateles#727 / #731 (qa lens): CLAUDE.md Verification discipline effect
+      # test was committed but collected by no lane — same defect class as
+      # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).
+      - name: Run CLAUDE.md verification-discipline effect tests
+        run: uv run --extra dev python -m pytest scripts/linters/test_claude_verification_discipline.py -q
 
   mcp-server-tests:
     runs-on: ubuntu-latest
@@ -77,10 +204,22 @@ jobs:
       - name: Install MCP server deps
         run: |
           uv venv .mcp-venv
-          # mcp 2.0 renamed Tool.inputSchema → input_schema and removed Server.list_tools;
-          # pin <2 until execution/mcp/ateles is migrated.
-          VIRTUAL_ENV=.mcp-venv uv pip install "mcp>=1.1.0,<2" httpx
+          # Install from the requirements file so CI and the server share one
+          # source of truth for the pin. That file pins mcp<2: mcp 2.0 renamed
+          # Tool.inputSchema → input_schema and removed Server.list_tools, so
+          # the pin holds until execution/mcp/ateles is migrated.
+          VIRTUAL_ENV=.mcp-venv uv pip install -r execution/mcp/ateles/requirements.txt
       - name: Run ateles MCP server tests
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server.py
       - name: Run ateles MCP server smoke tests
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server_smoke.py
+      # ateles#1037: the two steps above run named files directly, so a
+      # pytest-style suite added under execution/mcp/ateles/ is collected by
+      # NOTHING — the committed-but-uncollected gap this workflow has already
+      # closed for anthus (#584), execution/scripts (#524), tyto and turdus
+      # (#198). Collect the whole directory so a new test file is run because
+      # it exists, not because someone remembered to name it here.
+      - name: Run ateles MCP server pytest suites
+        run: |
+          VIRTUAL_ENV=.mcp-venv uv pip install pytest
+          .mcp-venv/bin/python -m pytest execution/mcp/ateles/ -q

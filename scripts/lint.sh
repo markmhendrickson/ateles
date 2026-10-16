@@ -54,32 +54,141 @@ echo "📝 Running custom linters..."
 # Parquet access linter
 echo "  - Checking parquet access patterns..."
 find . -name "*.py" -not -path "./.venv/*" -not -path "./venv*/*" -not -path "./mcp-servers/parquet/*" -not -path "./execution/scripts/*_import.py" | \
-    xargs python scripts/linters/ast_parquet_linter.py || ERRORS=$((ERRORS + 1))
+    xargs python3 scripts/linters/ast_parquet_linter.py || ERRORS=$((ERRORS + 1))
 
 # File naming
 echo "  - Checking file naming conventions..."
 find . -type f \( -name "*.py" -o -name "*.sh" -o -name "*.md" \) -not -path "./.venv/*" -not -path "./venv*/*" | \
-    xargs python scripts/linters/check_file_naming.py || ERRORS=$((ERRORS + 1))
+    xargs python3 scripts/linters/check_file_naming.py || ERRORS=$((ERRORS + 1))
 
 # Documentation
 echo "  - Checking documentation structure..."
 find . -name "*.md" -path "./docs/*" -o -name "*.md" -path "./strategy/*" | \
-    xargs python scripts/linters/check_documentation.py || ERRORS=$((ERRORS + 1))
+    xargs python3 scripts/linters/check_documentation.py || ERRORS=$((ERRORS + 1))
 
 # Workflow compliance
 echo "  - Checking workflow file compliance..."
 find ./strategy/operations -name "*.md" | \
-    xargs python scripts/linters/check_workflow_compliance.py || ERRORS=$((ERRORS + 1))
+    xargs python3 scripts/linters/check_workflow_compliance.py || ERRORS=$((ERRORS + 1))
 
 # Config sourcing (operator-specific config must be env/Neotoma-sourced)
 echo "  - Checking config sourcing (no hardcoded operator config)..."
-python scripts/linters/check_hardcoded_config.py || ERRORS=$((ERRORS + 1))
+python3 scripts/linters/check_hardcoded_config.py || ERRORS=$((ERRORS + 1))
 
 # Neotoma REST paths (ateles#606 — MCP tool names like `retrieve_entities` are
 # not routes; they 404, and the 404 is usually swallowed into an empty result
 # so the caller reports success while reading nothing).
 echo "  - Checking Neotoma REST paths (no MCP tool names used as routes)..."
-python scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
+python3 scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
+
+# Agent roster (no retired agent names in prompts, mirrors, or routing code)
+echo "  - Checking agent roster (no retired agent names)..."
+python3 scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
+
+# CLAUDE.md rule parity (ateles#973). A standing rule that vanishes from this
+# file stops binding, and a small diff can hide the loss — the six deletions in
+# the merge that motivated this were all same-rule replacements. Every side
+# whose rules must survive is passed as an input side: main alone cannot witness
+# the loss of a rule main never had.
+echo "  - Checking CLAUDE.md rule parity (no standing rule lost)..."
+if git rev-parse --verify --quiet origin/main >/dev/null; then
+  python3 scripts/verify_claude_md_merge.py --check \
+    --base origin/main:CLAUDE.md \
+    --other HEAD:CLAUDE.md \
+    --merged CLAUDE.md \
+    --dedups scripts/claude_md_dedups.txt || ERRORS=$((ERRORS + 1))
+else
+  echo "    (skipped — origin/main not fetched in this checkout)"
+fi
+
+# Hook-wiring reference (ateles#973). The snapshot session_start.py compares a
+# checkout against is generated from .claude/settings.json, so it must not drift
+# from it — a stale reference makes the banner lie in both directions.
+echo "  - Checking hook-wiring reference matches .claude/settings.json..."
+python3 .claude/hooks/hook_wiring_reference.py --check || ERRORS=$((ERRORS + 1))
+
+# Codex hook delivery (ateles#981). This is an effect check, not a config
+# presence check: it executes the commands named by .codex/hooks.json against
+# a synthetic local agent_policy corpus and a blocked stash command.
+echo "  - Checking Codex live-rule and guard hook effects..."
+python3 execution/scripts/test_codex_rule_hooks.py || ERRORS=$((ERRORS + 1))
+
+# Foundation documents (docs/foundation/). Registered in
+# conformance.md#mechanical-checks-on-this-directory. All stdlib-only, no Neotoma needed.
+echo "  - Checking foundation anchors (every intra-foundation link resolves)..."
+python3 execution/scripts/check_foundation_anchors.py || ERRORS=$((ERRORS + 1))
+
+echo "  - Checking foundation decision 78 is ruled in the corpus..."
+python3 execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 101 ruling is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_101.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 117 ruling is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_117.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking decision 119 commissioning is bound to the corpus..."
+python3 execution/scripts/check_foundation_decision_119.py || ERRORS=$((ERRORS + 1))
+
+echo "  - Checking foundation vocabulary (no Never word in the prose)..."
+python3 execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
+
+# Data model coverage: a governance type conformance_suite.md names must have a row in
+# data_model.md#concepts. `agent_policy` was authoritative in conformance.md and declared zero times
+# in data_model.md, with nothing failing — the gap this closes. Exit 2 means the check did not run
+# (its input moved), which is counted as an error and not as a pass.
+echo "  - Checking data model declares every governance type..."
+python3 execution/scripts/render_data_model.py --check || ERRORS=$((ERRORS + 1))
+
+echo "  - Checking vocabulary term links (first mentions link their definition)..."
+python3 execution/scripts/link_vocabulary_terms.py --check || ERRORS=$((ERRORS + 1))
+
+# Decision 74: a document's amendment history lives in revisions.md, and a section
+# stating three or more rules opens with the list of them. Both were fixed once by
+# hand and neither stays fixed on its own — the amendment obligation grows a chain
+# one clause per pass, and a section grows one rule at a time. This is what stops
+# the pattern re-accreting.
+echo "  - Checking foundation front matter (no revision chain; rule sections indexed)..."
+python3 execution/scripts/check_foundation_front_matter.py || ERRORS=$((ERRORS + 1))
+
+# Reading projection (decision 66): docs/foundation/projection/ is generated from
+# conformance_suite.md's matrix and is what a review prompt inlines. A rule edited in its
+# canonical document without regenerating is caught here and in CI, in the same run that
+# catches a broken anchor. Regenerate with the same script and no flag.
+echo "  - Checking reading projection is in sync with the conformance matrix..."
+python3 execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRORS + 1))
+
+# Decision state: docs/foundation/decision_state.md projects the register onto
+# ruled / merged / implemented, which the register's single status field cannot
+# express. Regenerate with the same script and no flag.
+#
+# --source worktree (the default; named explicitly here) reads
+# docs/foundation/conformance.md as checked out, not a re-fetched origin/main
+# blob -- ateles#1138 round two: a branch that adds or rules a register row
+# could never regenerate correctly against origin/main alone, since that row
+# does not exist on origin/main until the branch merges. The origin/main guard
+# below stays as a sanity check that this is a real clone with a remote, not
+# because the render itself still sweeps branches (#1292 already made it
+# read exactly one source).
+if git rev-parse --verify --quiet origin/main >/dev/null; then
+  echo "  - Checking decision state is in sync with the register..."
+  python3 execution/scripts/render_decision_state.py --check --source worktree || ERRORS=$((ERRORS + 1))
+else
+  echo "  - Skipping decision state (no origin/main to read the register from)"
+fi
+
+# Skill inventory: docs/foundation/skill_inventory.md is stage 0 of the skill
+# migration (migration.md stage 11 migrates skills BY CLASS, so an
+# uninventoried skill is never classified and never migrated). Generated, never
+# authored; --check holds it equal to the measured system.
+#
+# OPT-IN, not default. Unlike the rule inventory this needs no credential --
+# the Neotoma read is a committed snapshot -- but it walks every checkout under
+# ~/repos and ~/agent-work, which is ~60s on this machine and depends on
+# filesystem state no CI runner shares. Running it by default would make an
+# unrelated PR fail because a worktree appeared or vanished, which is a gate
+# that trains people to ignore it. Set ATELES_CHECK_SKILL_INVENTORY=1 to run.
+if [ "${ATELES_CHECK_SKILL_INVENTORY:-0}" = "1" ]; then
+  echo "  - Checking skill inventory is in sync with the measured system..."
+  python3 execution/scripts/render_skill_inventory.py --check || ERRORS=$((ERRORS + 1))
+fi
 
 # tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
 # by the CLI's --allowedTools parser; only Bash(<command>:*) is honored).
@@ -87,7 +196,7 @@ python scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
 # so this stays runnable on a machine without Neotoma access.
 if [ -n "$NEOTOMA_BASE_URL" ]; then
     echo "  - Checking agent_definition tool_allowlist grant grammar..."
-    python scripts/linters/validate_tool_allowlist.py || ERRORS=$((ERRORS + 1))
+    python3 scripts/linters/validate_tool_allowlist.py || ERRORS=$((ERRORS + 1))
 
     # Generated agent-doc mirrors must be fresh (docs/agents/*.md,
     # .claude/skills/*/SKILL.md are rendered FROM Neotoma agent_definition
@@ -95,7 +204,7 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     # drift unrelated to any one PR currently fails this check repo-wide (see
     # .github/workflows/agent-config-validation.yml for the tracking note).
     echo "  - Checking agent-doc mirrors are in sync with Neotoma (informational)..."
-    python execution/scripts/render_agent_docs.py --check || true
+    python3 execution/scripts/render_agent_docs.py --check || true
 else
     echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
@@ -109,4 +218,3 @@ else
     echo "Run with --fix to auto-fix some issues: ./scripts/lint.sh --fix"
     exit 1
 fi
-

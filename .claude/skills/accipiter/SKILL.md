@@ -107,7 +107,14 @@ correct(entity_id=<issue_entity_id>, fields={
   "owner_history": [*existing_history, {"agent": "accipiter", "gate": "ux", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
-# 2. Check join condition: if arch is also signed_off, advance to Phase 3
+# 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed
+snapshot = retrieve_entity_snapshot(entity_id=<issue_entity_id>)
+if (snapshot.get("gate_status") or {}).get("ux") != "signed_off":
+    # Do NOT emit SIGNED_OFF. Post **BLOCKED** with reason, attempted vs read-back,
+    # and next action (retry / escalate to Anthus / check agent_grant for accipiter).
+    raise GateWritebackError("ux gate writeback failed read-back")
+
+# 2. Check join condition ONLY after read-back confirms: if arch is also signed_off, advance to Phase 3
 if existing_gate_status.get("arch") in ("signed_off", "waived", "not_required"):
     correct(entity_id=<issue_entity_id>, fields={"current_owner": "cicada"}, observation_source="workflow_state")
 

@@ -60,6 +60,11 @@ class BtcTransferHandler(PaymentHandler):
             f"  Event: {summary}"
         )
 
+    def payee_identity(self) -> str | None:
+        """The address ``execute`` would pay, for binding consent to it."""
+        addr = (self.profile.btc_address or "").strip()
+        return f"btc|{addr}" if addr else None
+
     def execute(self, match: dict) -> dict[str, Any]:
         log.info(f"[{self.name}] Executing BTC payment via claude --print...")
 

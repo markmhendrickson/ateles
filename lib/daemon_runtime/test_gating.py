@@ -2,19 +2,56 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
+from lib.daemon_runtime import gating as gating_module
 from lib.daemon_runtime.gating import (
     DEFAULT_CLOSED_BOUNDARIES,
+    NEVER_AUTO_EXECUTE_ACTION_TYPES,
     BlastRadius,
     CheckpointPosture,
     ExecutionPolicy,
     GateAction,
     InvalidCheckpointPosture,
     _parse_policy,
+    close_checkpoint_without_release,
     evaluate_gate,
+    fetch_checkpoint_snapshot,
+    fetch_task_snapshot,
     read_checkpoint_resolution,
+    require_fresh_checkpoint_approval,
+    stamp_checkpoint_dispatched,
+    write_checkpoint_brief,
 )
+
+
+def _http_signer():
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from lib.daemon_runtime.aauth_httpsig import HttpSigSigner
+
+    private = ec.generate_private_key(ec.SECP256R1()).private_numbers()
+
+    def b64u(value: int) -> str:
+        return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode()
+
+    jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "d": b64u(private.private_value),
+        "x": b64u(private.public_numbers.x),
+        "y": b64u(private.public_numbers.y),
+        "sub": "apis@ateles-swarm",
+        "kid": "test-apis-key",
+    }
+    return HttpSigSigner(
+        private_jwk=jwk,
+        sub="apis@ateles-swarm",
+        iss="https://markmhendrickson.com",
+        kid="test-apis-key",
+    )
 
 
 def _default() -> ExecutionPolicy:
@@ -45,16 +82,57 @@ def test_low_conf_high_blast_proposes_alternatives():
     assert d.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
 
 
-def test_unknown_action_uses_policy_default_blast():
-    low = ExecutionPolicy(entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True)
-    d = evaluate_gate(confidence=0.9, action_type="totally_unknown", policy=low)
-    assert d.action == GateAction.AUTO_EXECUTE
+def test_unrecognized_action_type_never_auto_executes(caplog):
+    """An action type in NEITHER blast set must not resolve to LOW.
+
+    This test previously asserted the opposite — that an unrecognized action
+    type under a LOW default auto-executes. That was the ateles#715 fail-open
+    written down as expected behaviour: the next unclassified action type
+    inherits "safe" from a default that was never a judgment about it.
+    """
+    low = ExecutionPolicy(
+        entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True
+    )
+    with caplog.at_level("WARNING"):
+        d = evaluate_gate(confidence=0.9, action_type="totally_unknown", policy=low)
+    assert d.action == GateAction.CHECKPOINT
+    assert d.blast_radius == BlastRadius.NEVER
+    assert not d.may_auto_execute
 
     high = ExecutionPolicy(
         entity_id="p", blast_radius_default=BlastRadius.HIGH, loaded=True
     )
     d = evaluate_gate(confidence=0.9, action_type="totally_unknown", policy=high)
     assert d.action == GateAction.CHECKPOINT
+
+
+def test_unrecognized_action_type_warns_by_name(caplog):
+    """The fallthrough must be loud, naming the value, so a missing
+    classification is visible rather than silently permissive."""
+    pol = ExecutionPolicy(entity_id="ent_policy", loaded=True)
+    with caplog.at_level("WARNING"):
+        pol.blast_radius_for("open_pull_request")
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "unrecognized action_type must log a warning"
+    joined = " ".join(r.getMessage() for r in warnings)
+    assert "open_pull_request" in joined
+    assert "ent_policy" in joined
+
+
+def test_absent_action_type_still_uses_policy_default():
+    """ "Nothing declared" is distinct from "declared and unclassified".
+
+    A task with no action_type at all keeps the policy default — that is the
+    case the default exists for, and tightening it would checkpoint every
+    unannotated task. Only a DECLARED-but-unclassified value fails closed.
+    """
+    low = ExecutionPolicy(
+        entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True
+    )
+    assert low.blast_radius_for(None) == BlastRadius.LOW
+    assert low.blast_radius_for("") == BlastRadius.LOW
+    d = evaluate_gate(confidence=0.9, action_type=None, policy=low)
+    assert d.action == GateAction.AUTO_EXECUTE
 
 
 def test_recurrence_graduation_auto_executes_below_threshold():
@@ -126,7 +204,10 @@ def test_blast_radius_for_classification():
     )
     assert pol.blast_radius_for("payment") == BlastRadius.HIGH
     assert pol.blast_radius_for("draft") == BlastRadius.LOW
-    assert pol.blast_radius_for("unknown") == BlastRadius.LOW
+    # Declared but classified by neither set → NEVER, not the LOW default
+    # (ateles#715).
+    assert pol.blast_radius_for("unknown") == BlastRadius.NEVER
+    # Nothing declared at all → the policy default, unchanged.
     assert pol.blast_radius_for(None) == BlastRadius.LOW
 
 
@@ -154,6 +235,7 @@ def test_checkpoint_resolution_pending_is_none():
 
 def test_checkpoint_already_dispatched():
     from lib.daemon_runtime.gating import checkpoint_already_dispatched
+
     assert checkpoint_already_dispatched({"resolved_dispatched": True}) is True
     assert checkpoint_already_dispatched({"resolved_dispatched": "true"}) is True
     assert checkpoint_already_dispatched({"resolved_dispatched": "1"}) is True
@@ -264,3 +346,1408 @@ def test_load_policy_degrades_to_fallback_on_invalid_posture(monkeypatch):
     assert pol.entity_id == "ent_bad_policy"
     # Still resolves postures safely via the DEFAULT_CLOSED_BOUNDARIES fallback.
     assert pol.posture_for("pre_merge") == CheckpointPosture.CLOSED
+
+
+# ── operator_only: never auto-executable (ateles#715) ────────────────────────
+#
+# The regression these cover: `operator_only` was in neither
+# low_blast_action_types nor high_blast_action_types, so blast_radius_for()
+# fell through to blast_radius_default = LOW and the gate auto-executed on
+# high confidence. The observed line was:
+#
+#   gate: task=<id> → cicada action=operator_only blast=low conf=0.95/0.85
+#     → auto_execute (high confidence, low blast radius)
+#
+# The operator's decision was NEVER-auto-executable rather than merely
+# high-blast, because high-blast still graduates via
+# auto_execute_after_n_successful_recurrences — and `operator_only` does not
+# mean "risky", it means an agent structurally cannot do the work. No number of
+# prior successes changes whether the swarm holds a credential it was designed
+# not to hold. Hence `test_operator_only_never_graduates_via_recurrence` below,
+# which is the half that a merely-high-blast fix would silently fail.
+
+
+def test_operator_only_resolves_to_never_blast_radius():
+    assert _default().blast_radius_for("operator_only") == BlastRadius.NEVER
+
+
+@pytest.mark.parametrize("confidence", [0.0, 0.5, 0.85, 0.95, 0.99, 1.0])
+def test_operator_only_never_auto_executes_at_any_confidence(confidence):
+    """The observed bug scaled with confidence: the surer the authoring agent
+    was that a task needed a human, the more certainly it dispatched."""
+    d = evaluate_gate(
+        confidence=confidence, action_type="operator_only", policy=_default()
+    )
+    assert d.action != GateAction.AUTO_EXECUTE
+    assert not d.may_auto_execute
+    assert d.blast_radius == BlastRadius.NEVER
+
+
+def test_operator_only_reproduces_the_observed_case():
+    """Exactly the logged case: action=operator_only, conf=0.95, threshold 0.85."""
+    d = evaluate_gate(confidence=0.95, action_type="operator_only", policy=_default())
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+    assert d.blast_radius == BlastRadius.NEVER
+    assert "never auto-executable" in d.reason
+
+
+@pytest.mark.parametrize("recurrences", [0, 3, 5, 100, 10_000])
+def test_operator_only_never_graduates_via_recurrence(recurrences):
+    """THE operator decision: recurrence graduation must not reach it.
+
+    A HIGH-blast action is merely gated; a proven recurring series clears it
+    after N clean cycles. `operator_only` must bypass that path entirely, so
+    this asserts it at counts far past the graduation threshold.
+    """
+    pol = ExecutionPolicy(
+        entity_id="p",
+        confidence_threshold=0.85,
+        auto_execute_after_n_successful_recurrences=3,
+        loaded=True,
+    )
+    d = evaluate_gate(
+        confidence=0.99,
+        action_type="operator_only",
+        policy=pol,
+        successful_recurrences=recurrences,
+    )
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+    assert d.blast_radius == BlastRadius.NEVER
+
+
+def test_operator_only_graduation_contrast_with_low_blast():
+    """Control: the same recurrence count DOES graduate a low-blast action.
+
+    Without this contrast, the test above could pass because graduation is
+    broken generally rather than because operator_only is excluded from it.
+    """
+    pol = ExecutionPolicy(
+        entity_id="p",
+        confidence_threshold=0.85,
+        auto_execute_after_n_successful_recurrences=3,
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    graduated = evaluate_gate(
+        confidence=0.10, action_type="local_edit", policy=pol, successful_recurrences=5
+    )
+    assert graduated.action == GateAction.AUTO_EXECUTE
+
+    held = evaluate_gate(
+        confidence=0.10,
+        action_type="operator_only",
+        policy=pol,
+        successful_recurrences=5,
+    )
+    assert held.action == GateAction.CHECKPOINT
+
+
+def test_policy_cannot_demote_operator_only_to_low_blast():
+    """A policy listing operator_only as low blast must not win.
+
+    Membership in the low set is a tuning knob; "an agent structurally cannot
+    do this" is not. If a policy could demote it, the whole guarantee reduces
+    to whoever last edited the policy entity.
+    """
+    permissive = ExecutionPolicy(
+        entity_id="p",
+        low_blast_action_types=frozenset({"operator_only", "local_edit"}),
+        blast_radius_default=BlastRadius.LOW,
+        loaded=True,
+    )
+    assert permissive.blast_radius_for("operator_only") == BlastRadius.NEVER
+    d = evaluate_gate(
+        confidence=1.0,
+        action_type="operator_only",
+        policy=permissive,
+        successful_recurrences=999,
+    )
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+
+
+def test_operator_only_case_and_whitespace_insensitive():
+    for spelling in ("OPERATOR_ONLY", " operator_only ", "Operator_Only"):
+        assert _default().blast_radius_for(spelling) == BlastRadius.NEVER
+
+
+def test_operator_only_in_fallback_high_blast_as_defense_in_depth():
+    """Belt-and-braces: if the NEVER tier were ever lost in a refactor, the
+    fallback set must degrade operator_only to HIGH, not back to LOW."""
+    from lib.daemon_runtime.gating import _FALLBACK_HIGH_BLAST
+
+    assert "operator_only" in _FALLBACK_HIGH_BLAST
+    assert "operator_only" in NEVER_AUTO_EXECUTE_ACTION_TYPES
+
+
+def test_may_auto_execute_rejects_a_never_tier_decision():
+    """Hand-constructed AUTO_EXECUTE at NEVER radius is still not dispatchable."""
+    from lib.daemon_runtime.gating import GateDecision
+
+    forged = GateDecision(
+        action=GateAction.AUTO_EXECUTE,
+        blast_radius=BlastRadius.NEVER,
+        confidence=1.0,
+        threshold=0.85,
+        policy_id="p",
+        reason="forged",
+    )
+    assert not forged.may_auto_execute
+
+
+def test_parse_policy_accepts_never_as_blast_radius_default():
+    pol = _parse_policy("p", {"snapshot": {"blast_radius_default": "never"}})
+    assert pol.blast_radius_default == BlastRadius.NEVER
+    d = evaluate_gate(confidence=1.0, action_type=None, policy=pol)
+    assert d.action == GateAction.CHECKPOINT
+
+
+def test_any_action_type_vocabulary_must_contain_the_never_set():
+    """Forward guard against ateles#689's `normalize_action_type` discard rule.
+
+    PR #689 introduces `lib/daemon_runtime/action_type.py` with its own
+    `KNOWN_ACTION_TYPES` vocabulary and a `normalize_action_type()` that
+    DISCARDS any value outside it, returning None. That rule is right for a
+    typo ("open_pull_request"), but `operator_only` is not a typo — it is
+    absent from both of #689's vocabularies, so a declared `operator_only`
+    would be dropped as if never declared, fall through to text inference, and
+    land back on `blast_radius_default` = LOW. The gate would never see the
+    value this module refuses to auto-execute.
+
+    This test is skipped until that module exists, and fails the moment it
+    lands without `operator_only` in its vocabulary — so the two changes
+    cannot merge in the wrong order silently.
+    """
+    action_type = pytest.importorskip(
+        "lib.daemon_runtime.action_type",
+        reason="ateles#689 not merged yet — nothing to guard",
+    )
+
+    known = getattr(action_type, "KNOWN_ACTION_TYPES", None)
+    assert known is not None, "action_type module must expose KNOWN_ACTION_TYPES"
+    missing = NEVER_AUTO_EXECUTE_ACTION_TYPES - set(known)
+    assert not missing, (
+        f"{sorted(missing)} missing from KNOWN_ACTION_TYPES. "
+        "normalize_action_type() discards anything outside that set, so these "
+        "would be dropped as if undeclared and fall back to blast_radius_default "
+        "(LOW) — reopening ateles#715 through a different door."
+    )
+
+    normalize = getattr(action_type, "normalize_action_type", None)
+    if normalize is not None:
+        for value in NEVER_AUTO_EXECUTE_ACTION_TYPES:
+            assert normalize(value) == value, (
+                f"normalize_action_type({value!r}) must preserve the value, not "
+                "discard it — the gate cannot refuse what it never receives."
+            )
+
+
+# ── ateles#902: unscored task must not read as "low confidence" ────────────
+#
+# 36 of 49 pending checkpoints carried confidence=0.0 not because any agent
+# scored the task low, but because NOTHING scored it — `_read_confidence`
+# read an absent field, `float(None)` raised, and the fail-closed default
+# (0.0) was stamped into a reason string ("low confidence and high blast
+# radius") that reads as a judgment nobody made. These tests pin the fix:
+# the reason text (and `GateDecision.confidence_unscored`) must distinguish
+# not-scored-by-a-producer from scored-low, and fail-closed behavior must be
+# unchanged in both cases — an unscored task still checkpoints.
+
+
+def test_unscored_and_scored_low_high_blast_produce_different_reasons():
+    """The consequential case from the issue: high-blast + below threshold.
+
+    Before the fix, both an unscored task (confidence defaulted to 0.0) and a
+    task an agent genuinely scored at 0.0 hit the exact same branch and the
+    exact same reason string. That is the bug: one text for two different
+    facts. This is the test that fails against pre-fix code — `evaluate_gate`
+    had no `confidence_unscored` parameter and CHECKPOINT_WITH_ALTERNATIVES's
+    reason was a single hardcoded string.
+    """
+    policy = _default()
+
+    unscored = evaluate_gate(
+        confidence=0.0,
+        action_type="payment",
+        policy=policy,
+        confidence_unscored=True,
+    )
+    scored_low = evaluate_gate(
+        confidence=0.0,
+        action_type="payment",
+        policy=policy,
+        confidence_unscored=False,
+    )
+
+    assert unscored.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
+    assert scored_low.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
+
+    # Same action, same confidence value — but the reason must differ, and
+    # each must say what actually happened rather than sharing one string.
+    assert unscored.reason != scored_low.reason
+    assert "not scored by a producer" in unscored.reason.lower()
+    assert "low confidence" not in unscored.reason.lower()
+    assert "low confidence" in scored_low.reason.lower()
+    assert "not scored by a producer" not in scored_low.reason.lower()
+
+    assert unscored.confidence_unscored is True
+    assert scored_low.confidence_unscored is False
+
+
+def test_unscored_and_scored_low_below_threshold_produce_different_reasons():
+    """Same distinction on the plain (non-high-blast) CHECKPOINT branch."""
+    policy = _default()
+
+    unscored = evaluate_gate(
+        confidence=0.0,
+        action_type="local_edit",
+        policy=policy,
+        confidence_unscored=True,
+    )
+    scored_low = evaluate_gate(
+        confidence=0.0,
+        action_type="local_edit",
+        policy=policy,
+        confidence_unscored=False,
+    )
+
+    assert unscored.action == GateAction.CHECKPOINT
+    assert scored_low.action == GateAction.CHECKPOINT
+    assert unscored.reason != scored_low.reason
+    assert "not scored by a producer" in unscored.reason.lower()
+    assert unscored.reason != "below confidence threshold"
+    assert scored_low.reason == "below confidence threshold"
+
+
+def test_confidence_unscored_defaults_false_for_existing_callers():
+    """Every pre-existing call site omits `confidence_unscored` — it must
+    default to False so none of them silently start reporting an unscored estimate
+    for a value they explicitly passed in.
+    """
+    d = evaluate_gate(confidence=0.3, action_type="local_edit", policy=_default())
+    assert d.confidence_unscored is False
+    assert d.reason == "below confidence threshold"
+
+
+def test_unscored_high_blast_task_still_checkpoints_fail_closed():
+    """Fail-closed must hold exactly as before: an unscored high-blast task
+    still checkpoints — `confidence_unscored=True` never grants AUTO_EXECUTE.
+    """
+    policy = _default()
+    d = evaluate_gate(
+        confidence=0.0,
+        action_type="open_pr",
+        policy=policy,
+        confidence_unscored=True,
+    )
+    assert d.action != GateAction.AUTO_EXECUTE
+    assert not d.may_auto_execute
+
+
+def test_unscored_low_blast_task_still_checkpoints_below_threshold():
+    """An unscored LOW-blast task with a mechanically low score also still
+    checkpoints — unscored is a label on the reason, not a bypass of the
+    confidence axis itself.
+    """
+    policy = _default()
+    d = evaluate_gate(
+        confidence=0.2,
+        action_type="local_edit",
+        policy=policy,
+        confidence_unscored=True,
+    )
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+
+
+def test_unscored_reason_never_claims_no_confidence_was_recorded():
+    """The reason text must not contradict the confidence it carries (ateles#905, ux).
+
+    After Part 2 an unscored task is stamped with a mechanical score, so a
+    reason saying "no confidence recorded" is false on its face — the decision
+    carries a real float. The reason must say the score is mechanical, not that
+    none exists. Principle 3: the instrument's report must match what it read.
+    """
+    policy = _default()
+    # Both reason branches must be covered: a HIGH-blast action takes the
+    # propose-alternatives branch, a LOW-blast one below threshold takes the
+    # plain checkpoint branch. Each wrote its own "no confidence recorded"
+    # string, so a test hitting only one of them cannot fail on the other.
+    for blast_action in ("open_pr", "merge_pr", "draft", "local_edit"):
+        d = evaluate_gate(
+            confidence=0.55,
+            action_type=blast_action,
+            policy=policy,
+            confidence_unscored=True,
+        )
+        low = d.reason.lower()
+        assert "no confidence recorded" not in low, f"{blast_action}: {d.reason}"
+        assert "never scored" not in low, f"{blast_action}: {d.reason}"
+        assert d.confidence == 0.55
+
+
+def test_checkpoint_task_fetch_accepts_only_declared_task_type(monkeypatch):
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "task",
+            "snapshot": {"status": "awaiting_approval"},
+        },
+    )
+    assert fetch_task_snapshot("ent_task") == {"status": "awaiting_approval"}
+
+
+@pytest.mark.parametrize(
+    ("fetch", "entity_type"),
+    [
+        (fetch_task_snapshot, "task"),
+        (fetch_checkpoint_snapshot, "checkpoint_" + "brief"),
+    ],
+)
+def test_checkpoint_fetch_preserves_envelope_tenant(monkeypatch, fetch, entity_type):
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": entity_type,
+            "user_id": "tenant-a",
+            "snapshot": {"status": "awaiting_operator"},
+        },
+    )
+
+    assert fetch("ent")["user_id"] == "tenant-a"
+
+
+@pytest.mark.parametrize(
+    ("fetch", "entity_type"),
+    [
+        (fetch_task_snapshot, "task"),
+        (fetch_checkpoint_snapshot, "checkpoint_" + "brief"),
+    ],
+)
+def test_checkpoint_fetch_fails_tenant_conflict_closed(monkeypatch, fetch, entity_type):
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": entity_type,
+            "user_id": "tenant-envelope",
+            "snapshot": {
+                "status": "awaiting_operator",
+                "user_id": "tenant-snapshot",
+            },
+        },
+    )
+
+    assert fetch("ent")["user_id"] is None
+
+
+@pytest.mark.parametrize("entity_type", ["plan", "", None])
+def test_checkpoint_task_fetch_fails_closed_on_wrong_or_missing_type(
+    monkeypatch, entity_type
+):
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": entity_type,
+            "snapshot": {"status": "awaiting_approval"},
+        },
+    )
+    assert fetch_task_snapshot("ent_not_task") is None
+
+
+def test_checkpoint_stamp_requires_materialized_readback(monkeypatch):
+    """HTTP success without the field on the entity is not a claimed release."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"success": True, "snapshot": {"resolved_dispatched": True}}
+
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _Response()
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"resolved_dispatched": False},
+        },
+    )
+
+    assert stamp_checkpoint_dispatched("ent_cp", handler="apis") is False
+
+
+def test_checkpoint_stamp_duplicate_caller_does_not_own_claim(monkeypatch):
+    """A duplicate idempotency response must not authorize a second consumer."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _DuplicateResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            # Neotoma returns snapshot=null on the 23505/idempotent replay path.
+            return {"success": True, "snapshot": None}
+
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _DuplicateResponse()
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"resolved_dispatched": True},
+        },
+    )
+
+    assert stamp_checkpoint_dispatched("ent_cp", handler="apis") is False
+
+
+@pytest.mark.parametrize(
+    ("readback_status", "expected"),
+    [("approved_no_release", True), ("approved", False)],
+)
+def test_non_releasable_checkpoint_close_requires_exact_readback(
+    monkeypatch, readback_status, expected
+):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _Response()
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"status": readback_status},
+        },
+    )
+    assert (
+        close_checkpoint_without_release(
+            "ent_cp", handler="apis", reason="non-releasable test"
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("readback_status", "expected"),
+    [("approved_requires_fresh_approval", True), ("approved", False)],
+)
+def test_fresh_approval_transition_requires_exact_readback(
+    monkeypatch, readback_status, expected
+):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _Response()
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"status": readback_status},
+        },
+    )
+
+    assert (
+        require_fresh_checkpoint_approval(
+            "ent_cp", handler="apis", reason="authorization changed"
+        )
+        is expected
+    )
+
+
+def test_checkpoint_brief_carries_authenticated_immutable_authority(monkeypatch):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
+    signer = _http_signer()
+    monkeypatch.setattr(
+        gating_module, "CHECKPOINT_PRODUCER_JKT", signer.thumbprint, raising=False
+    )
+    posted: list[dict] = []
+    posted_content: list[bytes] = []
+    posted_headers: list[dict[str, str]] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_cp"}]}
+
+    def post(*args, **kwargs):
+        posted_content.append(kwargs["content"])
+        posted.append(gating_module.json.loads(kwargs["content"]))
+        posted_headers.append(kwargs["headers"])
+        return _Response()
+
+    monkeypatch.setattr(gating_module.httpx, "post", post)
+    monkeypatch.setattr(
+        gating_module,
+        "_checkpoint_producer_http_signer",
+        lambda handler: signer,
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_id": entity_id,
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": posted[0]["entities"][0],
+            "provenance": {
+                field: "obs-create"
+                for field in (
+                    "body",
+                    "task_entity_id",
+                    "policy_entity_id",
+                    "blast_radius",
+                    "gate_action",
+                    "handler",
+                )
+            },
+        },
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: [
+            {
+                "id": "obs-create",
+                "fields": posted[0]["entities"][0],
+                "user_id": "tenant-a",
+                "provenance": {
+                    "agent_sub": "apis@ateles-swarm",
+                    "agent_thumbprint": signer.thumbprint,
+                    "attribution_tier": "software",
+                },
+            }
+        ],
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 4,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"title": "Bounded work", "status": "awaiting_approval"},
+    }
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+
+    brief_id = write_checkpoint_brief(
+        task_entity_id="ent_task",
+        decision=decision,
+        title="Tenant-bound checkpoint",
+        plan_summary="Bounded work",
+        handler="apis",
+        user_id="tenant-a",
+        action_type="local_edit",
+        task_record=task_record,
+        policy=policy,
+    )
+
+    assert brief_id == "ent_cp"
+    snapshot = posted[0]["entities"][0]
+    assert "user_id" not in snapshot
+    authority = gating_module.read_authenticated_checkpoint_authorization(
+        "ent_cp", gating_module._fetch_entity("ent_cp")
+    )
+    assert authority["version"] == 2
+    assert authority["task_entity_id"] == "ent_task"
+    assert authority["required_approver_sub"] == "ateles@ateles-swarm"
+    assert authority["required_approver_jkt"] == "A" * 43
+    assert authority["producer_jkt"] == signer.thumbprint
+    assert authority["task_revision"] == gating_module.entity_record_digest(task_record)
+    assert authority["policy_revision"] == gating_module.execution_policy_revision(
+        policy
+    )
+    assert {"signature", "signature-input", "signature-key"}.issubset(posted_headers[0])
+    assert "X-AAuth-Token" not in posted_headers[0]
+    assert posted_headers[0]["content-digest"]
+    assert posted_content[0] == gating_module._canonical_json(posted[0]).encode()
+
+
+@pytest.mark.parametrize("configured_producer_jkt", ["", "B" * 43])
+def test_checkpoint_brief_refuses_unpinned_producer_key(
+    monkeypatch, configured_producer_jkt
+):
+    """The real /store sink must not accept an unpinned Apis signing key."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
+    monkeypatch.setattr(
+        gating_module,
+        "CHECKPOINT_PRODUCER_JKT",
+        configured_producer_jkt,
+        raising=False,
+    )
+    signer = _http_signer()
+    monkeypatch.setattr(
+        gating_module, "_checkpoint_producer_http_signer", lambda handler: signer
+    )
+    posted: list[bytes] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": []}
+
+    def post(*args, **kwargs):
+        posted.append(kwargs["content"])
+        return _Response()
+
+    monkeypatch.setattr(gating_module.httpx, "post", post)
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-22T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Producer identity must be pinned",
+            plan_summary="Do not mint authority with an unexpected producer key.",
+            handler="apis",
+            user_id="tenant-a",
+            action_type="local_edit",
+            task_record=task_record,
+            policy=policy,
+        )
+        is None
+    )
+    assert posted == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("matching", True),
+        ("missing", False),
+        ("wrong", False),
+        ("trusted_other", False),
+        ("wrong_envelope", False),
+    ],
+)
+def test_checkpoint_authorization_requires_expected_producer_jkt(
+    monkeypatch, mode, expected
+):
+    """Stored creation authority is valid only for the configured Apis JKT."""
+    producer_jkt = "P" * 43
+    monkeypatch.setattr(
+        gating_module, "CHECKPOINT_PRODUCER_JKT", producer_jkt, raising=False
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 2,
+        "last_observation_at": "2026-09-22T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    payload = gating_module.json.loads(
+        gating_module.build_checkpoint_authorization_envelope(
+            task_record=task_record,
+            policy=policy,
+            decision=decision,
+            action_type="local_edit",
+            user_id="tenant-a",
+            required_approver_jkt="A" * 43,
+        )
+    )
+    payload["producer_jkt"] = "Q" * 43 if mode == "wrong_envelope" else producer_jkt
+    encoded = gating_module._canonical_json(payload)
+    fields = {
+        "body": encoded,
+        "task_entity_id": "ent_task",
+        "policy_entity_id": decision.policy_id,
+        "blast_radius": decision.blast_radius.value,
+        "gate_action": decision.action.value,
+        "handler": "apis",
+    }
+    provenance = {field: "obs-create" for field in fields}
+    auth = {
+        "agent_sub": "apis@ateles-swarm",
+        "agent_thumbprint": producer_jkt,
+        "attribution_tier": "software",
+    }
+    if mode == "missing":
+        auth.pop("agent_thumbprint")
+    elif mode == "wrong":
+        auth["agent_thumbprint"] = "W" * 43
+    elif mode == "trusted_other":
+        auth["agent_thumbprint"] = "T" * 43
+        auth["attribution_tier"] = "operator_attested"
+    record = {
+        "entity_id": "ent_cp",
+        "entity_type": "checkpoint_" + "brief",
+        "snapshot": fields,
+        "provenance": provenance,
+    }
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: [
+            {
+                "id": "obs-create",
+                "fields": fields,
+                "user_id": "tenant-a",
+                "provenance": auth,
+            }
+        ],
+    )
+
+    authority = gating_module.read_authenticated_checkpoint_authorization(
+        "ent_cp", record
+    )
+
+    assert (authority is not None) is expected
+
+
+def test_checkpoint_brief_requires_authorization_snapshot_readback(monkeypatch):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_cp"}]}
+
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda *args, **kwargs: _Response()
+    )
+
+    monkeypatch.setattr(
+        gating_module,
+        "_checkpoint_producer_http_signer",
+        lambda handler: _http_signer(),
+    )
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"authorization_action_type": "local_edit"},
+        },
+    )
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Tenant-bound checkpoint",
+            plan_summary="Bounded work",
+            handler="apis",
+            user_id="tenant-a",
+            action_type="local_edit",
+            task_record=task_record,
+            policy=policy,
+        )
+        is None
+    )
+
+
+def test_checkpoint_authority_is_not_created_from_unloaded_policy(monkeypatch):
+    """The persistence sink must reject fallback-policy authority."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    posted: list[dict] = []
+
+    def fail_if_posted(*args, **kwargs):
+        posted.append(kwargs.get("json") or {})
+        raise AssertionError("unloaded policy must not reach the checkpoint store")
+
+    monkeypatch.setattr(gating_module.httpx, "post", fail_if_posted)
+    policy = ExecutionPolicy(entity_id="fallback", loaded=False)
+    decision = evaluate_gate(
+        confidence=0.3,
+        action_type="local_edit",
+        policy=policy,
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-22T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Fallback policy must not authorize",
+            plan_summary="Policy was unavailable.",
+            handler="apis",
+            user_id="tenant-a",
+            action_type="local_edit",
+            task_record=task_record,
+            policy=policy,
+        )
+        is None
+    )
+    assert posted == []
+
+
+def test_checkpoint_authority_is_not_created_without_resolver_key_pin(monkeypatch):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "")
+    posted: list[dict] = []
+
+    def fail_if_posted(*args, **kwargs):
+        posted.append(kwargs.get("json") or {})
+        raise AssertionError("missing resolver key pin must not reach the store")
+
+    monkeypatch.setattr(gating_module.httpx, "post", fail_if_posted)
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(
+        confidence=0.3,
+        action_type="local_edit",
+        policy=policy,
+    )
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-22T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval"},
+    }
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Missing resolver key pin",
+            plan_summary="Resolver identity is incomplete.",
+            handler="apis",
+            user_id="tenant-a",
+            action_type="local_edit",
+            task_record=task_record,
+            policy=policy,
+        )
+        is None
+    )
+    assert posted == []
+
+
+@pytest.mark.parametrize("tamper", ["protected_field", "producer", "body"])
+def test_authenticated_checkpoint_authority_rejects_mutable_or_untrusted_state(
+    monkeypatch, tamper
+):
+    producer_jkt = "P" * 43
+    monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", producer_jkt)
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 2,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval", "body": "approved effect"},
+    }
+    policy = _default()
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    encoded = gating_module.build_checkpoint_authorization_envelope(
+        task_record=task_record,
+        policy=policy,
+        decision=decision,
+        action_type="local_edit",
+        user_id="tenant-a",
+        required_approver_jkt="A" * 43,
+        producer_jkt=producer_jkt,
+    )
+    fields = {
+        "body": encoded,
+        "task_entity_id": "ent_task",
+        "policy_entity_id": decision.policy_id,
+        "blast_radius": decision.blast_radius.value,
+        "gate_action": decision.action.value,
+        "handler": "apis",
+    }
+    provenance = {field: "obs-create" for field in fields}
+    auth = {
+        "agent_sub": "apis@ateles-swarm",
+        "agent_thumbprint": producer_jkt,
+        "attribution_tier": "software",
+    }
+    if tamper == "protected_field":
+        provenance["gate_action"] = "obs-correction"
+    elif tamper == "producer":
+        auth["agent_sub"] = "other@ateles-swarm"
+    else:
+        fields["body"] = encoded.replace("local_edit", "payment")
+    record = {
+        "entity_id": "ent_cp",
+        "entity_type": "checkpoint_" + "brief",
+        "snapshot": dict(fields),
+        "provenance": provenance,
+    }
+    observation_fields = dict(fields)
+    if tamper == "body":
+        observation_fields["body"] = encoded
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: [
+            {
+                "id": "obs-create",
+                "fields": observation_fields,
+                "user_id": "tenant-a",
+                "provenance": auth,
+            }
+        ],
+    )
+
+    assert (
+        gating_module.read_authenticated_checkpoint_authorization("ent_cp", record)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("matching", "ateles@ateles-swarm"),
+        ("missing_status_provenance", None),
+        ("unreadable_observation", None),
+        ("mismatched_principal", None),
+        ("mismatched_key", None),
+        ("untrusted_tier", None),
+        ("wrong_status", None),
+        ("wrong_tenant", None),
+    ],
+)
+def test_checkpoint_resolution_requires_authenticated_matching_principal(
+    monkeypatch, mode, expected
+):
+    record = {
+        "entity_id": "ent_cp",
+        "entity_type": "checkpoint_" + "brief",
+        "snapshot": {"status": "approved"},
+        "provenance": {"status": "obs-approval"},
+    }
+    observation = {
+        "id": "obs-approval",
+        "fields": {"status": "approved"},
+        "user_id": "tenant-a",
+        "provenance": {
+            "agent_sub": "ateles@ateles-swarm",
+            "agent_thumbprint": "A" * 43,
+            "attribution_tier": "software",
+        },
+    }
+    observations = [observation]
+    if mode == "missing_status_provenance":
+        record["provenance"] = {}
+    elif mode == "unreadable_observation":
+        observations = []
+    elif mode == "mismatched_principal":
+        observation["provenance"]["agent_sub"] = "other@ateles-swarm"
+    elif mode == "mismatched_key":
+        observation["provenance"]["agent_thumbprint"] = "B" * 43
+    elif mode == "untrusted_tier":
+        observation["provenance"]["attribution_tier"] = "unverified_client"
+    elif mode == "wrong_status":
+        observation["fields"]["status"] = "rejected"
+    elif mode == "wrong_tenant":
+        observation["user_id"] = "tenant-b"
+
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity_observations",
+        lambda entity_id: observations,
+    )
+
+    result = gating_module.read_authenticated_checkpoint_resolution(
+        "ent_cp",
+        record,
+        required_approver_sub="ateles@ateles-swarm",
+        required_approver_jkt="A" * 43,
+        expected_user_id="tenant-a",
+    )
+
+    assert (result or {}).get("principal_sub") == expected
+
+
+# ── Signed checkpoint persistence against a faithful Neotoma stand-in ───────
+#
+# 643 signed checkpoint writes failed between 2026-09-28 and 2026-10-06, every
+# one of them leaving its task held with nothing for the operator to approve.
+# The stand-in below reproduces the two server rules that did it, so these
+# tests fail on the pre-fix code for the reason production failed:
+#   * a signed (AAuth-admitted) store is judged against the producer's grant,
+#     which covers entity types but no edges, so ANY relationship in the same
+#     request refuses the whole write (403 capability_denied);
+#   * an idempotency key reused with different content is a 400
+#     ERR_IDEMPOTENCY_MISMATCH.
+# It also folds two entities with the same checkpoint title into one, as the
+# schema's title-keyed identity does.
+
+
+class _FakeNeotoma:
+    def __init__(self, monkeypatch, signer):
+        self.signer = signer
+        self.stores: list[dict] = []
+        self.edges: list[dict] = []
+        self.by_key: dict[str, str] = {}
+        self.by_title: dict[str, str] = {}
+        self.entities: dict[str, dict] = {}
+        self.fail_edge = False
+        monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+        monkeypatch.setattr(gating_module, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
+        monkeypatch.setattr(
+            gating_module, "CHECKPOINT_PRODUCER_JKT", signer.thumbprint, raising=False
+        )
+        monkeypatch.setattr(
+            gating_module, "_checkpoint_producer_http_signer", lambda handler: signer
+        )
+        monkeypatch.setattr(gating_module.httpx, "post", self.post)
+        monkeypatch.setattr(gating_module, "_fetch_entity", self.fetch_entity)
+        monkeypatch.setattr(
+            gating_module, "_fetch_entity_observations", self.fetch_observations
+        )
+
+    def _response(self, status, payload):
+        import httpx
+
+        request = httpx.Request("POST", "https://neotoma.test/store")
+        return httpx.Response(status, json=payload, request=request)
+
+    def post(self, url, **kwargs):
+        if url.endswith("/create_relationship"):
+            self.edges.append(kwargs["json"])
+            if self.fail_edge:
+                return self._response(500, {"error_code": "DB_QUERY_FAILED"})
+            return self._response(200, {"success": True})
+        signed = "signature" in kwargs["headers"]
+        body = (
+            gating_module.json.loads(kwargs["content"])
+            if "content" in kwargs
+            else kwargs["json"]
+        )
+        self.stores.append({"signed": signed, "body": body})
+        if signed and body.get("relationships"):
+            return self._response(
+                403,
+                {
+                    "error_code": "capability_denied",
+                    "message": 'Agent "apis" is not permitted to create_relationship',
+                },
+            )
+        entity = body["entities"][0]
+        key = body["idempotency_key"]
+        digest = gating_module._canonical_json(body["entities"])
+        if key in self.by_key:
+            prior_id = self.by_key[key]
+            if self.entities[prior_id]["digest"] != digest:
+                return self._response(
+                    400,
+                    {
+                        "error_code": "ERR_STORE_RESOLUTION_FAILED",
+                        "message": "ERR_IDEMPOTENCY_MISMATCH: key reused",
+                    },
+                )
+            return self._response(
+                200, {"replayed": True, "entities": [{"entity_id": prior_id}]}
+            )
+        entity_id = self.by_title.get(entity["title"]) or f"ent_cp_{len(self.entities)}"
+        self.by_title[entity["title"]] = entity_id
+        self.by_key[key] = entity_id
+        self.entities[entity_id] = {"fields": entity, "digest": digest}
+        return self._response(200, {"entities": [{"entity_id": entity_id}]})
+
+    def fetch_entity(self, entity_id):
+        stored = self.entities.get(entity_id)
+        if stored is None:
+            return None
+        return {
+            "entity_id": entity_id,
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": stored["fields"],
+            "provenance": {
+                field: "obs-create"
+                for field in (
+                    "body",
+                    "task_entity_id",
+                    "policy_entity_id",
+                    "blast_radius",
+                    "gate_action",
+                    "handler",
+                )
+            },
+        }
+
+    def fetch_observations(self, entity_id):
+        stored = self.entities.get(entity_id)
+        if stored is None:
+            return []
+        return [
+            {
+                "id": "obs-create",
+                "fields": stored["fields"],
+                "user_id": "tenant-a",
+                "provenance": {
+                    "agent_sub": "apis@ateles-swarm",
+                    "agent_thumbprint": self.signer.thumbprint,
+                    "attribution_tier": "software",
+                },
+            }
+        ]
+
+
+def _hold(task_id="ent_task", *, observation_count=4, title="Bounded work", **extra):
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    task_record = {
+        "entity_id": task_id,
+        "entity_type": "task",
+        "observation_count": observation_count,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"title": title, "status": "awaiting_approval"},
+    }
+    return write_checkpoint_brief(
+        task_entity_id=task_id,
+        decision=decision,
+        title=title,
+        plan_summary="Bounded work",
+        handler="apis",
+        user_id="tenant-a",
+        action_type="local_edit",
+        task_record=task_record,
+        policy=policy,
+        **extra,
+    )
+
+
+def test_signed_checkpoint_write_carries_no_edge_so_the_producer_grant_admits_it(
+    monkeypatch,
+):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    brief_id = _hold()
+
+    assert brief_id is not None, "a signed checkpoint must persist and be proven"
+    signed = [s for s in server.stores if s["signed"]]
+    assert len(signed) == 1
+    assert "relationships" not in signed[0]["body"]
+    # No relationship is written by any other path either.
+    assert server.edges == []
+
+
+def test_signed_relationship_denial_results_in_no_bearer_path_write(monkeypatch):
+    """The relationship write stays within the producer's grant (security review).
+
+    Admission refuses a relationship the producer signs for; the checkpoint
+    still persists and proves, and no relationship request is made at all.
+    """
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    original = server.post
+    relationship_requests: list[bool] = []
+
+    def admission(url, **kwargs):
+        if url.endswith("/create_relationship"):
+            relationship_requests.append("signature" in kwargs["headers"])
+            if "signature" in kwargs["headers"]:
+                return server._response(403, {"error_code": "capability_denied"})
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(gating_module.httpx, "post", admission)
+
+    assert _hold() is not None, "the checkpoint is not invalidated by the missing edge"
+    assert relationship_requests == [], "no relationship request is made"
+    assert server.edges == [], "no relationship was written"
+
+
+def test_signed_checkpoint_still_fails_closed_when_the_store_refuses(
+    monkeypatch, caplog
+):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    original = server.post
+
+    def refuse(url, **kwargs):
+        if url.endswith("/store"):
+            return server._response(
+                403, {"error_code": "capability_denied", "message": "no grant"}
+            )
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(gating_module.httpx, "post", refuse)
+
+    with caplog.at_level("WARNING"):
+        assert _hold() is None
+    # The server's own reason is in the log, not just the status line.
+    assert "capability_denied" in caplog.text
+    assert server.edges == [], "no edge is written for an unproven checkpoint"
+
+
+def test_rehold_of_a_changed_task_is_a_new_checkpoint_not_a_key_mismatch(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    first = _hold(observation_count=4)
+    second = _hold(observation_count=9)  # task changed since the first hold
+
+    assert first is not None
+    assert second is not None, "a re-hold must not be refused as a key reuse"
+    keys = [s["body"]["idempotency_key"] for s in server.stores]
+    assert keys[0] != keys[1]
+    # ... and it is a DIFFERENT checkpoint, not the first one overwritten: the
+    # record resolves identity from the title, so the title must differ too.
+    assert first != second
+    assert set(server.entities) == {first, second}
+    assert server.entities[second]["fields"]["status"] == "awaiting_operator"
+    assert server.entities[first]["fields"]["status"] == "awaiting_operator"
+
+
+def test_exact_retry_is_an_idempotent_replay_of_one_checkpoint(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    first = _hold()
+    again = _hold()
+
+    assert first == again
+    assert len(server.entities) == 1
+
+
+def test_replacement_for_a_changed_hold_is_distinct_and_never_the_one_it_retires(
+    monkeypatch,
+):
+    """The replacement flow retires the PRIOR brief; with title-keyed identity
+    both holds used to be one entity, so it retired its own replacement."""
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    prior = _hold(observation_count=4)
+    replacement = _hold(observation_count=9, idempotency_context="fresh-x")
+    # The caller's retirement step, as _require_fresh_release_authority does it.
+    assert replacement != prior, "the replacement must not be the brief retired"
+    server.entities[prior]["fields"]["status"] = "approved_requires_fresh_approval"
+
+    assert server.entities[replacement]["fields"]["status"] == "awaiting_operator"
+    # An exact retry of the replacement creates nothing new.
+    assert _hold(observation_count=9, idempotency_context="fresh-x") == replacement
+    assert len(server.entities) == 2
+
+
+def test_two_tasks_with_one_title_get_two_checkpoints(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    first = _hold("ent_task_a", title="Serialize lens fetches")
+    second = _hold("ent_task_b", title="Serialize lens fetches")
+
+    assert first and second and first != second
+    assert {
+        e["fields"]["task_entity_id"] for e in server.entities.values()
+    } == {"ent_task_a", "ent_task_b"}
+
+
+def test_legacy_bearer_checkpoint_keeps_its_edge_in_the_same_request(monkeypatch):
+    posted: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_cp"}]}
+
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        gating_module.httpx,
+        "post",
+        lambda url, **kwargs: posted.append(kwargs["json"]) or _Response(),
+    )
+    decision = evaluate_gate(
+        confidence=0.3, action_type="local_edit", policy=_default()
+    )
+
+    assert (
+        write_checkpoint_brief(
+            task_entity_id="ent_task",
+            decision=decision,
+            title="Legacy",
+            plan_summary="x",
+            handler="apis",
+        )
+        == "ent_cp"
+    )
+    assert posted[0]["relationships"][0]["target_entity_id"] == "ent_task"
+
+
+def test_identical_replacement_content_is_still_a_distinct_checkpoint(monkeypatch):
+    """A fresh checkpoint for an unchanged task has the same content as the one
+    it replaces; its replacement context alone must make it a different entity,
+    or retiring the prior brief retires the replacement."""
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    prior = _hold(idempotency_context="fresh-prior")
+    replacement = _hold(idempotency_context="fresh-replaces-prior")
+
+    assert prior != replacement
+    assert set(server.entities) == {prior, replacement}
+    # An exact retry of the replacement is the same entity.
+    assert _hold(idempotency_context="fresh-replaces-prior") == replacement
+    assert len(server.entities) == 2
+
+
+class _FakeHttpError(Exception):
+    def __init__(self, payload):
+        self.response = type("R", (), {"json": staticmethod(lambda: payload)})()
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"error_code": "ERR_X", "message": "root shape"}, " [server: ERR_X root shape]"),
+        ({"error": {"code": "ERR_Y", "message": "nested"}}, " [server: ERR_Y nested]"),
+        (
+            {"error": {"error_code": "ERR_Z", "message": "nested root-style"}},
+            " [server: ERR_Z nested root-style]",
+        ),
+        (
+            {"message": "", "details": {"code": "ERR_D", "message": "in details"}},
+            " [server: ERR_D in details]",
+        ),
+        ({"error": "plain string"}, " [server:  plain string]"),
+        ({"unrelated": 1}, ""),
+        ([], ""),
+    ],
+)
+def test_server_error_detail_reads_the_code_and_message_wherever_they_sit(
+    payload, expected
+):
+    assert gating_module._server_error_detail(_FakeHttpError(payload)) == expected

@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 import github_gateway
@@ -139,6 +141,246 @@ def test_pr_synchronize_parses():
     t = parse_github_event("pull_request", _pr_payload(action="synchronize"))
     assert t is not None
     assert t.kind == "pr_synchronize"
+
+
+# ── `labeled` action (trigger-layer gate) ───────────────────────────────────
+#
+# Round-1 review on ateles#1269 (Pavo/Waxwing/Loxia, same defect independently
+# found): naively admitting "labeled" into ISSUE_ACTIONS/PR_ACTIONS meant
+# parse_github_event built a real trigger for EVERY label add on EVERY
+# issue/PR, and handle_trigger's `is_pr` branch would run the full review
+# panel — even with ATELES_SWARM_REQUIRE_LABEL unset, which broke the
+# documented "unset = today's behaviour exactly" guarantee and CLAUDE.md's
+# PR_ACTIONS = {opened, reopened, synchronize} review-trigger contract.
+#
+# The fix moves the decision to THIS layer: _labeled_event_admitted must
+# return False (dropping the delivery before any SwarmTrigger is built)
+# unless the gate is SET and the label GitHub reports as just added
+# (payload["label"]["name"]) equals it exactly. These tests monkeypatch the
+# module-level `_REQUIRE_LABEL` (read once at import time, same as
+# RELEASE_PUSH_REF above) rather than the env var, since the module is
+# already imported by the time a test runs.
+
+
+def _labeled_payload(kind, added_label, *, existing_labels=None):
+    """A `labeled` payload carrying GitHub's own extra `label` field (the
+    label that was JUST added — distinct from `issue`/`pull_request`.labels,
+    which is the full current label set after the add)."""
+    labels = [{"name": lbl} for lbl in (existing_labels or [added_label])]
+    if kind == "issues":
+        payload = _issue_payload(action="labeled", labels=labels)
+    else:
+        payload = _pr_payload(action="labeled")
+        payload["pull_request"]["labels"] = labels
+    payload["label"] = {"name": added_label}
+    return payload
+
+
+class TestLabeledEventTriggerLayerGate:
+    def test_gate_unset_issue_labeled_drops_before_building_a_trigger(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "")
+        with caplog.at_level(logging.DEBUG):
+            t = parse_github_event(
+                "issues", _labeled_payload("issues", "swarm-canary"), "d-1"
+            )
+        assert t is None
+        assert any("label gate is unset" in rec.message for rec in caplog.records)
+
+    def test_gate_unset_pr_labeled_drops_before_building_a_trigger(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "")
+        with caplog.at_level(logging.DEBUG):
+            t = parse_github_event(
+                "pull_request", _labeled_payload("pull_request", "needs-triage"), "d-2"
+            )
+        assert t is None
+        assert any("label gate is unset" in rec.message for rec in caplog.records)
+
+    def test_gate_set_issue_labeled_with_a_different_label_drops(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        with caplog.at_level(logging.DEBUG):
+            t = parse_github_event(
+                "issues", _labeled_payload("issues", "bug"), "d-3"
+            )
+        assert t is None
+        assert any("does not match" in rec.message for rec in caplog.records)
+
+    def test_gate_set_pr_labeled_with_a_different_label_drops(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        with caplog.at_level(logging.DEBUG):
+            t = parse_github_event(
+                "pull_request",
+                _labeled_payload("pull_request", "wontfix"),
+                "d-4",
+            )
+        assert t is None
+        assert any("does not match" in rec.message for rec in caplog.records)
+
+    def test_gate_set_issue_labeled_with_the_configured_label_starts_pipeline(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        t = parse_github_event(
+            "issues", _labeled_payload("issues", "swarm-canary"), "d-5"
+        )
+        assert t is not None
+        assert t.kind == "issue_opened"
+        assert t.action == "labeled"
+        assert t.labels == ["swarm-canary"]
+        assert not t.is_pr
+
+    def test_gate_set_pr_labeled_with_the_configured_label_starts_panel(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        t = parse_github_event(
+            "pull_request",
+            _labeled_payload("pull_request", "swarm-canary"),
+            "d-6",
+        )
+        assert t is not None
+        assert t.kind == "pr_labeled"
+        assert t.action == "labeled"
+        assert t.is_pr
+
+    def test_gate_set_configured_label_among_several_existing_labels_admits(
+        self, monkeypatch
+    ):
+        # The label GitHub reports as "just added" is what gates admission,
+        # not merely whether the configured label is somewhere in the full
+        # current label set — but a real "labeled" delivery's `label` field
+        # and its full `labels` list agree on the added label, so this should
+        # pass either way. Guards against a future refactor that switches to
+        # checking the full labels list instead of the specific added one.
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        t = parse_github_event(
+            "issues",
+            _labeled_payload(
+                "issues", "swarm-canary", existing_labels=["bug", "swarm-canary"]
+            ),
+            "d-7",
+        )
+        assert t is not None
+        assert t.kind == "issue_opened"
+
+    @pytest.mark.parametrize("kind", ["issues", "pull_request"])
+    @pytest.mark.parametrize(
+        "bad_label",
+        ["swarm-canary", ["swarm-canary"], None, {"name": None}, {"name": 5}],
+        ids=["string", "list", "null", "name-null", "name-int"],
+    )
+    def test_gate_set_malformed_label_field_is_denied_not_raised(
+        self, monkeypatch, kind, bad_label
+    ):
+        # Falco + qa (#1269 round 3): a `label` that is not a dict used to
+        # raise AttributeError out of parse_github_event, which the aiohttp
+        # handler turns into a 500. Malformed input must be a clean deny.
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        payload = _labeled_payload(kind, "swarm-canary")
+        payload["label"] = bad_label
+        assert parse_github_event(kind, payload, "d-bad") is None
+
+    def test_labeled_is_in_both_action_sets(self):
+        # Guards the gateway-level wiring the label gate depends on: without
+        # "labeled" in these sets, parse_github_event would drop the delivery
+        # before _labeled_event_admitted ever runs, and a label added after
+        # open could never start the pipeline for it even with a matching
+        # gate configured.
+        assert "labeled" in github_gateway.ISSUE_ACTIONS
+        assert "labeled" in github_gateway.PR_ACTIONS
+
+    # ── end-to-end through the real webhook receiver: a labeled delivery
+    #    with the gate unset must invoke the handler ZERO times and post no
+    #    response beyond the gateway's own ACK — nothing downstream ever
+    #    sees a trigger, which is the property the coordinator's fix review
+    #    asked to be proven "starts nothing and posts nothing".
+
+    def test_end_to_end_pr_labeled_with_gate_unset_never_invokes_handler(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "")
+        handler_calls = []
+
+        async def run() -> int:
+            async def handler(trigger):
+                handler_calls.append(trigger)
+
+            app = make_app(TEST_HMAC_KEY, handler)
+            body = json.dumps(_labeled_payload("pull_request", "needs-triage")).encode()
+            headers = {
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body),
+            }
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/github/webhook", data=body, headers=headers)
+                return resp.status
+
+        status = asyncio.run(run())
+        assert status == 200
+        assert handler_calls == [], (
+            "a labeled PR event with the gate unset must never reach the "
+            "handler — no pipeline, no review panel, no GitHub write"
+        )
+
+    def test_end_to_end_issue_labeled_with_gate_unset_never_invokes_handler(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "")
+        handler_calls = []
+
+        async def run() -> int:
+            async def handler(trigger):
+                handler_calls.append(trigger)
+
+            app = make_app(TEST_HMAC_KEY, handler)
+            body = json.dumps(_labeled_payload("issues", "swarm-canary")).encode()
+            headers = {
+                "X-GitHub-Event": "issues",
+                "X-Hub-Signature-256": _sign(body),
+            }
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/github/webhook", data=body, headers=headers)
+                return resp.status
+
+        status = asyncio.run(run())
+        assert status == 200
+        assert handler_calls == [], (
+            "an issue-labeled event with the gate unset must never reach "
+            "the handler, even when the label added happens to be the one "
+            "an operator might later configure as the gate label"
+        )
+
+    def test_end_to_end_pr_labeled_with_matching_gate_invokes_handler(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", "swarm-canary")
+        handler_calls = []
+
+        async def run() -> int:
+            async def handler(trigger):
+                handler_calls.append(trigger)
+
+            app = make_app(TEST_HMAC_KEY, handler)
+            body = json.dumps(_labeled_payload("pull_request", "swarm-canary")).encode()
+            headers = {
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body),
+            }
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/github/webhook", data=body, headers=headers)
+                return resp.status
+
+        status = asyncio.run(run())
+        assert status == 200
+        assert len(handler_calls) == 1
+        assert handler_calls[0].kind == "pr_labeled"
 
 
 # ── pull_request_review parsing (approval loop) ─────────────────────────────
@@ -553,3 +795,199 @@ def test_approve_release_accepted_builds_trigger():
     assert trig.kind == "release_approve"
     assert trig.release_version == "v0.20.0"
     assert trig.action == "approved"
+
+
+# ── rotation overlap window (rotate_swarm_secret.py; authority_model.md#grants) ─
+#
+# "Rotation is staged, never a flag day": the gateway must accept a delivery
+# signed under EITHER the current secret or the incoming one during the
+# overlap window rotate_swarm_secret.py opens, so its own live-verification
+# probe — a real signed delivery sent while both values are configured — can
+# succeed before the old secret retires.
+
+
+def test_webhook_accepts_old_secret_during_overlap_window():
+    """A delivery signed with the OLD secret must still be admitted while a
+    NEXT secret is staged (dual-admit) — an in-flight delivery must not be
+    dropped mid-rotation."""
+
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app(TEST_HMAC_KEY, handler, secret_next="incoming-secret")
+        body = b"{}"
+        headers = {"X-GitHub-Event": "ping", "X-Hub-Signature-256": _sign(body, TEST_HMAC_KEY)}
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    assert asyncio.run(run()) == 200
+
+
+def test_webhook_accepts_new_secret_during_overlap_window():
+    """A delivery signed with the NEW (incoming) secret must be admitted
+    during the overlap window — this is the rotator's own live-verification
+    probe, sent BEFORE the old secret retires."""
+
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app(TEST_HMAC_KEY, handler, secret_next="incoming-secret")
+        body = b"{}"
+        headers = {
+            "X-GitHub-Event": "ping",
+            "X-Hub-Signature-256": _sign(body, "incoming-secret"),
+        }
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    assert asyncio.run(run()) == 200
+
+
+def test_webhook_rejects_neither_old_nor_new_during_overlap_window():
+    """A signature that matches NEITHER value must still be rejected —
+    dual-admit widens to two values, not to "anything"."""
+
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app(TEST_HMAC_KEY, handler, secret_next="incoming-secret")
+        body = b"{}"
+        headers = {
+            "X-GitHub-Event": "ping",
+            "X-Hub-Signature-256": _sign(body, "some-other-secret"),
+        }
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    assert asyncio.run(run()) == 401
+
+
+def test_webhook_secret_next_alone_without_old_secret_still_accepted():
+    """The overlap window must also work when the OLD slot is empty (e.g. a
+    fresh install rotating in its first secret) — not just fail-open, an
+    explicit accept on the new value with no old value configured."""
+
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app("", handler, secret_next="incoming-secret")
+        body = b"{}"
+        headers = {
+            "X-GitHub-Event": "ping",
+            "X-Hub-Signature-256": _sign(body, "incoming-secret"),
+        }
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    assert asyncio.run(run()) == 200
+
+
+def test_approve_email_accepts_old_secret_during_overlap_window():
+    status, trig = _post_approve_email_overlap(
+        "old-secret", "new-secret", "old-secret", {"repository": "o/r", "pr_number": 5}
+    )
+    assert status == 200
+    assert trig is not None
+
+
+def test_approve_email_accepts_new_secret_during_overlap_window():
+    status, trig = _post_approve_email_overlap(
+        "old-secret", "new-secret", "new-secret", {"repository": "o/r", "pr_number": 5}
+    )
+    assert status == 200
+    assert trig is not None
+
+
+def test_approve_email_rejects_unrelated_secret_during_overlap_window():
+    status, trig = _post_approve_email_overlap(
+        "old-secret", "new-secret", "totally-unrelated", {"repository": "o/r", "pr_number": 5}
+    )
+    assert status == 401
+    assert trig is None
+
+
+def _post_approve_email_overlap(app_secret, app_secret_next, header_secret, body_obj):
+    """Like _post_approve_email, but also stages an APPROVE secret_next."""
+    captured = {}
+
+    async def run():
+        async def handler(trigger):
+            captured["trigger"] = trigger
+
+        app = make_app(
+            TEST_HMAC_KEY,
+            handler,
+            approve_email_secret=app_secret,
+            approve_email_secret_next=app_secret_next,
+        )
+        headers = {"X-Approve-Secret": header_secret}
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/approve-email", data=json.dumps(body_obj), headers=headers
+            )
+            await asyncio.sleep(0)
+            return resp.status
+
+    status = asyncio.run(run())
+    return status, captured.get("trigger")
+
+
+def test_approve_release_accepts_old_secret_during_overlap_window():
+    status, trig = _post_approve_release_overlap(
+        "old-secret", "new-secret", "old-secret", {"version": "v0.20.0"}
+    )
+    assert status == 200
+    assert trig is not None
+
+
+def test_approve_release_accepts_new_secret_during_overlap_window():
+    status, trig = _post_approve_release_overlap(
+        "old-secret", "new-secret", "new-secret", {"version": "v0.20.0"}
+    )
+    assert status == 200
+    assert trig is not None
+
+
+def _post_approve_release_overlap(app_secret, app_secret_next, header_secret, body_obj):
+    captured = {}
+
+    async def run():
+        async def handler(trigger):
+            captured["trigger"] = trigger
+
+        app = make_app(
+            TEST_HMAC_KEY,
+            handler,
+            approve_email_secret=app_secret,
+            approve_email_secret_next=app_secret_next,
+        )
+        headers = {"X-Approve-Secret": header_secret}
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/approve-release", data=json.dumps(body_obj), headers=headers
+            )
+            await asyncio.sleep(0)
+            return resp.status
+
+    status = asyncio.run(run())
+    return status, captured.get("trigger")
+
+
+def test_verify_github_signature_any_checks_every_candidate_no_shortcircuit():
+    """verify_github_signature_any must not skip checking later candidates
+    once one matches or fails — this guards against a future refactor
+    reintroducing a timing side-channel on secret count."""
+    body = b"{}"
+    sig = _sign(body, "the-real-one")
+    assert github_gateway.verify_github_signature_any(("wrong", "the-real-one"), body, sig)
+    assert github_gateway.verify_github_signature_any(("the-real-one", "wrong"), body, sig)
+    assert not github_gateway.verify_github_signature_any(("", ""), body, sig)
+    assert not github_gateway.verify_github_signature_any(("wrong", "also-wrong"), body, sig)

@@ -306,7 +306,7 @@ stop_recording() {
   local transcribe_ok=1
   if ! "${transcribe_cmd[@]}" | tee "$TRANSCRIBE_LOG_FILE"; then
     if [ "$using_diarization" = "1" ]; then
-      echo "Diarized transcription failed; retrying with OpenAI Whisper (--no-diarize)..."
+      echo "Diarized transcription failed; retrying with the free local whisper-cli backend (--no-diarize)..."
       using_diarization=0
       if ! "$VENV_PYTHON" "$TRANSCRIBE_SCRIPT" "$audio_path" --no-diarize | tee "$TRANSCRIBE_LOG_FILE"; then
         transcribe_ok=0

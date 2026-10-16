@@ -1,0 +1,7 @@
+{"entity_id":"e1","observed_at":"2026-10-06T10:00:00Z","fields":{"event_type":"subprocess","event_at":"2026-10-06T10:00:00+00:00","tool_name":"codex:alpha","success":"partial","task_entity_id":"t1"}}
+{"entity_id":"e1","observed_at":"2026-10-06T10:10:00Z","fields":{"event_type":"subprocess","event_at":"2026-10-06T10:10:00+00:00","tool_name":"codex:alpha","success":"true","duration_ms":600000,"task_entity_id":"t1"}}
+{"entity_id":"e1","observed_at":"2026-10-06T11:00:00Z","fields":{"event_type":"subprocess","event_at":"2026-10-06T11:00:00+00:00","tool_name":"claude:alpha","success":"true","duration_ms":120000,"task_entity_id":"t1","total_tokens":5000}}
+{"entity_id":"e2","observed_at":"2026-10-07T10:00:00Z","fields":{"event_type":"subprocess","event_at":"2026-10-07T10:00:00+00:00","tool_name":"claude:beta","success":"false","duration_ms":1800000,"task_entity_id":"t2"}}
+{"entity_id":"e2","observed_at":"2026-10-08T10:00:00Z","fields":{"event_type":"subprocess","event_at":"2026-10-08T10:00:00+00:00","tool_name":"codex:beta","success":"false"}}
+{"entity_id":"e2","observed_at":"2026-10-08T12:00:00Z","fields":{"event_type":"subprocess","event_at":"2026-10-08T12:00:00+00:00","tool_name":"codex:beta","success":"true","duration_ms":60000}}
+{"entity_id":"e2","observed_at":"2026-10-14T12:00:00Z","fields":{"event_type":"subprocess","event_at":"2026-10-14T12:00:00+00:00","tool_name":"codex:beta","success":"true","duration_ms":60000}}

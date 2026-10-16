@@ -99,6 +99,20 @@ def drifted_checkout(tmp_path):
     return clone
 
 
+def _identity_ok_env() -> dict[str, str]:
+    """
+    Satisfy checkout *identity* so freshness tests can reach warn_on_drift.
+
+    prepare.py now calls enforce_deploy_checkout before freshness (ateles#515).
+    Point both expected and actual at the real repo root that contains this
+    prepare.py so identity passes without requiring ~/ateles-rc-src in CI.
+    """
+    return {
+        "ATELES_DEPLOY_CHECKOUT": str(REPO_ROOT),
+        "ATELES_CHECKOUT_IDENTITY_ROOT": str(REPO_ROOT),
+    }
+
+
 def test_enforcement_aborts_the_daemon(drifted_checkout, tmp_path):
     """
     With enforcement on and a drifted checkout, prepare.py must NOT run.
@@ -106,7 +120,8 @@ def test_enforcement_aborts_the_daemon(drifted_checkout, tmp_path):
     Against the pre-fix entrypoint this fails: the blanket `except Exception`
     caught CheckoutDriftError and the daemon carried on to preflight.
     """
-    proc = _run_prepare(
+    env = _identity_ok_env()
+    env.update(
         {
             "ATELES_ENFORCE_CHECKOUT_FRESHNESS": "1",
             "ATELES_CHECKOUT_DRIFT_NO_FETCH": "1",
@@ -114,9 +129,9 @@ def test_enforcement_aborts_the_daemon(drifted_checkout, tmp_path):
             # never reaches it. Point the inspector at the fixture checkout.
             "ATELES_CHECKOUT_DRIFT_ROOT": str(drifted_checkout),
             "NEOTOMA_REPO_ROOT": str(tmp_path / "no-such-repo"),
-        },
-        cwd=drifted_checkout,
+        }
     )
+    proc = _run_prepare(env, cwd=drifted_checkout)
     combined = proc.stdout + proc.stderr
 
     assert proc.returncode != 0, (
@@ -129,18 +144,20 @@ def test_enforcement_aborts_the_daemon(drifted_checkout, tmp_path):
     assert "checkout freshness check unavailable" not in combined, (
         "the abort was swallowed and downgraded to the setup-failure warning"
     )
+    assert "FATAL: wrong checkout" not in combined
 
 
 def test_advisory_mode_does_not_abort(drifted_checkout, tmp_path):
     """Default posture: report the drift, keep running."""
-    proc = _run_prepare(
+    env = _identity_ok_env()
+    env.update(
         {
             "ATELES_CHECKOUT_DRIFT_NO_FETCH": "1",
             "ATELES_CHECKOUT_DRIFT_ROOT": str(drifted_checkout),
             "NEOTOMA_REPO_ROOT": str(tmp_path / "no-such-repo"),
-        },
-        cwd=drifted_checkout,
+        }
     )
+    proc = _run_prepare(env, cwd=drifted_checkout)
     combined = proc.stdout + proc.stderr
 
     assert "CHECKOUT DRIFT" in combined, (
@@ -152,3 +169,62 @@ def test_advisory_mode_does_not_abort(drifted_checkout, tmp_path):
         "advisory mode must not raise — a release daemon that refuses to start "
         "is worse than one running slightly stale code"
     )
+    assert "FATAL: wrong checkout" not in combined
+
+
+def test_wrong_tree_identity_aborts_before_freshness(drifted_checkout, tmp_path):
+    """Session clone vs deploy root → exit 78 before drift enforcement."""
+    deploy = tmp_path / "ateles-rc-src"
+    deploy.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", "-b", "main"],
+        cwd=str(deploy),
+        capture_output=True,
+        check=False,
+    )
+    (deploy / "README").write_text("x\n")
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"],
+        cwd=str(deploy),
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"],
+        cwd=str(deploy),
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"],
+        cwd=str(deploy),
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "add", "README"],
+        cwd=str(deploy),
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "init"],
+        cwd=str(deploy),
+        capture_output=True,
+        check=False,
+    )
+    proc = _run_prepare(
+        {
+            "ATELES_DEPLOY_CHECKOUT": str(deploy),
+            "ATELES_CHECKOUT_IDENTITY_ROOT": str(drifted_checkout),
+            "ATELES_ENFORCE_CHECKOUT_FRESHNESS": "1",
+            "ATELES_CHECKOUT_DRIFT_NO_FETCH": "1",
+            "ATELES_CHECKOUT_DRIFT_ROOT": str(drifted_checkout),
+            "NEOTOMA_REPO_ROOT": str(tmp_path / "no-such-repo"),
+        },
+        cwd=drifted_checkout,
+    )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 78, combined
+    assert "FATAL: wrong checkout" in combined
+    assert "CheckoutDriftError" not in combined

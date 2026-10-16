@@ -43,7 +43,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "execution" / "scripts"))
 load_dotenv(PROJECT_ROOT / ".env")
 
 # Configuration
-from config import get_data_dir
+from ateles.runtime_paths import get_data_dir  # noqa: E402
 
 DATA_DIR = get_data_dir()
 IMPORTS_DIR = DATA_DIR / "imports"
@@ -249,6 +249,86 @@ def transcribe_file(
         return {"success": False, "error": error_msg}
 
 
+def summarize_run(
+    imported_count: int,
+    skipped: int,
+    results: list[dict],
+    analyze_hint: bool = False,
+) -> tuple[int, list[str]]:
+    """Turn per-file transcription results into an exit code and summary lines.
+
+    A run is a success only when every file that was imported was also
+    transcribed and stored. Prior to this, the summary counted files *moved off
+    the Desktop* and claimed Neotoma storage unconditionally — so on
+    2026-09-12, when all 23 files failed with HTTP 429 and nothing was stored,
+    the pipeline still printed "✓ Import complete: 23 file(s) processed /
+    Transcriptions saved to Neotoma" and exited 0.
+
+    Importing a file is not the accomplishment; transcribing and storing it is.
+    Returns ``(exit_code, lines)`` rather than printing, so the contract is
+    directly testable.
+    """
+    transcribed = sum(1 for r in results if r.get("transcription_result", {}).get("success"))
+    failed = len(results) - transcribed
+    ok = failed == 0 and transcribed > 0
+
+    lines: list[str] = []
+    if ok:
+        lines.append(f"\n✓ Import complete: {transcribed} of {len(results)} file(s) transcribed")
+    elif transcribed == 0:
+        lines.append(
+            f"\n✗ Import FAILED: 0 of {imported_count} file(s) transcribed."
+            " Nothing was stored in Neotoma."
+        )
+    else:
+        lines.append(
+            f"\n✗ Import INCOMPLETE: {transcribed} of {len(results)} file(s) transcribed."
+        )
+
+    if failed:
+        lines.append(f"  {failed} file(s) failed to transcribe.")
+        # Surface the distinct reasons so a capped quota or a dead auth path is
+        # named in the summary rather than buried in per-file output above.
+        reasons: list[str] = []
+        for r in results:
+            tr = r.get("transcription_result", {})
+            if tr.get("success"):
+                continue
+            reason = (tr.get("error") or "unknown error").strip().splitlines()
+            reason = reason[-1] if reason else "unknown error"
+            if reason not in reasons:
+                reasons.append(reason)
+        for reason in reasons[:5]:
+            lines.append(f"    - {reason}")
+
+    if skipped:
+        lines.append(f"  {skipped} file(s) skipped (already imported).")
+
+    if imported_count:
+        lines.append(f"  Files imported to: {AUDIO_IMPORTS_DIR}")
+
+    if transcribed:
+        lines.append(
+            f"  Transcriptions saved to Neotoma: {transcribed}"
+            " (transcription entities + WAV)."
+        )
+
+    if failed:
+        lines.append(
+            "  The audio files are imported and still on disk — re-run once the"
+            " transcription path is working to retry the failures."
+        )
+
+    if ok and analyze_hint:
+        lines.append(
+            "  Run /analyze-meeting on each ANALYZE_MEETING_TRIGGER line above"
+            " for structured analysis (handled automatically when invoked via"
+            " /import-audio)."
+        )
+
+    return (0 if ok else 1), lines
+
+
 def transcript_path_from_transcribe_stdout(stdout: str) -> str | None:
     """Parse the saved transcript file path emitted by transcribe_audio.py.
 
@@ -403,8 +483,8 @@ def main():
             print(f"  ✗ Failed to import {audio_file.name}: {e}", file=sys.stderr)
 
     if not moved_files:
-        print("\nNo files were imported successfully.")
-        return
+        print("\n✗ No files were imported successfully. Nothing was transcribed or stored.")
+        sys.exit(1)
 
     print(f"\nTranscribing {len(moved_files)} file(s)...")
 
@@ -433,17 +513,16 @@ def main():
             target = transcript_path or str(audio_file)
             print(f"ANALYZE_MEETING_TRIGGER: {target}")
 
-    print(f"\n✓ Import complete: {len(moved_files)} file(s) processed")
-    if skipped:
-        print(f"  {skipped} file(s) skipped (already imported).")
-    print(f"  Files imported to: {AUDIO_IMPORTS_DIR}")
-    print("  Transcriptions saved to Neotoma (transcription entities + WAV).")
-    if not args.no_analyze:
-        print(
-            "  Run /analyze-meeting on each ANALYZE_MEETING_TRIGGER line above"
-            " for structured analysis (handled automatically when invoked via"
-            " /import-audio)."
-        )
+    exit_code, summary_lines = summarize_run(
+        imported_count=len(moved_files),
+        skipped=skipped,
+        results=transcription_results,
+        analyze_hint=not args.no_analyze,
+    )
+    for line in summary_lines:
+        print(line)
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

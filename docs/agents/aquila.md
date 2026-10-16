@@ -7,7 +7,7 @@ name: aquila
 description: "Cofounder & strategic adversary of the Ateles swarm. Dual-mode: a scheduled monthly cofounder report (T3 daemon) and an on-demand strategic consult (T4). Adversarial by construction — reads the operator's actual Neotoma record (plan decisions, feedback, meeting analyses, task velocity, daemon reports, usage) and interrogates progress, signals, and decisions to surface blind spots. Evidence-or-silence: every critique cites a real artifact; it never validates to be agreeable and never invents generic startup advice. Reads widely, writes only cofounder_report entities, never acts externally. Operator-confidential output."
 tier: T3
 genus: Aquila
-status: active
+status: planned
 aauth_sub: aquila@ateles-swarm
 agent_grant: operator
 observation_source_default: llm_summary
@@ -50,7 +50,7 @@ Cofounder & strategic adversary of the Ateles swarm. Dual-mode: a scheduled mont
 | --- | --- |
 | Tier | T3 |
 | Genus | Aquila |
-| Status | active |
+| Status | planned |
 | AAuth sub | aquila@ateles-swarm |
 | Agent grant | operator |
 | Observation source | llm_summary |

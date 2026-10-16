@@ -54,8 +54,35 @@ def main() -> int:
         "Skip for trivial one-step asks; invoke explicitly with /intake."
     )
 
+    _emit_hook_wiring_notice()
     _emit_skill_drift_notice()
     return 0
+
+
+def _emit_hook_wiring_notice() -> None:
+    """Surface hook wirings this checkout is missing, at session start.
+
+    The failure this closes (ateles#973): a session ran for hours from a
+    worktree whose `.claude/settings.json` lacked three wirings, so the
+    never-stash rule had no mechanical enforcement and neither compaction hook
+    fired. A hook that is not wired never runs and never errors — nothing
+    surfaced it. This prints one line naming each missing hook by filename, so
+    it can be grepped for and acted on.
+
+    Compares against a COMMITTED reference snapshot, never a live git or
+    network fetch: this runs on every session start in every environment,
+    including offline and sandboxed agent runs, and a checker that can hang or
+    throw would itself become the new silent-failure mode. Fail-open — any
+    error is swallowed, and a healthy checkout prints nothing at all.
+    """
+    try:
+        from hook_wiring_reference import banner, missing  # noqa: PLC0415
+
+        gaps = missing()
+        if gaps:
+            print(banner(gaps))
+    except Exception as exc:  # noqa: BLE001 — never delay or break session start
+        log(f"hook-wiring check skipped: {exc}")
 
 
 def _emit_skill_drift_notice() -> None:

@@ -22,6 +22,9 @@ Environment variables:
   TELEGRAM_CHAT_ID          Telegram chat ID
   TELEGRAM_TOPIC_ANTHUS     Telegram topic ID for Anthus notifications (optional)
   ANTHUS_AGENT_DEFINITION_ID  Neotoma entity ID for Anthus's agent_definition (optional)
+  ATELES_SWARM_REQUIRE_LABEL  Label gate (bootstrap mode / canary lane). When set,
+                            issue/PR orchestration runs only for items carrying
+                            this label (same gate as Apis; lib/daemon_runtime/label_gate)
 """
 
 from __future__ import annotations
@@ -44,6 +47,8 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
     hydrate_snapshot,
 )
+from lib.daemon_runtime import label_gate  # noqa: E402
+from lib import github_app_token  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -143,6 +148,14 @@ async def _orchestrate_workflow_for(event) -> None:
         log.debug(f"[{DAEMON_NAME}] no project derivable from event {event.entity_id}")
         return
 
+    # Label gate (ateles#1269, Falco round 3): Anthus is an automatic entry
+    # into issue/PR work independent of Apis, so it honours the same
+    # ATELES_SWARM_REQUIRE_LABEL. Checked before workflow selection — whose
+    # `feature` fallback would otherwise dispatch any unlabelled item — and
+    # before comment reads, drift harvesting and every gate dispatch below.
+    if not await _label_gate_allows(event, snap):
+        return
+
     workflows = await fetch_workflow_definitions(project)
     if not workflows:
         return
@@ -208,10 +221,11 @@ async def _orchestrate_workflow_for(event) -> None:
 
     comments = await _fetch_comments(snap)
 
-    # Autonomous generalization (ateles agent-operator learning): scan this
-    # work entity's comments for strategy_drift_signal lines, cluster them, and
-    # let the generalizer auto-apply agent-local policies (or open operator-
-    # gated proposals for cross-cutting themes). Fully reversible; best-effort.
+    # Generalization (ateles agent-operator learning): scan this work entity's
+    # comments for strategy_drift_signal lines, cluster them, and let the
+    # generalizer PROPOSE agent-local policies (or agent_definition revisions
+    # for cross-cutting themes). It never writes a live agent_policy row
+    # (ateles#1270); a proposal waits for approval. Best-effort.
     await _harvest_drift_signals(comments)
 
     existing = _gate_states.get(event.entity_id, {})
@@ -227,14 +241,43 @@ async def _orchestrate_workflow_for(event) -> None:
     _gate_states[event.entity_id] = state
 
     # Persist any newly-satisfied / newly-skipped gates discovered this tick.
+    #
+    # `agent` is a required field on participation_record. It is resolved from
+    # the workflow definition — the same source record_dispatched uses — since
+    # GateState does not carry it. Omitting it does not fail the write: Neotoma
+    # returns 200 with a MISSING_REQUIRED_FIELD warning and stores an
+    # incomplete row, which is how every terminal write was lost (ateles#682).
+    gate_owners = {g.gate_name: g.owner_agent for g in wf.gates}
     for gate_name, gs in state.items():
         prior = existing.get(gate_name)
-        if gs.status == "satisfied" and (not prior or prior.status != "satisfied"):
-            ref = gs.artifact_refs[-1] if gs.artifact_refs else ""
-            await participation.record_satisfied(event.entity_id, gate_name, ref)
-        elif gs.status == "skipped" and (not prior or prior.status != "skipped"):
-            reason = "fast_path" if gate_name not in unmet else "precondition_unmet"
-            await participation.record_skipped(event.entity_id, gate_name, reason)
+        agent = gate_owners.get(gate_name, "")
+        if not agent:
+            log.error(
+                f"[{DAEMON_NAME}] no owner_agent for gate {gate_name} in "
+                f"{wf.project}|{wf.workflow_type}; cannot record its terminal "
+                f"state for {event.entity_id}"
+            )
+            continue
+        try:
+            if gs.status == "satisfied" and (not prior or prior.status != "satisfied"):
+                ref = gs.artifact_refs[-1] if gs.artifact_refs else ""
+                await participation.record_satisfied(
+                    event.entity_id, gate_name, ref, agent
+                )
+            elif gs.status == "skipped" and (not prior or prior.status != "skipped"):
+                reason = "fast_path" if gate_name not in unmet else "precondition_unmet"
+                await participation.record_skipped(
+                    event.entity_id, gate_name, reason, agent
+                )
+        except participation.ParticipationWriteFailed as exc:
+            # Surface loudly, but do not abort the tick: the remaining gates
+            # still deserve their chance to record, and the next tick retries
+            # this one (the in-memory `prior` is per-process, and the write is
+            # idempotent by key).
+            log.error(
+                f"[{DAEMON_NAME}] failed to record {gs.status} for gate "
+                f"{gate_name} on {event.entity_id}: {exc}"
+            )
 
     for gate in ready:
         log.info(
@@ -244,14 +287,23 @@ async def _orchestrate_workflow_for(event) -> None:
         state[gate.gate_name].status = "dispatched"
         # Pin the exact agent_definition version at dispatch time (ateles#22).
         gate_agent_def = AgentLoader(gate.owner_agent).load()
-        await participation.record_dispatched(
-            work_entity_id=event.entity_id,
-            workflow_definition_id=wf.entity_id,
-            gate_name=gate.gate_name,
-            agent=gate.owner_agent,
-            agent_definition_ref=gate_agent_def.entity_id,
-            agent_definition_observation_id=gate_agent_def.last_observation_id,
-        )
+        try:
+            await participation.record_dispatched(
+                work_entity_id=event.entity_id,
+                workflow_definition_id=wf.entity_id,
+                gate_name=gate.gate_name,
+                agent=gate.owner_agent,
+                agent_definition_ref=gate_agent_def.entity_id,
+                agent_definition_observation_id=gate_agent_def.last_observation_id,
+            )
+        except participation.ParticipationWriteFailed as exc:
+            # The dispatch bookkeeping failed to land. Spawn anyway — the agent
+            # doing the work matters more than the record of it — but say so,
+            # rather than letting an unrecorded dispatch look like a clean one.
+            log.error(
+                f"[{DAEMON_NAME}] failed to record dispatch of gate "
+                f"{gate.gate_name} on {event.entity_id}: {exc}"
+            )
         # Spawn the agent via claude CLI. The `--skill` flag does not exist;
         # the working invocation is `--append-system-prompt` with the SKILL.md
         # content. Code-writing agents need `--dangerously-skip-permissions`
@@ -278,6 +330,156 @@ async def _orchestrate_workflow_for(event) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
+
+
+# ── Label gate (bootstrap mode / canary lane) ────────────────────────────────
+# Work entities whose skip has already been logged at WARNING. Anthus sees the
+# same issue/PR again on every entity update, so later skips log at DEBUG.
+_label_gate_warned: set[str] = set()
+
+
+def _label_gate_log(entity_id: str, message: str) -> None:
+    """WARNING once per work entity per process, DEBUG after that."""
+    if entity_id in _label_gate_warned:
+        log.debug(message)
+        return
+    _label_gate_warned.add(entity_id)
+    log.warning(message + " (logged once per process; later events at DEBUG)")
+
+
+async def _fetch_github_labels_and_body(
+    kind: str, repo: str, number: int
+) -> dict | None:
+    """Read an issue's or PR's live labels and body from GitHub via `gh`.
+
+    Returns ``{"labels": [...names], "body": str}``, or None on ANY failure —
+    the caller treats None as "label not confirmed" and denies.
+    """
+    import json as _json
+    import subprocess as _sp
+
+    sub = "pr" if kind == "pr" else "issue"
+    try:
+        out = await asyncio.to_thread(
+            _sp.run,
+            [
+                "gh",
+                sub,
+                "view",
+                str(number),
+                "--repo",
+                str(repo),
+                "--json",
+                "labels,body",
+            ],
+            # Read-only: the swarm App's short-lived token, not the agent PAT
+            # (credential_rotation_split_by_issuer).
+            env=github_app_token.gh_read_env(str(repo)),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        data = _json.loads(out.stdout)
+    except Exception as exc:  # noqa: BLE001 — fail closed, never crash dispatch
+        log.warning(
+            f"[{DAEMON_NAME}] label gate: could not read {sub} {repo}#{number} "
+            f"from GitHub: {exc}"
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    body = data.get("body")
+    return {
+        "labels": label_gate.label_names(data),
+        "body": body if isinstance(body, str) else "",
+    }
+
+
+async def _label_gate_allows(event, snap: dict) -> bool:
+    """Decide whether Anthus may orchestrate `event`'s issue/PR at all.
+
+    Same gate, same env var and same match rule as Apis
+    (`lib/daemon_runtime/label_gate`): with ATELES_SWARM_REQUIRE_LABEL unset
+    this returns True and changes nothing. With it set:
+
+    * an **issue** passes only when its Neotoma snapshot's ``labels`` carries
+      the label. Synced `issue` entities store ``labels`` as a list of names.
+    * a **pull_request** passes when the label is on its snapshot, OR on the
+      PR on GitHub, OR on its same-repo parent issue named in the PR body
+      (`Closes #N`, `Part of #N`, `Refs #N`, ...) — the Apis inheritance rule.
+      Neotoma `pull_request` entities carry no ``labels`` today, so the PR's
+      labels and body are read live from GitHub.
+
+    Anything that cannot be read — no labels field, unparseable labels, no PR
+    number, a failed GitHub read — counts as NOT labelled, and the item is
+    skipped. The gate fails closed.
+    """
+    required = label_gate.required_label()
+    if not required:
+        return True
+
+    entity_id = event.entity_id
+    repo = str(snap.get("repository") or snap.get("repo") or "")
+    number = (
+        snap.get("github_number")
+        or snap.get("number")
+        or snap.get("pr_number")
+        or snap.get("issue_number")
+    )
+    ref = f"{repo}#{number}" if number else entity_id
+
+    if label_gate.carries_label(
+        required, label_gate.snapshot_label_names(snap.get("labels"))
+    ):
+        return True
+
+    if event.entity_type == "pull_request":
+        if not repo or not str(number or "").isdigit():
+            _label_gate_log(
+                entity_id,
+                f"[{DAEMON_NAME}] label gate active (required={required!r}) — "
+                f"skipping pull_request {entity_id}: no repository/PR number on "
+                "the snapshot, so its labels cannot be confirmed (failing closed)",
+            )
+            return False
+        live = await _fetch_github_labels_and_body("pr", repo, int(number))
+        if live is None:
+            _label_gate_log(
+                entity_id,
+                f"[{DAEMON_NAME}] label gate active (required={required!r}) — "
+                f"skipping PR {ref} ({entity_id}): could not read its labels "
+                "from GitHub (failing closed)",
+            )
+            return False
+        if label_gate.carries_label(required, live["labels"]):
+            return True
+        body = live["body"] or str(snap.get("body") or "")
+        parent = label_gate.parent_issue_number(body, repo)
+        if parent is not None:
+            parent_live = await _fetch_github_labels_and_body("issue", repo, parent)
+            if parent_live is None:
+                _label_gate_log(
+                    entity_id,
+                    f"[{DAEMON_NAME}] label gate active (required={required!r}) — "
+                    f"skipping PR {ref} ({entity_id}): could not read parent "
+                    f"issue #{parent} labels (failing closed)",
+                )
+                return False
+            if label_gate.carries_label(required, parent_live["labels"]):
+                return True
+
+    _label_gate_log(
+        entity_id,
+        f"[{DAEMON_NAME}] label gate active (required={required!r}) — skipping "
+        f"{event.entity_type} {ref} ({entity_id}): label not present on "
+        + (
+            "the PR or its linked parent issue"
+            if event.entity_type == "pull_request"
+            else "the issue"
+        ),
+    )
+    return False
 
 
 # Agents that need write access to the local filesystem or to call MCP servers
@@ -460,6 +662,7 @@ async def _fetch_comments(snap: dict) -> list:
                 "--json",
                 "comments",
             ],
+            env=github_app_token.gh_read_env(str(repo)),
             capture_output=True,
             text=True,
             timeout=15,
@@ -485,19 +688,41 @@ async def _fetch_comments(snap: dict) -> list:
 
 async def _handle_escalation(event: NeotomaEvent) -> None:
     """Surface escalation entities to Ateles via Notifier."""
-    severity = event.snapshot.get("severity", "unknown")
-    summary = event.snapshot.get("summary", event.entity_id)
-    blocking = event.snapshot.get("blocking", False)
+    status = (event.snapshot.get("status") or "").lower()
+    dedupe_key = f"escalation:{event.entity_id}"
+    if status in ("resolved", "closed"):
+        _notifier.clear_dedupe(dedupe_key)
+        return
 
+    severity = event.snapshot.get("severity", "unknown")
+    blocking = event.snapshot.get("blocking", False)
+    summary = (event.snapshot.get("summary") or "").strip()
+    title = (event.snapshot.get("title") or "").strip()
+    reason = (event.snapshot.get("reason") or "").strip()
+    linked_task = (event.snapshot.get("linked_task_title") or "").strip()
+
+    text = summary or title or reason or linked_task
     priority = Priority.BLOCKER if blocking else Priority.OPERATOR_DECISION
+    email_eligible = bool(text)
+    if not text:
+        log.warning(
+            f"[{DAEMON_NAME}] escalation {event.entity_id} has no actionable "
+            "text; email_eligible=False"
+        )
+        text = f"Escalation {event.entity_id} (no summary in snapshot)"
+    else:
+        text = f"{text} (escalation {event.entity_id})"
+
     log.info(
         f"[{DAEMON_NAME}] escalation {event.entity_id}: severity={severity} "
         f"blocking={blocking} — notifying"
     )
     _notifier.send(
-        f"Escalation [{severity}]: {summary}",
+        f"Escalation [{severity}]: {text}",
         priority=priority,
         handler=DAEMON_NAME,
+        dedupe_key=dedupe_key,
+        email_eligible=email_eligible,
     )
 
 

@@ -27,12 +27,21 @@ def test_build_payload_new_conversation_with_learning():
     assert "learning" in types
     roles = {e.get("role") for e in b["entities"] if e["entity_type"] == "agent_message"}
     assert roles == {"user", "assistant"}
-    # the conversation (entity index 0) is anchored PART_OF both plan and task
-    conv_targets = {
+    conv_refs = {
         r.get("target_entity_id") for r in b["relationships"]
-        if r.get("source_index") == 0 and r["relationship_type"] == "PART_OF"
+        if r.get("source_index") == 0 and r["relationship_type"] == "REFERS_TO"
     }
-    assert {"ent_plan", "ent_task"} <= conv_targets
+    assert conv_refs == {"ent_task"}
+    assert not any(
+        r.get("source_index") == 0 and r["relationship_type"] == "PART_OF"
+        for r in b["relationships"]
+    )
+    learning_index = types.index("learning")
+    membership = [
+        r for r in b["relationships"]
+        if r.get("source_index") == learning_index and r["relationship_type"] == "PART_OF"
+    ]
+    assert [r["target_entity_id"] for r in membership] == ["ent_task"]
     assert b.get("idempotency_key")
 
 
@@ -109,16 +118,17 @@ def test_load_end_skill_fail_open(monkeypatch):
 # ── E1: conversation-per-execution-run ───────────────────────────────────────
 
 
-def test_build_run_conversation_anchors_task_and_plan():
+def test_build_run_conversation_refers_to_task_and_uses_task_ascent():
     b = sf.build_run_conversation_payload(
         task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0",
     )
     assert [e["entity_type"] for e in b["entities"]] == ["conversation"]
-    anchors = {
+    refs = {
         r["target_entity_id"] for r in b["relationships"]
-        if r["relationship_type"] == "PART_OF" and r["source_index"] == 0
+        if r["relationship_type"] == "REFERS_TO" and r["source_index"] == 0
     }
-    assert anchors == {"ent_task", "ent_plan"}
+    assert refs == {"ent_task"}
+    assert not any(r["relationship_type"] == "PART_OF" for r in b["relationships"])
     # run_key in the idempotency key → SSE replay reuses, retry (new key) opens new
     assert b["idempotency_key"] == "run-conv-ent_task-created-0"
 
@@ -127,6 +137,26 @@ def test_build_run_conversation_task_only():
     b = sf.build_run_conversation_payload(task_id="ent_task", agent="cicada", run_key="r1")
     assert len(b["relationships"]) == 1
     assert b["relationships"][0]["target_entity_id"] == "ent_task"
+    assert b["relationships"][0]["relationship_type"] == "REFERS_TO"
+
+
+def test_build_run_session_persists_runtime_identity_and_provenance():
+    b = sf.build_run_session_payload(
+        task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0",
+    )
+    assert [e["entity_type"] for e in b["entities"]] == ["conversation", "agent_session"]
+    conversation, session = b["entities"]
+    assert conversation["conversation_id"] == session["native_session_id"]
+    assert conversation["session_id"] == session["native_session_id"]
+    assert session["harness"] == "ateles-swarm"
+    assert session["kind"] == "autonomous"
+    assert session["trigger_ref"] == "ent_task"
+    session_refs = [
+        r for r in b["relationships"]
+        if r.get("source_index") == 1 and r["relationship_type"] == "REFERS_TO"
+    ]
+    assert [r["target_entity_id"] for r in session_refs] == ["ent_task"]
+    assert "ent_plan" not in {r.get("target_entity_id") for r in b["relationships"]}
 
 
 def test_build_turn_payload_appends_to_conversation():
@@ -148,9 +178,178 @@ def test_create_run_conversation_returns_id(monkeypatch):
             return {"entities": [{"entity_type": "conversation", "entity_id": "ent_conv99"}]}
 
     monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    class _Get:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"entity_id": "ent_conv99", "entity_type": "conversation",
+                    "snapshot": {"conversation_id": "ent_task:created-0",
+                                 "session_id": "ent_task:created-0"}}
+
     monkeypatch.setattr(sf.httpx, "post", lambda *a, **k: _R())
+    monkeypatch.setattr(sf.httpx, "get", lambda *a, **k: _Get())
     cid = sf.create_run_conversation(task_id="ent_task", agent="cicada", run_key="created-0")
     assert cid == "ent_conv99"
+
+
+def test_create_run_conversation_rejects_unreadable_write(monkeypatch):
+    class _Post:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"entities": [{"entity_type": "conversation", "entity_id": "ent_conv99"}]}
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(sf.httpx, "post", lambda *a, **k: _Post())
+    monkeypatch.setattr(sf.httpx, "get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    assert sf.create_run_conversation(task_id="ent_task", agent="cicada", run_key="created-0") is None
+
+
+def test_create_run_session_reads_back_both_records_and_task_link(monkeypatch):
+    class _Response:
+        def __init__(self, data): self.data = data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+    def fake_get(url, **_kwargs):
+        if url.endswith("/entities/ent_conv99"):
+            return _Response({"entity_id": "ent_conv99", "entity_type": "conversation",
+                              "snapshot": {"conversation_id": "ent_task:created-0",
+                                           "session_id": "ent_task:created-0"}})
+        if url.endswith("/entities/ent_session99"):
+            return _Response({"entity_id": "ent_session99", "entity_type": "agent_session",
+                              "snapshot": {"harness": "ateles-swarm",
+                                           "native_session_id": "ent_task:created-0"}})
+        source_entity_id = url.split("/entities/", 1)[1].split("/", 1)[0]
+        targets = {
+            "ent_conv99": ["ent_task", "ent_session99"],
+            "ent_session99": ["ent_task"],
+        }
+        return _Response({"relationships": [
+            {
+                "source_entity_id": source_entity_id,
+                "target_entity_id": target_entity_id,
+                "relationship_type": "REFERS_TO",
+            }
+            for target_entity_id in targets[source_entity_id]
+        ]})
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(sf.httpx, "post", lambda *a, **k: _Response({"entities": [
+        {"entity_type": "conversation", "entity_id": "ent_conv99"},
+        {"entity_type": "agent_session", "entity_id": "ent_session99"},
+    ]}))
+    monkeypatch.setattr(sf.httpx, "get", fake_get)
+    run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan",
+                                agent="cicada", run_key="created-0")
+    assert run == sf.RunSession("ent_conv99", "ent_session99", "ent_task:created-0")
+
+
+def test_update_run_session_status_reads_back_terminal_state(monkeypatch):
+    run = sf.RunSession("ent_conv99", "ent_session99", "ent_task:created-0")
+    posted = []
+    class _Response:
+        def __init__(self, data): self.data = data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+    def fake_post(*_args, **kwargs):
+        posted.append(kwargs["json"])
+        return _Response({"entities": [{"entity_type": "agent_session",
+                                         "entity_id": "ent_session99"}]})
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(sf.httpx, "post", fake_post)
+    monkeypatch.setattr(sf.httpx, "get", lambda *a, **k: _Response({
+        "entity_id": "ent_session99", "entity_type": "agent_session",
+        "snapshot": {"harness": "ateles-swarm", "native_session_id": "ent_task:created-0",
+                     "status": "completed"}}))
+    assert sf.update_run_session_status(run, status="completed") is True
+    assert posted[0]["entities"][0]["status"] == "completed"
+
+
+def test_recover_run_session_finds_exact_existing_run_and_verifies_links(monkeypatch):
+    native_session_id = "ent_task:approved-2"
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.data
+
+    def fake_post(url, **kwargs):
+        assert url.endswith("/entities/query")
+        entity_type = kwargs["json"]["entity_type"]
+        filters = kwargs["json"]["snapshot_filters"]
+        if entity_type == "agent_session":
+            assert filters == {
+                "native_session_id": {"op": "eq", "value": native_session_id}
+            }
+            return _Response({"entities": [{
+                "entity_id": "ent_session99",
+                "snapshot": {
+                    "harness": "ateles-swarm",
+                    "native_session_id": native_session_id,
+                    "status": "active",
+                },
+            }]})
+        assert filters == {
+            "conversation_id": {"op": "eq", "value": native_session_id}
+        }
+        return _Response({"entities": [{
+            "entity_id": "ent_conv99",
+            "snapshot": {
+                "conversation_id": native_session_id,
+                "session_id": native_session_id,
+            },
+        }]})
+
+    def fake_get(url, **_kwargs):
+        if url.endswith("/entities/ent_conv99"):
+            return _Response({
+                "entity_id": "ent_conv99",
+                "entity_type": "conversation",
+                "snapshot": {
+                    "conversation_id": native_session_id,
+                    "session_id": native_session_id,
+                },
+            })
+        if url.endswith("/entities/ent_session99"):
+            return _Response({
+                "entity_id": "ent_session99",
+                "entity_type": "agent_session",
+                "snapshot": {
+                    "harness": "ateles-swarm",
+                    "native_session_id": native_session_id,
+                },
+            })
+        source_entity_id = url.split("/entities/", 1)[1].split("/", 1)[0]
+        targets = {
+            "ent_conv99": ["ent_task", "ent_session99"],
+            "ent_session99": ["ent_task"],
+        }
+        return _Response({"relationships": [
+            {
+                "source_entity_id": source_entity_id,
+                "target_entity_id": target,
+                "relationship_type": "REFERS_TO",
+            }
+            for target in targets[source_entity_id]
+        ]})
+
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(sf.httpx, "post", fake_post)
+    monkeypatch.setattr(sf.httpx, "get", fake_get)
+
+    assert sf.recover_run_session(
+        task_id="ent_task",
+        native_session_id=native_session_id,
+    ) == sf.RunSession("ent_conv99", "ent_session99", native_session_id)
+
+
+def test_recover_run_session_rejects_identity_from_another_task(monkeypatch):
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
+    assert sf.recover_run_session(
+        task_id="ent_task",
+        native_session_id="ent_other:approved-2",
+    ) is None
 
 
 def test_create_run_conversation_fail_open(monkeypatch):

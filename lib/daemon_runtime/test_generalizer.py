@@ -11,7 +11,7 @@ import asyncio
 
 import generalizer as gz
 import pytest
-from drift import DriftCluster, DriftSignal, cluster_signals, parse_drift_signals
+from drift import DriftCluster, cluster_signals, parse_drift_signals
 from generalizer import (
     DEFAULT_POLICY_CAP_PER_AGENT,
     Action,
@@ -43,7 +43,7 @@ def test_below_threshold_is_noop():
 def test_threshold_met_auto_applies_agent_local():
     c = _cluster("pavo", "prefer terse landing copy", 3)
     d = decide(c, threshold=3, live_auto_policy_count=0)
-    assert d.action == Action.AUTO_APPLY
+    assert d.action == Action.PROPOSE_POLICY
     assert not d.affects_higher_layer
 
 
@@ -204,3 +204,45 @@ def test_generalizer_reads_post_to_entities_query(monkeypatch, call, payload):
             "retrieve_entities is an MCP tool name, not a REST path — it 404s "
             "live and _post degrades the 404 into an empty result"
         )
+
+
+class TestProposedPolicyFieldCorrectness:
+    """Loxia on #1184: the `domain` and `rule_kind` choices were argued but
+    untested. `domain` engages `canonical_name_fields`, so its value carries
+    dedup semantics — a regression here silently changes which policies
+    coalesce. Since ateles#1270 the generalizer proposes the row rather than
+    writing it, so these pin the PROPOSED row (`proposed_policy_fields`, which
+    is what `proposed_change` carries).
+    """
+
+    def _cluster(self):
+        # `representative_text` and `source_refs` are computed PROPERTIES over
+        # `signals`, not constructor arguments — build the cluster from a real
+        # signal so the fixture exercises the same shape production does.
+        sig = gz.DriftSignal(
+            agent="corvus",
+            text="Read a write back before reporting success.",
+            source_ref="ent_x",
+        )
+        return gz.DriftCluster(
+            agent="corvus", theme_key="checkpoint_release", signals=[sig]
+        )
+
+    def test_domain_is_the_theme_not_the_agent_identifier(self):
+        # data_model.md: `domain` is the SUBJECT a rule is about, "never an
+        # agent identifier, which is `agent_sub`'s". Writing the agent id here
+        # is what produced the live rows ateles#1118 found.
+        fields = gz.proposed_policy_fields(self._cluster())
+        assert fields["domain"] == "checkpoint_release"
+        assert not fields["domain"].endswith("@ateles-swarm")
+
+    def test_agent_sub_carries_the_full_principal(self):
+        assert gz.proposed_policy_fields(self._cluster())["agent_sub"] == "corvus@ateles-swarm"
+
+    def test_rule_kind_is_inside_the_closed_set(self):
+        # `rule_kind` is CLOSED to mandatory | advisory; anything else reads as
+        # mandatory, the restrictive branch. A generated rule must never land
+        # there by default — "prefer" did.
+        fields = gz.proposed_policy_fields(self._cluster())
+        assert fields["rule_kind"] in ("mandatory", "advisory")
+        assert fields["rule_kind"] == "advisory"

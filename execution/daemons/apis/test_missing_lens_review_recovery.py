@@ -34,6 +34,9 @@ Run: pytest execution/daemons/apis/test_missing_lens_review_recovery.py -v
 
 from __future__ import annotations
 
+import harness_router
+import pytest
+import skill_runner
 import swarm_dispatch as sd
 
 
@@ -144,17 +147,15 @@ def test_every_known_lens_name_parses():
 
 # ---------------------------------------------------------------------------
 # The sweep — the recovery half
-# ---------------------------------------------------------------------------
-
-import pytest
-
-
 class _Notifier:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    def send(self, msg: str, priority=None, handler=None) -> None:  # noqa: ANN001
+    def send(self, msg: str, priority=None, handler=None, **kwargs) -> None:  # noqa: ANN001
         self.sent.append(msg)
+
+    def clear_dedupe(self, key: str) -> None:
+        return None
 
 
 def _dispatcher() -> sd.SwarmDispatcher:
@@ -169,9 +170,23 @@ def _pr(number: int = 2153) -> dict:
         "draft": False,
         "user": {"login": "someone"},
         "html_url": f"https://github.com/o/r/pull/{number}",
-        "head": {"ref": "feature"},
+        "head": {"ref": "feature", "sha": "a" * 40},
         "base": {"ref": "main"},
     }
+
+
+@pytest.mark.asyncio
+async def test_redispatch_refuses_an_unresolved_head_before_running_lens(
+    monkeypatch,
+):
+    async def must_not_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("lens must not run without an exact head")
+
+    monkeypatch.setattr(sd, "run_skill", must_not_run)
+    pr = _pr()
+    pr["head"].pop("sha")
+    with pytest.raises(RuntimeError, match="verified full PR head SHA"):
+        await _dispatcher()._redispatch_missing_lens("o/r", pr, "security")
 
 
 @pytest.mark.asyncio
@@ -313,3 +328,96 @@ def test_the_sweep_is_actually_called_by_the_daemon():
     assert source.index("resume_stalled_reviews(") < source.index(
         "resume_missing_lens_reviews("
     ), "ordering: the missing-lens pass runs after the stalled pass"
+
+
+@pytest.mark.asyncio
+async def test_a_redispatched_verdict_is_persisted_and_posted(monkeypatch):
+    """Both halves, in the order the primary panel loop uses them.
+
+    The arch lens caught this on #447: `_redispatch_missing_lens` posted the
+    recovered verdict to GitHub but skipped the `_persist_panel_reviews` write
+    its sibling call site pairs with. The verdict then existed for the
+    aggregation and not for the durable record — a quieter version of the same
+    "produced a result nothing consumes" failure this sweep exists to fix.
+    """
+    d = _dispatcher()
+    order: list[str] = []
+
+    class _Ok:
+        ok = True
+        stdout = "**APPROVE**"
+        error = None
+        returncode = 0
+
+    async def fake_run_skill(agent, *a, **k):  # noqa: ANN001
+        return _Ok()
+
+    async def fake_persist(trigger, reviews, agents, **kwargs):  # noqa: ANN001
+        order.append("persist")
+        assert reviews == [("security", "**APPROVE**")]
+        assert agents == {"security": "falco"}
+        assert kwargs["reviewed_head"] == "a" * 40
+
+    async def fake_post(trigger, reviews, agents, **kwargs):  # noqa: ANN001
+        order.append("post")
+        assert kwargs["reviewed_head"] == "a" * 40
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(d, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", fake_post)
+
+    await d._redispatch_missing_lens("o/r", _pr(), "security")
+
+    assert order == ["persist", "post"], (
+        "a recovered verdict must be persisted to Neotoma as well as posted, "
+        "in the same order the primary panel loop uses"
+    )
+
+
+@pytest.mark.asyncio
+async def test_zero_headroom_lens_preference_uses_remaining_provider(
+    monkeypatch, tmp_path
+):
+    """The #491 recovery path must use the same soft preference as the panel."""
+    d = _dispatcher()
+    harness_router.reset_state()
+    monkeypatch.setenv("APIS_SECURITY_LENS_PROVIDER", "codex")
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        '{"claude": 1.0, "codex": 0.0}',
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: {"claude": "claude", "codex": "codex"},
+    )
+
+    class _Ok:
+        ok = True
+        stdout = "**APPROVE**"
+        error = None
+        returncode = 0
+
+    async def fake_run_skill(agent, *args, **kwargs):  # noqa: ANN001
+        assert "provider" not in kwargs
+        assert kwargs["preferred_provider"] is None
+        assert harness_router.provider_candidates(
+            skill_runner._provider_binaries(), now=100.0
+        ) == ["claude"]
+        return _Ok()
+
+    async def noop(*args, **kwargs):  # noqa: ANN001
+        return None
+
+    async def no_changed_files(*args, **kwargs):  # noqa: ANN001
+        return []
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(sd, "_token_for_agent_on_repo", lambda *args: "test-token")
+    monkeypatch.setattr(d, "_changed_files", no_changed_files)
+    monkeypatch.setattr(d, "_persist_panel_reviews", noop)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", noop)
+
+    await d._redispatch_missing_lens("o/r", _pr(), "security")

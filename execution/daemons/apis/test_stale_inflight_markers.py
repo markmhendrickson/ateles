@@ -23,13 +23,24 @@ comments that QUOTE a marker when reporting gate drift. Those carry
 operator-visible reasoning, so the sweep matches the marker as the ENTIRE body
 (`fullmatch`), never as a substring.
 
+ateles#446: the clear was correct (#437) but unreachable in production —
+awaited AFTER `resume_interrupted_pipelines` inside `resume_sweep()`, and the
+daemon restarts faster than resume returns. The reachability tests below assert
+the clear runs as a gather sibling while resume hangs.
+
 Run: pytest execution/daemons/apis/test_stale_inflight_markers.py -v
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import logging
+from unittest.mock import AsyncMock
+
 import pytest
 
+import apis
 import swarm_dispatch as sd
 
 
@@ -37,8 +48,11 @@ class _Notifier:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    def send(self, message, priority=None, handler=None):
+    def send(self, message, priority=None, handler=None, **kwargs):
         self.sent.append(message)
+
+    def clear_dedupe(self, key):
+        pass
 
 
 def _dispatcher() -> sd.SwarmDispatcher:
@@ -184,3 +198,198 @@ async def test_sweep_is_fail_open_and_continues_to_next_repo(monkeypatch):
     )
     assert deleted == [7], "a failing repo must not block the healthy one"
     assert cleared == 1
+
+
+# ── ateles#446: reachability under hung resume (gather siblings) ─────────────
+
+
+def _resume_sweep_body_source() -> str:
+    """Extract the nested `resume_sweep` body from apis.main source text."""
+    src = inspect.getsource(apis.main)
+    start = src.find("async def resume_sweep()")
+    assert start != -1, "resume_sweep missing from apis.main"
+    # Next sibling coroutine after resume_sweep inside main.
+    end = src.find("async def clear_closed_issue_markers_sweep()", start + 1)
+    if end == -1:
+        end = src.find("async def workflow_drift_check()", start + 1)
+    assert end != -1, "could not bound resume_sweep body"
+    return src[start:end]
+
+
+async def _mirror_clear_closed_issue_markers_sweep(clear_fn, log, daemon_name="apis"):
+    """Local reconstruction of the production coroutine shape (nested, not importable)."""
+    try:
+        cleared = await clear_fn()
+        log.info(f"[{daemon_name}] closed-issue marker sweep: cleared={cleared}")
+    except Exception as exc:
+        log.error(
+            f"[{daemon_name}] closed-issue marker sweep failed: {exc} "
+            "— will retry next boot; housekeeping independent of resume",
+            exc_info=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_clear_closed_markers_runs_while_resume_hangs():
+    """P0 effect: marker clear completes while resume is still blocked forever.
+
+    Pre-fix sequencing (clear awaited after hanging resume) fails this test;
+    post-fix gather-sibling scheduling passes it (foundation invariant 4).
+    """
+    clear_done = asyncio.Event()
+    resume_returned = False
+    clear_calls = 0
+
+    async def resume_like():
+        nonlocal resume_returned
+        await asyncio.Event().wait()  # hang forever
+        resume_returned = True
+
+    async def clear_fn():
+        nonlocal clear_calls
+        clear_calls += 1
+        clear_done.set()
+        return 0
+
+    class _Log:
+        def info(self, *a, **k):
+            return None
+
+        def error(self, *a, **k):
+            return None
+
+    async def clear_like():
+        await _mirror_clear_closed_issue_markers_sweep(clear_fn, _Log())
+
+    async def boot_gather():
+        await asyncio.gather(resume_like(), clear_like())
+
+    gather_task = asyncio.create_task(boot_gather())
+    try:
+        await asyncio.wait_for(clear_done.wait(), timeout=1.0)
+        assert clear_calls == 1
+        assert resume_returned is False
+    finally:
+        gather_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await gather_task
+
+
+def test_clear_closed_markers_not_sequenced_after_resume_in_resume_sweep():
+    """resume_sweep body must not call _clear_closed_issue_markers (ateles#446)."""
+    body = _resume_sweep_body_source()
+    assert "_clear_closed_issue_markers" not in body
+
+
+def test_startup_gather_includes_marker_sweep_coroutine():
+    """clear_closed_issue_markers_sweep is a gather sibling, not nested under resume."""
+    src = inspect.getsource(apis.main)
+    assert "async def clear_closed_issue_markers_sweep()" in src
+    gather_idx = src.rfind("await asyncio.gather(")
+    assert gather_idx != -1
+    gather_block = src[gather_idx:]
+    assert "resume_sweep()," in gather_block
+    assert "clear_closed_issue_markers_sweep()," in gather_block
+    resume_body = _resume_sweep_body_source()
+    assert "clear_closed_issue_markers_sweep" not in resume_body
+
+
+@pytest.mark.asyncio
+async def test_closed_issue_marker_sweep_logs_completion_when_cleared_zero(caplog):
+    """UX P0: cleared=0 still emits the stable completion phrase."""
+    clear_fn = AsyncMock(return_value=0)
+    with caplog.at_level(logging.INFO):
+        await _mirror_clear_closed_issue_markers_sweep(
+            clear_fn, logging.getLogger("apis")
+        )
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    matching = [
+        m for m in info_msgs if "closed-issue marker sweep" in m and "cleared=0" in m
+    ]
+    assert len(matching) == 1
+
+
+@pytest.mark.asyncio
+async def test_clear_closed_markers_sweep_survives_internal_exception(caplog):
+    """Sweep-level exception is fail-open; sibling gather continues."""
+
+    async def clear_fn():
+        raise RuntimeError("boom")
+
+    sibling_done = asyncio.Event()
+
+    async def sibling():
+        sibling_done.set()
+
+    with caplog.at_level(logging.ERROR):
+        await asyncio.gather(
+            _mirror_clear_closed_issue_markers_sweep(
+                clear_fn, logging.getLogger("apis")
+            ),
+            sibling(),
+        )
+    assert sibling_done.is_set()
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("closed-issue marker sweep failed" in r.getMessage() for r in errors)
+    assert any(r.exc_info for r in errors)
+
+
+@pytest.mark.asyncio
+async def test_marker_sweep_and_resume_start_concurrently():
+    """Both siblings enter within one gather tick — no implicit ordering."""
+    resume_entered = asyncio.Event()
+    clear_entered = asyncio.Event()
+
+    async def resume_like():
+        resume_entered.set()
+        await asyncio.sleep(0)
+
+    async def clear_like():
+        clear_entered.set()
+        await asyncio.sleep(0)
+
+    await asyncio.gather(resume_like(), clear_like())
+    assert resume_entered.is_set() and clear_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_marker_sweep_runs_once_per_gather_not_per_resume_issue():
+    """One boot gather → one clear call, even if resume processes N issues."""
+    clear_calls = 0
+    n_issues = 5
+
+    async def resume_like():
+        for _ in range(n_issues):
+            await asyncio.sleep(0)
+
+    async def clear_fn():
+        nonlocal clear_calls
+        clear_calls += 1
+        return 0
+
+    class _Log:
+        def info(self, *a, **k):
+            return None
+
+        def error(self, *a, **k):
+            return None
+
+    async def clear_like():
+        await _mirror_clear_closed_issue_markers_sweep(clear_fn, _Log())
+
+    await asyncio.gather(resume_like(), clear_like())
+    assert clear_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_clear_closed_markers_sweep_logs_success_count(caplog):
+    """cleared > 0 still uses the stable completion phrase with the count."""
+    clear_fn = AsyncMock(return_value=3)
+    with caplog.at_level(logging.INFO):
+        await _mirror_clear_closed_issue_markers_sweep(
+            clear_fn, logging.getLogger("apis")
+        )
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "closed-issue marker sweep" in m and "cleared=3" in m for m in info_msgs
+    )

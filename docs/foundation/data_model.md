@@ -1,0 +1,658 @@
+# Data model: how the foundation's concepts are recorded
+
+**Keyed document:** read when the Neotoma client, a schema script, the data-model renderer, or this
+document changes (`conformance.md`). **Kind:** foundation; maps each concept the other documents define
+onto the record (entity type, fields, edges, derived reads, projections) and never states which of them
+a checkout has registered. **Derived from:** `work_model.md`, `gates_and_workflows.md`,
+`failure_posture.md`, `authority_model.md`, principle 9 and principle 11 of `principles.md`, PR #745
+operator review (2026-09-04), the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator memos of 2026-09-05 (the `undetermined_scope` reason
+class), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: `DEPENDS_ON` from a batch to a task it holds on; `PART_OF` between artifacts; the consent tolerance on `action_policy`), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: `recurrence` and `due_date` on the task; `FOLLOWS` task → task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake_rule` row). Which types and edge types the registry holds is `status.md`.
+Amendment history: `revisions.md#data_modelmd`.
+## Purpose
+
+Give every concept exactly one home in the record, so that a schema change can be judged against the
+design it implements and a design change can name the schema it needs. The definitions in
+`vocabulary.md` say what a concept is; this document says how it is written down: the entity type that
+carries it, the fields that are stored, the edges that relate it, the reads that are derived and never
+stored, the projections that are stored and reconciled, and, for each, what is deliberately not a field.
+
+## Scope
+
+The concepts of the work model, the gate model, the failure posture, and the authority model. Neotoma is
+the record (principle 9): every type here is a Neotoma entity type or relationship type, and a concept
+with no row here is a concept the design does not persist. Field names are the design's; a checkout may
+carry older names, and the gap is `status.md`.
+
+## Concepts
+
+The rule that decides each row (principle 11): state that would need a watchdog, a sweeper, or a
+reconciler to stay correct is an edge with its own timestamps or a derived read, never a field. A
+projection is the one exception, and it is reconciled.
+
+One row is easy to over-read. `artifact` names a thing that an **external** system holds, identified by
+`system` and `external_id` and reached only through that system's adapter; it is not the general row for
+anything the swarm produces. What the swarm writes into the record — a verdict, a checkpoint, an
+analysis, a draft, a rendered page held here — is an entity of its own type, and the question that tells
+them apart is where the thing lives and how it is read, never how much it looks like an output
+(`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`).
+
+Two words a reader of the adapters documents leans on hard enough to expect a row here, and neither gets
+one, for two different reasons. **`observation`** is not an entity type; it is the write itself — every
+mutating write in the record is an observation, on whichever entity it targets, carrying a timestamp and
+provenance (`#record-conventions`, above). It has no row because it is not a *kind of thing held*, it is
+*how anything is held*: an artifact's `state`, a task's `priority`, a finding's `text` are each read as the
+latest observation of that field, so giving `observation` its own row would be a second, competing home for
+fields the owning type's row already states. This is not the `finding` gap the testability pass closed —
+`finding` needed a row because other rows referenced it by edge (`PART_OF`, `REFERS_TO`) and no row meant
+those edges pointed at nothing with a shape; nothing references an observation by edge, because an
+observation is never the target, only ever the mechanism a target's field is read through. **`delivery`**
+is deliberately never stored as an entity of its own either: the `artifact` row's own Deliberately-not-a-field
+column already forbids "the delivery log of the events that updated it," naming a delivery as a real
+temptation and refusing it. A delivery is transient by design — it resolves, within the write that handles
+it, to one of the four inbound outcomes (an observation, an artifact, a verdict, or a task) or to
+`dropped`, and it is the *outcome* that is recorded, never a receipt of the delivery that produced it
+(`adapters.md#what-the-adapter-does-with-every-event`). Even a drop is not a per-delivery row: drops are
+counted per window and the count, with its reasons, is itself one observation on the adapter's own
+`agent_session` (`adapters.md#what-the-adapter-does-with-every-event`) — aggregate, and reconstructable from
+what it produced, never a table of deliveries an adapter has seen. A stored delivery log would be exactly
+the sync bookkeeping principle 11 forbids adapters from keeping (`#what-each-actor-reads-and-writes`,
+below): a second ledger, beside the record's own observations, that a process would have to keep consistent
+with them.
+
+**Two governance types the design named for years and never gave a row, and what declaring them settles.**
+`agent_policy` is named by `conformance.md#direction-of-truth-per-class-of-record` as the authoritative
+home of an agent behavioural rule and of a skill's body, and by
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` as one of the eight
+governance types; `swarm_roster` is the resolver every `owner_role` on every declaration depends on
+(`workflows.md`), and the bootstrap cannot reach its first declaration without it
+(`conformance_suite.md#the-minimal-record-set-in-order`, step 9). Neither had a row here, which is the
+condition `#concepts`' own rule makes worst: a concept with no row is a concept the design does not
+persist, so two types the design leans on were, by this document's own reading, undeclared. The roster's
+absence was already registered as a gap (`migration.md`, G21) and is closed by the row above;
+`agent_policy`'s was not registered at all, which is the sharper finding — a type can be authoritative in
+one document and absent from the document that says what authority means, with nothing detecting the
+disagreement. The check registered in `conformance.md#mechanical-checks-on-this-directory` is what makes a
+repeat of either detectable rather than a thing a reader happens to notice.
+
+**Three things the `agent_policy` row decides, each against a live shape that does not hold.** The rows
+above state the design; what the record carries is `status.md`'s and `migration.md`'s, and the three
+disagreements are named here because a declaration that quietly ratified them would be stating the
+implementation rather than the design.
+
+*Which field scopes a rule to an agent.* `agent_sub`, and nothing else. The alternative is not
+hypothetical: the field exists and is populated in no row, while rules meant for one agent carry that
+agent's `sub` in `domain` instead — so a reader filtering on `agent_sub` finds nothing and a reader
+filtering on `domain` conflates "the agent this binds" with "the subject this is about". Two fields that
+can each carry the target is one field too many (principle 9): `agent_sub` names *whom the rule binds*,
+`domain` names *what it is about*, and a write putting an agent identifier in `domain` is a write of the
+wrong field, not a second spelling a tolerant reader should learn. This is deliberately **not** the
+tolerant-reader case `#record-conventions` describes — that convention is for one concept written under
+several field names, and these are two concepts, so widening the reader would make the conflation
+permanent rather than transitional.
+
+*What `rule_kind` takes, and what absence means.* Two values, `mandatory` and `advisory`, and **absence
+reads as `mandatory`**. The design takes the restrictive branch because this is the field carrying the
+safety meaning (`principles.md`, principle 5), and the failure it guards against is the one a permissive
+default produces exactly backwards: a rule whose author never said whether it binds would become the rule
+a reader is free to ignore. Bounding the vocabulary to two is the other half — an open vocabulary makes
+every unrecognized value a fresh decision at every read, and a reader that cannot classify a value cannot
+fail closed on it in any principled way. The live shape has six values and three rows with none, and the
+conflict this bound is chosen against is one the design must make *derivable*: two rules in force at one
+scope, stating the same subject, disagreeing on whether it binds. Reading either alone looks correct,
+which is why the row makes it a derived read and a refusal at the write rather than something a reader is
+asked to spot.
+
+*A rule bound to a condition rather than a date.* Argued in full at
+#whether-a-rules-end-is-a-date-a-condition-or-a-task below; in short: `effective_until` takes a date, and the design does not
+close this gap — it names it. A rule that binds "until the console provides the same projection" has no
+date to write, and the live record's answer is to put the condition in `scope`, where it is free text that
+no filter can read and that silently widens a field the row above closes to three values. Two shapes would
+close it, and neither is derivable from what the design states today: an `effective_until_condition`
+naming the fact that ends the rule, which makes the end of a rule a thing a reader can evaluate but needs
+a stated vocabulary of facts to evaluate against; or the rule's end being a *task* — the condition is work
+someone does, and the rule is retired by correction when that task lands, which needs no new field and
+makes every conditional rule a tracked obligation rather than a standing prose claim. The second fits the
+design's own posture that state needing a process to stay correct is not a field (principle 11), and it is
+recorded here as the candidate rather than the ruling, because which one holds is a design decision and
+not a documentation one. Registered in `conformance.md#the-register-of-open-design-decisions`.
+
+<!-- rendered: data_model concepts -->
+
+| Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
+|---|---|---|---|---|---|---|
+| task | `task` | `status` (`open`, or a terminal value from the set the registered type declares — one spelling per meaning, `work_model.md#what-a-claim-predicate-treats-as-claimable`); `title`, `description`; `acceptance_criteria[]` (stated at `pm`; amended only by a correction attributed to a step owner of the batch whose idempotency key names the finding it answers — `gates_and_workflows.md#declaration-batch-projection`); `action_type[]` (declared classes); `assigned_to` (eligibility; a principal's write, never an adapter's from a host's assignment — `work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease`); `priority`; `due_date`; `recurrence` (the rule, on a recurring task; copied to the next instance) | `ADDRESSED_BY` → batch; `PART_OF` → parent task, or → the planning record the task is under (one edge, one parent — `planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`); `DEPENDS_ON` → task or planning record; `PRODUCES` → action; `REFERS_TO` → artifact, or a record entity the task concerns (a `finding` the task was produced from among them); `DUPLICATE_OF` → task (the task this one duplicates, written at intake's `dedupe`); `LEASE` ← principal; `CHECKPOINTS` ← checkpoint; `FOLLOWS` → task (the instance whose completion created this one) | claimable (not terminal, no held lease, no open checkpoint holding it, and `assigned_to` unset or naming the claiming principal — `vocabulary.md#claimable`, `work_model.md#what-a-claim-predicate-treats-as-claimable`); dependency-ready within a commissioned frontier; active; chain; the ascent (the planning records above it along `PART_OF`), and unplanned where the ascent is empty; current batch; parent completion; the live instance of a recurring task, and its history along `FOLLOWS`; landed (the chain ended under a declaration that permits its ending there — `work_model.md#a-task-is-executed-only-through-a-workflow`) | `step_status` | the lease holder, `claimed_at`, any lease field; a liveness flag; the retired `blocked` status (a task the swarm cannot advance is held by an open checkpoint on it, and its claimability is read from that edge — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); the workflow it is in; the list of batches it has gone through; a parent's stored status; a series id, an occurrence count, a next due date computed from completion, or a reopened status (an occurrence is a task; the next is created); an `initiative` or `proposal` type beside it (an initiative is a task by class, and its acceptance is a checkpoint's resolution — `authority_model.md#initiative-approval-is-the-checkpoint`); a `plan_id`, a `project_id`, or any copy of what the records above it say (the ascent is read along the edge) |
+| planning record | a registered type the registry marks as a planning type, with a level (`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`; which types an instance registers is decision 57) | the **statement** — purpose, scope and what is out of it, `completion_criteria[]`; `cadence` (the recurrence rule its live `planning` task copies); `title`; the statement is on the engine's grant alone and written as the effect of a permitted `amend_<level>` action (decision 56's shape) | `PART_OF` → planning record of a higher level (at most one); `PART_OF` ← task, ← planning record, ← `decision`; `REFERS_TO` ← task (a task that concerns it and is not under it); `REFERS_TO` ← action (an `amend_<level>`, `commission_<level>`, `pause_<level>`, `resume_<level>`, or `cancel_<level>` action); `DEPENDS_ON` → task or planning record; `DEPENDS_ON` ← batch, task, or planning record; `ownership_grant` → principal | the latest unsuperseded control decision; the dependency-ready frontier and maximum safe parallelism; completion proof (descendants terminal and landed, each criterion carrying descendant effect evidence, every subordinate record complete); the open and terminal counts; the descendants held by an open checkpoint; the most recent activity beneath it; the fraction of descendants landed; the open descendants in priority order; its decisions (the `decision` entities `PART_OF` it); whether it is maintained (one live `planning` task under it); whether a task is unplanned (no planning record on its ascent) | — | a stored `status`, `commission_status`, execution cursor, frontier, `outcome`, or progress; a `todos` list or its counts (a todo is a task `PART_OF` the record); a `next_steps` list; a `decisions` map; a `parent` id field (the edge); a level field on the entity (the mark is the type's) |
+| planning decision | `decision` | the decision, its reason, its date; planning-control decisions carry one of commission, pause, resume, or cancel; written once and never edited into another | `PART_OF` → planning record (the record it was taken under); `SUPERSEDES` → `decision` (the prior control decision or the one this decision reverses); `REFERS_TO` ← action (the `amend_<level>` or planning-control action that wrote it) | which decisions stand under a record (those no later decision supersedes); the one control decision that stands; the history of a reversal or control transition | — | a `status` a process would move; a key in a map on the record; a copy on the record |
+| batch | `batch` | `project`, `workflow_type`; `status` (open or terminal); `opened_at`, `closed_at`; `successor` named by the closing verdict, or none | `ADDRESSED_BY` ← task; `FOLLOWS` → batch (the one it follows); `CLOSES` ← verdict; `PRODUCES` → artifact; `LEASE` ← principal (on a step, `step_name` on the edge); `DEPENDS_ON` → task (a task the batch holds on, `created_at` and `ended_at` on the edge) | step state per step (open, claimed, signed); current step; the successor's batch; whether a step is holding (a held lease, a finding naming a condition, no verdict); open dependencies | — | the list of attached tasks (edges); a per-step status row; a sequence of workflows above it; a held, paused, or waiting state; a `blocked_by` list |
+| lease | relationship `LEASE` | `claimed_at`, `expires_at`, `returned_at`; `runner_id`; `step_name` when the lease is on a step of a batch | principal → task, or principal → batch (step) | `held` (`expires_at` future, no `returned_at`); `lapsed` (`expires_at` past, no `returned_at`); `returned`; whether a verdict's signer holds it at the write (a `signed` or blocking verdict from a lease not `held` is refused — `conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`) | — | a stored state; a lock; anything on the task |
+| verdict | `verdict` | `step_name`; `conclusion` (`signed`, a blocking conclusion, or `waived` — the operator principal's close of an unsigned required step, carrying the reason; the verdict's own projection of its findings and its author, reconciled at the write by the refusal below — `gates_and_workflows.md#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author`); `signed_at`; `agent`, `agent_version` (the signing agent's; absent on the operator principal's `waived`); `artifact_refs[]`, each carrying the artifact's **pinned state** as observed at the moment the conclusion was made — `head` for a code artifact, and per kind for the rest (`#record-conventions`); `tasks_attached[]` (the tasks this verdict attached to the batch part-way, each asserted to inherit the verdicts already written — `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`); `successor` (closing verdict only, one or none where the declaration permits none) | `CLOSES` → batch; `SIGNED_BY` → principal (the step owner's agent, or the operator principal on `waived`); `PART_OF` ← finding (the findings it carries); `REFERS_TO` → artifact, or a record entity the step read (its state at `signed_at` is an as-of read), or → `session_digest` (the session that produced the verdict, required where `SIGNED_BY` is an agent and a digest exists for that session, permitted otherwise — decision 40, `gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`) | the signed step state; whether the conclusion agrees with the severities of the findings it carries (a blocking finding under a non-blocking conclusion is refused at submission — `gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`); whether a referenced artifact's current pinned state differs from the one judged; what the step read, resolved as of `signed_at`; whether the signer's lease on the step is `held` at the write (required for `signed` and a blocking conclusion, and the write is refused otherwise; `waived` needs none — `conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`); whether the signer is an author of an artifact the batch `PRODUCES` or the verdict pins (a `signed` or blocking conclusion on a step whose declared class is `review` is refused when it is, and when `artifact_refs[]` omits an artifact the batch `PRODUCES`; a `work` or `deterministic` step and the operator principal's `waived` are not refused — `gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`) | the `conclusion`, over its own findings and author; contributes to `step_status` | a conclusion on an issue or a PR (the subject is the batch's tasks); a `findings[]` copy (findings are entities, `PART_OF` the verdict); a condition; a stored stale-or-current flag; a copy of what was read; the session's transcript |
+| finding | `finding` | `severity` (`blocking`, `non_blocking`); `kind` (`implementation_only` or `decision_or_attestation` on a blocking finding; `hold` on the non-blocking finding that names a condition the step cannot yet judge and what would resolve it — `work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`; absent otherwise); `scope` (`batch`, `step`, `workflow`, `agent`, or `unknown` — the standing axis, one-off being `batch`; `unknown` raises `undetermined_scope` and is never coerced); `evidence` (the executed check and its output, or the mechanism that executed it and the result read; required on a blocking finding, whose write is refused without it); `text` (the one defect, objection, or condition); `step_name`; `recorded_at` | `PART_OF` → verdict (the verdict that carries it, where one is written; a hold's finding has none while the hold stands); `REFERS_TO` → batch (the work it judges); `REFERS_TO` ← task (a task the finding produced: a routed remedy, an institutionalization task, a redo — `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`) | whether it blocks (its severity, never the conclusion it sits under); whether its remedy is routable (its kind); where its change lands, and whether the change made went there (its scope against the type the produced task's write lands in); a hold's duration (its observations); whether a standing finding was discharged (the task it produced reached a terminal status) | — | a conclusion; a condition on a later step (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`); a stored discharged or resolved flag; a remark on an artifact (it carries no severity and reaches no step) |
+| improvement proposal | `improvement_proposal` | `text` (what the declaration could say that it does not, and why this task's context shows it); `scope` (`step` or `workflow`); `step_name`; `recorded_at` | `PART_OF` → verdict (the verdict that carries it); `REFERS_TO` → batch (the run it was raised on); `REFERS_TO` ← task (the task whose work is the amendment it proposes — `workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`, decision 116) | whether the amendment it proposed was made (the task it produced reached a terminal status) | — | a severity, a blocking kind, or a one-off scope (it names no defect — `vocabulary.md#improvement-proposal`); a field on the verdict; a stored adopted or rejected flag |
+| action | `action` | `action_type`; `confidence`; `dedup_key` (idempotency of the effect); `taken_at` and `result_ref` (the action confirmation, written by the adapter as an observation naming the artifact the effect left); for a `payment`, the `destination` (the full set of fields the adapter submits, read from the profile and written once at the take before submission) and the engine's take-time reading (the gate's reading of the five conditions is not a field and not a stored decision but an observation the engine writes on the action, carrying a reference to each record it read and the result for each condition, and it is what marks a release — `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`) | `PRODUCES` ← task; `REFERS_TO` → artifact it acts on; `CHECKPOINTS` ← checkpoint | blast radius under the policy; whether it may be taken | — | a stored gate decision (the reading above is what the gate read, as an observation, and not a verdict it stores); the artifact it leaves (an entity of its own) |
+| checkpoint | `checkpoint` | `reason` (a class from the one list in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`, or a policy-declared class); `needed_input`; `options[]`; `status` (open, or a terminal approval: approved, denied, vetoed, timed out); `deferral_until`; `raised_at`, `resolved_at`; `resolution_note`; `self_resolved` (the resolver's own assertion at the write that it is the principal `RAISED_BY` names, admitted for the operator alone; a resolution whose resolver is its raiser under the counting rule is refused without it, and any other principal's is refused with it — `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`) | `CHECKPOINTS` → action or task (the subject, exactly one); `AWAITS` → principal (one or more; a role the raiser names is resolved to principals through the roster when the checkpoint is raised, and the role itself is named in `needed_input` — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); `RESOLVED_BY` → principal; `RAISED_BY` → principal or agent | the queue (open checkpoints whose `AWAITS` names the reader); quorum and separation of duties over its principals — count and disjointness over `AWAITS`, `RESOLVED_BY`, and `RAISED_BY`, an agent counting as its bound principal, against the class's `quorum` and `disjoint_roles[]` on the `action_policy` (`authority_model.md#structural-checks-are-reads-over-the-checkpoints-principal-edges`); whether its subject task is held from claim (every task-subject class but `unclaimed_step` — `work_model.md#what-a-claim-predicate-treats-as-claimable`); whether its resolver is its raiser, against the mark | — | the subject as free text; a resolver as a bare status write; an unmarked self-resolution; a page or notification record; a vote, tally, or approval-set entity beside it |
+| artifact | `artifact` | `kind` (`issue`, `pull_request`, `release`, `page`, `message`, `thread`, `event`, `transfer`, and a host's `process` and `checkout` — `adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system` — …); `system`; `external_id`; `url`; `state` (per kind: `open`, `closed`, `merged`, `sent`, `settled`, …); `labels[]`; `head`; `checks` (`passing`, `failing`, `pending`, or `unknown`) — the last four written by the adapter as observations (`adapters.md`) | `PRODUCES` ← batch; `REFERS_TO` ← task; `REFERS_TO` ← action; `REFERS_TO` ← verdict; `PART_OF` → containing artifact (a message to its thread; an occurrence to its series) | whether the record tracks it (any batch or task edge); its container, and the members the record holds; its authors (the actor recorded on the action confirmation that left it and on each observation that moved its `head`, resolved at delivery by the adapter to an agent or the operator principal, to `external` only where the resolver returns `Deny (no binding)`, or to `unresolved` for every other outcome — read, never stored) | — | step state or conclusions (they belong to the batch and its verdicts); a workflow instruction; the delivery log of the events that updated it (they are its observations) |
+| workflow | `workflow` | `project`, `workflow_type`; `steps[]` (`step_name`, `owner_role` — a role the roster resolves at claim time, never an agent name; `class` — `review`, `work`, or `deterministic`, absent reading as `review`, so the builder-never-reviews refusal reads the class from the declaration (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`); `parallel_group`, `join_step`, `required`, `applies_when`, `on_fail`, `rounds_cap` (the rounds an `on_fail` loop may take before `rounds_exhausted`), `reads_to_enter[]`, `reads_to_close[]`, `freshness`, `unclaimed_after`, `hold_bound` — each of the two an interval or the batch's tasks' `due_date`; `gates_and_workflows.md#declaration-batch-projection`); `fast_paths[]`; `successors[]`, `none_permitted` (whether the closing verdict may name no successor — `gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`) | — | which batches are of it | — | a copy of the step list in code; a floor list; a `phase` field (decision 33: no `steps[].phase` exists — `vocabulary.md#stage`) |
+| action policy | `action_policy` | `low_blast_action_types[]`, `high_blast_action_types[]`; `confidence_threshold`; `recurrence_count`; `always_checkpoint_boundaries[]`; `permission_scope`; `consent_tolerance` per action class (the change to an action's consented figures that may be taken without a new checkpoint; absent reads as zero — `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero`; it governs the take-time change of a payment's figures only, and a payment's release without a checkpoint compares the amount exactly); `payee_caps[]` (per payee: a reference to the payee's `payment_profile`, a currency, and the largest amount one payment to that payee may be for and be taken without a checkpoint; counted as a cap only when the write that put it there was permitted by a checkpoint the operator principal resolved `approved`, read from the permitting action and never from the writer, which is the engine; absent, zero, unpermitted, or unreadable means no cap, so every payment to that payee waits on a checkpoint — `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`); `recoveries` (for every class listed in either tier, the class its recovery is taken under, or `forward_only`, or `none`; a policy write listing a class with no entry is refused — `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`); `lapse_cap` (the per-task lapse count at which `repeated_lapse` is raised; undeclared raises none — `failure_posture.md#repeated-lapse-raises-a-checkpoint`); `quorum` and `disjoint_roles[]` per action class (the count of awaited principals a resolution needs, and the role pairs on one checkpoint that must resolve to distinct principals; absent, every awaited principal and every named pair — `authority_model.md#the-thresholds-home-is-the-action_policy-per-class`); `metered_resources[]` per action class (the resources a class's actions are counted against a budget term in; absent, none — the permission stays the gate's, and a metered class with no budget term written resolves to `NEVER` — `authority_model.md#budget-is-a-scope-term-that-attenuates`) | — | blast radius for a class (a governance class with no value resolves to `NEVER` — `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`); whether a series has graduated; whether a re-quoted action is within tolerance; whether a payment is within its payee's cap; whether a checkpoint's resolutions meet the class's structural checks; which resources a class's actions are counted in | — | `operator_only` as a policy value (it is `NEVER` ahead of any policy); a tolerance the design supplies; a cap the design supplies |
+| intake rule | `intake_rule` | `subject_types[]` (entity types; never a work-model record type, a rule naming one refused at the write — decision 36, `work_model.md#whether-an-intake-rule-may-key-on-the-work-models-own-records`); `change_kinds[]` (`created`, `updated`, `corrected`); `predicate` (over the entity's fields after the change); `provenance_predicate` (system, instance, writer); `task_title`, `task_description` (the text the created task carries, naming the entity that fired it); `ceiling`, `window`; `ended_at` (a rule is ended by correction, never deleted) | — (the tasks it created carry provenance naming the rule and the change; no edge) | the tasks a rule created, by provenance; fires and drops per window; whether a rule is live | — | a last-evaluated cursor; a fired count the evaluator maintains; a successor, a workflow, a step, an action class, or an `assigned_to` for the created task (intake's); a batch it opens (the created task's intake batch opens on creation, as every task's does — `work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) |
+| agent session | `agent_session` | `runner_id`; `host`, `checkout`, `branch`, `head`; `started_at`, `last_seen_at`; on a daemon's session, one observation per declared window carrying the window, the coverage of the polls or deliveries made in it, and the dispositions counted — the write a successful empty poll makes (`adapters.md#what-the-adapter-does-with-every-event`) | `REFERS_TO` → task | active (with the lease); silent (no window observation past the declared window, while the record is reachable — `failure_posture.md#the-rules`, rule 2) | — | a history of runners; the session's transcript or reasoning; a copy of what the step read (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`) |
+| agent | `agent` | `name`, `prompt_markdown`, `context_entity_types[]`, version | `principal_binding` ← credential, **two edges** where the agent acts in a human's interest and not one: its AAuth edge ends at this `agent` (attribution, A-for-B) and its acts-as edge at the `operator` (the edge decision 48's counting rule reads), told apart by `credential_kind` — see the `principal` row and `#relationships`; `LEASE` → task or batch | — | — | the lease holder as a field on the task |
+| agent behavioural rule | `agent_policy` | `rule` (the rule itself, in the imperative — what an agent is to do or not do; the field a reader applies, and the one a rule with only a `description` does not have); `rule_kind` (**closed**: `mandatory`, or `advisory`. Absence, or a value outside the two, reads as `mandatory` — the restrictive branch, because this is the field carrying the safety meaning (`principles.md`, principle 5) and a rule whose bindingness is unstated is one no reader may weaken); `scope` (**closed**: `global`, `swarm`, or `agent`; a free-text scope is a scope nothing can filter on, and where the scope is `agent` the target is `agent_sub` and never `scope`); `agent_sub` (the one field that scopes a rule to an agent, naming the `agent` the rule binds — the `sub` its `principal_binding` carries; a rule of `scope: agent` with no `agent_sub` is refused at the write, and a rule of any other scope with one is refused too); `domain` (the subject the rule is about, for grouping rules a reader selects together — never an agent identifier, which is `agent_sub`'s); `status` (`active`, `provisional`, or `retired`); `effective_from`, `effective_until` (dates; a rule bound to a **condition** rather than a date takes no value here — its end is stated below); `supersedes` → the rule this one replaces; `rationale` (why the rule exists, so a later reader can judge whether it still holds) | `SUPERSEDES` → `agent_policy` (the rule it replaces, which stays readable as what was ruled then); `REFERS_TO` ← finding (the standing finding whose institutionalization wrote it — `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`); `REFERS_TO` → task (the task whose closing ends the rule, for a rule bound to a condition rather than a date — decision 111, stated below) | the rules in force for an agent at a time (its `agent_sub` rules and every rule of wider scope, `status` `active` or `provisional`, `effective_from` past and `effective_until` absent or future, that no later rule supersedes); whether two rules in force at one scope state the same subject and disagree on `rule_kind` — a conflict a reader of either alone cannot see, so it is derived and refused rather than left to the reader | the rendered `.claude/skills/` and `docs/agents/` mirrors (`conformance.md#direction-of-truth-per-class-of-record`) | an operator's name, figure, or locale (operator-specific content is a `task_policy` — `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`); an agent identifier in `domain` or `scope`; a maturation or drift-signal record serialized into a prose field (it is an observation, or it is a field the registry declares); a `enabled` flag beside `status`; a copy of the rule in a harness memory file, which is a cache and never its home |
+| roster | `swarm_roster` | `declaration_scope` (the scope the roster is for — `workflow` and this type are the two per-scope governance types, and the key is the declaration scope and never the planning record at the `project` level, decision 70, `planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term`); `roles` (role → the `agent` filling it, one agent per role; the role names are the implementation's own, the design fixing none — `workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`; the map every `owner_role` on a workflow's `steps[]` is resolved against, at claim and at declaration — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`) | `REFERS_TO` → `agent` (one edge per filled role, carrying the role on the edge; the map's values are edges and not name strings, so a renamed or retired agent cannot leave a role resolving to nothing — `conformance.md`'s rule that a rename leaves no reference behind) | which agent fills a role in a scope; whether every `owner_role` a declaration names resolves (an unresolved role, or a role resolving to an agent with no runner, raises `unspawnable_assignee` at declaration and again at claim — one reason class at both points, `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); the roles an agent fills, read back along the edges | — | an agent's credential, harness preference, or model tier (the `agent_grant` and the `vendor_binding` carry those — `adapters.md#where-the-binding-is-declared-no-new-home-is-needed`); a per-role channel or delivery preference (the `vendor_binding`'s, decision 35); an operator's identity (the `operator` principal); a second agent on one role, or a role with no agent held as an empty value rather than absent |
+| adapter | `agent` (a daemon; `adapters.md`) | `name`; the `system` it adapts | `principal_binding` → principal; provenance on every write it makes (the adapter, the system, the delivery id) | which artifacts it tracks (by `system`) | — | a per-artifact map of satisfied steps; an event log beside the artifact's observations; a workflow it reads |
+| principal | `operator` (human) or `agent` (non-human) | identity only — the type exists to be a principal; the identifier's form is `multi_tenant.md` section 7 | `principal_binding` ← credential (edge-keyed; no credential entity; many-to-one: one edge per credential carrying `credential_kind`, `credential_value`, `credential_issuer`, `expires_at` — e.g. `store_user_id` / host login to the `operator`; AAuth `sub`+`iss` to the `agent` that presented it, the principal that credential identifies. An agent that acts in a human's interest holds a **second** `principal_binding`, its acts-as binding, whose endpoint is the `operator` — the edge decision 48's counting rule names. The two are the same edge type, told apart by `credential_kind`, and both are required: the first attributes the write to the agent (A-for-B), the second makes two agents under one operator one interest); `ownership_grant` ← object; `delegation_edge` → principal | authority chain; whether a write resolves to a principal at all | — | a login string, an address, or a magic value standing in for the principal; a separate credential entity; `operator_profile` (the descriptive record beside the `operator`, carrying no authority edges); locale or preferences on the principal; a stored credit (a read model over attribution — `authority_model.md#credit-is-a-read-model-over-attribution`) |
+| grant | `agent_grant` | `sub`, `iss`; `capabilities[]` (operation × entity types × repositories, and the tools a principal may invoke — `migration.md#where-a-skills-harness-mechanics-live`; a governance type on the engine's grant alone — `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`; the right to propose an initiative as the `task` write capability constrained to the initiative class — `authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability`); `param_constraints` (per-tool parameter constraints; a field allowlist on a write capability — `authority_model.md#grants`; a budget, the bound on a resource a capability may consume, attenuating down a delegation chain — `authority_model.md#budget-is-a-scope-term-that-attenuates`); `expires_at` | — | permit, deny, or indeterminate for one request; what has been consumed against a budget (a read over confirmed actions) | — | a wildcard for a human; a harness preference or a model tier (a `vendor_binding`'s capability slot for the harness); a balance or a consumed amount; a governance type on any grant but the engine's |
+| delegation | relationship `delegation_edge` | `scope` (a subset of the delegator's; a budget among its terms — `authority_model.md#budget-is-a-scope-term-that-attenuates`); `expires_at` | delegator → delegate | authority chain; attenuation | — | a prose note on a task; a stored balance |
+
+<!-- /rendered -->
+
+## Relationships
+
+<!-- rendered: data_model relationships -->
+
+| Edge type | Source → target | Meaning | What derives from it |
+|---|---|---|---|
+| `PART_OF` | child task → parent task; task → planning record; planning record → planning record of a higher level; `decision` → planning record; artifact → containing artifact; finding → verdict; improvement proposal → verdict | the child is part of the parent's work; the task is under the planning record, and the record under the one above it, one edge per source and always upward in level (`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`); the decision was taken under the record; the contained record is part of the containing one (a message of its thread, an occurrence of its series), where the external system gives ids to both levels; the finding is carried by the verdict that judged the batch (a hold's finding has no verdict while the hold stands — `work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`) | parent completion (all children terminal), and completion at every planning level above; a task has at most one parent, and a planning record at most one; the ascent, read upward from a task to the root; a record's descendants and every derived read over them; a record's decisions; an artifact's container and its held members; a message regrouped by the system ends one edge and writes another; the findings a verdict carries, whose severities its conclusion must agree with |
+| `SUPERSEDES` | `decision` → `decision` | the source decision reverses or replaces the target, which stays readable as what was decided then (`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`) | which decisions stand under a planning record; the history of a reversal |
+| `DUPLICATE_OF` | task → task | the source task duplicates the target and closed terminal for that reason at intake's `dedupe` (`workflows.md#intake`) | which task carries the work; a duplicate's chain ends at intake, and its batch closes with no successor |
+| `ADDRESSED_BY` | task → batch | the task is attached to the batch and goes through the workflow with it | a task's current batch (at most one non-terminal); a batch's task set; attach and detach are the writing and ending of this edge |
+| `FOLLOWS` | batch → batch; task → task | the source batch opened for the tasks the target batch closed on, naming the source's workflow as successor; the source task is the next instance of a recurring task, created when the target instance's last batch closed, copying its `recurrence` rule (`work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`) | the chain, read from a live batch back to its intake batch; a recurring task's history, read from its live instance back, and the live instance itself (the one non-terminal task on the path) |
+| `DEPENDS_ON` | batch → task; task or planning record → task or planning record | a batch holds on the task it created and its step owner's verdict is refused while the edge is unended and the task non-terminal; a task or planning record is absent from a commissioned frontier until its target is complete (`work_model.md#a-batch-may-depend-on-a-task-it-created`, `planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`) | a step's hold; the blocked subtrees and dependency-ready frontier under a planning record; every source a task or planning record is holding up; the combined `PART_OF` / `DEPENDS_ON` cycle walk, refused at write and at attach where it would close a loop, escalated as `dependency_cycle` where found after |
+| `LEASE` | principal → task; principal → batch (with `step_name`) | the principal holds the task, or the step of the batch | held / lapsed / returned; claimable; the claimed step state; active (with activity entities) |
+| `CLOSES` | verdict → batch (with `step_name`) | the step owner closed that step on the batch | the signed step state; the batch's closing verdict and successor; `step_status` |
+| `SIGNED_BY` | verdict → principal | who signed: the step owner's agent, or the operator principal on a `waived` verdict (`gates_and_workflows.md#declaration-batch-projection`) | attribution of the verdict to its step owner, or to the operator who waived |
+| `PRODUCES` | task → action; batch → artifact | the task intends the effect; the batch left the record | an action's task for the gate and the dedup key; a batch's artifacts |
+| `CHECKPOINTS` | checkpoint → action or task | the held subject | the decision queue; what resumes on resolution (the action is taken or refused; the task is re-claimed or closed) |
+| `AWAITS` / `RESOLVED_BY` / `RAISED_BY` | checkpoint → principal | whose decision is needed (a role named by the raiser is resolved to principals through the roster when the checkpoint is raised; the edge never targets a role — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); who gave it; who raised it | quorum, separation of duties, the queue's scoping |
+| `REFERS_TO` | task → artifact, or → a record entity it concerns (a finding it was produced from, or a planning record it bears on and is not under, among them); action → artifact, or → the planning record an `amend_<level>` action amends, or → the records the gate read at its take (a payment's five conditions); verdict → artifact, or → a record entity it read, or → `session_digest` (the session that produced it — decision 40, required where the signer is an agent and a digest exists, permitted otherwise); finding → batch (the work it judges); improvement proposal → batch (the run it was raised on); agent session → task; `agent_policy` → task (the task whose closing ends a rule bound to a real-world condition — decision 111) | the source concerns, acts on, or was judged on the target | intake's `link` step, which attaches what the task names and nothing on relevance alone (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`); the anchors hydration resolves a step's reads from, grown by the context a step writes back; the task an adapter creates for intake, to the artifact it concerns; an action's target; a verdict's evidence and the read set it judged on, reproducible as of `signed_at`, and the session that produced it, resolved as of the same time; the tasks a finding produced, and the scope each was made at against the finding's own; a condition-bound rule's pending end, read from the task the edge names |
+| `principal_binding` | credential (edge-keyed; no credential entity) → principal | binds one presented credential to the principal it identifies; one edge per credential; fields: `credential_kind`, `credential_value`, `credential_issuer`, `expires_at`; an AAuth credential resolves to the `agent` that presented it; the human operator is reached through that agent's separate acts-as `principal_binding`, a second edge of this type whose endpoint is the `operator` (decision 48's counting rule reads that endpoint, so two agents under one operator are one interest); operator credentials resolve directly to the operator | credential-to-principal resolution (match live edges on kind+value[+issuer] → principal endpoint; several live matches valid only when they target the same principal); attribution (the AAuth edge, resolving to the agent, is what records a write as A-for-B rather than as the operator); the agent's acts-as principal, read from the acts-as edge; rotation dual-admit when several live edges with different credential values resolve to the same principal |
+| `ownership_grant` | object → principal | named accountability | who is asked when the object needs a decision — the required seat on any checkpoint whose subject concerns the object, and nothing more (`authority_model.md#what-owning-confers-the-required-seat`) |
+| `delegation_edge` | principal → principal | scoped, time-bounded transfer of rights | the authority chain; attenuation (a budget in `scope` narrows down the chain — `authority_model.md#budget-is-a-scope-term-that-attenuates`) |
+
+<!-- /rendered -->
+
+## Whether a rule's end is a date, a condition, or a task
+
+**Ruled (decision 111, 2026-09-25, the operator's): a rule whose end is a real-world condition names the
+task that ends it, and closing that task retires the rule.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The `agent_policy` row above gives a rule
+`effective_from` and `effective_until`, both dates, and a rule whose end is a **condition** rather than a
+date has nowhere to put it. This was not a hypothetical shape: a rule binding "until the full console
+provides the same projection" is a real one, and the record's answer had been to write that clause into
+`scope` — a field the row above closes to three values precisely so a reader can filter on it, turned back
+into free text by the one rule that needed somewhere else to go. A field carrying prose no filter reads is
+the shape principle 9 calls a second home, and it was there because the first home did not fit.
+
+**Why it is not settled by saying "write a date".** The condition is genuinely not a date. Nobody knows
+when the console will provide the projection, and a date guessed in its place is either an expiry that
+fires while the rule still binds — a safety rule silently lapsing — or one so far out that it never fires
+and the field is decoration. Principle 5 makes the direction of that error the question rather than a
+detail: a rule that ends too early fails open, which is the branch the `rule_kind` default above is chosen
+to avoid taking by accident.
+
+**The rule.** No condition vocabulary is added — there is no `effective_until_condition` field, and
+`effective_until` continues to take a date only. A rule bound to a real-world condition instead carries a
+`REFERS_TO` edge to the task whose completion is that condition; the rule has no end on its own fields,
+and it is retired by correction when the task it points to closes. This is the design's own precedent
+applied rather than a new mechanism invented: a condition discovered mid-flight is already a hold with a
+finding naming what would resolve it
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`), never a field on the thing held,
+and a rule's end is the same shape — something someone does, tracked the way every other "this stops when
+that happens" in the design is tracked (`work_model.md`).
+
+**The two rejected candidates.** An `effective_until_condition` field would have named the fact that ends
+the rule for a reader to evaluate directly against the rule, but it needs a vocabulary of facts to
+evaluate against that does not exist, and principle 11 is decisive against it regardless: a condition
+nothing evaluates is worse than a date, since the rule reads as bounded and is in fact permanent — naming
+a fact rather than a task supplies nothing that makes the rule's end *happen*, and a reader would still
+need a task to go verify or produce that fact, at which point the field only duplicates the task the
+ruling names directly. The design declining the question — leaving a conditional rule written as an
+unbounded one — was honest about what the record could evaluate and is what was effectively true before
+this ruling, but the distinction between "binds until something changes" and "binds indefinitely" is real
+on a governance type whose whole subject is what binds, and a task the record already tracks was available
+to carry it at no new cost; declining was the least honest of the three answers once that mechanism was in
+hand.
+
+**What this settles.** `data_model.md#relationships`' `agent_policy` row gains a `REFERS_TO` → task edge
+(the task whose closing ends the rule) beside its existing `SUPERSEDES` and `REFERS_TO` ← finding edges;
+no new field is added. Whatever is ruled, the `scope` field was never it: a rule's end does not belong in
+the field that says who the rule applies to.
+
+**Cost accepted.** A reader of the rule sees no end on the rule's own fields and must follow the edge to
+find that one is pending — the directness a stored condition field would have kept, traded for not
+inventing a vocabulary of facts nothing evaluates.
+
+**What this does not settle.** The live rows that carry a condition in `scope` as prose are not
+automatically converted by this ruling. Turning each into a `REFERS_TO` edge naming an actual task is a
+migration write (`migration.md` G32(c)) this ruling unblocks rather than performs; no task is created here.
+
+**What would reopen it.** A class of rule-ending condition that is not itself expressible as a task —
+closable, ownable, tracked — which nothing in the live corpus or the `agent_policy` row currently shows.
+
+
+## Whether acyclicity is a property of a relationship type or of the graph
+
+**Open.** Registered in `conformance.md#the-register-of-open-design-decisions`. The design reads acyclicity
+as a **per-type** property and says so twice.
+`work_model.md#a-batch-may-depend-on-a-task-it-created` states that the record refuses a `DEPENDS_ON` write
+that would close a cycle among its own edges, that `PART_OF` and `DEPENDS_ON` are "its hierarchical
+relationship types", and that a loop through `ADDRESSED_BY` "is invisible to that per-type check" — which is
+why the writer's own walk is the second check rather than a redundancy.
+`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward` relies on the same reading to
+bound the ascent, so that the walk upward from any task is a path that ends. Both cite the check as a
+property of the record the design relies on rather than rebuilds. **What neither states, and what this
+decision registers, is whether that per-type reading is the design's requirement or the design's assumption
+about the record it happened to be written against** — and therefore what the check does when a new
+relationship type is registered.
+
+**The seam has been noticed once and closed on a different question.** Contradiction X-15
+(`conformance_suite.md#contradictions-a-state-one-test-requires-and-another-forbids`) put the record's
+per-type refusal against the same section's writer walk, and closed it by dividing the enforcement: the
+record refuses the cycles its per-type check can see, and the writer is the enforcement point for the loop
+through `ADDRESSED_BY`, which is the shape decision 56 ruled for governance writes. That closure is correct
+about the division of labour and takes the per-type reading as its premise rather than as its subject. So
+the seam is not unnoticed — it is settled on the question of *who refuses* and unasked on the question of
+*what the check is a property of*, which is why this row is opened rather than folded into X-15.
+
+**Why the question binds stage 1 and is not deferred behind G25.** Every edge the design introduces is
+registered in stage 1 (`migration.md#ordering-dependencies-and-what-each-stage-depends-on`), and G25 already
+holds that stage on the record admitting new relationship types at all. The check is separate from that
+dependency and reaches further: whatever the relationship-type vocabulary comes to permit, a check applied
+without regard to type governs every type in it. Two of the design's own edges are the direct case.
+`FOLLOWS` is a chain read from a live batch back to its intake batch, and a recurring task's history read
+from its live instance back — the design reads it precisely as a sequence, so a check that refuses to close
+a loop in it refuses something the design does not intend to write, but a check that treats it as
+constrained the way `PART_OF` is has a claim about `FOLLOWS` that the design has not made.
+`ownership_grant` runs object → principal, and an object may be a principal, so a principal owning a type
+that owns a principal is a shape the design permits and a type-blind check would not distinguish from a
+defect. Neither is a hypothetical about a future type: both are among the thirteen.
+
+**Why it is Neotoma's code and an Ateles design question.** `conformance.md#what-the-design-requires-of-the-substrate-regardless-of-who-builds-it`
+already states the form: this corpus states what it requires of the record, and the record's own repository
+builds it; a gap between the two is located and fixed where it lives and is never a fact either side may
+reason from. The relationship-type vocabulary is exactly that shape already — G25 assigns the registry read
+to the substrate, and decision 67 names it the same missing mechanism as the substrate's several
+hand-kept copies of the same closed set. What this row owes is the requirement, in the form
+`conformance.md#what-the-design-requires-of-the-substrate-regardless-of-who-builds-it` states requirements: what the
+design needs a check to do, and what a conformance row would hold red until it does. The specification that
+implements it belongs to the record's own repository, alongside G25's.
+
+**The candidates.**
+
+1. **Per-type, declared at registration.** A registered relationship type declares whether it is acyclic,
+   and the check runs for the types that declare it. This is what the corpus already reads the record as
+   doing, so it makes an assumption into a requirement rather than changing a rule; it keeps the guard where
+   `PART_OF` and `DEPENDS_ON` genuinely need it, which is where the two sections above rely on it; and it
+   extends type registration rather than standing a second mechanism beside it, which is what invariant 6
+   asks. What it has to say is where the declaration lives — a property of the registered type, which is
+   what `data_model.md#concepts` would then carry a column for — and what a type that declares nothing
+   defaults to, which principle 5 makes the load-bearing half of the answer rather than a detail.
+
+2. **No check; acyclicity is the caller's concern.** The cheapest, and the design does not need it to be
+   wrong to reject it: the writer's walk that `work_model.md` already requires for the cross-type case
+   would become the whole mechanism, which is a coherent position and is the one the design already takes
+   for every loop the per-type check cannot see. What it drops is a guard two sections currently lean on to
+   bound a walk, so an answer here has to say what bounds the ascent instead.
+
+3. **Universal, and the design's edges conform.** Rejected on its face if `FOLLOWS` is genuinely a chain,
+   but the row states it rather than assuming it, because the assumption is the thing being tested: the
+   design reads `FOLLOWS` as a sequence and has never had to write one that closes, so "conform" may cost
+   nothing on the edges the design has and cost on an edge it has not yet named. What this candidate has to
+   say is which of the thirteen it constrains and whether any of those constraints is one the design would
+   have chosen on its own.
+
+**What any answer has to survive.** Principle 1 is the sharpest, and it bears on the answer twice. A check
+that runs on some write paths and not others is not a control in this design's sense — it reports on the
+paths it covers — so an answer that keeps the check has to say whether making it bind is part of the answer
+or a separate defect, and an answer that removes it has to name what fails when a cycle is written. The
+design's own precedent is that the writer is the enforcement point where the record's per-type check cannot
+see the loop, which is `work_model.md`'s cross-type walk and is the shape decision 56 ruled for governance
+writes: the one writer that holds the grant checks before it writes. Principle 5 governs the default: a
+type whose acyclicity is unstated resolves to the restrictive branch or to the permissive one, and this is
+the field carrying the safety meaning, so the answer states which. And an unbounded walk over a deep graph
+is a cost paid at every write, which makes a declared depth bound a candidate term of any answer rather
+than an implementation detail — with the design's own rule that a bound reached resolves to a refusal and
+never to a permissive default, as `#record-conventions` already requires of a degraded read.
+
+**What this does not reach.** Which relationship types the vocabulary holds is G25 and belongs to the
+record's repository; this question is what a check does with the types the vocabulary comes to hold,
+whichever they are. And the cross-type walk `work_model.md` requires of a step owner before it writes a
+`DEPENDS_ON` is unchanged by any candidate here: it exists because no per-type check can see a loop that
+runs through a second type, which stays true whether the per-type check is declared, universal, or absent.
+
+## Record conventions
+
+- **Observations are the history.** Every write is an append-only observation with a timestamp and
+  provenance; an entity's history is read from its observations, and no parallel log, transition event, or
+  assignment record is kept (`work_model.md`, principle 9). The current value of a field is the latest
+  observation of it.
+- **Corrections replace a field, and say so.** A correction is a write that supersedes a field's value
+  with an idempotency key naming its intent; it is itself an observation, so the superseded value stays
+  readable. A correction never rebuilds a field from a stale copy: the field is re-read and merged first.
+- **Idempotency keys on every mutating write.** A write that may be retried carries a key; a mismatch on
+  an existing key is refused, and a refusal is stronger evidence of a prior commit than a success response
+  is of the present one (`failure_posture.md`, rule 6). An action's `dedup_key` is this convention applied
+  to the effect on the external system.
+- **Read-back after every write that carries a decision** (principle 2): the retrieval that asserts the
+  field holds the value written. A response code is not evidence.
+- **A verdict is pinned to the artifact state it judged.** Each entry in a verdict's `artifact_refs[]`
+  carries the artifact's **pinned state** as observed when the conclusion was made, so a conclusion against a
+  superseded state is readable as one instead of being indistinguishable from a live conclusion. What the
+  pinned state is depends on the artifact's kind, and the list is closed with the kinds the design names:
+  `head` for a code artifact (a pull request, a branch, a release's tag); the message itself for a mail or
+  chat message, whose edits are observations and never re-identify it (`gmail.md#messages`,
+  `telegram.md#conditions-that-are-not-updates`); the message set the read returned, with its coverage, for
+  a thread; the dated fact for a calendar occurrence and the declaration as read for a series (decisions 23
+  and 24 — `gmail.md#a-thread-and-its-messages-are-each-artifacts-related-by-part_of`,
+  `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of`); the rail state as read
+  for a transfer (`payments.md#terminal-is-not-permanent-and-the-design-must-not-assume-it-is`). A kind
+  admitted later states its pinned state in its system's document, under linkage
+  (`adapters.md#what-an-adapters-document-must-contain`), so the derived staleness read below has a value to
+  compare on every kind. For the code artifact, which the rest of this bullet is written against, the head is resolved
+  before the work of the step begins, so new commits arriving mid-step cannot re-anchor a conclusion onto a
+  commit the step owner never read; a round that reopens after a blocking conclusion starts from the artifact's
+  recorded head, not from the earlier round's branch point. The second half, which `adapters.md` states
+  from the event side and this document states from the record side: **a later head does not invalidate a
+  verdict automatically.** A new-commits event is an observation updating the artifact's `head`, and open
+  verdicts are unaffected; a workflow that wants a step to open again on a new head declares that on the
+  step, and the event does not do it. A reader that needs to know whether a conclusion is current derives it
+  by comparing the pinned head to the artifact's — a derived read, never a stored freshness flag that a
+  process would have to keep true (principle 11).
+- **A verdict pins the agent version and names what it read; it does not pin the model that read it.**
+  `verdict.agent_version` is the signing [agent](vocabulary.md#agent)'s pinned version, and `artifact_refs[]`
+  names what was judged, at what state (above) — together, attribution to the agent, its declared version,
+  and its rules in scope. What is absent is the model or harness observed at the write: harness preference
+  and model tier are a `vendor_binding`'s, bound to the role the runner fills, not a per-write observation
+  (decision 42, `migration.md#where-a-skills-harness-mechanics-live`), so two verdicts from the same
+  `agent_version` may have run under different models with nothing on either row distinguishing them. This
+  is not an oversight the schema needs to close by itself: pinning a model per write would add a field the
+  registry does not declare, which is a design question — whether a verdict's attestation extends from
+  "which agent, at which version" to "which model, observed at this write" — and not a docs correction.
+  Decision 59 (`gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at`),
+  ruled 2026-09-06, is the adjacent question of whether a class's minimum model tier is checked at the gate;
+  a per-verdict model pin would be the attribution-side counterpart, and is named here as absent rather
+  than added.
+- **Tolerant readers, canonical writers.** Where one concept has been written under several field names,
+  the remedy is a tolerant reader and a canonical writer, never a bulk migration. Every new write uses the
+  canonical name only; every reader checks all known spellings, canonical first. A migration cannot make
+  readers safely narrow, because the record is append-only: the superseded spelling stays readable in the
+  observations that carried it, and any writer or checkout not yet updated keeps producing it. So the
+  tolerant reader is permanent, not transitional, and a reader narrowed on the strength of a completed
+  migration silently stops seeing everything written before it. The reader also may not assume the query
+  layer's coercions hold in process: a server filter that matches `{"value":459}` and `{"value":"459"}`
+  alike says nothing about an in-process comparison of the two.
+- **A registered type declares how competing observations resolve.** Registration sets the per-field merge
+  policy (`reducer_config`): which fields are last-write, what breaks a tie between two writes (the
+  `observed_at` the source states, never the arrival time we happened to record), and which types need no
+  reducer at all because they are immutable and never corrected. This is why registration is explicit
+  rather than inferred from the first store: an inferred type has no declared merge behaviour, and the
+  first concurrent writer is the one who discovers that. A field with several concurrent writers is
+  written through the correction path, which re-reads and merges; a whole-field store clobbers whatever
+  landed in between.
+- **Schema versions.** Every entity type is registered with a version, and a verdict pins the
+  `agent` version it was made under; a write that names a field the registered version does not
+  declare is not silently accepted as that field.
+- **`raw_fragments` for undeclared fields.** A write carrying a field the schema does not declare lands
+  in `raw_fragments`, not in the field, and the store reports success. A read-back therefore asserts the
+  declared field, never the response; a field that is only ever found in `raw_fragments` is a schema that
+  was never registered, and the linter for that shape is named in `principles.md` (invariant 2).
+- **Adapter writes are observations, keyed on the delivery id.** An inbound event's write carries the
+  external system's delivery id as its idempotency key and provenance naming the adapter and the system,
+  so a redelivery lands once. An action confirmation is an observation on the action (`taken_at`,
+  `result_ref`), read back from the external system. No edge type is introduced for either: the record
+  the effect left is `PRODUCES` from the batch, and the artifact an event concerns is found by `system`
+  and `external_id` (`adapters.md`).
+- **Sourcing rides on provenance; freshness is a read over it, never a maintained field.** The record
+  already carries, for every observation, where it came from, when, and through which interpretation — so
+  an adapter records its own sourcing through that mechanism rather than inventing bookkeeping beside it.
+  Every observation an adapter writes carries its source (the external system and the adapter), the time
+  it was sourced from that system rather than the time it was stored, and the **coverage** of the read
+  that produced it: what range the adapter asked for and what it actually got back, so a partial,
+  truncated, or paged read is distinguishable from a complete one. That last part is what makes silence
+  readable — without it, a page cut short and a system with nothing to report produce identical records,
+  and the gap is invisible until something downstream depends on it. How stale a system's picture is, and
+  whether it was ever completely read, are then derived by reading provenance across those observations:
+  a derived read (principle 11), not a freshness or last-synced field that a process would have to keep
+  true and that goes quietly wrong the moment that process stops. The source an observation was interpreted
+  from is itself kept in the record, not only named, so that a mapping corrected later is re-applied to
+  what was actually read and a past state is traceable to the raw things read at the time
+  (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`).
+- **Edges carry their own timestamps and fields.** A relationship is written with `created_at` and,
+  where it can end, an explicit end (`returned_at`, `ended_at`); a state derived from an edge is read from
+  those, never from a status the edge would have to be transitioned to.
+- **A registered entity type carries at most one `ownership_grant`.** One principal is accountable for
+  the type's shape and answers when it needs a decision (`authority_model.md#grants`). A type with no
+  owner is the one that accumulates use-specific fields from whichever writer arrived first, so that a
+  later generic write lands undeclared; a type with two owners has neither. Ownership is the edge the
+  record already has for named accountability, not a new field.
+- **The purpose the minimization rule below tests against is stated here, once.** Minimization
+  (RGPD Art. 5(1)(c)) bounds capture to what is "adequate, relevant and limited to what is necessary for
+  the purposes" — a test with no fixed point until the purpose is itself stated, not assumed. The
+  purpose this design captures for is an assistant conducting the operator's personal and professional life
+  at granularity, where a piece of context with no use today is the input to work not yet conceived
+  (`CLAUDE.md`, people-data processing, operator direction 2026-09). Under that purpose capture is
+  generous by design, on the same Art. 6(1)(f) legitimate-interest basis the record already operates
+  under: more is necessary once the stated purpose is broader, and a broader purpose is the legitimate way
+  to make more data necessary, provided it is written down rather than backed into. What this does not
+  relax is Art. 9 for a third party (below) or what leaves the record about one
+  (`gmail.md#what-this-adapter-refuses`, refusal 1; `workflows.md#outreach`) — the generous side of the
+  purpose is capture; the constraint moves to what a write, a draft, or a channel carries outward, stated
+  at each of those surfaces rather than at the point of capture.
+- **A registered type may be marked special-category, and the mark is read by three mechanisms that already
+  exist.** Some types hold what the RGPD's Article 9 names — health, and the other categories the
+  people-data rule lists — about the operator or about a person the record concerns: an episode, a result, a
+  diagnosis. **The purpose bullet above does not reach this mark.** Article 9 data about a third party sits
+  on a different legal basis than the Art. 6(1)(f) interest the broadened purpose extends — a person's
+  health, sex life, and religious or political belief are not the operator's to make "useful for future
+  work" by stating a broader purpose for his own; a broader purpose changes what is *necessary*, not whose
+  data a legitimate-interest basis can reach. The operator's own data in these categories is his to hold
+  under the same purpose as everything else; the mark exists for what the record holds about someone else.
+  The mark is a property of the **type**, set at registration by the principal accountable for the type, as the merge
+  policy and the version are; never a marker on a step's read
+  (`gates_and_workflows.md#declaration-batch-projection`), and never a per-subject fact (a person's objection
+  is an observation on that person's entity, `workflows.md#intake`), because what differs is how every value
+  of the type travels, whichever step reads it and whoever it is about. Three mechanisms read the mark, and
+  none is new. **Admission.** Write and read admission per type are by grant (`authority_model.md#grants`,
+  decision 41; `#what-each-actor-reads-and-writes`), so a marked type is admitted only to the roles whose
+  declarations name it as a read dependency, and a grant naming a marked type for a role no declaration gives
+  a reason to read it is the reviewable defect a wildcard grant is. **Reference, never value.** A verdict
+  names what it read and copies nothing (decision 40,
+  `gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`); for
+  a marked type that rule extends to every surface that travels — a task's `title` and `description`, an
+  intake rule's `task_title` and `task_description`, a checkpoint's `needed_input` and `options`, a finding,
+  a digest, and anything a channel carries
+  (`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`)
+  — each of which names the entity by reference and says what the work is, and carries no value read from
+  the type; the value is read on the record, under the reader's grant, and a channel adapter refuses to carry
+  one as the payment adapter refuses metadata a policy suppressed. **Minimization at write.** The adapters'
+  capture rule (`gmail.md#what-this-adapter-refuses`, refusal 1) and the meeting workflow's
+  (`workflows.md#meeting-processing`, `extract`) are the rule for every writer of a marked type — what serves
+  the work, summarized where the detail is incidental — stated here once rather than per writer. The mark's
+  shape is the registry's, as every registered type's is; what the design fixes is that it lives on the type
+  and what reads it.
+- **The harness's own transcript store is registered (decision 63, ruled).** `conversation`,
+  `conversation_message`, and `session_digest` are not registered types in this design's registry
+  (`status.md#revision-46-2026-09-06-the-session-reconciliation-pass--decision-40-against-sanctioned-practice-one-proposal-one-open-question`
+  found this by scan; `migration.md`'s population table carries no row for the first two at all). That
+  gap means the special-category mark, admission by grant, reference-never-value, and minimization at
+  write — every mechanism above — do not reach roughly 70,000 rows of turn-by-turn content, including
+  `session_digest`, whose own field description instructs "summarize, never transcribe sensitive
+  content" while sampled rows carry direct quotes, named counterparties, and project-identifying detail.
+  **This is not the minimization-at-capture rule being loosened for these types; it is an instruction with
+  no mechanism behind it, on types the registry does not know about, being replaced by one that reaches.**
+  The alternative — leaving the harness's transcript store outside the design's opinion, as `status.md`'s
+  revision 46 left it — was tested and rejected: principle 5's default is deny, and a type nobody
+  registered is the type an owner never claimed, which is the shape a wildcard grant is refused for
+  at the write (`authority_model.md#grants`, decision 41), applied here to a type instead of a write.
+  Fail-closed is the position that does not need a second argument:
+  registering these three types is strictly a widening of what the existing mechanisms cover, costs
+  nothing to a type already correctly shaped, and is the only reading under which "a registered type may
+  be marked special-category" is a claim about the record rather than a claim about the subset of it this
+  design happened to enumerate. **What is ruled:** the three types are registered, owned, and (for
+  `conversation_message` and `session_digest`, which hold turn content) eligible for the special-category
+  mark on the same basis as any type whose rows may carry Article 9 data about a third party incidentally
+  — the mark does not make every row special-category, it makes the three mechanisms watch the type.
+  **What is not ruled here, and is a separate write:** the owner, the merge policy, and the field-by-field
+  shape a registration carries (decision 64, below) — `conversation`'s 51 fields already show the
+  unowned-type drift this document warns of elsewhere, mixing turn-tracking fields with unrelated ones
+  from other writers, and normalizing that shape is its own decision, not a consequence this one carries.
+  **The migration consequence, not an argument against.** Roughly 70,000 existing rows predate any mark
+  or owner; registering the type does not retroactively minimize what they already hold, exactly as
+  a schema version never migrates `raw_fragments` (below) — this is drift to carry in `migration.md`,
+  the same way every other keep-and-backfill row in that document's population table already is, not a
+  reason to leave the type unregistered.
+  **`session_digest`'s "summarize, never transcribe" instruction is the stale thing, not the broadened
+  purpose.** Under a minimization-at-capture posture that rule made sense: a digest is read more widely
+  than the session it compresses, so verbatim content in it multiplied exposure for no purpose stated
+  anywhere. Under the purpose this document now states, a digest's job is different — it is itself
+  future work's input, and a paraphrase loses exactly the specific wording, names, and figures that make
+  a past decision reconstructible later, which is the failure mode principle 2 (read back what was
+  written) already warns against for any record. The correct fix is not to keep the instruction and
+  under-enforce it, which is what the sampled rows already show happening; it is to retire the
+  instruction for ordinary content and let the registered type's mechanisms — the special-category mark,
+  admission by grant, reference-never-value on every surface a digest's fields reach — carry the
+  third-party protection instead, the same division of labour refusal 1 states for the mail adapter
+  (`gmail.md#what-this-adapter-refuses`). A digest may transcribe; what travels off the digest through a
+  channel, task title, or checkpoint still never carries a marked type's value, only a reference to it.
+- **Decision 64, ruled in part (2026-09-06): the owner and reader of the three registered session
+  types, and the mark's reach — not their field-by-field shape.** Decision 63 registered `conversation`,
+  `conversation_message`, and `session_digest`; this rules what is derivable from mechanisms already in the
+  design and no more. **The writer is the runner**: it is the process that holds the lease and produces the
+  turns (`vocabulary.md#runner` — "the process that runs an agent and holds a lease on the agent's behalf"),
+  so a `conversation_message` or a `conversation` observation is written by the runner whose lease was live
+  when the turn happened, the same attribution `agent_session` already carries for a step
+  (`#record-conventions`). **The
+  reader is any step that declares the read**: nothing above restricts who may read a session or its digest
+  beyond the ordinary declared-read discipline every type carries
+  (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`) — a session's content is
+  reachable exactly as any other entity's is, by a step that names it. **The special-category mark applies
+  at the type**, per the mark's own rule stated above and per revision 36's F23 (a read dependency on a
+  special-category type carries no marker of its own): `conversation_message` and `session_digest` inherit
+  the mark decision 63 already granted them at the type, so a session carrying third-party Article 9 content
+  is covered by the type's mark and needs no per-row flag — the same division decision 63 draws between "the
+  mark reaches the type" and "every row is special-category," applied here to say a row needs no separate
+  declaration to be covered.
+
+  **What this does not decide, and stays with the schema.** The field-by-field shape — `conversation`'s 51
+  fields, which mix turn-tracking with unrelated writers' fields, and what `conversation_message` and
+  `session_digest` declare beyond what decision 63 already named — is the registered type's own business,
+  under `ownership_grant` (above: "one principal is accountable for the type's shape"), not this ruling's:
+  normalizing three sprawling, organically-grown types is a schema-authoring write with its own read-back,
+  the same as any other registration, and deciding the owner and reader first is what gives that write a
+  principal to be made by or on behalf of. The ~70,000 existing rows decision 63 already carries as
+  migration drift are unchanged by this ruling — assigning a writer and a reader going forward does not
+  retroactively attribute what predates either.
+
+  **The field-by-field shape is not a further design decision.** The close-out pass found no open half for
+  decision 64 to keep: which fields `conversation`, `conversation_message`, and `session_digest` declare,
+  which of `conversation`'s 51 existing fields survive normalization, and the `reducer_config` each needs is
+  schema authoring for the newly-named owner (the runner's `ownership_grant` principal, or whoever the
+  operator names), made through the ordinary registration path
+  (`#record-conventions`)
+  and authored in `migration.md#session-types-the-field-by-field-shape-decision-64-left-to-the-schema` — not
+  a design question this document decides in the abstract, and decision 64 is ruled in full, not in part.
+  **One incoming edge is settled independently of that authoring:** decision 40 gives `session_digest` a
+  `REFERS_TO` ← verdict edge (above, the `verdict` row and the `REFERS_TO` row), required where the
+  signing principal is an agent and a digest exists for its session, permitted otherwise. This is a
+  consequence of decision 40's ruling, not a claim on the schema-authoring write: the edge's existence is
+  settled, `session_digest`'s own field list — including whether it gains a field naming the verdicts that
+  reference it, or leaves that to the reverse read — is the authoring owner's to write.
+- **Type registration is an owned decision write, read back; tests never register into the shared
+  registry.** Registering a type, or a new version of one, is a write carrying a decision, so it is read
+  back against the registry (principle 2) and made by or on behalf of the type's `ownership_grant` principal. A test run that
+  registers a type — most visibly one whose name carries a timestamp to keep runs from colliding — leaves
+  that type in the production registry permanently, where nothing distinguishes it from a designed one.
+  Tests register into their own registry or use a type that already exists.
+- **A schema version does not migrate values already sitting in `raw_fragments`.** Declaring a field
+  changes what *subsequent* writes may land in it; every earlier write that carried that field is still in
+  `raw_fragments`, and stays there until something reads it out and re-writes it as the declared field.
+  So registering the schema does not close a gap it appeared to close: a read-back of the declared field
+  on an old entity still finds nothing, and the backfill is separate work with its own read-back.
+- **Key on what the source says, never on when we happened to look.** An idempotency key, a dedup key, or
+  any identity derived for a write is built from the source's own stable values. A wall-clock value inside
+  a key permanently poisons the row it keys, because no later write can reproduce it. The converse error
+  is as costly: a key derived from *(entity, field, value)* silently refuses any re-submission of a value
+  the field has held before while reporting success, so a field that alternates between two values becomes
+  unwritable after its first change — the key must distinguish the write, not the value.
+- **Merging duplicate entities is a write that carries decisions.** A merge chooses, per field, which of
+  two recorded values survives, and each choice is a decision — so every field is read back against both
+  sources afterwards, not merely the merge's success response. Edges are repointed from the absorbed
+  entity to the survivor rather than re-derived: re-deriving asks whatever produced an edge to produce it
+  again, which silently drops every edge whose producer is gone, and edge loss after a merge is invisible
+  because the survivor still looks well-formed. The bounded retrieval below is what keeps most merges from
+  being necessary at all.
+
+## What each actor reads and writes
+
+The tables above say where each concept lives. This section says who touches it: what an actor must
+retrieve before it acts, what it may not read, what it writes to close its work, and what it may never
+write. The rows are actor kinds, not named agents — a roster binds roles to agents, and a role appears
+here once however many agents fill it. Two documents supply the boundaries the columns enforce:
+`adapters.md` (the engine never reads an external system; the adapter never reads a workflow) and
+`authority_model.md#grants` (an actor reads what its grant admits, and nothing else).
+
+**What admits a read is the grant, and this contract narrows it (decision 94, ruled 2026-09-08).** The
+"Must not read" column below is not the admission mechanism and never was: read admission is default-deny
+per entity type against the reading principal's grant, checked at the read
+(`authority_model.md#grants`). These rows state what an actor of a kind reads *within* what its grant
+already admits, and a step's `reads_to_enter[]` and `reads_to_close[]` narrow it further. Neither may
+widen a grant, and an actor's `context_entity_types[]` — the types a runner puts in front of it — is not the
+admission mechanism, though it remains the inner bound the section below states.
+
+### Retrieval contract
+
+The rows below are the general form of a per-step **read dependency**
+(`gates_and_workflows.md#declaration-batch-projection`): what an actor must be able to read before it acts,
+and what absence means when it cannot. A `workflow`'s steps state the same thing per step, in
+`reads_to_enter` and `reads_to_close`, with a required freshness for adapter-sourced types — so these five
+rows are the actor-kind default and the step declaration is the specific one. Where they differ, the step's
+declaration is the operative requirement, and it may only narrow what the actor's grant and its `agent`
+definition already admit.
+
+| Actor kind | Retrieves before acting | Must not read | What absence means |
+|---|---|---|---|
+| agent claiming a step | the batch and its tasks; the `workflow` declaring the step, its `required` and `on_fail`; the verdicts already on the batch; the artifacts the tasks refer to, with their current `head` and `checks`; the context entity types its own `agent` names | another step owner's in-progress reasoning (there is none in the record — only verdicts); the external system directly, except through an adapter's observations | the step is not judgeable: `unknown` holds the step, and the owner raises the condition rather than signing. An absent `on_fail`, an absent artifact, an unreadable workflow are each `unknown`, never a permissive default |
+| adapter | the artifact for the event, by `system` and `external_id`; the credential binding that resolves the event's actor to a principal; the open steps and open checkpoints that principal owns, to decide which of the four outcomes applies; the action and its `dedup_key` for an outbound operation | **a `workflow`** — an adapter never reads step declarations, sequencing, `on_fail`, or fast paths, because mapping an event to a step's meaning is the engine's judgement, not the boundary's; another adapter's deliveries | the event is unmapped: an observation saying so, or `dropped` with the reason (`adapters.md`). An unresolvable credential is never resolved to the operator; an artifact that is not found is an untracked record, not an implicit new one |
+| operator-facing agent | the open checkpoints whose `AWAITS` names the operator, with each subject and its options; the tasks whose `assigned_to` names the operator principal; the `task_policy` and preference entities that govern how the operator is addressed | the operator's grants as a source of what to present (the checkpoint carries its own options); another principal's checkpoint queue | there is nothing to present. An empty queue is reported as an empty queue, never inferred from a failed read — a read that failed is `unknown` and is announced as such |
+| self-triggering daemon | its own `agent` and grant; the record's reachability, by a real read of what its work will read; the tasks or artifacts its poll produces work about; where it evaluates intake rules, every rule naming the changed entity's type, and the change's provenance (`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`); the `dedup_key` space of any effect it may repeat | step state, which it neither derives nor advances; a workflow; another daemon's leases | the record is unreachable: it halts work and keeps observing (`failure_posture.md` rule 1), announcing on the path that survives the outage. An empty poll is an empty poll only if the poll itself succeeded, and it is written as one — the window observation the write contract names |
+| reviewing step owner | the batch's tasks and their acceptance conditions; the artifact at a resolved `head`, and that head recorded for its own verdict; earlier verdicts on the batch, to see what has already been judged and at which head; the design basis its review claims to apply | the host's own review state as a substitute for the record's verdicts; another step owner's conclusion as grounds for its own | it cannot judge: the step stays open with the condition announced. A check it could not run is not a passing check, and a blocking conclusion rests on what the step owner executed |
+
+### Write contract
+
+| Actor kind | Writes to close its work | Reads back | Never writes |
+|---|---|---|---|
+| agent claiming a step | one `verdict` on the step, carrying the conclusion, the artifact refs with their judged heads, and the pinned `agent` version; the observations its work produced | the verdict, retrieved and asserted to hold the conclusion written — a response code is not evidence | another principal's verdict; step state as a field; a conclusion anywhere but the record (`failure_posture.md` rule 4); a parallel log of what it did |
+| adapter | observations on artifacts; action confirmations on actions (`taken_at`, `result_ref`); a task for intake, where a new-record event concerns a record the swarm does not track; a `dropped` disposition with its reason; a verdict or a checkpoint resolution it carried in, attributed to the principal the event's credential binds to and to itself as the carrier (A-for-B, never as B — `adapters.md#no-external-event-advances-a-step-by-itself`); one observation per declared window on its own `agent_session` carrying the window's coverage and dispositions (`adapters.md#what-the-adapter-does-with-every-event`) | every write that carries a decision — a verdict it carried in, a checkpoint resolution, an action confirmation — before it acknowledges the event to the external system | **step state, in any form** — it never opens, claims, closes, or initializes a step, and never writes `not_required`, `not_applicable`, or clear on an artifact with no batch; a task's status; a binding it inferred |
+| operator-facing agent | the checkpoint's resolution, attributed to the operator principal and to itself as the agent that carried it (A-for-B, never as B); tasks the operator's instructions produce | the resolution, before it reports to the operator that the decision landed | the operator's decision where the operator gave none; a verdict on a step it does not own; the operator's `waived` conclusion on its own initiative |
+| self-triggering daemon | the tasks its poll produces, each entering intake; observations carrying its provenance, among them one per declared window on its own `agent_session` carrying the window, the coverage of the polls made in it, and the dispositions counted — the write a successful empty poll makes, with zero tasks and the poll's coverage (`adapters.md#what-the-adapter-does-with-every-event`); nothing else — an effect it wants is a task it creates, never an action of its own (`work_model.md#a-task-is-executed-only-through-a-workflow`) | each task it created, so a poll that appears to have produced work but wrote none is caught; the window observation, so a daemon silent past its window is a derived read and not an absence | step state; a claim on a task it created (creating is publishing, not claiming); a routing decision that hands work to a named runner; an action `PRODUCES` from no task |
+| reviewing step owner | one `verdict` on its review step, with the head it judged, the findings it recorded, and the evidence it executed | the verdict | a conclusion on a step another principal owns; a comment on the host in place of the verdict; a conclusion rewritten in place (a later judgement is a **new** verdict, stated as such, and the latest per step owner per head is the one that stands); a conclusion contradicting its own findings (the write is rejected at submission); a conclusion carrying a condition |
+
+**Bounded retrieval before creating an entity.** Any actor about to create an entity first retrieves for
+the one that may already exist, by identifier where it has a concrete one and by type-and-search where it
+has a category. The retrieval is bounded — it names the type and the identifying values, rather than
+scanning — and its result decides between creating and correcting. Duplicates in the record arise almost
+entirely where this step was skipped: two actors resolve the same artifact, the same person, or the
+same task independently, and each creates. Merging them afterwards is a write carrying decisions, with
+edge loss as its failure mode (above), so the retrieval is cheaper than every path that follows from
+omitting it.
+
+**An agent's context entity types come from its own definition.** What an agent may retrieve is
+`agent.context_entity_types[]` — the types its role needs — and a type it was not granted is
+not read, whether or not a grant would admit the read. The definition is where an agent's information
+diet is declared and reviewed; reading past it makes the declaration decorative and makes an agent's
+behaviour depend on what happened to be reachable. Where an agent needs a type its definition does not
+name, the definition is corrected, which is an owned, reviewed write — never circumvented at runtime. The
+grant is the outer bound and the definition the inner one: a read must satisfy both, and a grant that
+admits more than the definition names is not permission to read more
+(`authority_model.md#grants`).
+
+## Rendering
+
+The concept and relationships tables above are render targets. The operative source is the schema
+registry on the record: the registered entity types, their fields and versions, and the relationship
+types in use. `execution/scripts/render_data_model.py` produces the two tables from the registry, between
+the markers that name them; its `--check` mode exits non-zero when a table on disk differs from the
+registry (the pattern of `render_workflow_docs.py` and `render_plan_docs.py`, `conformance.md`). The
+prose around the tables (the rule that decides each row, the conventions, this section) is authored here
+and reviewed in PRs. A row whose type the registry does not yet hold is hand-authored with the same
+marker and becomes the check's expected content the day the type is registered. This section is the
+contract for the renderer; whether the script exists is `status.md`.

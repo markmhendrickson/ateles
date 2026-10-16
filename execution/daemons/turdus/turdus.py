@@ -90,6 +90,17 @@ MAX_MESSAGES = int(os.environ.get("TURDUS_MAX_MESSAGES", "20"))
 # path as a GitHub review or /approve comment. Env-gated: without the operator
 # address AND the shared secret, this path is inert.
 OPERATOR_EMAIL = os.environ.get("OPERATOR_EMAIL", "").strip().lower()
+
+# ── Self-notification guard ───────────────────────────────────────────────────
+# Turdus sends its own digests via the notifier (gws +send --from ATELES_SWARM_EMAIL,
+# a `+swarm` Gmail alias that lands in the SAME inbox). Those digests carry an
+# "[Ateles] [turdus] … invoice(s) …" subject — which matches the invoice/actionable
+# keyword filters, so on the next poll Turdus re-triages its OWN notification and
+# fires another one: a runaway self-feeding loop. Skip any message Turdus itself
+# authored — identified by the swarm From-address or the "[Ateles]" subject prefix.
+SWARM_EMAIL = os.environ.get("ATELES_SWARM_EMAIL", "").strip().lower()
+_SELF_SUBJECT_PREFIX = "[Ateles]"
+
 APIS_APPROVE_URL = os.environ.get(
     "APIS_APPROVE_EMAIL_URL", "http://127.0.0.1:8742/approve-email"
 )
@@ -505,20 +516,22 @@ async def _store_email_entity(message: dict) -> str | None:
     payload = {
         "entities": [
             {
+                # /store reads entity fields FLAT off this object. A nested
+                # "snapshot" key is not a recognized field, so every field under
+                # it is silently dropped and the entity lands carrying only its
+                # canonical_name. (The deprecated /observations endpoint this was
+                # migrated from in #190 did take a nested snapshot — the nesting
+                # was carried over unchanged and nothing failed loudly.)
                 "entity_type": "email_message",
                 "canonical_name": f"email_message:gmail:{msg_id}",
-                "snapshot": {
-                    "message_id": message.get("id", ""),
-                    "sender": message.get("sender", ""),
-                    "subject": message.get("subject", ""),
-                    "snippet": message.get("snippet", ""),
-                    "date": message.get("date_iso", ""),
-                    "labels": message.get("labels", []),
-                    "classification": message.get(
-                        "classification", "informational"
-                    ),
-                    "source": "gmail",
-                },
+                "message_id": message.get("id", ""),
+                "sender": message.get("sender", ""),
+                "subject": message.get("subject", ""),
+                "snippet": message.get("snippet", ""),
+                "date": message.get("date_iso", ""),
+                "labels": message.get("labels", []),
+                "classification": message.get("classification", "informational"),
+                "source": "gmail",
             }
         ],
         "idempotency_key": f"turdus-email-{msg_id}",
@@ -579,6 +592,11 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
             "priority": "urgent",
             "status": "open",
             "domain": "finance",
+            # ateles#682: state what the task DOES so the gate infers blast
+            # radius from the action, not from which agent would handle it.
+            # Triage only reads and summarizes; payment stays operator-gated.
+            "action_type": "compute_only_analysis",
+            "confidence": 0.8,
         }
         log_label = "INVOICE→monedula"
     else:
@@ -593,6 +611,9 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
             ),
             "audience": "agent",
             "status": "open",
+            # ateles#682: as above — triaging an email is read-and-summarize.
+            "action_type": "compute_only_analysis",
+            "confidence": 0.8,
         }
         log_label = "actionable"
 
@@ -607,9 +628,12 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
     payload = {
         "entities": [
             {
+                # Flat, not nested under "snapshot" — see the note on the
+                # email_message store above. Nesting drops title/description/
+                # status, and a task with no status never reaches dispatch.
                 "entity_type": "task",
                 "canonical_name": f"task:turdus:email:{msg_id}",
-                "snapshot": snapshot,
+                **snapshot,
             }
         ],
         "idempotency_key": f"turdus-task-{msg_id}",
@@ -656,6 +680,20 @@ def _extract_sender_address(sender: str) -> str:
     m = re.search(r"<([^>]+)>", sender or "")
     addr = (m.group(1) if m else (sender or "")).strip().lower()
     return addr
+
+
+def _is_self_notification(sender: str, subject: str) -> bool:
+    """True if this message is one Turdus (or the swarm) sent to the operator.
+
+    Triage feeds on the operator's inbox, into which the notifier delivers swarm
+    digests via a `+swarm` alias — same inbox, unread. Left unfiltered, Turdus's
+    own "[Ateles] …" digest matches the invoice/actionable keywords and triggers
+    an endless self-notification loop. Match on the swarm From-address (primary)
+    or the "[Ateles]" subject prefix (fallback when the address isn't configured).
+    """
+    if SWARM_EMAIL and _extract_sender_address(sender) == SWARM_EMAIL:
+        return True
+    return (subject or "").lstrip().startswith(_SELF_SUBJECT_PREFIX)
 
 
 def _parse_approve_token(text: str) -> tuple[str, int] | None:
@@ -1046,6 +1084,15 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         sender = msg.get("sender", msg.get("from", ""))
         subject = msg.get("subject", "(no subject)")
         snippet = msg.get("snippet", "")
+
+        # Skip Turdus's own swarm digests — they re-enter the inbox via the
+        # +swarm alias and would otherwise self-trigger an invoice loop.
+        if _is_self_notification(sender, subject):
+            log.info(
+                f"[{DAEMON_NAME}] SELF-SKIP: own swarm digest "
+                f"subject={subject[:60]!r}"
+            )
+            continue
 
         classification = _classify_message(sender, subject, snippet)
         msg["classification"] = classification

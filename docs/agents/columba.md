@@ -17,8 +17,6 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__store
   - mcp__mcpsrv_neotoma__correct
   - mcp__mcpsrv_neotoma__list_observations
-  - mcp__mcpsrv_neotoma__list_recent_changes
-  - mcp__mcpsrv_neotoma__list_timeline_events
 canonical_context_entities:
   - operator_profile
   - product_profile
@@ -39,7 +37,7 @@ Constitution keeper and cross-cutting policy authority. Holds canonical record o
 | Status | planned |
 | Agent grant | service |
 | Observation source | llm_summary |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__list_recent_changes, mcp__mcpsrv_neotoma__list_timeline_events |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__list_observations |
 | Entity ID | ent_949454e143e72df5bf833dfd |
 
 ## Prompt

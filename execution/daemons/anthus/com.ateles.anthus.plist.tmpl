@@ -25,6 +25,14 @@
      is what produced the literal
      `subscription_id=__NEOTOMA_SSE_SUBSCRIPTION_ID_ANTHUS__` in the 2026-06-03
      logs when it drifted out of sync.
+
+  run_anthus_launchd.sh is a thin `exec` wrapper only (interpreter + repo-root
+  resolution) — it no longer exports the materialized dotenv into its process
+  environment (ateles#657: that export was the one path that made a GitHub
+  PAT and a Telegram bot token readable via `ps eww <pid>`; the in-process
+  load in lib/daemon_runtime/__init__.py above already makes them available
+  to anthus.py and, by inheritance, to its spawned `claude` child processes,
+  with no bash-level export needed).
 -->
 <plist version="1.0">
 <dict>

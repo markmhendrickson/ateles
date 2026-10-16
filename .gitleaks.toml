@@ -134,6 +134,15 @@ regexes = [
   '''\+?1234567890\b''',
   '''\+?0{7,}\b''',
   '''\+1[ -]?555[ -]?''',
+  # pii-phone-intl false positive: synthetic PII-shaped tamper input in
+  # test_rule_inventory_determinism.py's committed-file PII-screen test
+  # (test_pii_shaped_text_in_a_committed_block_fails_the_screen). The test
+  # asserts the screen REJECTS this string when inserted into a committed
+  # inventory block — the value must look like real PII to prove the screen
+  # catches it, so it cannot be replaced with an already-allowlisted shape.
+  # Anchored to the exact literal used as the fixture, not a general
+  # Spanish-mobile pattern, so it can only ever match this test fixture.
+  '''\+34 612 345 678\b''',
   # IBAN/card false positives: documentation placeholders (all-X, all-zero,
   # or sequential example numbers)
   '''\bES[0-9]{2}(?:[ ]?(?:X{4}|0{4}|1234))''',
@@ -152,6 +161,20 @@ regexes = [
   # (exact literal shape, 2-digit year+month, single trailing letter) so it can
   # only ever match this display-slug pattern, never a real credential.
   '''^advisory-2026-\d{2}-[a-z]$''',
+  # asana-client-id false positive: default gitleaks rule flags any bare
+  # 16-digit numeric string by shape. `asana_source_gid` is an Asana task
+  # object ID (import provenance marker, not a credential) stored on
+  # imported task entities and exercised in taskSearch tests/fixtures —
+  # confirmed by testing that renaming the surrounding field still flags the
+  # digits, so this is a value-shape false positive, not fixable by renaming.
+  # Anchored to the exact 16-digit literal used as the test fixture value.
+  '''\b1202469970914439\b''',
+  # generic-api-key false positive: OpenAI Realtime transcription model
+  # product ids (DEFAULT_MODEL / docs in stream_transcript.py). Hyphenated
+  # alphanumeric with enough entropy to trip the default rule; not secrets.
+  # Flagged on ateles#707 / PR tip commit against test_stream_transcript.py.
+  '''\bgpt-4o-transcribe\b''',
+  '''\bgpt-live-transcribe\b''',
 ]
 paths = [
   "execution/scripts/ga_last_7_days_report.py",

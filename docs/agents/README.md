@@ -4,14 +4,14 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 
 | Agent | Tier | Genus | Status | Prompt | File |
 | --- | --- | --- | --- | --- | --- |
-| accipiter | T4 | Accipiter | planned | ✅ | [accipiter.md](accipiter.md) |
+| accipiter | T4 | Accipiter | active | ✅ | [accipiter.md](accipiter.md) |
 | anthus | T3 | Anthus | active | ✅ | [anthus.md](anthus.md) |
 | apis | T3 | Apis | active | ✅ | [apis.md](apis.md) |
 | apus | T3 |  | active | ✅ | [apus.md](apus.md) |
-| aquila | T3 | Aquila | active | ✅ | [aquila.md](aquila.md) |
+| aquila | T3 | Aquila | planned | ✅ | [aquila.md](aquila.md) |
 | ateles | T2 | Ateles | active | ✅ | [ateles.md](ateles.md) |
 | aythya | T4 | Aythya | planned | ✅ | [aythya.md](aythya.md) |
-| buteo | T4 | Buteo | planned | ✅ | [buteo.md](buteo.md) |
+| buteo | T4 | Buteo | active | ✅ | [buteo.md](buteo.md) |
 | cicada | T4 | Cicada | active | ✅ | [cicada.md](cicada.md) |
 | ciconia | T4 | Ciconia | planned | ✅ | [ciconia.md](ciconia.md) |
 | columba | T4 | Columba | planned | ✅ | [columba.md](columba.md) |
@@ -20,25 +20,25 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | cotinga | T3 | Cotinga cotinga | active | ✅ | [cotinga.md](cotinga.md) |
 | falco | T4 | Falco | active | ✅ | [falco.md](falco.md) |
 | formica | T3 | Formica | active | ✅ | [formica.md](formica.md) |
-| fringilla | T4 | Fringilla | active | ✅ | [fringilla.md](fringilla.md) |
-| gorilla | T4 | Gorilla | active | ✅ | [gorilla.md](gorilla.md) |
+| fringilla | T4 | Fringilla | planned | ✅ | [fringilla.md](fringilla.md) |
+| gorilla | T4 | Gorilla | planned | ✅ | [gorilla.md](gorilla.md) |
 | hirundo | T4 | Hirundo | planned | ✅ | [hirundo.md](hirundo.md) |
-| lanius | T3 | Lanius | planned | ✅ | [lanius.md](lanius.md) |
+| lanius | T3 | Lanius | active | ✅ | [lanius.md](lanius.md) |
 | manucode | T4 | Manucodia | planned | ✅ | [manucode.md](manucode.md) |
 | menura | T2 | Menura | planned | ✅ | [menura.md](menura.md) |
 | monedula | T3 | Corvus monedula | active | ✅ | [monedula.md](monedula.md) |
-| neotoma-agent | T3 | Castor | planned | ✅ | [neotoma-agent.md](neotoma-agent.md) |
+| neotoma-agent | T3 | Castor | active | ✅ | [neotoma-agent.md](neotoma-agent.md) |
 | nucifraga | T4 | Nucifraga | planned | ✅ | [nucifraga.md](nucifraga.md) |
 | ops | T4 |  | planned | ✅ | [ops.md](ops.md) |
 | pavo | T4 | Pavo | active | ✅ | [pavo.md](pavo.md) |
-| phoenicurus | T4 | Phoenicurus | planned | ✅ | [phoenicurus.md](phoenicurus.md) |
-| picus | T4 | Picus | active | ✅ | [picus.md](picus.md) |
+| phoenicurus | T4 | Phoenicurus | active | ✅ | [phoenicurus.md](phoenicurus.md) |
+| picus | T4 | Picus | planned | ✅ | [picus.md](picus.md) |
 | ploceus | T4 | Ploceus | planned | ✅ | [ploceus.md](ploceus.md) |
 | regulus | T4 | Regulus | planned | ✅ | [regulus.md](regulus.md) |
 | robin | T4 | Erithacus | planned | ✅ | [robin.md](robin.md) |
-| sitta | T3 | Sitta | active-pending-deploy | ✅ | [sitta.md](sitta.md) |
+| sitta | T3 | Sitta | planned | ✅ | [sitta.md](sitta.md) |
 | struthio | T4 | Struthio | planned | ✅ | [struthio.md](struthio.md) |
-| sturnus | T3 | Sturnus | active | ✅ | [sturnus.md](sturnus.md) |
+| sturnus | T3 | Sturnus | planned | ✅ | [sturnus.md](sturnus.md) |
 | sylvia | T3 | Sylvia | active | ✅ | [sylvia.md](sylvia.md) |
 | turdus | T3 | Turdus | active | ✅ | [turdus.md](turdus.md) |
 | tyto | T3 | Tyto | active | ✅ | [tyto.md](tyto.md) |

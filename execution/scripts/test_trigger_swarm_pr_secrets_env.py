@@ -90,6 +90,7 @@ def _clear_swarm_env(monkeypatch):
         "GITHUB_TOKEN",
         "ATELES_AGENT_PAT",
         "NEOTOMA_AGENT_PAT",
+        "VANELLUS_AGENT_PAT",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -100,12 +101,29 @@ def test_early_return_when_both_primary_vars_set(monkeypatch):
     _clear_swarm_env(monkeypatch)
     monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "daemon-neotoma")
     monkeypatch.setenv("GITHUB_TOKEN", "daemon-github")
+    monkeypatch.setenv("VANELLUS_AGENT_PAT", "daemon-vanellus")
     mod = _fresh_module(monkeypatch, {"NEOTOMA_BEARER_TOKEN": "sops-neotoma"})
 
     mod._ensure_secrets_env()
 
     assert mod.os.environ["NEOTOMA_BEARER_TOKEN"] == "daemon-neotoma"
     assert mod.os.environ["GITHUB_TOKEN"] == "daemon-github"
+    assert mod.os.environ["VANELLUS_AGENT_PAT"] == "daemon-vanellus"
+
+
+def test_materializes_vanellus_when_primary_pair_already_set(monkeypatch):
+    """The old two-variable early return skipped the distinct reviewer token."""
+    _clear_swarm_env(monkeypatch)
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "daemon-neotoma")
+    monkeypatch.setenv("GITHUB_TOKEN", "daemon-github")
+    mod = _fresh_module(
+        monkeypatch,
+        {"VANELLUS_AGENT_PAT": "sops-vanellus-pat"},
+    )
+
+    mod._ensure_secrets_env()
+
+    assert mod.os.environ["VANELLUS_AGENT_PAT"] == "sops-vanellus-pat"
 
 
 def test_materializes_missing_keys_from_sops(monkeypatch):
@@ -118,6 +136,7 @@ def test_materializes_missing_keys_from_sops(monkeypatch):
             "NEOTOMA_BEARER_TOKEN": "sops-neotoma",
             "NEOTOMA_BEARER_TOKEN_PROD": "sops-neotoma-prod",
             "GITHUB_TOKEN": "sops-github",
+            "VANELLUS_AGENT_PAT": "sops-vanellus-pat",
         },
     )
 
@@ -126,6 +145,7 @@ def test_materializes_missing_keys_from_sops(monkeypatch):
     assert mod.os.environ["NEOTOMA_BEARER_TOKEN"] == "sops-neotoma"
     assert mod.os.environ["NEOTOMA_BEARER_TOKEN_PROD"] == "sops-neotoma-prod"
     assert mod.os.environ["GITHUB_TOKEN"] == "sops-github"
+    assert mod.os.environ["VANELLUS_AGENT_PAT"] == "sops-vanellus-pat"
 
 
 def test_does_not_overwrite_preset_value(monkeypatch):

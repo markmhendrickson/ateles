@@ -7,7 +7,7 @@ name: picus
 description: Invoke Picus, the annual tax-preparation agent — owns end-to-end, multi-jurisdiction tax-materials preparation, tax/refund estimation, and prior-year tax-strategy analysis, grounded in the operator Neotoma financial data plus the tax_profile and tax_preparer context entities (filing obligations, deadlines, and each preparer historical data requests). Use when the user says 'picus', 'prepare my taxes', 'run tax prep', 'estimate my taxes', 'tax strategy review', or when the dispatcher routes a tax-domain task (audience=agent). Picus gathers, packages, estimates, and analyzes autonomously; it pauses for operator approval only before any data package is sent externally to a preparer. Distinct from the financial-analysis agent (ongoing quarterly analysis) and the payment agent (payment execution).
 tier: T4
 genus: Picus
-status: active
+status: planned
 aauth_sub: picus@ateles-swarm
 agent_grant: service
 observation_source_default: sensor
@@ -59,7 +59,7 @@ Invoke Picus, the annual tax-preparation agent — owns end-to-end, multi-jurisd
 | --- | --- |
 | Tier | T4 |
 | Genus | Picus |
-| Status | active |
+| Status | planned |
 | AAuth sub | picus@ateles-swarm |
 | Agent grant | service |
 | Observation source | sensor |

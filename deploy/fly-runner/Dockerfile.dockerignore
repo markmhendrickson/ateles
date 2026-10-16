@@ -1,0 +1,11 @@
+# Build context for deploy/fly-runner/Dockerfile (BuildKit reads
+# <Dockerfile>.dockerignore beside the Dockerfile). An allowlist: everything is
+# excluded, then only the files the image copies are let back in.
+# test_fly_runner_image.py fails if anything secret-bearing becomes reachable.
+*
+**
+!lib/environment_allowlist.py
+!lib/credential_env_names.py
+!lib/daemon_runtime/aauth_httpsig.py
+!deploy/fly-runner/run_job.py
+!deploy/fly-runner/repo_delivery.py

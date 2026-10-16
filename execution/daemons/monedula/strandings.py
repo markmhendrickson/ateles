@@ -259,22 +259,61 @@ def build_escalation_entity(s: Stranding, *, observed_at: str) -> dict:
     }
 
 
+def stranded_fingerprint(strandings: list[Stranding]) -> str:
+    """Stable Notifier fingerprint of the active stranded set (sorted keys)."""
+    keys = sorted(s.key for s in strandings)
+    return "|".join(keys)
+
+
 def escalate(
     strandings: list[Stranding],
     *,
     notify=None,
     state_file: Path = STATE_FILE,
     now: float | None = None,
+    clear_dedupe=None,
+    **notify_kwargs,
 ) -> list[Stranding]:
     """Escalate newly-observed strandings. Returns those actually escalated.
 
     Writes a durable Neotoma ``escalation`` per stranding, then notifies
     best-effort. Deduplicated per (profile, reason) — see module docstring.
+
+    Notifier ``dedupe_key`` is ``monedula:stranded:<sorted keys fp>`` so an
+    unchanged stranded set does not re-fire every tick (ateles#1178). Pass
+    ``clear_dedupe(key)`` to release a prior key when the set empties or
+    changes. Extra ``notify_kwargs`` (e.g. ``email_eligible``) forward to
+    ``notify``.
     """
+    prior_key_path = state_file.with_name(state_file.name + ".notify_key")
+    prior_notify_key = ""
+    try:
+        prior_notify_key = prior_key_path.read_text().strip()
+    except OSError:
+        prior_notify_key = ""
+
     if not strandings:
         # Clear state so a condition that returns later reports as new.
         _save_state({}, state_file)
+        if prior_notify_key and clear_dedupe is not None:
+            try:
+                clear_dedupe(prior_notify_key)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"clear stranded dedupe failed: {exc}")
+        try:
+            if prior_key_path.exists():
+                prior_key_path.unlink()
+        except OSError:
+            pass
         return []
+
+    fp = stranded_fingerprint(strandings)
+    dedupe_key = f"monedula:stranded:{fp}"
+    if prior_notify_key and prior_notify_key != dedupe_key and clear_dedupe is not None:
+        try:
+            clear_dedupe(prior_notify_key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"clear prior stranded dedupe failed: {exc}")
 
     state = _load_state(state_file)
     fresh, next_state = select_new_strandings(strandings, state=state, now=now)
@@ -285,6 +324,12 @@ def escalate(
             f"{len(strandings)} stranded payment profile(s) — already escalated, "
             f"suppressed until {REESCALATE_AFTER_HOURS}h have passed"
         )
+        # Still stamp the current notify key so an unchanged set keeps the
+        # same Notifier fingerprint across ticks (Notifier suppresses repeats).
+        try:
+            prior_key_path.write_text(dedupe_key)
+        except OSError:
+            pass
         return []
 
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now or time.time()))
@@ -302,10 +347,27 @@ def escalate(
         labels = ", ".join(s.label for s in fresh)
         try:
             notify(
-                f"monedula: {len(fresh)} payment profile(s) STRANDED and cannot be "
-                f"paid — {labels}. Escalations filed in Neotoma.",
+                f"monedula: payment_profiles_stranded — {len(fresh)} profile(s) "
+                f"STRANDED and cannot be paid — {labels}. Escalations filed in Neotoma.",
                 priority="blocker",
+                dedupe_key=dedupe_key,
+                email_eligible=True,
+                **notify_kwargs,
             )
+            try:
+                prior_key_path.write_text(dedupe_key)
+            except OSError:
+                pass
+        except TypeError:
+            # Older notify callables that only accept (msg, priority=).
+            try:
+                notify(
+                    f"monedula: payment_profiles_stranded — {len(fresh)} profile(s) "
+                    f"STRANDED and cannot be paid — {labels}. Escalations filed in Neotoma.",
+                    priority="blocker",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"stranding notification failed: {exc}")
         except Exception as exc:  # noqa: BLE001 — notification must not fail the run
             log.warning(f"stranding notification failed: {exc}")
 

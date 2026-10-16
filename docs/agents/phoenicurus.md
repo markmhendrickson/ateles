@@ -7,7 +7,7 @@ name: phoenicurus
 description: Invoke Phoenicurus, the QA agent — test coverage audits, regression assessment, release readiness scorecards, and P0 edge case identification.
 tier: T4
 genus: Phoenicurus
-status: planned
+status: active
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -20,15 +20,9 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_related_entities
   - mcp__mcpsrv_neotoma__store
   - mcp__mcpsrv_neotoma__correct
-  - Read
-  - Grep
+  - WebSearch
+  - WebFetch
   - Bash
-  - Write
-  - Edit
-  - "Bash(pytest:*)"
-  - "Bash(npm test:*)"
-  - "Bash(npm run eval:tier1:*)"
-  - "Bash(gh pr checks:*)"
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -75,6 +69,7 @@ operational_entity_types:
   - release_gate
   - audit_run
   - strategy_drift_signal
+  - issue
 canonical_context_entities:
   - operator_profile
 ---
@@ -89,13 +84,13 @@ Invoke Phoenicurus, the QA agent — test coverage audits, regression assessment
 | --- | --- |
 | Tier | T4 |
 | Genus | Phoenicurus |
-| Status | planned |
+| Status | active |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | phoenicurus, /phoenicurus |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, Read, Grep, Bash, Write, Edit, Bash(pytest:*), Bash(npm test:*), Bash(npm run eval:tier1:*), Bash(gh pr checks:*) |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Bash |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, test_plan, coverage_record, bug_report, ui_bug_report, ui_bug, ui_issue, software_issue, technical_issue, validation_result, verification_result, audit_result, audit_run, feedback_finding, neotoma_qa_finding, accessibility_audit, security_finding, behavior_requirement, feature_spec, specification, error_event, runtime_error, javascript_error, frontend_error, frontend_runtime_error, console_error, incident, health_event, release_gate, release_criterion |
-| Operational entity types | test_plan, coverage_record, validation_result, verification_result, bug_report, neotoma_qa_finding, release_gate, audit_run, strategy_drift_signal |
+| Operational entity types | test_plan, coverage_record, validation_result, verification_result, bug_report, neotoma_qa_finding, release_gate, audit_run, strategy_drift_signal, issue |
 | Entity ID | ent_42843b65dd18fc39294e94a1 |
 
 ## Prompt
@@ -200,7 +195,14 @@ correct(entity_id=<issue_entity_id>, fields={
   "owner_history": [*existing_history, {"agent": "phoenicurus", "gate": "qa", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
-# 2. Check join condition: if legal is also signed_off (or not_required), advance
+# 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed
+snapshot = retrieve_entity_snapshot(entity_id=<issue_entity_id>)
+if (snapshot.get("gate_status") or {}).get("qa") != "signed_off":
+    # Do NOT emit SIGNED_OFF. Post **BLOCKED** with reason, attempted vs read-back,
+    # and next action (retry / escalate to Anthus / check agent_grant for phoenicurus).
+    raise GateWritebackError("qa gate writeback failed read-back")
+
+# 2. Check join condition ONLY after read-back confirms: if legal is also signed_off (or not_required), advance
 legal_status = existing_gate_status.get("legal", "not_required")
 if legal_status in ("signed_off", "waived", "not_required"):
     correct(entity_id=<issue_entity_id>, fields={"current_owner": "struthio"}, observation_source="workflow_state")

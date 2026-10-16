@@ -382,7 +382,30 @@ _LATIN_DIACRITICS_BY_LANGUAGE = {
 
 # Sessions are assumed to admit the operator's own languages even when the
 # expected language is narrower, so code-switching never reads as fabrication.
-DEFAULT_PLAUSIBLE_LANGUAGES = ("en", "es", "ca", "fr", "de", "pt", "it")
+#
+# The REAL set is operator configuration, resolved at runtime from the
+# `locale_profile` entity by `session_language.resolve_session_languages` and
+# threaded in as `plausible_languages`. This constant is only what a caller
+# that passes nothing gets, so it must be the languages the operator SPEAKS.
+#
+# It was ("en", "es", "ca", "fr", "de", "pt", "it") — the languages the operator
+# can READ — which is a different and much wider set. Admitting every German,
+# French, Portuguese and Italian diacritic let a whole class of fabrication
+# through unflagged: "Möchtest du ein Feuer?", "Und das hängt an der Korrex
+# auf." and "Taparvo sessões." all arrived during silence in English sessions
+# and all passed. Measured over the 1145-row capture corpus, narrowing to the
+# spoken set changes exactly 3 verdicts and all 3 are genuine fabrications —
+# 3 true positives, 0 false positives.
+#
+# Catalan is deliberately IN the set. It was briefly dropped on the reasoning
+# that the corpus contained no Catalan speech; absence from a sample is not
+# absence from the operator's speech, and that is the same overconfidence this
+# filter exists to catch.
+#
+# Safe because the operator's real Spanish is dense in the characters that stay
+# allowed (á in 134 rows, í 149, ó 117, é 111, ú 76, ñ 27), while every
+# character this rejects appears exactly ONCE and each time in a fabrication.
+DEFAULT_PLAUSIBLE_LANGUAGES = ("en", "es", "ca")
 
 
 def _allowed_diacritics(languages: tuple[str, ...]) -> set[str]:

@@ -6,6 +6,8 @@ those paths raised AttributeError instead of notifying.
 """
 
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -41,10 +43,12 @@ def test_warn_accepts_string_priority():
 
 
 def test_warn_queues_for_digest_in_silence_window():
+    # WARN inside silence is still held (actionable) — but never as a digest email.
     n = Notifier(rubric=ALWAYS_SILENT)
     sent = n.send("dispatch failed", priority=Priority.WARN, handler="formica")
     assert sent is False
     assert any("dispatch failed" in m for m in n._digest_queue)
+    assert all(m.lstrip().startswith("⚠") for m in n._digest_queue)
 
 
 def test_all_daemon_used_priorities_route():
@@ -121,9 +125,13 @@ def test_notify_to_defaults_to_operator_email(monkeypatch):
 
 
 def test_email_failure_falls_back_to_telegram(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     n = Notifier(rubric=NO_SILENCE)  # apprise unconfigured → Telegram returns False
+    n._apprise = None  # hermetic: ignore process-env tokens from other modules
     n._email_primary = True
     n._operator_email = "op@test"
+    n._notify_to = "op@test"
 
     class _P:
         returncode = 1
@@ -215,20 +223,21 @@ def test_from_neotoma_unset_topic_env_falls_back_to_default(monkeypatch):
     assert n._topic_id == "999"
 
 
-# ── digest queue is persistent and self-draining ────────────────────────────
+# ── held-notice queue is persistent; routine digests are disabled ───────────
 #
-# Before this, `_digest_queue` was an in-memory list whose only drain,
-# `flush_digest()`, had zero non-test callers in the tree. Daemons are
-# long-lived, so an OPERATOR_DECISION raised inside the silence window was
-# appended and never delivered. Measured on apis.log 2026-09-01: 45 "queuing
-# for digest" lines, 0 digests ever sent — the mechanism behind "the escalation
-# was written somewhere nobody reads" (ateles#565, #583).
+# Escalations held across silence must survive restart and drain as individual
+# deliveries. Routine INFO must never grow the queue or produce a bulk
+# "📋 Digest" email (standing_rule: do not send routine Ateles digest emails).
 
 
 def _notifier(tmp_path, rubric, sent):
     n = Notifier(rubric=rubric)
     n._digest_path = tmp_path / "digest.json"
-    n._deliver = lambda m, force=False: (sent.append(m), True)[1]
+    n._dedupe_path = tmp_path / "dedupe.json"
+    n._deliver = lambda m, force=False, email_eligible=True: (
+        sent.append(m),
+        True,
+    )[1]
     return n
 
 
@@ -244,9 +253,11 @@ def test_queued_escalation_survives_restart_and_is_delivered(tmp_path):
     n2 = _notifier(tmp_path, NO_SILENCE, sent)
     assert len(n2._digest_queue) == 1
 
-    # Outside the silence window, the next send drains it.
+    # Outside the silence window, the next send drains it individually —
+    # never as a bulk "📋 Digest" message.
     n2.send("a later alert", Priority.OPERATOR_DECISION, handler="apis")
-    assert any("570" in m and "Digest" in m for m in sent), sent
+    assert any("570" in m for m in sent), sent
+    assert all("📋 Digest" not in m for m in sent), sent
     assert n2._digest_queue == []
 
 
@@ -262,6 +273,27 @@ def test_failed_digest_delivery_keeps_items_queued(tmp_path):
     assert len(n._digest_queue) == 1
 
 
+def test_concurrent_held_writes_preserve_every_notification(tmp_path, monkeypatch):
+    """Worker-thread completions must not overwrite each other's held-queue writes."""
+    sent = []
+    # Silence window so WARN holds rather than delivering immediately.
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    monkeypatch.setattr(n, "_maybe_flush_digest", lambda: None)
+    messages = [f"completion-{index}" for index in range(32)]
+    start = threading.Barrier(len(messages))
+
+    def queue(message):
+        start.wait()
+        n.send(message, Priority.WARN, handler="tyto")
+
+    with ThreadPoolExecutor(max_workers=len(messages)) as pool:
+        list(pool.map(queue, messages))
+
+    assert sorted(n._digest_queue) == sorted(
+        f"⚠ [tyto] {message}" for message in messages
+    )
+
+
 def test_unreadable_queue_file_does_not_crash_send(tmp_path):
     sent = []
     n = _notifier(tmp_path, NO_SILENCE, sent)
@@ -269,3 +301,325 @@ def test_unreadable_queue_file_does_not_crash_send(tmp_path):
     assert n._digest_queue == []
     n.send("still works", Priority.BLOCKER, handler="apis")
     assert any("still works" in m for m in sent)
+
+
+# ── standing_rule: no routine digest email; actionable delivery intact ──────
+
+
+def test_info_does_not_grow_queue_or_emit_digest(tmp_path):
+    """Routine INFO must not pile up for a later flush or mint a Digest email."""
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    for i in range(5):
+        assert n.send(f"monedula started #{i}", Priority.INFO, handler="monedula") is False
+    assert n._digest_queue == []
+    assert sent == []
+    assert not n._digest_path.exists()
+
+
+def test_info_does_not_self_flush_as_digest_email(tmp_path, monkeypatch):
+    """Even with email primary, INFO must never produce a Digest-shaped send."""
+    sent_cmds = []
+    n = Notifier(rubric=NO_SILENCE)
+    n._digest_path = tmp_path / "digest.json"
+    n._email_primary = True
+    n._notify_to = "alerts@test"
+    n._swarm_email = "swarm@test"
+    n._apprise = None
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **k):
+        sent_cmds.append(cmd)
+        return _P()
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", fake_run)
+    n.send("tyto auto-transcribing", Priority.INFO, handler="tyto")
+    n.send("another info", Priority.INFO, handler="apis")
+    assert sent_cmds == []
+    assert n._digest_queue == []
+
+
+def test_blocker_still_delivers_when_digest_disabled(tmp_path, monkeypatch):
+    """Actionable failure notifications remain intact on the email channel."""
+    calls = {}
+    n = Notifier(rubric=NO_SILENCE)
+    n._digest_path = tmp_path / "digest.json"
+    n._email_primary = True
+    n._notify_to = "alerts@test"
+    n._swarm_email = "swarm@test"
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    def _run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        return _P()
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", _run)
+    assert n.send("daemon hard failure", Priority.BLOCKER, handler="apis") is True
+    subject = calls["cmd"][calls["cmd"].index("--subject") + 1]
+    assert subject.startswith("[Ateles]")
+    assert "Digest" not in subject
+    assert "daemon hard failure" in subject
+
+
+def test_operator_decision_still_delivers_outside_silence(tmp_path, monkeypatch):
+    calls = {}
+    n = Notifier(rubric=NO_SILENCE)
+    n._digest_path = tmp_path / "digest.json"
+    n._email_primary = True
+    n._notify_to = "alerts@test"
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    def _run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        return _P()
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", _run)
+    assert n.send("approve merge bypass?", Priority.OPERATOR_DECISION, handler="apis")
+    body = calls["cmd"][calls["cmd"].index("--body") + 1]
+    assert "approve merge bypass?" in body
+    assert "📋 Digest" not in body
+
+
+def test_classify_then_clear_preserves_actionable_drops_routine(tmp_path):
+    """Legacy mixed queues: drop INFO residue; deliver actionable individually."""
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    # Simulate a pre-existing digest file accumulated under the old policy.
+    n._digest_path.write_text(
+        __import__("json").dumps(
+            [
+                "[monedula] monedula started",
+                "[tyto] Auto-transcribing: clip.mp4",
+                "⚠️ [apis] PR #570: auto-fix exhausted — needs operator",
+                "[apis] Task created: something routine",
+                "⚠ [formica] dispatch failed for issue #12",
+            ]
+        )
+    )
+    actionable, routine = n.classify_queue()
+    assert len(actionable) == 2
+    assert len(routine) == 3
+
+    assert n.flush_digest() is True
+    assert n._digest_queue == []
+    assert any("570" in m for m in sent)
+    assert any("dispatch failed" in m for m in sent)
+    assert all("📋 Digest" not in m for m in sent)
+    assert all("monedula started" not in m for m in sent)
+    assert all("Auto-transcribing" not in m for m in sent)
+    assert all("Task created" not in m for m in sent)
+
+
+def test_flush_never_emits_bulk_digest_payload(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n._digest_path.write_text(
+        __import__("json").dumps(["⚠️ held decision", "[info] noise"])
+    )
+    n.flush_digest()
+    assert sent == ["⚠️ held decision"]
+    # Belt-and-suspenders: the real _deliver refuses digest-shaped payloads
+    # (do not use the _notifier mock — it always returns True).
+    real = Notifier(rubric=NO_SILENCE)
+    real._digest_path = tmp_path / "digest-refuse.json"
+    real._email_primary = False
+    real._apprise = None
+    assert (
+        Notifier._deliver(real, "📋 Digest (99 items)\n\n• noise", force=True) is False
+    )
+
+
+def test_hidden_queue_does_not_grow_from_info_then_self_flush(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n.send("noise a", Priority.INFO, handler="monedula")
+    n.send("noise b", Priority.INFO, handler="tyto")
+    # A later actionable send must not flush a pile of INFO as a digest.
+    n.send("real blocker", Priority.BLOCKER, handler="apis")
+    assert n._digest_queue == []
+    assert any("real blocker" in m for m in sent)
+    assert all("noise" not in m for m in sent)
+    assert all("📋 Digest" not in m for m in sent)
+
+
+# ── Repeat-condition dedupe journal (ateles#1127) ────────────────────────────
+#
+# Monedula's consent-channel-timeout alert sent 299 times over ~4 days at the
+# launchd poll cadence (~17 min), one per tick, because nothing remembered it
+# had already told the operator about the still-open condition. Same shape as
+# ateles#1083 (22,878 retries of one deterministic Tyto error), generalized
+# into the shared notifier so every daemon routing through Notifier gets it.
+
+
+def test_dedupe_key_suppresses_repeat_sends_for_the_same_open_condition(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    first = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    second = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    third = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    assert first is True
+    assert second is False
+    assert third is False
+    assert sent == ["[monedula] consent channel failed"]
+
+
+def test_dedupe_key_journal_survives_a_new_notifier_instance(tmp_path):
+    """A restarted daemon must not re-notify a condition it already reported."""
+    sent = []
+    n1 = _notifier(tmp_path, NO_SILENCE, sent)
+    n1.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    n2 = _notifier(tmp_path, NO_SILENCE, sent)  # fresh instance, same journal path
+    again = n2.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    assert again is False
+    assert sent == ["[monedula] consent channel failed"]
+
+
+def test_clear_dedupe_lets_a_genuine_recurrence_notify_again(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "monedula:consent_channel_failed"
+    n.send("consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key)
+    n.send("consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key)
+    n.clear_dedupe(key)  # condition resolved (a real reply arrived)
+    third = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key
+    )
+    assert third is True
+    assert sent == [
+        "[monedula] consent channel failed",
+        "[monedula] consent channel failed",
+    ]
+
+
+def test_info_send_does_not_consume_the_dedupe_key(tmp_path):
+    """INFO is dropped unconditionally, so it must not mark the key as reported.
+
+    Marking on an INFO send would suppress every later send of that condition —
+    including a BLOCKER — on the strength of a report the operator never got.
+    """
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    key = "monedula:consent_channel_failed"
+
+    info = n.send("consent channel failed", Priority.INFO, handler="monedula", dedupe_key=key)
+    blocker = n.send("consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key)
+    repeat = n.send("consent channel failed", Priority.BLOCKER, handler="monedula", dedupe_key=key)
+
+    assert info is False, "INFO is never delivered"
+    assert blocker is True, "the BLOCKER must still get through after an INFO send"
+    assert repeat is False, "dedupe still holds once the condition has actually been reported"
+    assert sent == ["[monedula] consent channel failed"]
+
+
+def test_distinct_dedupe_keys_do_not_suppress_each_other(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    a = n.send("A failed", Priority.BLOCKER, handler="monedula", dedupe_key="cond:a")
+    b = n.send("B failed", Priority.BLOCKER, handler="monedula", dedupe_key="cond:b")
+    assert a is True
+    assert b is True
+    assert len(sent) == 2
+
+
+def test_send_without_dedupe_key_is_unchanged_and_always_delivers(tmp_path):
+    """No key → no journal interaction, no suppression — pre-existing behaviour."""
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    for _ in range(3):
+        ok = n.send("routine blocker", Priority.BLOCKER, handler="apis")
+        assert ok is True
+    assert len(sent) == 3
+    assert not n._dedupe_path.exists()
+
+
+def test_unreadable_dedupe_journal_does_not_crash_send(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n._dedupe_path.write_text("not json")
+    ok = n.send(
+        "consent channel failed", Priority.BLOCKER, handler="monedula",
+        dedupe_key="monedula:consent_channel_failed",
+    )
+    assert ok is True  # treated as empty journal, not a crash
+
+
+def test_clear_dedupe_on_a_key_never_seen_does_not_raise(tmp_path):
+    n = Notifier(rubric=NO_SILENCE)
+    n._dedupe_path = tmp_path / "dedupe.json"
+    n.clear_dedupe("never-sent-key")  # must not raise
+
+
+# ── email_eligible gate — actionability, not severity (ateles#1127) ─────────
+#
+# The consent-channel-timeout body says "See escalation" — there is nothing
+# the operator can decide or do from the email itself. email_eligible=False
+# keeps the alert on Telegram/Apprise but stops it from becoming an inbox
+# item he has no way to resolve by reading it.
+
+
+def test_email_eligible_false_skips_email_but_still_delivers_telegram(monkeypatch):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    n = Notifier(rubric=NO_SILENCE)
+    n._email_primary = True
+    n._operator_email = "op@test"
+    n._notify_to = "op@test"
+    email_calls = []
+    monkeypatch.setattr(
+        n, "_deliver_email", lambda m: (email_calls.append(m), True)[1]
+    )
+    n._apprise = None  # "would send" (logged) path stands in for Telegram here
+    ok = n.send(
+        "consent channel failed — see escalation",
+        priority=Priority.BLOCKER,
+        handler="monedula",
+        email_eligible=False,
+    )
+    assert email_calls == []  # email transport was never tried
+    assert ok is False  # no apprise configured in this test — logged, not sent
+    # Contrast: the same send WITH email_eligible=True (default) does try email.
+    ok2 = n.send(
+        "consent channel failed — see escalation",
+        priority=Priority.BLOCKER,
+        handler="monedula",
+    )
+    assert email_calls == ["[monedula] consent channel failed — see escalation"]
+    assert ok2 is True
+
+
+def test_email_eligible_default_true_is_unchanged_behaviour(monkeypatch):
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    n = Notifier(rubric=NO_SILENCE)
+    n._email_primary = True
+    n._operator_email = "op@test"
+    n._notify_to = "op@test"
+    email_calls = []
+    monkeypatch.setattr(
+        n, "_deliver_email", lambda m: (email_calls.append(m), True)[1]
+    )
+    ok = n.send("routine blocker", priority=Priority.BLOCKER, handler="apis")
+    assert ok is True
+    assert email_calls == ["[apis] routine blocker"]

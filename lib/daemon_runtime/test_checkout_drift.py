@@ -16,6 +16,8 @@ Run: pytest lib/daemon_runtime/test_checkout_drift.py -v
 
 from __future__ import annotations
 
+import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -300,3 +302,47 @@ def test_drift_error_carries_the_report(remote_and_clone):
     assert isinstance(err.report, DriftReport)
     assert err.report.is_drifted
     assert "DIVERGED" in str(err)
+
+
+class TestUnverifiedStateIsLoud:
+    """
+    A non-verdict must not read like a pass.
+
+    Observed 2026-09-15 (ateles#1014): this guard logged "could not determine
+    checkout state (no upstream branch configured)" at INFO on every run,
+    because the inspected checkout sat on a detached HEAD. The check had been
+    vacuous for an unknown period while looking healthy in the log.
+    """
+
+    def test_unknown_logs_at_warning_not_info(self, tmp_path, caplog):
+        # A repo with no upstream configured => state "unknown".
+        repo = tmp_path / "noupstream"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "x"],
+                       cwd=repo, check=True,
+                       env={**os.environ,
+                            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+        with caplog.at_level(logging.WARNING):
+            report = warn_on_drift("test-daemon", repo)
+
+        assert report.state == "unknown"
+        assert "UNVERIFIED" in caplog.text
+        assert "not currently protecting anything" in caplog.text
+
+    def test_unknown_is_still_not_treated_as_drift(self, tmp_path):
+        """Loud, but not a false positive: unknown must not raise under enforcement."""
+        repo = tmp_path / "noupstream2"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "x"],
+                       cwd=repo, check=True,
+                       env={**os.environ,
+                            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+        # Must NOT raise: we could not tell, which is not evidence of staleness.
+        report = warn_on_drift("test-daemon", repo, enforce=True)
+        assert report.state == "unknown"

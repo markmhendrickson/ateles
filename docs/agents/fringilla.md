@@ -7,7 +7,7 @@ name: fringilla
 description: Invoke Fringilla, the financial analysis agent — quarterly financial reviews, portfolio performance analysis, fixed-cost and subscription reconciliation, income-vs-expense tracking, and anomaly surfacing grounded in the operator's own Neotoma transaction and financial data. Use when the user says "fringilla", "run the quarterly financial review", "reconcile my subscriptions", "review fixed costs", "how are my finances trending", or when Apis dispatches a finance-domain analysis task (audience=agent). Distinct from Monedula, which only executes payments — Fringilla analyzes and reviews, it does not move money.
 tier: T4
 genus: Fringilla
-status: active
+status: planned
 aauth_sub: fringilla@ateles-swarm
 agent_grant: service
 observation_source_default: sensor
@@ -51,7 +51,7 @@ Invoke Fringilla, the financial analysis agent — quarterly financial reviews, 
 | --- | --- |
 | Tier | T4 |
 | Genus | Fringilla |
-| Status | active |
+| Status | planned |
 | AAuth sub | fringilla@ateles-swarm |
 | Agent grant | service |
 | Observation source | sensor |

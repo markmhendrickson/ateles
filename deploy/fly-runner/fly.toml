@@ -1,0 +1,21 @@
+# Fly app for the Ateles swarm runner (ateles#1456). Separate from the Neotoma
+# app. It has NO services and NO app-level secrets: Fly hands app secrets to
+# every machine in the app, so each job's credentials go in as machine-level
+# files instead, written by Apis through the Machines API.
+#
+# The app name and region are placeholders the operator sets (Apis reads the
+# same values from APIS_FLY_APP and APIS_FLY_REGION). Build and push the image
+# only; never `fly deploy` without --build-only, which would start a machine
+# that holds no job:
+#   fly deploy --config deploy/fly-runner/fly.toml --dockerfile deploy/fly-runner/Dockerfile \
+#     --build-only --push --image-label "$(git rev-parse --short HEAD)" .
+
+app = "REPLACE-WITH-RUNNER-APP-NAME"
+primary_region = "REPLACE-WITH-NEOTOMA-APP-REGION"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2048mb"

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 log = logging.getLogger("apis.review_panel")
 
 # Provider the security lens prefers, so its adversarial pass does not run on
-# the same model that authored the code (Cicada/Gryllus default to `claude`).
+# the same model that authored the code (Cicada defaults to `claude`).
 # Deployments that do not have a second provider authenticated can set this to
 # "" to disable the preference outright rather than eat a per-review fallback.
 _DEFAULT_SECURITY_LENS_PROVIDER = "codex"
@@ -248,7 +248,7 @@ LENSES: tuple[Lens, ...] = (
             r"bypass|escalation|exploit|cve|ghsa|hardening|sanitiz)\b",
         ),
         # Prefer a different model than the one that most often authors the
-        # code under review (Cicada/Gryllus default to the claude provider), so
+        # code under review (Cicada defaults to the claude provider), so
         # the adversarial pass does not inherit the author's priors — the
         # documented same-priors blind spot. Overridable per deployment.
         preferred_provider=_security_lens_provider(),
@@ -270,7 +270,7 @@ LENSES: tuple[Lens, ...] = (
 def select_panel(
     gate_contributors: set[str],
     changed_files: list[str],
-    max_panel: int = 4,
+    max_panel: int = 6,
     pending_gates: set[str] | None = None,
 ) -> list[Lens]:
     """
@@ -308,8 +308,10 @@ def select_panel(
             selected.append(lens)
 
     # Priority order under the cap: lenses owning a still-pending gate first
-    # (they MUST re-run to clear it), then other blocking lenses, then
-    # forward-looking. Registry order is preserved within each tier.
+    # (they MUST re-run to clear it), then security, then always-on lenses,
+    # other blocking lenses, and forward-looking lenses. This keeps qa/pm in a
+    # constrained broad-diff panel rather than letting registry order evict
+    # them before their mandatory review runs.
     gate_owners = [
         item
         for item in selected
@@ -329,15 +331,24 @@ def select_panel(
         and item.lens == "security"
         and item not in gate_owners
     ]
+    always_on = [
+        item
+        for item in selected
+        if not item.forward_looking
+        and item.always
+        and item not in gate_owners
+        and item not in security
+    ]
     other_blocking = [
         item
         for item in selected
         if not item.forward_looking
         and item not in gate_owners
         and item not in security
+        and item not in always_on
     ]
     forward = [item for item in selected if item.forward_looking]
-    panel = (gate_owners + security + other_blocking + forward)[:max_panel]
+    panel = (gate_owners + security + always_on + other_blocking + forward)[:max_panel]
     dropped = [item.lens for item in selected if item not in panel]
     if dropped:
         log.info(f"[apis] review panel capped at {max_panel}; dropped: {dropped}")

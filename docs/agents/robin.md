@@ -22,14 +22,10 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__correct
   - mcp__mcpsrv_neotoma__list_observations
   - mcp__mcpsrv_neotoma__list_recent_changes
-  - mcp__mcpsrv_neotoma__retrieve_field_provenance
   - mcp__mcpsrv_neotoma__submit_issue
   - Bash
   - Read
   - Edit
-  - Grep
-  - mcp__mcpsrv_neotoma__submit_entity
-  - "Bash(rg:*)"
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -76,7 +72,7 @@ Session compliance supervisor (formerly Luscinia; renamed 2026-06-12 for voice/A
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | robin, /robin |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__list_recent_changes, mcp__mcpsrv_neotoma__retrieve_field_provenance, mcp__mcpsrv_neotoma__submit_issue, Bash, Read, Edit, Grep, mcp__mcpsrv_neotoma__submit_entity, Bash(rg:*) |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__list_recent_changes, mcp__mcpsrv_neotoma__submit_issue, Bash, Read, Edit |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, agent_instruction, agent_action_observation, participation_record, tool_usage, tool_call_observation, workflow_run, workflow_observation, session_event, context_event, assistant_session |
 | Operational entity types | validation_result, audit_run, audit_result, compliance_pass, agent_decision, issue, neotoma_qa_finding, strategy_drift_signal |
 | Entity ID | ent_56c7f1f528c2d34a47862362 |

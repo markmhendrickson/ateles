@@ -19,14 +19,6 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__correct
   - WebSearch
   - WebFetch
-  - mcp__typefully__*
-  - "Bash(.venvs/substack/bin/python:*)"
-  - mcp__medium__*
-  - Bash
-  - "Bash(scripts/sync_posts_to_neotoma.py:*)"
-  - "Bash(scripts/generate_cover_image.py:*)"
-  - Read
-  - Write
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -94,7 +86,7 @@ Content writer and social voice. Owns long-form technical posts, build-in-public
 | AAuth sub | corvus@ateles-swarm |
 | Agent grant | service |
 | Observation source | llm_summary |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, mcp__typefully__*, Bash(.venvs/substack/bin/python:*), mcp__medium__*, Bash, Bash(scripts/sync_posts_to_neotoma.py:*), Bash(scripts/generate_cover_image.py:*), Read, Write |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, brand_voice, post, blog_post, social_post, social_post_draft, social_share_draft, social_share_schedule, tweet, social_reply, social_draft_review, post_idea, social_feedback, social_media_interaction, linkedin_interaction, social_follow_candidate, social_strategy_question, growth_strategy, target_persona, customer_development_note, competitive_analysis, analysis, post_reference, post_query, thought_leadership_content, engagement_metric |
 | Operational entity types | social_post_draft, social_share_draft, tweet, social_reply, social_share_schedule, social_post, social_follow_candidate, outreach_interaction, outreach_activity, post, strategy_drift_signal |
 | Entity ID | ent_b95bf915804ac40bba674529 |

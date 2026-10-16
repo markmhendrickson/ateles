@@ -14,16 +14,20 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -60,17 +64,65 @@ except Exception:  # lib unavailable or Neotoma unreachable at import time
     _notifier = None
 
 
-def _notify(message: str, priority: str = "info") -> None:
-    """Send via lib/notify if available; silently skip if not."""
+def _notify(
+    message: str,
+    priority: str = "info",
+    dedupe_key: str | None = None,
+    email_eligible: bool = True,
+) -> None:
+    """Send via lib/notify if available; silently skip if not.
+
+    ``dedupe_key``, when given, is forwarded to Notifier.send() so a
+    repeating, still-open condition notifies once instead of on every tick
+    (ateles#1127). See ``_clear_notify_dedupe`` to release a key once the
+    condition resolves.
+
+    ``email_eligible=False`` keeps the alert on Telegram/Apprise but out of
+    the operator's inbox, for a notification he cannot act on from the
+    message body alone (ateles#1127) — the underlying condition still has a
+    durable Neotoma record via the escalation entity this daemon files
+    separately.
+    """
     if _notifier is None:
         return
     try:
         from lib.notify import Priority
 
         p = getattr(Priority, priority.upper(), Priority.INFO)
-        _notifier.send(message, priority=p, handler="monedula")
+        _notifier.send(
+            message,
+            priority=p,
+            handler="monedula",
+            dedupe_key=dedupe_key,
+            email_eligible=email_eligible,
+        )
     except Exception:
         pass
+
+
+def _clear_notify_dedupe(dedupe_key: str) -> None:
+    """Release a dedupe key once its condition has resolved. Never raises."""
+    if _notifier is None:
+        return
+    try:
+        _notifier.clear_dedupe(dedupe_key)
+    except Exception:
+        pass
+
+
+# Stable dedupe key for the consent-channel-timeout alert (ateles#1127). Must
+# NOT vary per tick — no timestamp, no streak count, no pending-handler list —
+# or it defeats the dedupe the same way a changing message would. Scoped to
+# "monedula" + the condition name; the streak/handlers/detail still appear in
+# the message body and in the escalation entity, just not in the key.
+_CONSENT_CHANNEL_DEDUPE_KEY = "monedula:consent_channel_failed"
+
+# Same shape, different condition: a calendar-fetch outage also re-evaluates
+# on every ~15-minute tick with no dedupe today. Not observed to have fired
+# in the 2026-09-13..09-20 email audit, but the retry loop is identical in
+# structure to the consent-channel case, so it gets the same key discipline
+# rather than being left to reproduce the failure later (ateles#1127).
+_CALENDAR_FETCH_DEDUPE_KEY = "monedula:calendar_fetch_failed"
 
 
 # Activity-log channel (CyphorhinusBot observation feed).
@@ -94,6 +146,11 @@ STATE_FILE = Path(__file__).parent / ".monedula_last_run"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ALLOWED_USER_ID = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "")
+# Telegram update offset. A module constant rather than an inline path so tests
+# can isolate it: two tests reusing an update_id would otherwise consume each
+# other's message, and an empty poll reads as "no reply" — the same outcome a
+# working guard produces, which would let stale state pass for a passing test.
+TG_OFFSET_FILE = Path(__file__).parent / ".monedula_tg_offset"
 # TELEGRAM_TOPIC_MONEDULA is the thread ID for Monedula notifications.
 # Legacy alias: TELEGRAM_TOPIC_PAYMENTS is also accepted for backwards compatibility.
 TELEGRAM_TOPIC_MONEDULA = os.environ.get(
@@ -101,6 +158,14 @@ TELEGRAM_TOPIC_MONEDULA = os.environ.get(
 ) or os.environ.get("TELEGRAM_TOPIC_PAYMENTS", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
+
+# N consecutive polls with zero approvals (channel failures, not declines) that
+# trip the dead-gate alarm (ateles#554). A daily schedule means N=3 is ~3 days
+# of a channel that cannot deliver a reply at all — long enough that a single
+# transient blip does not page, short enough that it cannot go unnoticed for
+# the ten weeks the real incident ran.
+MONEDULA_DEAD_GATE_THRESHOLD = int(os.environ.get("MONEDULA_DEAD_GATE_THRESHOLD", "3"))
+GATE_HEALTH_FILE = Path(__file__).parent / ".monedula_gate_health"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -367,7 +432,7 @@ def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
         log.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — cannot poll")
         return None
 
-    offset_file = Path(__file__).parent / ".monedula_tg_offset"
+    offset_file = TG_OFFSET_FILE
     offset = 0
     if offset_file.exists():
         try:
@@ -431,6 +496,526 @@ def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
 
     log.info("Telegram poll timed out — no reply received")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Structured poll outcome (ateles#554)
+#
+# `telegram_long_poll_once` above collapses three operationally distinct
+# situations into one `None`: no credentials, a channel error (HTTP 409
+# Conflict — another process holding the bot token's long-poll — or any other
+# transport failure), and a genuine timeout with no reply. `main()` cannot
+# branch on the difference, so a permanently broken gate and a legitimate
+# "no reply yet" looked identical, and both looked identical to an explicit
+# operator decline once `_parse_reply` turned the `None` into an empty set.
+#
+# `telegram_poll_approval` is the structured replacement `main()` now uses.
+# `telegram_long_poll_once` is kept as-is (same retry-to-deadline behaviour,
+# same tests) because it is still a reasonable "just give me text or None"
+# primitive and rewriting it in place would have made the diff harder to
+# review for a payment path; `telegram_poll_approval` is a thin layer above
+# it plus the 409 short-circuit and the explicit channel-error/timeout split.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TelegramPollResult:
+    """Outcome of one `telegram_poll_approval` call.
+
+    kind:
+      "reply"         — a matching message arrived; `text` is set.
+      "timeout"       — the poll ran to its deadline with no channel error and
+                         no matching message. Not proof the operator declined
+                         (they may not have seen the prompt) — treated as a
+                         channel failure per #554, same as `channel_error`.
+      "channel_error" — missing credentials, an HTTP error (409 Conflict
+                         chief among them — the actual production failure),
+                         a transport failure, or a malformed/`ok:false`
+                         Telegram response.
+    """
+
+    kind: str  # "reply" | "timeout" | "channel_error"
+    text: str | None = None
+    error_code: int | None = None
+    error_detail: str = ""
+
+
+def _resolve_operator_principal() -> tuple[int | None, str]:
+    """Resolve the Telegram user id permitted to authorize a payment.
+
+    Returns `(user_id, "")` on success, or `(None, reason)` when no principal
+    can be resolved — in which case the caller MUST refuse to accept any reply.
+
+    FAIL CLOSED. `TELEGRAM_ALLOWED_USER_ID` unset previously meant "accept
+    anyone": the guard read `if allowed_user_id and user_id != allowed_user_id`,
+    so an unset value short-circuited the comparison and every member of the
+    chat could authorize an irreversible transfer. Monedula posts into a group
+    topic, so that is a real set of people, not a theoretical one.
+
+    Absence of a configured principal is the ABSENCE of authority, never a
+    wildcard — `docs/foundation/authority_model.md#approval`: resolution is
+    authorized against the required approvers, not accepted from whoever writes
+    the status. A non-numeric value is likewise a misconfiguration, and is
+    caught here rather than raising ValueError out of the poll loop.
+    """
+    raw = (TELEGRAM_ALLOWED_USER_ID or "").strip()
+    if not raw:
+        return None, ("operator principal not configured "
+                      "(TELEGRAM_ALLOWED_USER_ID unset)")
+    try:
+        return int(raw), ""
+    except ValueError:
+        return None, ("operator principal malformed "
+                      "(TELEGRAM_ALLOWED_USER_ID is not a numeric user id)")
+
+
+def telegram_poll_approval(timeout_sec: int = 120) -> TelegramPollResult:
+    """Long-poll Telegram getUpdates for an approval reply.
+
+    Structured sibling of `telegram_long_poll_once`. A 409 Conflict (another
+    process — Cyphorhinus — already holds this bot token's long-poll, per the
+    #554 investigation) short-circuits immediately rather than retrying to the
+    deadline: retrying cannot win a single-consumer lock held elsewhere, and
+    burning the full timeout on a lock we cannot acquire only delays the
+    escalation that should fire instead.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error(
+            "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — channel_error, cannot poll"
+        )
+        return TelegramPollResult(
+            kind="channel_error", error_detail="missing_bot_token_or_chat_id"
+        )
+
+    offset_file = TG_OFFSET_FILE
+    offset = 0
+    if offset_file.exists():
+        try:
+            offset = int(offset_file.read_text().strip())
+        except ValueError:
+            offset = 0
+
+    allowed_user_id, principal_error = _resolve_operator_principal()
+    if allowed_user_id is None:
+        # Refuse BEFORE polling. There is no principal who could approve, so a
+        # reply cannot be authorized no matter what it says. Surfacing this as
+        # channel_error (not timeout) keeps #554's core promise: a gate that
+        # cannot ask must be loud, never silently indistinguishable from an
+        # operator who declined.
+        log.error(f"Telegram channel_error: {principal_error} — refusing to "
+                  "accept any approval (fail closed)")
+        return TelegramPollResult(
+            kind="channel_error", error_detail=principal_error
+        )
+
+    deadline = time.monotonic() + timeout_sec
+    chat_id = int(TELEGRAM_CHAT_ID)
+
+    log.info(
+        f"Polling Telegram for approval (timeout={timeout_sec}s, offset={offset})..."
+    )
+
+    while time.monotonic() < deadline:
+        remaining = int(deadline - time.monotonic())
+        if remaining <= 0:
+            break
+
+        poll_timeout = min(remaining, 30)  # max 30s per request
+        url = (
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+            f"?offset={offset}&timeout={poll_timeout}&allowed_updates=message"
+        )
+
+        try:
+            with urllib.request.urlopen(url, timeout=poll_timeout + 5) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            # 409 Conflict is the diagnosed production failure (#554,
+            # daemon_report ent_71b2ad5e84a9597b56b570e3): a second consumer
+            # (Cyphorhinus) holds this bot token's getUpdates. Short-circuit
+            # rather than retrying — we cannot win a lock held elsewhere, and
+            # every second spent retrying is a second the operator does not
+            # know the channel is down.
+            log.warning(
+                f"Telegram channel_error status={exc.code} {exc.reason} — "
+                "not retrying (likely single-consumer conflict)"
+            )
+            return TelegramPollResult(
+                kind="channel_error",
+                error_code=exc.code,
+                error_detail=f"HTTPError {exc.code}: {exc.reason}",
+            )
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            log.warning(f"Telegram getUpdates request failed: {exc} — retrying")
+            time.sleep(2)
+            continue
+        except json.JSONDecodeError as exc:
+            log.warning(f"Telegram getUpdates JSON parse error: {exc}")
+            time.sleep(2)
+            continue
+
+        if data.get("ok") is False:
+            log.warning(f"Telegram getUpdates returned ok=false: {data!r}")
+            return TelegramPollResult(
+                kind="channel_error", error_detail=f"ok=false: {data!r}"
+            )
+
+        updates = data.get("result") or []
+        for update in updates:
+            update_id = update.get("update_id", 0)
+            offset = max(offset, update_id + 1)
+            offset_file.write_text(str(offset))
+
+            msg = update.get("message") or {}
+            from_user = msg.get("from") or {}
+            msg_chat = msg.get("chat") or {}
+            user_id = from_user.get("id")
+            msg_chat_id = msg_chat.get("id")
+
+            # Filter to correct chat and the operator principal. Both
+            # comparisons are POSITIVE: `user_id` is None for a channel post
+            # (Telegram omits `from`), and an unverifiable sender must take the
+            # restrictive branch rather than compare equal to anything.
+            if msg_chat_id != chat_id:
+                continue
+            if user_id is None or user_id != allowed_user_id:
+                log.warning(
+                    f"Ignoring Telegram message from non-operator sender "
+                    f"(user_id={user_id!r}) — not an approval")
+                continue
+
+            text = (msg.get("text") or "").strip()
+            if text:
+                log.info(f"Received Telegram reply: {text!r}")
+                return TelegramPollResult(kind="reply", text=text)
+
+        if not updates:
+            # A real Telegram long-poll blocks server-side for ~poll_timeout
+            # before returning an empty result, so this loop is naturally
+            # throttled in production. But an empty `ok:true` response that
+            # returns instantly (a fast intermediary, a misbehaving proxy) has
+            # no other pacing in this branch — guard against a tight
+            # zero-sleep spin explicitly rather than relying on that
+            # incidental blocking.
+            time.sleep(1)
+
+    log.info("Telegram poll timed out — no reply received (channel failure, not decline)")
+    return TelegramPollResult(kind="timeout", error_detail="poll_deadline_exceeded")
+
+
+# ---------------------------------------------------------------------------
+# Gate health: dead-gate detector (ateles#554)
+#
+# A single channel failure escalates on its own (see `_emit_consent_escalation`
+# below). This tracks CONSECUTIVE failures across runs — a channel that never
+# once succeeds is a distinct, worse condition than one bad night, and it is
+# what actually happened: 480 consecutive zero-approval polls over ten weeks.
+# ---------------------------------------------------------------------------
+
+
+def _load_gate_health(path: Path | None = None) -> dict:
+    # `path` deliberately defaults to None rather than the module-level
+    # GATE_HEALTH_FILE: a mutable default is bound at function-definition
+    # time, so `monkeypatch.setattr(monedula, "GATE_HEALTH_FILE", tmp_path)`
+    # in a test would silently not redirect these functions. Reading the
+    # module global at call time is what makes the monkeypatch (and any
+    # runtime override) actually take effect.
+    if path is None:
+        path = GATE_HEALTH_FILE
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"consecutive_channel_failures": 0}
+
+
+def _save_gate_health(state: dict, path: Path | None = None) -> None:
+    if path is None:
+        path = GATE_HEALTH_FILE
+    try:
+        path.write_text(json.dumps(state, indent=2, sort_keys=True))
+    except OSError as exc:
+        log.warning(f"could not persist gate health state: {exc}")
+
+
+def _record_gate_failure(kind: str, *, path: Path | None = None) -> int:
+    """Bump the consecutive-failure streak. Returns the new streak length."""
+    if path is None:
+        path = GATE_HEALTH_FILE
+    state = _load_gate_health(path)
+    streak = int(state.get("consecutive_channel_failures", 0)) + 1
+    state["consecutive_channel_failures"] = streak
+    state["last_failure_kind"] = kind
+    state["last_failure_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _save_gate_health(state, path)
+    return streak
+
+
+def _reset_gate_failure_streak(*, path: Path | None = None) -> None:
+    """Any reply — approved or declined — proves the channel works. Reset."""
+    if path is None:
+        path = GATE_HEALTH_FILE
+    state = _load_gate_health(path)
+    if state.get("consecutive_channel_failures"):
+        state["consecutive_channel_failures"] = 0
+        _save_gate_health(state, path)
+
+
+# ---------------------------------------------------------------------------
+# Escalation writer (ateles#554)
+# ---------------------------------------------------------------------------
+
+
+def _post_escalation_entity(entity: dict, idempotency_key: str) -> bool:
+    """POST one escalation entity to Neotoma. Returns True on success.
+
+    Non-fatal on failure by design: a channel failure must still block
+    payment and still notify best-effort even when Neotoma itself is
+    unreachable. Mirrors `strandings._post_escalation`.
+    """
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
+    bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
+    if not base_url:
+        log.error("NEOTOMA_BASE_URL unset — cannot record consent-gate escalation")
+        return False
+
+    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
+    body = json.dumps(
+        {
+            "entities": [entity],
+            "idempotency_key": idempotency_key,
+            "observation_source": "workflow_state",
+        }
+    ).encode("utf-8")
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if bearer and not is_loopback:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    req = urllib.request.Request(
+        f"{base_url}/store", data=body, method="POST", headers=headers
+    )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+        return True
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        log.error(f"consent-gate escalation write FAILED: {exc}")
+        return False
+
+
+def _emit_consent_escalation(
+    result: Any,
+    *,
+    pending_handler_names: list[str],
+    yesterday_str: str,
+    gate_failure_streak: int,
+) -> bool:
+    """Escalate a consent-channel failure to Neotoma.
+
+    ``result`` is channel-agnostic: any object with ``kind``, ``error_code``,
+    and ``error_detail`` attributes (TelegramPollResult, or a SimpleNamespace
+    from the email path). Never carries payee names, IBANs, addresses, or
+    amounts — only handler labels and channel-failure diagnostics.
+    """
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    is_dead_gate = gate_failure_streak >= MONEDULA_DEAD_GATE_THRESHOLD
+    escalation_type = (
+        "monedula_dead_consent_gate"
+        if is_dead_gate
+        else "monedula_consent_channel_failure"
+    )
+    severity = "critical" if is_dead_gate else "error"
+
+    kind = getattr(result, "kind", "channel_error")
+    error_code = getattr(result, "error_code", None)
+    error_detail = getattr(result, "error_detail", "")
+    detail = (
+        f"kind={kind} error_code={error_code} "
+        f"detail={error_detail!r} consecutive_failures={gate_failure_streak} "
+        f"pending_handlers={pending_handler_names} payment_date={yesterday_str}"
+    )
+    entity = {
+        "entity_type": "escalation",
+        "title": (
+            "Monedula consent gate cannot ask for approval"
+            if not is_dead_gate
+            else f"Monedula consent gate DEAD — {gate_failure_streak} consecutive failures"
+        ),
+        "body": (
+            f"Monedula's consent channel failed while payments were "
+            f"pending. Payment is BLOCKED (fail-closed) — nothing was executed.\n\n"
+            f"{detail}\n\n"
+            f"This is a channel failure, not an operator decline: the operator "
+            f"was never able to see or respond to the approval prompt.\n\n"
+            + (
+                f"This is the {gate_failure_streak}th consecutive run with zero "
+                f"approvals — the gate has not worked at all across that span. "
+                f"See daemon_report ent_71b2ad5e84a9597b56b570e3 for the known "
+                f"Telegram getUpdates single-consumer conflict when Telegram "
+                f"break-glass is selected.\n\n"
+                if is_dead_gate
+                else ""
+            )
+            + "Escalated by the Monedula payment daemon."
+        ),
+        "severity": severity,
+        "source_agent": "monedula@ateles-swarm",
+        "source_entity_type": "consent_gate",
+        "status": "open",
+        "tags": ["monedula", "payments", "consent_gate", escalation_type],
+    }
+    idempotency_key = f"monedula-{escalation_type}-{today}"
+    return _post_escalation_entity(entity, idempotency_key)
+
+
+def _resolve_consent_channel() -> tuple[str | None, str]:
+    """Select email vs Telegram consent channel from config.
+
+    Returns ``(channel, source)`` where channel is ``\"email\"`` | ``\"telegram\"``
+    | ``None`` (misconfigured) and source is ``env`` | ``binding`` | ``automatic``.
+
+    Order: explicit ``MONEDULA_CONSENT_CHANNEL`` → optional vendor_binding
+    (fall-through only; Monedula has no loader on main today) → automatic
+    (email when Telegram creds absent and lib.approval email armed; else
+    Telegram when both creds + operator principal resolve).
+    """
+    override = (os.environ.get("MONEDULA_CONSENT_CHANNEL") or "").strip().lower()
+    if override in ("email", "telegram"):
+        return override, "env"
+
+    # Binding fall-through: no inventing defaults. A future loader may set
+    # source=binding when a concrete value is read; absent today → continue.
+    tg_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    tg_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+
+    if not tg_token or not tg_chat:
+        try:
+            from lib.approval.email_channel import email_enabled, operator_email
+
+            if email_enabled() and operator_email():
+                return "email", "automatic"
+        except Exception:
+            pass
+        missing = []
+        if not tg_token:
+            missing.append("TELEGRAM_BOT_TOKEN")
+        if not tg_chat:
+            missing.append("TELEGRAM_CHAT_ID")
+        # Also note email arming fields when automatic email could not select.
+        return None, "automatic"
+
+    # Both Telegram creds present.
+    principal, err = _resolve_operator_principal()
+    if principal is not None:
+        return "telegram", "automatic"
+    # Telegram creds present but principal broken — try email fallback before
+    # declaring unconfigured, so email can still be selected when armed.
+    try:
+        from lib.approval.email_channel import email_enabled, operator_email
+
+        if email_enabled() and operator_email():
+            return "email", "automatic"
+    except Exception:
+        pass
+    return None, "automatic"
+
+
+def _consent_failure_notify_body(
+    *,
+    reason_code: str,
+    pending_summaries: list[str],
+    recovery_hint: str,
+) -> str:
+    """Actionable consent-channel-failure alert body (ateles#1178)."""
+    pending = "; ".join(pending_summaries) if pending_summaries else "(none)"
+    return (
+        f"monedula: consent channel failed ({reason_code}). "
+        f"Pending: {pending}. "
+        f"No payment moved. "
+        f"Recovery: {recovery_hint}. "
+        f"Payments BLOCKED, not declined."
+    )
+
+
+_UNKNOWN_OUTCOME_DEDUPE_PREFIX = "monedula:payment_outcome_unknown"
+
+# Email consent held because no separate swarm mailbox is configured
+# (ateles#1221). Stable, so a standing gap alerts once, not every tick.
+_NEEDS_SWARM_MAILBOX_DEDUPE_KEY = "monedula:consent_email_needs_swarm_mailbox"
+
+
+def _notify_unauthenticated_reply(
+    message: str,
+    dedupe_key: str,
+    *,
+    handler_names: list[str],
+    yesterday_str: str,
+) -> None:
+    """A reply from the operator's address failed authentication.
+
+    Records an escalation and tells the operator the reply was received but
+    NOT accepted, so it is never mistaken for "no reply yet". Payments stay
+    held. ``consent_email`` calls this at most once per consent request; the
+    Notifier key and the escalation idempotency key carry the same identity.
+    Never carries addresses, amounts or message content.
+    """
+    entity = {
+        "entity_type": "escalation",
+        "title": "Monedula consent reply received but not authenticated",
+        "body": (
+            "A reply to a Monedula payment consent request came from the "
+            "operator's address but could not be authenticated, so it was not "
+            "accepted. No payment was made; payments stay held.\n\n"
+            f"pending_handlers={handler_names} payment_date={yesterday_str}\n\n"
+            "Check that the reply came from the operator's own mailbox, that "
+            "ATELES_SWARM_GWS_CONFIG_DIR is signed in as the swarm mailbox, and "
+            "that ATELES_MAIL_AUTHSERV_ID matches its provider.\n\n"
+            "Escalated by the Monedula payment daemon."
+        ),
+        "severity": "warning",
+        "source_agent": "monedula@ateles-swarm",
+        "source_entity_type": "consent_gate",
+        "status": "open",
+        "tags": ["monedula", "payments", "consent_gate", "consent_reply_unauthenticated"],
+    }
+    _post_escalation_entity(entity, dedupe_key.replace(":", "-"))
+    _notify(
+        message,
+        priority="blocker",
+        dedupe_key=dedupe_key,
+        email_eligible=True,
+    )
+
+
+def _notify_unknown_outcome(labels: list[str], yesterday_str: str) -> None:
+    """Escalate payments whose transfer was attempted but whose outcome was
+    never recorded (docs/foundation/payments.md, the unknown case).
+
+    Held, never retried automatically: the operator reads the rail and
+    decides. Deduped per set of held items so a standing hold alerts once.
+    """
+    held = sorted(set(labels))
+    digest = hashlib.sha256("|".join(held).encode()).hexdigest()[:12]
+    _notify(
+        f"monedula: payment outcome UNKNOWN for {yesterday_str}: {', '.join(held)}. "
+        "A transfer was attempted and its result was never recorded, so it may "
+        "or may not have been paid. Held — Monedula will NOT retry it. "
+        "Check the payment rail for this payment before doing anything; do not "
+        "pay it manually until the rail shows it did not land.",
+        priority="blocker",
+        dedupe_key=f"{_UNKNOWN_OUTCOME_DEDUPE_PREFIX}:{digest}",
+        email_eligible=True,
+    )
+
+
+def _pending_summaries(triggered: list) -> list[str]:
+    out: list[str] = []
+    for handler, _matches in triggered:
+        profile = getattr(handler, "profile", None)
+        label = getattr(profile, "label", None) or handler.name
+        amount = getattr(profile, "amount_eur", "?")
+        out.append(f"{handler.name}/{label}/EUR {amount}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +1160,11 @@ def escalate_strandings(strandings: list) -> list:
     try:
         from strandings import escalate
 
-        return escalate(strandings, notify=_notify)
+        return escalate(
+            strandings,
+            notify=_notify,
+            clear_dedupe=_clear_notify_dedupe,
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception(f"could not escalate stranded payment profiles: {exc}")
         return []
@@ -589,10 +1178,18 @@ def escalate_strandings(strandings: list) -> list:
 def main() -> bool:
     """Run one Monedula tick. Returns True for a clean run.
 
-    Returns False when an ACTIVE payment profile was stranded — i.e. a payment
-    that should have been possible was not. The entrypoint turns that into a
-    non-zero exit, so a run that could not pay no longer looks to launchd (or
-    to anyone reading the log) exactly like a run with nothing to do.
+    Returns False when an ACTIVE payment profile was stranded (ateles#553) OR
+    when the Telegram consent channel failed while a payment was pending
+    (ateles#554) — i.e. a payment that should have been possible, or should
+    have at least been askable, was not. Both are availability failures, not
+    payment-safety failures: no money moves in either case. The entrypoint
+    turns a False return into a non-zero exit, so a run that could not pay —
+    or could not even ask — no longer looks to launchd (or to anyone reading
+    the log) exactly like a run with nothing to do.
+
+    An explicit operator DECLINE (a real reply saying no, or one that fails to
+    name an attended session) is not a failure: it returns True and exits 0,
+    same as always. Only the inability to ask is treated as broken.
     """
     log.info("Monedula starting.")
 
@@ -632,6 +1229,7 @@ def main() -> bool:
     # Now the guard scopes to the calendar fetch, and one-offs are evaluated
     # on every ~15-minute tick.
     calendar_done = _check_already_ran_today()
+    calendar_fetch_ok = False
     if calendar_done:
         log.info("Calendar leg already ran today — one-off profiles only.")
         events: list | None = []
@@ -662,15 +1260,20 @@ def main() -> bool:
                 f"monedula: calendar fetch failed for {yesterday_str} — "
                 "recurring payment detection is DOWN; will retry next tick",
                 priority="blocker",
+                dedupe_key=_CALENDAR_FETCH_DEDUPE_KEY,
             )
             # Do NOT return: a calendar outage says nothing about whether an
             # invoice is due. Recurring payments are skipped this tick (no
             # events to attend-gate against), one-offs continue below.
             events = []
+            calendar_fetch_ok = False
         else:
-            # Calendar fetch succeeded — claim the day so concurrent launchd
-            # re-launches (and later ticks) skip the calendar leg.
-            _mark_ran_today()
+            # Fetch succeeded. Defer the daily claim until we know whether any
+            # calendar payments still need consent (email replies arrive on a
+            # later tick). Claiming here made later ticks see events=[] and
+            # clear consent state before the operator replied (ateles#1178).
+            calendar_fetch_ok = True
+            _clear_notify_dedupe(_CALENDAR_FETCH_DEDUPE_KEY)
 
     # Find triggered handlers from calendar
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
@@ -681,6 +1284,9 @@ def main() -> bool:
 
     if triggered:
         log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
+    elif calendar_fetch_ok:
+        # Successful fetch, nothing calendar-triggered — claim the day now.
+        _mark_ran_today()
 
     # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
     due_tasks = fetch_due_payment_tasks(all_handlers)
@@ -690,6 +1296,14 @@ def main() -> bool:
         log.info(
             "No payment handlers triggered and no due payment tasks — nothing to do."
         )
+        # Empty pending set: clear consent fingerprint + consent-failure dedupe.
+        try:
+            from consent_email import clear_consent_state
+
+            clear_consent_state()
+        except Exception:
+            pass
+        _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
         return not strandings
 
     if not triggered:
@@ -697,20 +1311,366 @@ def main() -> bool:
             "No calendar-triggered payments, but due payment tasks found — sending reminder only."
         )
 
-    # Build and send preview
+    # If there are only task reminders (no actionable calendar payments), don't wait for approval.
+    if not triggered:
+        # Reminder-only path: still use channel when Telegram break-glass is selected,
+        # otherwise skip Telegram preview when email is the consent default.
+        channel, source = _resolve_consent_channel()
+        log.info(f"consent_channel_selected channel={channel} source={source}")
+        if channel == "telegram":
+            preview_msg = _build_preview_message(
+                triggered, yesterday_str, due_tasks=due_tasks
+            )
+            log.info("Sending payment preview to Telegram...")
+            telegram_send(preview_msg)
+        log.info("Task reminders sent — no calendar payments to approve. Done.")
+        try:
+            from consent_email import clear_consent_state
+
+            clear_consent_state()
+        except Exception:
+            pass
+        _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+        return not strandings
+
+    # ── Consent: email (default when Telegram absent) or Telegram break-glass ──
+    channel, source = _resolve_consent_channel()
+    configured = []
+    missing = []
+    for name in (
+        "MONEDULA_CONSENT_CHANNEL",
+        "ATELES_NOTIFY_EMAIL",
+        "OPERATOR_EMAIL",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "TELEGRAM_ALLOWED_USER_ID",
+    ):
+        if (os.environ.get(name) or "").strip():
+            configured.append(name)
+        else:
+            missing.append(name)
+    log.info(
+        f"consent_channel_selected channel={channel} source={source} "
+        f"configured_fields={configured} missing_fields={missing}"
+    )
+
+    handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
+    summaries = _pending_summaries(triggered)
+
+    if channel is None:
+        streak = _record_gate_failure("consent_channel_unconfigured")
+        log.error(
+            "consent_channel_unconfigured — naming missing fields only; "
+            f"missing_fields={missing} — blocking payments, not silent no-op."
+        )
+        failure = types.SimpleNamespace(
+            kind="channel_error",
+            error_code=None,
+            error_detail="consent_channel_unconfigured",
+        )
+        _emit_consent_escalation(
+            failure,
+            pending_handler_names=handler_names,
+            yesterday_str=yesterday_str,
+            gate_failure_streak=streak,
+        )
+        _notify(
+            _consent_failure_notify_body(
+                reason_code="consent_channel_unconfigured",
+                pending_summaries=summaries,
+                recovery_hint=(
+                    "set MONEDULA_CONSENT_CHANNEL=email and arm ATELES_NOTIFY_EMAIL=1 "
+                    "plus OPERATOR_EMAIL, or set Telegram break-glass vars"
+                ),
+            ),
+            priority="blocker",
+            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            email_eligible=True,
+        )
+        return False
+
+    if channel == "telegram" and calendar_fetch_ok:
+        # Break-glass polls in the same tick — claim the calendar leg now
+        # (email path defers the claim until consent is terminal).
+        _mark_ran_today()
+
+    if channel == "email":
+        import payment_journal
+        from consent_email import (
+            needs_swarm_mailbox_hint,
+            REASON_NEEDS_SWARM_MAILBOX,
+            clear_consent_state,
+            journal_path,
+            match_key,
+            obligation_key,
+            request_and_collect,
+        )
+
+        consent = request_and_collect(
+            triggered,
+            yesterday_str,
+            clear_failure_dedupe=lambda: _clear_notify_dedupe(
+                _CONSENT_CHANNEL_DEDUPE_KEY
+            ),
+            on_unauthenticated_reply=lambda msg, key: _notify_unauthenticated_reply(
+                msg, key, handler_names=handler_names, yesterday_str=yesterday_str
+            ),
+        )
+        if consent.reason_code != REASON_NEEDS_SWARM_MAILBOX:
+            _clear_notify_dedupe(_NEEDS_SWARM_MAILBOX_DEDUPE_KEY)
+        if not consent.channel_ok:
+            reason = consent.reason_code or "consent_request_send_failed"
+            streak = _record_gate_failure(reason)
+            failure = types.SimpleNamespace(
+                kind="channel_error",
+                error_code=None,
+                error_detail=reason,
+            )
+            _emit_consent_escalation(
+                failure,
+                pending_handler_names=handler_names,
+                yesterday_str=yesterday_str,
+                gate_failure_streak=streak,
+            )
+            recovery = {
+                "consent_request_send_failed": (
+                    "request not delivered; next tick retries; check gws gmail +send"
+                ),
+                "consent_reply_read_failed": (
+                    "replies could not be checked; check gws/mailbox; no payment executed"
+                ),
+                "payment_journal_unreadable": (
+                    "the payment journal could not be read or written; no payment "
+                    "executed; inspect it before anything is paid"
+                ),
+                REASON_NEEDS_SWARM_MAILBOX: needs_swarm_mailbox_hint(),
+            }.get(reason, "arm ATELES_NOTIFY_EMAIL/OPERATOR_EMAIL or reply to consent thread")
+            _notify(
+                _consent_failure_notify_body(
+                    reason_code=reason,
+                    pending_summaries=summaries,
+                    recovery_hint=recovery,
+                ),
+                priority="blocker",
+                # A standing config gap gets its own key so an earlier,
+                # unrelated channel alert cannot suppress it (and vice versa).
+                dedupe_key=(
+                    _NEEDS_SWARM_MAILBOX_DEDUPE_KEY
+                    if reason == REASON_NEEDS_SWARM_MAILBOX
+                    else _CONSENT_CHANNEL_DEDUPE_KEY
+                ),
+                email_eligible=True,
+            )
+            # Leave day unclaimed so the next tick retries send/read.
+            return False
+
+        # Durable, obligation-keyed ordering (docs/foundation/payments.md):
+        # record intent → execute → record outcome. Intent without an outcome
+        # is UNKNOWN: held and escalated, never retried automatically.
+        jpath = journal_path()
+
+        def _journal_failure(detail: str) -> bool:
+            log.error(f"payment_journal_unreadable — payments held: {detail}")
+            _notify(
+                "monedula: payment journal could not be read or written "
+                "(payment_journal_unreadable). No further payment will execute "
+                "until it is readable. Inspect the journal before anything is paid.",
+                priority="blocker",
+                dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+                email_eligible=True,
+            )
+            return False
+
+        all_results = []
+        newly_executed: set[str] = set()
+        settled: set[str] = set()  # obligation already has a recorded outcome
+        unknown: list[str] = []  # intent recorded, outcome never recorded
+        terms_changed: set[str] = set()
+        for item in consent.pending_items:
+            key = match_key(item)
+            label = f"{item.handler_name}:{item.match_id or 'solo'}"
+            try:
+                journal = payment_journal.load(jpath)
+            except payment_journal.JournalError as exc:
+                return _journal_failure(str(exc))
+            state = payment_journal.obligation_state(journal, item.obligation)
+            if state == payment_journal.STATE_DONE:
+                log.info(f"Already paid {label} — at-most-once skip.")
+                settled.add(key)
+                continue
+            if state == payment_journal.STATE_INTENT:
+                log.error(
+                    f"payment_outcome_unknown {label} — a transfer was attempted "
+                    "and its outcome was never recorded; holding, not retrying."
+                )
+                unknown.append(label)
+                continue
+            if key not in consent.approved:
+                if key in consent.skipped:
+                    log.info(f"Skipping {label} (operator SKIP).")
+                else:
+                    log.info(f"Holding {label} (awaiting_approval).")
+                continue
+            if payment_journal.token_consumed(journal, key):
+                log.error(f"Approval for {label} already consumed — holding.")
+                unknown.append(label)
+                continue
+            handler = item.handler
+            match = item.match
+            # Execute-time term check: the obligation the live handler would
+            # pay must be exactly the one the operator approved.
+            current = obligation_key(handler, item.payment_date, item.match_id)
+            if current != item.obligation:
+                log.warning(
+                    f"consent_terms_changed {label} — approval does not cover the "
+                    "current payee/amount; holding and re-requesting."
+                )
+                terms_changed.add(key)
+                continue
+            try:
+                payment_journal.record_intent(
+                    jpath, item.obligation, key, generation=item.generation
+                )
+            except payment_journal.JournalError as exc:
+                return _journal_failure(str(exc))
+            log.info(f"Executing {label} payment...")
+            _job = (
+                _activity.started(f"executing {handler.name} payment")
+                if _activity
+                else None
+            )
+            try:
+                result = handler.execute(match)
+            except Exception as _exc:
+                # The rail may or may not have moved money. The intent stays
+                # without an outcome, which the next tick holds as unknown.
+                if _job:
+                    _job.failed(
+                        f"{handler.name} payment error: {type(_exc).__name__}"
+                    )
+                unknown.append(label)
+                _notify_unknown_outcome(unknown, yesterday_str)
+                raise
+            status = (
+                str(result.get("status") or "unreported")
+                if isinstance(result, dict)
+                else "unreported"
+            )
+            try:
+                payment_journal.record_outcome(jpath, item.obligation, status)
+            except payment_journal.JournalError as exc:
+                unknown.append(label)
+                _notify_unknown_outcome(unknown, yesterday_str)
+                return _journal_failure(str(exc))
+            all_results.append((handler, result))
+            newly_executed.add(key)
+            log.info(f"{label} result: {result}")
+            if _job:
+                _job.finished(f"{handler.name} payment executed")
+
+        if newly_executed:
+            _reset_gate_failure_streak()
+            _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+
+        if unknown:
+            _notify_unknown_outcome(unknown, yesterday_str)
+
+        if terms_changed:
+            # Drop the outstanding request so the next tick re-asks on the
+            # current terms under a fresh generation.
+            clear_consent_state()
+
+        terminal = settled | newly_executed | consent.skipped
+        still_open = any(match_key(i) not in terminal for i in consent.pending_items)
+        if still_open:
+            log.info(
+                f"Email consent: awaiting={sorted(consent.awaiting)} "
+                f"skipped={sorted(consent.skipped)} "
+                f"approved={sorted(consent.approved)} "
+                f"unknown_outcome={len(unknown)} "
+                f"executed_this_tick={len(newly_executed)} "
+                f"— calendar leg stays unclaimed for later ticks."
+            )
+            return not strandings and not unknown
+
+        # Every match is terminal (approved or skipped). Claim the day and
+        # clear the fingerprint so a future pending set can re-email.
+        _mark_ran_today()
+        clear_consent_state()
+        _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+        if not consent.approved and not newly_executed and not settled:
+            log.info(
+                f"Email consent: all skipped "
+                f"(skipped={sorted(consent.skipped)}) — no execute."
+            )
+        elif not all_results and not newly_executed:
+            log.info("Email consent: no new payments executed this tick.")
+        else:
+            log.info("Monedula email-consent run complete.")
+        return not strandings
+
+    # channel == "telegram" — break-glass path (unchanged attendance phrases)
     preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
     log.info("Sending payment preview to Telegram...")
     telegram_send(preview_msg)
 
-    # If there are only task reminders (no actionable calendar payments), don't wait for approval.
-    if not triggered:
-        log.info("Task reminders sent — no calendar payments to approve. Done.")
-        return not strandings
-
     # Wait for operator reply (2 minutes)
-    reply = telegram_long_poll_once(timeout_sec=120)
+    poll_result = telegram_poll_approval(timeout_sec=120)
 
-    handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
+    if poll_result.kind in ("channel_error", "timeout"):
+        # Channel failure, NOT a decline. Fail closed (no execute, same as a
+        # decline) but make it LOUD instead of logging the byte-identical
+        # "No payments approved" line a decline would produce (ateles#554):
+        # that indistinguishability is precisely why a 0/480 gate went
+        # unnoticed for ten weeks.
+        streak = _record_gate_failure(poll_result.kind)
+        log.error(
+            f"Consent channel failed (kind={poll_result.kind}, "
+            f"error_code={poll_result.error_code}, "
+            f"detail={poll_result.error_detail!r}, "
+            f"consecutive_failures={streak}) — blocking payments, NOT treating "
+            "as a decline."
+        )
+        escalated = _emit_consent_escalation(
+            poll_result,
+            pending_handler_names=handler_names,
+            yesterday_str=yesterday_str,
+            gate_failure_streak=streak,
+        )
+        if not escalated:
+            log.error(
+                "consent-gate escalation could not be written to Neotoma — "
+                "still blocking payment and notifying best-effort."
+            )
+        _notify(
+            _consent_failure_notify_body(
+                reason_code=poll_result.kind,
+                pending_summaries=summaries,
+                recovery_hint=(
+                    "check Telegram break-glass vars or switch to email consent "
+                    "(MONEDULA_CONSENT_CHANNEL=email, ATELES_NOTIFY_EMAIL=1, OPERATOR_EMAIL)"
+                ),
+            ),
+            priority="blocker",
+            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            email_eligible=True,
+        )
+        # Do NOT also call telegram_send here. `_notify` already routes BLOCKER
+        # to Telegram via Apprise; a parallel telegram_send double-fires on the
+        # first tick and bypasses the dedupe journal on every later tick while
+        # the condition stays open (ateles#1128 / Falco).
+        return False
+
+    # poll_result.kind == "reply" from here — a genuine reply arrived, so the
+    # channel demonstrably works. Any reply (including a decline) resets the
+    # dead-gate streak: it proves the operator could see and respond to the
+    # prompt, which is the property the streak exists to detect the absence of.
+    _reset_gate_failure_streak()
+    # The channel is demonstrably working again — release the dedupe key so a
+    # FUTURE timeout (a genuine recurrence, not a continuation of this one)
+    # notifies instead of staying silently suppressed forever (ateles#1127).
+    _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)
+    reply = poll_result.text
     approved = _parse_reply(reply, handler_names)
 
     if not approved:
@@ -769,12 +1729,15 @@ if __name__ == "__main__":
         if clean:
             _notify("monedula run complete", priority="info")
         else:
-            # A stranded profile means a payment did not happen. Exiting 0
-            # here is what let sixteen consecutive days of this read as
-            # sixteen clean runs (ateles#553).
+            # False covers two distinct availability failures: a stranded
+            # payment profile (ateles#553) and a Telegram consent-channel
+            # failure while a payment was pending (ateles#554). Either way, a
+            # payment that should have been possible — or askable — was not.
+            # Exiting 0 here is what let sixteen consecutive days of #553 and
+            # ten weeks of #554 read as clean runs.
             log.error(
-                "Monedula run completed with STRANDED payment profiles — "
-                "see the escalations filed in Neotoma."
+                "Monedula run completed with a STRANDED payment profile or a "
+                "FAILED consent channel — see the escalations filed in Neotoma."
             )
             sys.exit(1)
     except Exception as exc:

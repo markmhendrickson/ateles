@@ -1,0 +1,320 @@
+name: foundation checks
+
+# ateles#795 (acceptance criterion 4): docs/foundation/** changes were checked
+# by nothing. Every foundation PR opened on 2026-09-07 (#788, #790, #791, #794)
+# ran the corpus checkers BY HAND in the authoring agent's worktree and reported
+# them clean; statusCheckRollup on those PRs showed only gitleaks and a skipped
+# Loxia review. A PR whose author skipped the checkers was indistinguishable
+# from one whose author ran them — the "reports without binding" defect class the
+# foundation corpus keeps finding in itself, applied to its own CI.
+#
+# The checks below are the ones conformance.md#mechanical-checks-on-this-directory
+# lists as EXISTING scripts. The rows it marks "(contract; status.md says whether
+# it exists)" — check_foundation_rule_coverage.py, render_workflow_docs.py,
+# render_data_model.py — have no script yet and are deliberately not wired; they
+# join this lane when they land. check_foundation_citations.py was one of those
+# rows until ateles#801 wrote it, and is wired below.
+#
+# Why each checker is its own step: a red lane must name WHICH control failed,
+# not just that the lane failed. Same attributability reason as the per-daemon
+# steps in ateles-tests.yml.
+#
+# Branch-tolerance: the foundation corpus and its checkers live on a stack of
+# branches (feat/foundation-p1-docs and the PRs stacked onto it), and the
+# checkers landed on different branches at different times — e.g.
+# check_foundation_front_matter.py exists on the decision-74 branch but not on
+# the integration branch below it. A step whose script is absent on the branch
+# under test SKIPS with a printed notice rather than failing: a checker that
+# does not exist there is not a violated one. A checker that DOES exist always
+# runs and always binds. The corpus itself states this hazard in
+# conformance.md ("A check merged to `main` binds only branches descended from
+# that merge").
+
+on:
+  pull_request:
+    paths:
+      - "docs/foundation/**"
+      - "execution/scripts/check_foundation_*.py"
+      - "execution/scripts/link_vocabulary_terms.py"
+      - "execution/scripts/render_reading_projection.py"
+      - "execution/scripts/render_decision_state.py"
+      - "execution/scripts/check_plan_decision_citations.py"
+      - "execution/scripts/test_decision_state.py"
+      - "execution/scripts/test_check_foundation_*.py"
+      - "execution/scripts/test_foundation_mechanical_checks_ci.py"
+      - "docs/foundation/decision_state.md"
+      - "execution/daemons/apis/test_foundation*.py"
+      - "CLAUDE.md"
+      - ".github/workflows/foundation-checks.yml"
+    # Synchronize only re-runs when a matching path is in the push delta;
+    # empty commits skip this filter (ateles#802 — head 392aee1a missed the lane).
+  # ateles#1138: push to main carries NO paths filter, deliberately, and binds
+  # only the decision-state step (the rest of this job's checkers are read
+  # against the checked-out tree the same as on a PR, so they still run here,
+  # but the defect #1138 exists for is specific to decision-state: the
+  # committed docs/foundation/decision_state.md is a projection of
+  # origin/main itself, so it can go stale from a push that touches no
+  # foundation path -- e.g. a merge that lands a ruling branch into main
+  # without regenerating. A paths filter on this trigger would silently skip
+  # exactly the push most likely to leave main stale, which is the "reports
+  # without binding" failure this workflow exists to catch, applied to its
+  # own push trigger this time instead of to a PR.
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checkers:
+    name: foundation corpus checkers
+    runs-on: ubuntu-latest
+    steps:
+      # Full history, and origin/main fetched as a ref. The decision-state
+      # projection reads the register at origin/main and compares the rulings
+      # on the current remote branches against it, so a shallow single-branch
+      # checkout leaves it nothing to project and the step skips — a check that
+      # never runs is the defect it was written to catch (`principles.md` §1).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch origin/main as a ref
+        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      # The checkers are stdlib-only by design (each says so in its docstring),
+      # so they need an interpreter and nothing else. setup-python provides
+      # `python` AND `python3`; the harness shell that runs scripts/lint.sh has
+      # only `python3`, which is why that script reports 14 errors on an
+      # untouched tree. Do not reproduce that here: every step below calls
+      # `python3` explicitly regardless.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Corpus present
+        id: corpus
+        run: |
+          if [ -d docs/foundation ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "docs/foundation/: $(find docs/foundation -name '*.md' | wc -l) markdown file(s)"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::error::docs/foundation/ is absent on this branch, but the path filter matched it."
+            exit 1
+          fi
+
+      # Anchors: any link or backticked citation naming a file or heading in
+      # docs/foundation/ that does not exist.
+      - name: Anchors — every intra-foundation link resolves
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_anchors.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Decision 78 ruling: binds the register row's status cell to the ruling
+      # section's own opening line in adapters.md, so a prose edit that updates
+      # one but not the other is caught (ateles#929 — this check was previously
+      # wired only into scripts/lint.sh, a script a person runs, and never ran
+      # on this merge-gating path).
+      - name: Decision 78 ruling — register and adapters section agree
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_78.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Vocabulary: any Never item from vocabulary.md in foundation prose.
+      # Not-for items print as advisory and never fail — that is the script's
+      # own contract, not a softening applied here.
+      - name: Vocabulary — no banned Never term in the prose
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_vocabulary.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Term links: a first mention of a defined term in vocabulary.md that
+      # carries no link to its definition. --check writes nothing.
+      - name: Term links — every first mention links its definition
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/link_vocabulary_terms.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f" --check
+
+      # Decision citations: a commit hash in any document here but status.md, or
+      # an issue/PR number outside the positions a document names its sources in.
+      # conformance.md#phases-and-implementation-state gives both clauses their
+      # syntactic form precisely so this lint can read them. It does NOT check a
+      # decision's status against the register — the register spans branches this
+      # checkout cannot read, so an unseen row would be either a false positive on
+      # every unlanded decision or silence on the rows most likely to be wrong.
+      - name: Decision citations — no commit, issue, or PR cited as state
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_citations.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Reading projection: the copy a review actually reads, regenerated from
+      # conformance_suite.md's matrix and held equal to the canonical text.
+      - name: Reading projection — matches the canonical text at each anchor
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/render_reading_projection.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f" --check
+
+      # Decision state: the committed docs/foundation/decision_state.md held
+      # equal to a fresh render of ONE source (ateles#1138). The committed
+      # file is a pure projection of that source -- it never reads any other
+      # branch -- so this step's verdict does not move when an unrelated
+      # branch moves. The separate cross-branch "ruled on a branch but not yet
+      # merged" view is a report only (`render_decision_state.py --branches`,
+      # printed to stdout), never committed and never part of this check.
+      #
+      # --source worktree (the default; named explicitly here) reads
+      # docs/foundation/conformance.md as checked out rather than re-fetching
+      # origin/main. On this job's `pull_request` trigger, `actions/checkout`
+      # has already materialized base-plus-PR as the working tree (GitHub's
+      # own refs/pull/N/merge commit), so a PR that adds or rules a register
+      # row sees that row here and can regenerate decision_state.md correctly
+      # BEFORE it merges -- reading origin/main alone could never see a row
+      # the PR itself is adding, so that render was mechanically incapable of
+      # matching what main needs once the PR lands (ateles#1138 round two,
+      # ateles#1300). On this job's `push`-to-main trigger the working tree
+      # IS that push's own commit, so the source choice makes no difference
+      # there; --source worktree is still named for consistency.
+      #
+      # Runs on every pull_request in this job's paths filter above AND on
+      # every push to main with NO paths filter (ateles#1138): the committed
+      # file is main's own state, so a push that changes no foundation path
+      # can still leave it stale (e.g. a merge that lands a register ruling
+      # without regenerating), and skipping this step on such a push is the
+      # same "reports without binding" defect this whole workflow exists to
+      # catch, aimed at main this time instead of at a PR.
+      #
+      # Skipped only when origin/main is not fetchable -- the renderer exits
+      # nonzero with that diagnostic, and a lane that cannot read the register
+      # must not report the projection as correct. On push to main this branch
+      # is not expected to be reached: the "Fetch origin/main as a ref" step
+      # above has no continue-on-error, so a failed fetch already fails the
+      # job before this step runs, rather than this step quietly skipping.
+      - name: Decision state — matches the register it projects
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/render_decision_state.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          git rev-parse --verify --quiet origin/main >/dev/null || {
+            echo "::notice::origin/main not fetchable — decision state skipped"; exit 0; }
+          python3 "$f" --check --source worktree
+      # Register narrative: the decision register's prose held to its own table.
+      # The rule-coverage contract binds a decision opened in a DOCUMENT to a
+      # register row; nothing read the narrative around the table, so the prose
+      # drifted from rows three paragraphs below it and a "next free number"
+      # line went stale on five consecutive passes. Dated history is skipped by
+      # design — see the script's docstring for what it does not cover.
+      - name: Register narrative — prose agrees with the register table
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_register_narrative.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Front matter and rule indexes: decision 74's two halves — no revision
+      # chain in front matter, and a section stating 3+ rules opens with the
+      # index of them.
+      - name: Front matter — no residual revision chain, rule sections indexed
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_front_matter.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Decision 101: when register row 101 is ruled, data_model.md#relationships
+      # must carry the writable principal_binding credential shape (kind/value/
+      # issuer/expiry + one-edge-per-credential resolution). Prevents ruled-without-
+      # registration drift (ateles#916 panel finding).
+      - name: Decision 101 — ruled principal_binding shape in data_model
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_101.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Decision 117: when register row 117 is ruled, authority_model.md#grants
+      # must carry the widened capability tuple (relationship_types[] beside
+      # entity_types[], default-deny-on-absent/empty), refuse the legacy
+      # entity-types-by-repositories tuple with no relationship-type term, and
+      # the corpus must place principal_binding/delegation_edge/ownership_grant
+      # on the closed governance list or state the entity-only deferral naming
+      # the widened tuple as the alternate mechanism, plus the bootstrap
+      # step-3 admission sentence. Prevents ruled-without-registration drift
+      # (pm/qa REQUEST_CHANGES on ateles#1088, carrying ateles#925's own
+      # Engineering build checklist).
+      - name: Decision 117 — ruled relationship-type grant shape in authority_model
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_117.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Decision 119: a ruled commissioning design must carry its authority,
+      # dependency frontier, completion evidence, recovery, and planted
+      # negatives into the canonical corpus. Prevents a mutable status or a
+      # task-only dependency model from surviving the ruling.
+      - name: Decision 119 — commissioned planning execution corpus
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_119.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+  foundation-tests:
+    name: foundation binding tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      # test_foundation.py holds the reading-list budget (a projected kernel or
+      # keyed document over MAX_DOC_CHARS, a reading block over MAX_BLOCK_CHARS)
+      # and asserts the vocabulary/term-link checks at zero. Sibling job rather
+      # than a step: it needs the uv-resolved dev environment, the checkers above
+      # need nothing but an interpreter, and a red suite should be attributable
+      # on its own.
+      - name: Run foundation tests
+        run: |
+          set -e
+          found=0
+          for t in execution/daemons/apis/test_foundation.py \
+                   execution/daemons/apis/test_foundation_binding.py; do
+            if [ -f "$t" ]; then found=1; fi
+          done
+          if [ "$found" = "0" ]; then
+            echo "::notice::no test_foundation*.py on this branch — skipped"
+            exit 0
+          fi
+          uv run --extra dev python -m pytest \
+            execution/daemons/apis/test_foundation.py \
+            execution/daemons/apis/test_foundation_binding.py -q
+
+      # ateles#944 (qa lens on #929's own fix): this guard proves the
+      # conformance.md `Merge gate` column is true rather than decorative —
+      # exactly the class of "reports without binding" defect the foundation
+      # lane exists to catch, so it must run from this lane itself and not
+      # only from the generic execution/scripts/** sweep in ateles-tests.yml.
+      # Own step for the same attributability reason as the checkers above.
+      - name: Merge gate column — table claims resolve to real CI steps
+        run: |
+          f=execution/scripts/test_foundation_mechanical_checks_ci.py
+          if [ ! -f "$f" ]; then
+            echo "::notice::$f absent on this branch — skipped"
+            exit 0
+          fi
+          uv run --extra dev python -m pytest \
+            execution/scripts/test_foundation_mechanical_checks_ci.py -q

@@ -6,8 +6,11 @@ loudly (ateles#619): the operator cannot tell "nobody is talking" from "the
 socket died" by looking at an empty transcript, so the code has to tell them.
 """
 
+import asyncio
 import json
 import math
+import os
+import random
 import re
 import struct
 import sys
@@ -18,6 +21,7 @@ import pytest
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
+import session_language as sl  # noqa: E402
 import stream_transcript as st  # noqa: E402
 
 
@@ -1138,3 +1142,992 @@ def test_webrtcvad_is_declared_optional_in_the_manifest():
     # And NOT among the core install_requires.
     core = manifest.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert "webrtcvad" not in core
+
+
+# ---------------------------------------------------------------------------
+# The language pin (ateles ent_c7c2ea62e380df71ac38f1cd)
+#
+# The session used to send `transcription: {"model": model}` and nothing else.
+# The API's own echo confirms what that meant — it replies `"language": null`,
+# i.e. full auto-detect — and the operator's sessions duly produced confident
+# text in ten languages while nobody was speaking.
+# ---------------------------------------------------------------------------
+
+
+def _transcription(msg: dict) -> dict:
+    return msg["session"]["audio"]["input"]["transcription"]
+
+
+def test_session_pins_the_language_on_the_model():
+    """The regression that matters: a session config with no language field.
+
+    Fails against the pre-fix code, where `language` was never sent under any
+    argument.
+    """
+    tr = _transcription(st.session_update_message(language="en"))
+    assert tr.get("language") == "en", (
+        "no language field means the model auto-detects, which is where the "
+        "ten-language fabrication came from"
+    )
+
+
+def test_session_omits_language_only_when_none_is_resolved():
+    """Absent rather than null: the API distinguishes them, and an explicit
+    null is auto-detect stated out loud."""
+    tr = _transcription(st.session_update_message(language=None))
+    assert "language" not in tr
+
+
+def test_session_never_sends_the_plural_languages_field():
+    """Verified live: DEFAULT_MODEL rejects the plural languages field with
+    invalid_parameter, and the alternate live-transcribe model that accepts
+    it rejects turn_detection — so sending it would cost this path its server
+    VAD. Pinned so a future edit does not reintroduce it untested.
+
+    Model product ids are not spelled as hyphenated literals here: gitleaks'
+    generic-api-key rule treats those shapes as secrets.
+    """
+    tr = _transcription(st.session_update_message(language="en"))
+    assert "languages" not in tr
+
+
+def test_language_pin_survives_vad_tuning_overrides():
+    """The two configs are independent; setting one must not drop the other."""
+    tr = _transcription(
+        st.session_update_message(
+            language="es", silence_duration_ms=1500, prefix_padding_ms=450
+        )
+    )
+    assert tr["language"] == "es"
+
+
+# ---------------------------------------------------------------------------
+# Language resolution from the operator's locale_profile
+# ---------------------------------------------------------------------------
+
+
+def test_languages_resolve_from_the_locale_profile_snapshot():
+    """The entity stores English NAMES; the API needs ISO-639-1 codes."""
+    codes = sl.languages_from_profile(
+        {
+            "profile_key": "default",
+            "language": "English",
+            "secondary_languages": ["Spanish", "Catalan"],
+        }
+    )
+    assert codes == ["en", "es", "ca"], "primary first, then the rest"
+
+
+def test_language_resolution_degrades_to_a_pin_never_to_auto_detect(
+    monkeypatch, tmp_path
+):
+    """Neotoma being unreachable must not silently restore auto-detect.
+
+    Losing the pin is the whole defect, so the degraded path still pins
+    something — and says so, loudly enough for the operator to see. `source`
+    names WHICH degraded path was taken ("cache" or "seed"), because a caller
+    that cannot tell a week-old cache from a built-in default cannot tell a
+    healthy filter from a silently stale one.
+    """
+    monkeypatch.setattr(sl, "CACHE_PATH", tmp_path / "spoken_languages.json")
+    monkeypatch.setattr(
+        sl, "_fetch_locale_profile", lambda timeout: (_ for _ in ()).throw(OSError("down"))
+    )
+    resolved = sl.resolve_session_languages("en")
+    assert resolved.primary == "en"
+    assert resolved.source in {"cache", "seed"}
+    assert resolved.warnings, "a degraded pin must announce itself"
+
+
+def test_missing_locale_profile_still_pins(monkeypatch, tmp_path):
+    monkeypatch.setattr(sl, "CACHE_PATH", tmp_path / "spoken_languages.json")
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("es")
+    assert resolved.primary == "es"
+    assert resolved.warnings
+
+
+def test_override_wins_and_keeps_the_rest_for_the_output_filter(monkeypatch):
+    """The Realtime API pins ONE language. The others are not discarded — they
+    go to the output filter, so a trilingual operator code-switching is not
+    flagged as fabrication."""
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("en", override="ca,es,en")
+    assert resolved.primary == "ca"
+    assert resolved.plausible == ("ca", "es", "en")
+
+
+def test_a_language_the_api_cannot_pin_falls_back_rather_than_unpinning():
+    """An unsupported code must not become "send no language" — that is
+    auto-detect again. The API's supported set is its own, read from its error
+    response, so a preference outside it degrades to a pin plus a warning."""
+    resolved = sl._build(["mi_nonexistent"], "test", [])
+    assert resolved.primary in sl.REALTIME_SUPPORTED_LANGUAGES
+    assert resolved.warnings
+
+
+# ---------------------------------------------------------------------------
+# Silence must produce NO transcript (ateles ent_706afed58092b0b855e5098b)
+#
+# The test the pre-fix code would have passed is "speech transcribes
+# correctly". That one is green against the live bug. This one feeds the gate
+# what the operator's room actually sounds like when nobody is talking, and
+# asserts nothing reaches the model at all.
+# ---------------------------------------------------------------------------
+
+
+def _room_tone(seconds: float, dbfs: float, seed: int = 7) -> bytes:
+    """Pseudo-random noise at a target level — room tone, not digital silence.
+
+    Digital silence is the easy case and not the one that fabricates. The
+    measured room tone in the corpus sits near -55 dBFS; the fabricated
+    Georgian chunk arrived at -31.6.
+    """
+    rng = random.Random(seed)
+    amplitude = 32768.0 * (10.0 ** (dbfs / 20.0)) * math.sqrt(2.0)
+    n = int(st.SAMPLE_RATE * seconds)
+    vals = [
+        max(-32768, min(32767, int(rng.uniform(-amplitude, amplitude))))
+        for _ in range(n)
+    ]
+    return struct.pack(f"<{n}h", *vals)
+
+
+def _feed(gate: st.InputGate, payload: bytes, *, start: float = 0.0) -> int:
+    """Push audio through the gate in real frame sizes; count frames sent."""
+    sent = 0
+    now = start
+    step = st.STREAM_CHUNK_BYTES
+    for offset in range(0, len(payload) - step + 1, step):
+        if gate.should_send(payload[offset:offset + step], now):
+            sent += 1
+        now += step / st.BYTES_PER_SECOND
+    return sent
+
+
+def test_digital_silence_sends_nothing_to_the_model():
+    """Note for whoever reads a revert: this one, and the room-tone test below,
+    still PASS with the local VAD absent. The RMS gate carries silence on its
+    own — which is the repo's own measured finding (ateles#631: webrtcvad
+    changed zero suppression outcomes across 56 labelled chunks). They are
+    kept because they pin the behaviour that actually protects the operator,
+    not because they exercise the VAD. The VAD's own liveness is asserted
+    separately, below.
+    """
+    gate = st.InputGate(vad=st.load_speech_detector())
+    assert _feed(gate, b"\x00\x00" * (st.SAMPLE_RATE * 5)) == 0
+
+
+def test_room_tone_with_nobody_speaking_sends_nothing_to_the_model():
+    """The real failure case: a live room, mic open, nobody talking.
+
+    This is what was streaming continuously into the decoder and coming back
+    as Japanese, Amharic and Portuguese.
+    """
+    gate = st.InputGate(vad=st.load_speech_detector())
+    sent = _feed(gate, _room_tone(5.0, dbfs=-55.0))
+    assert sent == 0, (
+        f"{sent} frames of room tone reached the model; an autoregressive "
+        "decoder has no 'emit nothing' option, so it will invent text"
+    )
+
+
+def test_a_keyboard_click_admits_only_its_hangover_not_the_whole_room():
+    """A transient is BOUNDED, not eliminated — and the bound is the point.
+
+    Written first as "a click admits nothing" and that assertion failed, so it
+    is recorded here as measured rather than as hoped. A 10ms click inside a
+    100ms frame lifts that whole frame to about -18 dBFS, and a 1.5s window
+    holds only ~15 frames, so one loud frame reaches the p95. The gate then
+    holds open for its hangover and closes again.
+
+    That is frame-level averaging, not a regression: the same property lets a
+    quiet word-ending through, which is why the hangover exists. What must
+    never happen is the click admitting the MINUTES of room tone around it, so
+    the assertion is the bound.
+    """
+    gate = st.InputGate(vad=st.load_speech_detector())
+    audio = bytearray(_room_tone(20.0, dbfs=-55.0))
+    click = _pcm(12000, samples=int(st.SAMPLE_RATE * 0.01))
+    at = st.BYTES_PER_SECOND * 2
+    audio[at:at + len(click)] = click
+
+    sent = _feed(gate, bytes(audio))
+    ceiling = int(
+        (st.GATE_HANGOVER_SECONDS + st.GATE_WINDOW_SECONDS)
+        * st.BYTES_PER_SECOND
+        / st.STREAM_CHUNK_BYTES
+    )
+    assert 0 < sent <= ceiling, (
+        f"{sent} frames admitted by one click; the hangover bounds this at "
+        f"{ceiling}, and anything more means a transient opens the room"
+    )
+    assert gate.frames_suppressed > gate.frames_sent * 5, (
+        "the overwhelming majority of a quiet room must still be suppressed"
+    )
+
+
+def test_the_gate_still_passes_real_speech():
+    """The counterweight. A gate that suppresses everything would pass every
+    silence test and be useless — it must still carry the operator's words."""
+    gate = st.InputGate(vad=st.load_speech_detector())
+    n = int(st.SAMPLE_RATE * 3.0)
+    speech = struct.pack(
+        f"<{n}h",
+        *[
+            int(6000 * math.sin(2 * math.pi * 140 * i / st.SAMPLE_RATE)
+                * (1 + 0.6 * math.sin(2 * math.pi * 3 * i / st.SAMPLE_RATE)))
+            for i in range(n)
+        ],
+    )
+    assert _feed(gate, speech) > 0, "the operator's speech must reach the model"
+
+
+# ---------------------------------------------------------------------------
+# The VAD layer must be genuinely live, and loud when it is not
+# ---------------------------------------------------------------------------
+
+
+def test_webrtcvad_is_importable_and_the_detector_actually_loads():
+    """Asserts the OBJECT, not the absence of a warning.
+
+    `webrtcvad` 2.0.10 imports pkg_resources, which modern setuptools no
+    longer ships, so it raises ImportError from a package pip installed
+    successfully — a dead layer that looks installed. The manifest pins
+    `webrtcvad-wheels` for exactly that reason.
+    """
+    detector = st.load_speech_detector()
+    assert detector is not None, (
+        "local VAD did not load — check webrtcvad-wheels, not webrtcvad"
+    )
+    assert isinstance(detector, st.SpeechDetector)
+    assert st.InputGate(vad=detector).summary()["vad"] is not None
+
+
+def test_the_detector_discriminates_rather_than_merely_constructing():
+    """A detector that answers True to everything would satisfy every
+    is-it-loaded assertion while filtering nothing."""
+    detector = st.load_speech_detector()
+    assert detector is not None
+    assert detector.is_speech(b"\x00\x00" * (st.SAMPLE_RATE // 10)) is False
+
+
+def test_the_manifest_pins_the_fork_that_imports_on_modern_python():
+    manifest = (_SCRIPTS_DIR.parents[1] / "pyproject.toml").read_text()
+    assert "webrtcvad-wheels" in manifest
+    assert not re.search(r'"webrtcvad>=', manifest), (
+        "plain webrtcvad is unimportable on Python 3.12+ (pkg_resources)"
+    )
+
+
+def test_a_missing_vad_reports_its_cause_not_just_its_absence(monkeypatch, capsys):
+    """"Not installed" and "installed but unimportable" need different fixes,
+    and used to produce the identical message."""
+    def _boom(self, aggressiveness=2):
+        raise ImportError("No module named 'pkg_resources'")
+
+    monkeypatch.setattr(st.SpeechDetector, "__init__", _boom)
+    assert st.load_speech_detector() is None
+    err = capsys.readouterr().err
+    assert "pkg_resources" in err, "the cause must survive to the operator"
+
+
+def test_a_non_import_vad_failure_degrades_instead_of_killing_the_stream(monkeypatch):
+    """A built extension can fail for reasons that are not ImportError. The
+    old handler caught ImportError alone, so an OSError would have taken the
+    whole live transcript down over an OPTIONAL layer."""
+    def _boom(self, aggressiveness=2):
+        raise OSError("incompatible architecture")
+
+    monkeypatch.setattr(st.SpeechDetector, "__init__", _boom)
+    assert st.load_speech_detector() is None
+
+
+def test_degradation_is_fatal_only_when_the_operator_asked():
+    assert st.degraded_vad_record(0)["fatal"] is False
+    assert st.degraded_vad_record(0, fatal=True)["fatal"] is True
+
+
+def test_no_steering_prompt_is_sent_with_the_language_pin():
+    """A steering prompt LAUNDERS fabrications, and this pins that finding.
+
+    Measured against the live socket, all three on the same Japanese audio:
+
+      language=en             -> 'こんにちは、今日はいい天気ですね。'
+      language=en + a prompt  -> 'Hello, today is a nice day.'
+
+    The prompt is the only one of the two that changes the output — and it
+    changes it the wrong way. The output filter catches fabrication by its
+    non-Latin script; a prompt that renders the same fabrication as fluent
+    English removes the signal the filter depends on and leaves plausible text
+    in the transcript instead. Left out deliberately, not overlooked.
+    """
+    tr = _transcription(st.session_update_message(language="en"))
+    assert "prompt" not in tr
+
+
+def test_require_local_vad_aborts_before_capture_starts(tmp_path, monkeypatch):
+    """The strict path must abort BEFORE ffmpeg runs.
+
+    Its first draft called `proc.terminate()` on a process that did not exist
+    yet — caught by lint, not by a test, so here is the test. Aborting before
+    capture also means there is no half-written recording to finalize.
+    """
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    def _never(*args, **kwargs):
+        raise AssertionError("capture must not start when the VAD is required")
+
+    monkeypatch.setattr(st.asyncio, "create_subprocess_exec", _never)
+    out = tmp_path / "t_live.jsonl"
+    rc, _ = asyncio.run(
+        st.stream_session(
+            ":3", tmp_path / "t.m4a", out,
+            api_key="unused", require_local_vad=True,
+            languages=sl.SessionLanguages("en", ("en",), "test"),
+        )
+    )
+    assert rc == 2
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert any(r.get("fatal") for r in records), "the abort must be loud"
+
+
+# ---------------------------------------------------------------------------
+# Socket recovery (ateles#682)
+#
+# The failure being reproduced here is NOT a clean disconnect. It is a socket
+# that stays open, accepts every frame it is offered, and never answers — which
+# is what the operator hit three times in fifteen minutes, losing up to 16s of
+# continuous speech each time. A test that only closed the socket would pass
+# against the live bug, because the live bug's socket never closes.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCaptureStdout:
+    """ffmpeg's stdout: speech-level PCM forever, until told to stop."""
+
+    def __init__(self, frames: int) -> None:
+        self.remaining = frames
+        self.reads = 0
+
+    async def read(self, _size: int) -> bytes:
+        self.reads += 1
+        if self.remaining <= 0:
+            return b""  # capture ended — the intentional stop
+        self.remaining -= 1
+        await asyncio.sleep(0)
+        return _pcm(3000)  # -20.8 dBFS: unambiguously speech
+
+
+class _FakeProc:
+    def __init__(self, frames: int) -> None:
+        self.stdout = _FakeCaptureStdout(frames)
+        self.stderr = None
+        self.returncode = 0
+        self.terminated = 0
+
+    def terminate(self) -> None:
+        self.terminated += 1
+
+    async def wait(self) -> int:
+        return 0
+
+
+class _SilentSocket:
+    """A socket that ACCEPTS audio and NEVER answers. The actual bug.
+
+    `__aiter__` blocks forever rather than returning, because a socket that
+    returns is a socket that closed — a different, already-handled failure.
+    """
+
+    def __init__(self, log: list, *, answer: bool = False) -> None:
+        self.log = log
+        self.answer = answer
+        self.sent = 0
+
+    async def __aenter__(self):
+        self.log.append("connect")
+        return self
+
+    async def __aexit__(self, *exc):
+        self.log.append("close")
+        return False
+
+    async def send(self, _payload) -> None:
+        self.sent += 1
+
+    async def __aiter__(self):
+        if self.answer:
+            yield json.dumps({"type": "session.updated"})
+        # Never yields again: audio goes in, nothing comes back.
+        while True:
+            await asyncio.sleep(3600)
+
+
+def _silent_socket_session(tmp_path, monkeypatch, **kwargs):
+    """Drive a real `stream_session` against a socket that never answers.
+
+    The stall threshold is shrunk to milliseconds so the test proves the
+    behaviour rather than waiting out the production 45s, and the capture is
+    made effectively endless so the run ends by RECOVERY OUTCOME rather than by
+    ffmpeg running out of frames — which would silently turn every one of these
+    into a test of the intentional-stop path instead.
+    """
+    events: list = []
+    sockets: list = []
+
+    class _FastStallMonitor(st.HealthMonitor):
+        def __init__(self, **kw):
+            kw["socket_silent_seconds"] = 0.05
+            super().__init__(**kw)
+
+    monkeypatch.setattr(st, "HealthMonitor", _FastStallMonitor)
+
+    def _connect():
+        ws = _SilentSocket(events)
+        sockets.append(ws)
+        return ws
+
+    proc = _FakeProc(frames=kwargs.pop("frames", 10**9))
+    monkeypatch.setattr(
+        st.asyncio, "create_subprocess_exec",
+        lambda *a, **k: _make_future(proc),
+    )
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    slept: list = []
+
+    async def _sleep(delay):
+        slept.append(delay)
+        await asyncio.sleep(0)
+
+    out = tmp_path / "t_live.jsonl"
+    params = dict(
+        api_key="unused",
+        languages=sl.SessionLanguages("en", ("en",), "test"),
+        connect_factory=_connect,
+        sleep=_sleep,
+        # Tight so the test does not spend 45 real seconds proving the point.
+        health_poll=0.001,
+    )
+    params.update(kwargs)
+    monkeypatch.setattr(st, "SOCKET_SILENT_SECONDS", 0.05)
+
+    async def _run():
+        # Bounded deliberately. Reverting the recovery does not make these
+        # tests fail with an assertion — it makes the run never finish, which
+        # is the operator's actual symptom (the process sat there feeding a
+        # dead socket until he restarted it by hand). Without this timeout a
+        # reverted fix hangs the suite instead of failing it, and a hang is not
+        # a test result anyone reads.
+        return await asyncio.wait_for(
+            st.stream_session(":3", tmp_path / "t.m4a", out, **params),
+            timeout=10.0,
+        )
+
+    return _run, out, sockets, slept
+
+
+def _make_future(value):
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    fut.set_result(value)
+    return fut
+
+
+def test_an_unanswered_socket_is_torn_down_and_rebuilt(tmp_path, monkeypatch):
+    """THE regression test: audio offered, nothing returned, must reconnect.
+
+    Reverting the recovery (`reconnect=False`, which is the pre-fix behaviour
+    of logging UNHEALTHY and carrying on) makes this fail — asserted directly
+    in `test_without_recovery_a_stalled_socket_is_never_rebuilt` below.
+    """
+    run, out, sockets, slept = _silent_socket_session(
+        tmp_path, monkeypatch, max_reconnects=3
+    )
+
+    with pytest.raises(RuntimeError, match="could not be recovered"):
+        asyncio.run(run())
+
+    # The point of the whole change: more than one socket was built.
+    assert len(sockets) > 1, (
+        "a socket that accepts audio and never answers must be REBUILT, not "
+        "merely reported — this is the ateles#682 defect"
+    )
+    assert len(sockets) == 4, "3 reconnects after the original socket"
+    # Each dead socket was actually closed, not leaked.
+    assert sum(1 for e in sockets[0].log if e == "close") >= 1
+
+
+def test_without_recovery_a_stalled_socket_is_never_rebuilt(tmp_path, monkeypatch):
+    """The fix, reverted: detection still fires, the socket is never rebuilt.
+
+    `reconnect=False` reproduces the pre-ateles#682 behaviour exactly — the
+    stall is DETECTED and announced, and then the run carries on feeding audio
+    into a socket that will never answer. That run does not terminate on its
+    own, which is precisely why the operator had to restart the process by
+    hand, so the assertion is a timeout rather than a return value.
+
+    This is the test that proves the reconnect is what does the work: with
+    recovery on, the same fixture terminates (see the tests above); with it
+    off, it runs forever against one socket.
+    """
+    run, out, sockets, _ = _silent_socket_session(
+        tmp_path, monkeypatch, reconnect=False
+    )
+
+    # The harness bounds the run; without recovery it never completes.
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(run())
+
+    assert len(sockets) == 1, (
+        "without recovery the dead socket is kept and never rebuilt — the "
+        "pre-fix behaviour, and the reason speech was lost"
+    )
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert any("socket silent" in r.get("error", "") for r in records), (
+        "detection still fires without recovery — detection was never the "
+        "missing half"
+    )
+    assert not any("reconnect" in r for r in records), (
+        "and nothing is done about it"
+    )
+
+
+def test_the_reconnect_is_announced_in_the_jsonl(tmp_path, monkeypatch):
+    """A silent reconnect is nearly as bad as a silent stall."""
+    run, out, sockets, _ = _silent_socket_session(
+        tmp_path, monkeypatch, max_reconnects=2
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(run())
+
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    reconnects = [r for r in records if "reconnect" in r]
+    assert reconnects, "the operator must SEE that a gap happened"
+    recovered = [r for r in reconnects if r["reconnect"]["recovered"]]
+    assert recovered, "a successful reconnect is reported, not just the attempt"
+    # The lost audio is quantified, because the operator has to repeat it.
+    assert any(
+        r["reconnect"]["dropped_seconds"] is not None for r in recovered
+    )
+    assert any("repeat" in r["error"] for r in recovered), (
+        "the operator is told to repeat himself, not left to infer it"
+    )
+    # And the give-up is fatal and loud.
+    assert any(r.get("fatal") for r in records)
+
+
+def test_reconnect_backs_off_exponentially_with_a_ceiling():
+    """A reconnect loop against a down API must not hammer it."""
+    delays = [st.reconnect_backoff_delay(n) for n in range(1, 12)]
+    assert delays[0] < delays[1] < delays[2], "must back off"
+    assert all(d <= st.RECONNECT_BACKOFF_MAX_SECONDS for d in delays), (
+        "unbounded backoff means a recovered API waits out an old penalty"
+    )
+    assert delays[-1] == st.RECONNECT_BACKOFF_MAX_SECONDS, "reaches the ceiling"
+
+
+def test_reconnect_attempts_are_bounded(tmp_path, monkeypatch):
+    """Give up loudly rather than retry forever."""
+    run, out, sockets, slept = _silent_socket_session(
+        tmp_path, monkeypatch, max_reconnects=2
+    )
+    with pytest.raises(RuntimeError, match="2 consecutive attempts"):
+        asyncio.run(run())
+    assert len(sockets) == 3, "original + exactly 2 attempts, then stop"
+    assert slept, "attempts are spaced, not spun"
+
+
+def test_an_intentional_stop_never_reconnects(tmp_path, monkeypatch):
+    """A user who stops talking or stops the recorder is NOT a stall.
+
+    Reconnecting on an intentional stop would be a regression: the capture is
+    over, and a fresh socket would have nothing to feed it.
+    """
+    events: list = []
+    sockets: list = []
+
+    def _connect():
+        ws = _SilentSocket(events, answer=True)
+        sockets.append(ws)
+        return ws
+
+    # Capture ends immediately: EOF on the first read.
+    proc = _FakeProc(frames=0)
+    monkeypatch.setattr(
+        st.asyncio, "create_subprocess_exec", lambda *a, **k: _make_future(proc)
+    )
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    out = tmp_path / "t_live.jsonl"
+    rc, monitor = asyncio.run(
+        st.stream_session(
+            ":3", tmp_path / "t.m4a", out,
+            api_key="unused",
+            languages=sl.SessionLanguages("en", ("en",), "test"),
+            connect_factory=_connect,
+            health_poll=0.001,
+        )
+    )
+    assert rc == 0, "an intentional stop is a clean exit"
+    assert len(sockets) == 1, "the recorder stopping must not trigger a reconnect"
+    assert monitor.reconnects == 0
+
+
+def test_a_quiet_room_does_not_trigger_a_reconnect():
+    """Silence is not a stall — the distinction the detector already made.
+
+    Reconnecting on a quiet room would rebuild the socket every 45s of an
+    ordinary pause, which is the #631 false-alarm failure with teeth.
+    """
+    quiet = st.HealthMonitor(socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0)
+    t = 0.0
+    while t < 300.0:
+        quiet.note_audio(_pcm(60), now=t)  # room tone, below speech threshold
+        t += 1.0
+    assert not quiet.socket_stalled(now=t), (
+        "nobody talking is not a dead socket, however long the socket is quiet"
+    )
+
+
+def test_speech_going_unanswered_is_a_stall():
+    """The positive case, from the same predicate the message is built from."""
+    dead = st.HealthMonitor(socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0)
+    t = 0.0
+    while t < 120.0:
+        dead.note_audio(_pcm(3000), now=t)  # speech level
+        t += 1.0
+    assert dead.socket_stalled(now=t)
+    assert dead.unanswered_speech_seconds(now=t) > 0
+
+
+def test_reconnecting_clears_the_stall_so_it_does_not_immediately_refire():
+    """Without resetting the clocks the new socket inherits the old one's guilt."""
+    monitor = st.HealthMonitor(socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0)
+    t = 0.0
+    while t < 120.0:
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 1.0
+    assert monitor.socket_stalled(now=t)
+
+    monitor.note_reconnected(now=t)
+    assert not monitor.socket_stalled(now=t), (
+        "a freshly built socket must not be torn down by the previous stall"
+    )
+    assert monitor.reconnects == 1
+
+
+def test_the_capture_is_not_restarted_by_a_reconnect(tmp_path, monkeypatch):
+    """One recording across reconnects — a new .m4a per stall would fragment it.
+
+    Tyto and analyze-meeting consume the recording afterwards; splitting it to
+    fix the stream would trade one defect for another.
+    """
+    starts = []
+    events: list = []
+    sockets: list = []
+
+    def _connect():
+        ws = _SilentSocket(events)
+        sockets.append(ws)
+        return ws
+
+    proc = _FakeProc(frames=10_000)
+
+    def _spawn(*a, **k):
+        starts.append(a)
+        return _make_future(proc)
+
+    monkeypatch.setattr(st.asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    async def _sleep(_d):
+        await asyncio.sleep(0)
+
+    class _FastStallMonitor(st.HealthMonitor):
+        def __init__(self, **kw):
+            kw["socket_silent_seconds"] = 0.05
+            super().__init__(**kw)
+
+    monkeypatch.setattr(st, "HealthMonitor", _FastStallMonitor)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            st.stream_session(
+                ":3", tmp_path / "t.m4a", tmp_path / "t_live.jsonl",
+                api_key="unused",
+                languages=sl.SessionLanguages("en", ("en",), "test"),
+                connect_factory=_connect,
+                sleep=_sleep,
+                health_poll=0.001,
+                max_reconnects=3,
+            )
+        )
+
+    assert len(sockets) > 1, "sockets were rebuilt"
+    assert len(starts) == 1, (
+        "ffmpeg must start EXACTLY once — one recording, whatever the socket does"
+    )
+
+
+def test_the_session_cap_close_is_covered_by_the_same_path(tmp_path, monkeypatch):
+    """The 60-minute cap arrives as a clean server-side close, mid-capture.
+
+    Same mechanism, no separate handling: a socket that ends while the capture
+    is still running is reconnectable regardless of HOW it ended.
+    """
+    sockets: list = []
+
+    class _CappedSocket:
+        """Answers once, then closes cleanly — the `1001 going away` shape."""
+
+        def __init__(self) -> None:
+            self.log: list = []
+
+        async def __aenter__(self):
+            sockets.append(self)
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def send(self, _payload) -> None:
+            pass
+
+        async def __aiter__(self):
+            yield json.dumps({"type": "session.updated"})
+            await asyncio.sleep(0)
+            return  # server closed the stream: iteration simply ends
+
+    proc = _FakeProc(frames=10_000)
+    monkeypatch.setattr(
+        st.asyncio, "create_subprocess_exec", lambda *a, **k: _make_future(proc)
+    )
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    async def _sleep(_d):
+        await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            st.stream_session(
+                ":3", tmp_path / "t.m4a", tmp_path / "t_live.jsonl",
+                api_key="unused",
+                languages=sl.SessionLanguages("en", ("en",), "test"),
+                connect_factory=lambda: _CappedSocket(),
+                sleep=_sleep,
+                health_poll=5.0,
+                max_reconnects=2,
+            )
+        )
+    assert len(sockets) == 3, (
+        "a clean server-side close mid-capture reconnects on the same path as "
+        "a stall — the 60-minute cap needs no separate mechanism"
+    )
+
+
+def test_reconnect_can_be_disabled_from_the_cli():
+    args = st.build_parser().parse_args(["--no-reconnect"])
+    assert args.no_reconnect is True
+    assert st.build_parser().parse_args([]).no_reconnect is False
+
+
+def test_max_reconnects_is_settable_from_the_cli():
+    assert st.build_parser().parse_args(["--max-reconnects", "3"]).max_reconnects == 3
+
+
+def test_health_summary_reports_reconnects(tmp_path):
+    """A session that stayed up by reconnecting is not one that never faltered."""
+    monitor = st.HealthMonitor(now=0.0)
+    summary = monitor.summary(now=1.0)
+    assert summary["reconnects"] == 0
+    assert summary["dropped_speech_seconds"] == 0.0
+    monitor.note_reconnected(now=2.0)
+    assert monitor.summary(now=3.0)["reconnects"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The plausible set degrades differently from the pin (ateles#687)
+# ---------------------------------------------------------------------------
+
+
+def _isolate_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(sl, "CACHE_PATH", tmp_path / "spoken_languages.json")
+
+
+def test_degraded_plausible_set_does_not_collapse_to_the_pin(
+    monkeypatch, tmp_path
+):
+    """The defect this closes: an outage must not filter the operator's own
+    Spanish and Catalan.
+
+    The PIN is one code and rightly falls back to the configured language. The
+    PLAUSIBLE set is a different thing — collapsing it to that same single code
+    makes every non-ASCII letter foreign, so real code-switching comes back
+    `foreign_diacritic` precisely when Neotoma is down and nobody is watching.
+    """
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+
+    resolved = sl.resolve_session_languages("en")
+
+    assert resolved.primary == "en", "the pin still degrades to the configured language"
+    assert resolved.plausible != ("en",), (
+        "collapsing the set to the pin is what filtered real speech"
+    )
+    assert set(resolved.plausible) >= {"en", "es", "ca"}
+    assert resolved.source == "seed"
+    assert resolved.warnings, "a seeded set must announce it is not operator config"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["El niño está aquí.", "Això és el català.", "¿Qué opinas de la sesión?"],
+)
+def test_real_speech_survives_a_neotoma_outage(monkeypatch, tmp_path, text):
+    """End to end through the filter on the degraded path."""
+    from hallucination_filter import screen_transcription
+
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("en")
+
+    verdict = screen_transcription(
+        text,
+        expected_language=resolved.primary,
+        vad_closed=True,
+        plausible_languages=resolved.plausible,
+    )
+    assert not verdict.filtered, f"{text!r} is the operator, not a fabrication"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Möchtest du ein Feuer?", "Und das hängt an der Korrex auf.", "Taparvo sessões."],
+)
+def test_fabrications_outside_the_spoken_set_are_still_caught_when_degraded(
+    monkeypatch, tmp_path, text
+):
+    """Admitting real speech on the degraded path must not fall open.
+
+    These three are the only verdicts that change across the capture corpus
+    when the set narrows from the languages the operator can READ to the ones
+    he SPEAKS, and all three are genuine fabrications.
+    """
+    from hallucination_filter import screen_transcription
+
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("en")
+
+    verdict = screen_transcription(
+        text,
+        expected_language=resolved.primary,
+        vad_closed=True,
+        plausible_languages=resolved.plausible,
+    )
+    assert verdict.filtered, f"{text!r} is a fabrication"
+    assert verdict.reason == "foreign_diacritic"
+
+
+def test_a_good_read_is_cached_and_survives_the_next_outage(
+    monkeypatch, tmp_path
+):
+    """The cache is what makes the degraded set yesterday's truth rather than
+    a built-in guess."""
+    _isolate_cache(monkeypatch, tmp_path)
+    profile = {
+        "profile_key": "default",
+        "language": "English",
+        "secondary_languages": ["Spanish", "Catalan"],
+    }
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: profile)
+    live = sl.resolve_session_languages("en")
+    assert live.source == "locale_profile:default"
+    assert live.plausible == ("en", "es", "ca")
+
+    monkeypatch.setattr(
+        sl,
+        "_fetch_locale_profile",
+        lambda timeout: (_ for _ in ()).throw(OSError("down")),
+    )
+    degraded = sl.resolve_session_languages("en")
+    assert degraded.source == "cache", "a written cache beats the seed"
+    assert set(degraded.plausible) == {"en", "es", "ca"}
+    assert any("cached" in w for w in degraded.warnings), (
+        "a stale set must be diagnosable, not look fresh"
+    )
+
+
+def test_an_unwritable_cache_never_breaks_transcription(monkeypatch, tmp_path):
+    """Transcription runs on a laptop; a read-only cache dir is not fatal."""
+    target = tmp_path / "nope"
+    target.write_text("not a directory")
+    monkeypatch.setattr(sl, "CACHE_PATH", target / "spoken_languages.json")
+    monkeypatch.setattr(
+        sl,
+        "_fetch_locale_profile",
+        lambda timeout: {
+            "profile_key": "default",
+            "language": "English",
+            "secondary_languages": ["Spanish"],
+        },
+    )
+    resolved = sl.resolve_session_languages("en")
+    assert resolved.plausible == ("en", "es")
+    assert resolved.source == "locale_profile:default"
+
+
+def test_an_explicit_monolingual_override_is_still_honoured(
+    monkeypatch, tmp_path
+):
+    """The seed must not widen a caller who deliberately asked for one
+    language."""
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("en", override="es")
+    assert resolved.primary == "es"
+    assert resolved.plausible == ("es",)
+    assert resolved.source == "explicit override"
+
+
+def test_a_cache_carrying_junk_codes_is_normalized_not_trusted(
+    monkeypatch, tmp_path
+):
+    """The cache is a file on disk, so it is not a trusted input.
+
+    A hand edit or an older cache shape could otherwise put a non-ISO code into
+    `plausible`, where it matches no orthography table — silently narrowing the
+    allowed set while still reporting a healthy cached read.
+    """
+    import json as _json
+    import time as _time
+
+    cache = tmp_path / "spoken_languages.json"
+    cache.write_text(
+        _json.dumps(
+            {
+                "languages": ["English", "es", "not-a-language", "Catalan"],
+                "written_at": _time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sl, "CACHE_PATH", cache)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+
+    resolved = sl.resolve_session_languages("en")
+
+    assert resolved.source == "cache"
+    assert set(resolved.plausible) == {"en", "es", "ca"}, (
+        "names fold to codes and junk is dropped"
+    )
+
+
+def test_the_cache_is_keyed_by_profile_so_two_profiles_do_not_seed_each_other():
+    """Screening one operator's speech against another's languages would be
+    exactly the false-positive class this module exists to prevent."""
+    assert sl.LOCALE_PROFILE_KEY in str(sl.CACHE_PATH) or os.environ.get(
+        "STREAM_TRANSCRIPT_LANGUAGE_CACHE"
+    ), "the default cache path must carry the profile key"

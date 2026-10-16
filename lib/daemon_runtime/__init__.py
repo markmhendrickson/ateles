@@ -34,20 +34,60 @@ See individual modules for full API.
 # This centralizes what was previously per-daemon bootstrap — every daemon that
 # imports lib.daemon_runtime now inherits real credentials automatically.
 # Override only empty values and plist placeholders (wrapped in __...__).
+#
+# Skipped entirely under pytest (ateles#1285): the operator's materialized
+# dotenv carries operator-behaviour switches too — e.g.
+# ATELES_SWARM_REQUIRE_LABEL for the bootstrap canary gate — and loading it
+# at import time silently turned that gate ON for every local test run on a
+# machine with the file present, while CI (which has no such file) stayed
+# green. A test that wants a real credential or switch must set it itself.
+# `ATELES_SKIP_DOTENV=1` is the explicit override for a non-pytest caller
+# that wants the same isolation (e.g. a script under test harness control);
+# `_dotenv_should_load` is exported so a root conftest.py can arm it via
+# monkeypatch without relying on sys.modules ordering.
 import os as _os  # noqa: E402
+import sys as _sys  # noqa: E402
 from pathlib import Path as _Path  # noqa: E402
 
-_NEOTOMA_ENV_FILE = _Path.home() / ".config" / "neotoma" / ".env"
-if _NEOTOMA_ENV_FILE.exists():
-    for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
+
+def _dotenv_should_load(environ: dict | None = None, modules: dict | None = None) -> bool:
+    """False when this import should NOT pull the operator's dotenv into
+    os.environ — under pytest, or when ATELES_SKIP_DOTENV is set truthy."""
+    env = _os.environ if environ is None else environ
+    mods = _sys.modules if modules is None else modules
+    if (env.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if "pytest" in mods or env.get("PYTEST_CURRENT_TEST") is not None:
+        return False
+    return True
+
+
+def _dotenv_path(environ: dict | None = None) -> _Path:
+    """The dotenv file to load, overridable for tests via ATELES_DOTENV_FILE."""
+    env = _os.environ if environ is None else environ
+    override = env.get("ATELES_DOTENV_FILE")
+    if override:
+        return _Path(override)
+    return _Path.home() / ".config" / "neotoma" / ".env"
+
+
+def _load_dotenv_into_environ(path: _Path, environ: dict) -> None:
+    if not path.exists():
+        return
+    for _line in path.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
             _k = _k.strip()
             _v = _v.strip().strip('"').strip("'")
-            _existing = _os.environ.get(_k, "")
+            _existing = environ.get(_k, "")
             if not _existing or (_existing.startswith("__") and _existing.endswith("__")):
-                _os.environ[_k] = _v
+                environ[_k] = _v
+
+
+_NEOTOMA_ENV_FILE = _dotenv_path()
+if _dotenv_should_load():
+    _load_dotenv_into_environ(_NEOTOMA_ENV_FILE, _os.environ)
 
 from .aauth_signer import AAuthSigner
 from .agent_loader import (
@@ -72,6 +112,7 @@ from .gating import (
     BlastRadius,
     CheckpointPosture,
     DEFAULT_CLOSED_BOUNDARIES,
+    NEVER_AUTO_EXECUTE_ACTION_TYPES,
     ExecutionPolicy,
     GateAction,
     GateDecision,
@@ -89,6 +130,7 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
+from .confidence_scoring import ConfidenceScore, score_confidence
 from .readiness import (
     ReadinessAssessment,
     assess_readiness,
@@ -104,21 +146,45 @@ from .run_email import (
     thread_ids,
 )
 from .session_finalize import (
+    RunSession,
     append_turn,
     build_finalize_payload,
     build_run_conversation_payload,
+    build_run_session_payload,
     build_turn_payload,
     create_run_conversation,
+    create_run_session,
     finalize_session,
     load_end_skill,
+    recover_run_session,
+    update_run_session_status,
 )
 from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
+from .artifact_contract import (
+    ARTIFACT_CONTRACTS,
+    ArtifactContract,
+    ArtifactHeader,
+    InvalidRef,
+    ParsedRef,
+    artifact_gate_reason,
+    body_shape_for_dispatch,
+    classify_artifact_body,
+    gate_satisfaction_rules,
+    infer_body_shape,
+    looks_like_pr_or_commit_ref,
+    parse_artifact_header,
+    parse_github_ref,
+    role_required_artifact,
+    stdout_tail_for_reason,
+)
 from .task_lifecycle import (
     MAX_ATTEMPTS,
+    CompletionOutcome,
     TaskStatus,
     attempts_exhausted,
     backoff_seconds,
     can_transition,
+    complete_task_with_result,
     set_task_status,
 )
 
@@ -153,6 +219,7 @@ __all__ = [
     # checkpoint posture (ateles#350)
     "CheckpointPosture",
     "DEFAULT_CLOSED_BOUNDARIES",
+    "NEVER_AUTO_EXECUTE_ACTION_TYPES",
     "InvalidCheckpointPosture",
     "CheckFailure",
     "PostureOutcome",
@@ -166,18 +233,41 @@ __all__ = [
     # task lifecycle (state machine)
     "TaskStatus",
     "set_task_status",
+    "complete_task_with_result",
+    "CompletionOutcome",
     "can_transition",
     "backoff_seconds",
     "attempts_exhausted",
     "MAX_ATTEMPTS",
+    # artifact contracts (ateles#1155 — Apis + Anthus one source)
+    "ARTIFACT_CONTRACTS",
+    "ArtifactContract",
+    "ArtifactHeader",
+    "ParsedRef",
+    "InvalidRef",
+    "role_required_artifact",
+    "gate_satisfaction_rules",
+    "parse_artifact_header",
+    "classify_artifact_body",
+    "looks_like_pr_or_commit_ref",
+    "parse_github_ref",
+    "body_shape_for_dispatch",
+    "infer_body_shape",
+    "artifact_gate_reason",
+    "stdout_tail_for_reason",
     # session finalize (/end convergence)
     "build_finalize_payload",
     "finalize_session",
     "load_end_skill",
     # conversation-per-execution-run (E1)
     "build_run_conversation_payload",
+    "build_run_session_payload",
     "build_turn_payload",
     "create_run_conversation",
+    "create_run_session",
+    "recover_run_session",
+    "RunSession",
+    "update_run_session_status",
     "append_turn",
     # run-thread email (E2)
     "run_subject",
@@ -191,4 +281,7 @@ __all__ = [
     "missing_request",
     "build_assessment_entity",
     "write_assessment",
+    # confidence scoring (ateles#902) — populates confidence ahead of the gate
+    "ConfidenceScore",
+    "score_confidence",
 ]

@@ -4,11 +4,11 @@ End-to-end test of the agent swarm against `markmhendrickson/harness-sandbox`.
 
 ## Purpose
 
-Operationalize the agent-swarm smoke test described in `swarm_orchestration.md`. Provides two execution procedures (operator-driven now, Anthus-driven once orchestrator is deployed) and success criteria for evaluating whether the swarm coordinates correctly.
+Operationalize the agent-swarm smoke test described in `archive/swarm_orchestration.md` (archived; gate model in `foundation/gates_and_workflows.md`). Provides two execution procedures (operator-driven now, Anthus-driven once orchestrator is deployed) and success criteria for evaluating whether the swarm coordinates correctly.
 
 ## Scope
 
-Covers running the smoke test against the harness-sandbox repo end to end, the expected artifacts per agent, and the success/failure interpretation rubric. Does not cover real production workflows; for those see `swarm_orchestration.md`.
+Covers running the smoke test against the harness-sandbox repo end to end, the expected artifacts per agent, and the success/failure interpretation rubric. Does not cover real production workflows; for those see `foundation/gates_and_workflows.md`.
 
 ## Procedures
 
@@ -42,7 +42,7 @@ Expected agent involvement (12):
 | 6 | social_draft | Corvus | `[corvus] social_post_draft:` |
 | 6 | devrel_docs | Regulus | `[regulus] docs_diff_or_no_change_note:` |
 
-The artifact-header convention (`[<agent>] <artifact_type>:`) is how Anthus recognizes a gate as satisfied. Each agent's SKILL.md should produce a comment with this header.
+The artifact-header convention (`[<agent>] <artifact_type>:`) is how Anthus recognizes a gate as satisfied. Each agent's SKILL.md should produce a comment with this header. **Apis direct-task completion** and **Anthus gate satisfaction** parse the same header grammar — see `docs/agent_execution_runbook.md#direct-task-artifact-completion`.
 
 ## Operator-driven procedure
 

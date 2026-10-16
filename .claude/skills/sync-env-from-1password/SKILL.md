@@ -24,6 +24,8 @@ Sync environment variables from 1Password to local `.env` file using environment
 
 This is the loop that makes re-prompting unnecessary: retrieve once → cache to `.env` + map in Neotoma → every later agent reads `.env` (or runs this sync) instead of re-fetching.
 
+**Never read a credential `.env` whole to find or verify one variable** — three agents did exactly that and printed live secret values into a transcript (2026-09-07, 2026-09-25, 2026-09-26). Use a variable by sourcing it without echoing (`set -a; source <file>; set +a`, then reference `$VAR_NAME` — never print it), or check existence/enumerate names without printing values (`grep -c '^NAME='` for existence, `grep -o '^[A-Z_]*='` for names only). `.claude/hooks/credential_read_guard.py` enforces this mechanically across Bash/Read/Grep/Glob; see CLAUDE.md's "Credential-read guard hook" section.
+
 ## Command
 
 ```

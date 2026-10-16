@@ -1,0 +1,23 @@
+# LiteLLM proxy config for the claude-local provider (template; holds no secrets).
+#
+# Chain, all loopback: claude CLI -> LiteLLM :4000 (Anthropic /v1/messages)
+#   -> ollama_shim :11435 -> Ollama :11434.
+#
+# `model_name` is the id the claude-local provider config passes as --model;
+# keep the two equal. `litellm_params.model` names the Ollama model tag.
+#
+# Deliberately no general_settings.master_key: with one set, LiteLLM's proxy
+# auth requires a connected Postgres for virtual-key checks. Bind the proxy to
+# 127.0.0.1 only (`litellm --config <this file> --host 127.0.0.1 --port 4000`).
+model_list:
+  - model_name: qwen3-coder-ollama
+    litellm_params:
+      model: openai/qwen3-coder:30b-a3b-q4_K_M
+      api_base: http://127.0.0.1:11435/v1
+      api_key: "not-needed"  # gitleaks:allow — placeholder; the loopback proxy takes no credential
+
+litellm_settings:
+  drop_params: true
+  # Without this LiteLLM bridges /v1/messages through the OpenAI Responses API,
+  # which Ollama's OpenAI-compatible server does not implement.
+  use_chat_completions_url_for_anthropic_messages: true

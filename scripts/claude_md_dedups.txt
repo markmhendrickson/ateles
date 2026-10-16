@@ -1,0 +1,57 @@
+# Deliberate same-rule dedups in CLAUDE.md.
+#
+# Format: <dropped lead> => <surviving lead>
+#
+# Each line records a rule NAME that a union merge dropped because both sides
+# stated the same rule and one phrasing was kept. Adding a line here is a
+# claim that a human checked the surviving rule clause by clause and confirmed
+# it carries everything the dropped one did. It is not a way to quiet the
+# check: verify_claude_md_merge.py verifies both sides of the arrow against the
+# merged file, so a stale entry fails the gate rather than excusing it.
+#
+# A rule that is merely SIMILAR does not belong here. `Dispatch, don't work
+# inline` and `Dispatch, don't drift inline` are two rules with different
+# content, and both stay.
+
+# ateles#973 — reconciling the bidirectional CLAUDE.md divergence.
+# main's phrasing yielded to the worktree's stronger form, which names the
+# consent-gate carve-out explicitly and calls the violation by name. Main's
+# unique clause — re-surface an unanswered question each turn rather than
+# dropping it — is appended to the survivor.
+Proceed on your recommendation instead of stopping to ask. => Proceed with your recommendation — don't ask.
+
+# ateles#973 — main's phrasing yielded to the worktree's longer form, which
+# adds the PR_ACTIONS mechanism, the stays-the-operator's bound, and the
+# preference for a reopen over a gate waive. Main's "not mistaken for
+# flapping" clause is present in both.
+Re-request review yourself when monitoring shows it is warranted. => Re-request review yourself whenever monitoring shows it is warranted — do not wait to be asked.
+
+# Operator ruling, 2026-09-25 — hosted-instance deploys (own and client) move
+# from Mark's absolutely to the swarm's, run exactly from the instance's
+# deployment_configuration entity with an operator veto retained; credential
+# rotation and release approval stay Mark's. The old lead named two classes
+# that were both operator-only; the surviving lead narrows to the one class
+# (credential rotation) that is still operator-only, and the deploy content
+# moves to a new clause in the same bullet rather than disappearing.
+# SUPERSEDED 2026-09-26 (chained below): the 2026-09-25 survivor
+# "Merge stays gated, and credential rotation stays Mark's absolutely." was
+# itself dropped by the 2026-09-26 pass, so this entry's kept_lead now points
+# straight at that pass's final survivor rather than at the intermediate lead,
+# keeping both hops honoured against the current file in one entry.
+Merge stays gated, and two classes stay Mark's absolutely. => Merge stays gated, and minting a credential plus anything touching a root secret stay Mark's absolutely.
+
+# Operator ruling, 2026-09-26 — credential rotation split by issuer
+# (Neotoma master plan ent_81aadb43caf2fa493361e8ed,
+# decisions.credential_rotation_split_by_issuer; foundation register decision
+# 118 in docs/foundation/conformance.md). "Credential rotation" was one
+# undifferentiated class reserved to Mark absolutely. It is now four: the
+# swarm rotates unattended what it alone issues and consumes (agent signing
+# keys, internal shared secrets), a long-lived GitHub PAT is replaced by a
+# short-lived GitHub App installation token, Mark mints a provider API key
+# with everything after minting the swarm's, and a root secret (age key,
+# Neotoma mnemonic, 1Password) stays Mark's outright. The surviving lead
+# narrows "credential rotation" to the two classes still absolutely Mark's —
+# minting a provider credential, and anything touching a root secret — and
+# states the swarm's unattended-rotation class and the PAT-to-installation-
+# token replacement in the bullet body rather than dropping them.
+Merge stays gated, and credential rotation stays Mark's absolutely. => Merge stays gated, and minting a credential plus anything touching a root secret stay Mark's absolutely.

@@ -1,0 +1,1382 @@
+# Workflows: reference designs, each from its own purpose
+
+**Authored companion (not on the review reading list; whether it is keyed is the operator's budget
+decision, recorded in `status.md`):** binds via the `workflow` entity for each (declaration scope, type) and
+`execution/scripts/render_workflow_docs.py --check`; reviewers load the kernel and gates instead
+(`conformance.md`). **Kind:** foundation; states the design of each reference workflow, why its steps exist,
+and which successors its tasks may enter, and never the state of a checkout. **Derived from:** `work_model.md`, `gates_and_workflows.md`, the `workflow` declarations on the
+record for the built workflows (their step lists and fast paths, not their agent names), the agent
+policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
+operator review (2026-09-04), the operator's 2026-09-25 ruling on dynamic workflows (decision 116: a workflow created for the task no declaration fits, and improved by every task it carries), the operator's 2026-09-26 ruling that the named workflows here are reference designs an instance may seed drafts from, none live by default, with intake alone core because every task enters through it, and that a workflow's status is draft, active, or retired with nothing above active, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
+only, is `status.md`.
+Amendment history: `revisions.md#workflowsmd`.
+## Purpose
+
+Give the abstract model of `work_model.md` and `gates_and_workflows.md` concrete reference points, and
+ensure each reference workflow is envisioned from its own purpose rather than from what happens to be built.
+A reviewer reading a change to a step list, a fast path, or a successor checks it against the section
+here for that workflow; a reference workflow with no section here has no stated purpose, and a step whose reason
+this document cannot give is a step to question. A workflow created for a task no declaration fits is not a
+reference workflow and has no section here; where its purpose is stated is
+`#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`.
+
+## Scope
+
+Fourteen reference workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
+research and analysis, meeting processing, operator-only, planning, and postmortem, with session digestion
+beside them as the recovery path of the one execution mechanism that holds no lease. Each is a **generic
+design by purpose**, not a live workflow: an instance may seed a draft declaration from one, but none of
+the fourteen is live by default, and a section here binds no instance to run it. **Intake is the one
+exception, and the only core workflow** — every task enters through it, so an instance has no path to
+work at all without a live intake declaration; the operator's 2026-09-26 ruling withdraws any other
+workflow's earlier default liveness (payment, meeting processing, session digestion, and planning had been
+activated under a "core" label; that activation is withdrawn, and each now activates through the ordinary
+draft path once the engine cuts over, prioritised by measured usage, not by a label). Beside the reference
+workflows, a declaration scope holds whatever workflows were created for tasks none of its declarations fitted
+(decision 116, `#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`);
+they are declarations like any other and have no section here. Each is a workflow type; a `workflow` entity
+is declared per (declaration scope, workflow type), so one type may have several declarations that share the design
+stated here and differ in step owners and thresholds. A step owner is declared as a **role** and resolved
+to a principal at claim time: the declaration's `owner_role` holds the role, the roster binds that role to
+an agent per declaration scope (`swarm_roster`, by role), and the binding is read when the step is claimed, so a
+renamed or replaced agent leaves no stale name here or in the declaration (`vocabulary.md#step-owner`).
+The step-owner column of every table below is therefore a role, and a role that resolves to no principal
+raises a checkpoint (reason `unspawnable_assignee`) rather than falling through to any available agent.
+The role names in those columns are **example slot names**: the design fixes no role set, each implementation
+defines its own and fills each slot it uses, and an implementation may rename, merge, or split the examples
+so long as the constraints of `#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`
+hold. No section names an operator, a payee, a contact, or a channel; those are context entities the step
+owner retrieves at runtime.
+
+## How to read a workflow section
+
+Every section has the same shape, so the sections can be compared and so the step tables can be rendered
+from the declarations (below).
+
+- **Purpose**: one sentence, the reason the workflow exists.
+- **Entry condition**: what makes a task eligible to enter this workflow. For every workflow but intake,
+  the entry condition includes that an intake batch closed naming this workflow as successor
+  (`work_model.md#intake-is-every-tasks-first-workflow`).
+- **Steps**: the ordered list, each with its step owner by role (an example slot name, `#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`), whether it is required, and its parallel group
+  and join where it has one. A workflow's last step is always a single step, never a parallel group; its
+  verdict is the batch's closing verdict and names the successor
+  (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). A step's state within a batch
+  is open, claimed, or signed, derived from edges (`gates_and_workflows.md`). A verdict carries a
+  conclusion; a failing conclusion does not advance the batch, and the workflow declares per step which earlier
+  step opens again (`on_fail`), the failing verdict staying in the record as history; a declared cap on
+  such rounds, when reached, escalates the batch's tasks (`failure_posture.md`, reason `rounds_exhausted`).
+  Two intervals are declared on every step and shown in no table: `unclaimed_after`, after which an
+  unclaimed step raises `unclaimed_step`, and `hold_bound`, the most a claimed step may hold on a condition
+  before its declared alternative close or `rounds_exhausted`
+  (`gates_and_workflows.md#declaration-batch-projection`). A third thing is declared on every step and shown
+  in no table: its `class` (`review`, `work`, or `deterministic`), which the builder-never-reviews refusal reads and
+  the section that states it lists for the reference workflows
+  (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). Where a section's prose names a declared interval
+  — a follow-up interval, the bound on an `await` — it is that step's `hold_bound`; a step whose close
+  condition names an arrival from outside the swarm is a planned wait, held under decision 13 and ended by
+  that bound. Either interval may be declared as the task's `due_date` where the bound is a date fixed
+  outside the swarm and known at formation; reaching it is reaching the bound, and it closes nothing. A step
+  whose action is `operator_only` carries the gate's checkpoint as a `consent` step does, holds for the
+  confirmation, and closes on it, never on the resolution
+  (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`).
+- **Stages**: named groups of contiguous steps, for reading and for reporting where a batch is.
+- **Artifacts**: the entries external systems hold that the batch produces or references, attached by edge and
+  never the subject of a step (`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`).
+  Where a workflow's main product is an entity in the record rather than an artifact, the section
+  says so; an entity in the record is not an artifact.
+- **Typical action classes**: the `action_type` values the batch's actions usually carry. Every one is
+  evaluated at the action gate at the moment it would be taken, whatever the workflow
+  (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`); the list is what to expect, not
+  a bound.
+- **Successors**: the workflows the closing verdict may name, and whether it may name none
+  (`none_permitted` — `gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). A batch's
+  tasks enter exactly one successor or, where the declaration permits it, none.
+- **Fast paths**: the declared skips and the condition that permits each. A fast path's condition is a
+  property of the task set fixed at intake — never a label on an artifact, and never a reading of what the
+  change touches, because a fast path is declared before the change exists.
+- **Applicability**: which steps are optional (`required: no`) and the declared `applies_when` condition
+  that decides whether each opens. Unlike a fast path, an applicability condition **may** read what the
+  batch's change touches, because the question it answers — which perspectives this particular change
+  warrants — is one intake cannot answer. It is still never a label on an artifact: the condition lives on
+  the workflow declaration, and nothing the reviewed change says about itself seats or unseats a reviewer
+  (`gates_and_workflows.md#declaration-batch-projection`). A step the condition rules out is recorded
+  **inapplicable** on the batch, which never reads as signed.
+
+## Rendering
+
+The design of each workflow lives here; the operative declaration is the `workflow` entity. The two are
+kept from diverging the way the plan-mirrored documents are: the step table in each section is a render
+target, produced from the entity by `execution/scripts/render_workflow_docs.py`, whose `--check` mode
+exits non-zero when a table on disk differs from the record (the pattern of `render_plan_docs.py`,
+`conformance.md`). Each table sits between markers naming the (declaration scope, workflow type) it renders. The
+prose around a table (purpose, entry condition, stages, artifacts, successors, the reason for each step)
+is authored here and reviewed in PRs; a change to a step list is made to the entity and rendered, and a
+PR that edits a table by hand fails the check. A section whose workflow has no declaration yet carries a
+hand-authored table with the same marker, which becomes the check's expected content the day the entity
+is declared.
+
+## Roles are slots, and the design fixes only the constraints on filling them
+
+**The rules in this section.**
+
+- [A role is a slot an implementation fills](#a-role-is-a-slot-an-implementation-fills).
+- [Five constraints hold for any role set](#five-constraints-hold-for-any-role-set).
+
+### A role is a slot an implementation fills
+
+No role is foundational: no implementation needs a particular one, and this document defines no fixed list
+of them (operator ruling, 2026-10-13, register decision 142). A step declaration's `owner_role` names a role,
+which stands for a **slot**: each implementation defines its own role set, declares which roles it uses, and fills each
+slot with a principal through its roster (`swarm_roster`, per declaration scope). The role names that appear in
+the step tables of the sections below (`pm`, `ux`, `arch`, `pr_review`, `qa`, `legal`, implementer,
+steward, copywriter, content author, lint runner, operator-facing agent, payer, verifier, researcher,
+analyst, planner, and the like) are **example role names** chosen so the reference workflows read
+concretely. An implementation may rename them, merge two into one, or split one into several, and a section
+here binds no implementation to any of them. What binds is the set of constraints below, which every role
+set must satisfy. Where an implementation keeps a mapping from its own role set to the examples, that mapping
+is implementation state and lives outside this directory (`migration.md` states the same boundary for
+names the checkout uses).
+
+### Five constraints hold for any role set
+
+Each is stated here without naming a role and is argued where it is cited.
+
+1. **Separation of duties.** Where the design requires two duties to be held by distinct principals, the roles
+   an implementation defines for them must resolve to distinct principals, an agent counting as the principal
+   it is bound to (decision 48), except in two places, which are checked on the agent itself: the fourth place below, the builder and the
+   reviewer (decision 143), and the first place below where the payment is taken without a checkpoint, the payer
+   and the verifier (decision 144). The design requires it in at least four places:
+   - in the payment workflow, whoever verifies and reconciles a payment is not whoever prepares and takes it
+     and, where the payment is taken without a checkpoint, the verifier is also a different agent from every holder
+     of a payer-slot step: the signer of `prepare`, the agents seated in `pay`, the holders of the payer-slot
+     leases, and the agent that takes `pay` (`#payment`, `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, `payments.md#what-gates-a-payment-and-why-it-is-not-a-new-mechanism`);
+   - on every checkpoint, whoever raised it does not resolve it, except the operator resolving a checkpoint the
+     operator raised, which is marked (`gates_and_workflows.md#the-checkpoint`, decision 47);
+   - on every new or amended declaration, the swarm's approval is never the proposer's
+     (`#who-approves-a-new-or-amended-declaration`);
+   - on every artifact, the agent that built it never signs a review step on it
+     (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`).
+
+   Any further pair is policy data, the `disjoint_roles[]` of an action class on the `action_policy`, and an
+   absent value is the fail-closed one (`authority_model.md#structural-checks-quorum-and-separation-of-duties`,
+   decision 50).
+2. **A review step is signed by its own step owner, or waived by the operator.** The verdict that closes a
+   required step is written by the principal that fills the slot the step declares; the one other way it closes
+   is the operator's `waived` verdict, which is itself a verdict attributed to the operator principal
+   (`gates_and_workflows.md#declaration-batch-projection`, "A required step is closed only by a verdict, and no principal signs for another").
+   A CI result, an approval from a credential bound to no principal or to one other than the step owner, or the
+   fact that a remedy was routed to and carried out by another slot never stands in for it: the rule is about
+   identity, so a credential bound to the step owner does sign, and routing a remedy never transfers the
+   conclusion (`adapters.md#no-external-event-advances-a-step-by-itself`;
+   `github.md#reviews-review-comments-and-threads`; `gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
+3. **An `operator_only` action is taken by the operator, and its step closes on the confirmation.** No agent
+   takes such an action: it resolves to `NEVER` ahead of any policy. The task or step that carries it is carried
+   to the operator by whichever slot the implementation designates for that, holds for the confirmation, and
+   closes on it, never on the checkpoint's resolution alone (`#operator-only`,
+   `work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`,
+   `gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`).
+   Every implementation therefore needs some slot that carries work to the operator, and the same slot carries
+   every checkpoint awaiting the operator, not only `operator_only` work (`vocabulary.md#operator-facing-agent`).
+4. **A deterministic step is still filled by a principal.** A step whose work is a script and whose verdict is
+   the script's result, such as the lint steps of `#social-content` and `#outreach`, is declared `deterministic`
+   (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`) and is filled by a principal all the
+   same. That principal is an `agent` in the design's sense
+   (`vocabulary.md#agent`) and resolves through the roster like any slot (constraint 5). A blocking conclusion
+   may rest on the script's result provided the verdict names the mechanism and what it read
+   (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
+5. **Every slot resolves, and an unresolved one holds.** Each role a declaration names resolves to exactly one
+   principal for the declaration scope, an agent that can be run, at declaration and again at claim. A role that
+   resolves to no principal, or to an agent with no runner, raises a checkpoint with reason
+   `unspawnable_assignee`, at declaration and again at claim, and never falls through to any available agent
+   (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; the declaration-time check is also the
+   `swarm_roster` row of `data_model.md#concepts`). The slot that fills intake's step owners must exist, as
+   must the slot constraint 3 requires, because intake is the one core workflow and no task enters without it
+   (`#scope`).
+
+**What this removes and what it keeps.** The previous list of named roles and what each claims stood in this
+directory until revision 133 (2026-10-13). `owner_role` and the roster stay, redefined as above; the examples
+stay in the reference workflows; the five constraints gather the rules the list rested on, each from the
+documents cited, which state the rule it rests on.
+The list itself is kept outside this directory, as the reference implementation's role set
+([`docs/swarm_role_set.md`](../swarm_role_set.md)), because it is implementation state.
+
+## intake
+
+**Purpose:** turn a created task into a routed one: classified, linked to the records it concerns,
+deduplicated, prioritized, and handed to exactly one successor workflow, to none, or to the operator.
+
+**Entry condition:** a task exists in the record and has no intake batch. Creation is publication
+(`work_model.md#the-transition-vocabulary`), so every task meets this condition once, at creation, and no
+task meets it twice. A task with no intake batch is by that fact unrouted; there is no separate unrouted
+state (`work_model.md#intake-is-every-tasks-first-workflow`).
+
+**Steps**
+
+<!-- rendered: workflow=*|intake steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `classify` | `pm` step owner | yes | | the task's `action_type` declares the classes of action it expects to produce, from what the task does; `assigned_to` is written only where a named principal is the point; `PART_OF` to a parent, or children split out, where the work is an aggregate |
+| 2 | `link` | `pm` step owner | yes | | every existing record the task **names** is attached by edge: an artifact (an issue, a pull request, a thread, a page), and a record already in the record (a transcription, an obligation, a profile, a plan, a contact) by `REFERS_TO` from the task; nothing is attached on relevance alone (`#what-link-attaches-and-what-it-leaves-to-hydration`); finding none is a valid close |
+| 3 | `dedupe` | `pm` step owner | yes | | the task is compared against tasks that are not terminal; a duplicate closes terminal with a `DUPLICATE_OF` edge to the task it duplicates (`data_model.md#relationships`) and this batch closes with no successor |
+| 4 | `prioritize` | `pm` step owner | yes | | the task's priority is set from the `priority_rubric` entity, retrieved by type, never from the classifier's own sense of urgency |
+| 5 | `route` | `pm` step owner | yes | | the closing verdict names one successor workflow, or none, or `operator-only` |
+
+<!-- /rendered -->
+
+The steps exist because each failure they prevent has a name. Without `classify`, blast radius is inferred
+from the handling agent at the moment the action is taken (`gates_and_workflows.md#confidence-and-three-blast-tiers`).
+Without `link`, the workflow that follows opens a second issue for work that has one. Without `dedupe`,
+two batches carry the same change to two pull requests. Without `prioritize`, the claim order is the creation
+order. Without `route`, a task reaches a workflow by whichever engine noticed it first.
+
+**`route` names a declaration that fits the task, holds it on one amendment where a declaration nearly
+fits, or opens the authoring of one for it; it never holds the task for similar tasks to appear** (decision
+116). Where a declaration in force for the task's declaration scope fits, the verdict names it, and the task
+proceeds as a batch of one if nothing else is carried with it. Where one nearly fits, or none fits, the step
+creates the task whose work is the amendment or the new declaration, records a dependency on it, and signs
+the verdict naming the amended or new workflow once that declaration has been approved. The rules are
+`#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`; the rendered
+table above is unchanged, because the successor the verdict names is still one declared workflow.
+
+**A standing constraint recorded on an entity the task names is read at intake, and it is a fact on that
+entity, not a rule beside the record.** A person's recorded objection to further processing is the case: it
+outlives any batch and binds every future one about that person, and nothing per batch, per principal, or
+per class carries it — a `task_policy` is the operator's preference, a grant is one principal's capability,
+and an `action_policy` is per class of effect. What carries it is the entity itself: the objection is an
+observation on the `contact`, with provenance naming the message or the meeting that stated it and the time
+it was stated (`data_model.md#record-conventions`), and `link` attaches that contact because the task names
+it (`#what-link-attaches-and-what-it-leaves-to-hydration`). `route` then closes the batch with no successor,
+its verdict carrying a finding that names the constraint, so that the refusal is a recorded conclusion and not
+a silent skip; a step of a later workflow whose `reads_to_enter` names the type reads the same observation
+and holds the same way. The shape is principle 11's: a constraint written once on the thing it constrains
+needs no process to keep it true, where a prohibition list kept beside the record is the second source that
+goes stale in the direction that matters. Its field is the schema's, as every context entity's shape is; the
+design states only where the constraint lives and who reads it, and what the operator is owed on it — that
+the objection was received and honoured — is the observation and the closing finding, read on the record
+like any closed work
+(`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`).
+
+**Stages:** triage (`classify`, `link`, `dedupe`); disposition (`prioritize`, `route`).
+
+**Artifacts:** none produced. Existing artifacts are attached.
+
+**Typical action classes:** none. Every write intake makes is an internal operational write to the record,
+which is not an action (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
+
+**Successors:** any workflow declared for the task's declaration scope except intake — a reference workflow in
+this document, or one created for a task under decision 116, including the one created for this task; or
+none; or operator-only, which is a workflow like the others and is named the same way. The set is read from
+the declarations in force when the verdict is written, so a new declaration needs no second write adding it
+to intake's list.
+
+**Fast paths:** `inherits`, for a child task created by a batch that is already routed: `link` and
+`dedupe` are skipped and `classify` may copy the parent's declaration, since the parent's intake did that
+work; `prioritize` and `route` are never skipped, because a child may need a different workflow from its
+siblings (`work_model.md#parent-and-child-tasks`).
+
+### What `link` attaches, and what it leaves to hydration
+
+**Ruled (decision 39, 2026-09-06): intake attaches what the task names, records in the record and external
+records alike, and attaches nothing on relevance alone; what a step needs beyond that is resolved by
+hydration, per step, from those anchors.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The question was whether a task should enter the
+record already related to everything in it that bears on the task — the entities in scope of a finance
+task, the people and threads around a meeting — so that context travels with the task instead of being
+found again at each step; or whether each step should retrieve its own context as it opens; or a hybrid of
+the two. The operator proposed the first and asked that the inclination be interrogated rather than taken.
+This section is that interrogation, and the answer is the hybrid, with a precise line between its halves.
+
+**What `link` attaches.** Every record the task **names** — by identifier, by reference in its
+description, or by the artifact an adapter created it for — is attached by edge at intake: an
+artifact, `REFERS_TO` task → artifact; a record the record already holds as
+`REFERS_TO` task → entity (`data_model.md#relationships`). Names are what make the attachment bounded:
+`link` resolves each to the one entity that exists for it, by the bounded retrieval the record conventions
+require before any edge is written (`data_model.md#record-conventions`), and where a name resolves to
+nothing, nothing is created and nothing is guessed. A task that names nothing leaves `link` with no edges,
+which is a valid close.
+
+**What `link` does not attach: anything the task does not name.** A general pull — "everything
+contextually related" — fails three tests the design already applies. It has no stopping rule: relatedness
+is a judgement with no boundary, and an edge written on a judgement of relevance is read later, by every
+step and every reader, as a fact that the task concerns that entity, with the judgement gone. It goes
+stale: a link is a claim about relevance at intake time, and the step that reads it may run after the
+context has changed — which is the reason the design resolves a step's reads at the step and never before
+it (`gates_and_workflows.md#declaration-batch-projection`, hydration). And it is purpose-blind: attaching a
+task to every person entity that might bear on it is the profile-building the people-data rule forbids,
+where attaching the contact the task names is the relationship the rule exists for. The intake-wide pull is
+the pattern principle 11 warns of, applied to edges — a set of relations some process would have to keep
+true as relevance moves, or that quietly stays wrong.
+
+**What hydration resolves, and from where.** A step declares the entity types it must read
+(`reads_to_enter`, `reads_to_close`), the agent's definition bounds the types it may read at all
+(`data_model.md#what-each-actor-reads-and-writes`), and the hydration phase resolves the instances before
+the step opens. The instances are found from the task's anchors — its `REFERS_TO` edges and the edges those
+entities carry — by the same bounded retrieval, so that a payment step reads the profile the task names
+and not every profile, and a meeting step reads the contacts the transcript names and not the address
+book. This is the per-step arm of the hybrid, and it is where "which context" is decided, because the step
+is the one component that knows what it is about to judge. Context a step discovers the task concerns is
+written back onto the task as the same `REFERS_TO` edge `link` writes
+(`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`),
+so the anchors grow as the batch proceeds, and a later step, or a later batch on the same task, starts from
+more than intake had.
+
+**Reason.** The two arms answer different questions. `link` answers "what is this task about", which is
+knowable at intake and is a property of the task; hydration answers "what does this step need", which is
+knowable only at the step and is a property of the declaration. Giving intake the second question makes it
+guess; giving the step the first makes every step re-derive what the task already said. The anchors are
+the interface between them, and typed edges are what "well organized" means here: a reader walks from the
+task to what it concerns and from there to what a step read, and no free-text field holds any of it.
+
+**The cost accepted** is that a step whose declared type is not reachable from the task's anchors — a
+research step whose sources the task did not name — finds them by search, which is the ordinary retrieval
+an agent makes within its context types, and writes back what it found. **What would reopen it:** a class
+of task in practice whose steps repeatedly retrieve the same unnamed context, batch after batch — which
+would argue for naming it in the task at creation, or for a declaration that names it as a read, and not
+for a general pull at intake.
+
+**A matter, a case, or a filing is such an anchor, and it is a record entity, not a work-model one.** Work
+that runs for months around one dispute, one claim, or one obligation to an agency — the correspondence, the
+documents, the parties, the dates — needs a bounded set for its steps to read from and write to, and the
+answer is the one this section already gives: the task names the matter, `link` attaches it by `REFERS_TO`,
+and hydration resolves each step's reads from it and from the edges it carries — the documents and threads
+that refer to it, the `contact` entities with their roles in it, the tasks that are its deadlines, each with
+its `due_date` (`data_model.md#concepts`). What the matter *is* in the record is a context entity of the
+operator's, retrieved by type and shaped by the registry
+(`migration.md#context-entities-the-design-retrieves-and-never-migrates`): the standing of an obligation, an
+episode, or a `payment_profile`, and like them named here by role and never defined. It is not a `plan`,
+which is outside the four models and held (`migration.md#gaps-and-contradictions-the-mapping-exposed`, G10);
+not a batch, which goes through one workflow for its whole life and holds on a task by edge (decisions 13
+and 14, `work_model.md#a-batch-may-depend-on-a-task-it-created`); not a parent task, which groups tasks,
+completes when they do, and holds no document or party; and not a new work-model type, because nothing about
+it is work — it is what the work concerns. Its tasks over the months are ordinary tasks, each `REFERS_TO` the
+matter, each with its own intake and chain, and a reader asking what has been done in a matter walks its
+edges. An intake rule for correspondence in a matter keys on a field, so membership reaches a rule only as a
+field a step wrote — a thread's classification naming the matter
+(`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) — and
+never as an edge the rule infers at evaluation.
+
+## feature
+
+**Purpose:** carry a change that adds or alters behaviour from scoped intent to merged code, reviewed by
+every review step the change concerns.
+
+**Entry condition:** intake closed naming `feature`; the task names a repository, which is the
+[domain](vocabulary.md#domain) the step owners' grants are checked against (`authority_model.md#grants`).
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|feature steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `pm` | `pm` step owner | yes | | the scope, the acceptance evidence (the task's `acceptance_criteria[]`), and the design basis are stated on the task (`conformance.md#design-basis`) |
+| 2 | `ux` | `ux` step owner | yes | group `design`, joins `arch` | the change's user-facing behaviour is judged against the stated scope |
+| 3 | `arch` | `arch` step owner | yes | group `design`, joins `ux` | the design basis is checked and the change conforms to the cited section, or the citation is found false |
+| 4 | `impl` | implementer | yes | | a pull request exists as an artifact of the batch, its CI is green at the pinned head, and it is mergeable as read (`github.md#conditions-that-are-not-events`) |
+| 5 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and judged for correctness |
+| 6 | `qa` | `qa` step owner | yes | group `verification`, joins `legal` | the tests can fail on the thing they watch (`principles.md`, invariant 4) |
+| 7 | `legal` | `legal` step owner | no | group `verification`, joins `qa` | licensing, data-handling, and disclosure are judged where the change touches them |
+| 8 | `merge` | steward | yes | | the merge action taken through the action gate and the merged pull request read back; the verdict names the successor |
+
+<!-- /rendered -->
+
+The two parallel groups exist because their reviewing step owners judge independent things and neither
+needs the other's conclusion; the join is what makes the batch wait for both. `legal` is the one optional
+step, and it carries an `applies_when` condition: it opens where the change touches licensing,
+data-handling, or disclosure, and is recorded inapplicable where it does not, with the condition that
+ruled it out (`gates_and_workflows.md#declaration-batch-projection`). Every other step here is required
+and opens on every batch. This placement — a review step, seated after `impl`, gated by relevance rather
+than by a chronological default — is the design's answer to where a discipline like legal belongs: it is
+not exiled to a gate of last resort (a public essay series, *The Human Inversion*, Part 3, on the
+pre-inversion shape where such disciplines "lived almost entirely at foundation … and review … but were
+exiled to the gates"), because `applies_when` seats it exactly where its relevance is decided, the same
+principle that fails an unclassified action type closed rather than passing it by default. A declaration scope whose
+legal risk must be judged before implementation starts, not after, expresses that by seating `legal` in the
+design stage of its own workflow declaration instead — the design does not preclude it, and does not
+declare it here. `merge` is a step so that the merge
+action has a step owner to claim it, a taking to record, and a verdict to close the batch with; the
+action itself is governed by action policy, not by the step
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
+
+**Stages:** scoping (`pm`); design (`ux`, `arch`); implementation (`impl`); review (`pr_review`, `qa`,
+`legal`); integration (`merge`).
+
+**Artifacts:** the issue that carries the specification; the pull request; its CI check runs; the merge
+commit.
+
+**Typical action classes:** `build`, `docs`, `git_push`, `open_pr`, `merge_pr`.
+
+**Successors:** `release`; or none, where the declaration permits it (`none_permitted`) because the scope
+deploys its default branch on its own cadence and the merge is the last effect the task needs — a
+declaration for a project that does not is written with none not permitted, and a closing verdict naming
+none under it is refused (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
+
+**Fast paths:** `bug` skips `ux`; `copy` skips `arch`; `security` skips `ux`, `qa`, and `legal`. Each is
+for a declaration scope that declares no dedicated workflow of that type; where the scope does declare one,
+intake routes to it and the fast path is never taken.
+
+## bug
+
+**Purpose:** carry a fix for behaviour that contradicts its specification to merged code with the
+minimum review that still proves the fix.
+
+**Entry condition:** intake closed naming `bug`; the task names a repository and cites the behaviour that
+is wrong, ideally as a failing test.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|bug steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `pm` | `pm` step owner | yes | | the defect is reproduced or the reproduction's absence is stated; the acceptance evidence is the test that goes red without the fix |
+| 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read, and the red-then-green result recorded in its body |
+| 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read; the fix addresses the cause, not the symptom |
+| 4 | `qa` | `qa` step owner | yes | | the test fails on the reverted fix (`principles.md`, invariant 4) |
+| 5 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the verdict names the successor |
+
+<!-- /rendered -->
+
+There is no `ux` or `arch` step because a fix restores stated behaviour and does not choose new
+behaviour; a bug whose fix requires a design choice is not carried by adding steps here: this batch closes
+without a successor, its closing verdict carrying the finding that names the choice, and the design work is
+a **new** task through intake, referring to this batch's artifacts and produced from that finding
+(`gates_and_workflows.md#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened`)
+— no task enters intake twice (`#intake`).
+
+**Stages:** scoping (`pm`); implementation (`impl`); review (`pr_review`, `qa`); integration (`merge`).
+
+**Artifacts:** the issue; the pull request; its CI check runs; the merge commit.
+
+**Typical action classes:** `build`, `git_push`, `open_pr`, `merge_pr`.
+
+**Successors:** `release`; or none, as for feature.
+
+**Fast paths:** none. This workflow is itself the reduced path.
+
+## security
+
+**Purpose:** carry a fix for a vulnerability to merged and released code faster than the feature or bug
+workflows allow, without widening what the public record says about the vulnerability before the fix
+is deployed.
+
+**Entry condition:** intake closed naming `security`; the task is marked as security-sensitive at
+`classify`, which also restricts what its artifacts may say.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|security steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `pm` | `pm` step owner | yes | | the affected surface and the fix's scope are stated in the record; the public artifacts carry no exploit detail |
+| 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read; its body describes the change, not the exploit |
+| 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and the fix is judged complete for the stated surface |
+| 4 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the verdict names `release` |
+
+<!-- /rendered -->
+
+The review steps that are absent (`ux`, `qa`, `legal`) are absent for speed, and the workflow compensates
+by never closing without a successor: a security fix that is merged and not released is not fixed, and
+the closing verdict's only permitted successor is `release`. Disclosure hygiene is a property of the
+artifacts, checked at `pm` and `pr_review`, because the pull request and the release are public records.
+
+**Stages:** scoping (`pm`); implementation (`impl`); review (`pr_review`); integration (`merge`).
+
+**Artifacts:** the issue (private where the system allows); the pull request; the merge commit.
+
+**Typical action classes:** `build`, `git_push`, `open_pr`, `merge_pr`.
+
+**Successors:** `release`, always: the declaration does not permit none (`none_permitted`), so a closing
+verdict naming none is refused at the write (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
+
+**Fast paths:** none.
+
+## copy
+
+**Purpose:** carry a change to the words a product shows, in a site, a document, or a message template,
+through a copy-specific review to merged content.
+
+**Entry condition:** intake closed naming `copy`; the task names the surface whose words change and the
+repository that holds it.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|copy steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `pm` | `pm` step owner | yes | | the surface, the audience, and the intent of the change are stated |
+| 2 | `copy` | copywriter | yes | | the words are written against the `brand_voice` entity, retrieved by type, and stored on the task |
+| 3 | `ux` | `ux` step owner | no | | layout consequences of the new words are judged; nothing about the words themselves |
+| 4 | `impl` | implementer | yes | | a pull request carries the words into the surface |
+| 5 | `pr_review` | `pr_review` step owner | yes | | the diff changes only the words the task names |
+| 6 | `legal` | `legal` step owner | no | | claims, comparisons, and regulated wording are judged where the copy makes them |
+| 7 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the verdict names the successor |
+
+<!-- /rendered -->
+
+`copy` precedes `impl` because the words are the deliverable and the implementation is their carriage;
+`ux` is optional and scoped to layout so that the copy step's conclusion on the words is not re-litigated by
+a second reviewing step, and its `applies_when` opens it where the change alters the surface the words sit
+in rather than only the words. `legal` is optional on the same footing as on feature. There is no `arch`
+step: copy changes no behaviour.
+
+**Stages:** scoping (`pm`); authoring (`copy`, `ux`); implementation (`impl`); review (`pr_review`,
+`legal`); integration (`merge`).
+
+**Artifacts:** the pull request; the merge commit; the published surface once released.
+
+**Typical action classes:** `docs`, `git_push`, `open_pr`, `merge_pr`.
+
+**Successors:** `release`; or none, as for feature.
+
+**Fast paths:** none.
+
+## social content
+
+**Purpose:** produce share material for a piece of content across the platforms it targets and post it,
+with the operator's consent recorded through the action gate before anything is public.
+
+**Entry condition:** intake closed naming `social_content`; the task names the content being shared and
+the target platforms, from the `vendor_binding` entity retrieved by type.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|social_content steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `draft` | content author | yes | | complete drafts exist for every targeted platform, stored in the record, against the `brand_voice` entity |
+| 2 | `draft_lint` | lint runner | yes | on fail: `draft` | the deterministic checks pass: no relative-time anchors, a substance floor per platform, no near-duplicate text across platforms, every targeted platform present |
+| 3 | `consent` | operator-facing agent | yes | on fail: `draft` | the checkpoint on the `publish` action, carrying the drafts inline, is resolved by the operator; feedback reopens `draft` |
+| 4 | `post` | content author | yes | | the `publish` action taken through the action gate on each platform and the posts read back; the verdict closes the batch |
+
+<!-- /rendered -->
+
+`draft_lint` sits before the operator sees anything so that the operator's attention is spent on
+judgment, not on defects a script can find. `consent` is not a second gate: the `publish` action
+is created when the drafts pass lint, the action gate evaluates it, and the step is where the
+operator-facing agent carries the gate's checkpoint and records the decision
+(`gates_and_workflows.md#the-action-gate-is-pr-independent`, principle 6). The checkpoint is written when
+the step opens and the gate holds the action; `post` asks the gate again at the take, on the standing
+resolution, the parameters, the policy as read then, and the key (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
+
+**Stages:** authoring (`draft`, `draft_lint`); consent (`consent`); publication (`post`).
+
+**Artifacts:** the posts on each platform, each attached by edge with its platform identifier.
+
+**Typical action classes:** `publish`.
+
+**Successors:** none.
+
+**Fast paths:** `approved` skips `consent`, permitted only when the action gate would not
+checkpoint the `publish` action: an action series for the class has graduated under the
+`action_policy`, or the operator's standing approval for the content is already recorded on the task.
+The fast path never bypasses the gate; it skips the step that would have carried a checkpoint the gate
+would not have written.
+
+## release
+
+**Purpose:** cut and ship a release from merged code, verify it is the code that was reviewed, and
+confirm it reached the deployed checkout.
+
+**Entry condition:** intake closed naming `release`, or a code batch closed naming `release` as its
+successor. Several tasks whose code batches closed since the last release normally enter the release
+workflow together, as one batch (`work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks`).
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|release steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `criteria` | release steward | yes | | every criterion in the `release_criteria` entity, retrieved by type, is read and holds; a criterion that cannot be read is `unknown`, and unknown holds the batch (`principles.md`, invariant 7) |
+| 2 | `release` | release steward | yes | on fail: `criteria` | the `release` action taken through the action gate; the tag, package, or deployment is read back at its terminal status (`principles.md`, invariant 2) |
+| 3 | `verify_deployed` | deployment verifier | yes | on fail: `release` | the deployed checkout reports the released version; the verdict closes the batch |
+
+<!-- /rendered -->
+
+`verify_deployed` is a separate step because "released" and "landed" are different claims
+(`principles.md`, invariant 10), and a batch that closed on the release action's success would record
+the first as the second. `criteria` is separate from `release` so that the read of the criteria and the
+taking of the release are two verdicts, and a release taken against criteria nobody read is visible as a
+batch missing one. `verify_deployed` is declared `review` and has its own slot, distinct from `release`'s, so
+that an agent other than the one that took the release confirms the deployment
+(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`); `criteria` and `release` are `work`.
+
+**Stages:** readiness (`criteria`); shipping (`release`, `verify_deployed`).
+
+**Artifacts:** the tag; the package or image; the release notes; the deployment record.
+
+**Typical action classes:** `release`, `git_push`, `external_api_write`.
+
+**Successors:** none.
+
+**Fast paths:** none. A release that skips its criteria is the failure the workflow exists to prevent.
+
+## outreach
+
+**Purpose:** compose and send a message to a party outside the swarm, with the message reviewed, the send
+consented to through the action gate, and the follow-up owned.
+
+**Entry condition:** intake closed naming `outreach`; the task names the recipient by reference to a
+`contact` entity and the purpose of the message; the recipient's history with the operator is retrieved
+from the record and the mail archive before anything is drafted, never assumed.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|outreach steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `draft` | content author | yes | | a draft exists in the record, written against the `brand_voice` entity and the operator's voice guidance, every factual claim in it traced to a source the author read |
+| 2 | `disclosure_lint` | lint runner | yes | on fail: `draft` | the deterministic check passes: every third party the draft names, or every field about one it states as fact, resolves to an entity `link` attached to this task (`#what-link-attaches-and-what-it-leaves-to-hydration`) — a name or a detail with no such edge is a finding, not a judgement call |
+| 3 | `review` | `pr_review` step owner | yes | on fail: `draft` | the draft is judged for facts, voice, and scope (it answers what was asked and nothing else) |
+| 4 | `consent` | operator-facing agent | yes | on fail: `draft` | the checkpoint on the `send_external_comms` action, carrying the full draft, is resolved by the operator |
+| 5 | `send` | content author | yes | | the `send_external_comms` action taken through the action gate and the sent message read back from the mail system, never inferred from the send call's return |
+| 6 | `follow_up` | content author | no | | a reply is linked as an artifact, or the declared follow-up interval passes and one follow-up was sent through the same gate, or the operator ends the follow-up; the verdict closes the batch |
+
+<!-- /rendered -->
+
+`disclosure_lint` is the mechanical half of what `review` used to carry alone as a judgement — "what it
+discloses" — and it exists because the broadened capture purpose
+(`data_model.md#record-conventions`) makes that judgement load-bearing rather than incidental: capture is
+generous precisely because the record holds more about more people than any one task needs, so the step
+that assembles a message to one of them is where an unbounded read would surface it. The check is the same
+shape `#what-link-attaches-and-what-it-leaves-to-hydration` already states for edges, extended to draft
+text: a third party or a fact about one that the draft states is either traceable to what the task's `link`
+step attached, or it is a name or a detail this batch pulled in on relevance alone, which is the
+profile-crossing pull that section already refuses for edges and this step refuses for prose. It sits
+before `review` for the same reason `draft_lint` precedes `social content`'s `consent`
+(`#social-content`): the operator's and the reviewer's attention goes to judgement — facts, voice, whether
+the reply answers what was asked — not to a defect a mechanical pass already catches, and a draft that
+names an uncredited third party never reaches a human reader. `review` precedes `consent` so that the
+operator sees a draft that has already been checked, and the draft the operator consents to is the draft
+that is sent: `send` takes the action on the reviewed content by its dedup key, and any change after
+consent is a new `draft`, which re-enters at `disclosure_lint`. The checkpoint `consent` carries is written
+when the step opens and the gate holds the `send_external_comms` action; at `send` the gate is evaluated
+again, on the standing resolution, the parameters, the policy as read then, and the key
+(`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`). A staged draft is never modified in place in
+the mail system, because on some systems an update is a send; the design's staging is the draft in the
+record. `follow_up` is a step of the same batch so that an unanswered message has a step owner until
+the batch closes, and so that a follow-up goes through the same gate as the first message. The follow-up
+interval is `follow_up`'s `hold_bound`: the step holds on the reply under decision 13, and reaching the bound
+is the cue to sign on the step's alternative close rather than a checkpoint
+(`gates_and_workflows.md#declaration-batch-projection`).
+
+**Stages:** composition (`draft`, `disclosure_lint`, `review`); consent (`consent`); delivery (`send`, `follow_up`).
+
+**Artifacts:** the sent message; the thread; any reply.
+
+**Typical action classes:** `send_external_comms`.
+
+**Successors:** none. A reply that needs work of another kind is a new task, created at `follow_up` and
+routed by its own intake.
+
+**Fast paths:** none. Every outward message passes the gate.
+
+## payment
+
+**Purpose:** move money to a payee for an obligation the record holds, with the payee and amount verified
+by a second principal against the payment profile before the operator consents and before the payment is
+taken, or, where the five conditions of decision 144 hold, before the payment is taken without a checkpoint
+(`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
+
+**Entry condition:** intake closed naming `payment`; the task references the obligation (an invoice, a
+recurring fee, a wage) and the `payment_profile` entity, retrieved by type, that names the payee, the
+rail, and the constraints. A task that names a payee or an amount inline, rather than by reference to a
+profile, fails `classify` at intake.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|payment steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `prepare` | payer | yes | | the payee, amount, currency, rail, destination, and reference are assembled from the profile and the obligation and stored on the task; the profile's constraints (no memo, attendance gate, cadence) are applied |
+| 2 | `verify` | verifier | yes | on fail: `prepare` | payee, amount, and destination match the profile and the obligation, and the destination is compared with the reference checkpoint's; the verifier is a principal disjoint from the payer (`authority_model.md#structural-checks-quorum-and-separation-of-duties`), and where the payment may go without a checkpoint, an agent that holds the lease of none of the payer-slot steps (`prepare`, `pay`), is not the one that takes `pay`, and signs after the last write of any figure it covers (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, decision 144) |
+| 3 | `consent` | operator-facing agent | yes | on fail: `prepare` | the checkpoint on the `payment` action is resolved by the operator; it carries the payee, amount, currency, period, rail, and destination exactly as the `verify` verdict recorded them, and refers to that verdict (`payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`, decision 27); or, where the gate read the five conditions of decision 144 as holding, no checkpoint is written and the step closes on a verdict that names what the gate read, as a record and never as a permit |
+| 4 | `pay` | payer | yes | | the `payment` action taken through the action gate, keyed on its dedup key so a re-claim never pays twice (`work_model.md#at-least-once-implies-effect-dedup`) |
+| 5 | `reconcile` | verifier | yes | on fail: `pay` | the transfer is read back from the rail at its terminal status, matched to the obligation, and recorded as a `transaction` entity; the verdict closes the batch |
+
+<!-- /rendered -->
+
+`verify` and `reconcile` belong to a principal other than the payer so that one principal never both
+proposes and confirms a movement of money; this is the smallest separation of duties the authority model
+names, applied to the workflow where it matters most. `reconcile` exists because a rail's acceptance of a
+transfer is not its settlement; a payment whose reconcile step never signed is visible as a batch missing
+one. The consent step is named `consent`, not `checkpoint`: a checkpoint is the held state of the
+`payment` action, which the step carries to the operator; the step is not the checkpoint. The checkpoint is
+written when `consent` opens and the gate holds the action; `pay` asks the gate again at the take, on the
+standing resolution, the figures against the tolerance (decision 28), the policy as read then, and the
+key (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
+Where the five conditions of decision 144 hold and the payee has not already been released in the period, or since the reference checkpoint where it has no schedule, the gate holds nothing at `consent` and reads all of them again at
+the take, and a difference at the take writes a checkpoint then (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
+
+**Stages:** preparation (`prepare`, `verify`); consent (`consent`); settlement (`pay`, `reconcile`).
+
+**Artifacts:** the rail's own entry for the transfer; the receipt or confirmation message. The `transaction`
+entity is a record in the record, not an artifact.
+
+**Typical action classes:** `payment`, `transfer`.
+
+**Successors:** none. A confirmation message to the payee is an outreach task, created at `reconcile`
+and routed by its own intake.
+
+**Fast paths:** none. A payment never graduates under the `action_policy`'s recurrence rule, whatever the count
+of earlier payments. Where the payee is known, the amount is the expected amount, the bank details are unchanged,
+the payment is under the operator's per-payee cap, and a second principal has verified it, the gate holds no
+checkpoint, which changes whether `consent` carries one and not whether the step exists
+(`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`, decision 144).
+
+## research and analysis
+
+**Purpose:** answer a stated question from sources, with the answer persisted as an entity whose claims
+trace to what was read, and delivered to whoever asked.
+
+**Entry condition:** intake closed naming `research`; the task states the question, the scope, and the
+sources permitted; a task that states an answer to confirm rather than a question to answer fails
+`classify`.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|research steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `brief` | `pm` step owner | yes | | the question, the scope, the permitted sources, the audience, and the form of the deliverable are stated on the task |
+| 2 | `gather` | researcher | yes | | every source read is recorded with its provenance; a source that could not be read is recorded as unread, not omitted |
+| 3 | `synthesize` | researcher | yes | on fail: `gather` | the analysis is written with each claim traced to a gathered source; a claim with no source is marked as the author's |
+| 4 | `persist` | researcher | yes | | an `analysis` entity holds the full body and is read back; the task refers to it |
+| 5 | `deliver` | researcher | yes | | the analysis reaches its audience in the briefed form: a rendered page, a message, or nothing beyond the entity; the verdict closes the batch |
+
+<!-- /rendered -->
+
+`persist` precedes `deliver` so that what was delivered is what the record holds, and so that a delivery
+that fails leaves the work. `gather` records unread sources because a synthesis over a partial corpus
+that looks complete is the instrument failure principle 3 names.
+
+**Stages:** framing (`brief`); work (`gather`, `synthesize`); output (`persist`, `deliver`).
+
+**Artifacts:** the rendered page or the sent message, where the briefed form is external. The `analysis`
+entity is in the record, not an artifact.
+
+**Typical action classes:** `publish` or `send_external_comms` at `deliver`; none otherwise.
+
+**Successors:** `outreach`, where the deliverable is a message to an external party and the brief said
+so; otherwise none.
+
+**Fast paths:** none.
+
+## meeting processing
+
+**Purpose:** turn a transcript into the record's account of the meeting: a summary, the decisions, the
+tasks and commitments it created, and the people it involved, captured under the people-data rules.
+
+**Entry condition:** intake closed naming `meeting_processing`; the task references a transcript, as a
+`transcription` entity or an uploaded source, and the calendar event or the recording time that locates
+it. Only recordings the operator was a party to are processed; a recording the operator was not party
+to fails `classify` (`CLAUDE.md`, people-data processing).
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|meeting_processing steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `ingest` | analyst | yes | | the transcript is in the record as a source with provenance, linked to the calendar event where one is found |
+| 2 | `summarize` | analyst | yes | | a `meeting_analysis` entity holds the summary, the decisions, and the open questions |
+| 3 | `extract` | analyst | yes | on fail: `summarize` | the action items, commitments, and participants are extracted; each participant is a `contact` entity holding what serves the relationship and nothing incidental or sensitive (RGPD Art. 9 categories are summarized or omitted, never transcribed); the fields a `contact` may take from a transcript are the allowlist on the analyst's grant, and a write outside them is denied at admission (`authority_model.md#grants`) |
+| 4 | `persist` | analyst | yes | | every extracted task is created in the record and enters its own intake; every entity is read back; the verdict closes the batch |
+| 5 | `deliver` | analyst | no | | a recap per participant is drafted as an outreach task, where the brief asked for one; never sent from this batch |
+
+<!-- /rendered -->
+
+`extract` carries the people-data rule as its closing condition because the extraction is where a
+transcript's incidental disclosures would otherwise become durable profile fields. `deliver` is optional
+and creates tasks rather than sending, so that no recap reaches a participant without passing the
+outreach workflow's review and consent.
+
+**Stages:** intake of the record (`ingest`); analysis (`summarize`, `extract`); output (`persist`,
+`deliver`).
+
+**Artifacts:** the calendar event. The transcript is not an artifact: it is a source in the record — the
+`transcription` entity, or the uploaded file with its provenance — reached by retrieval and through no
+adapter (`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`). The `meeting_analysis`,
+`contact`, and `task` entities are in the record.
+
+**Typical action classes:** none. Every outward effect is a task for another workflow.
+
+**Successors:** `outreach`, per recap task; otherwise none.
+
+**Fast paths:** none.
+
+## operator-only
+
+**Purpose:** carry a task the swarm structurally cannot complete to the operator, hold it while the
+operator decides or acts, and record the outcome, so that operator-only work is on the task path and
+visible rather than a notification nobody owns.
+
+**Entry condition:** intake closed naming `operator-only`, or the task's declared action classes include
+`operator_only`. Only the slot the implementation designates for operator-only work (example name:
+operator-facing agent) is eligible to claim it
+(`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`). The task is an ordinary
+task, not a checkpoint: it raises one only when an action inside it reaches the action gate, which holds
+an `operator_only` action with reason `gate_hold`; the checkpoint is what this workflow carries
+(`failure_posture.md#what-a-checkpoint-does-not-absorb`).
+
+**Steps**
+
+<!-- rendered: workflow=*|operator_only steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `present` | operator-facing agent | yes | | the task, its context, and the exact operator action it needs are carried to the operator through the channel the `vendor_binding` entity names; where an action exists, its checkpoint is what is carried, through the one decision queue |
+| 2 | `await` | operator-facing agent | yes | | the confirmation, never the resolution alone, closes the step — an adapter's read-back, an arriving artifact, or, where declared, the operator's report of the action taken, written as a report attributed to the operator principal (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`); a `denied` resolution closes the step on its failing conclusion instead, with no confirmation to wait for; the lease is renewed throughout; the deferral is bounded and its exhaustion escalates the task with reason `rounds_exhausted` (`failure_posture.md#the-rules`, rule 5) |
+| 3 | `record` | operator-facing agent | yes | | the confirmation `await` closed on, or the failing conclusion, is where the outcome lands: written on the task and read back; the verdict closes the batch and names the successor the outcome calls for |
+
+<!-- /rendered -->
+
+The workflow has three steps rather than one so that "presented and awaiting" is a readable state of the
+batch and not a notification's delivery status, and so that a task the operator never answers is
+visible as a batch whose `await` step has been open past its bound. That bound is `await`'s `hold_bound`, and
+because the step's close condition names no alternative to the confirmation but a `denied` resolution's
+failing conclusion, reaching the bound with neither is rule 5's ceiling
+(`gates_and_workflows.md#declaration-batch-projection`).
+
+A single step of another workflow whose action is `operator_only` does not route here. It carries the
+checkpoint, holds for the confirmation, and closes on it in place — the three steps above are what its life
+looks like from its own batch
+(`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`). This workflow is for a task whose whole work is the operator's.
+
+**Stages:** presentation (`present`); decision (`await`, `record`).
+
+**Artifacts:** whatever record the operator's action left, attached when the operator reports it.
+
+**Typical action classes:** `operator_only`. The class resolves to `NEVER` ahead of any policy; no action
+in this batch is taken without the operator (`gates_and_workflows.md#confidence-and-three-blast-tiers`).
+
+**Successors:** whichever workflow the operator's decision calls for, or none. A task the operator
+completed by hand closes with none; a task the operator redirected is routed by this batch's closing
+verdict, not by a new intake, because the classification did not change.
+
+**Fast paths:** none.
+
+## session digestion
+
+**Purpose:** turn what an [interactive session](vocabulary.md#interactive-session) did and left undone
+into tasks, so that the one execution mechanism holding no lease has a recovery path that is designed and
+owned rather than emergent. A session claims nothing, so nothing lapses when it dies and there is no task
+to make claimable again; digestion is what stands in for the lease, and it is a workflow because a
+recovery nobody owns is not a recovery.
+
+**Entry condition:** intake closed naming `session_digestion`; the task references one or more sessions by
+their transcripts. A session is eligible whether it ended cleanly or was interrupted — an interrupted one
+is the case the workflow exists for, and waiting for a session to "finish" would exclude it.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|session_digestion steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `digest` | analyst | yes | | each session in scope has one digest in the record, stating what it claimed to do and what it left open; a session whose transcript cannot be read is recorded as unread, never as empty |
+| 2 | `verify` | analyst | yes | on fail: `digest` | every claim the digest carries is checked against the system of record that would hold its effect, and each is marked confirmed, refuted, or unverifiable; an unverifiable claim stays unverifiable and is never promoted to confirmed |
+| 3 | `reconcile` | analyst | yes | | claims that survive verification are reconciled against the tasks that already exist, so that a claim already tracked produces no duplicate |
+| 4 | `file` | analyst | yes | | every unreconciled item is created as a task and enters its own intake; each is read back; the verdict closes the batch |
+
+<!-- /rendered -->
+
+`verify` is required and separate from `digest` because a session's own account of itself is a claim and
+not evidence: the digest states what the session said it did, and only the system that would hold the
+effect can say whether it happened (principle 2). `verify` is declared `work`: it reads a record and the
+systems that would hold the effects, and the batch produces no artifact for the builder-never-reviews rule to
+read (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). Whether a digest must be
+verified by an agent other than its author is a separate question that rule does not decide. `file` creates tasks and completes none — digestion
+recovers work by making it claimable again, which is the guarantee the lease gives the other three
+mechanisms, and it never marks the recovered work done on the strength of the session having attempted it
+(principle 10).
+
+**Stages:** reconstruction (`digest`); confirmation (`verify`, `reconcile`); output (`file`).
+
+**Artifacts:** the session transcripts. The digests and the tasks are entities in the record.
+
+**Typical action classes:** none. Every outward effect the digestion finds outstanding becomes a task for
+the workflow that owns it.
+
+**Successors:** none. Each filed task enters intake on its own.
+
+**Fast paths:** none.
+
+## planning
+
+**Purpose:** keep one planning record consistent with the work beneath it and the record above it — its
+completion criteria judged against its descendants' derived state, its decisions recorded as entities, the
+work it still owes created as tasks, and the lessons that belong to its parent filed upward — so that the
+layers of the planning hierarchy are held together by verdicts rather than by a session's convention
+(`planning_model.md#maintenance-is-work-the-planning-workflow`).
+
+**Entry condition:** intake closed naming `planning`; the task is `PART_OF` exactly one planning record,
+which is the batch's subject and the first record on the task's ascent; it is the record's one live
+recurring instance (`work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`),
+carrying a `recurrence` rule read from the record's `cadence`, whose `due_date` a descendant task's closing
+verdict corrects to now and whose next instance this batch's closing verdict creates. A planning task
+`PART_OF` no record, or two, fails `classify`.
+
+**Steps**
+
+<!-- rendered: workflow=*|planning steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `survey` | `planner` | yes | | the record's statement and its parent's, the derived reads over its descendants (completion, the open and terminal counts, the descendants held by a checkpoint, the open tasks in priority order, the child records with no live `planning` task), and the `decision` entities under it are read, resolved along the task's ascent and down the record's edges, and named on the verdict as what was read |
+| 2 | `judge` | `planner` | yes | | findings are recorded, one each: a completion criterion met that nothing closed on; a criterion the descendants cannot meet as stated; a descendant the statement does not describe; a decision under the record the work has since contradicted; a lesson that belongs to the parent; a child record no batch maintains |
+| 3 | `amend` | `planner` | yes | on fail: `judge` | every finding's remedy is written through the record's own primitives and read back: a correction to the statement and each new `decision` entity `PART_OF` the record as `amend_<level>` actions through the action gate, written by the engine on the permit; a task `PART_OF` the record for each criterion still owed; a task `PART_OF` the parent for each lesson that lands there; the next `planning` instance created before the verdict; the verdict closes the batch naming no successor |
+
+<!-- /rendered -->
+
+`survey` is separate from `judge` so that what the batch read is named on one verdict and what it
+concluded on another, and a finding is checkable against the reads it was made on (decision 40). `judge`
+writes nothing to the record but findings, so that a planner cannot amend a statement on a judgement it
+did not record. `amend` is the only step that writes authored content, and it writes through the gate: an
+`amend_<level>` class the policy lists in neither tier resolves to `NEVER`, so an amendment at a level the
+operator has not loosened is a checkpoint the operator resolves, and the step holds on it as a `consent`
+step holds (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
+What the workflow never writes is stated once: a descendant's status, any derived read, the parent's
+statement, or anything on a record the task is not `PART_OF`
+(`planning_model.md#the-mechanism-against-cross-record-collision-is-the-subject`). A finding that a
+child record has no live `planning` task is remedied at `amend` by creating that child's first instance,
+which is what makes an unmaintained record a finding rather than a silence. Under decision 116 one more
+thing runs here: an authoring task for a created workflow is a planning task `PART_OF` its originating task's
+plan, and `amend` may carry its `workflow` declaration write, a governance write approved by blast tier and
+not an `amend_<level>` action. `survey` no longer counts tasks toward a core proposal: the operator's
+2026-09-26 ruling withdraws the core-at-five promotion (`#a-workflow-created-for-one-task`); a workflow's
+usage is reported, never a promotion trigger.
+
+**Stages:** reading (`survey`); judgement (`judge`); writing (`amend`).
+
+**Artifacts:** none. The planning record, the `decision` entities, and the tasks are in the record; a
+document rendered from a statement is a render target, not an artifact of this batch.
+
+**Typical action classes:** `amend_<level>`, one class per planning level the instance registers.
+
+**Successors:** none. The closing verdict creates the next instance, which is a task creation and not a
+successor, as every recurring task's is.
+
+**Fast paths:** none.
+
+**Applicability:** a declaration scope may declare optional review steps between `judge` and `amend`, one per role
+whose judgement the record's level warrants — the finance role on a plan whose criteria name a figure, the
+legal role on one whose scope names a jurisdiction — each with an `applies_when` over the record's type and
+statement, each closing on that role's findings, and each recorded inapplicable where its condition does
+not hold. That is the home of the plan-participation protocol the roles once carried by hand, and a
+role's concern is a blocking finding `amend` cannot sign around (`planning_model.md#maintenance-is-work-the-planning-workflow`).
+
+## postmortem
+
+**Purpose:** turn a halt, a repeated failure, or a standing finding into a written account of what the
+observations should have caught and did not, so drift that happened anyway is institutionalized rather
+than left to recur unremarked — the class of work a public essay series (*The Human Inversion*, Part 5)
+names directly: "publish postmortems when drift happened anyway, with links to the observations that
+should have prevented it."
+
+**Entry condition:** an `intake_rule` matching one of four classifications recorded on an existing entity,
+never a work-model record type itself (decision 36): the operator-invoked halt's read-back confirming it
+stopped (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`), carried
+as a classification on an ordinary entity of an allowed type, with the halt's read-back as its evidence;
+a checkpoint whose reason is
+`repeated_lapse`, `rounds_exhausted`, or `dependency_cycle` reaching a terminal resolution
+(`failure_posture.md#the-rules`); a checkpoint whose reason is `capability_denied` or `capability_unavailable`
+reaching a terminal resolution where the resolution does not clear the underlying gap — the operator declines
+to grant the capability, or declines to make it available — so the checkpoint closes with the task still
+unable to do what it was trying to do (`authority_model.md#grants`,
+`failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`); or a standing
+[finding](vocabulary.md#finding) whose institutionalization task (decision 17) has landed and closed. Each of
+the four reaches the rule through a classification field another step writes and reads back on an ordinary
+entity of an allowed type, with provenance naming the source event and the writing principal. A session,
+checkpoint, or task may be evidence for that classification, never the rule's subject: decision 36's seven
+excluded types still apply (`work_model.md#whether-an-intake-rule-may-key-on-the-work-models-own-records`).
+The handling or closing step carries the classification; there is no new listener on the work model. A
+task this rule creates enters intake and is classified like any other; `classify` names which of the four
+fired and the entity it fired on.
+
+**A capability gap is the same shape as any other postmortem trigger, not a new kind of one.** Hitting
+`capability_denied` (the class is not permitted at all) or `capability_unavailable` (the class is permitted
+but transiently unreachable) is ordinary operation, resolved at the checkpoint the denial or the lapse
+already raises (`authority_model.md#grants`, `failure_posture.md#a-runners-model-or-harness-going-
+unavailable-mid-step`) — most resolve there and never reach this workflow. What reaches `postmortem` is
+narrower: the checkpoint resolved, and the task's blocking condition still holds, because the gap is not
+"the operator hasn't granted this yet" but "there is nothing to grant" — no governance class covers the write, no
+declared read exists for what the step needs, or the workflow has no step shaped to do it. That is an
+architecture gap discovered during a halt, and it is the same shape as a postmortem finding: an observation
+that should have existed and did not, per this workflow's own purpose above, except the missing thing is a
+foundation document's own coverage rather than a gate, a check, or an instrument.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|postmortem steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `pm` | `pm` step owner | yes | | the triggering halt, checkpoint, or standing finding is named, with its subject and reason class, and the scope of the review is stated on the task |
+| 2 | `investigate` | analyst | yes | | the observations that should have caught the drift before it compounded are named by reference, resolved as of the incident's time, and a finding is recorded stating what was missing — a gate, a check, a declared read, an instrument — not merely what happened |
+| 3 | `pr_review` | `pr_review` step owner | yes | | the finding names an executed check or a resolvable reference for every claim, per principle 2, and is judged complete for the incident's scope |
+| 4 | `merge` | steward | yes | | the finding's remedy is routed: an implementation-only fix as a task through intake, referring to this batch's finding; a decision-or-attestation gap as the institutionalization task of decision 17, referring to the same finding; the verdict names the successor |
+
+<!-- /rendered -->
+
+`investigate` is separate from `pm` so that the incident is scoped before the account of it is written, and
+separate from `pr_review` so that a claim about what should have caught the drift is checked before it is
+institutionalized — the same reason `survey` and `judge` are separated in `planning`. This workflow writes
+no fix itself: its output is the finding and the task the finding produces, never a direct change to the
+agent, workflow, or step that produced the drift, because a proposed change is a proposal until the gate
+lets it through, never a mutation an agent makes to itself on its own finding
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+Where the incident's remedy is a recovery already taken under `action_policy.recoveries`
+(`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`), this workflow
+does not repeat that recovery — it names, as part of `investigate`'s finding, whether the recovery path was
+exercised and read back, which is a recovery exercise in the sense that document already requires, not a
+new one this workflow invents.
+
+**A finding that carries a proposed architecture change is routed at `merge` exactly like any other finding,
+and no new workflow is declared for it.** The operator's own framing — that the swarm could propose an
+update to its architecture, which the operator would review and approve before it is implemented — is two
+separate acts under the design as it already stands, not one: the proposal, and the implementation. The
+proposal is `merge`'s ordinary routing of a decision-or-attestation gap to the institutionalization task of
+decision 17, referring to the finding — a task through intake like any other, never a direct write
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-
+produced-it`). What the operator "approves" is a checkpoint on that task, resolved by the operator, per
+decision 52's shape: proposing is a capability of a grant, distinct from taking the action, and what stops
+or proceeds is the task and its checkpoint, never the proposal itself acting as a permit
+(`authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-
+is-a-grant-capability`). Approving the proposal is not the change: the write to `docs/foundation/` — or to
+the `agent`, `agent_policy`, or `workflow` entity the finding concerns — is a governance write, reserved to
+the operator by default under decision 18 and, where it is ever granted, made only by the engine on a
+permit under decision 56's sole-writer grant
+(`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`). One checkpoint approving
+"pursue this" does not carry a second permit for "and now write it"; the write is its own action, evaluated
+at the gate on its own class, whether that class is reserved or granted.
+
+The closest existing shape for the proposal itself is `planning`'s `amend` step
+(`#planning`, third step): a `planning` instance reads its record and its descendants at `survey`, records
+findings at `judge`, and writes every finding's remedy through the record's own primitives at `amend`, each
+write an `amend_<level>` action through the action gate, held at a `NEVER`-tier by default like any other
+unwritten governance class
+(`planning_model.md#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels`). A postmortem's proposed architecture change is the same
+shape one level up, applied reflexively to the architecture the swarm runs under rather than to a plan
+record it maintains: survey (`pm`, `investigate`) before judging, judgement recorded as a finding rather
+than assumed, and the remedy written only through the record's own primitives — here, a PR against
+`docs/foundation/` that cites the finding and the decision it consolidates
+(`conformance.md#amending-a-foundation-document`), not a write any agent makes to the directory directly. It is not
+literally an `amend_<level>` action, because `docs/foundation/` is not a planning record and carries no
+`amend_<level>` class of its own (`planning_model.md#authority-per-level-an-amendment-is-an-action-and-its-
+class-is-the-levels`); no new workflow is declared to make it one. The analogy is in the shape — survey,
+judge, write-through-the-record's-primitives-only — not in a shared action class, and `postmortem` is left
+as the workflow that carries it, since decision 17 already routes an institutionalization task through
+intake and nothing about a proposed architecture change needs a fifteenth reference workflow to say that again.
+
+**Stages:** scoping (`pm`); investigation (`investigate`); review (`pr_review`); routing (`merge`).
+
+**Artifacts:** the issue that carries the account, where the scope's declaration files one; none otherwise — the
+finding and the tasks it produces are in the record.
+
+**Typical action classes:** none of its own; a recovery a finding names as unexercised is an action under
+its own class, taken through the action gate like any other recovery.
+
+**Successors:** none. The closing verdict's effect is the routed task or the institutionalization task it
+refers to, not a workflow this batch itself enters.
+
+**Fast paths:** none.
+
+**The limit this does not resolve.** Revision 21 already states bootstrapping as a limitation, not a
+mechanism: a workflow too broken to open a step cannot repair itself, and the first declaration is an
+operator act by design, with no built counterpart standing in for it
+(`status.md`'s revision-21 table, `gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds` in
+`gates_and_workflows.md`). An architecture gap that prevents the proposal itself from being expressed — no
+`intake_rule` classification fires because the gap is in what an `intake_rule` can name, or `postmortem`
+cannot be entered because the entry condition above does not cover the shape of gap found — is the same
+class of limitation, one level up: the mechanism meant to carry a self-found gap into the record cannot
+carry this particular one. Its escape is the same as the workflow-open case, and no more privileged: the
+announcement path of last resort
+(`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-
+or-cannot-wait`), which carries what cannot wait for a read and may have no record to be read from. That
+path is a notification, never a write — it does not create the task, rule the decision, or touch
+`docs/foundation/`, and reaching it is not a mechanism that resolves the gap, only a stated fact that below
+some depth of architecture gap, an agent's only remaining move is to say so out loud and wait. This is
+disclosed as a limitation because it is one: nothing above closes the recursion, the same honesty revision
+21 already applied to a workflow that cannot open its own first step.
+
+## A workflow is created for the task no declaration fits, and improved by every task it carries
+
+**The rules in this section.**
+
+- `route` names a declaration that fits, holds the task on one amendment where a declaration nearly fits, or opens the authoring of a new one; the task is never held for similar tasks.
+- A task waits only on the one amendment or the one authoring its own routing needs, as a dependency its intake batch records, bounded by `route`'s `hold_bound`.
+- A new or amended declaration whose steps are all low-blast is approved by the swarm, the approver distinct from the proposer; one that adds a consent point, an `operator_only` action, or a high-blast action is approved by the operator, and so is any amendment that removes or weakens a consent point, a review step, or a closing condition.
+- A run, or a step's verdict, may propose an amendment to the declaration it ran under — as a standing finding where it names a defect, as an improvement proposal where it names none, an entity of its own linked to the run that raised it — and the proposing batch never approves it.
+- The task that authors a new declaration is `PART_OF` the originating task's plan and goes through the planning workflow once that workflow's draft declaration is active, whose `amend` step carries the declaration write; it goes through operator-only until then.
+- A created workflow is named for its class of work, deduplicated against the declarations in force, and stays declared whether or not a second task uses it.
+- Nothing retires a declaration automatically; a declaration is retired only when someone raises a retirement task, and retiring one that holds a consent point or a review step is the operator's.
+- A workflow's status is draft, active, or retired, with nothing above active; no created workflow becomes "core," and a workflow's task count is reported as usage, never a promotion trigger (the operator's 2026-09-26 ruling, superseding default (g) below and the survey-driven proposal it fed).
+
+**Ruled (decision 116, 2026-09-25, the operator's).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The ruling, verbatim: "Workflows are most powerful
+when dynamic. Every task is executed by a workflow as soon as possible, never held until similar tasks
+appear. When no workflow fits, one is created for that task; when one fits, each new task's context is used
+to improve it as a class. Improving existing workflows is as important as creating new ones." Source: master
+plan `ent_81aadb43caf2fa493361e8ed`, decision `workflows_are_dynamic_created_and_improved_per_task`. The
+operator ruled the questions the first writing left open the same day: who approves a new or amended
+declaration (`workflow_declaration_approval_by_blast_tier`), what a near fit does
+(`near_fit_task_amends_workflow_first`), and that no declaration retires automatically
+(`workflows_never_retire_automatically`); three defaults were taken without objection — the workflow that
+carries an authoring task, the term for an improvement that names no defect, and when a created workflow
+becomes core (`workflow_decision_116_defaults`). The four questions that left open were settled the same
+day: that removing or weakening a protection goes to the operator
+(`workflow_protection_removals_need_operator`, the operator's ruling), and, as defaults taken without
+objection, where an authoring task sits in the planning hierarchy, what record an improvement proposal is,
+and which step counts toward a workflow becoming core (`workflow_decision_116_defaults_2`). The last two
+questions were closed the same day as defaults applied by consistency with those rulings, each citing the
+ruling it follows from: an originating task under no plan (below, from `workflow_decision_116_defaults_2`
+and `workflow_decision_116_defaults`), and a retirement that removes a protection (below, from
+`workflow_protection_removals_need_operator`).
+
+**Default (g) is superseded.** Default (g) — a created workflow becomes core by the operator's decision,
+proposed once planning's `survey` counts five or more tasks it has carried — and the matching sub-question
+in `workflow_decision_116_defaults_2` (which step counts toward a workflow becoming core) no longer hold.
+The operator's 2026-09-26 ruling (`no_workflow_status_above_active`, master plan
+`ent_81aadb43caf2fa493361e8ed`) states a workflow's status as draft, active, or retired, with nothing above
+active: there is no "core" promotion, and `survey`'s task count is reported as usage rather than read toward
+a proposal. A companion ruling the same day (`foundation_workflows_are_reference_designs_intake_is_core`)
+holds that the named workflows in this document are reference designs an instance may seed drafts from,
+none live by default, with intake alone core because every task enters through it — so "core" now names
+intake's unique role in the architecture, not a status a created workflow could ever reach. `survey`'s read
+is unaffected in kind, only in what it is for: it still names, on its verdict, the tasks each workflow
+created under the record has carried, but that read no longer feeds a proposal at `judge` or a task at
+`amend`.
+
+**What this changes, and what it leaves alone.** Before this ruling, a task no declaration fitted had two
+exits at `route`: none, which ends its chain with the work undone, or operator-only, which hands the operator
+work the swarm could have carried had a declaration existed. The second is a return with no missing
+authority, judgement, or fact behind it — an unnecessary return in the sense of
+`principles.md#the-autonomy-the-design-is-for-the-operator-is-involved-wherever-involvement-is-needed-and-nowhere-it-is-not` —
+and the first is a task dropped. The ruling closes both by making the declaration the thing that is created.
+It adds no mechanism to do so: that a workflow may create a workflow, and that the write is a governance
+write at the action gate, is already the design
+(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`), and that a
+standing finding obliges a change to the workflow that produced it is decision 17
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+What the ruling adds is where those paths are taken — at `route`, for every task no declaration fits or
+nearly fits, and at every run, for every declaration a task was carried by — that improving a declaration
+ranks with creating one, and who approves each write. The need is measured, not hypothetical: a survey of
+the procedures the operator runs by hand found most candidate workflows to be reference workflows with no
+declaration in force or extensions of declared ones, not new types (analysis `ent_38cc677d0754cae42843838e`,
+2026-09-25), which is the near-fit and amendment case this section rules on.
+
+### What `route` does: fit, near fit, or none
+
+**Fit is judged at `route` and recorded on its verdict.** A declaration fits a task when the task meets its
+entry condition and its steps can close on what the task asks for; the judgement is the `route`
+step owner's, made on the properties intake fixed, and the verdict names the declarations it considered and
+why the one it names fits, nearly fits, or why none did. That no declaration fitted is not a reason to close
+naming none, and not a reason to name operator-only for work the swarm could carry once a declaration
+exists: those are the two exits this ruling removes.
+
+**Where a declaration nearly fits, the task waits for its amendment and then runs on the improved
+workflow.** `route` creates the task whose work is the amendment — the step, read, condition, or successor
+the declaration lacks for this task's class of work — and the intake batch records a dependency on it
+(`work_model.md#a-batch-may-depend-on-a-task-it-created`, decision 14). When the amendment is approved and
+read back, the dependency ends and `route` signs naming the amended declaration, so the task is the first
+batch of its class to run on it. A near fit is not run as-is with the amendment proposed afterwards, and it
+is not answered with a second declaration beside the first, which is the near-duplicate the comparison below
+exists to prevent.
+
+**Where none fits, `route` opens the authoring of one for this task.** The step creates a task whose work is
+a new declaration: the workflow type, its steps with their `owner_role` and closing conditions, its
+successors and whether it permits none, and the purpose and entry condition in the shape
+`#how-to-read-a-workflow-section` gives a reference workflow. That task refers to the task being routed as the
+case the declaration is written from, enters its own intake like every task, and the intake batch records a
+dependency on it as for a near fit.
+
+**Both holds are the task's own, and neither is a wait for other tasks.** The ruling forbids holding a task
+until similar tasks appear. A near-fit or authoring hold is not that: it waits on one amendment or one
+declaration, created for this task by this task's own `route` step, and on nothing another task does. It is
+decision 14's case — `route`'s verdict would be false without it, since it would name a declaration that does
+not exist or does not yet carry the task — and not decision 17's, whose raising batch is not waiting on the
+change to exist. It is bounded by `route`'s declared `hold_bound`, and reaching the bound escalates as
+`rounds_exhausted`, as any hold does.
+
+**The task proceeds as soon as the declaration clears its approval.** The approval is the action gate on the
+declaration write, under the blast-tier approval below, and, above the tier the instance names, the proving decision 100
+requires before a declaration binds production work
+(`work_model.md#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`). Nothing
+between those points waits for another task: not for a second task of the kind, not for a batch to fill, and
+not for a sweep to find it, which is the grouping by predicate batch formation already forbids
+(`work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`).
+
+### Who approves a new or amended declaration
+
+**The swarm approves a declaration whose steps are all low-blast; the operator approves one that adds a
+consent point, an `operator_only` action, or a high-blast action.** The line is the blast tier of the action
+classes the declaration's steps take, resolved under the instance's `action_policy` as the gate resolves any
+class (`gates_and_workflows.md#confidence-and-three-blast-tiers`): a declaration every one of whose classes
+the policy places low is the swarm's to approve, and one that introduces a `consent` step, an
+`operator_only` action, or a class the policy places high is the operator's. A class the policy lists in
+neither set resolves to `NEVER` and is the operator's, as everywhere. An amendment is judged by what it adds:
+an amendment that adds none of the three is the swarm's, whatever the declaration already held — unless it
+takes a protection away.
+
+**An amendment that removes or weakens a consent point, a review step, or a closing condition is the
+operator's, even where every step that remains is low-blast.** Losing a protection is treated as adding
+risk, which is the fail-closed direction (principle 5): a declaration from which a consent step or a review
+step has been removed, or whose closing condition now accepts what it used to refuse, can take effects the
+operator relied on its catching, and the tier of the steps that remain says nothing about what the removed
+one caught. Whether an amendment weakens a condition is judged against the declaration in force; where the
+approving principal cannot tell that it does not, it is treated as a weakening and goes to the operator,
+since "cannot tell" is not a conclusion that it is safe (principle 7).
+
+**The swarm's approval is never the proposer's.** The principal that approves a declaration or an amendment
+is distinct from the one that proposed it — the author of the authoring task's declaration, or the step owner
+whose verdict proposed the amendment — which is the separation of duties the authority model already names
+(`authority_model.md#structural-checks-quorum-and-separation-of-duties`) and the rule that no principal signs
+for another (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
+
+**What this does to decision 18.** Decision 18 reserves each governance class to the operator until the
+operator writes a policy value for it, and a grant is made class by class. This ruling is such a grant, and
+it is narrower than the `workflow` class: the class is split by blast tier. A write to a `workflow`
+declaration carries, as its class, the highest tier among the action classes its steps take or, for an
+amendment, among those it adds — so that the low-tier declaration write is a class the operator has granted
+the swarm and the high-tier and `NEVER` writes stay reserved. An amendment that removes or weakens a
+protection carries the reserved class whatever its tier, so no grant of the low tier reaches it. The reservation is unchanged for every other
+governance class, and the operator reserves the low tier again by removing the grant.
+
+### A run may propose an amendment to its own declaration
+
+**Every batch is evidence about the declaration it ran under, and a step owner may record it as such.** A
+step's verdict, or the closing verdict, may carry a proposal that the task's context shows the declaration
+could serve its class better — a read the step needed and the declaration did not name, an `applies_when`
+that seated a step the change did not warrant, a step the work needed and the declaration lacked, a closing
+condition this task showed too weak. Where the proposal names a defect, it is a [finding](vocabulary.md#finding),
+judged on the standing axis like any other and scoped narrowest-first to the step or the workflow; the
+correction this batch's work owes is made in the batch, and the change to the declaration is owed besides.
+Where it names no defect — the declaration did what it says, and could say more — it is an
+[improvement proposal](vocabulary.md#improvement-proposal), a term distinct from finding, so that a finding
+keeps meaning a defect or an objection and carries severity, and a proposal to improve carries none. An
+improvement proposal is an entity of its own, not a field on the verdict, and it is linked to the run that
+raised it by the relationship types a finding already uses: `PART_OF` → the verdict that carries it, and
+`REFERS_TO` → the batch it was raised on (`data_model.md#relationships`). No relationship type is minted for
+it.
+
+**Both reach the declaration through the learning loop, decision 17, and through nothing shorter.** Each
+produces a task that `REFERS_TO` what proposed it; the task enters intake and goes through a workflow; the
+amendment is a governance write to the `workflow` declaration, taken as an action at the gate and approved
+under the blast-tier approval above. The batch that proposed it does not wait, since the amendment changes how the next
+batch of the kind runs and cannot reach this one — unlike a near fit at `route`, where the amendment is made
+for the task before it runs. A finding whose scope the step owner cannot decide goes to the operator as
+`undetermined_scope`. Improving a declaration is weighted as the ruling weights it: nothing here ranks the
+task that amends a declaration below the task that authors a new one by kind, and each is prioritized from
+the `priority_rubric` at its own intake.
+
+### A workflow created for one task
+
+**The task that authors it sits under the originating task's plan and goes through the planning workflow,
+and through operator-only until that workflow can carry it.** The authoring task is `PART_OF` the planning
+record the originating task is under — the first record on its ascent — which meets `#planning`'s entry
+condition that a planning task be `PART_OF` exactly one planning record. Authoring a declaration is survey,
+judgement, and a write through the gate, the shape `#planning` already has, and planning's `amend` step may
+carry the declaration write: beside its `amend_<level>` actions it takes a governance write to the
+`workflow` declaration, approved under the blast-tier approval above and not under the record's
+`amend_<level>` class, since a declaration is a governance type and not a planning one. Once the planning
+workflow's draft declaration is active, an authoring task is routed to it. Until then, it is routed to
+operator-only (`#operator-only`), which is also where the first declaration for a declaration scope comes
+from, as an operator act
+(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
+
+**An originating task is placed under a plan before `route` can open authoring, and where no plan fits,
+authoring goes operator-only.** A default applied by consistency (2026-09-25), following from
+`workflow_decision_116_defaults_2` — the authoring task is `PART_OF` the originating task's plan — and from
+`workflow_decision_116_defaults`, which already names operator-only as the route for authoring the planning
+workflow cannot carry. Intake's `classify` is the step that already writes a task's `PART_OF` (`#intake`),
+so it is where a task whose ascent would otherwise be empty is placed under a plan, before `route` judges
+fit. Where no plan fits it, the authoring task has no plan to be `PART_OF` and cannot meet the
+planning workflow's entry condition, so it goes to operator-only — the existing fallback, not a new path.
+
+**It is named for its class of work, and deduplicated before it is written.** The workflow type names what
+the task is an instance of, never the task, so that the next task of the kind can be judged to fit it; a
+name that coincides with a declared workflow type, a step name, or a defined term in the scope is refused
+under invariant 12's no-overlap half
+(`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`). Before a new
+declaration is written, the authoring compares it against the declarations in force for the scope: where
+one would admit the task on its entry condition, the case is fit, not creation, and where one nearly fits,
+the case is an amendment to it, as above.
+
+**Its purpose is stated where it is authored.** A created workflow has no section in this document. Its
+purpose, entry condition, and the reason for each step are stated by the batch that authored it and
+reviewed with its declaration, so the rule that a step whose reason cannot be given is a step to question
+holds for it as for a reference workflow.
+
+**It stays declared whether or not a second task ever uses it, and nothing retires it automatically.** A
+declaration that has carried one task is not a defect and not a candidate for removal on that ground: it is
+reviewable on the record like any other, and the next task of its class fits it. No interval, count, or
+sweep proposes retiring an unused declaration. A declaration is retired only when someone raises a
+retirement task, which is a change to the swarm like any other: it enters intake, goes through a workflow,
+and its write is a governance write approved under the blast-tier approval above. **Retiring a declaration
+that holds a consent point or a review step is the operator's**, a default applied by consistency
+(2026-09-25) with `workflow_protection_removals_need_operator`: retirement removes every protection the
+declaration held, and a removed protection is the operator's to approve, fail-closed, whatever the tier of
+the steps that go with it.
+
+**Nothing promotes it above active.** A workflow's status is draft, active, or retired
+(`no_workflow_status_above_active`, the operator's 2026-09-26 ruling, master plan
+`ent_81aadb43caf2fa493361e8ed`), and there is no status above active for a created workflow to reach: it
+does not become "core," and no operator decision at a task-count threshold promotes it. This supersedes
+decision 116's default (g) — a created workflow became core by the operator's decision, proposed once
+planning's `survey` counted five or more tasks it had carried — and the matching planning-survey step that
+raised that proposal at five. The `survey` of the planning record its authoring task sat under still reads,
+for each workflow created under that record, the tasks it has carried — a derived read over the batches that
+ran under the declaration, named on `survey`'s verdict with its other reads, never a counter kept on the
+declaration (principle 11) — but that count is reported as usage and is not read toward any promotion
+proposal at `judge` or `amend`.
+
+## Whether a stage names anything a step does not
+
+**Ruled (2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`. Drop the
+`steps[].phase` field. Every workflow section above carries a **Stages** line, and
+`gates_and_workflows.md#declaration-batch-projection` defined a stage as a contiguous named group of steps
+and gave each declared step a `phase` field. No rule reads either: no gate, conclusion, fast path,
+`applies_when`, successor, or checkpoint keys on a stage, and where a batch is is already its current step
+(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`). The grouping was stated in two homes — the
+prose line and the declaration's field — with no mechanism behind either, the shape principle 9 names, and
+the second option considered is the one that holds: keep the Stages line as authored prose, so the grouping
+has one home, and drop the field, since the declaration should carry nothing no rule reads.
+
+**Reason.** The field is decoration by principle 4's own test — a mechanism nothing exercises cannot fail,
+and nothing here can fail because nothing reads it. The prose line survives because it is not the same
+claim: it is a reporting aid a reader consults directly, the same convenience "the batch is in review" adds
+over "the batch is at `qa`", and dropping it would cost that grain for no gain, since nothing was reading it
+as a mechanism to begin with — it was never claiming to be one. Retiring `stage` itself, the first option,
+was set aside because `migration.md` uses the word in its own sense for its own ordered stages, and
+retiring the term here would ban a word a companion document relies on or force it to rename over a
+question that was never about that word's other use.
+
+**Cost accepted.** `gates_and_workflows.md#declaration-batch-projection` and `vocabulary.md#step` (and any
+declared-step field list) drop `phase` from the fields a step carries; a workflow's grouping into stages is
+authored prose only, read by a person and not resolved by any rule, and a reader who wants "where a batch
+is" reads its current step, per `vocabulary.md#owner-five-meanings-one-word-forbidden-alone`, exactly as
+before this ruling.
+
+**What this leaves open.** The *Stages* prose itself — whether its wording, granularity, or presence per
+workflow section should change — is an editorial matter for this document, not decided here. This ruling settles only
+that the field is dropped and the prose is kept; it does not touch what the prose says.
+
+## What no workflow in this document does
+
+None lets a task that has no intake batch enter it, except intake itself. None names two successors.
+None takes a step on an issue or a pull request rather than on the batch's tasks. None takes an outward
+effect outside the action gate, none carries a second gate beside it, and none raises task-level failure
+anywhere but the checkpoint queue.
+None names an agent, an operator, a payee, a contact, or a channel; each is resolved from a context
+entity at runtime. Each absence is an invariant of `work_model.md` or `gates_and_workflows.md`, and a
+workflow that needs one of them is a change to the foundation, made through a PR that says so
+(`conformance.md`).

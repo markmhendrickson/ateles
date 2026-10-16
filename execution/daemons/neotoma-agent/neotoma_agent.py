@@ -28,6 +28,12 @@ Environment variables:
   NEOTOMA_AGENT_DEFINITION_ID   Neotoma entity ID for neotoma-agent's agent_definition (optional)
   NEOTOMA_AGENT_REPO            GitHub repo slug for automation (default: markmhendrickson/neotoma)
   NEOTOMA_AGENT_TRIAGE_LABEL    Label gating issue/PR dispatch (default: "triage:neotoma-agent")
+  ATELES_SWARM_REQUIRE_LABEL    Label gate (bootstrap mode / canary lane). When set, an
+                                issue/PR must ALSO carry this label, in addition to
+                                NEOTOMA_AGENT_TRIAGE_LABEL, before Cicada/Vanellus is
+                                spawned (same gate as Apis, Anthus and Formica;
+                                lib/daemon_runtime/label_gate). Unset: unchanged.
+                                Task due-date hygiene spawns no agent and is not gated.
   NEOTOMA_AGENT_CLAUDE_BIN      Absolute path to `claude` binary (default: auto-detect on PATH)
   NEOTOMA_AGENT_DISPATCH_TIMEOUT Per-dispatch timeout in seconds (default: 1800)
   NEOTOMA_AGENT_DRY_RUN         Set to "1" to log dispatch intent without spawning (default: 0)
@@ -62,6 +68,7 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
     hydrate_snapshot,
 )
+from lib.daemon_runtime import label_gate  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -112,6 +119,54 @@ def _issue_has_triage_label(snapshot: dict) -> bool:
             raw_labels = [lbl.strip() for lbl in raw_labels.split(",") if lbl.strip()]
     labels_lower = {str(lbl).lower() for lbl in raw_labels}
     return NEOTOMA_AGENT_TRIAGE_LABEL.lower() in labels_lower
+
+
+# ── Label gate (bootstrap mode / canary lane) ────────────────────────────────
+#
+# ateles#1269 added ATELES_SWARM_REQUIRE_LABEL so that, in bootstrap mode, the
+# swarm starts agent work only on labelled (canary) items. Apis and Anthus read
+# it; neotoma-agent did not, so an item carrying only `triage:neotoma-agent`
+# still reached Cicada/Vanellus with the gate set (security review on #1269).
+# It now requires BOTH labels while the gate is set.
+#
+# Labels are read from the Neotoma snapshot only, so the canary label must be on
+# the item itself: a PR does NOT inherit it from a parent issue here, and
+# anything unreadable counts as unlabelled. The gate fails closed.
+
+# Work entities whose skip has already been logged at WARNING. neotoma-agent
+# sees the same issue/PR again on every event, so later skips log at DEBUG.
+_label_gate_warned: set[str] = set()
+
+
+def _label_gate_log(entity_id: str, message: str) -> None:
+    """WARNING once per work entity per process, DEBUG after that."""
+    if entity_id in _label_gate_warned:
+        log.debug(message)
+        return
+    _label_gate_warned.add(entity_id)
+    log.warning(message + " (logged once per process; later events at DEBUG)")
+
+
+def _label_gate_allows(entity_id: str, snapshot: dict, kind: str) -> bool:
+    """True when the swarm label gate lets neotoma-agent act on this item.
+
+    Gate unset -> True (behaviour unchanged). Gate set -> True only when the
+    snapshot's labels carry the configured label exactly
+    (`label_gate.carries_label`). Malformed or missing labels deny.
+    """
+    required = label_gate.required_label()
+    if not required:
+        return True
+    raw = snapshot.get("labels") if isinstance(snapshot, dict) else None
+    if label_gate.carries_label(required, label_gate.snapshot_label_names(raw)):
+        return True
+    _label_gate_log(
+        entity_id,
+        f"[{DAEMON_NAME}] label gate active (required={required!r}) — skipping "
+        f"{kind} {entity_id}: label not present on the item (it needs both "
+        f"{NEOTOMA_AGENT_TRIAGE_LABEL!r} and {required!r}; failing closed)",
+    )
+    return False
 
 
 # ── Due-date hygiene ───────────────────────────────────────────────────────────
@@ -296,7 +351,14 @@ async def _spawn_claude_skill(
 
     Mirrors Formica's _spawn_claude_skill — one daemon failure does not crash
     neotoma-agent; errors surface via lib/notify/.
+
+    This is the only place neotoma-agent starts a process, so the label gate is
+    checked here too: `handle_event` checks it first (so a gated item pages
+    nobody), and this check makes every current and future caller bound by it.
     """
+    if not _label_gate_allows(entity_id, snapshot, f"{skill} dispatch for"):
+        return
+
     if CLAUDE_BIN is None:
         log.warning(
             f"[{DAEMON_NAME}] CLAUDE_BIN not configured and `claude` not on "
@@ -445,6 +507,8 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
                 f"missing label {NEOTOMA_AGENT_TRIAGE_LABEL!r}"
             )
             return
+        if not _label_gate_allows(entity_id, snapshot, "issue"):
+            return
         notifier.send(
             f"New issue [{audience}]: {title[:80]}\n  {entity_id}",
             priority=Priority.INFO,
@@ -473,6 +537,8 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
                 f"[{DAEMON_NAME}] PR {entity_id} skipped — "
                 f"missing label {NEOTOMA_AGENT_TRIAGE_LABEL!r}"
             )
+            return
+        if not _label_gate_allows(entity_id, snapshot, "pull_request"):
             return
         notifier.send(
             f"New PR: {title[:80]}\n  {entity_id}",
@@ -539,6 +605,10 @@ async def main() -> None:
         f"[{DAEMON_NAME}] Dispatch: dry_run={DRY_RUN} "
         f"claude_bin={CLAUDE_BIN or '<not-found>'} "
         f"timeout={DISPATCH_TIMEOUT_SECONDS}s"
+    )
+    log.info(
+        f"[{DAEMON_NAME}] triage_label={NEOTOMA_AGENT_TRIAGE_LABEL!r} "
+        f"swarm_require_label={label_gate.required_label() or '<unset>'!r}"
     )
 
     notifier.send(

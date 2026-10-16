@@ -1,0 +1,6 @@
+# Keep the build context small and the image free of host state.
+node_modules
+dist
+server-dist
+.git
+*.log

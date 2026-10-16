@@ -65,6 +65,10 @@ class SpecSection:
     ``always`` — True when this section always runs (PM, Eng, QA); False for the
                  conditional lenses (Design/UX, Security, Legal) which run only
                  when the lens is selected.
+    ``dispatched`` — False when the section is authored inside ANOTHER
+                 section's turn rather than by its own agent run: the design
+                 basis is written by Pavo in the pm turn (fenced separately),
+                 so stating a basis costs no extra dispatch.
     """
 
     key: str
@@ -73,12 +77,30 @@ class SpecSection:
     agent: str
     heading: str
     always: bool
+    dispatched: bool = True
 
 
 # Canonical ordered sequence.  Order here IS the pipeline order and the mirror
 # assembly order.  PM, Eng, QA always run; Design/UX, Security, Legal run only
 # when their lens is selected for the issue.
+# The design basis is the FIRST section: the foundation document and section
+# the issue conforms to, or the explicit statement that no design applies
+# (docs/foundation/conformance.md, "Design basis"). Pavo states it in the pm
+# turn, from the kernel the reading list loads into that turn, so it is not
+# dispatched on its own; the arch gate checks it (mechanically via
+# foundation.check_design_basis, then by reading the cited document).
+DESIGN_BASIS = SpecSection(
+    "basis",
+    "design_basis_section",
+    "pm",
+    "pavo",
+    "Design basis",
+    True,
+    dispatched=False,
+)
+
 SECTIONS: tuple[SpecSection, ...] = (
+    DESIGN_BASIS,
     SpecSection("pm", "pm_section", "pm", "pavo", "Product / Scope (PM)", True),
     SpecSection(
         "design", "design_section", "ux", "accipiter", "Design / UX", False
@@ -91,20 +113,51 @@ SECTIONS: tuple[SpecSection, ...] = (
     SpecSection("legal", "legal_section", "legal", "buteo", "Legal", False),
 )
 
-# Fast lookups.
+# The sections that run as their own agent turn, in pipeline order.
+DISPATCHED_SECTIONS: tuple[SpecSection, ...] = tuple(
+    s for s in SECTIONS if s.dispatched
+)
+
+# Fast lookups. The by-agent / by-lens maps index DISPATCHED sections only:
+# the design basis shares Pavo's `pm` lens and must not shadow the pm section.
 SECTION_BY_KEY: dict[str, SpecSection] = {s.key: s for s in SECTIONS}
-SECTION_BY_AGENT: dict[str, SpecSection] = {s.agent: s for s in SECTIONS}
-SECTION_BY_LENS: dict[str, SpecSection] = {s.lens: s for s in SECTIONS}
+SECTION_BY_AGENT: dict[str, SpecSection] = {
+    s.agent: s for s in DISPATCHED_SECTIONS
+}
+SECTION_BY_LENS: dict[str, SpecSection] = {s.lens: s for s in DISPATCHED_SECTIONS}
 # All section field names, in canonical order.
 SECTION_FIELDS: tuple[str, ...] = tuple(s.field for s in SECTIONS)
 
-# Sections that always run regardless of lens selection.
-ALWAYS_KEYS: tuple[str, ...] = tuple(s.key for s in SECTIONS if s.always)
+# Sections that always run (as their own turn) regardless of lens selection.
+ALWAYS_KEYS: tuple[str, ...] = tuple(
+    s.key for s in DISPATCHED_SECTIONS if s.always
+)
 
 
 def spec_key(repo: str, issue_number: int) -> str:
     """Canonical key for an issue's spec entity: ``<repo>#<number>``."""
     return f"{repo}#{issue_number}"
+
+
+# ── Design basis (fenced inside the pm turn) ─────────────────────────────────
+DESIGN_BASIS_MARKER_START = "<<<DESIGN_BASIS>>>"
+DESIGN_BASIS_MARKER_END = "<<<END_DESIGN_BASIS>>>"
+
+
+def extract_design_basis(stdout: str | None) -> str:
+    """The pm turn's design-basis statement, or '' when it emitted none.
+
+    Fenced separately from the spec section so one pm run yields two fields.
+    Deliberately NO fallback to raw stdout (unlike the spec-section extractor):
+    an absent basis must stay absent — and be reported MISSING to the arch
+    gate — never be inferred from surrounding prose.
+    """
+    blob = stdout or ""
+    start = blob.find(DESIGN_BASIS_MARKER_START)
+    end = blob.find(DESIGN_BASIS_MARKER_END)
+    if start == -1 or end == -1 or end <= start:
+        return ""
+    return blob[start + len(DESIGN_BASIS_MARKER_START) : end].strip()
 
 
 # ── Pure assembly / splice helpers (unit-tested without any I/O) ─────────────

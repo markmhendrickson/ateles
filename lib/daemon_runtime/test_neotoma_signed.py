@@ -93,6 +93,104 @@ class NeotomaSignedTest(unittest.TestCase):
             ns.signed_request("GET", "http://x", agent_name="ghost")
         self.assertIn("no AAuth key", str(cm.exception))
 
+    # ── ateles#795 constraint 2: explicit subject, never ambient ──────────────
+
+    def test_agent_identity_explicit_sub_ignores_ambient_env(self):
+        """An explicit `sub` wins even when NEOTOMA_AAUTH_SUB names someone else.
+
+        Reproduces the daemon-process hazard named in ateles#795: a process
+        (e.g. Apis) that already carries its OWN NEOTOMA_AAUTH_SUB must still
+        be able to sign as a DIFFERENT principal (a reviewing lens) without
+        that ambient value leaking into the signature.
+        """
+        self._write_key("pavo", kid="pavo-kid")
+        os.environ["NEOTOMA_AAUTH_SUB"] = "apis@ateles-swarm"
+        ident = ns.agent_identity("pavo", sub="pavo@ateles-swarm")
+        self.assertEqual(ident["sub"], "pavo@ateles-swarm")
+        self.assertNotEqual(ident["sub"], os.environ["NEOTOMA_AAUTH_SUB"])
+
+    def test_agent_identity_no_explicit_sub_keeps_ambient_ladder(self):
+        """Omitting `sub` preserves EXACT existing behavior for agent_loader.py."""
+        self._write_key("apus", kid="apus-kid")
+        os.environ["NEOTOMA_AAUTH_SUB"] = "custom@x"
+        self.assertEqual(ns.agent_identity("apus")["sub"], "custom@x")
+        os.environ.pop("NEOTOMA_AAUTH_SUB", None)
+        self.assertEqual(ns.agent_identity("apus")["sub"], "apus@ateles-swarm")
+
+    def test_signed_request_explicit_sub_reaches_the_subprocess_env(self):
+        """`sign_off`'s explicit subject must reach NEOTOMA_AAUTH_SUB in the
+        subprocess env — not the daemon process's own ambient value."""
+        self._write_key("waxwing", kid="waxwing-kid")
+        os.environ["NEOTOMA_AAUTH_SUB"] = "apis@ateles-swarm"
+        helper_out = json.dumps({"status": 200, "ok": True, "body": "{}"})
+
+        seen_env = {}
+
+        def fake_run(cmd, **kw):
+            seen_env.update(kw["env"])
+            return subprocess.CompletedProcess(cmd, 0, stdout=helper_out, stderr="")
+
+        with mock.patch.object(ns.subprocess, "run", side_effect=fake_run):
+            ns.signed_request(
+                "POST",
+                "http://x/correct",
+                {"f": 1},
+                agent_name="waxwing",
+                sub="waxwing@ateles-swarm",
+            )
+        self.assertEqual(seen_env["NEOTOMA_AAUTH_SUB"], "waxwing@ateles-swarm")
+        self.assertNotEqual(seen_env["NEOTOMA_AAUTH_SUB"], "apis@ateles-swarm")
+
+
+class CheckObservationAttributionTest(unittest.TestCase):
+    """PR #1274 round-3 (Falco): this check compares the key thumbprint Neotoma
+    records for the observation, not the agent_sub label alone. A verified signature
+    actually proves the KEY, which Neotoma records as provenance.agent_thumbprint —
+    the value that must be pinned alongside agent_sub, not agent_sub alone."""
+
+    SUB = "anthus@ateles-swarm"
+    TIER = "software"
+    TP = "expected-thumbprint-abc123"
+
+    def _obs(self, obs_id="obs_1", sub=SUB, tier=TIER, thumbprint="__unset__"):
+        prov = {"agent_sub": sub, "attribution_tier": tier}
+        if thumbprint != "__unset__":
+            prov["agent_thumbprint"] = thumbprint
+        return {"id": obs_id, "provenance": prov}
+
+    def test_name_matches_but_thumbprint_does_not_is_not_accepted(self):
+        obs = self._obs(thumbprint="a-different-key-thumbprint")
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, self.TP)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
+
+    def test_both_sub_and_thumbprint_match_is_accepted(self):
+        obs = self._obs(thumbprint=self.TP)
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, self.TP)
+        self.assertTrue(check.ok, check.reason)
+        self.assertEqual(check.agent_thumbprint, self.TP)
+
+    def test_thumbprint_missing_is_not_accepted(self):
+        obs = self._obs(thumbprint="__unset__")
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, self.TP)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
+
+    def test_thumbprint_empty_string_is_not_accepted(self):
+        obs = self._obs(thumbprint="")
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, self.TP)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
+
+    def test_no_expected_thumbprint_is_not_accepted(self):
+        """PR #1274 round-4 (Falco non-blocking note 1): the sub-only fallback was reachable
+        because expected_thumbprint defaulted to None; it is now a required argument, so
+        passing None must fail rather than silently accept a sub-only match."""
+        obs = self._obs(thumbprint="whatever-or-nothing")
+        check = ns.check_observation_attribution([obs], "obs_1", self.SUB, None)
+        self.assertFalse(check.ok)
+        self.assertIn("agent_thumbprint", check.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

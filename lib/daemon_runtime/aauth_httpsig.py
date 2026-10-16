@@ -34,8 +34,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
@@ -61,6 +63,9 @@ COMPONENTS_WITHOUT_BODY: tuple[str, ...] = (
 
 class AAuthSigningError(Exception):
     """Raised when a request cannot be signed (bad key, missing crypto, etc.)."""
+
+
+DEFAULT_AAUTH_ISSUER = "https://markmhendrickson.com"
 
 
 # ── base64 / digest (match base64Encode: STANDARD base64 with padding) ───────
@@ -205,6 +210,16 @@ class HttpSigSigner:
         self._private_key = load_ec_private_key_from_jwk(self.private_jwk)
         self._public_jwk = public_part_of(self.private_jwk)
 
+    @property
+    def public_jwk(self) -> dict[str, Any]:
+        """Return a copy of the public-only key material."""
+        return dict(self._public_jwk)
+
+    @property
+    def thumbprint(self) -> str:
+        """RFC 7638 thumbprint derived only from the public JWK members."""
+        return jwk_thumbprint(self._public_jwk)
+
     def sign_headers(
         self,
         *,
@@ -290,3 +305,44 @@ class HttpSigSigner:
         if has_body and content_type:
             out.setdefault("content-type", content_type)
         return out
+
+
+def load_http_sig_signer(
+    jwk_path: Path,
+    *,
+    expected_sub: str | None = None,
+    issuer: str | None = None,
+) -> HttpSigSigner:
+    """Load one existing private JWK into the RFC 9421 signer.
+
+    This loader never searches for or substitutes a different identity. The
+    caller chooses the exact file, and an expected subject mismatch fails
+    closed. It exists for request-producing processes; verification-only
+    services must not call it.
+    """
+    try:
+        raw = json.loads(Path(jwk_path).read_text())
+    except Exception as exc:  # noqa: BLE001 — normalize key-load failures
+        raise AAuthSigningError(
+            f"could not load AAuth JWK from {Path(jwk_path).name}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise AAuthSigningError("AAuth JWK must be a JSON object")
+    sub = str(raw.get("sub") or "").strip()
+    required_sub = str(expected_sub or "").strip()
+    if not sub or (required_sub and sub != required_sub):
+        raise AAuthSigningError("AAuth JWK subject is missing or mismatched")
+    resolved_issuer = str(
+        issuer
+        or raw.get("iss")
+        or os.environ.get("NEOTOMA_AAUTH_ISS")
+        or DEFAULT_AAUTH_ISSUER
+    ).strip()
+    if not resolved_issuer:
+        raise AAuthSigningError("AAuth issuer is missing")
+    return HttpSigSigner(
+        private_jwk=raw,
+        sub=sub,
+        iss=resolved_issuer,
+        kid=str(raw.get("kid") or "").strip() or None,
+    )

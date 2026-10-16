@@ -6,13 +6,26 @@
 
 ## Problem
 
-Today every PR to `main` is reviewed by a single generic agent, **Loxia**
-(`loxia-pr-review.yml` → `loxia_review.py`). Loxia applies one fixed checklist
-(scope, secrets, gitleaks, linting, T3 pattern consistency, docs) regardless of
-what the PR touches. That is the right *baseline* — every PR should get the
-secrets/scope/style pass — but it means a finance change and a health change get
-the same reviewer with no domain expertise, unlike the neotoma repo where review
-is routed to the relevant owning agent.
+**Update, 2026-09-26:** Loxia no longer runs on every PR. Bootstrap mode
+(agent_policy `ent_d0f1a840e549b3b299f62397`) routes ordinary software work
+through the operator/lens review path; only the `swarm-canary` lane still
+goes through the swarm pipeline end to end. Loxia re-reviewing every push
+duplicated that bootstrap review and consumed the same Claude subscription
+quota bootstrap needed, so `loxia-pr-review.yml` now gates its `review` job
+on a `swarm-canary` label (on the PR or its linked parent issue) via
+`execution/scripts/loxia_canary_gate.py`. The design below (per-domain
+fan-out) was written when Loxia ran universally and still describes the
+target design for the canary lane; "every PR" in the text that follows means
+"every PR in the swarm-canary lane," not literally every PR to `main`.
+
+Before the gate, every PR to `main` was reviewed by a single generic agent,
+**Loxia** (`loxia-pr-review.yml` → `loxia_review.py`). Loxia applies one fixed
+checklist (scope, secrets, gitleaks, linting, T3 pattern consistency, docs)
+regardless of what the PR touches. That is the right *baseline* — every
+canary-lane PR should get the secrets/scope/style pass — but it means a
+finance change and a health change get the same reviewer with no domain
+expertise, unlike the neotoma repo where review is routed to the relevant
+owning agent.
 
 ## Goal
 
@@ -96,3 +109,47 @@ inline checklist.
   (Per-agent is simpler to attribute; consolidated is quieter.)
 - Do we want domain `REQUEST_CHANGES` to ever block merge, or stay advisory and
   rely on the operator? (Default: advisory.)
+
+## Subscription provider routing for prompt-only CI reviews
+
+Loxia and its registered domain reviewers call `skill_runner.run_review_prompt`.
+That entrypoint shares the provider selection, headroom, cooldown, and failover
+loop used by `run_skill`. The role prompt and the GitHub publishing identity stay
+with the caller. A review lens's provider preference orders eligible attempts;
+it does not pin the lens to an exhausted provider.
+
+CI must set repository variable `APIS_REVIEW_MODELS` to a JSON object mapping
+qualified providers to explicitly selected model identifiers. Missing or malformed
+qualification fails the review job. `APIS_HARNESS_PROVIDERS` controls the eligible
+subscription pool using the existing router policy. This implementation provides
+restricted Claude and Codex prompt adapters. Cursor remains ineligible for this
+prompt-only surface until an equivalent tool restriction is verified; ordinary
+skill dispatch still uses its existing Cursor adapter.
+
+The CI workflow accepts existing Claude subscription authentication through
+`CLAUDE_CODE_OAUTH_TOKEN`, and optional Codex ChatGPT subscription authentication
+through `CODEX_AUTH_JSON`. The latter restores a private `auth.json` on the
+runner, rejects API-key credentials, and never logs its contents. Provisioning
+these secrets and model qualifications is separate from deploying the code.
+The workflow provides no metered-key fallback. Model/credential availability must
+be verified on the runner before claiming live multi-provider operation.
+
+The restricted adapter sends identical role/task input on every attempt and
+keeps publisher credentials out of the child environment. Claude runs without
+built-in tools, ambient settings, or MCP servers. Codex ignores user configuration,
+disables shell/exec and web search, requires ChatGPT login, and uses a read-only
+sandbox in an empty temporary directory. Because these attempts cannot perform
+publisher writes, timeout and outage retries are safe here. Ordinary skill work
+continues to avoid replaying an arbitrary side-effecting task after timeout.
+
+A failed or incomplete panel has no verdict. Apis records an incomplete-review
+retry instead of converting its failure into a native GitHub review. A recovered
+aggregation comment must match the current head and have been updated during the
+current invocation. A historical comment, even at the same head, cannot replace a
+failed current review. Unavailable capacity remains an explicit retry state.
+
+Verification: the quota regression fails when the shared loop is mutated to stop
+after its first provider. The fallback regressions fail when an old-head verdict
+or a verdict after failed aggregation is allowed through. Focused tests also cover
+same-head historical comments, preserved role input, publisher credential
+separation, explicit model qualification, and ordinary skill dispatch compatibility.

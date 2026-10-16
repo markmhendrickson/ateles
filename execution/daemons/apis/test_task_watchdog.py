@@ -37,8 +37,13 @@ def test_inflight_fresh_vs_stalled():
 
 def test_handsoff_states():
     wd = tw.TaskWatchdog(stall_seconds=3600)
-    for s in ("pending", "done", "verified", "awaiting_approval", "blocked", "declined"):
+    for s in ("pending", "done", "awaiting_approval", "blocked", "declined"):
         assert wd.classify("t", s, 99999) == tw.WatchdogAction.NONE
+
+
+def test_verified_reconciles_instead_of_retrying():
+    wd = tw.TaskWatchdog(stall_seconds=3600)
+    assert wd.classify("t", "verified", 99999) == tw.WatchdogAction.RECONCILE
 
 
 def test_backoff_between_retries():
@@ -100,6 +105,30 @@ def test_sweep_skips_during_backoff(monkeypatch):
     assert dispatched == []
 
 
+def test_sweep_leaves_unresolved_verified_effect_without_dispatch(monkeypatch):
+    wd = tw.TaskWatchdog(stall_seconds=3600)
+    snapshot = {
+        "status": "verified",
+        "result": (
+            "cicada completed (trigger=approved); "
+            "run_session=ent_task:approved-2; provenance=unverified"
+        ),
+    }
+    monkeypatch.setattr(tw, "_query_tasks", lambda _limit: [("ent_task", snapshot)])
+    monkeypatch.setattr(tw, "_reconcile_completed_task", lambda *_args: False)
+
+    dispatched: list[str] = []
+
+    async def dispatch_fn(task_id, _snapshot, _trigger):
+        dispatched.append(task_id)
+
+    counts = asyncio.run(wd.sweep(object(), dispatch_fn))
+
+    assert counts["reconciled"] == 0
+    assert counts["retried"] == 0
+    assert dispatched == []
+
+
 def test_sweep_fail_open_on_query_error(monkeypatch):
     wd = tw.TaskWatchdog()
 
@@ -130,3 +159,17 @@ def test_query_tasks_unwraps_shapes():
     assert tw._unwrap_snapshot({"snapshot": {"snapshot": {"status": "x"}}}) == {"status": "x"}
     assert tw._unwrap_snapshot({"snapshot": {"status": "y"}}) == {"status": "y"}
     assert tw._unwrap_snapshot({"status": "z"}) == {"status": "z"}
+
+
+def test_stall_outlasts_a_fly_queue_wait_plus_the_run():
+    """ateles#1456: with the Fly executor enabled, a login-machine queue wait
+    is not counted against the dispatch timeout, so the stall threshold must
+    cover it, or a run still in flight would be re-dispatched."""
+    from task_watchdog import stall_seconds
+
+    base = {"APIS_DISPATCH_TIMEOUT": "1800", "APIS_STALL_SECONDS": "3600"}
+    assert stall_seconds(base) == 3600
+    fly = {**base, "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+           "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": "1800"}  # fmt: skip
+    assert stall_seconds(fly) == 1800 + 600 + 1800 + 120
+    assert stall_seconds(fly) > 1800 + 1800 + 120  # queue + run + Apis grace

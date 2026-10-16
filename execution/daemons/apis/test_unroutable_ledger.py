@@ -227,3 +227,172 @@ def test_string_path_still_persists(tmp_path):
     assert led.note("ent_a", "t", [], None, now=1000.0) is True
     assert path.exists(), "a str path silently disabled persistence"
     assert UnroutableLedger(path=str(path)).note("ent_a", "t", [], None, now=1002.0) is False
+
+
+# ── the two writers must not clobber each other (Loxia review, ateles#656) ───
+#
+# apis.dispatch_task records unroutable TASKS; skill_runner records undefined
+# ROLES. Both write the same file. When each held its own UnroutableLedger, the
+# `_loaded` latch froze a stale view per instance and every save() wrote all
+# three fields back from that stale memory — silently dropping the other
+# writer's records, and re-escalating the dropped task on the next restart.
+
+
+def test_two_instances_on_one_file_do_not_clobber(tmp_path):
+    """The raw hazard, stated directly against two independent instances."""
+    path = tmp_path / "l.json"
+    a = UnroutableLedger(path=path)
+    b = UnroutableLedger(path=path)
+    b.load()                                    # b latches an empty view at T0
+    a.note("ent_a", "t", [], None, now=1000.0)  # a writes a task
+    b.note_undefined_role("pavo", now=1001.0)   # b writes a role
+
+    disk = json.loads(path.read_text())
+    assert "pavo" in disk["roles"]
+    assert "ent_a" in disk["tasks"], "the role write dropped the task record"
+
+
+def test_shared_ledger_returns_one_instance():
+    from unroutable_ledger import shared_ledger
+
+    assert shared_ledger() is shared_ledger()
+
+
+def test_shared_ledger_keeps_both_writers_records(tmp_path, monkeypatch):
+    """Through the SHARED accessor both writers actually use, then reloaded."""
+    import unroutable_ledger as ul
+
+    path = tmp_path / "l.json"
+    monkeypatch.setattr(ul, "_SHARED", None)
+    monkeypatch.setenv("APIS_UNROUTABLE_LEDGER", str(path))
+    monkeypatch.setattr(ul, "_default_ledger_path", lambda: path)
+
+    ul.shared_ledger().note("ent_a", "t", [], None, now=1000.0)
+    ul.shared_ledger().note_undefined_role("pavo", now=1001.0)
+
+    reloaded = UnroutableLedger(path=path)
+    reloaded.load()
+    # Neither writer's dedup was lost: both re-notes are suppressed.
+    assert reloaded.note("ent_a", "t", [], None, now=1002.0) is False
+    assert reloaded.note_undefined_role("pavo", now=1002.0) is False
+
+
+def test_both_writers_survive_a_restart_cycle(tmp_path, monkeypatch):
+    """Restart survival with BOTH writers active — the deployed shape.
+
+    Apis restarted twice on the day this bug shipped and daemons run for months,
+    so the invariant that matters is: after N restarts, with unroutable-task
+    writes and undefined-role writes interleaved, nothing either writer recorded
+    has been lost. A clobbered ledger is indistinguishable from one that
+    legitimately had no entry, so this is asserted by re-noting and requiring
+    suppression rather than by inspecting the file.
+    """
+    import unroutable_ledger as ul
+
+    path = tmp_path / "l.json"
+    monkeypatch.setattr(ul, "_default_ledger_path", lambda: path)
+
+    for cycle in range(3):
+        monkeypatch.setattr(ul, "_SHARED", None)  # process restart
+        led = ul.shared_ledger()
+        led.note(f"ent_{cycle}", "t", [], None, now=1000.0 + cycle)
+        led.note_undefined_role(f"role_{cycle}", now=1000.0 + cycle)
+
+    monkeypatch.setattr(ul, "_SHARED", None)
+    final = ul.shared_ledger()
+    for cycle in range(3):
+        assert final.note(f"ent_{cycle}", "t", [], None, now=2000.0) is False, (
+            f"task from cycle {cycle} was lost across restarts"
+        )
+        assert final.note_undefined_role(f"role_{cycle}", now=2000.0) is False, (
+            f"role from cycle {cycle} was lost across restarts"
+        )
+
+
+def test_unreadable_records_also_survive_the_other_writer(tmp_path):
+    """The third field. A whole-file overwrite drops it as easily as the others."""
+    path = tmp_path / "l.json"
+    a = UnroutableLedger(path=path)
+    b = UnroutableLedger(path=path)
+    b.load()
+    for _ in range(5):
+        a.note_unreadable("ent_u", now=1000.0)
+    b.note_undefined_role("pavo", now=1001.0)
+    disk = json.loads(path.read_text())
+    assert "ent_u" in disk["unreadable"], "the role write dropped the unreadable record"
+    assert "pavo" in disk["roles"]
+
+
+# ── deletion must be representable (Loxia review, ateles#666) ────────────────
+#
+# Merge-on-write unions the prior file back in, which cannot express a DELETE.
+# `_unreadable` is the only field with a delete path, so without a tombstone the
+# clear never persists: the entry leaks for the daemon's whole life, and on
+# restart the stale streak reloads and reports on the very first later blip —
+# exactly what clearing exists to prevent.
+
+
+def test_clear_unreadable_actually_persists(tmp_path):
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    for _ in range(3):
+        led.note_unreadable("ent_x", now=1000.0)
+    assert "ent_x" in json.loads(path.read_text())["unreadable"]
+
+    led.clear_unreadable("ent_x")
+    assert "ent_x" not in json.loads(path.read_text())["unreadable"], (
+        "the merge resurrected a deliberately cleared entry"
+    )
+
+
+def test_cleared_entry_stays_gone_after_reload(tmp_path):
+    """The consequence that actually bites: a stale streak reloaded on restart
+    reports on the first later blip instead of starting from zero."""
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    for _ in range(3):
+        led.note_unreadable("ent_x", now=1000.0)
+    led.clear_unreadable("ent_x")
+
+    restarted = UnroutableLedger(path=path)
+    restarted.load()
+    assert "ent_x" not in restarted._unreadable
+    # A single fresh failure must NOT immediately report (streak restarts at 1).
+    assert restarted.note_unreadable("ent_x", now=2000.0) is False
+
+
+def test_a_new_streak_after_a_clear_is_recorded_again(tmp_path):
+    """The tombstone must not permanently blacklist the key."""
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    for _ in range(3):
+        led.note_unreadable("ent_x", now=1000.0)
+    led.clear_unreadable("ent_x")
+    for _ in range(2):
+        led.note_unreadable("ent_x", now=2000.0)
+    assert "ent_x" in json.loads(path.read_text())["unreadable"]
+
+
+def test_clearing_one_entry_does_not_disturb_another(tmp_path):
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    for _ in range(3):
+        led.note_unreadable("ent_keep", now=1000.0)
+        led.note_unreadable("ent_drop", now=1000.0)
+    led.clear_unreadable("ent_drop")
+    disk = json.loads(path.read_text())["unreadable"]
+    assert "ent_keep" in disk and "ent_drop" not in disk
+
+
+def test_clear_does_not_disturb_the_other_writers_fields(tmp_path):
+    """A tombstoned delete must stay scoped to its own field."""
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    led.note("ent_a", "t", [], None, now=1000.0)
+    led.note_undefined_role("pavo", now=1000.0)
+    for _ in range(3):
+        led.note_unreadable("ent_u", now=1000.0)
+    led.clear_unreadable("ent_u")
+    disk = json.loads(path.read_text())
+    assert "ent_a" in disk["tasks"] and "pavo" in disk["roles"]
+    assert "ent_u" not in disk["unreadable"]

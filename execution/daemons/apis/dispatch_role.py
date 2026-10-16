@@ -36,9 +36,14 @@ USAGE
         --role cicada \\
         --task "Report the current git branch and HEAD sha." \\
         [--provider codex] \\
+        [--work-class rebase] \\
+        [--rebase-onto origin/main [--integration rebase|merge]] \\
+        [--regenerate-cmd "python3 scripts/gen.py"] \\
         [--cwd /path/to/worktree] \\
         [--timeout 600] \\
         [--task-entity-id ent_...] \\
+        [--github-delivery] \\
+        [--github-token-env ATELES_AGENT_PAT] \\
         [--json]
 
 ``--provider`` pins the run to one adapter, bypassing weighted selection but
@@ -46,9 +51,53 @@ NOT the eligibility rules (headroom floor, cooldowns, binary presence). The
 operator wants this while automatic balancing is still being trusted. Without
 it, ``harness_router`` chooses using the headroom file.
 
-Exit codes: 0 on a successful run, 1 on any failure. The agent's stdout goes to
-this process's stdout; diagnostics go to stderr, so the caller can pipe the
-result cleanly.
+``--work-class`` names the kind of work. A mechanical class
+(``local_provider.MECHANICAL_WORK_CLASSES``) that the ``claude-local``
+config enables runs on the local model first; ``--provider claude-local`` pins
+the local model outright. A failed local run falls over only to a frontier
+provider with a model bound to the cheapest frontier tier in the vendor_binding
+(pinned to it); with none bound the dispatch fails and says why. It is never
+replayed on a provider's default model.
+
+DETERMINISTIC FIRST (mechanical_first.py)
+-----------------------------------------
+``--work-class rebase --rebase-onto BASE`` integrates BASE with git before any
+model is considered. ``--integration rebase`` (default) rebases; ``--integration
+merge`` makes a merge commit, which is the right method for a branch that is
+already pushed and reviewed. A clean result is verified against the repository
+and reported with NO model call. Only when git stops on conflicts is a model
+invoked, with a brief scoped to the conflicted hunks; its result is verified the
+same way, and a failed run is undone so the worktree is left as it was found. Both
+refuse anything but a dedicated linked worktree (never a shared main clone), and
+verification proves the branch's own work survived, not only that the base is in
+HEAD. ``--work-class regenerate_generated_files --regenerate-cmd CMD`` (repeatable)
+runs the named generator directly and reports the changed files, also with no
+model call. Without those flags the class runs on the model path as before.
+
+Exit codes: 0 on a successful run, non-zero on any failure. The agent's stdout
+goes to this process's stdout; diagnostics go to stderr, so the caller can pipe
+the result cleanly.
+
+THE ENVELOPE IS UNCONDITIONAL (ateles#585)
+------------------------------------------
+Under ``--json`` this entrypoint writes exactly one JSON envelope on stdout on
+EVERY exit path — success, refusal, provider failure, unhandled exception,
+usage error, and death by signal. An empty output file is not a reachable
+outcome.
+
+That is a correctness requirement, not a nicety. Before #585 the envelope was
+written only after ``asyncio.run`` returned, so anything that killed the
+process mid-dispatch (a SIGTERM/SIGHUP from a harness that backgrounds or
+times out its shell call being the observed cause) left a 0-byte file, three
+healthy-looking banner lines on stderr, and no other trace. The caller could
+not distinguish "still working" from "died ten seconds ago", and read the
+silence as success. A dispatcher that fails invisibly is worse than one that
+crashes loudly, so failure is now always self-reporting:
+
+* ``ok: false`` with a ``reason`` naming the failure class,
+* a non-zero exit code, and
+* for a signal, exit ``128 + signum`` (SIGTERM -> 143), preserving the shell
+  convention the caller already knows how to read.
 
 NOT IN SCOPE (deliberately)
 ---------------------------
@@ -63,8 +112,10 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import sys
 from pathlib import Path
+
 
 # ── Env bootstrap ─────────────────────────────────────────────────────────────
 # An orchestrating session's shell does not necessarily carry the daemon env,
@@ -72,8 +123,25 @@ from pathlib import Path
 # design — see the 2026-08-04 hosted migration). Mirrors apis.py's bootstrap so
 # an ad-hoc run behaves identically to a launchd-started daemon. setdefault
 # throughout: an explicitly exported value always wins over the file.
+#
+# Skipped under pytest (ateles#1285), same rationale as apis.py: this module
+# is imported directly by several test_*.py here, and the operator's
+# materialized dotenv carries operator-behaviour switches (e.g.
+# ATELES_SWARM_REQUIRE_LABEL) that must not silently reach a test process.
+def _dotenv_should_load() -> bool:
+    if (os.environ.get("ATELES_SKIP_DOTENV") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return False
+    if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return False
+    return True
+
+
 _NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
-if _NEOTOMA_ENV_FILE.exists():
+if _dotenv_should_load() and _NEOTOMA_ENV_FILE.exists():
     for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
@@ -138,13 +206,27 @@ from harness_router import (  # noqa: E402
     configured_headroom,
     configured_providers,
     cooling_providers,
+    live_headroom,
 )
+from local_provider import (  # noqa: E402
+    LOCAL_PROVIDER,
+    MECHANICAL_WORK_CLASSES,
+    config_path as local_config_path,
+    load_config as load_local_config,
+)
+import model_tiering  # noqa: E402
+import mechanical_first  # noqa: E402
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
     SkillResult,
     _load_agent_def,
     run_skill,
 )
+
+# A pseudo-provider for runs that made no model call: it spends nothing, so a
+# per-provider budget or cooldown consumer must treat it as "no spend", not as an
+# unknown provider.
+DETERMINISTIC_PROVIDER = "deterministic"
 
 
 def available_roles() -> list[str]:
@@ -159,9 +241,7 @@ def available_roles() -> list[str]:
     skills_dir = ATELES_REPO / ".claude" / "skills"
     if not skills_dir.is_dir():
         return []
-    return sorted(
-        p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file()
-    )
+    return sorted(p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file())
 
 
 async def dispatch(
@@ -172,8 +252,30 @@ async def dispatch(
     cwd: str | None = None,
     timeout: int | None = None,
     task_entity_id: str = "",
+    env_extra: dict[str, str] | None = None,
+    seated_reviewer: bool = False,
+    command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
+    work_class: str | None = None,
+    github_delivery: bool = False,
+    github_token: str | None = None,
+    action_class: str | None = None,
+    model: str | None = None,
+    escalation_signals: "model_tiering.EscalationSignals | None" = None,
+    integration_base: str | None = None,
+    integration_mode: str = mechanical_first.MODE_REBASE,
+    regenerate_commands: list[str] | None = None,
+    runner: str | None = None,
+    repository: str = "",
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
+
+    ``runner`` / ``repository`` (ateles#1456): ``runner="fly"`` forces the
+    run onto a Fly Machine holding only this job's credentials (refused, with
+    the reason, when the role is not eligible); ``"local"`` forces the local
+    executor; ``None`` follows ``APIS_FLY_RUNNER_CLASSES``. ``repository``
+    scopes the Fly job's per-job GitHub App token.
 
     ``role`` names both the agent_definition to load AND the SKILL.md to run —
     they are the same string throughout this codebase, which is why run_skill's
@@ -183,15 +285,225 @@ async def dispatch(
     subagent happens inside run_skill: identity, allowlist, provider routing,
     credential stripping, and the harness_event rows. This function's only job
     is to hand it a well-formed request.
+
+    ``env_extra`` (harness-lens-runner, ent_898998f41372ce24369fb365): merged
+    on top of the child's environment by ``_subscription_only_env`` inside
+    ``run_skill`` — the mechanism a caller uses to override ``HOME`` /
+    ``CODEX_HOME`` for an isolated, credential-blind sandbox on a non-Claude
+    provider. This process's own environment (and hence its Neotoma/gh
+    access) is untouched; only the dispatched CHILD sees the override.
+
+    ``seated_reviewer`` forwards to ``run_skill`` unchanged. It does NOT mean
+    "this is a lens run" in general — it means the run must be treated exactly
+    like a panel-seated reviewer with shared-bearer Neotoma MCP access, which
+    restricts routing to adapters with a proven subtractive deny for
+    ``correct`` (see ``run_skill``'s docstring). A caller dispatching an
+    inference-only review that never receives Neotoma MCP tools should leave
+    this False; it does not need the seated-review control.
+
+    ``command_wrapper`` (ent_89a4d44b063cb0902106da49): forwarded verbatim to
+    ``run_skill`` -> ``_run_skill_once``, which prepends it to the provider's
+    OWN argv before the subprocess actually runs. This is how a caller makes
+    a guard (e.g. a macOS ``sandbox-exec`` profile denying reads of specific
+    credential paths) bind onto the real dispatched process rather than
+    merely describe an intended mitigation next to code that runs unwrapped.
+
+    ``codex_outer_sandboxed`` accompanies harness_lens_runner's probed
+    ``sandbox-exec`` wrapper. It tells the Codex adapter not to attempt an
+    unsupported nested Seatbelt sandbox; ``run_skill`` fails closed if the
+    flag is supplied without that outer wrapper.
+
+    ``local_review`` selects the inference-only environment: no ambient
+    GitHub/Neotoma publication authority or credential fallback reaches the
+    child. The caller, not the child, owns any later publication.
+    ``github_delivery`` states that this task must commit, push, or open a pull
+    request. It reuses ``run_skill``'s existing GitHub-contract path, which both
+    injects the delivery contract and enables Codex network for this dispatch.
+    Such a run must also supply ``github_token`` explicitly; the shared runner
+    refuses omitted or empty bindings instead of inheriting the daemon's ambient
+    GitHub identity. The default stays False so read-only and filesystem-only
+    work remains under the sandbox's network denial.
+
+    ``action_class``/``model`` (operator ruling 2026-09-29, model_tiering.py):
+    forwarded unchanged to ``run_skill``. ``action_class`` resolves a tier from
+    the live action_policy/vendor_binding config; ``model`` overrides that
+    resolution outright. Neither is required — an orchestrating session's
+    one-off dispatch that names no ``action_class`` runs exactly as before.
+
+    ``integration_base`` / ``integration_mode`` (work class ``rebase``) and
+    ``regenerate_commands`` (work class ``regenerate_generated_files``) opt the
+    dispatch into the deterministic-first path: see ``mechanical_first``. Without
+    them every class runs on the model path exactly as before.
     """
-    return await run_skill(
-        role,
-        task,
+    model = model_tiering.validate_model_selector(model)
+    run_kwargs = dict(
         role=role,
         task_entity_id=task_entity_id,
         timeout=timeout,
         cwd=cwd,
         provider=provider,
+        env_extra=env_extra,
+        seated_reviewer=seated_reviewer,
+        command_wrapper=command_wrapper,
+        codex_outer_sandboxed=codex_outer_sandboxed,
+        local_review=local_review,
+        work_class=work_class,
+        github_token=github_token,
+        include_github_contract=github_delivery,
+        action_class=action_class,
+        escalation_signals=escalation_signals,
+        model=model,
+    )
+    if runner is not None:
+        run_kwargs["runner"] = runner
+    if repository:
+        run_kwargs["repository"] = repository
+    if work_class == "rebase" and integration_base:
+        return await _integrate_then_model(
+            role,
+            task,
+            base=integration_base,
+            mode=integration_mode,
+            workdir=cwd or os.getcwd(),
+            run_kwargs=run_kwargs,
+        )
+    if work_class == "regenerate_generated_files" and regenerate_commands:
+        outcome = await asyncio.to_thread(
+            mechanical_first.run_generators, cwd or os.getcwd(), regenerate_commands
+        )
+        return _deterministic_result(role, task_entity_id, work_class, outcome)
+    # work_class reaches run_skill's local-first routing AND (via
+    # _run_skill_once) the lean-prompt/post-condition path — see
+    # local_provider.build_lean_prompt / verify_postcondition.
+    return await run_skill(role, task, **run_kwargs)
+
+
+def _record_deterministic(
+    role: str, task_entity_id: str, work_class: str, ok: bool, summary: str
+) -> None:
+    """Best-effort harness_event for a run that finished without a model."""
+    try:
+        from skill_runner import DispatchUsage, _write_harness_event
+
+        _write_harness_event(
+            task_entity_id=task_entity_id,
+            role=role,
+            agent_sub="",
+            event_type="subprocess",
+            tool_name=f"{DETERMINISTIC_PROVIDER}:{work_class}",
+            success="true" if ok else "false",
+            output_summary=f"no model call: {summary}"[:500],
+            usage=DispatchUsage(provider=DETERMINISTIC_PROVIDER),
+        )
+    except Exception as exc:  # noqa: BLE001 — provenance must not fail the run
+        print(f"dispatch_role: harness_event not written: {exc}", file=sys.stderr)
+
+
+def _deterministic_result(
+    role: str, task_entity_id: str, work_class: str, outcome: "mechanical_first.Outcome"
+) -> SkillResult:
+    """The SkillResult for a mechanical run that ended without a model call."""
+    ok = outcome.status == mechanical_first.DONE
+    summary = outcome.summary
+    if ok and outcome.changed_files:
+        summary += ": " + ", ".join(outcome.changed_files[:50])
+    _record_deterministic(role, task_entity_id, work_class, ok, summary)
+    return SkillResult(
+        role,
+        ok,
+        0 if ok else 1,
+        f"deterministic {work_class}: {summary}\n" if ok else "",
+        "",
+        error="" if ok else f"deterministic {work_class} {outcome.status}: {summary}",
+        provider=DETERMINISTIC_PROVIDER,
+        attempted_providers=(DETERMINISTIC_PROVIDER,),
+    )
+
+
+async def _integrate_then_model(
+    role: str, task: str, *, base: str, mode: str, workdir: str, run_kwargs: dict
+) -> SkillResult:
+    """Integrate with git first; call a model only for conflicts, and verify it."""
+    outcome = await asyncio.to_thread(
+        mechanical_first.attempt_integration, workdir, base, mode
+    )
+    if outcome.status != mechanical_first.CONFLICTS:
+        return _deterministic_result(
+            role, run_kwargs["task_entity_id"], "rebase", outcome
+        )
+    print(
+        f"dispatch_role: {outcome.summary}; invoking a model on the conflicted hunks only",
+        file=sys.stderr,
+    )
+    prompt = (
+        outcome.brief
+        + "\n\n---\nThe caller's original task, for context only (the brief above is "
+        + "authoritative):\n"
+        + task[:2000]
+    )
+    try:
+        result = await run_skill(role, prompt, **run_kwargs)
+    except BaseException:
+        # A crash or cancellation mid-run must not leave the integration open.
+        restored = await asyncio.to_thread(
+            mechanical_first.restore_original,
+            workdir,
+            outcome.orig_head,
+            outcome.orig_ref,
+        )
+        if restored.problem:
+            print(f"dispatch_role: RESTORE FAILED: {restored.problem}", file=sys.stderr)
+        raise
+    if result.ok:
+        problem = await asyncio.to_thread(
+            mechanical_first.verify_integration,
+            workdir,
+            outcome.base_sha,
+            mode,
+            outcome.orig_head,
+        )
+        if problem:
+            result.ok = False
+            result.error = f"the model reported success but the integration did not verify: {problem}"
+    if not result.ok:
+        restored = await asyncio.to_thread(
+            mechanical_first.restore_original,
+            workdir,
+            outcome.orig_head,
+            outcome.orig_ref,
+        )
+        detail = result.error or "dispatch failed"
+        if restored.problem:
+            print(f"dispatch_role: RESTORE FAILED: {restored.problem}", file=sys.stderr)
+            result.error = f"{detail} (RESTORE FAILED: {restored.problem})"
+        elif restored.undone:
+            result.error = (
+                f"{detail} (undid {restored.undone}; the worktree is as it was found)"
+            )
+    result.attempted_providers = (DETERMINISTIC_PROVIDER, *result.attempted_providers)
+    return result
+
+
+def _signals_from_args(args: argparse.Namespace) -> "model_tiering.EscalationSignals | None":
+    """Build escalation signals from the CLI's measured-fact flags, or None
+    when none was given (so an untouched invocation resolves exactly as the
+    policy alone says)."""
+    if not (
+        args.review_round > 1
+        or args.prior_blocking_finding
+        or args.prior_attempt_failed
+        or args.new_blocking_finding
+        or args.diff_lines
+        or args.changed_file
+    ):
+        return None
+    return model_tiering.EscalationSignals(
+        changed_files=tuple(args.changed_file or ()),
+        diff_lines_changed=args.diff_lines or 0,
+        prior_blocking_finding=args.prior_blocking_finding,
+        review_round=args.review_round,
+        prior_attempt_failed=args.prior_attempt_failed,
+        new_blocking_finding=args.new_blocking_finding,
     )
 
 
@@ -214,7 +526,13 @@ def _preflight(role: str, *, provider: str | None) -> str | None:
             f"unknown role {role!r}. Roles with a SKILL.md in {ATELES_REPO}: "
             + ", ".join(roles)
         )
-    if provider is not None and provider not in configured_providers():
+    if provider == LOCAL_PROVIDER:
+        if load_local_config() is None:
+            return (
+                f"provider {LOCAL_PROVIDER!r} is not configured: no valid, "
+                f"enabled config at {local_config_path()}"
+            )
+    elif provider is not None and provider not in configured_providers():
         return (
             f"provider {provider!r} is not in the configured order "
             f"({', '.join(configured_providers())}); "
@@ -243,13 +561,134 @@ def _headroom_note() -> str:
         source = "env APIS_HARNESS_HEADROOM"
     else:
         source = "defaults (all 1.0)"
+    live = [p for p in configured_providers() if live_headroom(p) is not None]
+    if live:
+        source += f"; live usage for {', '.join(live)}"
     values = configured_headroom()
     rendered = ", ".join(f"{p}={values[p]:g}" for p in configured_providers())
     cooling = ", ".join(sorted(cooling_providers())) or "none"
     return f"headroom [{source}]: {rendered}; cooling: {cooling}"
 
 
+class _Emitter:
+    """Guarantees exactly one JSON envelope on stdout, whatever happens.
+
+    Every exit path funnels through ``emit``. The ``_done`` latch makes it
+    idempotent, which matters because the paths race: a SIGTERM can arrive
+    while the normal result is being written, and two envelopes in one stream
+    is a parse error for the caller — as unusable as zero.
+
+    ``enabled`` is False without ``--json``: the human-readable mode keeps its
+    plain-text output, and the failure detail still reaches stderr.
+    """
+
+    def __init__(self, *, enabled: bool, role: str) -> None:
+        self.enabled = enabled
+        self.role = role
+        self._done = False
+
+    def emit(self, payload: dict) -> None:
+        if self._done:
+            return
+        self._done = True
+        if not self.enabled:
+            return
+        body = {"role": self.role, **payload}
+        try:
+            sys.stdout.write(json.dumps(body, indent=2) + "\n")
+            sys.stdout.flush()
+        except Exception:  # noqa: BLE001
+            # stdout is gone (closed pipe / full disk). Nothing further can be
+            # done for the caller, but this must not mask the original failure
+            # or turn a reported error into a traceback.
+            pass
+
+    def emit_failure(self, reason: str, **extra) -> None:
+        """The failure envelope. ``reason`` is required and never empty."""
+        self.emit(
+            {
+                "ok": False,
+                "reason": reason,
+                "provider": extra.pop("provider", None),
+                "attempted_providers": extra.pop("attempted_providers", []),
+                "returncode": extra.pop("returncode", None),
+                "error": extra.pop("error", reason),
+                "stdout": extra.pop("stdout", ""),
+                "stderr": extra.pop("stderr", ""),
+                **extra,
+            }
+        )
+
+
+def _usage_failure(emitter: _Emitter, reason: str) -> int:
+    """A usage error, reported through the emitter rather than argparse.
+
+    ``parser.error`` raises ``SystemExit(2)`` straight past the emitter, which
+    left ``--json`` callers with the 0-byte stdout of ateles#585 — the exact
+    signature this module exists to eliminate. Loud on stderr (argparse's own
+    behaviour is preserved) AND structured on stdout, so neither a human nor a
+    parser is left guessing. Exit 2 is kept: it is the conventional usage
+    status and callers may already branch on it.
+    """
+    print(f"dispatch_role: error: {reason}", file=sys.stderr)
+    emitter.emit_failure(reason, error="usage error")
+    return 2
+
+
+def _install_signal_envelope(emitter: _Emitter) -> None:
+    """Turn a fatal signal into a reported failure instead of silence.
+
+    SIGTERM and SIGHUP are the observed killers (#585): a harness that
+    backgrounds or times out its shell call delivers one of them, and Python's
+    default disposition is to die immediately, writing nothing. SIGINT is
+    included for symmetry with an operator's Ctrl-C.
+
+    The handler emits, then re-raises the signal through the default handler so
+    the process still dies with the conventional ``128 + signum`` status rather
+    than a laundered exit 0 — a caller checking only the exit code must not be
+    told a killed dispatch succeeded.
+    """
+
+    def _handler(signum, _frame):  # pragma: no cover - exercised as a subprocess
+        name = signal.Signals(signum).name
+        emitter.emit_failure(
+            f"dispatch terminated by {name} before the run completed",
+            error=f"killed by {name}",
+        )
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        try:
+            signal.signal(_sig, _handler)
+        except (ValueError, OSError, AttributeError):
+            # Not the main thread, or the platform lacks the signal. Losing one
+            # handler must not prevent the dispatch from running at all.
+            pass
+
+
+def _peek_argv(argv: list[str]) -> tuple[bool, str]:
+    """Detect ``--json`` and ``--role`` before argparse runs.
+
+    ``parse_args`` can fail (unknown flags, bad types) by calling ``error``,
+    which raises ``SystemExit(2)`` before the caller knows ``args.json``. A
+    caller redirecting stdout to a file still gets the #585 0-byte signature
+    unless the emitter exists first.
+    """
+    json_mode = "--json" in argv
+    role = ""
+    for i, arg in enumerate(argv):
+        if arg == "--role" and i + 1 < len(argv):
+            role = argv[i + 1].strip().lower()
+            break
+    return json_mode, role
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    json_mode, peek_role = _peek_argv(argv)
+    emitter = _Emitter(enabled=json_mode, role=peek_role)
+
     parser = argparse.ArgumentParser(
         prog="dispatch_role",
         description=(
@@ -272,10 +711,107 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--provider",
-        choices=["claude", "codex", "cursor"],
+        choices=["claude", "codex", "cursor", LOCAL_PROVIDER],
         help=(
             "Force one provider, bypassing weighted selection (eligibility "
             "rules still apply). Omit to let the router choose on headroom."
+        ),
+    )
+    parser.add_argument(
+        "--work-class",
+        choices=sorted(MECHANICAL_WORK_CLASSES),
+        help=(
+            "Mechanical work class. When the claude-local config enables it, "
+            "the local model runs first and the frontier providers are the "
+            "fallback."
+        ),
+    )
+    parser.add_argument(
+        "--action-class",
+        help=(
+            "Action class for model tiering (operator ruling 2026-09-29, "
+            "model_tiering.py), e.g. 'build', 'lens_review:security', "
+            "'carry_forward_check'. Resolves a minimum tier from the live "
+            "action_policy config, escalated by measured signals, then a "
+            "model from the live vendor_binding config for the chosen "
+            "provider. Omit to leave model selection exactly as before "
+            "(the provider's ambient default)."
+        ),
+    )
+    parser.add_argument(
+        "--review-round", type=int, default=1,
+        help=(
+            "Review round number for tier escalation. Round 2 or later raises "
+            "to top, except a small pm/qa/ux re-review, which stays mid."
+        ),
+    )
+    parser.add_argument(
+        "--prior-blocking-finding", action="store_true",
+        help=(
+            "An earlier round raised a blocking finding; raises the tier to "
+            "top (not for a pm/qa/ux re-review, which needs a NEW finding)."
+        ),
+    )
+    parser.add_argument(
+        "--new-blocking-finding", action="store_true",
+        help=(
+            "The last round raised a blocking finding no earlier round had; "
+            "raises the tier to top, including for pm/qa/ux re-reviews."
+        ),
+    )
+    parser.add_argument(
+        "--prior-attempt-failed", action="store_true",
+        help="A previous attempt at this work failed; raises the tier to top.",
+    )
+    parser.add_argument(
+        "--diff-lines", type=int, default=0,
+        help="Added + deleted lines in the change; over 400 raises the tier to top.",
+    )
+    parser.add_argument(
+        "--changed-file", action="append", metavar="PATH",
+        help=(
+            "A file the change touches (repeatable); a security-sensitive path "
+            "raises the tier to top."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        type=model_tiering.parse_model_selector,
+        help=(
+            "Explicit model id, overriding any --action-class tier "
+            "resolution outright. Use one non-empty identifier without "
+            "whitespace/control characters or a leading '-'. Passed as the provider's own --model flag "
+            "(claude/codex/cursor); has no effect on claude-local."
+        ),
+    )
+    parser.add_argument(
+        "--rebase-onto",
+        metavar="BASE",
+        help=(
+            "With --work-class rebase: integrate this base ref into the current "
+            "branch with git BEFORE any model. A clean result is verified and "
+            "reported with no model call; only conflicts invoke a model, on the "
+            "conflicted hunks alone. The base must already resolve locally."
+        ),
+    )
+    parser.add_argument(
+        "--integration",
+        choices=list(mechanical_first.MODES),
+        default=None,
+        help=(
+            "How --rebase-onto integrates: 'rebase' (default) or 'merge' for a "
+            "merge commit — use merge for a branch that is already pushed and "
+            "reviewed, since a rebase rewrites its published history."
+        ),
+    )
+    parser.add_argument(
+        "--regenerate-cmd",
+        action="append",
+        metavar="CMD",
+        help=(
+            "With --work-class regenerate_generated_files: a generator command to "
+            "run directly (no shell), repeatable, in order. Reports the changed "
+            "files with no model call; a failing generator fails the dispatch."
         ),
     )
     parser.add_argument(
@@ -296,6 +832,42 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--github-delivery",
+        action="store_true",
+        help=(
+            "Task must commit, push, or open a pull request. Injects the shared "
+            "GitHub delivery contract and enables scoped Codex network access "
+            "for this dispatch only."
+        ),
+    )
+    parser.add_argument(
+        "--github-token-env",
+        help=(
+            "Environment variable containing the scoped token for this GitHub "
+            "delivery invocation. The value is never accepted on argv or "
+            "included in output. Required with --github-delivery until a "
+            "named non-token identity mechanism is established for this path."
+        ),
+    )
+    parser.add_argument(
+        "--runner",
+        choices=["local", "fly"],
+        help=(
+            "Executor for the CLI (ateles#1456). 'fly' forces a Fly Machine "
+            "that holds only this job's credentials, and refuses with the "
+            "reason when the role is not eligible; 'local' forces this "
+            "machine. Omit to follow APIS_FLY_RUNNER_CLASSES."
+        ),
+    )
+    parser.add_argument(
+        "--repository",
+        default="",
+        help=(
+            "owner/name the job touches. With --runner fly and "
+            "--github-delivery, the job's GitHub App token is scoped to it."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the full result as JSON on stdout instead of raw agent output.",
@@ -305,32 +877,121 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the dispatchable role names and exit.",
     )
-    args = parser.parse_args(argv)
+
+    def _parser_error(message: str) -> None:
+        print(f"dispatch_role: error: {message}", file=sys.stderr)
+        emitter.emit_failure(message, error="usage error")
+        raise SystemExit(2)
+
+    parser.error = _parser_error  # type: ignore[method-assign]
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
 
     if args.list_roles:
         for name in available_roles():
             print(name)
         return 0
-    if not args.role:
-        parser.error("--role is required (or use --list-roles)")
+    # Armed before ANY work that can fail — including the usage checks below —
+    # and before the signal handlers, so there is no window in which this
+    # process can die reporting nothing. A usage error is still a dispatch that
+    # produced no result, and a caller parsing --json must not be handed the
+    # 0-byte file of ateles#585 just because argparse rejected the arguments.
+    emitter.enabled = args.json
+    emitter.role = (args.role or peek_role or "").strip().lower()
+    _install_signal_envelope(emitter)
 
-    # Resolve the task text from exactly one source.
+    if not args.role:
+        return _usage_failure(emitter, "--role is required (or use --list-roles)")
+
+    role = args.role.strip().lower()
+    emitter.role = role
+
+    # Resolve the task text from exactly one source. A missing or unreadable
+    # --task-file used to raise straight out of main() as a traceback with no
+    # envelope; it is a dispatch failure like any other.
     if args.task_file:
-        task = Path(args.task_file).read_text(encoding="utf-8")
+        try:
+            task = Path(args.task_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            reason = f"could not read --task-file {args.task_file!r}: {exc}"
+            print(f"dispatch_role: {reason}", file=sys.stderr)
+            emitter.emit_failure(reason)
+            return 1
     elif args.task == "-":
-        task = sys.stdin.read()
+        # Reading a closed or blocked stdin raises; it is a dispatch failure
+        # like any other, not a traceback with no envelope.
+        try:
+            task = sys.stdin.read()
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            reason = f"could not read task from stdin: {exc}"
+            print(f"dispatch_role: {reason}", file=sys.stderr)
+            emitter.emit_failure(reason)
+            return 1
     elif args.task:
         task = args.task
     else:
-        parser.error("one of --task, --task-file is required")
+        return _usage_failure(emitter, "one of --task, --task-file is required")
     if not task.strip():
-        parser.error("task description is empty")
+        reason = "task description is empty"
+        print(f"dispatch_role: {reason}", file=sys.stderr)
+        emitter.emit_failure(reason)
+        return 1
 
-    role = args.role.strip().lower()
+    if args.rebase_onto and args.work_class != "rebase":
+        return _usage_failure(emitter, "--rebase-onto requires --work-class rebase")
+    if args.regenerate_cmd and args.work_class != "regenerate_generated_files":
+        return _usage_failure(
+            emitter, "--regenerate-cmd requires --work-class regenerate_generated_files"
+        )
+    if args.integration and not args.rebase_onto:
+        return _usage_failure(emitter, "--integration requires --rebase-onto")
+    if args.rebase_onto and not args.cwd:
+        return _usage_failure(
+            emitter, "--rebase-onto requires --cwd (the worktree to integrate in)"
+        )
+    if args.regenerate_cmd and not args.cwd:
+        return _usage_failure(
+            emitter, "--regenerate-cmd requires --cwd (the worktree to regenerate in)"
+        )
+
+    github_token: str | None = None
+    if args.github_token_env:
+        if not args.github_delivery:
+            return _usage_failure(
+                emitter, "--github-token-env requires --github-delivery"
+            )
+        if not args.github_token_env.isidentifier():
+            return _usage_failure(
+                emitter, "--github-token-env must name a valid environment variable"
+            )
+        github_token = os.environ.get(args.github_token_env, "")
+    elif args.github_delivery and args.runner == "fly":
+        # A Fly job's GitHub credential is a per-job App installation token
+        # minted at launch and scoped to --repository; no token on this side.
+        if not args.repository:
+            return _usage_failure(
+                emitter, "--runner fly with --github-delivery requires --repository"
+            )
+    elif args.github_delivery:
+        # Caught here as a fast, structured usage error — same shape as every
+        # other CLI misuse below — rather than left to surface deep inside
+        # skill_runner's credential-boundary refusal (ateles#590 security
+        # repair) as an unstructured "dispatch raised" error. Both paths
+        # ultimately refuse the same run; this one is knowable from the
+        # parsed arguments alone and should say so immediately.
+        return _usage_failure(
+            emitter,
+            "--github-delivery requires --github-token-env (a network-enabled "
+            "GitHub delivery run must bind an explicit scoped credential; "
+            "omitting it would otherwise be refused deeper in the dispatch)",
+        )
 
     refusal = _preflight(role, provider=args.provider)
     if refusal:
         print(f"dispatch_role: {refusal}", file=sys.stderr)
+        emitter.emit_failure(refusal)
         return 1
 
     # Report the identity actually loaded, so a degraded dispatch (Neotoma
@@ -356,36 +1017,76 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
 
-    result = asyncio.run(
-        dispatch(
-            role,
-            task,
-            provider=args.provider,
-            cwd=args.cwd,
-            timeout=args.timeout,
-            task_entity_id=args.task_entity_id,
-        )
-    )
-
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "role": role,
-                    "ok": result.ok,
-                    "provider": result.provider,
-                    "attempted_providers": list(result.attempted_providers),
-                    "returncode": result.returncode,
-                    "error": result.error,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                },
-                indent=2,
+    # run_skill is documented to return a SkillResult on every failure it
+    # anticipates, but "anticipates" is the operative word: an unhandled
+    # exception anywhere beneath it (a provider adapter, the Neotoma client, an
+    # asyncio teardown) previously escaped as a traceback with an empty
+    # envelope. Catch BaseException so a SystemExit or KeyboardInterrupt raised
+    # deep in the stack is reported too, then re-raise nothing — the reason is
+    # already in the envelope and the exit code carries the failure.
+    try:
+        result = asyncio.run(
+            dispatch(
+                role,
+                task,
+                provider=args.provider,
+                cwd=args.cwd,
+                timeout=args.timeout,
+                task_entity_id=args.task_entity_id,
+                work_class=args.work_class,
+                github_delivery=args.github_delivery,
+                github_token=github_token,
+                action_class=args.action_class,
+                escalation_signals=_signals_from_args(args),
+                model=args.model,
+                integration_base=args.rebase_onto,
+                integration_mode=args.integration or mechanical_first.MODE_REBASE,
+                regenerate_commands=args.regenerate_cmd,
+                runner=args.runner,
+                repository=args.repository,
             )
         )
-    else:
-        if result.stdout:
-            print(result.stdout)
+    except BaseException as exc:  # noqa: BLE001 — see above
+        reason = f"dispatch raised {type(exc).__name__}: {exc}"
+        print(f"dispatch_role: {reason}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
+        emitter.emit_failure(reason)
+        return 1
+
+    emitter.emit(
+        {
+            "ok": result.ok,
+            **({} if result.ok else {"reason": result.error or "dispatch failed"}),
+            "provider": result.provider,
+            "attempted_providers": list(result.attempted_providers),
+            "returncode": result.returncode,
+            "error": result.error,
+            "local_failure": result.local_failure,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
+            **({"output_truncated": True} if getattr(result, "output_truncated", False) else {}),
+            # Every Fly run reports its identity and machine state, whether
+            # its outcome is known or not: cleanup and outcome are separate.
+            **(
+                {
+                    "remote_outcome_unknown": bool(result.remote_outcome_unknown),
+                    "remote_run_id": result.remote_run_id,
+                    "remote_machine_state": result.remote_machine_state,
+                    # What the Mac's usage reading would have said against
+                    # this provider; a Fly run is not gated by it.
+                    **({"usage_gate_exempted": result.usage_gate_exempted}
+                       if getattr(result, "usage_gate_exempted", "") else {}),
+                }
+                if getattr(result, "remote_run_id", "")
+                else {}
+            ),
+        }
+    )
+    if not args.json and result.stdout:
+        print(result.stdout)
 
     print(
         f"dispatch_role: ok={result.ok} provider={result.provider or '(none)'} "
@@ -393,6 +1094,26 @@ def main(argv: list[str] | None = None) -> int:
         f"rc={result.returncode}",
         file=sys.stderr,
     )
+    if getattr(result, "remote_run_id", ""):
+        if result.remote_outcome_unknown:
+            print(
+                f"dispatch_role: remote run {result.remote_run_id} has an UNKNOWN outcome "
+                f"(machine {result.remote_machine_state or 'unconfirmed'}); check what it did "
+                "before dispatching it again",
+                file=sys.stderr,
+            )
+        elif result.remote_machine_state == "unconfirmed":
+            print(
+                f"dispatch_role: warning: remote run {result.remote_run_id} finished, but its "
+                "machine is not confirmed terminated; its reservation is kept for the reaper",
+                file=sys.stderr,
+            )
+    if result.local_failure:
+        print(
+            f"dispatch_role: claude-local failed ({result.local_failure})"
+            + ("; the run then ran on " + result.provider if result.ok else ""),
+            file=sys.stderr,
+        )
     if not result.ok:
         if result.error:
             print(f"dispatch_role: error: {result.error}", file=sys.stderr)

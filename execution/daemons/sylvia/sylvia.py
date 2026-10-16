@@ -614,6 +614,15 @@ def import_calendar_tasks(
 
 
 def main() -> None:
+    from lib.daemon_runtime.checkout_identity import enforce_deploy_checkout
+
+    enforce_deploy_checkout(
+        "sylvia",
+        Path(__file__).resolve(),
+        why="Recurring-task rollforward mutates Neotoma tasks.",
+        plist_label="com.ateles.sylvia",
+    )
+
     log.info("Sylvia starting.")
 
     if _already_ran_today():

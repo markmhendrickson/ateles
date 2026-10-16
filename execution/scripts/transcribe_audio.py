@@ -2,9 +2,11 @@
 """
 Audio Transcription Script
 
-Transcribes audio with ElevenLabs speech-to-text (diarization or multichannel)
-when ELEVENLABS_API_KEY is set and diarization is not disabled; otherwise OpenAI
-Whisper. Persists each result as a Neotoma ``transcription`` entity with the WAV
+Transcribes audio with LOCAL whisper-cli by default (free, on-device, no API
+key). ElevenLabs is used when diarization is requested — speaker separation is
+the one thing the local model cannot do — and the METERED OpenAI Whisper API
+only on an explicit opt-in (``--backend openai`` / ``TRANSCRIBE_BACKEND``); it
+is never a silent fallback. Persists each result as a Neotoma ``transcription`` entity with the WAV
 attached (``neotoma store`` combined file + entities). Optional: after store,
 creates ``REFERS_TO`` edges from the new ``transcription`` to ``contact`` and/or
 ``feedback_analysis`` entities (CLI flags, env vars, or ``<stem>_neotoma_relations.json``
@@ -12,7 +14,9 @@ next to the WAV — see ``save_transcription`` / ``record_meeting`` skill).
 
 Usage:
     python transcribe_audio.py <audio_file_path> [--language <language_code>]
-    python transcribe_audio.py file.wav --no-diarize   # force Whisper only
+    python transcribe_audio.py file.wav                # local whisper-cli (default)
+    python transcribe_audio.py file.wav --diarize      # ElevenLabs, speaker labels
+    python transcribe_audio.py file.wav --backend openai  # METERED OpenAI API
 
 Examples:
     python transcribe_audio.py data/imports/audio/recording.wav
@@ -20,7 +24,9 @@ Examples:
 """
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
 import os
@@ -30,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import UTC, date, datetime, timezone
+from datetime import date
 from pathlib import Path
 
 import requests
@@ -45,11 +51,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(
     0, str(PROJECT_ROOT / "execution" / "scripts")
 )  # Add scripts directory to path
-
-# Load environment variables from .env file
-# Check for parsing errors and abort if found
-import contextlib
-import io
 
 stderr_capture = io.StringIO()
 with contextlib.redirect_stderr(stderr_capture):
@@ -68,11 +69,30 @@ if "could not parse statement" in stderr_output.lower():
     print(f"{'=' * 80}\n")
     sys.exit(1)
 
-# Import config - try both paths
+from ateles.runtime_paths import get_data_dir  # noqa: E402
+
 try:
-    from scripts.config import get_data_dir
-except ImportError:
-    from config import get_data_dir
+    from scripts.local_whisper import (
+        BACKEND_ELEVENLABS,
+        BACKEND_LOCAL,
+        BACKEND_OPENAI,
+        DEFAULT_MODEL_NAME,
+        TRANSCRIPTION_ENGINE_LOCAL,
+        VALID_BACKENDS,
+        resolve_backend,
+        transcribe_local,
+    )
+except ImportError:  # pragma: no cover - path-dependent import
+    from local_whisper import (  # type: ignore[no-redef]
+        BACKEND_ELEVENLABS,
+        BACKEND_LOCAL,
+        BACKEND_OPENAI,
+        DEFAULT_MODEL_NAME,
+        TRANSCRIPTION_ENGINE_LOCAL,
+        VALID_BACKENDS,
+        resolve_backend,
+        transcribe_local,
+    )
 
 # Configuration
 DATA_DIR = get_data_dir()
@@ -158,13 +178,12 @@ def transcribe_with_retry(
                 # maps .mp4 → video/mp4 which Whisper rejects.  Open the file
                 # with a .m4a name so the SDK sends audio/mp4 (m4a alias).
                 if audio_path_obj.suffix.lower() == ".mp4":
-                    import tempfile, shutil as _shutil
                     _tmp = tempfile.NamedTemporaryFile(
                         suffix=".m4a", delete=False,
                         dir=audio_path_obj.parent,
                     )
                     _tmp.close()
-                    _shutil.copy2(str(audio_path_obj), _tmp.name)
+                    shutil.copy2(str(audio_path_obj), _tmp.name)
                     raw_fh = open(_tmp.name, "rb")
                     _mp4_tmp = _tmp.name  # track for cleanup
                 else:
@@ -190,7 +209,7 @@ def transcribe_with_retry(
                 file_opened_here = False
             if _mp4_tmp:
                 try:
-                    import os as _os; _os.unlink(_mp4_tmp)
+                    os.unlink(_mp4_tmp)
                 except Exception:
                     pass
                 _mp4_tmp = None
@@ -395,16 +414,16 @@ def _proper_nouns_from_neotoma() -> list[tuple[str, str]]:
         "yes",
     ):
         return []
-    if not shutil.which("neotoma"):
+    if not _neotoma_cli_available():
         return []
     entity_id = os.environ.get("TRANSCRIBE_VOCABULARY_ENTITY_ID", "").strip()
     base = _neotoma_prod_base_url()
     # `entities get <id>` when we have an id; otherwise `entities search <name>`.
     if entity_id:
-        cmd = ["neotoma", "--base-url", base, "--api-only", "--json",
+        cmd = [*_neotoma_cli_prefix(), "--base-url", base, "--api-only", "--json",
                "entities", "get", entity_id]
     else:
-        cmd = ["neotoma", "--base-url", base, "--api-only", "--json",
+        cmd = [*_neotoma_cli_prefix(), "--base-url", base, "--api-only", "--json",
                "entities", "search", "operator transcription proper-noun corrections",
                "--type", "transcription_vocabulary"]
     try:
@@ -777,7 +796,7 @@ def _format_multichannel_transcripts_chronologically(transcripts: list) -> str |
 
 
 def get_audio_channel_count(audio_path: Path) -> int | None:
-    """Return channel count for WAV via stdlib wave; else pydub if available."""
+    """Return channel count via WAV, pydub, then ffprobe; None when unknown."""
     try:
         if audio_path.suffix.lower() == ".wav":
             import wave
@@ -792,7 +811,45 @@ def get_audio_channel_count(audio_path: Path) -> int | None:
         segment = AudioSegment.from_file(str(audio_path))
         return int(segment.channels)
     except Exception:
+        pass
+    return _ffprobe_channel_count(audio_path)
+
+
+def _ffprobe_channel_count(audio_path: Path) -> int | None:
+    """Return the first audio stream's channel count without raising."""
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
         return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=channels",
+                "-of",
+                "csv=p=0",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    first_line = (result.stdout or "").strip().splitlines()
+    if not first_line:
+        return None
+    try:
+        channels = int(first_line[0].strip().rstrip(","))
+    except ValueError:
+        return None
+    return channels if channels > 0 else None
 
 
 def _elevenlabs_request_timeout() -> tuple[float, float]:
@@ -1265,6 +1322,9 @@ def transcribe_with_elevenlabs_speech_to_text(
             "audio_duration_seconds": duration,
             "file_size_bytes": original_path.stat().st_size,
             "raw_response": {"segments": raw_segments},
+            "backend": BACKEND_ELEVENLABS,
+            "transcription_engine": "elevenlabs_stt",
+            "transcription_model": model_id,
         }
 
     upload_path, upload_temp = prepare_elevenlabs_upload_file(
@@ -1285,6 +1345,9 @@ def transcribe_with_elevenlabs_speech_to_text(
         "audio_duration_seconds": get_audio_duration(original_path),
         "file_size_bytes": original_path.stat().st_size,
         "raw_response": body,
+        "backend": BACKEND_ELEVENLABS,
+        "transcription_engine": "elevenlabs_stt",
+        "transcription_model": model_id,
     }
 
 
@@ -1607,17 +1670,31 @@ def transcribe_audio_file(
     language: str | None = None,
     verbose: bool = False,
     use_diarization: bool | None = None,
+    backend: str | None = None,
 ) -> dict:
     """
-    Transcribe an audio file using ElevenLabs (diarization / multichannel) when
-    ELEVENLABS_API_KEY is set and diarization is enabled; otherwise OpenAI Whisper.
+    Transcribe an audio file. The DEFAULT backend is local ``whisper-cli``: free,
+    already installed, and for single-speaker personal memos as effective as the
+    paid alternatives.
+
+    Backend precedence (see ``local_whisper.resolve_backend``):
+
+    1. ``backend`` argument / ``--backend`` — an explicit choice wins outright.
+    2. ``TRANSCRIBE_BACKEND`` env var — the same decision in the environment.
+    3. Diarization requested (``use_diarization=True``, or
+       ``RECORD_MEETING_DIARIZE=1`` with a key present) → ElevenLabs. Speaker
+       separation is the one thing local cannot do, and meetings need it.
+    4. Otherwise → local whisper-cli.
+
+    The metered OpenAI path is reachable only via 1 and 2. It is NEVER a silent
+    fallback: if the local backend is misconfigured, that raises rather than
+    quietly starting to bill.
 
     Args:
         audio_path: Path to audio file
         language: Optional language code (e.g., 'en', 'es'). If None, auto-detect.
-        use_diarization: If True, use ElevenLabs when key is set. If False, Whisper only.
-            If None (default), use ElevenLabs when ELEVENLABS_API_KEY is set and
-            RECORD_MEETING_DIARIZE is not ``0``.
+        use_diarization: True forces ElevenLabs; False forbids it.
+        backend: Explicit backend name ('local', 'elevenlabs', 'openai').
 
     Returns:
         Dictionary with transcription results including text and metadata
@@ -1625,11 +1702,46 @@ def transcribe_audio_file(
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    if use_diarization is None:
-        use_diarization = (
-            bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
-            and os.environ.get("RECORD_MEETING_DIARIZE", "1") != "0"
+    # RECORD_MEETING_DIARIZE historically defaulted to "1", which made ElevenLabs
+    # the implicit default for every file whenever a key was present. The default
+    # is now local, so an unset value no longer means "diarize" — only an
+    # explicit "1" does. record_meeting sets it explicitly, so meeting
+    # transcription is unaffected.
+    resolved_backend = resolve_backend(
+        explicit=backend,
+        use_diarization=use_diarization,
+        channel_count=get_audio_channel_count(audio_path),
+    )
+    if verbose:
+        print(f"TRANSCRIPTION_BACKEND_SELECTED={resolved_backend}", flush=True)
+
+    if resolved_backend == BACKEND_LOCAL:
+        if verbose:
+            print("    Transcribing locally with whisper-cli (free, on-device)...")
+        local = transcribe_local(
+            audio_path, language=language, verbose=verbose
         )
+        return {
+            "transcription_text": _postprocess_transcript(
+                local["transcription_text"]
+            )
+            if not local.get("silence")
+            else local["transcription_text"],
+            "language": local["language"],
+            "audio_duration_seconds": get_audio_duration(audio_path),
+            "file_size_bytes": audio_path.stat().st_size,
+            "backend": BACKEND_LOCAL,
+            "transcription_engine": local.get(
+                "transcription_engine", TRANSCRIPTION_ENGINE_LOCAL
+            ),
+            "transcription_model": local.get(
+                "transcription_model", DEFAULT_MODEL_NAME
+            ),
+            "rms_db": local.get("rms_db"),
+            "silence": bool(local.get("silence")),
+        }
+
+    use_diarization = resolved_backend == BACKEND_ELEVENLABS
 
     # Convert .qta files to .m4a for OpenAI compatibility
     converted_file = None
@@ -1659,6 +1771,19 @@ def transcribe_audio_file(
     chunk_temp_dir = None
 
     try:
+        if use_diarization and not os.environ.get("ELEVENLABS_API_KEY", "").strip():
+            # Chosen explicitly (or by RECORD_MEETING_DIARIZE=1) but unusable.
+            # Falling through here would silently spend money on the metered
+            # OpenAI path AND drop the diarization the caller asked for, which
+            # is the worse of the two failures — a meeting transcript with every
+            # speaker merged into one voice looks fine and is wrong.
+            raise RuntimeError(
+                "ElevenLabs was selected for diarization but ELEVENLABS_API_KEY "
+                "is not set. Set the key, or drop the diarization request to use "
+                "the free local backend (which cannot separate speakers). Not "
+                "falling back to the metered OpenAI API."
+            )
+
         if use_diarization and os.environ.get("ELEVENLABS_API_KEY", "").strip():
             if verbose:
                 print(
@@ -1676,9 +1801,37 @@ def transcribe_audio_file(
                 # Carry the raw ElevenLabs response through so the single-file
                 # path also writes the .stt_raw.json sidecar for offline re-merge.
                 "raw_response": el.get("raw_response"),
+                "backend": el.get("backend", BACKEND_ELEVENLABS),
+                "transcription_engine": el.get(
+                    "transcription_engine", "elevenlabs_stt"
+                ),
+                "transcription_model": el.get(
+                    "transcription_model", "scribe_v2"
+                ),
             }
 
-        # OpenAI Whisper path
+        # OpenAI Whisper path — METERED platform billing, not a subscription.
+        #
+        # This endpoint (/v1/audio/transcriptions) cannot be served by a ChatGPT
+        # subscription. Codex's OAuth token carries scopes
+        # ["openid","profile","email","offline_access","api.connectors.read",
+        # "api.connectors.invoke"] and routes to chatgpt.com/backend-api/codex,
+        # which exposes only codex/responses. Presenting that token to
+        # api.openai.com returns 403 "Missing scopes: api.model.read". So there
+        # is no OAuth path here to fall back to; the only options are a metered
+        # platform key, ElevenLabs, or a local model. Say which path is in use
+        # rather than letting the SDK fail opaquely on a missing key.
+        if not os.environ.get("OPENAI_API_KEY", "").strip():
+            raise RuntimeError(
+                "No transcription backend available. The OpenAI Whisper path "
+                "requires OPENAI_API_KEY (METERED platform billing) and none is "
+                "set. A ChatGPT subscription cannot serve this endpoint: its "
+                "OAuth token is scoped to the Codex backend, not the platform "
+                "audio API. Set ELEVENLABS_API_KEY to use ElevenLabs instead, "
+                "or transcribe locally with whisper-cli."
+            )
+        if verbose:
+            print("    Transcribing with OpenAI Whisper (METERED platform API key)...")
         try:
             client = OpenAI()
         except Exception as e:
@@ -1838,6 +1991,9 @@ def transcribe_audio_file(
             "language": transcript_language,
             "audio_duration_seconds": audio_duration,
             "file_size_bytes": file_size,
+            "backend": BACKEND_OPENAI,
+            "transcription_engine": "openai_whisper_api",
+            "transcription_model": "whisper-1",
         }
 
     finally:
@@ -1910,10 +2066,25 @@ def _neotoma_auth_preflight() -> tuple[bool, str]:
     return True, "ok"
 
 
+def _neotoma_cli_prefix() -> list[str]:
+    """Use a daemon's deployed runtime when configured, otherwise the CLI on PATH."""
+    script = os.environ.get("NEOTOMA_CLI_SCRIPT", "").strip()
+    if script:
+        return [os.environ.get("NODE_BIN", "node"), script]
+    return ["neotoma"]
+
+
+def _neotoma_cli_available() -> bool:
+    prefix = _neotoma_cli_prefix()
+    return bool(shutil.which(prefix[0])) and (
+        len(prefix) == 1 or Path(prefix[1]).is_file()
+    )
+
+
 def _neotoma_prod_cli_argv(extra: list[str]) -> list[str]:
     """Build a CLI argv that forces the prod HTTP API and fails loudly if unreachable."""
     return [
-        "neotoma",
+        *_neotoma_cli_prefix(),
         "--json",
         "--api-only",
         "--base-url",
@@ -1929,7 +2100,7 @@ def _neotoma_cli_json(cli_args: list[str]) -> dict | None:
     Auth/network failures from prod surface in the parsed payload's ``error_code``;
     callers that need strict failure semantics should use ``_neotoma_cli_or_raise``.
     """
-    if not shutil.which("neotoma"):
+    if not _neotoma_cli_available():
         return None
     cmd = _neotoma_prod_cli_argv(cli_args)
     try:
@@ -2109,8 +2280,8 @@ def _neotoma_cli_relationship_create(
     source_entity_id: str, target_entity_id: str, relationship_type: str = "REFERS_TO"
 ) -> tuple[bool, str]:
     """Create one relationship on prod API via CLI; returns (ok, message)."""
-    if not shutil.which("neotoma"):
-        return False, "neotoma CLI not on PATH"
+    if not _neotoma_cli_available():
+        return False, "configured Neotoma CLI runtime unavailable"
     auth_ok, auth_reason = _neotoma_auth_preflight()
     if not auth_ok:
         return False, auth_reason
@@ -2250,6 +2421,234 @@ def _write_transcript_sidecars(
             print(f"    (sidecar write skipped: {e})", file=sys.stderr)
 
 
+_TRANSCRIPTION_REQUIRED_FIELDS = (
+    "audio_content_sha256", "original_source_file", "capture_method",
+    "transcription_engine", "consent_basis", "transcription_text", "file_size_bytes",
+)
+
+
+# The payload itself. A store whose transcript cannot be read back has not
+# landed, so this is verified even if the schema lookup says it is undeclared —
+# an undeclared transcript is a broken schema, not a field to skip.
+_TRANSCRIPTION_ALWAYS_VERIFIED_FIELDS = ("transcription_text",)
+
+# Recorded when the audio is too large for the remote transport and the
+# transcription is stored without it. Read back like any other field it sets.
+_ATTACHMENT_STATUS_FIELDS = ("audio_attachment_status", "audio_attachment_note")
+
+
+def _declared_transcription_fields() -> set[str] | None:
+    """Field names the live ``transcription`` schema declares, or None if unknown.
+
+    Neotoma routes an undeclared field to ``raw_fragments`` and leaves it out of
+    the snapshot, so a read-back that demands it fails on every store even when
+    the store landed (2026-09-25: five provenance fields undeclared on
+    ``transcription`` 1.3.0 made Tyto re-store every voice memo every five
+    minutes). ``None`` means the lookup failed; the caller then verifies every
+    field, which fails closed rather than silently narrowing the check.
+    """
+    data = _neotoma_cli_json(["schemas", "get", "--entity-type", "transcription"])
+    if not isinstance(data, dict):
+        return None
+    schema = data.get("schema", data)
+    if not isinstance(schema, dict):
+        return None
+    fields = schema.get("fields")
+    if not isinstance(fields, dict):
+        fields = (schema.get("schema_definition") or {}).get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return None
+    return set(fields)
+
+
+def _fields_to_verify(expected: dict, declared: set[str] | None) -> list[str]:
+    """Required fields the snapshot can be expected to carry.
+
+    With the schema known, a required field the schema does not declare is
+    reported on stderr (it was stored, but only as a raw fragment) and skipped;
+    the transcript itself is always verified.
+    """
+    wanted = list(_TRANSCRIPTION_REQUIRED_FIELDS) + [
+        field for field in _ATTACHMENT_STATUS_FIELDS if field in expected
+    ]
+    if declared is None:
+        return wanted
+    undeclared = [
+        field for field in wanted
+        if field not in declared and field not in _TRANSCRIPTION_ALWAYS_VERIFIED_FIELDS
+    ]
+    if undeclared:
+        print(
+            "Warning: transcription schema does not declare "
+            + ", ".join(undeclared)
+            + "; stored as raw fragments and not read back from the snapshot. "
+            "Declare them on the schema to verify them.",
+            file=sys.stderr,
+            flush=True,
+        )
+    return [field for field in wanted if field not in undeclared]
+
+
+def _verify_transcription_storage(entity_id, expected, source_id=None, declared_fields=None):
+    """Verify the stored record and provenance before reporting completion.
+
+    ``declared_fields`` is the live schema's field set; pass ``None`` to verify
+    every required field regardless (the fail-closed default).
+    """
+    result = _neotoma_cli_json(["entities", "get", entity_id]) or {}
+    record = result.get("entity", result)
+    snapshot = record.get("snapshot") or {}
+    missing = [field for field in _fields_to_verify(expected, declared_fields)
+               if field not in snapshot or snapshot[field] != expected[field]]
+    if missing:
+        raise RuntimeError("Transcription ingestion incomplete: read-back mismatch for "
+                           + ", ".join(missing))
+    if source_id:
+        # The audio is its own source. `ingest --source-file` stores it beside
+        # the structured payload but creates no observation tying it to the
+        # entity (the entity's observations cite the JSON source), so an
+        # observation-link check can never pass on this write path — it was
+        # masked only because the field read-back above failed first. Verify
+        # what the write actually produced: the source exists and holds these
+        # exact bytes.
+        result = _neotoma_cli_json(["sources", "get", source_id]) or {}
+        source = result.get("source", result)
+        if source.get("content_hash") != expected["audio_content_sha256"]:
+            raise RuntimeError("Transcription ingestion incomplete: audio source hash mismatch")
+
+
+def _find_existing_transcription(content_hash: str | None, resolved_audio: Path) -> str | None:
+    """Entity id of a ``transcription`` already stored for these bytes, or None.
+
+    Matches on content first, then on the absolute path — rows written while
+    ``audio_content_sha256`` was undeclared carry it only as a raw fragment, so
+    the content lookup can miss them while the path lookup still hits.
+    """
+    for identifier, by_field in (
+        (content_hash, "audio_content_sha256"),
+        (str(resolved_audio), "audio_file_path"),
+    ):
+        if not identifier:
+            continue
+        data = _neotoma_cli_json(
+            [
+                "entities", "search",
+                "--identifier", identifier,
+                "--entity-type", "transcription",
+                "--by", by_field,
+                "--limit", "1",
+            ]
+        ) or {}
+        for row in data.get("entities") or []:
+            entity_id = row.get("entity_id") or row.get("id")
+            if entity_id:
+                return entity_id
+    return None
+
+
+def _find_audio_source(audio_name: str, content_hash: str) -> str | None:
+    """Id of a stored source holding exactly these audio bytes, or None.
+
+    Searched by filename and confirmed by content hash: the audio source is
+    not linked to the transcription entity by any observation (see
+    ``_verify_transcription_storage``), so the entity cannot lead to it.
+    """
+    data = _neotoma_cli_json(
+        ["sources", "list", "--search", audio_name, "--limit", "20"]
+    ) or {}
+    for source in data.get("sources") or []:
+        if source.get("content_hash") == content_hash and source.get("id"):
+            return source["id"]
+    return None
+
+
+def _recover_prior_transcription_write(
+    expected: dict,
+    resolved_audio: Path,
+    *,
+    attachment_expected: bool,
+) -> str:
+    """Resolve and verify the entity an earlier attempt stored under this key.
+
+    ``ERR_IDEMPOTENCY_MISMATCH`` on a content-keyed store means a prior write
+    for these exact audio bytes already landed with a different payload — in
+    practice a retry on a later day, since the payload carries today's date.
+    Re-sending can never succeed, so the prior write is the durable record:
+    find it, and read back the fields that identify it as this recording.
+    The transcript text is required to be present, not equal — the earlier
+    attempt's transcript is the one that was stored.
+
+    Raises ``RuntimeError`` carrying ``ERR_IDEMPOTENCY_MISMATCH`` when no
+    matching entity can be found, which the daemon treats as permanent.
+    """
+    content_hash = expected["audio_content_sha256"]
+    entity_id = _find_existing_transcription(content_hash, resolved_audio)
+    if not entity_id:
+        raise RuntimeError(
+            "Neotoma store failed: ERR_IDEMPOTENCY_MISMATCH and no stored "
+            "transcription matches this audio; the prior write under this "
+            "content key cannot be resolved"
+        )
+    result = _neotoma_cli_json(["entities", "get", entity_id]) or {}
+    record = result.get("entity", result)
+    snapshot = record.get("snapshot") or {}
+    problems = []
+    if not str(snapshot.get("transcription_text") or "").strip():
+        problems.append("transcription_text")
+    identity_ok = snapshot.get("audio_content_sha256") == content_hash or (
+        snapshot.get("audio_file_path") == str(resolved_audio)
+    )
+    if not identity_ok:
+        problems.append("audio_content_sha256/audio_file_path")
+    if "file_size_bytes" in snapshot and snapshot["file_size_bytes"] != expected["file_size_bytes"]:
+        problems.append("file_size_bytes")
+    if problems:
+        raise RuntimeError(
+            "Transcription ingestion incomplete: prior write read-back mismatch for "
+            + ", ".join(problems)
+        )
+    if attachment_expected and not _find_audio_source(resolved_audio.name, content_hash):
+        raise RuntimeError(
+            "Transcription ingestion incomplete: prior write has no stored audio source"
+        )
+    print(
+        f"Recovered prior transcription write {entity_id} after ERR_IDEMPOTENCY_MISMATCH",
+        file=sys.stderr,
+        flush=True,
+    )
+    return entity_id
+
+
+# Neotoma's CLI refuses a remote upload whose base64 body would exceed the
+# server's 10 MiB JSON cap: floor(10 MiB * 0.72) raw bytes (neotoma
+# src/cli/index.ts, MAX_UPLOADABLE_BYTES). A file over it can never be attached
+# over the hosted transport, so retrying only repeats the refusal.
+_DEFAULT_REMOTE_UPLOAD_MAX_BYTES = int(10 * 1024 * 1024 * 0.72)
+
+
+def _remote_upload_max_bytes() -> int:
+    raw = os.environ.get("NEOTOMA_REMOTE_UPLOAD_MAX_BYTES", "").strip()
+    try:
+        return int(raw) if raw else _DEFAULT_REMOTE_UPLOAD_MAX_BYTES
+    except ValueError:
+        return _DEFAULT_REMOTE_UPLOAD_MAX_BYTES
+
+
+def _neotoma_target_is_localhost() -> bool:
+    """True only when the store target is known to be a loopback API.
+
+    An unknown target is treated as remote: the CLI uploads bytes to anything
+    that is not localhost, so remote is the case whose size limit applies.
+    """
+    url = _neotoma_prod_base_url() or os.environ.get("NEOTOMA_BASE_URL", "").strip()
+    if not url:
+        return False
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
 def save_transcription(
     audio_path: Path,
     transcription_result: dict,
@@ -2287,10 +2686,10 @@ def save_transcription(
     Returns:
         Dictionary with saved transcription metadata including ``entity_id``
     """
-    if not shutil.which("neotoma"):
+    if not _neotoma_cli_available():
         raise RuntimeError(
-            "neotoma CLI not found on PATH; install Neotoma CLI or add it to PATH "
-            "to store transcriptions."
+            "Configured Neotoma CLI runtime unavailable; check NEOTOMA_CLI_SCRIPT "
+            "and NODE_BIN, or install the Neotoma CLI on PATH."
         )
 
     auth_ok, auth_reason = _neotoma_auth_preflight()
@@ -2319,12 +2718,44 @@ def save_transcription(
     except ValueError:
         audio_file_path_rel = str(audio_path)
 
-    now_utc = datetime.now(UTC).isoformat()
     title = f"Transcription — {audio_path.name}"
-    data_source = f"transcribe_audio.py store {now_utc} path={resolved_audio}"
-
     duration = _json_safe_float(transcription_result.get("audio_duration_seconds"))
-    size_i = _json_safe_nonnegative_int(transcription_result.get("file_size_bytes", 0))
+    file_present = resolved_audio.is_file()
+    extras = dict(extra_entity_fields or {})
+
+    # File-backed stores fail closed when the audio is missing. Metadata-only
+    # imports (attach_audio_file=False) may supply size/hash from the result.
+    if attach_audio_file and not file_present:
+        raise RuntimeError("Transcription ingestion incomplete: audio file missing")
+
+    content_hash = _audio_content_hash(audio_path) if file_present else None
+    if not content_hash:
+        content_hash = (
+            transcription_result.get("audio_content_sha256")
+            or extras.get("audio_content_sha256")
+        )
+    if file_present:
+        try:
+            size_i = int(audio_path.stat().st_size)
+        except OSError as exc:
+            if attach_audio_file:
+                raise RuntimeError(
+                    "Transcription ingestion incomplete: audio file unreadable"
+                ) from exc
+            size_i = transcription_result.get("file_size_bytes", extras.get("file_size_bytes"))
+    else:
+        size_i = transcription_result.get("file_size_bytes", extras.get("file_size_bytes"))
+    if size_i is None:
+        raise RuntimeError("Transcription ingestion incomplete: file size unavailable")
+    size_i = int(size_i)
+
+    # Stable under the content-keyed idempotency key: a changing timestamp would
+    # turn a post-write read-back retry into ERR_IDEMPOTENCY_MISMATCH forever.
+    data_source = (
+        f"transcribe_audio.py store audio_sha256={content_hash}"
+        if content_hash
+        else f"transcribe_audio.py store path={resolved_audio}"
+    )
 
     entity = {
         "entity_type": "transcription",
@@ -2341,35 +2772,74 @@ def save_transcription(
         # Path-independent identity. The path fields above stay for provenance,
         # but this is what dedupe matches on, so a recording that moves to object
         # storage is still recognised as already transcribed (ateles#625).
-        "audio_content_sha256": _audio_content_hash(audio_path),
+        "audio_content_sha256": content_hash,
         "audio_file_name": audio_path.name,
         "original_source_file": original_source_file or audio_path.name,
         "source_directory": source_directory,
         "data_source": data_source,
     }
-    if extra_entity_fields:
-        entity.update(extra_entity_fields)
+    for field in ("transcription_engine", "transcription_model"):
+        value = transcription_result.get(field)
+        if value:
+            entity[field] = value
+    if extras:
+        entity.update(extras)
+    # Capture method never implies consent; unknown is an explicit absence of attestation.
+    entity["transcription_engine"] = transcription_result.get("transcription_engine") or entity.get("transcription_engine") or "unknown"
+    for field in ("capture_method", "consent_basis", "transcription_engine"):
+        entity[field] = str(entity.get(field) or "unknown").strip() or "unknown"
+    entity["audio_content_sha256"] = content_hash
+    entity["file_size_bytes"] = size_i
+    entity["original_source_file"] = original_source_file or audio_path.name
+    entity["transcription_text"] = transcription_result["transcription_text"]
+    entity["data_source"] = data_source
+    if not entity["audio_content_sha256"]:
+        raise RuntimeError("Transcription ingestion incomplete: audio hash unavailable")
+    attachment_requested = attach_audio_file
 
-    # Neotoma rejects source uploads over ~2 GiB; store structured transcription only.
+    # Refuse a requested attachment above the caller limit before writing metadata.
+    # The remote service independently enforces its configured upload limit.
     max_wav_attach = int(
         os.getenv(
             "NEOTOMA_MAX_TRANSCRIPTION_WAV_BYTES", str(2 * 1024 * 1024 * 1024 - 1024)
         )
     )
-    attach_wav = bool(attach_audio_file and resolved_audio.is_file())
+    attach_wav = bool(attach_audio_file and file_present)
     if attach_wav:
         try:
             wav_bytes = resolved_audio.stat().st_size
         except OSError:
-            attach_wav = False
-            wav_bytes = 0
+            raise RuntimeError(
+                "Transcription ingestion incomplete: audio file unreadable"
+            )
         else:
             if wav_bytes > max_wav_attach:
-                entity["wav_attachment_omitted_bytes"] = wav_bytes
-                entity[
-                    "wav_attachment_omit_reason"
-                ] = "exceeds_neotoma_source_size_limit"
+                raise RuntimeError(
+                    "Transcription ingestion incomplete: requested audio exceeds attachment limit"
+                )
+            remote_limit = _remote_upload_max_bytes()
+            if wav_bytes > remote_limit and not _neotoma_target_is_localhost():
+                # The hosted transport cannot carry these bytes (the CLI
+                # refuses before any HTTP call), and it never will on retry.
+                # Store the transcript without the audio and record why, so
+                # the omission is a visible, verified field rather than a
+                # retry loop (2026-09-25: two-minute .qta memos retried every
+                # five minutes for a week).
                 attach_wav = False
+                attachment_requested = False
+                entity["audio_attachment_status"] = "omitted_exceeds_remote_upload_limit"
+                entity["audio_attachment_note"] = (
+                    f"audio is {wav_bytes} bytes; the remote upload limit is "
+                    f"{remote_limit} bytes, so the transcription was stored "
+                    "without the audio attachment"
+                )
+                print(
+                    f"Audio {audio_path.name} is {wav_bytes} bytes, over the remote "
+                    f"upload limit of {remote_limit} bytes; storing the transcription "
+                    "without the audio attachment.",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     idem = idempotency_key or _transcription_idempotency_key(audio_path)
     file_idem = file_idempotency_key or _transcription_file_idempotency_key(audio_path)
@@ -2381,24 +2851,44 @@ def save_transcription(
         entities_path = tmp.name
 
     try:
-        cmd = _neotoma_prod_cli_argv(
-            [
-                "store",
-                "--file",
-                entities_path,
-                "--idempotency-key",
-                idem,
-                "--observation-source",
-                observation_source,
-            ]
-        )
         if attach_wav:
-            cmd += [
-                "--file-path",
-                str(resolved_audio),
-                "--file-idempotency-key",
-                file_idem,
-            ]
+            # `store --file-path` sends a path the server resolves on its OWN
+            # filesystem. That was correct when Neotoma ran co-located with
+            # this daemon; against hosted Neotoma the server has no such path
+            # and rejects it with ERR_FILE_PATH_IS_SERVER_LOCAL (ateles#1083),
+            # silently losing every voice-memo transcription. `ingest
+            # --source-file` composes the same /store call but has the CLI
+            # decide the transport itself: it uploads the bytes as
+            # `file_content` whenever the target base URL is not localhost,
+            # and only falls back to a server-side `file_path` when the API
+            # actually is local. Do not reintroduce `store --file-path` here.
+            cmd = _neotoma_prod_cli_argv(
+                [
+                    "ingest",
+                    "--entities",
+                    entities_path,
+                    "--source-file",
+                    str(resolved_audio),
+                    "--idempotency-key",
+                    idem,
+                    "--file-idempotency-key",
+                    file_idem,
+                    "--observation-source",
+                    observation_source,
+                ]
+            )
+        else:
+            cmd = _neotoma_prod_cli_argv(
+                [
+                    "store",
+                    "--file",
+                    entities_path,
+                    "--idempotency-key",
+                    idem,
+                    "--observation-source",
+                    observation_source,
+                ]
+            )
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -2415,49 +2905,37 @@ def save_transcription(
     raw = (proc.stdout or "").strip()
     if proc.returncode != 0 or not raw:
         err = (proc.stderr or "").strip() or raw or f"exit {proc.returncode}"
-        # Idempotency mismatch means this recording was already stored.
-        # Extract the existing entity_id from stdout or error text and exit 0
-        # so callers (Tyto) treat it as a successful duplicate detection.
-        if "ERR_IDEMPOTENCY_MISMATCH" in err or "already used" in err:
-            import re as _re, sys as _sys
-            existing_id = None
-            # Check stdout first — prior run may have printed the entity line
-            for line in raw.splitlines():
-                if line.startswith("NEOTOMA_TRANSCRIPTION_ENTITY_ID="):
-                    existing_id = line.split("=", 1)[1].strip()
-                    break
-            # Also scan the error text for an entity ID pattern
-            if not existing_id:
-                m = _re.search(r"ent_[0-9a-f]{24}", err)
-                if m:
-                    existing_id = m.group(0)
-            if existing_id:
-                print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={existing_id}", flush=True)
-                print(f"\nSaved to Neotoma (transcription + WAV): entity {existing_id}", flush=True)
-                _sys.exit(0)
-            # Can't recover entity_id — exit 0 silently (already stored)
-            print(
-                f"[transcribe_audio] Idempotency mismatch for {audio_path.name} — "
-                f"already stored. Entity ID unknown.",
-                file=_sys.stderr,
-            )
-            _sys.exit(0)
-        raise RuntimeError(f"Neotoma store failed: {err}")
+        if "ERR_IDEMPOTENCY_MISMATCH" not in err:
+            raise RuntimeError(f"Neotoma store failed: {err}")
+        entity_id = _recover_prior_transcription_write(
+            entity,
+            resolved_audio,
+            attachment_expected=attach_wav,
+        )
+    else:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Neotoma store returned non-JSON: {raw[:500]}") from e
 
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Neotoma store returned non-JSON: {raw[:500]}") from e
+        structured = payload.get("structured") or {}
+        rows = structured.get("entities") or payload.get("entities") or []
+        if not rows:
+            raise RuntimeError(f"Neotoma store missing entities in response: {raw[:800]}")
 
-    structured = payload.get("structured") or {}
-    rows = structured.get("entities") or payload.get("entities") or []
-    if not rows:
-        raise RuntimeError(f"Neotoma store missing entities in response: {raw[:800]}")
+        entity_id = rows[0].get("entity_id")
+        if not entity_id:
+            raise RuntimeError(f"Neotoma store missing entity_id: {raw[:800]}")
 
-    entity_id = rows[0].get("entity_id")
-    if not entity_id:
-        raise RuntimeError(f"Neotoma store missing entity_id: {raw[:800]}")
-
+        source_id = (payload.get("unstructured") or {}).get("source_id")
+        if attachment_requested and (not attach_wav or not source_id):
+            raise RuntimeError("Transcription ingestion incomplete: audio attachment missing")
+        _verify_transcription_storage(
+            entity_id,
+            entity,
+            source_id if attach_wav else None,
+            declared_fields=_declared_transcription_fields(),
+        )
     print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={entity_id}", flush=True)
 
     contacts = [c for c in (relate_contact_entity_ids or []) if c.startswith("ent_")]
@@ -2503,6 +2981,16 @@ def main():
         help="Language code for transcription (e.g., en, es). If not provided, auto-detect.",
     )
     parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        choices=list(VALID_BACKENDS),
+        help="Transcription backend. Default: 'local' (whisper-cli, free, "
+        "on-device). 'elevenlabs' adds diarization (needs ELEVENLABS_API_KEY); "
+        "'openai' is the METERED platform Whisper API and is never selected "
+        "automatically.",
+    )
+    parser.add_argument(
         "--diarize",
         action="store_true",
         help="Use ElevenLabs speech-to-text with diarization (mono) or multichannel labels (stereo) when ELEVENLABS_API_KEY is set.",
@@ -2510,7 +2998,8 @@ def main():
     parser.add_argument(
         "--no-diarize",
         action="store_true",
-        help="Force OpenAI Whisper even if ELEVENLABS_API_KEY is set.",
+        help="Forbid ElevenLabs. Falls to the default local whisper-cli backend "
+        "(use --backend openai for the metered API).",
     )
     parser.add_argument(
         "--relate-contact-entity-id",
@@ -2555,6 +3044,11 @@ def main():
         metavar="FILENAME",
         help="Original filename before any rename (e.g. the Voice Memos filename). "
         "Stored as original_source_file in the Neotoma transcription entity for dedup.",
+    )
+    parser.add_argument(
+        "--consent-basis",
+        default=os.environ.get("TRANSCRIPTION_CONSENT_BASIS", "unknown"),
+        help="Explicit capture consent attestation or unknown; never inferred from capture method.",
     )
     parser.add_argument(
         "--capture-method",
@@ -2616,8 +3110,13 @@ def main():
             transcription_result = transcribe_audio_file(
                 audio_path,
                 language=args.language,
+                verbose=True,
                 use_diarization=use_diarization,
+                backend=args.backend,
             )
+
+        engine = (transcription_result.get("transcription_engine") or "unknown").strip()
+        print(f"TRANSCRIPTION_ENGINE={engine}", flush=True)
 
         # Always drop sidecars next to the audio: a .txt of the merged transcript
         # (recoverable even if the Neotoma store is later rejected as a duplicate
@@ -2636,11 +3135,10 @@ def main():
             args.relate_contact_entity_id or None,
             args.relate_feedback_analysis_entity_id,
         )
-        extra_fields = (
-            {"capture_method": args.capture_method.strip()}
-            if args.capture_method and args.capture_method.strip()
-            else None
-        )
+        extra_fields = {
+            "capture_method": (args.capture_method or "unknown").strip(),
+            "consent_basis": (args.consent_basis or "unknown").strip(),
+        }
         transcription_record = save_transcription(
             audio_path,
             transcription_result,

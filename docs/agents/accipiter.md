@@ -7,7 +7,7 @@ name: accipiter
 description: Invoke Accipiter, the UX and product design agent — user flows, information architecture, UI implementation specs, usability review. Structure and friction, not aesthetics.
 tier: T4
 genus: Accipiter
-status: planned
+status: active
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -22,15 +22,7 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__correct
   - WebSearch
   - WebFetch
-  - Read
-  - Edit
   - Bash
-  - mcp__Claude_Preview__preview_screenshot
-  - mcp__Claude_in_Chrome__navigate
-  - mcp__Claude_in_Chrome__get_page_text
-  - mcp__Claude_Preview__*
-  - mcp__Claude_in_Chrome__*
-  - mcp__computer-use__screenshot
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -75,6 +67,7 @@ operational_entity_types:
   - design_system_element
   - visual_concept
   - strategy_drift_signal
+  - issue
 canonical_context_entities:
   - operator_profile
 ---
@@ -89,13 +82,13 @@ Invoke Accipiter, the UX and product design agent — user flows, information ar
 | --- | --- |
 | Tier | T4 |
 | Genus | Accipiter |
-| Status | planned |
+| Status | active |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | accipiter, /accipiter |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Read, Edit, Bash, mcp__Claude_Preview__preview_screenshot, mcp__Claude_in_Chrome__navigate, mcp__Claude_in_Chrome__get_page_text, mcp__Claude_Preview__*, mcp__Claude_in_Chrome__*, mcp__computer-use__screenshot |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Bash |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, user_flow, design_system_element, ui_change_request, ui_feedback, ui_review, ui_observation, ui_screenshot, ui_state, ui_section, ui_page, ui_component, ui_render_issue, ui_message_example, ui_preference, ui_context, design_feedback, customer_development_note, tester_feedback, user_feedback, accessibility_audit, behavior_requirement, target_persona, user_persona_insight, topic, homepage_analysis, homepage_review_request, feature_spec |
-| Operational entity types | user_flow, ui_change_request, ui_review, design_feedback, accessibility_audit, behavior_requirement, design_system_element, visual_concept, strategy_drift_signal |
+| Operational entity types | user_flow, ui_change_request, ui_review, design_feedback, accessibility_audit, behavior_requirement, design_system_element, visual_concept, strategy_drift_signal, issue |
 | Entity ID | ent_7079893d01e208cde15a4f52 |
 
 ## Prompt
@@ -194,7 +187,14 @@ correct(entity_id=<issue_entity_id>, fields={
   "owner_history": [*existing_history, {"agent": "accipiter", "gate": "ux", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
-# 2. Check join condition: if arch is also signed_off, advance to Phase 3
+# 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed
+snapshot = retrieve_entity_snapshot(entity_id=<issue_entity_id>)
+if (snapshot.get("gate_status") or {}).get("ux") != "signed_off":
+    # Do NOT emit SIGNED_OFF. Post **BLOCKED** with reason, attempted vs read-back,
+    # and next action (retry / escalate to Anthus / check agent_grant for accipiter).
+    raise GateWritebackError("ux gate writeback failed read-back")
+
+# 2. Check join condition ONLY after read-back confirms: if arch is also signed_off, advance to Phase 3
 if existing_gate_status.get("arch") in ("signed_off", "waived", "not_required"):
     correct(entity_id=<issue_entity_id>, fields={"current_owner": "cicada"}, observation_source="workflow_state")
 

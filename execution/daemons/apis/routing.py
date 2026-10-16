@@ -14,6 +14,7 @@ domain-routing knowledge in this module; importers should not redefine it.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable
 
@@ -323,7 +324,19 @@ DOMAIN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
             r"\b(daemon|skill|swarm|formica|apus|tyto|anthus|subagent)\b"
-            r"|\bagents?\b",
+            r"|\bagents?\b"
+            # Swarm-mechanics vocabulary. Added from measured misses, not from
+            # guesswork: tasks about the dispatcher itself ("Add dispatch gate
+            # sequencing…", "Route tasks by claim predicate…") inferred NO tags
+            # at all and blocked. Each term is qualified by a swarm noun rather
+            # than left bare — "gate", "dispatch", "route" and "claim" are all
+            # ordinary English ("gate the release", "claim expenses"), and a
+            # bare token here is how the silent misroutes above were born.
+            r"|\b(dispatch|routing|route)\s+(gate|gates|task|tasks|pipeline|"
+            r"sequence|sequences|predicate|table|health)\b"
+            r"|\b(gate|gates|checkpoint|checkpoints)\s+(sequence|sequences|"
+            r"status|dispatch|observability)\b"
+            r"|\b(claim|lease)\s+(predicate|primitive|protocol)\b",
             re.I,
         ),
         "agents",
@@ -486,24 +499,111 @@ def infer_tags_from_text(title: str, body: str = "") -> list[str]:
     return tags
 
 
+# Values that encode "nobody owns this" as a STRING rather than as absence.
+# They are worse than an empty field: `bool(assigned_to)` is True for them, so
+# they satisfy an owner check (`readiness.assess_readiness(has_owner=...)`) and
+# an `eq` filter without naming an owner any dispatcher can resolve.
+# `canonical_assignee` maps them to None so absence is spelled exactly one way.
+SENTINEL_ASSIGNEES = frozenset({"unassigned", "none", "nobody", "tbd", "n/a", "-"})
+
+# AAuth subjects are written `<agent>@ateles-swarm` (lib/daemon_runtime/
+# aauth_signer.py builds them as f"{name}@ateles-swarm"). The local part IS the
+# agent name by construction, so an assignee carrying the suffix names the same
+# owner as the bare form and must resolve identically.
+_AAUTH_SUFFIXES = ("@ateles-swarm", "@ateles")
+
+# ── Human ownership is a routing ANSWER, not a routing miss ──────────────────
+#
+# `resolve_skill` returns this when `assigned_to` names a person rather than an
+# agent. It is deliberately NOT a key in ASSIGNED_TO_ROUTES and never names a
+# skill: `dispatch_task` branches on it before any spawn path, parks the task in
+# AWAITING_INPUT, and notifies at OPERATOR_DECISION. Correctly-assigned human
+# work is not a defect to page about, so it must not travel the BLOCKED +
+# BLOCKER unroutable path either.
+HUMAN_OWNED = "HUMAN_OWNED"
+
+
+def _human_assignee_keys() -> frozenset[str]:
+    """Assignee values that mean "a person owns this", in canonical form.
+
+    Always includes the generic `operator`. The operator's own login is read
+    from `APIS_OPERATOR_LOGIN` at CALL time (not import time) so a test can
+    monkeypatch it, and so a fork supplies its own identity — this file must
+    never hardcode a personal login (the repo is public, and operator identity
+    is env-sourced per the operator-config rule).
+    """
+    keys = {"operator"}
+    login = os.environ.get("APIS_OPERATOR_LOGIN", "").strip().lower()
+    if login:
+        keys.add(login)
+    return frozenset(keys)
+
+
+def canonical_assignee(assigned_to: str | None) -> str | None:
+    """
+    Reduce an ``assigned_to`` value to the one form the dispatcher resolves.
+
+    The canonical form is not a preference — it is whatever
+    ``ASSIGNED_TO_ROUTES`` is keyed by: a bare, lowercase, stripped agent name
+    (the keys are derived from ``DOMAIN_ROUTES.values()``). This normalizes the
+    three mechanical variations observed in stored tasks — surrounding
+    whitespace, capitalization, and the AAuth-subject suffix — and maps the
+    "unassigned" sentinel family to ``None`` so absence has a single spelling.
+
+    Returns ``None`` for absence/sentinels, otherwise the reduced string. A
+    value that is not a known agent is returned reduced but unchanged: this
+    function normalizes *form*, and never invents or guesses an owner (a human
+    name, or prose, is left for the caller to treat as unroutable).
+    """
+    if not assigned_to:
+        return None
+    key = assigned_to.strip().lower()
+    if not key or key in SENTINEL_ASSIGNEES:
+        return None
+    for suffix in _AAUTH_SUFFIXES:
+        if key.endswith(suffix):
+            key = key[: -len(suffix)].strip()
+            break
+    return key or None
+
+
 def resolve_skill(tags: list[str], assigned_to: str | None = None) -> str | None:
     """
     Pick the T4 skill for a task.
 
+    Returns one of three things — the contract is three-way, not two-way:
+
+      * an agent skill name — a resolved owner the dispatcher may spawn;
+      * ``HUMAN_OWNED``    — a person owns this; park it, never spawn;
+      * ``None``           — nobody owns this; escalate it loudly.
+
     An explicit `assigned_to` (set by Sylvia/Turdus when they create or route a
     task) always wins over tag inference — the creating agent already decided
-    the owner. Only when `assigned_to` is unset, unknown, or the dispatcher
-    itself ("apis") do we fall back to domain-tag routing. First matching tag
-    wins; returns None if nothing maps to a route.
+    the owner. Tag inference runs ONLY when the field is genuinely absent: unset,
+    a sentinel ("unassigned"), or the dispatcher itself ("apis").
+
+    An `assigned_to` naming someone who is not a routable agent is a HARD STOP,
+    never a fallthrough. This used to fall through to keyword tag inference,
+    which is the silent misroute the old comment here disclaimed while
+    performing it: with 17 domain owners against a ~38-name roster, every other
+    agent name — `pavo`, `apus`, `turdus`, `waxwing`, … — was treated as absent,
+    so a finance-tagged task assigned to ANY of them reached `monedula`, the
+    payment executor, and a product task assigned to `pavo` became a `cicada`
+    code change. A named owner nobody can spawn must block visibly (#702).
     """
-    if assigned_to:
-        key = assigned_to.strip().lower()
-        if key and key != "apis":
-            skill = ASSIGNED_TO_ROUTES.get(key)
-            if skill:
-                return skill
-            # Unknown assignee: don't silently misroute — let tag inference try,
-            # but the caller can log the miss.
+    key = canonical_assignee(assigned_to)
+    if key and key != "apis":
+        skill = ASSIGNED_TO_ROUTES.get(key)
+        if skill:
+            return skill
+        if key in _human_assignee_keys():
+            # Deliberate human ownership — terminal, and not an escalation.
+            return HUMAN_OWNED
+        # A named owner that is neither an agent nor the operator. Stop here:
+        # tag inference would reassign work its creator explicitly gave to
+        # someone else, and a confident wrong owner reads as covered while a
+        # missing one is visibly unowned.
+        return None
     for tag in tags:
         skill = DOMAIN_ROUTES.get(tag)
         if skill:
