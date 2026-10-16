@@ -162,24 +162,6 @@ def test_a_persistent_transport_failure_stays_fail_closed_in_bounded_time(monkey
     assert clock["now"] - start <= 45.0
 
 
-def test_the_total_time_cap_stops_further_attempts(monkeypatch):
-    clock = {"now": 0.0}
-
-    async def sleep(delay):
-        clock["now"] += delay
-
-    monkeypatch.setattr(gate_waive, "_retry_sleep", sleep, raising=False)
-    monkeypatch.setattr(gate_waive, "_monotonic", lambda: clock["now"], raising=False)
-    monkeypatch.setattr(gate_waive, "SIGNED_WRITE_TOTAL_CAP_S", 2.0, raising=False)
-    rec = _Record({"pm": "pending"}, idempotent=True, script={GATE_STATUS_FIELD: ["transport"] * 10})
-    store = _wire(monkeypatch, rec)
-
-    outcome = _sign(store)
-
-    assert not outcome.ok
-    assert len(_gate_keys(rec)) == 2, "the cap (2 s) allowed one 1 s retry and no more"
-
-
 # ── what is NOT retried ──────────────────────────────────────────────────────
 
 
@@ -376,3 +358,303 @@ def test_a_waive_write_that_succeeds_first_time_is_not_repeated(monkeypatch, wai
     store = IssueGateStore("http://x", "tok")
     assert _run(store._post("correct", {"k": 1})) == {}
     assert len(client.calls) == 1
+
+
+# ── the cap is a real deadline: attempts are bounded, not only the waits ─────
+#
+# The clock below advances on REQUEST DURATION as well as on sleep. A request is
+# given the timeout the code passes it; the fake runs for the pattern's duration
+# or for that timeout, whichever is shorter, then fails the way a timed-out
+# request fails. A cap that counted only waits would pass a test whose clock
+# moves only on sleep; this one does not.
+
+import itertools
+
+from lib.daemon_runtime.neotoma_signed import SignedRequestError  # noqa: E402
+
+CAP = 45.0
+HANG = 10_000.0  # "never answers": runs until its timeout
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+        self.started = self.now
+        self.launched: list[tuple[float, float, float]] = []  # (elapsed, timeout, left)
+
+    @property
+    def elapsed(self):
+        return self.now - self.started
+
+
+def _virtual(monkeypatch, clock):
+    async def sleep(delay):
+        clock.now += delay
+
+    monkeypatch.setattr(gate_waive, "_retry_sleep", sleep, raising=False)
+    monkeypatch.setattr(gate_waive, "_monotonic", lambda: clock.now, raising=False)
+
+
+def _signed_fake(clock, durations):
+    """Each call takes durations[i] (the last repeats) or its timeout, then fails."""
+    calls = {"n": 0}
+
+    def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        i = min(calls["n"], len(durations) - 1)
+        calls["n"] += 1
+        clock.launched.append((clock.elapsed, timeout, CAP - clock.elapsed))
+        took = min(durations[i], timeout)
+        clock.now += took
+        raise SignedRequestError("fetch failed", "transport_error")
+
+    return signed, calls
+
+
+def _write(store):
+    return _run(
+        store._sign_off_write(
+            "ent_1", GATE_STATUS_FIELD, "v", "key-1",
+            lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+        )
+    )
+
+
+PATTERNS = {
+    "first hangs": [HANG, 0.1],
+    "second hangs": [0.1, HANG, 0.1],
+    "all hang": [HANG],
+    "slow then hang": [30.0, HANG],
+    "long first leaves little": [43.0, HANG],
+    "just fits one retry": [41.0, 0.1],
+    "fast failures": [0.1],
+}
+
+
+def _store():
+    return IssueGateStore("http://x", "tok")
+
+
+@pytest.mark.parametrize("name", sorted(PATTERNS))
+def test_a_signed_write_never_outlasts_the_cap(monkeypatch, name):
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    signed, _ = _signed_fake(clock, PATTERNS[name])
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+
+    assert _write(_store()) == SIGN_OFF_SIGNING_FAILED
+
+    assert clock.elapsed <= CAP, f"{name}: {clock.elapsed}s of waits plus attempts"
+    for elapsed, timeout, left in clock.launched:
+        assert timeout <= left + 1e-9, "an attempt was launched with more time than was left"
+        assert timeout >= gate_waive.MIN_ATTEMPT_TIMEOUT_S - 1e-9 or elapsed == 0
+
+
+def test_every_pair_of_attempt_durations_stays_inside_the_cap(monkeypatch):
+    for d1, d2, d3 in itertools.product([0.1, 5.0, 19.0, 30.0, 43.0, HANG], repeat=3):
+        clock = _Clock()
+        _virtual(monkeypatch, clock)
+        signed, _ = _signed_fake(clock, [d1, d2, d3])
+        monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+        _write(_store())
+        assert clock.elapsed <= CAP, (d1, d2, d3, clock.elapsed)
+        assert all(t <= left + 1e-9 for _, t, left in clock.launched), (d1, d2, d3)
+
+
+def test_all_hang_makes_two_attempts_and_the_true_worst_case_is_41_seconds(monkeypatch):
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    signed, calls = _signed_fake(clock, [HANG])
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+
+    _write(_store())
+
+    assert calls["n"] == 2, "a third attempt needs 41 + 3 + 2 s, which does not fit in 45"
+    assert clock.elapsed == pytest.approx(41.0)
+    assert [t for _, t, _ in clock.launched] == [20.0, 20.0]
+
+
+def test_a_retry_that_cannot_fit_is_not_started(monkeypatch):
+    """The first attempt ends at 43 s: 43 + 1 s backoff + 2 s minimum is over 45."""
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    signed, calls = _signed_fake(clock, [43.0])
+    # an attempt can't really take 43 s with a 20 s timeout; model a slow helper
+    # whose timeout the code did not (yet) shorten by lifting the default
+    monkeypatch.setattr(gate_waive, "SIGNED_ATTEMPT_TIMEOUT_S", 44.0)
+    monkeypatch.setattr(gate_waive.IssueGateStore, "_signed_correct", _passthrough(signed))
+
+    _write(_store())
+
+    assert calls["n"] == 1
+    assert clock.elapsed == pytest.approx(43.0)
+
+
+def _passthrough(signed):
+    async def _signed_correct(self, entity_id, field_name, value, key, *, lens_agent, lens_sub,
+                              timeout=20.0):
+        return signed("POST", "u", {}, agent_name=lens_agent, timeout=timeout, sub=lens_sub)
+
+    return _signed_correct
+
+
+def test_a_retry_that_just_fits_is_started_with_the_time_that_is_left(monkeypatch):
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    signed, calls = _signed_fake(clock, [20.0, 20.0])  # ends at 20; retry at 21 gets 20
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+
+    _write(_store())
+
+    # attempt 1: 0-20, wait 1, attempt 2: 21-41; a third would need 41+3+2 > 45
+    assert calls["n"] == 2
+
+
+def test_the_timeout_passed_shrinks_to_the_time_left(monkeypatch):
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    monkeypatch.setattr(gate_waive, "SIGNED_WRITE_TOTAL_CAP_S", 30.0)
+    signed, calls = _signed_fake(clock, [HANG])
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+
+    _write(_store())
+
+    # 20 s, wait 1, then only 9 s left: the retry is launched with 9, not 20
+    assert [t for _, t, _ in clock.launched] == [20.0, 9.0]
+    assert clock.elapsed == pytest.approx(30.0)
+
+
+def test_the_failure_note_and_restore_writes_have_their_own_deadline(monkeypatch):
+    """Both go through the same loop: each is bounded by its own cap."""
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    signed, _ = _signed_fake(clock, [HANG])
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+    store = _store()
+
+    for field in ("owner_history", GATE_STATUS_FIELD):
+        clock.started = clock.now
+        clock.launched.clear()
+        _run(store._sign_off_write(
+            "ent_1", field, "v", f"key-{field}",
+            lens_agent="pavo", lens_sub="pavo@ateles-swarm", context=("o/r", 1, "pm"),
+        ))
+        assert clock.elapsed <= CAP
+
+
+def test_the_logs_state_no_cap_that_is_not_kept(monkeypatch, caplog):
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    signed, _ = _signed_fake(clock, [HANG])
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+
+    with caplog.at_level(logging.INFO, logger="apis.gate_waive"):
+        _write(_store())
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "deadline reached, no further attempt fits" in text
+    assert "time cap reached" not in text
+
+
+# ── the bearer path ──────────────────────────────────────────────────────────
+
+
+class _TimedClient:
+    """AsyncClient fake on the virtual clock: records each attempt's timeout."""
+
+    clock: _Clock
+    durations: list = []
+    timeouts: list = []
+
+    def __init__(self, *a, timeout=None, **k):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        i = min(len(_TimedClient.timeouts), len(_TimedClient.durations) - 1)
+        d = _TimedClient.durations[i]
+        _TimedClient.timeouts.append(self.timeout)
+        _TimedClient.clock.launched.append(
+            (_TimedClient.clock.elapsed, self.timeout, CAP - _TimedClient.clock.elapsed)
+        )
+        _TimedClient.clock.now += min(d, self.timeout)
+        raise httpx.ReadTimeout("timed out")
+
+
+@pytest.mark.parametrize("name", sorted(PATTERNS))
+def test_a_waive_write_never_outlasts_the_cap(monkeypatch, name):
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    _TimedClient.clock, _TimedClient.durations, _TimedClient.timeouts = clock, PATTERNS[name], []
+    monkeypatch.setattr(gate_waive.httpx, "AsyncClient", _TimedClient)
+
+    assert _run(IssueGateStore("http://x", "tok")._post("correct", {"k": 1})) is None
+
+    assert clock.elapsed <= CAP, f"{name}: {clock.elapsed}s"
+    assert all(t <= left + 1e-9 for _, t, left in clock.launched)
+
+
+def test_a_waive_write_that_hangs_for_real_is_cut_at_its_attempt_timeout(monkeypatch):
+    """httpx's timeout is per operation; the whole request must be bounded too."""
+    import time as _time
+
+    monkeypatch.setattr(gate_waive, "BEARER_ATTEMPT_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(gate_waive, "SIGNED_WRITE_TOTAL_CAP_S", 1.0)
+    monkeypatch.setattr(gate_waive, "MIN_ATTEMPT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(gate_waive, "SIGNED_WRITE_BACKOFFS_S", (0.05, 0.05))
+    monkeypatch.setattr(gate_waive, "_retry_sleep", asyncio.sleep, raising=False)
+    monkeypatch.setattr(gate_waive, "_monotonic", _time.monotonic, raising=False)
+
+    class _Hangs(_TimedClient):
+        async def post(self, url, json=None, headers=None):
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(gate_waive.httpx, "AsyncClient", _Hangs)
+    t0 = _time.monotonic()
+
+    assert _run(IssueGateStore("http://x", "tok")._post("correct", {"k": 1})) is None
+
+    assert _time.monotonic() - t0 < 1.5
+
+
+# ── planted red: the old "elapsed + next wait" check ─────────────────────────
+
+
+def _old_rule(monkeypatch):
+    """Reinstate the previous check: it counted elapsed + the next wait only, and
+    launched every attempt with its full default timeout."""
+    monkeypatch.setattr(
+        gate_waive, "_retry_fits",
+        lambda started, done: (gate_waive._monotonic() - started + gate_waive._next_backoff(done)
+                               <= gate_waive.SIGNED_WRITE_TOTAL_CAP_S),
+        raising=False,
+    )
+    monkeypatch.setattr(gate_waive, "_attempt_timeout", lambda default, started: default, raising=False)
+
+
+def test_planted_red_the_old_check_lets_a_signed_write_run_past_the_cap(monkeypatch):
+    _old_rule(monkeypatch)
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    signed, _ = _signed_fake(clock, [HANG])
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+
+    _write(_store())
+
+    assert clock.elapsed > CAP, "the old rule is the defect: it overran the cap"
+
+
+def test_planted_red_the_old_check_lets_a_waive_write_run_past_the_cap(monkeypatch):
+    _old_rule(monkeypatch)
+    clock = _Clock()
+    _virtual(monkeypatch, clock)
+    _TimedClient.clock, _TimedClient.durations, _TimedClient.timeouts = clock, [HANG], []
+    monkeypatch.setattr(gate_waive.httpx, "AsyncClient", _TimedClient)
+
+    _run(IssueGateStore("http://x", "tok")._post("correct", {"k": 1}))
+
+    assert clock.elapsed > CAP

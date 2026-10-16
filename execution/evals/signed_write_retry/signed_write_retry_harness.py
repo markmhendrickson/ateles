@@ -10,6 +10,7 @@ per attempt, each one of
     ok            the write lands and the response arrives
     transport     the call fails before the write lands (a transport error)
     timeout       the signing helper times out before the write lands
+    hang          the helper never answers: it runs until the timeout it was given
     lost          the write LANDS, then the response is lost (a transport error)
     http:<n>      the server answers with status n and applies nothing
 
@@ -40,7 +41,7 @@ gate_waive = base.gate_waive
 ns = base.ns
 GATE_STATUS_FIELD = base.GATE_STATUS_FIELD
 
-MUTATIONS = ("none", "no_retry", "retry_4xx", "fresh_key_per_attempt")
+MUTATIONS = ("none", "no_retry", "retry_4xx", "fresh_key_per_attempt", "old_cap")
 
 
 def load() -> dict:
@@ -55,8 +56,9 @@ class FlakyStore(base.FakeIssueStore):
         self.script = {k: list(v) for k, v in script.items()}
         self.seen_keys: set[str] = set()
         self.attempts: dict[str, list[str]] = {}  # field -> idempotency key per attempt
+        self.timeouts: list[float] = []  # the timeout each hanging attempt was given
 
-    def transport(self, body: dict, sub: str | None) -> tuple[int, dict]:
+    def transport(self, body: dict, sub: str | None, timeout: float = 20.0, clock=None) -> tuple[int, dict]:
         field, key = body["field"], body.get("idempotency_key", "")
         self.attempts.setdefault(field, []).append(key)
         outcome = (self.script.get(field) or ["ok"]).pop(0) if self.script.get(field) else "ok"
@@ -64,6 +66,11 @@ class FlakyStore(base.FakeIssueStore):
             raise ns.SignedRequestError("fetch failed (private detail)", "transport_error")
         if outcome == "timeout":
             raise subprocess.TimeoutExpired("signed_fetch", 20)
+        if outcome == "hang":
+            if clock is not None:
+                clock["now"] += timeout  # the request consumed all it was given
+            self.timeouts.append(timeout)
+            raise subprocess.TimeoutExpired("signed_fetch", timeout)
         if outcome.startswith("http:"):
             return int(outcome[5:]), {}
         replay = key in self.seen_keys
@@ -101,11 +108,23 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         issue_store = base._wire(mp, store, signer_fails=None)
 
         def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None):
-            return store.transport(body, sub)
+            return store.transport(body, sub, timeout, clock)
 
         mp.setattr(gate_waive._ns, "signed_request", signed)
         mp.setattr(gate_waive, "_retry_sleep", sleep, raising=False)
         mp.setattr(gate_waive, "_monotonic", lambda: clock["now"], raising=False)
+        if mutation == "old_cap":
+            # The previous check: elapsed + next wait only; every attempt launched
+            # with its full default timeout.
+            mp.setattr(
+                gate_waive, "_retry_fits",
+                lambda started, done: (
+                    gate_waive._monotonic() - started + gate_waive._next_backoff(done)
+                    <= gate_waive.SIGNED_WRITE_TOTAL_CAP_S
+                ),
+                raising=False,
+            )
+            mp.setattr(gate_waive, "_attempt_timeout", lambda default, started: default, raising=False)
         if mutation == "no_retry":
             mp.setattr(gate_waive, "retries_for_reason", lambda code: 0)
             mp.setattr(gate_waive, "retries_for_status", lambda status: 0)
@@ -169,7 +188,7 @@ def check(scenario: dict, obs: dict) -> list[str]:
         want("stored history actions", [e.get("action") for e in store.owner_history],
              exp["history_actions"])
     if "max_seconds" in exp and obs["clock"]["now"] > exp["max_seconds"]:
-        bad.append(f"took {obs['clock']['now']}s of backoff, over {exp['max_seconds']}s")
+        bad.append(f"took {obs['clock']['now']}s of waits and attempts, over {exp['max_seconds']}s")
     log = "\n".join(obs["log"])
     for needle in exp.get("log_contains", []):
         if needle not in log:

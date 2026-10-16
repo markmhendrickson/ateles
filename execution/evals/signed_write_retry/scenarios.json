@@ -4,107 +4,317 @@
     {
       "id": "one_transport_error_on_a_gate_that_already_reads_signed_off_ends_verified",
       "why": "the canary failure: a re-sign of a gate that already reads signed_off failed once in transit and the gates were treated as not green. One retry with the same key now ends verified.",
-      "gates": {"pm": "signed_off"},
-      "script": {"gate_status": ["transport"]},
-      "steps": [{"gate": "pm"}],
+      "gates": {
+        "pm": "signed_off"
+      },
+      "script": {
+        "gate_status": [
+          "transport"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
       "expect": {
-        "ok": [true],
-        "verified": [true],
-        "gates": {"pm": "signed_off"},
-        "attempts": {"owner_history": 1, "gate_status": 2},
+        "ok": [
+          true
+        ],
+        "verified": [
+          true
+        ],
+        "gates": {
+          "pm": "signed_off"
+        },
+        "attempts": {
+          "owner_history": 1,
+          "gate_status": 2
+        },
         "one_key_per_field": true,
-        "delays": [1.0],
-        "log_contains": ["attempt 1 failed", "reason=transport_error", "succeeded on attempt 2"],
-        "log_excludes": ["private detail", "Bearer"]
+        "delays": [
+          1.0
+        ],
+        "log_contains": [
+          "attempt 1 failed",
+          "reason=transport_error",
+          "succeeded on attempt 2"
+        ],
+        "log_excludes": [
+          "private detail",
+          "Bearer"
+        ]
       }
     },
     {
       "id": "a_timeout_then_a_503_then_success_uses_both_retries_with_the_stated_backoff",
       "why": "a helper timeout and a server 5xx are both transient; the two retries wait 1 s then 3 s and the third attempt lands",
-      "gates": {"pm": "pending"},
-      "script": {"gate_status": ["timeout", "http:503"]},
-      "steps": [{"gate": "pm"}],
+      "gates": {
+        "pm": "pending"
+      },
+      "script": {
+        "gate_status": [
+          "timeout",
+          "http:503"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
       "expect": {
-        "ok": [true],
-        "verified": [true],
-        "gates": {"pm": "signed_off"},
-        "attempts": {"owner_history": 1, "gate_status": 3},
+        "ok": [
+          true
+        ],
+        "verified": [
+          true
+        ],
+        "gates": {
+          "pm": "signed_off"
+        },
+        "attempts": {
+          "owner_history": 1,
+          "gate_status": 3
+        },
         "one_key_per_field": true,
-        "delays": [1.0, 3.0],
+        "delays": [
+          1.0,
+          3.0
+        ],
         "gate_writes_applied": 1,
-        "log_contains": ["reason=helper_timeout", "reason=server_error"]
+        "log_contains": [
+          "reason=helper_timeout",
+          "reason=server_error"
+        ]
       }
     },
     {
       "id": "a_gate_write_that_landed_with_a_lost_response_is_replayed_not_applied_twice",
       "why": "the write reached the server and only the response was lost: the retry carries the same key, the server answers a replay, the gate is applied once and the sign-off ends verified",
-      "gates": {"pm": "pending"},
-      "script": {"gate_status": ["lost"]},
-      "steps": [{"gate": "pm"}],
+      "gates": {
+        "pm": "pending"
+      },
+      "script": {
+        "gate_status": [
+          "lost"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
       "expect": {
-        "ok": [true],
-        "verified": [true],
-        "gates": {"pm": "signed_off"},
-        "attempts": {"owner_history": 1, "gate_status": 2},
+        "ok": [
+          true
+        ],
+        "verified": [
+          true
+        ],
+        "gates": {
+          "pm": "signed_off"
+        },
+        "attempts": {
+          "owner_history": 1,
+          "gate_status": 2
+        },
         "one_key_per_field": true,
         "gate_writes_applied": 1,
-        "history_actions": ["signed_off"]
+        "history_actions": [
+          "signed_off"
+        ]
       }
     },
     {
       "id": "a_history_entry_that_landed_with_a_lost_response_is_not_doubled",
       "why": "the owner_history write lands and loses its response; the retry is a replay, so the history holds one entry, not two",
-      "gates": {"pm": "pending"},
-      "script": {"owner_history": ["lost"]},
-      "steps": [{"gate": "pm"}],
+      "gates": {
+        "pm": "pending"
+      },
+      "script": {
+        "owner_history": [
+          "lost"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
       "expect": {
-        "ok": [true],
-        "verified": [true],
-        "attempts": {"owner_history": 2, "gate_status": 1},
+        "ok": [
+          true
+        ],
+        "verified": [
+          true
+        ],
+        "attempts": {
+          "owner_history": 2,
+          "gate_status": 1
+        },
         "one_key_per_field": true,
-        "history_actions": ["signed_off"]
+        "history_actions": [
+          "signed_off"
+        ]
       }
     },
     {
       "id": "a_persistent_transport_failure_stays_fail_closed_in_bounded_time",
       "why": "every attempt fails: three attempts, 4 s of backoff, the gate does not read cleared and the sign-off fails exactly as before (the second history write is the one failure note)",
-      "gates": {"pm": "pending"},
-      "script": {"gate_status": ["transport", "transport", "transport", "transport", "transport"]},
-      "steps": [{"gate": "pm"}],
+      "gates": {
+        "pm": "pending"
+      },
+      "script": {
+        "gate_status": [
+          "transport",
+          "transport",
+          "transport",
+          "transport",
+          "transport"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
       "expect": {
-        "ok": [false],
-        "verified": [false],
-        "gates": {"pm": "pending"},
-        "attempts": {"owner_history": 2, "gate_status": 3},
-        "delays": [1.0, 3.0],
+        "ok": [
+          false
+        ],
+        "verified": [
+          false
+        ],
+        "gates": {
+          "pm": "pending"
+        },
+        "attempts": {
+          "owner_history": 2,
+          "gate_status": 3
+        },
+        "delays": [
+          1.0,
+          3.0
+        ],
         "max_seconds": 45,
-        "log_contains": ["attempt=3/3", "reason=transport_error"],
-        "log_excludes": ["private detail"]
+        "log_contains": [
+          "attempt=3/3",
+          "reason=transport_error"
+        ],
+        "log_excludes": [
+          "private detail"
+        ]
       }
     },
     {
       "id": "a_refused_4xx_is_never_retried",
       "why": "a 403 is an answer, not a transient fault: one attempt, no wait, fail closed",
-      "gates": {"pm": "pending"},
-      "script": {"gate_status": ["http:403", "http:403", "http:403"]},
-      "steps": [{"gate": "pm"}],
+      "gates": {
+        "pm": "pending"
+      },
+      "script": {
+        "gate_status": [
+          "http:403",
+          "http:403",
+          "http:403"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
       "expect": {
-        "ok": [false],
-        "gates": {"pm": "pending"},
-        "attempts": {"owner_history": 2, "gate_status": 1},
+        "ok": [
+          false
+        ],
+        "gates": {
+          "pm": "pending"
+        },
+        "attempts": {
+          "owner_history": 2,
+          "gate_status": 1
+        },
         "delays": []
       }
     },
     {
       "id": "a_one_off_401_is_retried_exactly_once",
       "why": "a 401 that clears on the retry succeeds; one that does not stops after that single retry",
-      "gates": {"pm": "pending", "ux": "pending"},
-      "script": {"gate_status": ["http:401", "ok", "http:401", "http:401", "http:401"]},
-      "steps": [{"gate": "pm"}, {"gate": "ux"}],
+      "gates": {
+        "pm": "pending",
+        "ux": "pending"
+      },
+      "script": {
+        "gate_status": [
+          "http:401",
+          "ok",
+          "http:401",
+          "http:401",
+          "http:401"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        },
+        {
+          "gate": "ux"
+        }
+      ],
       "expect": {
-        "ok": [true, false],
-        "attempts": {"owner_history": 3, "gate_status": 4},
-        "delays": [1.0, 1.0]
+        "ok": [
+          true,
+          false
+        ],
+        "attempts": {
+          "owner_history": 3,
+          "gate_status": 4
+        },
+        "delays": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": "a_write_whose_every_attempt_hangs_ends_inside_the_cap_counting_the_attempts",
+      "why": "the cap is a real deadline: waits AND attempt durations. Every attempt hangs until its timeout; two attempts of 20 s and one 1 s wait is 41 s, and a third would not fit in 45 s, so it is not started",
+      "gates": {
+        "pm": "pending"
+      },
+      "script": {
+        "gate_status": [
+          "hang",
+          "hang",
+          "hang",
+          "hang"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
+      "expect": {
+        "ok": [
+          false
+        ],
+        "gates": {
+          "pm": "pending"
+        },
+        "attempts": {
+          "owner_history": 2,
+          "gate_status": 2
+        },
+        "delays": [
+          1.0
+        ],
+        "max_seconds": 45,
+        "log_contains": [
+          "deadline reached, no further attempt fits"
+        ]
       }
     }
   ]

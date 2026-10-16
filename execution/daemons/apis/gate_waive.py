@@ -268,18 +268,43 @@ def new_history_entries(current: list[dict], entries: list[dict]) -> list[dict]:
 #   HTTP 401 (a one-off token hiccup)                      1 retry
 #   every other 4xx, and every other reason code           none
 #
-# Backoff is short (1 s, then 3 s) and the whole write is capped in wall-clock time,
-# so a persistent failure still ends, fail-closed, in bounded time.
+# Backoff is short (1 s, then 3 s). The whole write is bounded by ONE DEADLINE,
+# computed when the operation starts:
+#
+#   * every attempt (the first included) is launched with a timeout of
+#     min(its default timeout, time left before the deadline), so no attempt can
+#     run past the deadline;
+#   * a retry is started only if elapsed + its backoff + MIN_ATTEMPT_TIMEOUT_S still
+#     fits before the deadline; otherwise the write stops and fails closed.
+#
+# So the true worst case is the cap itself, SIGNED_WRITE_TOTAL_CAP_S (45 s), plus
+# only the scheduling and process-teardown jitter of the last attempt, not the cap
+# plus a full extra request. With the defaults an all-hanging signed write makes
+# two attempts (20 s, wait 1 s, 20 s = 41 s); a third would need 41 + 3 + 2 > 45.
 SIGNED_WRITE_BACKOFFS_S = (1.0, 3.0)
 SIGNED_WRITE_TOTAL_CAP_S = 45.0
+SIGNED_ATTEMPT_TIMEOUT_S = 20.0  # the signing helper's own default timeout
+BEARER_ATTEMPT_TIMEOUT_S = 30.0  # the bearer path's default HTTP timeout
+MIN_ATTEMPT_TIMEOUT_S = 2.0  # a retry is not started with less than this left
 _RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout"})
 _monotonic = time.monotonic
 
 
 def _next_backoff(retries_done: int) -> float:
-    """The wait before the next retry; the total cap counts it, so a retry that
-    would finish past the cap is not started."""
+    """The wait before the next retry."""
     return SIGNED_WRITE_BACKOFFS_S[min(retries_done, len(SIGNED_WRITE_BACKOFFS_S) - 1)]
+
+
+def _attempt_timeout(default: float, started: float) -> float:
+    """The timeout for the next attempt: its default, but never more than is left."""
+    remaining = SIGNED_WRITE_TOTAL_CAP_S - (_monotonic() - started)
+    return min(default, remaining)
+
+
+def _retry_fits(started: float, retries_done: int) -> bool:
+    """True if one more attempt, after its backoff, still fits before the deadline."""
+    elapsed = _monotonic() - started
+    return elapsed + _next_backoff(retries_done) + MIN_ATTEMPT_TIMEOUT_S <= SIGNED_WRITE_TOTAL_CAP_S
 
 
 _retry_sleep = asyncio.sleep
@@ -1094,36 +1119,40 @@ class IssueGateStore:
         while True:
             attempt += 1
             retries_allowed = 0
+            timeout = _attempt_timeout(BEARER_ATTEMPT_TIMEOUT_S, started)
             try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    resp = await client.post(
-                        f"{self.base_url}/{path}",
-                        json=payload,
-                        headers=self._headers(),
-                    )
-                    if resp.status_code >= 400:
-                        reason = http_failure_code(resp.status_code)
-                        retries_allowed = retries_for_status(resp.status_code)
-                        shown = f"HTTP {resp.status_code}"
-                        resp.raise_for_status()
-                    if resp.content:
-                        return resp.json()
-                    return {}
+                # httpx's timeout applies per operation; wait_for makes it the
+                # whole request, so the attempt cannot outlast the deadline.
+                resp = await asyncio.wait_for(
+                    self._post_once(path, payload, timeout), timeout=timeout
+                )
+                if resp.status_code >= 400:
+                    reason = http_failure_code(resp.status_code)
+                    retries_allowed = retries_for_status(resp.status_code)
+                    shown = f"HTTP {resp.status_code}"
+                    resp.raise_for_status()
+                if resp.content:
+                    return resp.json()
+                return {}
             except Exception as exc:  # noqa: BLE001 — never crash the pipeline
                 if not retries_allowed and not isinstance(exc, httpx.HTTPStatusError):
-                    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+                    if isinstance(
+                        exc,
+                        (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError),
+                    ):
                         reason, shown = "transport_error", type(exc).__name__
                         retries_allowed = len(SIGNED_WRITE_BACKOFFS_S)
                     else:
                         reason, shown = "unexpected", type(exc).__name__
                 retries_done = attempt - 1
-                over_cap = (
-                _monotonic() - started + _next_backoff(attempt - 1) > SIGNED_WRITE_TOTAL_CAP_S
-            )
-                if retries_done >= retries_allowed or over_cap:
+                out_of_time = retries_done < retries_allowed and not _retry_fits(
+                    started, retries_done
+                )
+                if retries_done >= retries_allowed or out_of_time:
                     log.error(
-                        "[apis.gate_waive] %s failed: %s reason=%s attempt=%d/%d",
+                        "[apis.gate_waive] %s failed: %s reason=%s attempt=%d/%d%s",
                         path, shown, reason, attempt, retries_allowed + 1,
+                        " (deadline reached, no further attempt fits)" if out_of_time else "",
                     )
                     return None
                 delay = _next_backoff(retries_done)
@@ -1133,6 +1162,14 @@ class IssueGateStore:
                     path, attempt, shown, reason, delay,
                 )
             await _retry_sleep(delay)
+
+    async def _post_once(self, path: str, payload: dict, timeout: float):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.post(
+                f"{self.base_url}/{path}",
+                json=payload,
+                headers=self._headers(),
+            )
 
     async def _observations_page(
         self, entity_id: str, *, limit: int, offset: int
@@ -2093,8 +2130,12 @@ class IssueGateStore:
         *,
         lens_agent: str,
         lens_sub: str,
+        timeout: float = SIGNED_ATTEMPT_TIMEOUT_S,
     ) -> tuple[int, dict]:
         """One lens-signed `correct`, off the event loop.
+
+        ``timeout`` bounds the signing helper process for THIS attempt (the retry
+        loop passes what is left before its deadline).
 
         `neotoma_signed.signed_request` is SYNCHRONOUS (it runs the node
         signing helper as a subprocess and returns `(status, body)`). It used
@@ -2121,6 +2162,7 @@ class IssueGateStore:
                 "idempotency_key": idempotency_key,
             },
             agent_name=lens_agent,
+            timeout=timeout,
             sub=lens_sub,
         )
         if inspect.isawaitable(result):
@@ -2161,6 +2203,7 @@ class IssueGateStore:
                     idempotency_key,
                     lens_agent=lens_agent,
                     lens_sub=lens_sub,
+                    timeout=_attempt_timeout(SIGNED_ATTEMPT_TIMEOUT_S, started),
                 )
             except Exception as exc:  # noqa: BLE001 — classify, never crash
                 # The exception's CLASS and a fixed reason code, plus the size of
@@ -2186,17 +2229,17 @@ class IssueGateStore:
                 retries_allowed = retries_for_status(status)
 
             retries_done = attempt - 1
-            over_cap = (
-                _monotonic() - started + _next_backoff(attempt - 1) > SIGNED_WRITE_TOTAL_CAP_S
+            out_of_time = retries_done < retries_allowed and not _retry_fits(
+                started, retries_done
             )
-            if retries_done >= retries_allowed or over_cap:
+            if retries_done >= retries_allowed or out_of_time:
                 log.error(
                     "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
                     "(%s) reason=%s value_bytes=%s attempt=%d/%d%s",
                     repo, issue_number, gate, lens_agent, field_name,
                     SIGN_OFF_SIGNING_FAILED, shown, reason, _value_bytes(value),
                     attempt, retries_allowed + 1,
-                    " (time cap reached)" if over_cap and retries_done < retries_allowed else "",
+                    " (deadline reached, no further attempt fits)" if out_of_time else "",
                 )
                 return SIGN_OFF_SIGNING_FAILED
             delay = _next_backoff(retries_done)
