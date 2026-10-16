@@ -3,7 +3,7 @@
   "scenarios": [
     {
       "id": "omitted_selectors_preserve_default",
-      "why": "Omission retains existing provider-default behavior.",
+      "why": "Omitted selectors use the canonical task_dispatch mid policy without an explicit model override.",
       "args": [
         "--provider",
         "codex"
@@ -12,7 +12,7 @@
         "exit_code": 0,
         "launches": 1,
         "models": [
-          null
+          "gpt-5.6-terra"
         ]
       }
     },
@@ -72,7 +72,7 @@
     },
     {
       "id": "omitted_selectors_comparison_preserves_defaults",
-      "why": "Comparison retains default selection for each provider when selectors are omitted.",
+      "why": "Comparison resolves the canonical task_dispatch mid policy independently for each provider.",
       "args": [
         "--compare",
         "codex,cursor"
@@ -81,8 +81,8 @@
         "exit_code": 0,
         "launches": 2,
         "models": [
-          null,
-          null
+          "gpt-5.6-terra",
+          "gpt-5.6-terra-medium"
         ]
       }
     },

@@ -116,7 +116,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
         mp.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
         mp.setattr(skill_runner, "_write_harness_event", lambda **kw: obs["events"].append(kw))
-        mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top"})
+        mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top", "task_dispatch": "mid"})
         mp.setattr(model_tiering, "configured_vendor_binding", lambda: BINDING)
 
         def create(worktree, *, head):
