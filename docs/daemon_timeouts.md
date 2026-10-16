@@ -27,3 +27,6 @@ Codex, Cursor, and Fly degraded children are refused before launch, with no
 role output. Review notices keep the gate pending and require a new PR push
 (synchronize event) or reopen after the role definition reloads successfully;
 this failure does not schedule an automatic retry.
+For a missing-lens recovery sweep, the existing dispatcher can retry after a
+healthy role-definition reload; the preflight refusal itself schedules none.
+Each refused task records a terminal failed runner event without a start event.

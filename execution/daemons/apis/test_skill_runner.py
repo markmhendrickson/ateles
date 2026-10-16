@@ -558,10 +558,49 @@ class TestRunSkill:
         assert any("refused before launch" in msg and "no role output" in msg
                    and provider in msg and "ent_test" in msg for msg in notices)
 
+    @pytest.mark.parametrize("provider", ["codex", "cursor"])
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_refusal_records_terminal_event_for_each_task(
+        self, MockLoader, event, monkeypatch, provider
+    ) -> None:
+        """Role-wide paging dedupe cannot leave either task looking in flight."""
+        MockLoader.return_value.load.return_value = _stub_def()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", provider)
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM", f'{{"{provider}": 1.0}}')
+        harness_router.reset_state()
+        with (
+            patch.object(skill_runner, f"{provider.upper()}_BIN", f"/usr/bin/{provider}"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec") as spawn,
+            patch("unroutable_ledger.shared_ledger") as ledger,
+        ):
+            ledger.return_value.note_undefined_role.side_effect = [True, False]
+            for task_id in ("ent_first", "ent_second"):
+                result = self._run(skill_runner.run_skill(
+                    "gryllus", "work", role="gryllus", provider=provider,
+                    task_entity_id=task_id,
+                ))
+                assert not result.ok and result.degraded_load
+        spawn.assert_not_called()
+        task_events = [call.kwargs for call in event.call_args_list
+                       if call.kwargs.get("task_entity_id") in {"ent_first", "ent_second"}
+                       and call.kwargs.get("event_type") == "subprocess"]
+        assert {e["task_entity_id"] for e in task_events} == {"ent_first", "ent_second"}
+        assert all(e["success"] == "false" for e in task_events)
+        assert all("refused before launch" in e["output_summary"] for e in task_events)
+        assert not any(e["success"] == "partial" for e in task_events)
+        from execution.mcp.ateles.server import _runner_entry
+
+        timeline = [_runner_entry({"fields": e}) for e in task_events]
+        assert [entry["kind"] for entry in timeline] == ["runner_ended", "runner_ended"]
+        assert all(entry["outcome"] == "failed" for entry in timeline)
+
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
     def test_degraded_fly_child_reports_refusal_before_launch(
-        self, MockLoader, _event, monkeypatch
+        self, MockLoader, event, monkeypatch
     ) -> None:
         MockLoader.return_value.load.return_value = _stub_def()
         notifier = MagicMock()
@@ -580,6 +619,11 @@ class TestRunSkill:
             ))
         assert not result.ok and result.degraded_load
         spawn.assert_not_called()
+        subprocess_events = [call.kwargs for call in event.call_args_list
+                             if call.kwargs.get("event_type") == "subprocess"]
+        assert len(subprocess_events) == 1
+        assert subprocess_events[0]["success"] == "false"
+        assert "Fly refused before launch" in subprocess_events[0]["output_summary"]
         notices = [str(call.args[0]) for call in notifier.send.call_args_list]
         assert any("Fly" in msg and "refused before launch" in msg
                    and "no role output" in msg and "ent_test" in msg

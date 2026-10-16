@@ -1433,6 +1433,29 @@ def test_degraded_lanius_cannot_clear_inheritance_or_reach_panel(
                    for name, value, *_ in calls)
 
 
+def test_failed_lanius_partial_clear_cannot_reach_panel(monkeypatch):
+    """A clear token in stdout is not a verdict when the role run failed."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(("run", skill))
+        if skill == "lanius":
+            return SkillResult(skill, False, 1, "GATE_INHERITANCE: clear", "role failed")
+        return SkillResult(skill, True, 0, "**APPROVE**", "")
+
+    async def fake_incomplete(self, trigger, parent, lens, *args, **kwargs):
+        calls.append(("incomplete", lens))
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_incomplete)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert calls.count(("run", "lanius")) == 2
+    assert ("incomplete", "lanius") in calls
+    assert not any(name in {"run", "review", "gate", "route"} and value != "lanius"
+                   for name, value, *_ in calls)
+
+
 @pytest.mark.parametrize("stdout", [
     "no inheritance verdict",
     "I could not verify; the example is `GATE_INHERITANCE: clear`.",
@@ -1563,6 +1586,7 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch, degraded
     d = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
     )
+    d.config.auto_rereview_on_push = True
     incomplete = []
 
     async def fake_incomplete(self, *args, **kwargs):
@@ -1578,7 +1602,7 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch, degraded
         # sign_off branch additionally requires `lens.lens in pending_gates`.
         if skill == "lanius":
             return SkillResult(
-                skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", ""
+                skill, True, 0, "GATE_INHERITANCE: blocked\nGATE_PENDING: arch", ""
             )
         if skill == "vanellus":
             return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
@@ -1596,7 +1620,10 @@ def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch, degraded
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_gate_pending)
 
-    asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha=review_head)))
+    asyncio.run(d._handle_pr(_trigger(
+        body="Closes #80.", head_sha=review_head,
+        kind="pr_synchronize", action="synchronize",
+    )))
 
     if degraded_load:
         assert not sign_off_calls, "degraded output must not authorize a gate"
@@ -12321,6 +12348,7 @@ class TestGateLaunchRefusalSurface:
         d = _pr_dispatcher_with_stubs(
             monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
         )
+        d.config.auto_rereview_on_push = True
         monkeypatch.setattr(
             swarm_dispatch,
             "select_panel",
@@ -12333,7 +12361,7 @@ class TestGateLaunchRefusalSurface:
             if skill == "lanius":
                 return SkillResult(
                     skill, True, 0,
-                    "GATE_INHERITANCE: clear\nGATE_PENDING: ux", "",
+                    "GATE_INHERITANCE: blocked\nGATE_PENDING: ux", "",
                 )
             if skill == "accipiter":
                 return SkillResult(
@@ -12362,7 +12390,9 @@ class TestGateLaunchRefusalSurface:
             SwarmDispatcher, "_surface_gate_launch_refusals", fake_launch_refusal
         )
 
-        asyncio.run(d._handle_pr(_trigger(body="Closes #795.")))
+        asyncio.run(d._handle_pr(_trigger(
+            body="Closes #795.", kind="pr_synchronize", action="synchronize",
+        )))
 
         assert session_limit_calls == []
         assert len(launch_refusal_calls) == 1
@@ -12538,10 +12568,11 @@ class TestCallersTreatAFailedSignOffAsNotCleared:
         monkeypatch.setattr(swarm_dispatch.IssueGateStore, "load", fake_load)
         monkeypatch.setattr(SwarmDispatcher, "_live_gate_status", fake_live)
         d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls)
+        d.config.auto_rereview_on_push = True
 
         async def fake_run_skill(skill, prompt, **kwargs):
             if skill == "lanius":
-                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", "")
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: blocked\nGATE_PENDING: arch", "")
             if skill == "waxwing":
                 return SkillResult(
                     skill, True, 0,
@@ -12567,7 +12598,9 @@ class TestCallersTreatAFailedSignOffAsNotCleared:
         monkeypatch.setattr(SwarmDispatcher, "_vanellus_prompt", staticmethod(spy_prompt))
         monkeypatch.setattr(SwarmDispatcher, "_surface_failed_sign_offs", fake_surface)
 
-        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+        asyncio.run(d._handle_pr(_trigger(
+            body="Closes #80.", kind="pr_synchronize", action="synchronize",
+        )))
 
         assert surfaced, "the failed sign_off must be surfaced"
         assert "arch" in captured.get("pending_gates", set()), (

@@ -2713,23 +2713,26 @@ async def _run_skill_once(
             except Exception as exc:
                 log.debug(f"[apis] notifier.send failed: {exc}")
 
-        # Stage 5: degraded harness_event
-        try:
-            await asyncio.to_thread(
-                _write_harness_event,
-                task_entity_id=task_entity_id,
-                agent_session_id=agent_session_id,
-                role=_role,
-                agent_sub=agent_def.aauth_sub,
-                event_type="subprocess",
-                tool_name=f"{provider}:{skill}",
-                success="partial",
-                input_summary=_title_hint,
-                output_summary=f"degraded_generic_subagent ⚠ DEGRADED {load_error}",
-                resolved_tier=resolved_tier,
-            )
-        except Exception as exc:
-            log.debug(f"[apis] degraded harness_event write failed: {exc}")
+        async def _record_preflight_refusal(outcome: str) -> None:
+            # A role-wide alert may be deduplicated, but each task needs a
+            # terminal event. No child was launched, so do not write a partial
+            # subprocess event that the timeline interprets as runner_started.
+            try:
+                await asyncio.to_thread(
+                    _write_harness_event,
+                    task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
+                    role=_role,
+                    agent_sub=agent_def.aauth_sub,
+                    event_type="subprocess",
+                    tool_name=f"{provider}:{skill}",
+                    success="false",
+                    input_summary=_title_hint,
+                    output_summary=f"degraded_generic_subagent: {outcome}; {load_error}",
+                    resolved_tier=resolved_tier,
+                )
+            except Exception as exc:
+                log.debug(f"[apis] degraded refusal harness_event write failed: {exc}")
 
         # These adapters have no per-dispatch tool allowlist that binds a
         # degraded child. Keep healthy dispatches unchanged; refuse only the
@@ -2742,6 +2745,7 @@ async def _run_skill_once(
             )
             log.error("[apis] %s", msg)
             _report_degraded_outcome("refused before launch; no role output", output_exists=False)
+            await _record_preflight_refusal("refused before launch; no role output")
             return SkillResult(
                 skill, False, None, "", "", error=msg, provider=provider,
                 degraded_load=True, load_error=load_error,
@@ -2752,6 +2756,7 @@ async def _run_skill_once(
                 "Fly degraded child authority is not bound"
             )
             _report_degraded_outcome("Fly refused before launch; no role output", output_exists=False)
+            await _record_preflight_refusal("Fly refused before launch; no role output")
             return SkillResult(
                 skill, False, None, "", "", error=msg, provider=provider,
                 degraded_load=True, load_error=load_error,
@@ -3127,6 +3132,10 @@ async def _run_skill_once(
             tool_name=f"{provider}:{skill}",
             success="partial",  # "partial" = in-flight / started
             input_summary=prompt[:200],
+            output_summary=(
+                f"degraded_generic_subagent ⚠ DEGRADED {load_error}"
+                if degraded else ""
+            ),
             resolved_tier=resolved_tier,
         )
     except Exception as exc:
