@@ -149,7 +149,6 @@ class FakeNeotoma:
             "provenance": dict(e["provenance"]),
             "observation_count": len(e["observations"]),
             "last_observation_at": f"2026-10-06T00:00:{len(e['observations']):02d}Z",
-            "user_id": self.tenant,
         }
 
     # -- transport -----------------------------------------------------------
@@ -206,8 +205,19 @@ class FakeNeotoma:
             if len(parts) == 3 and parts[2] == "observations":
                 if entity_id in self.fail_observations:
                     return self._response(500, {"error_code": "DB_QUERY_FAILED"}, url)
+                params = kwargs.get("params") or {}
+                limit = int(params.get("limit") or 100)
+                offset = int(params.get("offset") or 0)
+                observations = list(reversed(e["observations"]))
                 return self._response(
-                    200, {"observations": list(e["observations"])}, url
+                    200,
+                    {
+                        "observations": observations[offset : offset + limit],
+                        "total": len(observations),
+                        "limit": limit,
+                        "offset": offset,
+                    },
+                    url,
                 )
             return self._response(200, self.record(entity_id), url)
         return self._response(404, {"error_code": "NOT_FOUND"}, url)

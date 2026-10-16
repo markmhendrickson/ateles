@@ -36,6 +36,26 @@ def test_dry_run_performs_zero_writes(world, monkeypatch, capsys):
     assert not set(FINISHED) & set(got), "finished tasks are not even enumerated"
 
 
+def test_fake_neotoma_exposes_complete_server_owned_observation_paging(world):
+    """The recovery eval must model the entity and observation HTTP contract."""
+    task_id = "ent_task_held_plain"
+    for revision in range(100):
+        world.touch_task(task_id, blocked_reason=f"revision {revision}")
+
+    record = world.record(task_id)
+    assert "user_id" not in record
+    assert "user_id" not in record["snapshot"]
+
+    url = f"https://neotoma.test/entities/{task_id}/observations"
+    first = world.get(url, params={"limit": 100, "offset": 0}).json()
+    last = world.get(url, params={"limit": 100, "offset": 100}).json()
+    assert (first["total"], first["limit"], first["offset"]) == (101, 100, 0)
+    assert (last["total"], last["limit"], last["offset"]) == (101, 100, 100)
+    assert len(first["observations"]) == 100
+    assert len(last["observations"]) == 1
+    assert gating.fetch_entity_user_id(task_id) == world.tenant
+
+
 def test_apply_gives_each_held_task_exactly_one_authenticated_checkpoint(
     world, monkeypatch, capsys
 ):
