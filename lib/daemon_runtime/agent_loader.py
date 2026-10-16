@@ -678,6 +678,29 @@ class _LoadBusy(Exception):
     """Every request worker is in use; nothing was started."""
 
 
+def admit_agent_definition(agent_def: AgentDefinition, agent_name: str) -> AgentDefinition:
+    """Admit one canonical definition for execution, never for introspection.
+
+    Successful reads can legitimately inspect retired roles or an inert absence
+    marker. Execution callers must apply this same status/capability boundary.
+    """
+    if not isinstance(agent_def, AgentDefinition):
+        raise AgentDefinitionUnavailable(agent_name, "bad_response", 1)
+    if agent_def.is_stub:
+        raise AgentDefinitionUnavailable(agent_name, "not_found", 1)
+    if not isinstance(agent_def.status, str):
+        raise AgentDefinitionUnavailable(agent_name, "bad_response", 1)
+    action, reason = evaluate_status(agent_def.status)
+    if action is StatusAction.REFUSE:
+        raise AgentDefinitionUnavailable(agent_name, "refused_status", 1)
+    if (not isinstance(agent_def.prompt_markdown, str)
+            or not agent_def.prompt_markdown.strip() or not agent_def.tools):
+        raise AgentDefinitionUnavailable(agent_name, "bad_response", 1)
+    if action is StatusAction.WARN:
+        log.warning(f"[{agent_name}] Status check: {reason}")
+    return agent_def
+
+
 class _TransportStatus(Exception):
     """The transport returned a status other than the one accepted."""
 

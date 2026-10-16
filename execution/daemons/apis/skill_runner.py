@@ -64,7 +64,7 @@ from lib.credential_scrub import (  # noqa: E402
     is_generation_credential,
 )
 from lib.daemon_runtime import (  # noqa: E402
-    AgentDefinition, AgentDefinitionUnavailable, AgentLoader, StatusAction, evaluate_status,
+    AgentDefinition, AgentDefinitionUnavailable, AgentLoader, admit_agent_definition,
 )
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
@@ -571,12 +571,8 @@ def _load_agent_def(role: str) -> AgentDefinition:
     Absence markers are refused even if a lower loader returns one.
     """
     if role in _agent_def_cache:
-        return _agent_def_cache[role]
-    agent_def = AgentLoader(role).load()
-    if agent_def.is_stub:
-        raise AgentDefinitionUnavailable(role, "not_found", 1)
-    if evaluate_status(agent_def.status)[0] is StatusAction.REFUSE:
-        raise AgentDefinitionUnavailable(role, "refused_status", 1)
+        return admit_agent_definition(_agent_def_cache[role], role)
+    agent_def = admit_agent_definition(AgentLoader(role).load(), role)
     _agent_def_cache[role] = agent_def
     return agent_def
 

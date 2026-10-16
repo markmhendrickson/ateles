@@ -35,6 +35,8 @@ import orchestrator
 import participation
 import pytest
 
+from lib.daemon_runtime import AgentDefinition
+
 CANARY = "swarm-canary"
 REPO = "markmhendrickson/ateles"
 
@@ -66,9 +68,11 @@ class _Notifier:
         return None
 
 
-class _AgentDef:
-    entity_id = "ent_agentdef"
-    last_observation_id = "obs_1"
+class _AgentDef(AgentDefinition):
+    def __init__(self):
+        super().__init__(entity_id="ent_agentdef", last_observation_id="obs_1",
+                         name="pavo", status="active", prompt_markdown="Canonical role",
+                         tool_allowlist=["Read"])
 
 
 class _Loader:

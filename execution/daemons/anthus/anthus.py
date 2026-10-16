@@ -41,8 +41,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
+    AgentDefinition,
     AgentDefinitionUnavailable,
     AgentLoader,
+    admit_agent_definition,
     load_agent_definition_or_exit,
     enforce_status_or_exit,
     NeotomaEvent,
@@ -295,6 +297,7 @@ async def _orchestrate_workflow_for(event) -> None:
             gate_agent_def = await asyncio.to_thread(
                 AgentLoader(gate.owner_agent).load
             )
+            gate_agent_def = admit_agent_definition(gate_agent_def, gate.owner_agent)
         except AgentDefinitionUnavailable as exc:
             log.error(
                 f"[{DAEMON_NAME}] gate {gate.gate_name} → {gate.owner_agent} "
@@ -321,11 +324,8 @@ async def _orchestrate_workflow_for(event) -> None:
                 f"[{DAEMON_NAME}] failed to record dispatch of gate "
                 f"{gate.gate_name} on {event.entity_id}: {exc}"
             )
-        # Spawn the agent via claude CLI. The `--skill` flag does not exist;
-        # the working invocation is `--append-system-prompt` with the SKILL.md
-        # content. Code-writing agents need `--dangerously-skip-permissions`
-        # to avoid interactive prompts under launchd (per Tier 1 smoke test
-        # findings, 2026-05-25).
+        # Launch the same canonical version pinned above. Local skill text is
+        # supplementary context, never execution authority.
         job = _activity.started(
             f"dispatching gate {gate.gate_name} → {gate.owner_agent} on {event.entity_id}"
         )
@@ -335,6 +335,7 @@ async def _orchestrate_workflow_for(event) -> None:
                 work_entity_id=event.entity_id,
                 gate_name=gate.gate_name,
                 snapshot=snap,
+                agent_definition=gate_agent_def,
             )
             job.finished(
                 f"spawned {gate.owner_agent} for {gate.gate_name} on {event.entity_id}"
@@ -499,32 +500,31 @@ async def _label_gate_allows(event, snap: dict) -> bool:
     return False
 
 
-# Agents that need write access to the local filesystem or to call MCP servers
-# that prompt for permission. Anthus runs under launchd with no TTY, so these
-# must be invoked with --dangerously-skip-permissions.
-_AGENTS_NEEDING_SKIP_PERMISSIONS = frozenset(
-    {"cicada", "vanellus", "apus", "formica", "neotoma-agent"}
-)
-
-
 async def _spawn_agent(
     owner_agent: str,
     work_entity_id: str,
     gate_name: str,
     snapshot: dict,
+    agent_definition: AgentDefinition | None = None,
 ) -> None:
     """
-    Spawn an agent via `claude --print --append-system-prompt` with the agent's
-    SKILL.md content as the system prompt. Runs in the background; output is
-    logged but not awaited synchronously — the agent posts its artifact to the
+    Spawn an admitted canonical role with its declared tool surface. Runs in
+    the background; output is logged but not awaited synchronously — the agent posts its artifact to the
     GitHub issue/PR, and Anthus picks it up on the next SSE event.
 
-    The chosen invocation pattern matches the operator-driven Tier 1 workflow
-    so that operator-run and Anthus-run dispatches produce identical artifacts.
+    The canonical definition supplies authority; a local skill may only
+    supplement the role instructions.
     """
     import os
     import shutil
     from pathlib import Path
+
+    # The direct entry is guarded too; the orchestrator passes its already
+    # pinned canonical read so launch and participation cite one version.
+    if agent_definition is None:
+        agent_definition = await asyncio.to_thread(AgentLoader(owner_agent).load)
+    agent_definition = admit_agent_definition(agent_definition, owner_agent)
+    tools = agent_definition.tools
 
     claude_bin = shutil.which("claude")
     if not claude_bin:
@@ -541,17 +541,12 @@ async def _spawn_agent(
         / owner_agent
         / "SKILL.md"
     )
-    if not skill_path.exists():
-        log.error(
-            f"[{DAEMON_NAME}] SKILL.md not found for {owner_agent} at {skill_path}"
-        )
-        return
-
-    try:
-        skill_md = skill_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        log.error(f"[{DAEMON_NAME}] failed to read {skill_path}: {exc}")
-        return
+    skill_md = agent_definition.prompt_markdown
+    if skill_path.exists():
+        try:
+            skill_md += "\n\n" + skill_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            log.warning(f"[{DAEMON_NAME}] could not read skill supplement: {exc}")
 
     # Inject this agent's learned, agent-local policies (active + provisional)
     # into the system prompt so generalized behaviour is actually applied at
@@ -594,14 +589,25 @@ async def _spawn_agent(
         "--append-system-prompt",
         skill_md,
     ]
-    if owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS:
-        args.append("--dangerously-skip-permissions")
+    # --allowed-tools only pre-approves permission checks; it does not remove
+    # intrinsically available read tools. --tools also bounds the built-in
+    # surface. dontAsk denies unapproved MCP/write calls without a TTY, and
+    # disabling ambient settings prevents saved user/project allow rules from
+    # broadening this canonical grant. An explicit registered * stays broad.
+    builtin_tools = (
+        "default" if "*" in tools else ",".join(dict.fromkeys(
+            tool.split("(", 1)[0] for tool in tools if not tool.startswith("mcp__")
+        ))
+    )
+    args += [
+        "--tools", builtin_tools,
+        "--allowed-tools", ",".join(tools),
+        "--permission-mode", "dontAsk",
+        "--setting-sources", "",
+    ]
     args.append(prompt)
 
-    log.info(
-        f"[{DAEMON_NAME}] spawning {owner_agent} for {work_entity_id} "
-        f"(skip_perms={owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS})"
-    )
+    log.info(f"[{DAEMON_NAME}] spawning admitted {owner_agent} for {work_entity_id}")
 
     # Fire-and-forget: agent runs as background subprocess. Its artifact is
     # posted to the GitHub issue/PR; Anthus picks up satisfaction on the next

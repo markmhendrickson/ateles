@@ -157,11 +157,10 @@ class _FakeLoader:
         self.name = name
 
     def load(self):
-        class _D:
-            entity_id = "ent_def"
-            last_observation_id = "obs"
-
-        return _D()
+        return anthus.AgentDefinition(
+            entity_id="ent_def", last_observation_id="obs", name=self.name,
+            prompt_markdown="Canonical role", tool_allowlist=["Read"],
+        )
 
     def render_policy_prompt(self):
         return ""
