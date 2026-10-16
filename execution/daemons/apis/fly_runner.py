@@ -1580,7 +1580,7 @@ def delivery_result_from_record(record: dict) -> dict:
     recognised ``delivery_status`` (for example, fields the record store does
     not hold yet) reads as ``unreported``: never as a delivery outcome."""
     status = record.get("delivery_status")
-    out = {"delivery_status": status if status in DELIVERY_STATUSES else "unreported"}
+    out = {"delivery_status": status if isinstance(status, str) and status in DELIVERY_STATUSES else "unreported"}
     for name in ("delivery_reason", "delivery_branch", "delivery_commit", "pr_url"):
         value = record.get(name)
         out[name] = value if isinstance(value, str) else ""
@@ -2524,7 +2524,14 @@ class FlyExecutor:
             raise FlyResultUnreadable("result record does not belong to this run")
         rc = record["exit_code"]
         if job.delivery is not None:
-            job.delivery_result = delivery_result_from_record(record)
+            got = delivery_result_from_record(record)
+            if got["delivery_status"] in {"opened", "updated"}:
+                expected_url = f"https://github.com/{job.repository}/pull/{got['pr_number']}"
+                if (got["pr_url"] != expected_url or got["pr_number"] is None
+                        or got["delivery_branch"] != job.delivery["branch"]
+                        or re.fullmatch(r"[0-9a-f]{40}", got["delivery_commit"]) is None):
+                    raise FlyResultUnreadable("delivery artifact does not match its job")
+            job.delivery_result = got
         if record["probe_ok"] is False:
             log.error(f"[fly] run={job.run_id} credential probe failed: {record['refused']}")
         stdout = redact_nonces(record["stdout"])

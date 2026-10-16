@@ -297,7 +297,6 @@ from lib.daemon_runtime.artifact_contract import (  # noqa: E402
     parse_github_ref,
     role_required_artifact,
     stdout_tail_for_reason,
-    trim_on_word,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
@@ -808,6 +807,12 @@ async def _spawn_harness_skill(
                 "names no repository — running without worktree or network"
             )
         else:
+            blocker = build_delivery.fly_delivery_blocker(
+                build_delivery.fly_delivery_key(repository, key, entity_id)
+            )
+            if blocker:
+                return SkillResult(skill, False, None, "", "", error=blocker,
+                                   fly_delivery_status="unknown")
             # Opted onto Fly (APIS_FLY_RUNNER_CLASSES lists the delivery class):
             # the job runner clones, builds and delivers on a Fly machine, and
             # no local worktree is made. Not eligible before launch (including
@@ -887,12 +892,22 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             )  # fmt: skip
 
         result = await build_delivery.run_fly_delivery(
-            plan, launch, lambda reason: SkillResult(skill, False, None, "", "", error=reason))
+            plan, launch, lambda reason: SkillResult(
+                skill, False, None, "", "", error=reason, fly_delivery_status="unknown"))
     if result is not None and result.fly_delivery_status:
         summary = build_delivery.fly_delivery_summary(result)
         log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
-        if not result.ok or not result.fly_pr_url:
-            result.error = result.error or summary
+        if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
+            # The runner opens the PR after the model exits. Its read-back
+            # supplies the artifact header the existing resolving gate verifies.
+            result.stdout = (
+                f"[{role or skill}] pull_request_link: {result.fly_pr_url}; {summary}\n"
+                + result.stdout
+            )
+            result.ok = True
+        else:
+            result.ok = False
+            result.error = summary
     return result
 
 
@@ -2815,6 +2830,28 @@ async def dispatch_task(
                 key_suffix=trigger,
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+        elif getattr(result, "fly_delivery_status", ""):
+            reason = result.error or build_delivery.fly_delivery_summary(result)
+            _run_stage("assistant", reason, stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            set_task_status(
+                entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value, reason=reason,
+                result=reason, key_suffix=trigger,
+            )
+            try:
+                saved = fetch_task_snapshot(entity_id) or {}
+                held = (normalize_status(saved.get("status")) == TaskStatus.BLOCKED.value
+                        and saved.get("result") == reason)
+            except Exception:
+                held = False
+            notice = reason if held else (
+                f"{reason} Task result/status could not be verified; durable Fly receipt "
+                "still refuses another delivery. Reconcile the record."
+            )
+            notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} → {skill} Fly delivery ended")
         elif getattr(result, "remote_outcome_unknown", False):
             # ateles#1456: the remote run may have done its work. BLOCKED, not
             # FAILED: the watchdog retries FAILED tasks and leaves BLOCKED ones

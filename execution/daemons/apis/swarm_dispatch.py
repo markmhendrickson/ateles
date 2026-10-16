@@ -6153,6 +6153,12 @@ class SwarmDispatcher:
         done = ", ".join(completed) or "none"
         try:
             pr_url = await self._open_implementation_pr(trigger, state)
+        except build_delivery.FlyDeliveryEnded as exc:
+            self.notifier.send(
+                f"Issue {ref}: {exc.text}", priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME, dedupe_key=f"fly-delivery:{ref}",
+            )
+            return
         except build_delivery.BuildNotStarted as exc:
             self.notifier.send(
                 f"Issue {ref}: additive spec assembled ({done}); auto-build ON, but "
@@ -6691,6 +6697,42 @@ class SwarmDispatcher:
         # network via include_github_contract. The worktree is provisioned
         # BEFORE the dispatch so a missing clone fails here, in seconds and by
         # name, rather than after a build that cannot deliver.
+        # Check the durable receipt even after opt-out or process restart. A
+        # prior Fly run may have pushed; resuming must not create a local build.
+        key = build_delivery.fly_delivery_key(
+            trigger.repository, (trigger.repository, trigger.number)
+        )
+        blocker = build_delivery.fly_delivery_blocker(key)
+        if blocker:
+            raise build_delivery.FlyDeliveryEnded(blocker)
+        plan = build_delivery.plan_fly_delivery(
+            trigger.repository, f"issue-{trigger.number}", key=key,
+            issue_number=trigger.number,
+        )
+        if plan is not None:
+            with build_delivery.claim_build(
+                trigger.repository, trigger.number, "swarm-build-handoff"
+            ) as claim:
+                async def launch():
+                    return await run_skill(
+                        "cicada",
+                        self._cicada_build_prompt(trigger, state, claim=claim, delivery=plan),
+                        notifier=self.notifier, action_class=model_tiering.ACTION_BUILD,
+                        repository=trigger.repository, runner="fly", fly_delivery=plan.spec(),
+                    )
+
+                def blocked(reason):
+                    raise build_delivery.FlyDeliveryEnded(reason)
+
+                result = await build_delivery.run_fly_delivery(plan, launch, blocked)
+            if result is not None:
+                summary = build_delivery.fly_delivery_summary(result)
+                if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
+                    self.notifier.send(summary, priority=Priority.INFO, handler=DAEMON_NAME)
+                    return result.fly_pr_url
+                # A launched run is terminal, including success with no changes.
+                # Do not query another PR or start a local/provider fallback.
+                raise build_delivery.FlyDeliveryEnded(summary)
         try:
             worktree = await build_delivery.prepare_build_worktree(
                 trigger.repository, f"issue-{trigger.number}"
@@ -11972,6 +12014,7 @@ class SwarmDispatcher:
         state: SpecState,
         worktree: "build_delivery.BuildWorktree | None" = None,
         claim: "build_delivery.BuildClaim | None" = None,
+        delivery: "build_delivery.FlyDeliveryPlan | None" = None,
     ) -> str:
         """Auto-build handoff prompt: Cicada opens an implementation PR.
 
@@ -11981,7 +12024,12 @@ class SwarmDispatcher:
         takes over.  NEVER merges — the merge boundary stays operator-gated.
         """
         spec_md = assemble_spec_markdown(state.sections or {})
-        if worktree:
+        if delivery:
+            wt_block = f"{build_delivery.fly_delivery_instructions(delivery)}\n\n"
+            if claim:
+                wt_block += f"{build_delivery.tracking_instructions(claim)}\n\n"
+            step_one = "  1. Build on the job branch above in its existing checkout.\n"
+        elif worktree:
             wt_block = f"{build_delivery.worktree_instructions(worktree)}\n\n"
             if claim:
                 wt_block += f"{build_delivery.tracking_instructions(claim)}\n\n"
@@ -11995,6 +12043,12 @@ class SwarmDispatcher:
                 "  1. Branch off FRESH origin/main (fetch first) in an isolated "
                 "git worktree — never off a feature branch.\n"
             )
+        delivery_step = (
+            "  4. Write the pull request text to the file specified above; the runner delivers it.\n\n"
+            if delivery else
+            f"  4. Open a PR whose body references the issue with `Closes #{t.number}` "
+            "so gate inheritance links back to it.\n\n"
+        )
         return (
             "Invoke the cicada agent per your appended system prompt.\n\n"
             f"The Ateles swarm has assembled a full additive specification for "
@@ -12028,8 +12082,7 @@ class SwarmDispatcher:
             "and honoring the QA/Security/Legal requirements as "
             "definition-of-done.\n"
             "  3. Add/extend tests per the QA section and run them.\n"
-            f"  4. Open a PR whose body references the issue with "
-            f"`Closes #{t.number}` so gate inheritance links back to it.\n\n"
+            f"{delivery_step}"
             "HARD GUARDRAIL — DO NOT MERGE. Opening the PR is the end of your "
             "handoff: the PR gate pipeline reviews it and the merge stays "
             "operator-gated. Never merge, and never force-push over main.\n\n"

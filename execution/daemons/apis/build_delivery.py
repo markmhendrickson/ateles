@@ -730,13 +730,13 @@ def worktree_instructions(wt: BuildWorktree) -> str:
 # interrupted issue pipeline, the task watchdog) reaches the builder through
 # ``run_fly_delivery``, which refuses while that record says the delivery
 # launched and may have pushed. Only an outcome that provably pushed nothing
-# (``clone_failed``, ``not_delivered``, ``no_changes``) allows a new one.
+# (``clone_failed``, ``not_delivered``) allows a new one.
 
 FLY_DELIVERY_BASE_BRANCH = "main"
 FLY_DELIVERY_AUTHOR = ("cicada (ateles swarm)", "cicada@ateles-swarm.invalid")
 FLY_DELIVERY_REGISTRY_ENV = "APIS_FLY_DELIVERY_REGISTRY_FILE"
 # Outcomes that pushed nothing, so a new delivery for the same key is safe.
-FLY_RETRYABLE_STATUSES = frozenset({"clone_failed", "not_delivered", "no_changes"})
+FLY_RETRYABLE_STATUSES = frozenset({"clone_failed", "not_delivered"})
 _REGISTRY_LOCK = threading.Lock()
 
 
@@ -832,9 +832,17 @@ def _write_registry(path: Path, deliveries: dict) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"deliveries": deliveries}, indent=1, sort_keys=True),
-                   encoding="utf-8")  # fmt: skip
+    with tmp.open("w", encoding="utf-8") as out:
+        json.dump({"deliveries": deliveries}, out, indent=1, sort_keys=True)
+        out.flush()
+        os.fsync(out.fileno())
     os.replace(tmp, path)
+    # Persist the rename before launching any external effect.
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def fly_delivery_blocker(key: str) -> str:
@@ -853,15 +861,46 @@ def fly_delivery_blocker(key: str) -> str:
             f"{_registry_path()} to allow a new one")  # fmt: skip
 
 
-def _record(key: str, entry: dict | None) -> None:
+@contextlib.contextmanager
+def _registry_transaction():
+    # A process restart and a second dispatcher must see the same claim. The
+    # lock file is stable across atomic replacements of the JSON receipt.
+    import fcntl
+
     with _REGISTRY_LOCK:
         path = _registry_path()
-        deliveries = _read_registry(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield path, _read_registry(path)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _record(key: str, entry: dict | None) -> None:
+    with _registry_transaction() as (path, deliveries):
         if entry is None:
             deliveries.pop(key, None)
         else:
             deliveries[key] = entry
         _write_registry(path, deliveries)
+        if _read_registry(path).get(key) != entry:
+            raise OSError("delivery receipt did not read back")
+
+
+def _reserve_delivery(plan: FlyDeliveryPlan) -> bool:
+    with _registry_transaction() as (path, deliveries):
+        old = deliveries.get(plan.key)
+        if old is not None and old["status"] not in FLY_RETRYABLE_STATUSES:
+            return False
+        entry = {"status": "launching", "branch": plan.branch, "run_id": "",
+                 "recorded_at": time.time()}
+        deliveries[plan.key] = entry
+        _write_registry(path, deliveries)
+        if _read_registry(path).get(plan.key) != entry:
+            raise OSError("delivery reservation did not read back")
+        return True
 
 
 async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
@@ -875,8 +914,8 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
         log.warning("[apis] %s", reason)
         return blocked(reason)
     try:
-        _record(plan.key, {"status": "launching", "branch": plan.branch, "run_id": "",
-                           "recorded_at": time.time()})  # fmt: skip
+        if not _reserve_delivery(plan):
+            return blocked("another dispatcher already reserved this Fly delivery; not launching")
     except (OSError, ValueError):
         return blocked("the Fly delivery record could not be written; not launching")
     try:
@@ -933,4 +972,8 @@ def fly_delivery_summary(result) -> str:
                  "pushed and no pull request was opened")  # fmt: skip
     if result.fly_delivery_reason and status not in ("opened", "updated"):
         text += f" ({result.fly_delivery_reason})"
-    return text + "."
+    return text + (
+        f". Run {result.remote_run_id or 'not reported'}; "
+        f"branch {result.fly_delivery_branch or 'not reported'}; "
+        f"commit {result.fly_delivery_commit or 'not reported'}."
+    )
