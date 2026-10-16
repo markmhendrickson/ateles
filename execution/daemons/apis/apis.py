@@ -2548,7 +2548,7 @@ async def dispatch_task(
             # The stored result is the header line as redacted, and the read-back
             # compares against that same string.
             stored_line = header.matched_line
-            if result.fly_delivery_status:
+            if getattr(result, "fly_delivery_status", ""):
                 # Reference parsing requires exactly one URL in the header.
                 # Keep the runner metadata in the persisted result, alongside
                 # that verified reference, without changing the header body.
