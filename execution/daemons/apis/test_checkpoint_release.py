@@ -637,6 +637,10 @@ async def test_approve_releases_task_and_marks_brief_consumed(
         "wrong_key",
         "wrong_body",
         "wrong_producer",
+        "direct_neotoma_shape",
+        "direct_snapshot_conflict",
+        "direct_task_snapshot_conflict",
+        "direct_noncanonical_owner",
     ],
 )
 async def test_authoritative_owner_signed_resolution_releases_exactly_once(
@@ -650,13 +654,19 @@ async def test_authoritative_owner_signed_resolution_releases_exactly_once(
     from test_server import _resolver_proof
 
     records, brief_id, task_id = release_store
-    owner = "11111111-1111-4111-8111-111111111111"
+    owner = (
+        "tenant-a"
+        if mode == "direct_noncanonical_owner"
+        else "11111111-1111-4111-8111-111111111111"
+    )
     headers, resolver_jkt = _resolver_proof(checkpoint_id=brief_id)
     producer_jkt = "P" * 43
     monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", producer_jkt)
     # Neotoma GET /entities/:id does not return a root user_id. Ownership is
     # available through the server-owned observation rows instead.
     records[task_id]["snapshot"]["user_id"] = owner
+    if mode == "direct_task_snapshot_conflict":
+        records[task_id]["snapshot"]["user_id"] = None
     records[brief_id]["snapshot"].pop("user_id")
     policy = ExecutionPolicy(
         entity_id="default",
@@ -790,6 +800,34 @@ async def test_authoritative_owner_signed_resolution_releases_exactly_once(
         headers, _ = _resolver_proof(checkpoint_id=brief_id, action="reject")
     elif mode == "wrong_producer":
         observations[0]["provenance"]["agent_thumbprint"] = "Q" * 43
+    if mode.startswith("direct_"):
+        fields["status"] = "approved"
+        records[brief_id]["provenance"]["status"] = "obs-direct-resolution"
+        observations.append(
+            {
+                "id": "obs-direct-resolution",
+                "fields": {"status": "approved"},
+                "user_id": owner,
+                "provenance": {
+                    "agent_sub": "ateles@ateles-swarm",
+                    "agent_thumbprint": resolver_jkt,
+                    "attribution_tier": "software",
+                },
+            }
+        )
+        if mode == "direct_snapshot_conflict":
+            fields["user_id"] = None
+        consumed = await apis.handle_checkpoint_brief(brief_id, fields, _Notifier())
+        if mode == "direct_neotoma_shape":
+            assert consumed is True
+            assert len(dispatches) == 1
+            assert records[task_id]["snapshot"]["status"] == "routed"
+        else:
+            assert consumed is False
+            assert dispatches == []
+            assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+            assert fields["resolved_dispatched"] is False
+        return
     result = await _resolve(brief_id, "approve", headers)
     if mode != "neotoma_shape":
         assert "error" in result
