@@ -1080,8 +1080,14 @@ def main(argv: list[str] | None = None) -> int:
     loaded: dict[str, dict] = {}
     for index, raw in enumerate(args.check, 1):
         label = f"configuration {index}"
-        path = Path(raw).expanduser()
-        kind, data, errors, warnings = check_config_file(path)
+        try:
+            path = Path(raw).expanduser()
+        except (OSError, RuntimeError, ValueError):
+            kind, data, errors, warnings = (
+                None, {}, [_config_error("selected path cannot be prepared")], []
+            )
+        else:
+            kind, data, errors, warnings = check_config_file(path)
         for msg in errors:
             print(f"ERROR {label}: {msg}")
         for msg in warnings:

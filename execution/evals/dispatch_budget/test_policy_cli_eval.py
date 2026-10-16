@@ -105,7 +105,7 @@ def test_agent_policy_cli_scenario(tmp_path, case):
 
 def _check_configuration_cli(tmp_path, case):
     """The actual pre-install checker CLI; no role/provider collaborator needed."""
-    selected = tmp_path / "selected-path-marker.json"
+    selected = Path(case["check_path"]) if "check_path" in case else tmp_path / "selected-path-marker.json"
     if case.get("directory"):
         selected.mkdir()
     elif "check_raw" in case:
@@ -119,6 +119,7 @@ def _check_configuration_cli(tmp_path, case):
                            "--check", *map(str, paths)], capture_output=True, text=True, timeout=10,
                           env={"PATH": os.defpath, "HOME": str(tmp_path)})
     output = done.stdout + done.stderr
+    assert "Traceback" not in output
     assert not any(value in output for value in ("selected-path-marker", "other-path-marker",
                                                  "member-marker", "value-marker", "tier-marker"))
     if case["expect"] == "invalid":

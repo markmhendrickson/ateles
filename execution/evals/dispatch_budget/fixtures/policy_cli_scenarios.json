@@ -26,5 +26,6 @@
   {"id":"checker-invalid-policy","entrypoint":"check","check_raw":"{\"member-marker\":\"tier-marker\"}","expect":"invalid"},
   {"id":"checker-invalid-binding","entrypoint":"check","check_raw":"{\"member-marker\":{\"tier-marker\":\"value-marker\"}}","expect":"invalid"},
   {"id":"checker-valid-stale-warning","entrypoint":"check","check_raw":"{\"member-marker\":\"mid\"}","expect":"valid"},
-  {"id":"checker-valid-escaped-pair","entrypoint":"check","check_raw":"{\"bu\\u0069ld\":\"top\"}","extra_raw":"{\"codex\":{\"to\\u0070\":\"value-marker\"}}","expect":"valid"}
+  {"id":"checker-valid-escaped-pair","entrypoint":"check","check_raw":"{\"bu\\u0069ld\":\"top\"}","extra_raw":"{\"codex\":{\"to\\u0070\":\"value-marker\"}}","expect":"valid"},
+  {"id":"checker-home-expansion-failure","entrypoint":"check","check_path":"~selected-path-marker-no-such-home","expect":"invalid"}
 ]

@@ -617,3 +617,15 @@ def test_checker_multiple_inputs_use_stable_indices_and_keep_kinds(tmp_path, cap
     assert "ok    configuration 1 (action-policy, 1 entries)" in output
     assert "ok    configuration 2 (vendor-binding, 1 entries)" in output
     assert not any(value in output for value in (*CHECKER_PRIVATE_MARKERS, "other-path-marker"))
+
+
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError, ValueError])
+def test_checker_path_preparation_failure_is_bounded(tmp_path, monkeypatch, capsys, error_type):
+    def refuse(path):
+        raise error_type("member-marker")
+    monkeypatch.setattr(Path, "expanduser", refuse)
+    assert model_tiering.main(["--check", "~selected-path-marker"]) == 1
+    output = capsys.readouterr().out
+    assert "ERROR configuration 1" in output and "FAIL  configuration 1" in output
+    assert "invalid configuration" in output and "correct" in output and "--check" in output
+    assert not any(value in output for value in (*CHECKER_PRIVATE_MARKERS, "Traceback"))
