@@ -54,8 +54,9 @@ Two transports live here, sharing one key resolution (:func:`agent_identity`):
 * :func:`signed_request` — the older per-request ``node signed_fetch.mjs``
   path. Its remaining callers (``gate_waive.IssueGateStore.sign_off`` and the
   ``NEOTOMA_AAUTH_VIA_CLI`` branch in ``agent_loader.py``) move onto
-  :class:`NeotomaWriter` in a later step; it is kept unchanged here so this
-  change does not touch the live gate sign-off path.
+  :class:`NeotomaWriter` in a later step. Preparation and helper execution
+  share one deadline; preparation runs in a spawned child so a stalled key
+  read cannot retain a signing worker indefinitely.
 
 Server notes (neotoma ``origin/main``): a verified signature whose ``sub`` /
 ``iss`` match an active ``agent_grant`` is **admitted** and is a complete auth
@@ -71,9 +72,11 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 import os
 import re
 import subprocess
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
@@ -177,14 +180,34 @@ def _helper_error_code(message: object) -> str:
     return "helper_error"
 
 
+def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method, url, body):
+    """Killable preparation: resolve key metadata and encode the request."""
+    try:
+        ident = resolver(agent_name, sub=sub, keys_dir=keys_dir)
+        if ident is None:
+            sender.send(("error", "no_key"))
+            return
+        spec = {"url": url, "method": method.upper(), "headers": {"content-type": "application/json"}}
+        if body is not None:
+            spec["body"] = json.dumps(body)
+        sender.send(("ok", ident, json.dumps(spec)))
+    except BaseException:
+        sender.send(("error", "helper_error"))
+    finally:
+        sender.close()
+
+
 def signed_request(
     method: str,
     url: str,
     body: "dict | None" = None,
     agent_name: str = "",
-    timeout: int = 20,
+    timeout: float = 20,
     *,
     sub: "str | None" = None,
+    deadline: float | None = None,
+    cancelled: Any = None,
+    clock: Any = None,
 ) -> "tuple[int, dict]":
     """Perform a per-agent AAuth-signed request. Returns (status, parsed_json).
 
@@ -201,13 +224,60 @@ def signed_request(
     EXPLICIT subject — see its docstring for why this must not be left to the
     ambient ``NEOTOMA_AAUTH_SUB`` when signing on behalf of a principal other
     than the calling process's own identity.
+
+    ``timeout`` covers preparation plus transport, including for the loader.
+    ``deadline`` is an optional absolute monotonic limit supplied by a retry
+    caller; ``cancelled`` is its abandonment event. The worker reaps the
+    preparer before returning or launching the helper. The launch recomputes
+    its allowance after preparation and refuses expiry or abandonment.
+    ``clock`` must use the same monotonic domain as ``deadline``.
     """
-    ident = agent_identity(agent_name, sub=sub)
-    if ident is None:
-        raise SignedRequestError(f"no AAuth key for agent {agent_name!r}", "no_key")
-    spec: dict = {"url": url, "method": method.upper(), "headers": {"content-type": "application/json"}}
-    if body is not None:
-        spec["body"] = json.dumps(body)
+    # All callers, including the loader, get a bounded preparation phase. Spawn
+    # instead of forking a daemon's multithreaded process. Key-file I/O and JSON
+    # encoding run in the child, which performs no network I/O.
+    clock = clock or time.monotonic
+    operation_deadline = min(deadline if deadline is not None else float("inf"), clock() + timeout)
+
+    def remaining():
+        if cancelled is not None and cancelled.is_set():
+            raise SignedRequestError("attempt abandoned", "expired")
+        now = clock()
+        if deadline is not None and now >= deadline:
+            raise SignedRequestError("attempt deadline passed", "expired")
+        allowance = operation_deadline - now
+        if allowance <= 0:
+            raise subprocess.TimeoutExpired("signed_request", timeout)
+        return allowance
+
+    remaining()
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    preparer = context.Process(
+        target=_prepare_signed_request,
+        args=(sender, agent_identity, agent_name, sub or os.environ.get("NEOTOMA_AAUTH_SUB"),
+              AAUTH_KEYS_DIR, method, url, body),
+        daemon=True,
+    )
+    try:
+        preparer.start()
+        sender.close()
+        while not receiver.poll(min(remaining(), 0.01)):
+            if not preparer.is_alive():
+                raise SignedRequestError("signing preparation failed", "helper_error")
+        prepared = receiver.recv()
+    finally:
+        sender.close()
+        if preparer.pid is not None:
+            if preparer.is_alive():
+                preparer.kill()
+            preparer.join()  # reap before the signing worker releases its permit
+        receiver.close()
+    if prepared[0] != "ok":
+        raise SignedRequestError(
+            "no AAuth key" if prepared[1] == "no_key" else "signing preparation failed",
+            prepared[1],
+        )
+    _, ident, request_json = prepared
     env = dict(
         os.environ,
         NEOTOMA_RC_DIR=NEOTOMA_RC_DIR,
@@ -215,13 +285,16 @@ def signed_request(
         NEOTOMA_AAUTH_SUB=ident["sub"],
         NEOTOMA_AAUTH_KID=ident["kid"],
     )
+    # Preparation has finished and been reaped. This is the transport launch
+    # boundary: never reuse the relative allowance computed before preparation.
+    allowance = remaining()
     proc = subprocess.run(
         [NODE_BIN, str(_HELPER)],
-        input=json.dumps(spec),
+        input=request_json,
         env=env,
         capture_output=True,
         text=True,
-        timeout=timeout,
+        timeout=allowance,
     )
     try:
         out = json.loads(proc.stdout or "{}")

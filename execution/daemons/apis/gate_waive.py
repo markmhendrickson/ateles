@@ -36,10 +36,13 @@ Shape notes learned from the live prod entity (``ent_4c1f77bc5fc86a2bad2025d6``)
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import hashlib
 import json
 import subprocess
+import threading
+import time
 import logging
 import os
 import weakref
@@ -255,6 +258,81 @@ def new_history_entries(current: list[dict], entries: list[dict]) -> list[dict]:
     return out
 
 
+# ── Bounded retry of a transient signed-write failure ────────────────────────
+#
+# A signed write carries an idempotency key, so repeating it is safe: if the first
+# attempt LANDED and only its response was lost, the repeat is answered as a replay
+# of the same observation, never applied twice. The retry is for the failures that
+# say "the server or the path to it was briefly unavailable" and for nothing else:
+#
+#   transport_error / helper_timeout / response_not_json   2 retries
+#   HTTP 5xx                                               2 retries
+#   HTTP 401 (a one-off token hiccup)                      1 retry
+#   every other 4xx, and every other reason code           none
+#
+# Backoff is short (1 s, then 3 s). The whole write is bounded by ONE DEADLINE,
+# computed when the operation starts:
+#
+#   * every attempt (the first included) is launched with a timeout of
+#     min(its default timeout, time left before the deadline), so no attempt can
+#     run past the deadline;
+#   * a retry is started only if elapsed + its backoff + MIN_ATTEMPT_TIMEOUT_S still
+#     fits before the deadline; otherwise the write stops and fails closed.
+#
+# So the true worst case is the cap itself, SIGNED_WRITE_TOTAL_CAP_S (45 s), plus
+# only the scheduling and process-teardown jitter of the last attempt, not the cap
+# plus a full extra request. With the defaults an all-hanging signed write makes
+# two attempts (20 s, wait 1 s, 20 s = 41 s); a third would need 41 + 3 + 2 > 45.
+SIGNED_WRITE_BACKOFFS_S = (1.0, 3.0)
+SIGNED_WRITE_TOTAL_CAP_S = 45.0
+SIGNED_ATTEMPT_TIMEOUT_S = 20.0  # the signing helper's own default timeout
+BEARER_ATTEMPT_TIMEOUT_S = 30.0  # the bearer path's default HTTP timeout
+MIN_ATTEMPT_TIMEOUT_S = 2.0  # a retry is not started with less than this left
+_RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout", "busy"})
+_monotonic = time.monotonic
+
+
+def _next_backoff(retries_done: int) -> float:
+    """The wait before the next retry."""
+    return SIGNED_WRITE_BACKOFFS_S[min(retries_done, len(SIGNED_WRITE_BACKOFFS_S) - 1)]
+
+
+def _retry_fits(started: float, retries_done: int) -> bool:
+    """True if one more attempt, after its backoff, still fits before the deadline."""
+    elapsed = _monotonic() - started
+    return elapsed + _next_backoff(retries_done) + MIN_ATTEMPT_TIMEOUT_S <= SIGNED_WRITE_TOTAL_CAP_S
+
+
+_retry_sleep = asyncio.sleep
+
+# Signing workers: a small, FIXED pool owned by this module, with one permit per
+# worker so a call is never queued behind another. A call that finds no free permit
+# fails at once with the retryable reason "busy" (it is retried inside the deadline
+# like any transient failure). A permit is released when the WORKER finishes, not when
+# the caller gives up, so the number of live workers can never exceed the pool size,
+# and both signing preparation and the helper process are killed and reaped when
+# their shared allowance expires (with OS kill/reap latency). The same approach
+# (fixed pool, permit per worker, deadline re-read when work begins, abandon flag,
+# bounded await) is used by the agent-definition loader.
+SIGNED_WORKERS = 8
+_signed_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=SIGNED_WORKERS, thread_name_prefix="signed-write"
+)
+_signed_permits = threading.BoundedSemaphore(SIGNED_WORKERS)
+
+
+def retries_for_reason(code: str) -> int:
+    return len(SIGNED_WRITE_BACKOFFS_S) if code in _RETRYABLE_CODES else 0
+
+
+def retries_for_status(status: int) -> int:
+    if status >= 500:
+        return len(SIGNED_WRITE_BACKOFFS_S)
+    if status == 401:
+        return 1
+    return 0
+
+
 def signed_failure_code(exc: BaseException) -> str:
     """A fixed, non-sensitive reason code for a signed write that raised.
 
@@ -274,8 +352,11 @@ def signed_failure_code(exc: BaseException) -> str:
     return "unexpected"
 
 
+# "expired" = the attempt's deadline passed before (or while) it ran; no write was
+# issued by a worker that saw it, and a late one is discarded. Never retried.
 _SIGNED_FAILURE_CODES = frozenset(
-    {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error"}
+    {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error",
+     "expired", "busy"}
 )
 
 
@@ -1033,25 +1114,83 @@ class IssueGateStore:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     async def _post(self, path: str, payload: dict) -> dict | None:
+        """POST to Neotoma over the bearer path; ``None`` on failure.
+
+        A transient failure (a transport error or timeout, an HTTP 5xx, or one 401)
+        is retried under the same bounded policy as the signed writes, with the SAME
+        payload, so a `correct` repeats with its own idempotency key and a landed
+        write whose response was lost is answered as a replay, not applied twice.
+        Every other failure is final on the first attempt. Fail-open to ``None`` as
+        before: the callers re-read to verify what landed.
+        """
         if not self.token:
             log.warning(
                 "[apis.gate_waive] NEOTOMA_BEARER_TOKEN unset — %s skipped", path
             )
             return None
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{self.base_url}/{path}",
-                    json=payload,
-                    headers=self._headers(),
+        started = _monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            retries_allowed = 0
+            deadline = started + SIGNED_WRITE_TOTAL_CAP_S
+            try:
+                # httpx's timeout applies per operation; wait_for makes it the
+                # whole request, so the attempt cannot outlast the deadline. The
+                # request re-reads the clock when it actually starts and sends
+                # nothing if the deadline has already passed.
+                resp = await asyncio.wait_for(
+                    self._post_once(path, payload, deadline),
+                    timeout=max(min(BEARER_ATTEMPT_TIMEOUT_S, deadline - _monotonic()), 0.0),
                 )
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    reason = http_failure_code(resp.status_code)
+                    retries_allowed = retries_for_status(resp.status_code)
+                    shown = f"HTTP {resp.status_code}"
+                    resp.raise_for_status()
                 if resp.content:
                     return resp.json()
                 return {}
-        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
-            log.error("[apis.gate_waive] %s failed: %s", path, exc)
-            return None
+            except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+                if not retries_allowed and not isinstance(exc, httpx.HTTPStatusError):
+                    if isinstance(
+                        exc,
+                        (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError),
+                    ):
+                        reason, shown = "transport_error", type(exc).__name__
+                        retries_allowed = len(SIGNED_WRITE_BACKOFFS_S)
+                    else:
+                        reason, shown = "unexpected", type(exc).__name__
+                retries_done = attempt - 1
+                out_of_time = retries_done < retries_allowed and not _retry_fits(
+                    started, retries_done
+                )
+                if retries_done >= retries_allowed or out_of_time:
+                    log.error(
+                        "[apis.gate_waive] %s failed: %s reason=%s attempt=%d/%d%s",
+                        path, shown, reason, attempt, retries_allowed + 1,
+                        " (deadline reached, no further attempt fits)" if out_of_time else "",
+                    )
+                    return None
+                delay = _next_backoff(retries_done)
+                log.warning(
+                    "[apis.gate_waive] %s attempt %d failed (%s) reason=%s — retrying in "
+                    "%.1fs with the same payload",
+                    path, attempt, shown, reason, delay,
+                )
+            await _retry_sleep(delay)
+
+    async def _post_once(self, path: str, payload: dict, deadline: float):
+        remaining = deadline - _monotonic()
+        if remaining < MIN_ATTEMPT_TIMEOUT_S:
+            raise asyncio.TimeoutError("deadline passed before the request began")
+        timeout = min(BEARER_ATTEMPT_TIMEOUT_S, remaining)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.post(
+                f"{self.base_url}/{path}",
+                json=payload,
+                headers=self._headers(),
+            )
 
     async def _observations_page(
         self, entity_id: str, *, limit: int, offset: int
@@ -2012,8 +2151,28 @@ class IssueGateStore:
         *,
         lens_agent: str,
         lens_sub: str,
+        deadline: float | None = None,
     ) -> tuple[int, dict]:
-        """One lens-signed `correct`, off the event loop.
+        """One lens-signed `correct`, off the event loop, bounded by an ABSOLUTE deadline.
+
+        ``deadline`` is a `_monotonic()` instant. It is enforced at every stage,
+        not only when the attempt is scheduled:
+
+        * the worker re-reads the clock at the moment it actually BEGINS; if the
+          deadline has passed (it waited in the executor queue) or the caller has
+          already given up, it raises ``expired`` WITHOUT issuing the write;
+        * signed_request receives the absolute deadline and abandonment flag;
+          identity reads and request encoding run in a killable spawned preparer;
+        * after reaping preparation, the helper launch rechecks abandonment and
+          computes min(default, time left), then subprocess.run kills and reaps
+          the helper at that limit;
+        * the await itself is bounded by the same deadline, so the caller is never
+          held past it; when it gives up it marks the attempt abandoned, so a queued
+          worker never starts and a mid-flight worker's late result is discarded
+          (the future is cancelled; nothing reads it).
+
+        A late write that did land is the landed-but-lost case: the retry or the
+        settle read-back sees it, and the idempotency key makes a repeat a replay.
 
         `neotoma_signed.signed_request` is SYNCHRONOUS (it runs the node
         signing helper as a subprocess and returns `(status, body)`). It used
@@ -2028,22 +2187,64 @@ class IssueGateStore:
         assert field_name in _SIGN_OFF_DECLARED_FIELDS, (
             f"sign_off attempted to write undeclared field {field_name!r}"
         )
-        result = await asyncio.to_thread(
-            _ns.signed_request,
-            "POST",
-            f"{self.base_url}/correct",
-            {
-                "entity_id": entity_id,
-                "entity_type": self.ENTITY_TYPE,
-                "field": field_name,
-                "value": value,
-                "idempotency_key": idempotency_key,
-            },
-            agent_name=lens_agent,
-            sub=lens_sub,
-        )
-        if inspect.isawaitable(result):
-            result = await result
+        if deadline is None:
+            deadline = _monotonic() + SIGNED_WRITE_TOTAL_CAP_S
+        abandoned = threading.Event()
+        url = f"{self.base_url}/correct"
+        body = {
+            "entity_id": entity_id,
+            "entity_type": self.ENTITY_TYPE,
+            "field": field_name,
+            "value": value,
+            "idempotency_key": idempotency_key,
+        }
+
+        def run():
+            # Executed by the worker: decide NOW, with the clock as it is now.
+            if abandoned.is_set():
+                raise _ns.SignedRequestError("attempt abandoned before it began", "expired")
+            remaining = deadline - _monotonic()
+            if remaining < MIN_ATTEMPT_TIMEOUT_S:
+                raise _ns.SignedRequestError("deadline passed before the attempt began", "expired")
+            return _ns.signed_request(
+                "POST",
+                url,
+                body,
+                agent_name=lens_agent,
+                timeout=min(SIGNED_ATTEMPT_TIMEOUT_S, remaining),
+                sub=lens_sub,
+                deadline=deadline,
+                cancelled=abandoned,
+                clock=_monotonic,
+            )
+
+        permits = _signed_permits
+        if not permits.acquire(blocking=False):
+            raise _ns.SignedRequestError("no free signing worker", "busy")
+
+        def release(_done):
+            permits.release()
+
+        try:
+            concurrent_future = _signed_pool.submit(run)
+        except BaseException:
+            permits.release()
+            raise
+        concurrent_future.add_done_callback(release)
+        future = asyncio.wrap_future(concurrent_future)
+        try:
+            result = await asyncio.wait_for(future, timeout=max(deadline - _monotonic(), 0.0))
+            if inspect.isawaitable(result):
+                result = await asyncio.wait_for(result, timeout=max(deadline - _monotonic(), 0.0))
+        except asyncio.TimeoutError:
+            abandoned.set()
+            if concurrent_future.done() and not concurrent_future.cancelled() \
+                    and concurrent_future.exception() is not None:
+                raise concurrent_future.exception()  # a timeout raised by the call itself
+            raise _ns.SignedRequestError("attempt outlasted the deadline", "expired") from None
+        except BaseException:
+            abandoned.set()
+            raise
         return result
 
     async def _sign_off_write(
@@ -2067,51 +2268,67 @@ class IssueGateStore:
         would lean entirely on a read-back that happens to also fail.
         """
         repo, issue_number, gate = context
-        try:
-            status, _resp = await self._signed_correct(
-                entity_id,
-                field_name,
-                value,
-                idempotency_key,
-                lens_agent=lens_agent,
-                lens_sub=lens_sub,
+        started = _monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            reason, shown, retries_allowed = "", "", 0
+            try:
+                status, _resp = await self._signed_correct(
+                    entity_id,
+                    field_name,
+                    value,
+                    idempotency_key,
+                    lens_agent=lens_agent,
+                    lens_sub=lens_sub,
+                    deadline=started + SIGNED_WRITE_TOTAL_CAP_S,
+                )
+            except Exception as exc:  # noqa: BLE001 — classify, never crash
+                # The exception's CLASS and a fixed reason code, plus the size of
+                # the serialized FIELD VALUE being written (an integer; the signed
+                # request wraps it in a small envelope, so the body is a little
+                # larger): enough to tell "no key" from a helper fault from an
+                # oversized write, with none of the text that could carry a body, a
+                # header or a path.
+                reason = signed_failure_code(exc)
+                shown = type(exc).__name__
+                retries_allowed = retries_for_reason(reason)
+            else:
+                if 200 <= status < 300:
+                    if attempt > 1:
+                        log.info(
+                            "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: "
+                            "signed write succeeded on attempt %d (same idempotency key)",
+                            repo, issue_number, gate, lens_agent, field_name, attempt,
+                        )
+                    return ""
+                reason = http_failure_code(status)
+                shown = f"HTTP {status}"
+                retries_allowed = retries_for_status(status)
+
+            retries_done = attempt - 1
+            out_of_time = retries_done < retries_allowed and not _retry_fits(
+                started, retries_done
             )
-        except Exception as exc:  # noqa: BLE001 — classify, never crash
-            # The exception's CLASS and a fixed reason code, plus the size of the
-            # serialized FIELD VALUE being written (an integer; the signed request
-            # wraps it in a small envelope, so the body is a little larger):
-            # enough to tell "no key" from a helper fault from an oversized write,
-            # with none of the text that could carry a body, a header or a path.
-            log.error(
-                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
-                "(%s) reason=%s value_bytes=%s",
-                repo,
-                issue_number,
-                gate,
-                lens_agent,
-                field_name,
-                SIGN_OFF_SIGNING_FAILED,
-                type(exc).__name__,
-                signed_failure_code(exc),
-                _value_bytes(value),
+            if retries_done >= retries_allowed or out_of_time:
+                log.error(
+                    "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
+                    "(%s) reason=%s value_bytes=%s attempt=%d/%d%s",
+                    repo, issue_number, gate, lens_agent, field_name,
+                    SIGN_OFF_SIGNING_FAILED, shown, reason, _value_bytes(value),
+                    attempt, retries_allowed + 1,
+                    " (deadline reached, no further attempt fits)" if out_of_time else "",
+                )
+                return SIGN_OFF_SIGNING_FAILED
+            delay = _next_backoff(retries_done)
+            log.warning(
+                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: signed write "
+                "attempt %d failed (%s) reason=%s value_bytes=%s — retrying in %.1fs with "
+                "the same idempotency key",
+                repo, issue_number, gate, lens_agent, field_name, attempt, shown, reason,
+                _value_bytes(value), delay,
             )
-            return SIGN_OFF_SIGNING_FAILED
-        if status < 200 or status >= 300:
-            log.error(
-                "[apis.gate_waive] sign_off %s#%s gate=%s lens=%s field=%s: %s "
-                "(HTTP %s) reason=%s value_bytes=%s",
-                repo,
-                issue_number,
-                gate,
-                lens_agent,
-                field_name,
-                SIGN_OFF_SIGNING_FAILED,
-                status,
-                http_failure_code(status),
-                _value_bytes(value),
-            )
-            return SIGN_OFF_SIGNING_FAILED
-        return ""
+            await _retry_sleep(delay)
 
     async def _settle_failed_sign_off(
         self,

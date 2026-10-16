@@ -8,12 +8,19 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import neotoma_signed as ns  # noqa: E402
+
+
+def _identity_after_virtual_second(agent_name, *, sub=None, keys_dir=None):
+    (Path(keys_dir) / "prepared").write_text("prepared")
+    return {"key": "synthetic-unused", "sub": sub or "synthetic", "kid": "synthetic"}
 
 
 class NeotomaSignedTest(unittest.TestCase):
@@ -67,6 +74,8 @@ class NeotomaSignedTest(unittest.TestCase):
         def fake_run(cmd, **kw):
             self.assertTrue(kw["env"]["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"].endswith("apus.jwk.json"))
             self.assertEqual(kw["env"]["NEOTOMA_AAUTH_SUB"], "apus@ateles-swarm")
+            self.assertGreater(kw["timeout"], 0)
+            self.assertLess(kw["timeout"], 20, "preparation must consume the transport budget")
             return subprocess.CompletedProcess(cmd, 0, stdout=helper_out, stderr="")
 
         with mock.patch.object(ns.subprocess, "run", side_effect=fake_run):
@@ -92,6 +101,37 @@ class NeotomaSignedTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             ns.signed_request("GET", "http://x", agent_name="ghost")
         self.assertIn("no AAuth key", str(cm.exception))
+
+    def test_launch_timeout_is_recomputed_after_preparation(self):
+        ns.AAUTH_KEYS_DIR = str(self.keys)
+
+        def clock():
+            return 101.0 if (self.keys / "prepared").exists() else 100.0
+
+        with mock.patch.object(ns, "agent_identity", _identity_after_virtual_second), mock.patch.object(
+            ns.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0, stdout='{"status":200,"body":"{}"}'),
+        ) as launch:
+            ns.signed_request("POST", "http://unused.invalid", {}, timeout=10,
+                              deadline=110.0, clock=clock)
+        self.assertEqual(launch.call_args.kwargs["timeout"], 9.0)
+
+    def test_expired_request_never_starts_preparation_or_transport(self):
+        with mock.patch.object(ns.multiprocessing, "get_context") as context:
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://unused.invalid", {},
+                                  deadline=time.monotonic() - 1)
+        self.assertEqual(caught.exception.code, "expired")
+        context.assert_not_called()
+
+    def test_abandoned_request_never_starts_preparation_or_transport(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        with mock.patch.object(ns.multiprocessing, "get_context") as context:
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://unused.invalid", {}, cancelled=cancelled)
+        self.assertEqual(caught.exception.code, "expired")
+        context.assert_not_called()
 
     # ── ateles#795 constraint 2: explicit subject, never ambient ──────────────
 

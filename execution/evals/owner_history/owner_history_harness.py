@@ -152,7 +152,7 @@ def _wire(mp: pytest.MonkeyPatch, store: FakeIssueStore, *, signer_fails: str | 
         lambda agent, sub=None: {"key": f"/k/{agent}", "sub": sub or f"{agent}@ateles-swarm", "kid": agent},
     )
 
-    def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+    def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
         if signer_fails == "no_key":
             raise ns.SignedRequestError("no AAuth key for this agent (private detail)", "no_key")
         if signer_fails == "helper_error":
