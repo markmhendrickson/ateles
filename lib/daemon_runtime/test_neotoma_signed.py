@@ -133,6 +133,73 @@ class NeotomaSignedTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "expired")
         context.assert_not_called()
 
+    def _real_helper_fixture(self):
+        root = Path(self._tmp.name) / "helper-fixture"
+        module = root / "dist" / "cli" / "aauth_signer.js"
+        module.parent.mkdir(parents=True)
+        (root / "package.json").write_text('{"type":"module"}')
+        module.write_text(
+            'import fs from "node:fs";\n'
+            'export async function cliSignedFetch(url, options) {\n'
+            '  fs.writeFileSync(process.env.ATELES_SIGNED_TEST_EFFECT,\n'
+            '    JSON.stringify({pid: process.pid, method: options.method}));\n'
+            '  return {status: 200, ok: true, text: async () => "{}"};\n'
+            '}\n'
+        )
+        effect = root / "effect.json"
+        os.environ["ATELES_SIGNED_TEST_EFFECT"] = str(effect)
+        self._write_key("apus")
+        return root, effect
+
+    def test_real_helper_fixture_records_success(self):
+        root, effect = self._real_helper_fixture()
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            result = ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus")
+        self.assertEqual(result, (200, {}))
+        self.assertGreater(json.loads(effect.read_text())["pid"], 0)
+
+    def test_cancelled_attempt_has_no_effect_at_process_boundary(self):
+        root, effect = self._real_helper_fixture()
+        cancelled = threading.Event()
+        real_run = subprocess.run
+
+        def cancel_then_run(*args, **kwargs):
+            cancelled.set()
+            return real_run(*args, **kwargs)
+
+        error = None
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            ns.subprocess, "run", side_effect=cancel_then_run
+        ):
+            try:
+                ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                  cancelled=cancelled)
+            except (ns.SignedRequestError, subprocess.TimeoutExpired) as exc:
+                error = exc
+        self.assertFalse(effect.exists(), "a cancelled attempt produced a real helper effect")
+        self.assertIsNotNone(error)
+
+    def test_expired_attempt_has_no_effect_at_process_boundary(self):
+        root, effect = self._real_helper_fixture()
+        deadline = time.monotonic() + 1.0
+        real_run = subprocess.run
+
+        def expire_then_run(*args, **kwargs):
+            threading.Event().wait(max(0.0, deadline - time.monotonic()) + 0.05)
+            return real_run(*args, **kwargs)
+
+        error = None
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            ns.subprocess, "run", side_effect=expire_then_run
+        ):
+            try:
+                ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                  deadline=deadline)
+            except (ns.SignedRequestError, subprocess.TimeoutExpired) as exc:
+                error = exc
+        self.assertFalse(effect.exists(), "an expired attempt produced a real helper effect")
+        self.assertIsNotNone(error)
+
     # ── ateles#795 constraint 2: explicit subject, never ambient ──────────────
 
     def test_agent_identity_explicit_sub_ignores_ambient_env(self):
