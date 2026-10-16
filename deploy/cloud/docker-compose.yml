@@ -1,4 +1,5 @@
 # Ateles Bucket-A (device-agnostic) daemons — one container per daemon, shared
+# Superseded VM scaffold; current Bucket-C jobs use deploy/fly-runner/ instead.
 # image. Task #5 of plan ent_aff87747b49e338790568af6. Runbook: deploy/cloud/README.md.
 #
 # Secrets are mounted read-only and decrypted at container start by entrypoint.sh:
@@ -51,7 +52,7 @@ services:
     ports:
       - "8741:8741"                              # Neotoma->git mirror webhook
 
-  # ── GitHub automation (code-touching dispatch -> Bucket C / GHA, see README) ─
+  # ── Historical GitHub automation services; current routing: docs/cloud_hosting.md ─
   formica:
     <<: *daemon
     container_name: ateles-formica

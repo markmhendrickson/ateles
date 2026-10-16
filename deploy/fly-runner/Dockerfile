@@ -84,6 +84,8 @@ WORKDIR /opt/ateles
 COPY lib/environment_allowlist.py lib/credential_env_names.py /opt/ateles/lib/
 COPY lib/daemon_runtime/aauth_httpsig.py /opt/ateles/lib/daemon_runtime/aauth_httpsig.py
 COPY deploy/fly-runner/run_job.py /opt/ateles/run_job.py
+# Repository delivery: used only by a job whose job.json carries a delivery.
+COPY deploy/fly-runner/repo_delivery.py /opt/ateles/repo_delivery.py
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
