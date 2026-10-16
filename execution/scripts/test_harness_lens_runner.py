@@ -4559,3 +4559,51 @@ def test_dry_run_reports_unbound_model_as_refusal(
     assert report["would_refuse"] == "no model bound for review"
     assert "--model" not in report["example_command"]
     assert report["no_model_call_made"] is True
+
+
+@pytest.mark.parametrize("model", [
+    "", "   ", "gpt 6", "gpt-6-sol\n", "--help", "\u200b", 0, False, [], {},
+])
+@pytest.mark.parametrize("entrypoint", ["run_one", "run_compare", "dry_run_report"])
+def test_model_selector_contract_rejects_invalid_direct_inputs_before_setup(
+    monkeypatch, tmp_path, target, brief_file, model, entrypoint
+):
+    import asyncio
+
+    def unexpected_setup(*args, **kwargs):
+        raise AssertionError("invalid selector reached setup")
+
+    monkeypatch.setattr(hlr, "check_headroom", unexpected_setup)
+    with pytest.raises(ValueError, match="model"):
+        if entrypoint == "dry_run_report":
+            hlr.dry_run_report(
+                target, provider="codex", sandbox=None, task_text="review",
+                worktree_path=tmp_path, model=model, action_class="lens_review:arch",
+            )
+        else:
+            kwargs = dict(
+                dry_run=False, post=False, repo_worktree_name="ateles",
+                scratch_root=tmp_path, brief_path=brief_file, timeout=None,
+                model=model, action_class="lens_review:arch",
+            )
+            if entrypoint == "run_compare":
+                asyncio.run(hlr.run_compare(target, providers=[], **kwargs))
+            else:
+                asyncio.run(hlr.run_one(target, provider="codex", **kwargs))
+
+
+@pytest.mark.parametrize("model", ["", "  ", "gpt 6", "gpt-6-sol\n", "--help", "\u200b"])
+def test_cli_model_selector_contract_refuses_invalid_inputs_before_dispatch(
+    monkeypatch, brief_file, model
+):
+    async def unexpected_dispatch(*args, **kwargs):
+        raise AssertionError("invalid selector reached dispatch")
+
+    monkeypatch.setattr(hlr, "run_one", unexpected_dispatch)
+    with pytest.raises(SystemExit) as exc:
+        hlr.main([
+            "--repo", "owner/repository", "--pr", "1", "--head", SAMPLE_HEAD,
+            "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
+            "--model=" + model,
+        ])
+    assert exc.value.code == 2
