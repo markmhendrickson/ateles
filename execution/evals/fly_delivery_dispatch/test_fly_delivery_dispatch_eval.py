@@ -101,7 +101,11 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         async def read(run_id):
             # The stand-in job runs only after the real executor has minted,
             # reserved and launched; a refused mint cannot create effects.
-            jt = job_eval.run_scenario(JOBS[scenario["job"]], root, monkeypatch)
+            with monkeypatch.context() as machine_env:
+                # The in-process stand-in machine must not inherit the host's
+                # Fly API credential, just like the real job boundary.
+                machine_env.delenv("APIS_FLY_API_TOKEN", raising=False)
+                jt = job_eval.run_scenario(JOBS[scenario["job"]], root, machine_env)
             traces.append(jt)
             assert jt.record["run_id"] == run_id
             if scenario["status"] == "unknown":
