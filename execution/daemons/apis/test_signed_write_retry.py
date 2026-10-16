@@ -970,7 +970,7 @@ def test_real_signing_preparation_cannot_outlive_or_launch_after_deadline(monkey
     async def exercise():
         started = _real_time.monotonic()
         failure = await IssueGateStore("http://unused.invalid", "")._sign_off_write(
-            "synthetic", "gate_status", {}, "synthetic-key", lens_agent="synthetic",
+            "synthetic", GATE_STATUS_FIELD, {}, "synthetic-key", lens_agent="synthetic",
             lens_sub="synthetic", context=("synthetic", 1, "pm"))
         elapsed = _real_time.monotonic() - started
         assert failure and elapsed < 1.2

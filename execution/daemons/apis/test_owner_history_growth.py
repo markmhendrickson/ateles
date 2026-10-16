@@ -428,15 +428,14 @@ class _Proc:
         self.stdout, self.stderr, self.returncode = stdout, stderr, 0
 
 
-def test_signed_request_codes_each_failure_without_signing_anything(monkeypatch):
-    monkeypatch.setattr(ns, "agent_identity", lambda name, sub=None: None)
+def test_signed_request_codes_each_failure_without_signing_anything(monkeypatch, tmp_path):
+    # Real identity lookup and spawned preparation, with synthetic key metadata only.
+    monkeypatch.setattr(ns, "AAUTH_KEYS_DIR", str(tmp_path))
     with pytest.raises(ns.SignedRequestError) as raised:
         ns.signed_request("POST", "http://x/correct", {"a": 1}, agent_name="waxwing")
     assert raised.value.code == "no_key"
 
-    monkeypatch.setattr(
-        ns, "agent_identity", lambda name, sub=None: {"key": "/k", "sub": "s", "kid": "k"}
-    )
+    (tmp_path / "waxwing.jwk.json").write_text('{"kid":"synthetic"}')
     for stdout, code in (
         ("not json", "helper_non_json"),
         ('{"error": "fetch failed: connect ECONNRESET"}', "transport_error"),
@@ -450,11 +449,10 @@ def test_signed_request_codes_each_failure_without_signing_anything(monkeypatch)
         assert isinstance(raised.value, RuntimeError), "callers that catch RuntimeError must still work"
 
 
-def test_the_body_goes_to_the_helper_on_stdin_not_argv_or_the_environment(monkeypatch):
+def test_the_body_goes_to_the_helper_on_stdin_not_argv_or_the_environment(monkeypatch, tmp_path):
     """So its size cannot meet an argv or environment limit."""
-    monkeypatch.setattr(
-        ns, "agent_identity", lambda name, sub=None: {"key": "/k", "sub": "s", "kid": "k"}
-    )
+    monkeypatch.setattr(ns, "AAUTH_KEYS_DIR", str(tmp_path))
+    (tmp_path / "waxwing.jwk.json").write_text('{"kid":"synthetic"}')
     seen: dict = {}
 
     def run(cmd, input=None, env=None, **k):
