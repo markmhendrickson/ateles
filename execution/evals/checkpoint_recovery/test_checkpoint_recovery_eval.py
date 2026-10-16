@@ -53,6 +53,8 @@ def test_fake_neotoma_exposes_complete_server_owned_observation_paging(world):
     assert (last["total"], last["limit"], last["offset"]) == (101, 100, 100)
     assert len(first["observations"]) == 100
     assert len(last["observations"]) == 1
+    assert first["observations"][0]["fields"]["blocked_reason"] == "revision 99"
+    assert last["observations"][0] == world.entities[task_id]["observations"][0]
     assert gating.fetch_entity_user_id(task_id) == world.tenant
 
 
