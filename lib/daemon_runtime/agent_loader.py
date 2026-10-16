@@ -696,6 +696,11 @@ def admit_agent_definition(agent_def: AgentDefinition, agent_name: str) -> Agent
     if (not isinstance(agent_def.prompt_markdown, str)
             or not agent_def.prompt_markdown.strip() or not agent_def.tools):
         raise AgentDefinitionUnavailable(agent_name, "bad_response", 1)
+    # These are CLI selectors/options, not declared tool names. In
+    # particular, the provider's `default` selector means all built-ins;
+    # only an explicit canonical * may authorize that broad surface.
+    if any(tool == "default" or tool.startswith("-") for tool in agent_def.tools):
+        raise AgentDefinitionUnavailable(agent_name, "bad_response", 1)
     if action is StatusAction.WARN:
         log.warning(f"[{agent_name}] Status check: {reason}")
     return agent_def

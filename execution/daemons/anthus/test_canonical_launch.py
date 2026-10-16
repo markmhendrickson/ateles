@@ -95,7 +95,8 @@ Path(os.environ['FIXTURE_RECEIPT']).write_text(json.dumps({
     {"status": "retired"}, {"status": "disabled"}, {"status": "undefined"},
     {"status": "unrecognized"}, {"status": None}, {"prompt_markdown": None},
     {"prompt_markdown": ""}, {"tool_allowlist": []}, {"tool_allowlist": None},
-    {"tool_allowlist": "[invalid"}, {"is_stub": True},
+    {"tool_allowlist": "[invalid"}, {"tool_allowlist": ["default"]},
+    {"tool_allowlist": ["--dangerously-skip-permissions"]}, {"is_stub": True},
 ])
 def test_direct_launch_refuses_unadmitted_definition(monkeypatch, overrides):
     definition = anthus.AgentDefinition(
@@ -104,7 +105,9 @@ def test_direct_launch_refuses_unadmitted_definition(monkeypatch, overrides):
     )
     children = []
     async def child(*args, **kwargs):
+        from types import SimpleNamespace
         children.append(args)
+        return SimpleNamespace(pid=123)
     monkeypatch.setattr(anthus.asyncio, "create_subprocess_exec", child)
     with pytest.raises(anthus.AgentDefinitionUnavailable):
         asyncio.run(anthus._spawn_agent("pavo", "ent_work", "pm", {}, definition))

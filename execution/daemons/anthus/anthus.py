@@ -509,8 +509,9 @@ async def _spawn_agent(
 ) -> None:
     """
     Spawn an admitted canonical role with its declared tool surface. Runs in
-    the background; output is logged but not awaited synchronously — the agent posts its artifact to the
-    GitHub issue/PR, and Anthus picks it up on the next SSE event.
+    the background; output is logged but not awaited synchronously. The agent
+    posts its artifact to the GitHub issue/PR, and Anthus picks it up on the next
+    SSE event.
 
     The canonical definition supplies authority; a local skill may only
     supplement the role instructions.

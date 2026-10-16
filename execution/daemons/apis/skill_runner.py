@@ -16,9 +16,10 @@ SKILL.md, and (when the definition specifies a restricted tool_allowlist) passes
 Stage 2 (ateles#94): writes a harness_event to Neotoma at dispatch start,
 completion, and failure.
 
-Stage 5 (ateles#94): when no agent_definition loads (empty prompt_markdown),
-emits a notifier WARN and a harness_event with the degraded_generic_subagent
-marker so degraded dispatches are observable. Dispatch still proceeds.
+Canonical execution admission refuses absent, malformed or inactive role
+instructions before child construction. Historical prompt-formatting helpers
+still expose a degraded marker for introspection; that marker grants no
+execution authority.
 
 ateles#257: on a FAILED dispatch the complete child stdout AND stderr are
 persisted to a per-dispatch file under ``~/Library/Logs/ateles/dispatch-failures/``
@@ -2298,9 +2299,9 @@ async def _run_skill_once(
     passes ``action_class`` with no ``precomputed_tier`` still gets a fresh
     resolution, unchanged from before.
 
-    Stage 5: when agent_definition carries empty prompt_markdown, logs a WARN,
-    sends a notifier alert (when a notifier is supplied), and records a
-    degraded_generic_subagent harness_event. Dispatch still proceeds.
+    The canonical admission boundary refuses empty role instructions before
+    prompt formatting or provider construction; local skill text cannot supply
+    the missing authority.
 
     ``github_token`` (#109 — per-agent GitHub identity): when supplied and
     non-empty, the token is injected into subprocess_env as both
