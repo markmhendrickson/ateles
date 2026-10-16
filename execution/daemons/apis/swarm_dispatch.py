@@ -5866,7 +5866,6 @@ class SwarmDispatcher:
         )
 
         completed: list[str] = []
-        degraded_sections: list[str] = []
         # (lens, agent, error_class, observed_state) per failed sign_off.
         failed_sign_offs: list[tuple[str, str, str, str]] = []
         # (gate, agent, header, observed) when the pm reply is refused only
@@ -5921,11 +5920,20 @@ class SwarmDispatcher:
             )
             section_text = self._extract_section_text(result.stdout, section)
             if result.degraded_load:
-                degraded_sections.append(section.key)
-                section_text = (
-                    f"⚠ DEGRADED — role definition {result.load_error or 'unavailable'}; "
-                    "gate sign-off suppressed.\n\n" + section_text
+                # A degraded role has no authority to replace a verified
+                # section. Leave this step incomplete and do not pass its
+                # output to later lenses or the issue-body mirror.
+                log.error(
+                    "[%s] %s: degraded %s spec section held; canonical spec unchanged",
+                    DAEMON_NAME, ref, section.agent,
                 )
+                self.notifier.send(
+                    f"{ref}: {section.agent} spec section incomplete after "
+                    "role-definition load failure; prior verified spec preserved",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+                return
             # Persist ADDITIVELY: correct only this section's field. Even when
             # extraction yields nothing usable we still record the turn ran so
             # the sequence_state and mirror reflect progress.
@@ -6096,7 +6104,7 @@ class SwarmDispatcher:
                 [trigger.repository, trigger.number, trigger.title, trigger.body]
             ),
         )
-        if lanius.degraded_load or degraded_sections:
+        if lanius.degraded_load:
             log.error(
                 "[%s] %s: degraded role output cannot advance the issue gate",
                 DAEMON_NAME, ref,

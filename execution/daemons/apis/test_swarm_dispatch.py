@@ -7705,8 +7705,11 @@ def test_pm_clean_verdict_triggers_dispatcher_sign_off(monkeypatch, degraded_loa
     assert head_sha  # a non-empty content-derived surrogate, never blank
 
 
-def test_degraded_spec_section_is_marked_and_cannot_auto_build(monkeypatch):
+def test_degraded_spec_section_keeps_verified_state_and_stops_pipeline(monkeypatch):
+    calls = []
+
     async def fake_run_skill(skill, prompt, **_kwargs):
+        calls.append((skill, prompt))
         return SkillResult(
             skill, True, 0,
             "<<<SPEC_SECTION>>>review content<<<END_SPEC_SECTION>>>", "",
@@ -7716,17 +7719,39 @@ def test_degraded_spec_section_is_marked_and_cannot_auto_build(monkeypatch):
     _install_pipeline_stubs(
         monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
     )
+    prior_state = SpecState(
+        repo="owner/repo", issue_number=100, title="A new feature",
+        entity_id="ent_fake", sections={"pm_section": "verified prior PM"},
+        sequence_state=["pm"],
+    )
+
+    async def load_prior(self, repo, issue_number, title):
+        return prior_state
+
+    monkeypatch.setattr(_FakeSpecStore, "load", load_prior)
     handoffs = []
+    mirrors = []
 
     async def fake_handoff(self, *args, **kwargs):
         handoffs.append((args, kwargs))
 
+    async def fake_mirror(self, *args, **kwargs):
+        mirrors.append((args, kwargs))
+
     monkeypatch.setattr(SwarmDispatcher, "_hand_off_to_build", fake_handoff)
-    dispatcher = SwarmDispatcher(_StubNotifier(), _config(auto_build=True))
+    monkeypatch.setattr(SwarmDispatcher, "_mirror_spec_to_issue", fake_mirror)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config(auto_build=True))
     asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
-    pm_text = next(text for key, text in _FakeSpecStore.instances[-1].upserts if key == "pm")
-    assert pm_text.startswith("⚠ DEGRADED — role definition timeout; gate sign-off suppressed.")
+    store = _FakeSpecStore.instances[-1]
+    assert store.upserts == []
+    assert prior_state.sections == {"pm_section": "verified prior PM"}
+    assert prior_state.sequence_state == ["pm"]
+    assert not store.mirrored
+    assert not mirrors
+    assert [skill for skill, _ in calls] == ["lanius", "pavo"]
     assert not handoffs
+    assert any("pavo" in message.lower() for message in notifier.sent)
 
 
 def test_pm_section_run_skill_call_carries_owns_pending_gate(monkeypatch):
