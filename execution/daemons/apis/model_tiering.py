@@ -51,6 +51,7 @@ failed prior attempt), not a classifier's guess.
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -60,6 +61,35 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 log = logging.getLogger("apis.model_tiering")
+
+
+def validate_model_selector(model: str | None) -> str | None:
+    """Preserve omission; require an explicit selection to be one identifier.
+
+    This validates syntax, not provider availability or tier policy. Providers
+    remain responsible for recognizing model ids, including explicit overrides.
+    """
+    if model is None:
+        return None
+    if (
+        not isinstance(model, str)
+        or not model
+        or model.startswith("-")
+        or any(char.isspace() or not char.isprintable() for char in model)
+    ):
+        raise ValueError(
+            "model must be a non-empty identifier without whitespace/control "
+            "characters or a leading '-'; omit --model for policy/default selection"
+        )
+    return model
+
+
+def parse_model_selector(value: str) -> str:
+    try:
+        return validate_model_selector(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
 
 # Ordered weakest -> strongest. Index comparison is how "raise the tier" and
 # "the strongest tier" are computed; never compare tier names as strings.

@@ -1530,10 +1530,15 @@ def test_dry_run_makes_no_model_call_and_reports_command(
             scratch_root=tmp_path,
             brief_path=brief_file,
             timeout=None,
+            model="preview-model",
+            action_class="lens_review:pm",
         )
     )
 
     assert dispatch_called is False
+    assert report["model"] == "preview-model"
+    assert report["action_class"] == "lens_review:pm"
+    assert report["example_command"][report["example_command"].index("--model") + 1] == "preview-model"
     assert report["dry_run"] is True
     assert report["ok"] is (report["would_refuse"] is None)
     assert report["no_model_call_made"] is True
@@ -3808,8 +3813,12 @@ def test_lens_by_name_agent_mapping_matches_registry_for_pm_and_arch():
 # ── Worktree lifecycle: guards reach the real dispatch boundary -----------------
 
 
+@pytest.mark.parametrize("model,action_class", [
+    (None, None), ("review-model", None), (None, "lens_review:arch"),
+    ("review-model", "lens_review:arch"),
+])
 def test_run_one_passes_sandbox_env_extra_to_dispatch(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, model, action_class
 ):
     seen = {}
 
@@ -3871,9 +3880,13 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
             scratch_root=tmp_path,
             brief_path=brief_file,
             timeout=None,
+            model=model,
+            action_class=action_class,
         )
     )
 
+    assert seen["model"] == model
+    assert seen["action_class"] == action_class
     assert "CODEX_HOME" in seen["env_extra"]
     assert seen["command_wrapper"]
     assert seen["command_wrapper"][0] == "/usr/bin/sandbox-exec"
@@ -4463,3 +4476,139 @@ def test_the_real_sandbox_reads_templates_and_still_denies_credentials(tmp_path)
     assert hlr.refuse_if_credential_files_in_worktree(project) is None
     for template in templates:
         assert not _hook.is_credential_path(str(template))
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "cursor"])
+@pytest.mark.parametrize("model,action_class,want", [
+    (None, None, None), ("explicit-review", None, "explicit-review"),
+    (None, "lens_review:arch", "bound-review"),
+    ("explicit-review", "lens_review:arch", "explicit-review"),
+])
+def test_dry_run_model_selection_uses_dispatch_resolver(
+    monkeypatch, tmp_path, target, mock_ready_sandbox, provider, model, action_class, want
+):
+    calls = []
+    tiering = hlr.dispatch_role.model_tiering
+    real_resolve = tiering.resolve_tier
+
+    def resolve(action, **kwargs):
+        calls.append(action)
+        return real_resolve(action, policy={"lens_review:arch": "top"})
+
+    monkeypatch.setattr(tiering, "resolve_tier", resolve)
+    monkeypatch.setattr(tiering, "model_for_tier", lambda p, tier: "bound-review")
+    sandbox = hlr.HarnessSandbox.build(provider, tmp_path)
+    report = hlr.dry_run_report(
+        target, provider=provider, sandbox=sandbox, task_text="review",
+        worktree_path=tmp_path, model=model, action_class=action_class,
+    )
+    assert report["model"] == want
+    assert report["action_class"] == action_class
+    assert calls == ([action_class] if model is None and action_class else [])
+    command = report["example_command"]
+    assert ("--model" in command) == bool(want)
+    if want:
+        assert command[command.index("--model") + 1] == want
+    assert report["no_model_call_made"] is True
+
+
+@pytest.mark.parametrize("mode,providers", [
+    (["--provider", "codex"], ["codex"]),
+    (["--compare", "codex,cursor"], ["codex", "cursor"]),
+])
+@pytest.mark.parametrize("selectors,model,action_class", [
+    ([], None, None),
+    (["--model", "explicit-review", "--action-class", "lens_review:arch"],
+     "explicit-review", "lens_review:arch"),
+])
+def test_cli_forwards_model_selectors_to_every_provider(
+    monkeypatch, brief_file, mode, providers, selectors, model, action_class
+):
+    seen = []
+
+    async def capture(target, **kwargs):
+        seen.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(hlr, "run_one", capture)
+    assert hlr.main([
+        "--repo", "owner/repository", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--brief", str(brief_file), *mode, *selectors,
+    ]) == 0
+    assert [call["provider"] for call in seen] == providers
+    assert all(call["model"] == model for call in seen)
+    assert all(call["action_class"] == action_class for call in seen)
+
+
+def test_dry_run_reports_unbound_model_as_refusal(
+    monkeypatch, tmp_path, target, mock_ready_sandbox
+):
+    tiering = hlr.dispatch_role.model_tiering
+    real_resolve = tiering.resolve_tier
+    monkeypatch.setattr(tiering, "resolve_tier", lambda action: real_resolve(action, policy={}))
+
+    def unbound(*args):
+        raise tiering.UnboundTierError("no model bound for review")
+
+    monkeypatch.setattr(tiering, "model_for_tier", unbound)
+    report = hlr.dry_run_report(
+        target, provider="codex", sandbox=hlr.HarnessSandbox.build("codex", tmp_path),
+        task_text="review", worktree_path=tmp_path, action_class="lens_review:arch",
+    )
+    assert report["ok"] is False
+    assert report["would_refuse"] == "no model bound for review"
+    assert "--model" not in report["example_command"]
+    assert report["no_model_call_made"] is True
+
+
+@pytest.mark.parametrize("model", [
+    "", "   ", "gpt 6", "gpt-6-sol\n", "--help", "\u200b", 0, False, [], {},
+])
+@pytest.mark.parametrize("entrypoint", ["run_one", "run_compare", "dry_run_report"])
+def test_model_selector_contract_rejects_invalid_direct_inputs_before_setup(
+    monkeypatch, tmp_path, target, brief_file, model, entrypoint
+):
+    import asyncio
+
+    def unexpected_setup(*args, **kwargs):
+        raise AssertionError("invalid selector reached setup")
+
+    monkeypatch.setattr(hlr, "check_headroom", unexpected_setup)
+    with pytest.raises(ValueError, match="model"):
+        if entrypoint == "dry_run_report":
+            hlr.dry_run_report(
+                target, provider="codex", sandbox=None, task_text="review",
+                worktree_path=tmp_path, model=model, action_class="lens_review:arch",
+            )
+        else:
+            kwargs = dict(
+                dry_run=False, post=False, repo_worktree_name="ateles",
+                scratch_root=tmp_path, brief_path=brief_file, timeout=None,
+                model=model, action_class="lens_review:arch",
+            )
+            if entrypoint == "run_compare":
+                asyncio.run(hlr.run_compare(target, providers=[], **kwargs))
+            else:
+                asyncio.run(hlr.run_one(target, provider="codex", **kwargs))
+
+
+@pytest.mark.parametrize("model", ["", "  ", "gpt 6", "gpt-6-sol\n", "--help", "\u200b"])
+def test_cli_model_selector_contract_refuses_invalid_inputs_before_dispatch(
+    monkeypatch, brief_file, model
+):
+    async def unexpected_dispatch(*args, **kwargs):
+        raise AssertionError("invalid selector reached dispatch")
+
+    monkeypatch.setattr(hlr, "run_one", unexpected_dispatch)
+    with pytest.raises(SystemExit) as exc:
+        hlr.main([
+            "--repo", "owner/repository", "--pr", "1", "--head", SAMPLE_HEAD,
+            "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
+            "--model=" + model,
+        ])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("model", [None, "gpt-6-sol", "gpt-5.6-terra", "provider/custom-v1:latest"])
+def test_model_selector_contract_preserves_omission_and_valid_identifiers(model):
+    assert hlr.validate_model_selector(model) == model
