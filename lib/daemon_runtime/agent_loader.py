@@ -830,12 +830,16 @@ class AgentLoader:
         """
         if deadline is None:
             deadline = _monotonic() + LOAD_TOTAL_CAP_S
-        if ns.via_cli_enabled() and ns.agent_identity(self.agent_name):
+        if ns.via_cli_enabled():
+            # signed_request owns bounded identity preparation. A synchronous
+            # key preflight here would escape the load deadline. Missing keys
+            # retain the existing helper-error bearer fallback.
             try:
                 result = _on_worker(
                     lambda remaining: ns.signed_request(
                         method, url, body, agent_name=self.agent_name,
                         timeout=min(SIGNED_REQUEST_TIMEOUT_S, remaining),
+                        deadline=deadline, clock=_monotonic,
                     ),
                     deadline,
                 )
@@ -1067,7 +1071,7 @@ class AgentLoader:
         """
         # Need either a bearer token or per-agent signing to authenticate.
         if not NEOTOMA_BEARER_TOKEN and not (
-            ns.via_cli_enabled() and ns.agent_identity(self.agent_name)
+            ns.via_cli_enabled()
         ):
             return []
         agent_sub = f"{self.agent_name}@ateles-swarm"

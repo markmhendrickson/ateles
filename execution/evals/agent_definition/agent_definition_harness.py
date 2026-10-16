@@ -167,7 +167,7 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         if scenario.get("path") == "signed":
             signed_script = list(scenario["neotoma"])
 
-            def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+            def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None, **kwargs):
                 obs["signed_requests"] = obs.get("signed_requests", 0) + 1
                 outcome = str(signed_script.pop(0) if len(signed_script) > 1 else signed_script[0])
                 return int(outcome), REAL

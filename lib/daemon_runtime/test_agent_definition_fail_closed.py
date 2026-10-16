@@ -11,6 +11,7 @@ Run: pytest lib/daemon_runtime/test_agent_definition_fail_closed.py -v
 from __future__ import annotations
 
 import logging
+import json as _json
 
 import httpx
 import pytest
@@ -246,7 +247,6 @@ def test_planted_red_reinstating_the_stand_in_is_caught(neotoma, monkeypatch):
 
 # ── authoritative absence is narrow: everything else is unavailable ──────────
 
-import json as _json
 
 
 def _response(status=200, body=None, text=None):
@@ -454,7 +454,7 @@ def _virtual(monkeypatch, clock, durations, *, signed=False):
             raise httpx.ReadTimeout("timed out")
         return _response(200, {"entities": []})
 
-    def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+    def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None, **kwargs):
         if take(timeout):
             raise RuntimeError("helper timed out")
         return 200, {"entities": []}
@@ -649,7 +649,7 @@ def transport(monkeypatch):
         state["bearer_calls"] += 1
         return state["bearer"]()
 
-    def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+    def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None, **kwargs):
         state["signed_calls"] += 1
         return state["signed"]()
 
@@ -849,3 +849,32 @@ def test_signed_identity_preparation_cannot_hold_the_loader_past_its_deadline(mo
     assert time.monotonic() - started < 0.25
     assert definition.entity_id == "ent_real"
     assert identity_calls == [], "identity preparation must be inside signed_request's bounded mechanism"
+
+
+def _stalled_loader_preparation(sender, *args):
+    # Synthetic key-read stall in the actual spawned preparation process.
+    import time
+    time.sleep(2)
+
+
+def test_actual_signed_preparation_is_bounded_and_reaped_for_loader(monkeypatch):
+    import multiprocessing
+    import time
+
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
+    monkeypatch.setattr(al.ns, "_prepare_signed_request", _stalled_loader_preparation)
+    monkeypatch.setattr(al, "LOAD_TOTAL_CAP_S", 0.3)
+    monkeypatch.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(al, "LOAD_BACKOFFS_S", ())
+    monkeypatch.setattr(al, "_monotonic", time.monotonic)
+    monkeypatch.setattr(al.httpx, "post", lambda *a, **k: (_ for _ in ()).throw(httpx.ReadTimeout("synthetic")))
+    before = {child.pid for child in multiprocessing.active_children()}
+    started = time.monotonic()
+    with pytest.raises(AgentDefinitionUnavailable):
+        AgentLoader("pavo").load()
+    assert time.monotonic() - started < 1.0
+    # The outer timeout and worker's child cleanup can race by a few scheduler ticks.
+    limit = time.monotonic() + 1.0
+    while time.monotonic() < limit and {c.pid for c in multiprocessing.active_children()} - before:
+        time.sleep(0.01)
+    assert {child.pid for child in multiprocessing.active_children()} <= before
