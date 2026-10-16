@@ -447,3 +447,58 @@ def test_matching_delivery_readback_supplies_the_runner_artifact():
         skill_runner._fly_delivery_fields(job, unknown=False)["fly_pr_url"]
         == record["pr_url"]
     )
+
+
+def test_accounting_settlement_and_month_rollover_preserve_delivery_binding(
+    monkeypatch,
+):
+    from datetime import datetime, timezone
+
+    key = REPO + "#123"
+    ledger = delivery._delivery_ledger()
+    now = [datetime(2026, 10, 16, tzinfo=timezone.utc).timestamp()]
+    ledger._clock = lambda: now[0]
+    entry = {"status": "unknown", "run_id": "run-123", "branch": BRANCH}
+    assert ledger.record_delivery(key, entry, retryable=frozenset())
+    config = fly_runner.FlyConfig.from_env()
+    ledger.reserve(config, run_id="run-123", owner="test-owner", max_run_seconds=60)
+    ledger.settle("run-123", config=config, now=now[0] + 10)
+    ledger.count_local_fallback()
+    now[0] = datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()
+    ledger.count_local_fallback()
+    assert ledger.snapshot()["in_flight"] == {}
+    assert ledger.delivery_receipts()[key] == entry
+
+
+from test_build_delivery import dispatch_env  # noqa: E402,F401 -- fixture
+
+
+@pytest.mark.parametrize("status", ["unknown", "no_time", "pr_failed"])
+def test_failed_fly_task_is_blocked_with_verified_result(
+    monkeypatch, dispatch_env, status
+):
+    writes, _, store = dispatch_env
+    eid = "ent_eval_terminal_task"
+    snapshot = task_snapshot()
+    store.rows[eid] = snapshot.copy()
+
+    def save(eid, state, **kw):
+        store.status(eid, state, **kw)
+        if kw.get("result") is not None:
+            store.field(eid, "result", kw["result"])
+        return True
+
+    async def spawn(*a, **kw):
+        return result(status)
+
+    monkeypatch.setattr(apis, "set_task_status", save)
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    notice = _StubNotifier()
+    asyncio.run(
+        apis.dispatch_task(eid, snapshot, "approved", notice, gate_override=True)
+    )
+    assert store.rows[eid]["status"] == "blocked"
+    assert (
+        "run-123" in store.rows[eid]["result"] and COMMIT in store.rows[eid]["result"]
+    )
+    assert notice.sent

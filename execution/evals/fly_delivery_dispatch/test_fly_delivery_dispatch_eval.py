@@ -14,6 +14,7 @@ import dataclasses
 import importlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -23,11 +24,13 @@ ROOT = HERE.parents[2]
 for path in (ROOT / "execution/daemons/apis", HERE.parent / "fly_runner_delivery"):
     sys.path.insert(0, str(path))
 
-import apis
-import build_delivery as delivery
-import fly_delivery_eval as job_eval
-import skill_runner
-from test_swarm_dispatch import (
+import apis  # noqa: E402
+import build_delivery as delivery  # noqa: E402
+import fly_delivery_eval as job_eval  # noqa: E402
+import skill_runner  # noqa: E402
+import fly_runner  # noqa: E402
+from test_fly_runner import FakeFly, make_executor, FLY_TOKEN  # noqa: E402
+from test_swarm_dispatch import (  # noqa: E402
     SwarmDispatcher,
     _StubNotifier,
     _config,
@@ -79,21 +82,54 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         root.mkdir()
         jt = job_eval.run_scenario(JOBS[scenario["job"]], root, monkeypatch)
         traces.append(jt)
-        fields = skill_runner._fly_delivery_fields(
-            type(
-                "Job",
-                (),
-                dict(delivery={"branch": job_eval.BRANCH}, delivery_result=jt.record),
-            )(),
-            unknown=scenario["status"] == "unknown",
+        # Exercise executor launch, per-repository token mint ownership, result
+        # validation and revocation around the real job-entrypoint artifact.
+        monkeypatch.setenv("APIS_FLY_APP", "runner-app")
+        monkeypatch.setenv("APIS_FLY_API_TOKEN", FLY_TOKEN)
+        monkeypatch.setenv("APIS_FLY_IMAGE", "eval-image")
+        monkeypatch.setenv("APIS_FLY_REGION", "ams")
+        monkeypatch.setattr(
+            fly_runner, "LOGIN_PROVIDERS", frozenset({"codex", "cursor"})
         )
+        executor, read_mints, revoked = make_executor(FakeFly(), clock=time.time)
+        minted = []
+
+        def mint(repo, **kw):
+            minted.append(repo)
+            return fly_runner.DeliveryToken(job_eval.TOKEN, time.time() + 3600, repo)
+
+        executor._mint_delivery = mint
+
+        async def read(run_id):
+            if scenario["status"] == "unknown":
+                raise fly_runner.FlyResultUnreadable(
+                    "eval lost the result after the job ran"
+                )
+            return jt.record
+
+        executor._read_result = read
+        job = fly_runner.FlyJob(
+            run_id=jt.record["run_id"],
+            role=skill,
+            provider="claude",
+            repository=job_eval.REPO,
+            argv=["claude", "--print"],
+            stdin=prompt.encode(),
+            timeout=60,
+            needs_github=False,
+            delivery=kw["fly_delivery"],
+        )
+        rc, out, err = await executor.run(job)
+        assert minted == [job_eval.REPO] and read_mints == []
+        assert revoked == [job_eval.TOKEN] and job.secrets == {}
+        fields = skill_runner._fly_delivery_fields(job, unknown=job.outcome_unknown)
         return skill_runner.SkillResult(
             skill,
-            jt.rc == 0,
-            jt.rc,
-            jt.record.get("stdout", ""),
-            "",
-            remote_run_id=jt.record["run_id"],
+            rc == 0,
+            rc,
+            out.decode(),
+            err.decode(),
+            remote_run_id=job.run_id,
             **fields,
         )
 

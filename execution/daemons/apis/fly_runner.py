@@ -696,6 +696,7 @@ class LedgerSnapshot:
     local_fallbacks: int
     entries: dict[str, dict]
     owners: dict[str, dict]
+    deliveries: dict[str, dict] = field(default_factory=dict)
 
     def outstanding_usd(self) -> float:
         """The reserved maximum cost of every reservation still held,
@@ -731,6 +732,7 @@ class LedgerSnapshot:
             "month": self.month, "day": self.day, "spend_usd": self.spend_usd,
             "launches_today": self.launches_today, "local_fallbacks": self.local_fallbacks,
             "in_flight": copy.deepcopy(self.entries), "owners": copy.deepcopy(self.owners),
+            **({"deliveries": copy.deepcopy(self.deliveries)} if self.deliveries else {}),
         }  # fmt: skip
 
 
@@ -837,13 +839,20 @@ class FlyLedger:
             if record["id"] != key:
                 raise FlyLedgerError(f"Fly ledger {name}: owner {key} names another owner")
             owners[key] = copy.deepcopy(record)
+        deliveries = raw.get("deliveries", {})
+        if not isinstance(deliveries, dict) or not all(
+            isinstance(key, str) and isinstance(value, dict)
+            and isinstance(value.get("status"), str)
+            for key, value in deliveries.items()
+        ):
+            raise FlyLedgerError(f"Fly ledger {name}: delivery receipts are unreadable")
         period = {"month": raw["month"], "day": raw["day"], "spend_usd": raw["spend_usd"],
                   "launches_today": raw["launches_today"]}  # fmt: skip
         self._roll(period, now)  # refuses a later period; resets only on a rollover
         snap = LedgerSnapshot(
             month=period["month"], day=period["day"], spend_usd=float(period["spend_usd"]),
             launches_today=period["launches_today"], local_fallbacks=raw["local_fallbacks"],
-            entries=entries, owners=owners,
+            entries=entries, owners=owners, deliveries=copy.deepcopy(deliveries),
         )
         if admission:
             if config is None:
@@ -880,8 +889,52 @@ class FlyLedger:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
+        directory = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def delivery_receipts(self) -> dict[str, dict]:
+        """Durable issue/task → run bindings, kept when accounting settles.
+
+        Retained across period rollovers: spending resets do not prove that a
+        previous job pushed nothing. The receipt contains only the executor's
+        observed result fields and never any credential.
+        """
+        if not self.path.exists():
+            return {}
+        with self._locked():
+            return self._snapshot(self._clock()).deliveries
+
+    def record_delivery(self, key: str, entry: dict | None, *,
+                        retryable: frozenset[str] | None = None) -> bool:
+        """Reserve/update a delivery under the same cross-process ledger lock.
+
+        With ``retryable``, this is compare-and-reserve. A read-back is required
+        before the caller may send anything to Fly. Accounting/reaper writes
+        preserve these bindings through ``LedgerSnapshot.document``.
+        """
+        with self._locked():
+            data = self._load()
+            receipts = data.setdefault("deliveries", {})
+            old = receipts.get(key)
+            if retryable is not None and old is not None and old["status"] not in retryable:
+                return False
+            if entry is None:
+                receipts.pop(key, None)
+            else:
+                if not isinstance(entry.get("status"), str):
+                    raise FlyLedgerError("delivery receipt has no status")
+                receipts[key] = entry
+            self._save(data)
+            if self._snapshot(self._clock()).deliveries.get(key) != entry:
+                raise FlyLedgerError("delivery receipt did not read back")
+            return True
 
     def _roll(self, data: dict, now: float) -> None:
         """Start a new period only on a genuine rollover: a VALID marker

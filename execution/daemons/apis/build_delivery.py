@@ -724,7 +724,7 @@ def worktree_instructions(wt: BuildWorktree) -> str:
 # request with a token minted for that job. Unset, nothing here routes.
 #
 # A launched delivery is never started twice for the same issue: a durable
-# record (``fly-deliveries.json`` beside the Fly ledger) is written BEFORE the
+# binding in the existing Fly ledger is written BEFORE the
 # launch and kept with its outcome. Every lane that can re-run a builder (the
 # swarm build handoff, the task path, the startup resume sweep that re-runs an
 # interrupted issue pipeline, the task watchdog) reaches the builder through
@@ -734,10 +734,10 @@ def worktree_instructions(wt: BuildWorktree) -> str:
 
 FLY_DELIVERY_BASE_BRANCH = "main"
 FLY_DELIVERY_AUTHOR = ("cicada (ateles swarm)", "cicada@ateles-swarm.invalid")
-FLY_DELIVERY_REGISTRY_ENV = "APIS_FLY_DELIVERY_REGISTRY_FILE"
+# Same ledger and lock as executor admission, accounting, and reaping.
+FLY_DELIVERY_REGISTRY_ENV = "APIS_FLY_LEDGER_FILE"
 # Outcomes that pushed nothing, so a new delivery for the same key is safe.
 FLY_RETRYABLE_STATUSES = frozenset({"clone_failed", "not_delivered"})
-_REGISTRY_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -805,102 +805,58 @@ def fly_delivery_key(repository: str, issue: tuple[str, int] | None, task_id: st
 
 
 def _registry_path() -> Path:
-    configured = os.environ.get(FLY_DELIVERY_REGISTRY_ENV, "").strip()
-    if configured:
-        return Path(configured).expanduser()
     import fly_runner
 
-    return fly_runner.FlyConfig.from_env().ledger_path.with_name("fly-deliveries.json")
+    return fly_runner.FlyConfig.from_env().ledger_path
 
 
-def _read_registry(path: Path) -> dict:
-    """The registry's deliveries; ``ValueError`` when it cannot be trusted."""
-    import json
+def _delivery_ledger():
+    import fly_runner
 
-    if not path.exists():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    deliveries = data.get("deliveries") if isinstance(data, dict) else None
-    if not isinstance(deliveries, dict) or not all(
-            isinstance(v, dict) and isinstance(v.get("status"), str) for v in deliveries.values()):
-        raise ValueError("malformed delivery registry")
-    return deliveries
-
-
-def _write_registry(path: Path, deliveries: dict) -> None:
-    import json
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as out:
-        json.dump({"deliveries": deliveries}, out, indent=1, sort_keys=True)
-        out.flush()
-        os.fsync(out.fileno())
-    os.replace(tmp, path)
-    # Persist the rename before launching any external effect.
-    directory = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    return fly_runner.FlyLedger(_registry_path())
 
 
 def fly_delivery_blocker(key: str) -> str:
-    """Why a new Fly delivery for *key* must not start, or ``""``."""
-    with _REGISTRY_LOCK:
-        try:
-            entry = _read_registry(_registry_path()).get(key)
-        except (OSError, ValueError):
-            return ("the Fly delivery record could not be read, so whether a delivery for "
-                    f"{key} already ran is unknown; not starting another")  # fmt: skip
+    """Why a new delivery for *key* must not start, or an empty string.
+
+    Uses the executor's own durable ledger. A receipt survives reservation
+    settlement and provider/accounting resets; the result is what the executor
+    read back, bound to the issue/task before launch.
+    """
+    import fly_runner
+
+    try:
+        entry = _delivery_ledger().delivery_receipts().get(key)
+    except (OSError, fly_runner.FlyLedgerError):
+        return ("the Fly delivery ledger could not be read, so whether a delivery for "
+                f"{key} already ran is unknown; not starting another")
     if entry is None or entry["status"] in FLY_RETRYABLE_STATUSES:
         return ""
     return (f"a Fly delivery for {key} is already recorded (status {entry['status']}, branch "
             f"{entry.get('branch', '?')}, run {entry.get('run_id') or 'not known'}); not "
-            "starting another. Check it, then remove its entry from "
-            f"{_registry_path()} to allow a new one")  # fmt: skip
-
-
-@contextlib.contextmanager
-def _registry_transaction():
-    # A process restart and a second dispatcher must see the same claim. The
-    # lock file is stable across atomic replacements of the JSON receipt.
-    import fcntl
-
-    with _REGISTRY_LOCK:
-        path = _registry_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.with_suffix(".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                yield path, _read_registry(path)
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+            "starting another. Reconcile the run and remote branch before clearing "
+            "its delivery binding in the Fly ledger")
 
 
 def _record(key: str, entry: dict | None) -> None:
-    with _registry_transaction() as (path, deliveries):
-        if entry is None:
-            deliveries.pop(key, None)
-        else:
-            deliveries[key] = entry
-        _write_registry(path, deliveries)
-        if _read_registry(path).get(key) != entry:
-            raise OSError("delivery receipt did not read back")
+    import fly_runner
+
+    try:
+        _delivery_ledger().record_delivery(key, entry)
+    except fly_runner.FlyLedgerError as exc:
+        raise ValueError(str(exc)) from None
 
 
 def _reserve_delivery(plan: FlyDeliveryPlan) -> bool:
-    with _registry_transaction() as (path, deliveries):
-        old = deliveries.get(plan.key)
-        if old is not None and old["status"] not in FLY_RETRYABLE_STATUSES:
-            return False
-        entry = {"status": "launching", "branch": plan.branch, "run_id": "",
-                 "recorded_at": time.time()}
-        deliveries[plan.key] = entry
-        _write_registry(path, deliveries)
-        if _read_registry(path).get(plan.key) != entry:
-            raise OSError("delivery reservation did not read back")
-        return True
+    import fly_runner
+
+    try:
+        return _delivery_ledger().record_delivery(
+            plan.key, {"status": "launching", "branch": plan.branch, "run_id": "",
+                       "recorded_at": time.time()}, retryable=FLY_RETRYABLE_STATUSES,
+        )
+    except fly_runner.FlyLedgerError as exc:
+        raise ValueError(str(exc)) from None
 
 
 async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
