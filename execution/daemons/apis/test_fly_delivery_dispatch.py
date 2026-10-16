@@ -128,8 +128,8 @@ def test_both_entries_pass_the_delivery_spec_without_local_grants(monkeypatch, e
     if entry == "task":
         got = asyncio.run(run_task())
         assert got.ok
-        assert got.stdout.startswith(
-            f"[cicada] pull_request_link: https://github.com/{REPO}/pull/99"
+        assert got.stdout.endswith(
+            f"[cicada] pull_request_link: https://github.com/{REPO}/pull/99\n"
         )
         assert COMMIT in got.stdout and "run-123" in got.stdout
     else:
@@ -552,3 +552,26 @@ def test_remote_unknown_flag_alone_never_clears_the_delivery_binding():
         return SkillResult("cicada", False, 1, "", "", remote_outcome_unknown=True)
     asyncio.run(delivery.run_fly_delivery(plan, lost, lambda reason: reason))
     assert "already recorded" in delivery.fly_delivery_blocker(plan.key)
+
+
+def test_runner_pr_reaches_existing_artifact_gate_and_verified_task_completion(
+    monkeypatch, dispatch_env
+):
+    _, _, store = dispatch_env
+    eid = "ent_eval_success_task"
+    snapshot = task_snapshot()
+    store.rows[eid] = snapshot.copy()
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    async def run(*a, **kw):
+        got = result()
+        got.stdout = "[cicada] pull_request_link: BLOCKED before runner delivery"
+        return got
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **kw: "exists")
+    monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
+    asyncio.run(apis.dispatch_task(eid, snapshot, "approved", _StubNotifier(), gate_override=True))
+    assert store.rows[eid]["status"] == "done", store.rows[eid]
+    saved = store.rows[eid]["result"]
+    assert f"[cicada] pull_request_link: https://github.com/{REPO}/pull/99\n" in saved
+    assert COMMIT in saved and "run-123" in saved

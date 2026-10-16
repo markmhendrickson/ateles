@@ -901,8 +901,8 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             # The runner opens the PR after the model exits. Its read-back
             # supplies the artifact header the existing resolving gate verifies.
             result.stdout = (
-                f"[{role or skill}] pull_request_link: {result.fly_pr_url}; {summary}\n"
-                + result.stdout
+                f"{result.stdout.rstrip()}\n{summary}\n"
+                f"[{role or skill}] pull_request_link: {result.fly_pr_url}\n"
             )
             result.ok = True
         else:
@@ -2548,6 +2548,11 @@ async def dispatch_task(
             # The stored result is the header line as redacted, and the read-back
             # compares against that same string.
             stored_line = header.matched_line
+            if result.fly_delivery_status:
+                # Reference parsing requires exactly one URL in the header.
+                # Keep the runner metadata in the persisted result, alongside
+                # that verified reference, without changing the header body.
+                stored_line += "\n" + build_delivery.fly_delivery_summary(result)
 
             if shape == "eng_spec_section" and not eng_spec_has_content(header.body):
                 # A bare token names no authored section.
