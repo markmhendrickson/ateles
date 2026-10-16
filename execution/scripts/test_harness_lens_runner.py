@@ -3808,8 +3808,12 @@ def test_lens_by_name_agent_mapping_matches_registry_for_pm_and_arch():
 # ── Worktree lifecycle: guards reach the real dispatch boundary -----------------
 
 
+@pytest.mark.parametrize("model,action_class", [
+    (None, None), ("review-model", None), (None, "lens_review:arch"),
+    ("review-model", "lens_review:arch"),
+])
 def test_run_one_passes_sandbox_env_extra_to_dispatch(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, model, action_class
 ):
     seen = {}
 
@@ -3871,9 +3875,13 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
             scratch_root=tmp_path,
             brief_path=brief_file,
             timeout=None,
+            model=model,
+            action_class=action_class,
         )
     )
 
+    assert seen["model"] == model
+    assert seen["action_class"] == action_class
     assert "CODEX_HOME" in seen["env_extra"]
     assert seen["command_wrapper"]
     assert seen["command_wrapper"][0] == "/usr/bin/sandbox-exec"
@@ -4463,3 +4471,37 @@ def test_the_real_sandbox_reads_templates_and_still_denies_credentials(tmp_path)
     assert hlr.refuse_if_credential_files_in_worktree(project) is None
     for template in templates:
         assert not _hook.is_credential_path(str(template))
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "cursor"])
+@pytest.mark.parametrize("model,action_class,want", [
+    (None, None, None), ("explicit-review", None, "explicit-review"),
+    (None, "lens_review:arch", "bound-review"),
+    ("explicit-review", "lens_review:arch", "explicit-review"),
+])
+def test_dry_run_model_selection_uses_dispatch_resolver(
+    monkeypatch, tmp_path, target, mock_ready_sandbox, provider, model, action_class, want
+):
+    calls = []
+    tiering = hlr.dispatch_role.model_tiering
+    real_resolve = tiering.resolve_tier
+
+    def resolve(action, **kwargs):
+        calls.append(action)
+        return real_resolve(action, policy={"lens_review:arch": "top"})
+
+    monkeypatch.setattr(tiering, "resolve_tier", resolve)
+    monkeypatch.setattr(tiering, "model_for_tier", lambda p, tier: "bound-review")
+    sandbox = hlr.HarnessSandbox.build(provider, tmp_path)
+    report = hlr.dry_run_report(
+        target, provider=provider, sandbox=sandbox, task_text="review",
+        worktree_path=tmp_path, model=model, action_class=action_class,
+    )
+    assert report["model"] == want
+    assert report["action_class"] == action_class
+    assert calls == ([action_class] if model is None and action_class else [])
+    command = report["example_command"]
+    assert ("--model" in command) == bool(want)
+    if want:
+        assert command[command.index("--model") + 1] == want
+    assert report["no_model_call_made"] is True
