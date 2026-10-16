@@ -302,16 +302,12 @@ def test_failed_load_is_logged_at_error(monkeypatch, caplog):
     assert any("FAILED" in m for m in msgs), msgs
 
 
-def test_no_matching_definition_is_refused_unless_the_caller_opted_in(monkeypatch):
-    """A 200 with no matching name is `not_found`: refused by default, and the
-    "undefined" definition only through the explicit opt-in."""
+def test_an_empty_200_is_absence_and_only_the_opt_in_accepts_it(monkeypatch):
+    """A well-formed 200 with an empty `entities` list is `not_found`: refused by
+    default, and the "undefined" definition only through the explicit opt-in."""
     _no_signing(monkeypatch)
     monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
-    monkeypatch.setattr(
-        al.httpx, "post",
-        lambda url, **kw: _Resp({"entities": [{"entity_id": "e",
-                                               "snapshot": {"name": "someone-else"}}]}),
-    )
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp({"entities": []}))
 
     with pytest.raises(al.AgentDefinitionUnavailable) as raised:
         al.AgentLoader("apis").load()
@@ -320,6 +316,19 @@ def test_no_matching_definition_is_refused_unless_the_caller_opted_in(monkeypatc
     d = al.AgentLoader("apis").load(allow_undefined=True)
     assert d.is_stub is True
     assert d.load_error == "not_found"
+
+
+def test_a_result_for_a_different_name_is_not_absence(monkeypatch):
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(
+        al.httpx, "post",
+        lambda url, **kw: _Resp({"entities": [{"entity_id": "e",
+                                               "snapshot": {"name": "someone-else"}}]}),
+    )
+    with pytest.raises(al.AgentDefinitionUnavailable) as raised:
+        al.AgentLoader("apis").load(allow_undefined=True)
+    assert raised.value.code == "bad_response"
 
 
 class TestPolicyScoping:

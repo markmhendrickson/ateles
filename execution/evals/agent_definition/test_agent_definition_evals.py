@@ -41,6 +41,10 @@ RED = [
     ("no_retry", "a_server_error_then_success_loads_the_real_definition"),
     ("no_retry", "a_daemon_survives_one_timeout_at_startup"),
     ("retry_rejected", "a_refused_request_is_final_at_once"),
+    ("loose_absence", "a_malformed_answer_is_not_absence"),
+    ("loose_absence", "a_result_for_another_agent_is_not_absence"),
+    ("loose_absence", "a_route_error_is_not_absence"),
+    ("old_deadline", "a_load_whose_every_request_hangs_ends_inside_the_deadline_counting_the_requests"),
 ]
 
 

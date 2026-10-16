@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -426,15 +427,26 @@ UNDEFINED_STATUS = "undefined"
 
 
 # A definition that cannot be loaded right now is retried briefly, then refused.
-# Short backoff (0.5 s, then 1.5 s) and a wall-clock cap: the load runs on the
-# dispatch path, so it must end. Reason codes that are retried are the ones that say
-# "the request did not get a usable answer"; a definite answer (not found, a 4xx) is
-# final at once.
+#
+# The whole load is bounded by ONE DEADLINE computed when it starts
+# (LOAD_TOTAL_CAP_S). Every request (the signed request, and the bearer request
+# that follows a failed signed one) is launched with min(its default timeout, time
+# left), and bounded as a whole, not per socket operation. A retry is started only
+# if elapsed + its backoff + MIN_ATTEMPT_TIMEOUT_S still fits before the deadline.
+# So the true worst case is LOAD_TOTAL_CAP_S plus process-teardown jitter.
+#
+# Reason codes that are retried say "the request did not get a usable answer"; any
+# other answer is final at once.
 LOAD_BACKOFFS_S = (0.5, 1.5)
 LOAD_TOTAL_CAP_S = 25.0
+SIGNED_REQUEST_TIMEOUT_S = 20.0  # the signing helper's own default
+BEARER_REQUEST_TIMEOUT_S = 10.0
+MIN_ATTEMPT_TIMEOUT_S = 2.0
 _RETRYABLE_LOAD_CODES = frozenset(
     {"timeout", "transport_error", "server_error", "throttled"}
 )
+# Authoritative absence: a well-formed success response that positively says there
+# is no definition. NOTHING else is absence (see ``_validated_entities``).
 NOT_FOUND = "not_found"
 
 _monotonic = time.monotonic
@@ -445,7 +457,7 @@ class AgentDefinitionUnavailable(RuntimeError):
     """An agent_definition could not be loaded. The caller must NOT run the agent.
 
     ``code`` is one of a fixed set (timeout, transport_error, server_error,
-    throttled, rejected, not_found, bad_response, unexpected). The message
+    throttled, rejected, not_found, bad_response, invalid_name, unexpected). The message
     carries the agent name, the code and the attempt count and nothing from the
     response, the request or the underlying exception.
     """
@@ -471,8 +483,8 @@ def load_failure_code(exc: BaseException) -> str:
         return "timeout"
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        if status == 404:
-            return NOT_FOUND
+        # A 404 (or any other 4xx or 3xx) on the lookup route is a ROUTE answer, not
+        # "Neotoma has no such definition"; only a well-formed 200 can say that.
         if status == 429:
             return "throttled"
         if status >= 500:
@@ -634,6 +646,31 @@ class AgentDefinition:
         return self.agent_grant == "service"
 
 
+def _bounded(call, timeout: float):
+    """Run a blocking request and give up on it after ``timeout`` seconds in total.
+
+    httpx applies its timeout to each socket operation, so a server that trickles
+    bytes can outlast it. The request runs in a daemon thread and is abandoned at
+    the limit (the thread ends on its own when httpx's per-operation timeout fires).
+    """
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = call()
+        except BaseException as exc:  # noqa: BLE001 — re-raised in the caller
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise httpx.ReadTimeout("request exceeded its time budget")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 class AgentLoader:
     """
     Load an agent_definition entity from Neotoma by agent name.
@@ -655,12 +692,16 @@ class AgentLoader:
         Load agent_definition from Neotoma, or raise ``AgentDefinitionUnavailable``.
 
         A transient failure (timeout, transport error, 5xx, 429) is retried with
-        the short backoff in ``LOAD_BACKOFFS_S`` inside ``LOAD_TOTAL_CAP_S``; any
-        other failure is final at once. ``allow_undefined=True`` is the explicit,
-        narrow opt-in for a caller that runs this agent without a definition on
-        purpose: it turns ONLY a definite ``not_found`` into the "undefined"
-        definition and never a transient failure.
+        the short backoff in ``LOAD_BACKOFFS_S`` under the single deadline
+        ``LOAD_TOTAL_CAP_S``; any other failure is final at once.
+        ``allow_undefined=True`` is the explicit, narrow opt-in for a caller that
+        runs this agent without a definition on purpose: it turns ONLY authoritative
+        absence (a well-formed 200 whose ``entities`` list is empty) into the
+        "undefined" definition. A malformed response, a route error, a redirect, a
+        timeout: all of those raise, with or without the opt-in.
         """
+        if not self.agent_name.strip():
+            raise AgentDefinitionUnavailable(self.agent_name, "invalid_name", 0)
         if not NEOTOMA_BEARER_TOKEN:
             # Open-mode Neotoma instances accept unauthenticated reads. Proceed
             # without a token.
@@ -683,13 +724,15 @@ class AgentLoader:
 
     def _load_with_retry(self) -> AgentDefinition:
         started = _monotonic()
+        deadline = started + LOAD_TOTAL_CAP_S
         attempt = 0
         while True:
             attempt += 1
             try:
-                return self._load_once()
-            except AgentDefinitionUnavailable:
-                raise
+                return self._load_once(deadline)
+            except AgentDefinitionUnavailable as exc:
+                # Raised by validation with a final code; restamp the attempt count.
+                raise AgentDefinitionUnavailable(self.agent_name, exc.code, attempt) from None
             except Exception as exc:  # noqa: BLE001 — classified into a fixed code
                 code = load_failure_code(exc)
                 retries_done = attempt - 1
@@ -698,7 +741,7 @@ class AgentLoader:
                         self.agent_name, code, attempt
                     ) from None
                 delay = LOAD_BACKOFFS_S[retries_done]
-                if _monotonic() - started + delay > LOAD_TOTAL_CAP_S:
+                if _monotonic() + delay + MIN_ATTEMPT_TIMEOUT_S > deadline:
                     raise AgentDefinitionUnavailable(
                         self.agent_name, code, attempt
                     ) from None
@@ -708,52 +751,135 @@ class AgentLoader:
                 )
                 _sleep(delay)
 
-    def _load_once(self) -> AgentDefinition:
+    def _load_once(self, deadline: float) -> AgentDefinition:
         explicit_id = os.environ.get(f"{self._prefix}_AGENT_DEFINITION_ID", "")
         if explicit_id:
-            return self._load_by_id(explicit_id)
-        return self._load_by_name()
+            return self._load_by_id(explicit_id, deadline)
+        return self._load_by_name(deadline)
 
-    def _neotoma(self, method: str, url: str, body: "dict | None" = None) -> dict:
-        """Fetch JSON from Neotoma, returning the parsed body.
+    def _budget(self, default: float, deadline: float) -> float:
+        """The timeout for the next request: its default, never more than is left."""
+        left = deadline - _monotonic()
+        if left < MIN_ATTEMPT_TIMEOUT_S - 1e-9:
+            raise httpx.ReadTimeout("deadline reached")
+        return min(default, left)
+
+    def _neotoma(
+        self, method: str, url: str, body: "dict | None" = None, deadline: "float | None" = None
+    ) -> object:
+        """Fetch JSON from Neotoma, returning the parsed body (unvalidated).
 
         Per-agent AAuth-signed when ``NEOTOMA_AAUTH_VIA_CLI`` is on and this agent
         has a key; otherwise the unsigned/bearer httpx path (behavior unchanged).
         Falls back to bearer on any signing failure or non-2xx, so enabling
         signing can never reduce availability. Raises on transport error — callers
-        already handle that.
+        already handle that. Every request gets min(its default timeout, time left
+        before ``deadline``), the bearer fallback included.
         """
+        if deadline is None:
+            deadline = _monotonic() + LOAD_TOTAL_CAP_S
         if ns.via_cli_enabled() and ns.agent_identity(self.agent_name):
             try:
-                status, data = ns.signed_request(method, url, body, agent_name=self.agent_name)
+                status, data = ns.signed_request(
+                    method, url, body, agent_name=self.agent_name,
+                    timeout=self._budget(SIGNED_REQUEST_TIMEOUT_S, deadline),
+                )
                 if 200 <= status < 300:
                     return data
                 log.warning(
-                    f"[{self.agent_name}] signed {method} {url} -> {status}; falling back to bearer"
+                    f"[{self.agent_name}] signed {method} -> {status}; falling back to bearer"
                 )
             except Exception as exc:
                 log.warning(
-                    f"[{self.agent_name}] signed request failed ({exc}); falling back to bearer"
+                    f"[{self.agent_name}] signed request failed ({type(exc).__name__}); "
+                    "falling back to bearer"
                 )
-        if method.upper() == "GET":
-            resp = httpx.get(url, headers=_auth_headers(), timeout=10)
-        else:
-            resp = httpx.post(url, json=body, headers=_auth_headers(), timeout=10)
-        resp.raise_for_status()
+        timeout = self._budget(BEARER_REQUEST_TIMEOUT_S, deadline)
+        resp = _bounded(
+            (lambda: httpx.get(url, headers=_auth_headers(), timeout=timeout))
+            if method.upper() == "GET"
+            else (lambda: httpx.post(url, json=body, headers=_auth_headers(), timeout=timeout)),
+            timeout,
+        )
+        resp.raise_for_status()  # any non-2xx, redirects included, raises
         return resp.json()
 
-    def _load_by_id(self, entity_id: str) -> AgentDefinition:
-        url = f"{NEOTOMA_BASE_URL}/entities/{entity_id}"
-        data = self._neotoma("GET", url)
-        return self._parse(entity_id, data)
+    def _unavailable(self, code: str) -> AgentDefinitionUnavailable:
+        return AgentDefinitionUnavailable(self.agent_name, code, 1)
 
-    def _load_by_name(self) -> AgentDefinition:
+    def _validated_entities(self, data: object) -> list:
+        """The ``entities`` list of a well-formed query response, or raise.
+
+        Well-formed means: a JSON object, no error-shaped keys, an ``entities`` key
+        holding a list, and no sign that the page is partial. Anything else is
+        ``bad_response``, never absence.
+        """
+        if not isinstance(data, dict):
+            raise self._unavailable("bad_response")
+        if any(data.get(k) for k in ("error", "error_code", "errors", "detail")):
+            raise self._unavailable("bad_response")
+        entities = data.get("entities")
+        if not isinstance(entities, list):
+            raise self._unavailable("bad_response")
+        total = data.get("total")
+        if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
+            raise self._unavailable("bad_response")
+        if not entities:
+            # Absence is a positive claim, so it must not be a partial page: any
+            # sign of more results than were returned is not "none".
+            if total:
+                raise self._unavailable("bad_response")
+            for flag in ("has_more", "truncated", "next_offset", "next_cursor"):
+                if data.get(flag):
+                    raise self._unavailable("bad_response")
+        return entities
+
+    def _validated_snapshot(self, snap: object) -> dict:
+        """A definition snapshot with its fields typed, or raise ``bad_response``."""
+        if not isinstance(snap, dict):
+            raise self._unavailable("bad_response")
+        name = snap.get("name")
+        if not isinstance(name, str) or name.strip().lower() != self.agent_name:
+            raise self._unavailable("bad_response")  # missing, mistyped or a different name
+        for key in (
+            "description", "tier", "genus", "status", "prompt_markdown", "agent_grant",
+            "override_policy", "aauth_sub", "version", "notes",
+        ):
+            if snap.get(key) is not None and not isinstance(snap[key], str):
+                raise self._unavailable("bad_response")
+        allow = snap.get("tool_allowlist")
+        if allow is not None and not (
+            isinstance(allow, str)
+            or (isinstance(allow, (list, tuple)) and all(isinstance(t, str) for t in allow))
+        ):
+            raise self._unavailable("bad_response")
+        prov = snap.get("provenance")
+        if prov is not None and not isinstance(prov, dict):
+            raise self._unavailable("bad_response")
+        return snap
+
+    def _load_by_id(self, entity_id: str, deadline: float) -> AgentDefinition:
+        url = f"{NEOTOMA_BASE_URL}/entities/{entity_id}"
+        data = self._neotoma("GET", url, None, deadline)
+        if not isinstance(data, dict):
+            raise self._unavailable("bad_response")
+        if any(data.get(k) for k in ("error", "error_code", "errors", "detail")):
+            raise self._unavailable("bad_response")
+        snap = data.get("snapshot")
+        if snap is None and isinstance(data.get("entity"), dict):
+            snap = data["entity"].get("snapshot")
+        return self._parse(entity_id, {"snapshot": self._validated_snapshot(snap)})
+
+    def _load_by_name(self, deadline: float) -> AgentDefinition:
         """Search for agent_definition by name field via POST /entities/query.
 
         GET /entities does not exist on local Neotoma (404); /entities/query is
         the canonical list route (same fix applied to the Anthus orchestrator in
         PR #58). Its response nests the field dict as entity.snapshot.snapshot.
-        Raises on any failure; a 200 with no matching name is ``not_found``.
+
+        Absence is authoritative ONLY for a well-formed 200 whose ``entities`` list
+        is empty. A result for a different name, several results, a malformed
+        entry, an error-shaped or partial response: all ``AgentDefinitionUnavailable``.
         """
         url = f"{NEOTOMA_BASE_URL}/entities/query"
         body = {
@@ -762,19 +888,34 @@ class AgentLoader:
             "limit": 5,
             "include_snapshots": True,
         }
-        data = self._neotoma("POST", url, body)
-        entities = data.get("entities", [])
+        entities = self._validated_entities(self._neotoma("POST", url, body, deadline))
+        if not entities:
+            raise self._unavailable(NOT_FOUND)
+        # The search is fuzzy, so other agents' definitions may come back beside the
+        # one asked for. Every entry must still be well-formed, exactly one must carry
+        # THIS name, and that one's snapshot must validate. No exact match, or more
+        # than one, is not absence: it is an unreadable answer.
+        exact: list[tuple[str, dict]] = []
         for ent in entities:
+            if not isinstance(ent, dict):
+                raise self._unavailable("bad_response")
+            entity_id = ent.get("entity_id")
+            outer = ent.get("snapshot")
+            if not isinstance(entity_id, str) or not entity_id.strip() or not isinstance(outer, dict):
+                raise self._unavailable("bad_response")
             # Unwrap the doubly-nested snapshot to the flat field dict.
-            outer = ent.get("snapshot") or {}
             snap = outer.get("snapshot", outer)
-            if str(snap.get("name", "")).lower() == self.agent_name:
-                log.info(
-                    f"[{self.agent_name}] Loaded agent_definition "
-                    f"{ent['entity_id']} from Neotoma"
-                )
-                return self._parse(ent["entity_id"], {"snapshot": snap})
-        raise AgentDefinitionUnavailable(self.agent_name, NOT_FOUND, 1)
+            if not isinstance(snap, dict):
+                raise self._unavailable("bad_response")
+            name = snap.get("name")
+            if isinstance(name, str) and name.strip().lower() == self.agent_name:
+                exact.append((entity_id, snap))
+        if len(exact) != 1:
+            raise self._unavailable("bad_response")
+        entity_id, snap = exact[0]
+        snap = self._validated_snapshot(snap)
+        log.info(f"[{self.agent_name}] Loaded agent_definition {entity_id} from Neotoma")
+        return self._parse(entity_id, {"snapshot": snap})
 
     def _parse(self, entity_id: str, data: dict) -> AgentDefinition:
         snap = data.get("snapshot") or data.get("entity", {}).get("snapshot", {})
@@ -784,20 +925,26 @@ class AgentLoader:
         last_obs_id = provenance.get("name") or next(
             (v for v in provenance.values() if v), ""
         )
+
+        def text(key: str, default: str) -> str:
+            value = snap.get(key)
+            return default if value is None else value
+
+        allow = snap.get("tool_allowlist")
         return AgentDefinition(
             entity_id=entity_id,
-            name=snap.get("name", self.agent_name),
-            description=snap.get("description", ""),
-            tier=snap.get("tier", ""),
-            genus=snap.get("genus", ""),
-            status=snap.get("status", "active"),
-            prompt_markdown=snap.get("prompt_markdown", ""),
-            tool_allowlist=snap.get("tool_allowlist", "*"),
-            agent_grant=snap.get("agent_grant", "service"),
-            override_policy=snap.get("override_policy", ""),
-            aauth_sub=snap.get("aauth_sub", f"{self.agent_name}@ateles-swarm"),
-            version=snap.get("version", "1.0.0"),
-            notes=snap.get("notes", ""),
+            name=text("name", self.agent_name),
+            description=text("description", ""),
+            tier=text("tier", ""),
+            genus=text("genus", ""),
+            status=text("status", "active"),
+            prompt_markdown=text("prompt_markdown", ""),
+            tool_allowlist="*" if allow is None else allow,
+            agent_grant=text("agent_grant", "service"),
+            override_policy=text("override_policy", ""),
+            aauth_sub=text("aauth_sub", f"{self.agent_name}@ateles-swarm"),
+            version=text("version", "1.0.0"),
+            notes=text("notes", ""),
             raw=data,
             last_observation_id=str(last_obs_id) if last_obs_id else "",
         )

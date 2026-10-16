@@ -150,20 +150,6 @@ def test_a_response_that_is_not_json_is_final_at_once(neotoma):
     assert raised.value.code == "bad_response" and neotoma["calls"] == 1
 
 
-def test_the_wall_clock_cap_ends_the_retries(neotoma, monkeypatch):
-    clock = {"now": 0.0}
-    monkeypatch.setattr(al, "_monotonic", lambda: clock["now"], raising=False)
-    monkeypatch.setattr(al, "_sleep", lambda s: clock.__setitem__("now", clock["now"] + s), raising=False)
-    monkeypatch.setattr(al, "LOAD_TOTAL_CAP_S", 1.0, raising=False)
-    neotoma["script"] = ["timeout"]
-
-    with pytest.raises(AgentDefinitionUnavailable) as raised:
-        AgentLoader("pavo").load()
-
-    # The first 0.5 s wait fits inside 1.0 s; the next 1.5 s wait would not.
-    assert raised.value.attempts == 2
-
-
 # ── "there is no such definition" is a different fact ─────────────────────────
 
 
@@ -204,12 +190,12 @@ def test_the_explicit_id_path_fails_closed_too(neotoma, monkeypatch):
     assert raised.value.code == "timeout" and len(calls) == 3
 
 
-def test_a_404_on_the_explicit_id_is_not_found(neotoma, monkeypatch):
+def test_a_404_on_the_explicit_id_is_a_route_answer_not_absence(neotoma, monkeypatch):
     monkeypatch.setenv("PAVO_AGENT_DEFINITION_ID", "ent_x")
     monkeypatch.setattr(al.httpx, "get", lambda url, **kw: _Resp(status=404))
     with pytest.raises(AgentDefinitionUnavailable) as raised:
-        AgentLoader("pavo").load()
-    assert raised.value.code == "not_found"
+        AgentLoader("pavo").load(allow_undefined=True)
+    assert raised.value.code == "rejected"
 
 
 # ── a daemon's own startup ───────────────────────────────────────────────────
@@ -256,3 +242,322 @@ def test_planted_red_reinstating_the_stand_in_is_caught(neotoma, monkeypatch):
     d = AgentLoader("pavo").load()
 
     assert d.prompt_markdown == "" and d.tools == ["*"], "the reinstated stand-in is exactly the defect"
+
+
+# ── authoritative absence is narrow: everything else is unavailable ──────────
+
+import json as _json
+
+
+def _response(status=200, body=None, text=None):
+    request = httpx.Request("POST", "http://neotoma.invalid/entities/query")
+    if text is not None:
+        return httpx.Response(status, request=request, text=text)
+    return httpx.Response(status, request=request, content=_json.dumps(body).encode())
+
+
+def _entity(name="pavo", **snap):
+    snapshot = {"name": name, "prompt_markdown": "# the real role prompt",
+                "tool_allowlist": ["Read"], "status": "active"}
+    snapshot.update(snap)
+    return {"entity_id": f"ent_{name}", "snapshot": snapshot}
+
+
+NEGATIVE_CONTROLS = {
+    # the route or transport answered, not the lookup
+    "route 404": lambda: _response(404, {"error": "not found"}),
+    "route 404 empty": lambda: _response(404, {"entities": []}),
+    "400": lambda: _response(400, {"entities": []}),
+    "401": lambda: _response(401, {}),
+    "403": lambda: _response(403, {"entities": []}),
+    "301 redirect": lambda: _response(301, {"entities": []}),
+    "302 redirect": lambda: _response(302, {}),
+    "204 no body": lambda: _response(204, text=""),
+    # wrong envelope shape or types
+    "list body": lambda: _response(200, []),
+    "string body": lambda: _response(200, "ok"),
+    "null body": lambda: _response(200, None),
+    "not json": lambda: _response(200, text="<html>gateway</html>"),
+    "missing entities": lambda: _response(200, {}),
+    "renamed field": lambda: _response(200, {"results": []}),
+    "entities null": lambda: _response(200, {"entities": None}),
+    "entities object": lambda: _response(200, {"entities": {}}),
+    "entities string": lambda: _response(200, {"entities": "[]"}),
+    # error-shaped envelopes
+    "error with empty list": lambda: _response(200, {"entities": [], "error": "boom"}),
+    "error code only": lambda: _response(200, {"error_code": "ERR_X", "message": "no"}),
+    "errors list": lambda: _response(200, {"entities": [], "errors": ["x"]}),
+    # a partial page cannot claim absence
+    "partial: total says 3": lambda: _response(200, {"entities": [], "total": 3}),
+    "partial: has_more": lambda: _response(200, {"entities": [], "has_more": True}),
+    "partial: next cursor": lambda: _response(200, {"entities": [], "next_cursor": "abc"}),
+    "total mistyped": lambda: _response(200, {"entities": [], "total": "0"}),
+    # results that are not this agent's definition
+    "different name": lambda: _response(200, {"entities": [_entity("someone-else")]}),
+    "several different names": lambda: _response(200, {"entities": [_entity("a"), _entity("b")]}),
+    "conflicting duplicates": lambda: _response(
+        200, {"entities": [_entity("pavo"), {**_entity("pavo"), "entity_id": "ent_other"}]}),
+    "same entity twice": lambda: _response(200, {"entities": [_entity("pavo"), _entity("pavo")]}),
+    # a malformed "found"
+    "entry not an object": lambda: _response(200, {"entities": ["pavo"]}),
+    "entry without id": lambda: _response(200, {"entities": [{"snapshot": {"name": "pavo"}}]}),
+    "entry id mistyped": lambda: _response(200, {"entities": [{"entity_id": 7, "snapshot": {"name": "pavo"}}]}),
+    "snapshot not an object": lambda: _response(200, {"entities": [{"entity_id": "e", "snapshot": "x"}]}),
+    "snapshot missing": lambda: _response(200, {"entities": [{"entity_id": "e"}]}),
+    "name missing": lambda: _response(200, {"entities": [{"entity_id": "e", "snapshot": {"prompt_markdown": "p"}}]}),
+    "name mistyped": lambda: _response(200, {"entities": [_entity(name=5)]}),
+    "prompt mistyped": lambda: _response(200, {"entities": [_entity(prompt_markdown=5)]}),
+    "allowlist object": lambda: _response(200, {"entities": [_entity(tool_allowlist={"a": 1})]}),
+    "allowlist item mistyped": lambda: _response(200, {"entities": [_entity(tool_allowlist=["Read", 3])]}),
+    "status mistyped": lambda: _response(200, {"entities": [_entity(status=["active"])]}),
+    "provenance mistyped": lambda: _response(200, {"entities": [_entity(provenance="x")]}),
+    "good entry beside a malformed one": lambda: _response(200, {"entities": [_entity("pavo"), "junk"]}),
+}
+
+
+@pytest.fixture
+def lookup(monkeypatch):
+    state = {"make": None, "calls": 0}
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(al, "_sleep", lambda s: None, raising=False)
+
+    def post(url, **kwargs):
+        state["calls"] += 1
+        return state["make"]()
+
+    monkeypatch.setattr(al.httpx, "post", post)
+    return state
+
+
+@pytest.mark.parametrize("name", sorted(NEGATIVE_CONTROLS))
+def test_a_negative_control_is_unavailable_and_never_a_stand_in(lookup, name):
+    lookup["make"] = NEGATIVE_CONTROLS[name]
+    for opt_in in (False, True):
+        with pytest.raises(AgentDefinitionUnavailable) as raised:
+            AgentLoader("pavo").load(allow_undefined=opt_in)
+        assert raised.value.code != "not_found", f"{name} was read as authoritative absence"
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_an_empty_name_is_refused_before_any_lookup(lookup, name):
+    lookup["make"] = lambda: _response(200, {"entities": []})
+    with pytest.raises(AgentDefinitionUnavailable) as raised:
+        AgentLoader(name).load(allow_undefined=True)
+    assert raised.value.code == "invalid_name" and lookup["calls"] == 0
+
+
+def test_positive_control_a_true_empty_200_is_absence_only_with_the_opt_in(lookup):
+    lookup["make"] = lambda: _response(200, {"entities": []})
+    with pytest.raises(AgentDefinitionUnavailable) as raised:
+        AgentLoader("pavo").load()
+    assert raised.value.code == "not_found"
+    assert AgentLoader("pavo").load(allow_undefined=True).is_stub is True
+
+
+def test_positive_control_an_empty_200_with_zero_total_is_absence(lookup):
+    lookup["make"] = lambda: _response(200, {"entities": [], "total": 0, "has_more": False})
+    assert AgentLoader("pavo").load(allow_undefined=True).load_error == "not_found"
+
+
+def test_positive_control_a_well_formed_definition_loads(lookup):
+    lookup["make"] = lambda: _response(200, {"entities": [_entity("pavo")]})
+    d = AgentLoader("pavo").load()
+    assert d.is_stub is False and d.entity_id == "ent_pavo"
+    assert d.prompt_markdown == "# the real role prompt" and d.tools == ["Read"]
+
+
+def test_positive_control_the_doubly_nested_snapshot_loads(lookup):
+    nested = {"entity_id": "ent_pavo", "snapshot": {"snapshot": _entity("pavo")["snapshot"]}}
+    lookup["make"] = lambda: _response(200, {"entities": [nested]})
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+
+
+def test_positive_control_the_search_may_return_other_agents_beside_it(lookup):
+    lookup["make"] = lambda: _response(200, {"entities": [_entity("pavo-legacy"), _entity("pavo")]})
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+
+
+def test_positive_control_a_partial_page_that_contains_the_definition_loads(lookup):
+    lookup["make"] = lambda: _response(200, {"entities": [_entity("pavo")], "total": 9})
+    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
+
+
+def test_positive_control_null_optional_fields_take_their_defaults(lookup):
+    lookup["make"] = lambda: _response(
+        200, {"entities": [_entity("pavo", description=None, tool_allowlist=None, status=None)]})
+    d = AgentLoader("pavo").load()
+    assert d.status == "active" and d.tools == ["*"]
+
+
+def test_planted_red_loosened_classification_accepts_the_negative_controls(lookup, monkeypatch):
+    """Loosen it the way the defect was: treat any 404, any non-list `entities` and any
+    unmatched result as absence. The table would then read these as absence."""
+    real = AgentLoader._load_by_name
+
+    def loose(self, deadline):
+        try:
+            return real(self, deadline)
+        except Exception as exc:  # noqa: BLE001
+            code = exc.code if isinstance(exc, AgentDefinitionUnavailable) else al.load_failure_code(exc)
+            if code in ("bad_response", "rejected"):
+                raise self._unavailable(al.NOT_FOUND) from None
+            raise
+
+    monkeypatch.setattr(AgentLoader, "_load_by_name", loose)
+    reached_the_stand_in = []
+    for name in ("route 404", "list body", "missing entities", "error with empty list",
+                 "different name", "partial: total says 3"):
+        lookup["make"] = NEGATIVE_CONTROLS[name]
+        try:
+            d = AgentLoader("pavo").load(allow_undefined=True)
+        except AgentDefinitionUnavailable:
+            continue
+        if d.is_stub:
+            reached_the_stand_in.append(name)
+    assert reached_the_stand_in, "the loosened rule must let some control reach the stand-in"
+
+
+# ── the deadline is real: requests are bounded, not only the waits ───────────
+#
+# The clock advances on REQUEST DURATION as well as on sleep. A request runs for the
+# pattern's duration or for the timeout it was given, whichever is shorter.
+
+CAP = 25.0
+HANG = 10_000.0
+
+
+class _VClock:
+    def __init__(self):
+        self.now = 500.0
+        self.start = self.now
+        self.launched = []  # (timeout, time left at launch)
+
+    @property
+    def elapsed(self):
+        return self.now - self.start
+
+
+def _virtual(monkeypatch, clock, durations, *, signed=False):
+    calls = {"n": 0}
+
+    def take(timeout):
+        i = min(calls["n"], len(durations) - 1)
+        calls["n"] += 1
+        clock.launched.append((timeout, CAP - clock.elapsed))
+        clock.now += min(durations[i], timeout)
+        return durations[i] >= timeout
+
+    def post(url, json=None, headers=None, timeout=None):
+        if take(timeout):
+            raise httpx.ReadTimeout("timed out")
+        return _response(200, {"entities": []})
+
+    def signed_request(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        if take(timeout):
+            raise RuntimeError("helper timed out")
+        return 200, {"entities": []}
+
+    monkeypatch.setattr(al, "_monotonic", lambda: clock.now)
+    monkeypatch.setattr(al, "_sleep", lambda s: setattr(clock, "now", clock.now + s), raising=False)
+    monkeypatch.setattr(al.httpx, "post", post)
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: signed)
+    monkeypatch.setattr(al.ns, "agent_identity", lambda name, sub=None: {"key": "k"} if signed else None)
+    monkeypatch.setattr(al.ns, "signed_request", signed_request)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+
+
+LOAD_PATTERNS = {
+    "first hangs": [HANG, 0.1],
+    "second hangs": [0.1, HANG, 0.1],
+    "all hang": [HANG],
+    "slow then hang": [9.0, HANG],
+    "third hangs": [HANG, HANG, 0.1],
+    "fast server errors": [0.1],
+}
+
+
+@pytest.mark.parametrize("signed", [False, True], ids=["bearer", "signed+fallback"])
+@pytest.mark.parametrize("name", sorted(LOAD_PATTERNS))
+def test_a_load_never_outlasts_the_cap(monkeypatch, name, signed):
+    clock = _VClock()
+    _virtual(monkeypatch, clock, LOAD_PATTERNS[name], signed=signed)
+
+    try:
+        AgentLoader("pavo").load()
+    except AgentDefinitionUnavailable:
+        pass
+
+    assert clock.elapsed <= CAP + 1e-9, f"{name}: {clock.elapsed}s"
+    for timeout, left in clock.launched:
+        assert timeout <= left + 1e-9, "a request was launched with more time than was left"
+
+
+def test_all_hang_uses_the_whole_budget_and_not_a_second_more(monkeypatch):
+    clock = _VClock()
+    _virtual(monkeypatch, clock, [HANG])
+
+    with pytest.raises(AgentDefinitionUnavailable) as raised:
+        AgentLoader("pavo").load()
+
+    assert raised.value.code == "timeout"
+    assert [t for t, _ in clock.launched] == [10.0, 10.0, 3.0]
+    assert clock.elapsed == pytest.approx(25.0)
+
+
+def test_a_retry_that_cannot_fit_is_not_started(monkeypatch):
+    clock = _VClock()
+    _virtual(monkeypatch, clock, [HANG])
+    monkeypatch.setattr(al, "LOAD_TOTAL_CAP_S", 12.0)
+
+    with pytest.raises(AgentDefinitionUnavailable) as raised:
+        AgentLoader("pavo").load()
+
+    # 10 s used; a retry needs 0.5 s of backoff plus the 2 s minimum: 12.5 > 12
+    assert raised.value.attempts == 1 and len(clock.launched) == 1
+
+
+def test_the_signed_request_and_its_bearer_fallback_share_one_deadline(monkeypatch):
+    clock = _VClock()
+    _virtual(monkeypatch, clock, [HANG], signed=True)
+
+    with pytest.raises(AgentDefinitionUnavailable):
+        AgentLoader("pavo").load()
+
+    # the signing helper takes 20 s of the 25; the fallback gets the 5 s that are left
+    assert clock.launched[0] == (20.0, 25.0)
+    assert clock.launched[1][0] == pytest.approx(5.0)
+    assert clock.elapsed <= CAP + 1e-9
+
+
+def test_a_request_that_trickles_is_cut_at_its_budget_in_real_time(monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(al, "BEARER_REQUEST_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(al, "LOAD_TOTAL_CAP_S", 1.0)
+    monkeypatch.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(al, "LOAD_BACKOFFS_S", (0.02, 0.02))
+    monkeypatch.setattr(al, "_monotonic", _time.monotonic)
+    monkeypatch.setattr(al, "_sleep", _time.sleep, raising=False)
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(al.httpx, "post", lambda *a, **k: _time.sleep(5))
+    t0 = _time.monotonic()
+
+    with pytest.raises(AgentDefinitionUnavailable):
+        AgentLoader("pavo").load()
+
+    assert _time.monotonic() - t0 < 1.6
+
+
+def test_planted_red_the_old_check_overruns_the_cap(monkeypatch):
+    """The previous rule: full default timeouts, and a retry check of elapsed + wait only."""
+    clock = _VClock()
+    _virtual(monkeypatch, clock, [HANG])
+    monkeypatch.setattr(AgentLoader, "_budget", lambda self, default, deadline: default)
+    monkeypatch.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.0)
+
+    with pytest.raises(AgentDefinitionUnavailable):
+        AgentLoader("pavo").load()
+
+    assert clock.elapsed > CAP, "the old rule is the defect: three 10 s failures took 32 s"

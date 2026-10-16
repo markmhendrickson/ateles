@@ -570,9 +570,16 @@ def _load_agent_def(role: str) -> AgentDefinition:
     degraded on its SKILL.md and is reported once per role (see the degraded
     branch of ``_run_skill_once``). It does not cover a failed load.
     """
-    if role not in _agent_def_cache:
-        _agent_def_cache[role] = AgentLoader(role).load(allow_undefined=True)
-    return _agent_def_cache[role]
+    if role in _agent_def_cache:
+        return _agent_def_cache[role]
+    agent_def = AgentLoader(role).load(allow_undefined=True)
+    if agent_def.is_stub:
+        # The "no definition" result is returned for this dispatch but never
+        # remembered: only a validated, found definition is cached, so a role
+        # registered later is picked up without a restart.
+        return agent_def
+    _agent_def_cache[role] = agent_def
+    return agent_def
 
 
 def _load_active_policy_prompt(role: str) -> str:

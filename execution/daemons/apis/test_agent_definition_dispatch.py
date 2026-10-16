@@ -170,7 +170,7 @@ def test_planted_red_a_stand_in_would_dispatch_with_wildcard_tools(neotoma, monk
     result = _once()
 
     assert result.definition_unavailable is False, "the reinstated stand-in lets the dispatch proceed"
-    stand_in = skill_runner._agent_def_cache["pavo"]
+    stand_in = skill_runner._load_agent_def("pavo")
     assert stand_in.prompt_markdown == "" and stand_in.tools == ["*"]
 
 
@@ -200,3 +200,32 @@ def test_a_retry_safe_dispatch_does_not_fail_over_or_cool_a_provider(neotoma, mo
     assert result.definition_unavailable is True
     assert len(attempts) == 1, attempts
     assert cooled == []
+
+
+def test_only_a_validated_found_definition_is_cached(neotoma):
+    """The "no definition" result serves one dispatch and is not remembered; a role
+    registered afterwards is picked up on the next one."""
+    neotoma["script"] = ["none", "real"]
+
+    first = skill_runner._load_agent_def("pavo")
+    assert first.is_stub is True
+    assert "pavo" not in skill_runner._agent_def_cache
+
+    second = skill_runner._load_agent_def("pavo")
+    assert second.prompt_markdown == "# the real role prompt"
+    assert skill_runner._agent_def_cache["pavo"] is second
+
+
+@pytest.mark.parametrize("malformed", [{"error": "boom"}, {"results": []}, {"entities": "x"}])
+def test_a_malformed_lookup_is_refused_not_degraded(neotoma, monkeypatch, malformed):
+    """The degraded path is for authoritative absence only."""
+    class _Bad(_Resp):
+        pass
+
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: _Bad(malformed))
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {})
+
+    result = _once()
+
+    assert result.definition_unavailable is True
+    assert skill_runner._agent_def_cache == {}

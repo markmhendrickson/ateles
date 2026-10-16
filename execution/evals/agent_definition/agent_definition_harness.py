@@ -11,9 +11,16 @@ Each scenario scripts Neotoma's answers to the definition query, one per request
 last repeats), each one of: ``real`` (the real definition), ``none`` (no definition),
 ``timeout``, ``connect``, or an HTTP status number.
 
+Also: ``hang`` (the request runs until the timeout it was given, on a clock that
+advances with request duration and with waits), ``malformed`` (a 200 whose body is an
+error-shaped envelope), ``other_name`` (a 200 holding only another agent's
+definition).
+
 ``mutation`` reinstates a defect so a test can show the checks go red:
 ``reinstate_stub`` (a failed load becomes a stand-in again), ``no_retry`` (no
-retry), ``retry_rejected`` (a 4xx is retried).
+retry), ``retry_rejected`` (a 4xx is retried), ``loose_absence`` (a malformed answer
+or a route error counts as "no such definition"), ``old_deadline`` (full default
+timeouts, and a retry check of elapsed + wait only).
 
 Synthetic and public-safe: no key, no token, no operator data.
 """
@@ -39,7 +46,7 @@ for _p in (str(REPO_ROOT), str(APIS_DIR)):
 import skill_runner  # noqa: E402
 from lib.daemon_runtime import agent_loader as al  # noqa: E402
 
-MUTATIONS = ("none", "reinstate_stub", "no_retry", "retry_rejected")
+MUTATIONS = ("none", "reinstate_stub", "no_retry", "retry_rejected", "loose_absence", "old_deadline")
 REAL_PROMPT = "# the real role prompt"
 REAL = {
     "entities": [
@@ -89,6 +96,8 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
     assert mutation in MUTATIONS, mutation
     script = list(scenario["neotoma"])
     obs: dict = {"requests": 0, "sleeps": [], "spawned": [], "cooled": []}
+    vclock = {"now": 5000.0}
+    obs["vclock"] = vclock
     capture = _Capture()
     loggers = [logging.getLogger(n) for n in ("lib.daemon_runtime.agent_loader", "apis.skill_runner")]
     for lg in loggers:
@@ -108,12 +117,24 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         mp.setenv("APIS_USAGE_PROBE", "off")
         mp.setattr(al.ns, "via_cli_enabled", lambda: False)
         mp.setattr(al, "NEOTOMA_BEARER_TOKEN", "eval-token-not-real")
-        mp.setattr(al, "_sleep", lambda s: obs["sleeps"].append(s), raising=False)
+        def _sleep(seconds):
+            obs["sleeps"].append(seconds)
+            vclock["now"] += seconds
+
+        mp.setattr(al, "_sleep", _sleep, raising=False)
+        mp.setattr(al, "_monotonic", lambda: vclock["now"], raising=False)
         skill_runner._agent_def_cache.clear()
 
         def post(url, **kwargs):
             obs["requests"] += 1
             outcome = str(script.pop(0) if len(script) > 1 else script[0])
+            if outcome == "hang":
+                vclock["now"] += kwargs.get("timeout") or 0
+                raise httpx.ReadTimeout("timed out (private detail)")
+            if outcome == "malformed":
+                return _Resp({"error": "boom", "entities": []})
+            if outcome == "other_name":
+                return _Resp({"entities": [{"entity_id": "e2", "snapshot": {"name": "someone-else"}}]})
             if outcome == "timeout":
                 raise httpx.ReadTimeout("timed out (private detail)")
             if outcome == "connect":
@@ -144,6 +165,22 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
                     return self._undefined_definition(exc.code)
 
             mp.setattr(al.AgentLoader, "load", reinstated)
+        if mutation == "loose_absence":
+            real_by_name = al.AgentLoader._load_by_name
+
+            def loose(self, deadline):
+                try:
+                    return real_by_name(self, deadline)
+                except Exception as exc:  # noqa: BLE001
+                    code = exc.code if isinstance(exc, al.AgentDefinitionUnavailable) else al.load_failure_code(exc)
+                    if code in ("bad_response", "rejected"):
+                        raise self._unavailable(al.NOT_FOUND) from None
+                    raise
+
+            mp.setattr(al.AgentLoader, "_load_by_name", loose)
+        if mutation == "old_deadline":
+            mp.setattr(al.AgentLoader, "_budget", lambda self, default, deadline: default)
+            mp.setattr(al, "MIN_ATTEMPT_TIMEOUT_S", 0.0)
         if mutation == "no_retry":
             mp.setattr(al, "LOAD_BACKOFFS_S", ())
         if mutation == "retry_rejected":
@@ -214,6 +251,10 @@ def check(scenario: dict, obs: dict) -> list[str]:
             bad.append("a stand-in definition (empty prompt / wildcard tools) was used")
     if "requests" in exp:
         want("requests to Neotoma", obs["requests"], exp["requests"])
+    if "max_seconds" in exp:
+        elapsed = obs["vclock"]["now"] - 5000.0
+        if elapsed > exp["max_seconds"] + 1e-9:
+            bad.append(f"the load took {elapsed}s of waits and requests, over {exp['max_seconds']}s")
     if "sleeps" in exp:
         want("backoff waits", obs["sleeps"], exp["sleeps"])
     if exp.get("nothing_spawned"):
