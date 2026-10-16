@@ -426,7 +426,7 @@ def test_delivery_token_is_job_only_minted_at_launch_and_revoked(monkeypatch, ou
         assert MINTED.encode() not in files["/run/job/stdin"]
 
 
-def test_matching_delivery_readback_supplies_the_runner_artifact():
+def test_matching_fields_without_runner_origin_stay_unconfirmed():
     from test_fly_runner import complete_record
 
     job = fly_runner.FlyJob(
@@ -441,18 +441,17 @@ def test_matching_delivery_readback_supplies_the_runner_artifact():
         delivery={"branch": BRANCH},
     )
     record = complete_record(
-        job.run_id,
+        job.run_id, role=job.role, provider=job.provider, repository=job.repository,
         delivery_status="opened",
         delivery_branch=BRANCH,
         delivery_commit=COMMIT,
         pr_number=99,
         pr_url=f"https://github.com/{REPO}/pull/99",
     )
-    assert fly_runner.FlyExecutor._result_from_record(None, job, record)[0] == 0
-    assert (
-        skill_runner._fly_delivery_fields(job, unknown=False)["fly_pr_url"]
-        == record["pr_url"]
-    )
+    with pytest.raises(fly_runner.FlyResultUnreadable, match="runner-origin proof"):
+        fly_runner.FlyExecutor._result_from_record(None, job, record)
+    assert job.outcome_unknown and job.delivery_result is None
+    assert skill_runner._fly_delivery_fields(job, unknown=True)["fly_delivery_status"] == "unknown"
 
 
 def test_accounting_settlement_and_month_rollover_preserve_delivery_binding(
@@ -464,7 +463,7 @@ def test_accounting_settlement_and_month_rollover_preserve_delivery_binding(
     ledger = delivery._delivery_ledger()
     now = [datetime(2026, 10, 16, tzinfo=timezone.utc).timestamp()]
     ledger._clock = lambda: now[0]
-    entry = {"status": "unknown", "run_id": "run-123", "branch": BRANCH}
+    entry = {"status": "unknown", "run_id": "run-123", "branch": BRANCH, "recorded_at": 1.0}
     assert ledger.record_delivery(key, entry, retryable=frozenset())
     config = fly_runner.FlyConfig.from_env()
     ledger.reserve(config, run_id="run-123", owner="test-owner", max_run_seconds=60)
@@ -530,7 +529,8 @@ def test_retry_and_deferred_task_entrances_read_the_durable_ledger(
     snapshot = task_snapshot()
     store.rows[eid] = snapshot.copy()
     delivery._record(
-        REPO + "#123", {"status": status, "branch": BRANCH, "run_id": "run-123"}
+        REPO + "#123", {"status": status, "branch": BRANCH, "run_id": "run-123",
+                        "recorded_at": 1.0, "commit": "", "reason": "", "pr_number": None, "pr_url": ""}
     )
 
     async def never(*a, **kw):

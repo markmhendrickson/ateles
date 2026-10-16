@@ -799,9 +799,14 @@ def fly_delivery_instructions(plan: FlyDeliveryPlan) -> str:
 
 
 def fly_delivery_key(repository: str, issue: tuple[str, int] | None, task_id: str = "") -> str:
+    import fly_runner
+
+    repo = validate_repository(repository).lower()
     if issue:
-        return f"{issue[0]}#{issue[1]}"
-    return f"{repository}#task:{task_id}"
+        if validate_repository(issue[0]).lower() != repo:
+            raise BuildWorktreeError("delivery issue names another repository")
+        return fly_runner.canonical_delivery_key(f"{repo}#{issue[1]}")
+    return fly_runner.canonical_delivery_key(f"{repo}#task:{task_id}")
 
 
 def _registry_path() -> Path:
@@ -826,6 +831,7 @@ def fly_delivery_blocker(key: str) -> str:
     import fly_runner
 
     try:
+        key = fly_runner.canonical_delivery_key(key)
         entry = _delivery_ledger().delivery_receipts().get(key)
     except (OSError, fly_runner.FlyLedgerError):
         return ("the Fly delivery ledger could not be read, so whether a delivery for "
@@ -842,7 +848,8 @@ def _record(key: str, entry: dict | None) -> None:
     import fly_runner
 
     try:
-        _delivery_ledger().record_delivery(key, entry)
+        if not _delivery_ledger().record_delivery(key, entry):
+            raise ValueError("delivery receipt persistence was not confirmed")
     except fly_runner.FlyLedgerError as exc:
         raise ValueError(str(exc)) from None
 
@@ -886,15 +893,19 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
                     or result.remote_outcome_unknown)
     if not launched:
         # Nothing reached Fly: no record is kept.
-        with contextlib.suppress(OSError, ValueError):
+        try:
             _record(plan.key, None)
+        except (OSError, ValueError):
+            return blocked("delivery receipt release was not confirmed; not falling back")
         return None if result.fly_ineligible_before_launch else result
-    with contextlib.suppress(OSError, ValueError):
+    try:
         _record(plan.key, {"status": result.fly_delivery_status or "unknown",
                            "branch": plan.branch, "run_id": result.remote_run_id,
                            "commit": result.fly_delivery_commit,
                            "reason": result.fly_delivery_reason, "pr_number": result.fly_pr_number,
                            "pr_url": result.fly_pr_url, "recorded_at": time.time()})  # fmt: skip
+    except (OSError, ValueError):
+        return blocked("delivery receipt persistence was not confirmed; outcome unresolved")
     return result
 
 

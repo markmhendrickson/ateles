@@ -839,13 +839,16 @@ class FlyLedger:
             if record["id"] != key:
                 raise FlyLedgerError(f"Fly ledger {name}: owner {key} names another owner")
             owners[key] = copy.deepcopy(record)
-        deliveries = raw.get("deliveries", {})
-        if not isinstance(deliveries, dict) or not all(
-            isinstance(key, str) and isinstance(value, dict)
-            and isinstance(value.get("status"), str)
-            for key, value in deliveries.items()
-        ):
+        raw_deliveries = raw.get("deliveries", {})
+        if not isinstance(raw_deliveries, dict):
             raise FlyLedgerError(f"Fly ledger {name}: delivery receipts are unreadable")
+        deliveries = {}
+        for key, entry in raw_deliveries.items():
+            canonical = canonical_delivery_key(key)
+            validate_delivery_receipt(canonical, entry)
+            if canonical in deliveries and deliveries[canonical] != entry:
+                raise FlyLedgerError("conflicting delivery receipts require reconciliation")
+            deliveries[canonical] = copy.deepcopy(entry)
         period = {"month": raw["month"], "day": raw["day"], "spend_usd": raw["spend_usd"],
                   "launches_today": raw["launches_today"]}  # fmt: skip
         self._roll(period, now)  # refuses a later period; resets only on a rollover
@@ -909,7 +912,13 @@ class FlyLedger:
         if not self.path.exists():
             return {}
         with self._locked():
-            return self._snapshot(self._clock()).deliveries
+            snap = self._snapshot(self._clock())
+            _, raw = self._read_document()
+            if isinstance(raw, dict) and raw.get("deliveries", {}) != snap.deliveries:
+                self._save(snap.document())
+                if self._snapshot(self._clock()).deliveries != snap.deliveries:
+                    raise FlyLedgerError("delivery reconciliation did not read back")
+            return snap.deliveries
 
     def record_delivery(self, key: str, entry: dict | None, *,
                         retryable: frozenset[str] | None = None) -> bool:
@@ -919,6 +928,9 @@ class FlyLedger:
         before the caller may send anything to Fly. Accounting/reaper writes
         preserve these bindings through ``LedgerSnapshot.document``.
         """
+        key = canonical_delivery_key(key)
+        if entry is not None:
+            validate_delivery_receipt(key, entry)
         with self._locked():
             data = self._load()
             receipts = data.setdefault("deliveries", {})
@@ -1626,6 +1638,59 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
 
 DELIVERY_STATUSES = frozenset({"opened", "updated", "no_changes", "clone_failed",
                                "not_delivered", "push_failed", "pr_failed", "no_time"})
+
+
+def canonical_delivery_key(key: str) -> str:
+    """One durable identity for both callers and preexisting receipt spellings."""
+    if not isinstance(key, str) or key.count("#") != 1:
+        raise FlyLedgerError("delivery receipt key is invalid")
+    repo, subject = key.split("#")
+    try:
+        repo = _delivery_repository(repo).lower()
+    except FlyIneligible:
+        raise FlyLedgerError("delivery receipt repository is invalid") from None
+    if subject.startswith("task:"):
+        if not subject[5:] or any(c.isspace() for c in subject):
+            raise FlyLedgerError("delivery receipt task identity is invalid")
+    elif re.fullmatch(r"[0-9]+", subject) and int(subject) > 0:
+        subject = str(int(subject))
+    else:
+        raise FlyLedgerError("delivery receipt issue identity is invalid")
+    return f"{repo}#{subject}"
+
+
+def validate_delivery_receipt(key: str, entry: Any) -> None:
+    """Validate present receipts before any replay or retry decision."""
+    statuses = DELIVERY_STATUSES | {"launching", "unknown", "unreported"}
+    if (not isinstance(entry, dict) or not isinstance(entry.get("status"), str)
+            or entry["status"] not in statuses
+            or not isinstance(entry.get("branch"), str) or not entry["branch"]
+            or not isinstance(entry.get("run_id"), str)
+            or not _finite_number(entry.get("recorded_at"), 0, MAX_RECORD_NUMBER)):
+        raise FlyLedgerError("delivery receipt is incomplete or invalid")
+    status = entry["status"]
+    if status not in {"launching", "unknown", "unreported"} and not entry["run_id"]:
+        raise FlyLedgerError("delivery receipt has no run identity")
+    if status not in {"launching", "unknown", "unreported"} and not {"commit", "reason", "pr_number", "pr_url"} <= entry.keys():
+        raise FlyLedgerError("delivery receipt outcome fields are incomplete")
+    for metadata in ("commit", "reason", "pr_url"):
+        if metadata in entry and not isinstance(entry[metadata], str):
+            raise FlyLedgerError("delivery receipt field has the wrong type")
+    commit = entry.get("commit", "")
+    if commit and re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise FlyLedgerError("delivery receipt commit is invalid")
+    number, url = entry.get("pr_number"), entry.get("pr_url", "")
+    if status in {"opened", "updated"}:
+        repo = key.split("#", 1)[0]
+        if (not commit or type(number) is not int or number <= 0
+                or url != f"https://github.com/{repo}/pull/{number}"):
+            raise FlyLedgerError("delivery receipt artifact is incomplete")
+    elif number is not None or url:
+        raise FlyLedgerError("delivery receipt status conflicts with its artifact")
+    if status in {"clone_failed", "not_delivered", "no_changes", "launching"} and commit:
+        raise FlyLedgerError("delivery receipt status conflicts with its commit")
+    if status == "pr_failed" and not commit:
+        raise FlyLedgerError("delivery receipt lacks its pushed commit")
 
 
 def delivery_result_from_record(record: dict) -> dict:
@@ -2577,14 +2642,28 @@ class FlyExecutor:
             raise FlyResultUnreadable("result record does not belong to this run")
         rc = record["exit_code"]
         if job.delivery is not None:
+            if (record.get("role") != job.role or record.get("provider") != job.provider
+                    or not isinstance(record.get("repository"), str)
+                    or record["repository"].lower() != job.repository.lower()):
+                raise FlyResultUnreadable("delivery record job identity differs")
+            if not record["probe_ok"]:
+                raise FlyResultUnreadable("delivery record credential probe was not successful")
             got = delivery_result_from_record(record)
+            if (got["delivery_status"] in {"opened", "updated", "no_changes"}
+                    and (rc != 0 or record["timed_out"] or record["refused"])):
+                raise FlyResultUnreadable("delivery status conflicts with execution outcome")
             if got["delivery_status"] in {"opened", "updated"}:
                 expected_url = f"https://github.com/{job.repository}/pull/{got['pr_number']}"
                 if (got["pr_url"] != expected_url or got["pr_number"] is None
                         or got["delivery_branch"] != job.delivery["branch"]
                         or re.fullmatch(r"[0-9a-f]{40}", got["delivery_commit"]) is None):
                     raise FlyResultUnreadable("delivery artifact does not match its job")
-            job.delivery_result = got
+            # A flattened result has no admitted runner-origin evidence. The
+            # canonical attribution/runner isolation dependency must be proved
+            # before this seam can accept delivery completion or safe retry.
+            # Do not synthesize proof from the consistency fields above.
+            job.outcome_unknown = True
+            raise FlyResultUnreadable("canonical runner-origin proof unavailable; delivery unconfirmed")
         if record["probe_ok"] is False:
             log.error(f"[fly] run={job.run_id} credential probe failed: {record['refused']}")
         stdout = redact_nonces(record["stdout"])

@@ -9,7 +9,8 @@ import pytest
 
 import build_delivery as delivery
 import fly_runner
-from test_fly_delivery_dispatch import BRANCH, COMMIT, REPO, isolated_receipt, result
+from test_fly_delivery_dispatch import BRANCH, COMMIT, REPO, result
+from test_fly_delivery_dispatch import isolated_receipt as isolated_receipt
 from test_fly_runner import complete_record
 
 
@@ -84,5 +85,5 @@ def test_result_job_and_execution_bindings_precede_delivery_acceptance(changes):
                              delivery_commit=COMMIT, pr_number=99,
                              pr_url=f"https://github.com/{REPO}/pull/99")
     record.update(changes)
-    with pytest.raises(fly_runner.FlyResultUnreadable):
+    with pytest.raises(fly_runner.FlyResultUnreadable, match="job identity|credential probe|execution outcome"):
         fly_runner.FlyExecutor._result_from_record(None, job, record)
