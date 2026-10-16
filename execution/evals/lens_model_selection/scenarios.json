@@ -1217,7 +1217,9 @@
       "reader_dependency": "available",
       "args": [
         "--provider",
-        "codex"
+        "codex",
+        "--action-class",
+        "lens_review:arch"
       ],
       "expect": {
         "exit_code": 0,
@@ -1226,7 +1228,7 @@
         "worktrees": 1,
         "sandboxes": 1,
         "models": [
-          null
+          "gpt-6-sol"
         ]
       }
     }
