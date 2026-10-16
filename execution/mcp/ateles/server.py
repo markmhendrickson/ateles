@@ -530,8 +530,8 @@ def _checkpoint_resolver_authority(
 ) -> tuple[str, str, str] | None:
     """Return the authenticated resolver subject, key pin, and tenant."""
     from lib.daemon_runtime.gating import (
-        fetch_entity_user_id,
         read_authenticated_checkpoint_authorization,
+        read_verified_entity_owner,
     )
 
     authority = read_authenticated_checkpoint_authorization(
@@ -542,29 +542,16 @@ def _checkpoint_resolver_authority(
     required_sub = str(authority.get("required_approver_sub") or "").strip()
     required_jkt = str(authority.get("required_approver_jkt") or "").strip()
     tenant_id = authority.get("user_id")
-    # GET /entities/:id omits the row's user_id. Read server-owned observation
-    # ownership instead; reducer-built snapshots are only consistency checks.
-    # Do not coerce or strip safety-bearing values: malformed input denies.
-    owner = fetch_entity_user_id(checkpoint_id)
-    uuid_pattern = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
     if (
         not required_sub
         or "@" not in required_sub
         or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
         or not isinstance(tenant_id, str)
-        or not re.fullmatch(uuid_pattern, tenant_id)
-        or not isinstance(owner, str)
-        or not re.fullmatch(uuid_pattern, owner)
-        or owner != tenant_id
+        or read_verified_entity_owner(
+            checkpoint_id, checkpoint_record, expected_user_id=tenant_id
+        ) is None
     ):
         return None
-    # Both supported snapshot envelopes may contain user-authored fields.
-    # An explicitly present falsey/malformed/conflicting owner is not absence.
-    snapshot = checkpoint_record.get("snapshot")
-    while isinstance(snapshot, dict):
-        if "user_id" in snapshot and snapshot["user_id"] != owner:
-            return None
-        snapshot = snapshot.get("snapshot")
     return required_sub, required_jkt, tenant_id
 
 

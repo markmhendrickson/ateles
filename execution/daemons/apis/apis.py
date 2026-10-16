@@ -260,6 +260,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     mark_task_declined,
     read_authenticated_checkpoint_authorization,
     read_authenticated_checkpoint_resolution,
+    read_verified_entity_owner,
     write_producer_assessment,
     read_checkpoint_resolution,
     query_all_entities,
@@ -291,7 +292,6 @@ from lib.daemon_runtime.artifact_contract import (  # noqa: E402
     parse_github_ref,
     role_required_artifact,
     stdout_tail_for_reason,
-    trim_on_word,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
@@ -2783,8 +2783,13 @@ async def handle_checkpoint_brief(
         authorization = read_authenticated_checkpoint_authorization(
             entity_id, checkpoint_record
         )
-        brief_user_id = fetch_entity_user_id(entity_id)
-        task_user_id = fetch_entity_user_id(task_id)
+        expected_user_id = (authorization or {}).get("user_id")
+        brief_user_id = read_verified_entity_owner(
+            entity_id, checkpoint_record, expected_user_id=expected_user_id
+        )
+        task_user_id = read_verified_entity_owner(
+            task_id, fetch_task_record(task_id), expected_user_id=expected_user_id
+        )
         required_approver_sub = str(
             (authorization or {}).get("required_approver_sub") or ""
         ).strip()
@@ -2846,8 +2851,8 @@ async def handle_checkpoint_brief(
         )
         return False
 
-    brief_user_id = fetch_entity_user_id(entity_id)
-    task_user_id = fetch_entity_user_id(task_id)
+    brief_user_id = read_verified_entity_owner(entity_id, checkpoint_record)
+    task_user_id = read_verified_entity_owner(task_id, task_record)
     if not brief_user_id or not task_user_id or brief_user_id != task_user_id:
         log.warning(
             f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} do not have "

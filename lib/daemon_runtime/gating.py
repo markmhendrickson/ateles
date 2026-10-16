@@ -440,44 +440,77 @@ def _fetch_entity(entity_id: str) -> dict | None:
 
 
 def _fetch_entity_observations(entity_id: str, *, limit: int = 100) -> list[dict]:
-    if not NEOTOMA_BEARER_TOKEN:
-        return []
-    try:
-        resp = httpx.get(
-            f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            params={"limit": limit},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        observations = data.get("observations") if isinstance(data, dict) else None
-        return observations if isinstance(observations, list) else []
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[gating] could not fetch observations for %s: %s", entity_id, exc)
-        return []
+    return fetch_entity_observations_strict(entity_id, limit=limit) or []
 
 
-def fetch_entity_observations_strict(entity_id: str, *, limit: int = 100) -> list[dict] | None:
-    """Observations of an entity, or ``None`` when the read FAILED.
+def fetch_entity_observations_strict(
+    entity_id: str, *, limit: int = 100
+) -> list[dict] | None:
+    """Complete observations of an entity, or ``None`` on an uncertain read.
 
-    ``_fetch_entity_observations`` folds a failed read into an empty list, which
-    callers that decide "is this authority valid" cannot tell from "there are no
-    observations".  A recovery decision must not treat an outage as evidence.
+    Ownership decisions cannot trust one page of a paginated history. Validate
+    every page against the same reported total and recheck the first page after
+    a multi-page read so observed page drift denies rather than omits evidence.
     """
-    if not NEOTOMA_BEARER_TOKEN:
+    if (
+        not NEOTOMA_BEARER_TOKEN
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or limit <= 0
+    ):
         return None
-    try:
+
+    def read_page(offset: int) -> tuple[list[dict], int]:
         resp = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            params={"limit": limit},
+            params={"limit": limit, "offset": offset},
             timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
-        observations = data.get("observations") if isinstance(data, dict) else None
-        return observations if isinstance(observations, list) else None
+        if not isinstance(data, dict):
+            raise ValueError("observation response is not an object")
+        rows = data.get("observations")
+        total = data.get("total")
+        if (
+            not isinstance(rows, list)
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or total < 0
+            or data.get("limit") != limit
+            or data.get("offset") != offset
+            or offset > total
+            or len(rows) != min(limit, total - offset)
+        ):
+            raise ValueError("observation page metadata is incomplete or inconsistent")
+        return rows, total
+
+    try:
+        observations: list[dict] = []
+        seen_ids: set[str] = set()
+        total: int | None = None
+        first_page: list[dict] | None = None
+        while total is None or len(observations) < total:
+            page, reported_total = read_page(len(observations))
+            if total is None:
+                total = reported_total
+                first_page = page
+            elif reported_total != total:
+                raise ValueError("observation count changed during pagination")
+            for item in page:
+                observation_id = item.get("id") if isinstance(item, dict) else None
+                if (
+                    not isinstance(observation_id, str)
+                    or not observation_id
+                    or observation_id in seen_ids
+                ):
+                    raise ValueError("observation row is malformed or repeated")
+                seen_ids.add(observation_id)
+            observations.extend(page)
+        if total > limit and read_page(0) != (first_page, total):
+            raise ValueError("observation first page changed during pagination")
+        return observations
     except Exception as exc:  # noqa: BLE001
         log.warning("[gating] could not read observations for %s: %s", entity_id, exc)
         return None
@@ -499,6 +532,32 @@ def fetch_entity_user_id(entity_id: str) -> str | None:
         return None
     user_ids = {item["user_id"] for item in observations}
     return next(iter(user_ids)) if len(user_ids) == 1 else None
+
+
+_OWNER_UUID_PATTERN = re.compile(
+    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+)
+
+
+def read_verified_entity_owner(
+    entity_id: str, record: dict | None, *, expected_user_id: str | None = None
+) -> str | None:
+    """Bind an entity to complete observation ownership and deny snapshot conflicts."""
+    if not isinstance(record, dict):
+        return None
+    owner = fetch_entity_user_id(entity_id)
+    if (
+        not isinstance(owner, str)
+        or not _OWNER_UUID_PATTERN.fullmatch(owner)
+        or (expected_user_id is not None and owner != expected_user_id)
+    ):
+        return None
+    current = record
+    while isinstance(current, dict):
+        if "user_id" in current and current["user_id"] != owner:
+            return None
+        current = current.get("snapshot")
+    return owner
 
 
 def load_policy(policy_id: str | None = None) -> ExecutionPolicy:

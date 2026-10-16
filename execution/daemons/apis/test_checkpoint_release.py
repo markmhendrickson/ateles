@@ -68,6 +68,8 @@ from lib.daemon_runtime.gating import (  # noqa: E402
 )
 
 TEST_RESOLVER_JKT = "A" * 43
+TEST_OWNER = "11111111-1111-4111-8111-111111111111"
+TEST_OTHER_OWNER = "22222222-2222-4222-8222-222222222222"
 
 CHECKPOINT_TYPE = "checkpoint_" + "brief"
 REAL_READ_AUTHENTICATED_RESOLUTION = (
@@ -131,7 +133,6 @@ def release_store(monkeypatch, tmp_path):
                 "blast_radius": "low",
                 "policy_entity_id": "default",
                 "title": "Approve the bounded implementation",
-                "user_id": "tenant-a",
             },
         },
         task_id: {
@@ -146,12 +147,16 @@ def release_store(monkeypatch, tmp_path):
                 "repo": "markmhendrickson/ateles",
                 "title": "Implement the bounded change",
                 "body": "Engineering work in the dispatcher.",
-                "user_id": "tenant-a",
                 "action_type": "local_edit",
                 "confidence": 0.3,
             },
         },
     }
+    observations = {
+        brief_id: [{"id": "obs-brief-create", "user_id": TEST_OWNER}],
+        task_id: [{"id": "obs-task-create", "user_id": TEST_OWNER}],
+    }
+    records["_observations"] = observations
 
     def get(path, params=None):
         return records.get(path.rsplit("/", 1)[-1])
@@ -198,7 +203,7 @@ def release_store(monkeypatch, tmp_path):
         lambda checkpoint_id, record: (
             "ateles@ateles-swarm",
             TEST_RESOLVER_JKT,
-            "tenant-a",
+            TEST_OWNER,
         ),
     )
     monkeypatch.setattr(
@@ -226,18 +231,13 @@ def release_store(monkeypatch, tmp_path):
         ),
     )
     monkeypatch.setattr(
-        apis,
-        "fetch_entity_user_id",
-        lambda entity_id: (records.get(entity_id, {}).get("snapshot") or {}).get(
-            "user_id"
-        ),
-    )
-    monkeypatch.setattr(
         gating_module,
-        "fetch_entity_user_id",
-        lambda entity_id: (records.get(entity_id, {}).get("snapshot") or {}).get(
-            "user_id"
-        ),
+        "_fetch_entity_observations",
+        lambda entity_id: observations.get(entity_id, []),
+    )
+    monkeypatch.setattr(apis, "fetch_entity_user_id", REAL_FETCH_ENTITY_USER_ID)
+    monkeypatch.setattr(
+        gating_module, "fetch_entity_user_id", REAL_FETCH_ENTITY_USER_ID
     )
     policy = ExecutionPolicy(
         entity_id="default",
@@ -251,7 +251,7 @@ def release_store(monkeypatch, tmp_path):
         policy=policy,
         decision=decision,
         action_type="local_edit",
-        user_id="tenant-a",
+        user_id=TEST_OWNER,
         required_approver_jkt=TEST_RESOLVER_JKT,
     )
     authority = json.loads(encoded_authority)
@@ -278,7 +278,7 @@ def release_store(monkeypatch, tmp_path):
         assert checkpoint_id == brief_id
         assert required_approver_sub == "ateles@ateles-swarm"
         assert required_approver_jkt == TEST_RESOLVER_JKT
-        assert expected_user_id == "tenant-a"
+        assert expected_user_id == TEST_OWNER
         return {
             "principal_sub": "ateles@ateles-swarm",
             "observation_id": "obs-approval",
@@ -347,7 +347,7 @@ async def test_unattributed_approval_never_reaches_gate_override(
         {
             "id": "obs-approval",
             "fields": {"status": "approved"},
-            "user_id": "tenant-a",
+            "user_id": TEST_OWNER,
             "provenance": {
                 "agent_sub": "ateles@ateles-swarm",
                 "agent_thumbprint": TEST_RESOLVER_JKT,
@@ -375,7 +375,11 @@ async def test_unattributed_approval_never_reaches_gate_override(
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity_observations",
-        lambda checkpoint_id: observations,
+        lambda entity_id: (
+            records["_observations"][entity_id] + observations
+            if entity_id == brief_id
+            else records["_observations"].get(entity_id, [])
+        ),
     )
 
     released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
@@ -401,7 +405,7 @@ async def test_unattributed_rejection_never_declines_task(
         {
             "id": "obs-rejection",
             "fields": {"status": "rejected"},
-            "user_id": "tenant-a",
+            "user_id": TEST_OWNER,
             "provenance": {
                 "agent_sub": "ateles@ateles-swarm",
                 "agent_thumbprint": TEST_RESOLVER_JKT,
@@ -423,7 +427,11 @@ async def test_unattributed_rejection_never_declines_task(
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity_observations",
-        lambda checkpoint_id: observations,
+        lambda entity_id: (
+            records["_observations"][entity_id] + observations
+            if entity_id == brief_id
+            else records["_observations"].get(entity_id, [])
+        ),
     )
     monkeypatch.setattr(
         apis,
@@ -448,7 +456,7 @@ async def test_authenticated_rejection_declines_task(monkeypatch, release_store)
         {
             "id": "obs-rejection",
             "fields": {"status": "rejected"},
-            "user_id": "tenant-a",
+            "user_id": TEST_OWNER,
             "provenance": {
                 "agent_sub": "ateles@ateles-swarm",
                 "agent_thumbprint": TEST_RESOLVER_JKT,
@@ -465,7 +473,11 @@ async def test_authenticated_rejection_declines_task(monkeypatch, release_store)
     monkeypatch.setattr(
         gating_module,
         "_fetch_entity_observations",
-        lambda checkpoint_id: observations,
+        lambda entity_id: (
+            records["_observations"][entity_id] + observations
+            if entity_id == brief_id
+            else records["_observations"].get(entity_id, [])
+        ),
     )
 
     def decline(entity_id, **kwargs):
@@ -563,7 +575,7 @@ def _bind_v2_authorization(
         policy=policy,
         decision=decision,
         action_type=action_type,
-        user_id="tenant-a",
+        user_id=TEST_OWNER,
         required_approver_jkt=TEST_RESOLVER_JKT,
     )
     authority = json.loads(encoded)
@@ -667,7 +679,7 @@ async def test_authoritative_owner_signed_resolution_releases_exactly_once(
     records[task_id]["snapshot"]["user_id"] = owner
     if mode == "direct_task_snapshot_conflict":
         records[task_id]["snapshot"]["user_id"] = None
-    records[brief_id]["snapshot"].pop("user_id")
+    records[brief_id]["snapshot"].pop("user_id", None)
     policy = ExecutionPolicy(
         entity_id="default",
         low_blast_action_types=frozenset({"local_edit"}),
@@ -1303,7 +1315,7 @@ async def test_current_high_requires_fresh_approval_instead_of_stale_low_authori
             "policy_entity_id": "default",
             "authorization_context_digest": _authorization_digest(
                 task_id=task_id,
-                user_id="tenant-a",
+                user_id=TEST_OWNER,
                 action_type="local_edit",
                 gate_action="checkpoint_plan_approval",
                 blast_radius="low",
@@ -1523,7 +1535,7 @@ def test_replacement_checkpoint_uses_current_live_policy(monkeypatch):
         "assigned_to": "cicada",
         "action_type": action_type,
         "confidence": 0.99,
-        "user_id": "tenant-a",
+        "user_id": TEST_OWNER,
     }
     policy = ExecutionPolicy(
         entity_id="ent_current_policy",
@@ -1543,7 +1555,7 @@ def test_replacement_checkpoint_uses_current_live_policy(monkeypatch):
 
     monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
     monkeypatch.setattr(apis, "fetch_task_record", lambda task_id: task_record)
-    monkeypatch.setattr(apis, "fetch_entity_user_id", lambda task_id: "tenant-a")
+    monkeypatch.setattr(apis, "fetch_entity_user_id", lambda task_id: TEST_OWNER)
     monkeypatch.setattr(
         apis,
         "write_checkpoint_brief",
@@ -1842,7 +1854,7 @@ async def test_absent_never_or_unknown_blast_radius_never_releases(
 @pytest.mark.asyncio
 async def test_cross_tenant_task_is_not_dispatched(monkeypatch, release_store):
     records, brief_id, task_id = release_store
-    records[task_id]["snapshot"]["user_id"] = "tenant-b"
+    records["_observations"][task_id][0]["user_id"] = TEST_OTHER_OWNER
     dispatches: list[tuple] = []
 
     async def spy_dispatch(*args, **kwargs):
@@ -1863,10 +1875,10 @@ async def test_cross_tenant_task_is_not_dispatched(monkeypatch, release_store):
     ("brief_user_id", "task_user_id", "should_dispatch"),
     [
         (None, None, False),
-        (None, "tenant-a", False),
-        ("tenant-a", None, False),
-        ("tenant-a", "tenant-b", False),
-        ("tenant-a", "tenant-a", True),
+        (None, TEST_OWNER, False),
+        (TEST_OWNER, None, False),
+        (TEST_OWNER, TEST_OTHER_OWNER, False),
+        (TEST_OWNER, TEST_OWNER, True),
     ],
 )
 async def test_release_requires_matching_present_tenant_provenance(
@@ -1877,8 +1889,8 @@ async def test_release_requires_matching_present_tenant_provenance(
     release_store,
 ):
     records, brief_id, task_id = release_store
-    brief = records[brief_id]["snapshot"]
-    task = records[task_id]["snapshot"]
+    brief = records["_observations"][brief_id][0]
+    task = records["_observations"][task_id][0]
     if brief_user_id is None:
         brief.pop("user_id")
     else:
@@ -1909,8 +1921,8 @@ async def test_release_requires_matching_present_tenant_provenance(
         ("absent", False),
         ("", False),
         (None, False),
-        ("tenant-b", False),
-        ("tenant-a", True),
+        (TEST_OTHER_OWNER, False),
+        (TEST_OWNER, True),
     ],
 )
 async def test_direct_consumer_delivery_requires_matching_owner(
@@ -1921,10 +1933,11 @@ async def test_direct_consumer_delivery_requires_matching_owner(
     records, brief_id, task_id = release_store
     brief = records[brief_id]["snapshot"]
     brief["status"] = "approved"
+    creation = records["_observations"][brief_id][0]
     if brief_owner == "absent":
-        brief.pop("user_id")
+        creation.pop("user_id")
     else:
-        brief["user_id"] = brief_owner
+        creation["user_id"] = brief_owner
     dispatches: list[tuple] = []
 
     async def spy_dispatch(*args, **kwargs):
