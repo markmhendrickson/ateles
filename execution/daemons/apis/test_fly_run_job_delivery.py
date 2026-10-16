@@ -562,3 +562,113 @@ def test_cleanup_diagnostics_do_not_follow_a_link_at_the_work_root(world):
     details = _cleanup_details(world)
     link_mode = stat.S_IMODE(world["work_root"].lstat().st_mode)
     assert details["leftovers"] == [{"relative": ".", "mode": f"{link_mode:04o}", "kind": "link"}]
+
+
+# These controls drive the same assertion paths as delivery tests, not only the
+# formatter. Synthetic filenames and error text must never reach their output.
+def _assert_safe_cleanup_failure(call, world):
+    with pytest.raises((OSError, AssertionError, pytest.fail.Exception)) as caught:
+        call()
+    message = str(caught.value)
+    assert message.startswith("delivery cleanup failed: ")
+    assert all(value not in message for value in (TOKEN, HEADER, ROLE_TOKEN, str(world["tmp"])))
+    return json.loads(message.removeprefix("delivery cleanup failed: "))
+
+
+@pytest.mark.parametrize("target_state", ["empty", "populated", "dangling"])
+def test_cleanup_assertion_never_probes_a_linked_root(world, monkeypatch, target_state):
+    outside = world["tmp"] / "outside"
+    if target_state != "dangling":
+        outside.mkdir()
+        if target_state == "populated":
+            (outside / TOKEN).write_text(ROLE_TOKEN)
+    world["work_root"].symlink_to(outside, target_is_directory=True)
+    real_listdir = os.listdir
+    probes = []
+
+    def listdir(path):
+        if Path(path) == world["work_root"]:
+            probes.append(True)
+            raise OSError(errno.EACCES, TOKEN, str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
+    assert probes == []
+    assert details["leftovers"] == [{"relative": ".", "mode": "0777", "kind": "link"}]
+
+
+@pytest.mark.parametrize("failure_site", ["root_lstat", "listdir", "entry_lstat", "walk"])
+def test_cleanup_assertion_sanitizes_probe_and_traversal_errors(world, monkeypatch, failure_site):
+    root = world["work_root"]
+    root.mkdir()
+    (root / TOKEN).touch()
+    real_lstat, real_listdir, real_walk = Path.lstat, os.listdir, os.walk
+
+    def fail(path):
+        raise OSError(errno.EACCES, TOKEN + HEADER + ROLE_TOKEN, str(path))
+
+    def lstat(path, *args, **kwargs):
+        if (failure_site == "root_lstat" and path == root or
+                failure_site == "entry_lstat" and path == root / TOKEN):
+            return fail(path)
+        return real_lstat(path, *args, **kwargs)
+
+    def listdir(path):
+        if Path(path) == root and failure_site == "listdir":
+            return fail(path)
+        return real_listdir(path)
+
+    def walk(path, *args, **kwargs):
+        if Path(path) == root and failure_site == "walk":
+            error = OSError(errno.EACCES, TOKEN, str(root / HEADER))
+            if kwargs.get("onerror"):
+                kwargs["onerror"](error)
+            return iter(())
+        return real_walk(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(os, "walk", walk)
+    details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
+    assert details["incomplete"] is True
+    errors = details["errors"] + details["leftovers"]
+    assert any(row.get("type") == "PermissionError" and row.get("errno") == errno.EACCES
+               for row in errors)
+
+
+@pytest.mark.parametrize("test_name", [
+    "test_a_deadline_that_expires_during_the_import_pushes_nothing",
+    "test_a_deadline_spent_before_the_clone_never_starts_the_cli",
+    "test_the_work_directory_is_removed_when_the_cli_raises",
+])
+def test_all_delivery_cleanup_assertion_sinks_use_safe_evidence(world, monkeypatch, test_name):
+    real_main = run_job.main
+
+    def leave_after_main(*args, **kwargs):
+        try:
+            return real_main(*args, **kwargs)
+        finally:
+            world["work_root"].mkdir(exist_ok=True)
+            (world["work_root"] / TOKEN).touch()
+
+    monkeypatch.setattr(run_job, "main", leave_after_main)
+    test = globals()[test_name]
+    def call():
+        if "monkeypatch" in test.__code__.co_varnames[:test.__code__.co_argcount]:
+            test(world, monkeypatch)
+        else:
+            test(world)
+    details = _assert_safe_cleanup_failure(call, world)
+    assert details["leftovers"] == [{"relative": "<entry>", "mode": "0644", "kind": "file"}]
+
+
+def test_cleanup_assertion_bounds_and_redacts_more_than_64_rows(world):
+    root = world["work_root"]
+    root.mkdir()
+    for i in range(65):
+        (root / f"{TOKEN}-{i:03}").touch()
+    details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
+    assert len(details["leftovers"]) == 64
+    assert all(row["relative"] == "<entry>" for row in details["leftovers"])
+    assert details["truncated"] is True
