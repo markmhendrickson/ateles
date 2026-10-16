@@ -92,7 +92,7 @@ async def _run(scenario: dict, mutation: str, mp: pytest.MonkeyPatch) -> dict:
 
     app = scenario["app"]
     mint_calls: list[threading.Thread] = []
-    mp.setattr(sd._github_app_token, "app_configured", lambda prefix=None: app != "unconfigured")
+    mp.setattr(sd, "_app_write_configured", lambda: app != "unconfigured")
     mp.setattr(sd._github_app_token, "bot_login", lambda prefix=None: BOT)
 
     def _mint(repo=None, *, prefix=None):

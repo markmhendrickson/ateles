@@ -54,7 +54,7 @@ def _env(monkeypatch):
 
 def _configure_app(monkeypatch, *, mint=None, calls=None):
     """Configure the App and stub the library's mint."""
-    monkeypatch.setattr(sd._github_app_token, "app_configured", lambda prefix=None: True)
+    monkeypatch.setattr(sd, "_app_write_configured", lambda: True)
 
     def _info(repo=None, *, prefix=None):
         if calls is not None:
@@ -73,7 +73,7 @@ def _configure_app(monkeypatch, *, mint=None, calls=None):
 
 
 def _unconfigure_app(monkeypatch):
-    monkeypatch.setattr(sd._github_app_token, "app_configured", lambda prefix=None: False)
+    monkeypatch.setattr(sd, "_app_write_configured", lambda: False)
 
 
 def _dispatcher() -> sd.SwarmDispatcher:

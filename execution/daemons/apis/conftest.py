@@ -126,9 +126,9 @@ def _default_github_write_credential(monkeypatch):
         lambda repo, app_token: real(repo, app_token) or "pat-conftest-fixture",
     )
     monkeypatch.setattr(swarm_dispatch, "_REAL_RESOLVE_GITHUB_WRITE_TOKEN", real, raising=False)
-    monkeypatch.setattr(
-        swarm_dispatch._github_app_token, "app_configured", lambda prefix=None: False
-    )
+    # Disable only dispatcher token minting. The shared helper also resolves
+    # per-lens Apps; mocking it globally erases those identities in their tests.
+    monkeypatch.setattr(swarm_dispatch, "_app_write_configured", lambda: False)
     swarm_dispatch._clear_app_write_token_cache()
 
 
