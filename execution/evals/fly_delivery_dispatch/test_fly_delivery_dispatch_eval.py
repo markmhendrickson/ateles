@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import importlib
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -244,6 +245,82 @@ def judge(scenario, trace):
 def test_dispatch_scenario(scenario, tmp_path, monkeypatch):
     trace = run_scenario(scenario, tmp_path, monkeypatch)
     assert judge(scenario, trace) == []
+
+
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+@pytest.mark.parametrize("mismatch", [None, "base", "branch", "commit"])
+def test_remote_pr_contract_after_actual_agent_delivery(tmp_path, monkeypatch, entry, mismatch):
+    """Completion component control, not an authenticated producer admission.
+
+    The real job/agent/git/PR effects supply the outcome, then an explicit
+    SkillResult stand-in exercises the parent completion boundary separately.
+    The actual executor remains covered above and refuses unproven origin.
+    """
+    root = tmp_path / "job"
+    root.mkdir()
+    with monkeypatch.context() as machine:
+        trace = job_eval.run_scenario(JOBS["delivery_pushes_and_opens_a_pull_request"], root, machine)
+    assert job_eval.judge(JOBS["delivery_pushes_and_opens_a_pull_request"], trace) == []
+    record = trace.record
+    branch, commit = record["delivery_branch"], record["delivery_commit"]
+    assert trace.cli_ran and trace.remote_after[f"refs/heads/{branch}"] == commit
+    monkeypatch.setenv(delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "receipts.json"))
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    monkeypatch.setattr(delivery, "_new_branch", lambda label: (branch, "eval", "eval"))
+    launches, reads = [], []
+    answer = {"number": record["pr_number"], "url": record["pr_url"],
+              "baseRefName": "other" if mismatch == "base" else "main",
+              "headRefName": "other" if mismatch == "branch" else branch,
+              "headRefOid": "b" * 40 if mismatch == "commit" else commit,
+              "headRepository": {"nameWithOwner": job_eval.REPO}}
+    real_run = subprocess.run
+
+    def gh_read(argv, *args, **kwargs):
+        if argv[:3] == ["gh", "pr", "view"]:
+            reads.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps(answer), "")
+        return real_run(argv, *args, **kwargs)
+
+    async def completed_component(skill, prompt, **kwargs):
+        launches.append(kwargs)
+        return skill_runner.SkillResult(
+            skill, True, 0, "", "", remote_run_id=record["run_id"],
+            fly_delivery_status=record["delivery_status"], fly_delivery_branch=branch,
+            fly_delivery_commit=commit, fly_pr_number=record["pr_number"],
+            fly_pr_url=record["pr_url"],
+        )
+
+    monkeypatch.setattr(subprocess, "run", gh_read)
+    monkeypatch.setattr(apis, "run_skill", completed_component)
+    monkeypatch.setattr("swarm_dispatch.run_skill", completed_component)
+    snap = {"title": "Build", "assigned_to": "cicada", "repository": job_eval.REPO,
+            "issue_number": 123, "action_type": "open_or_merge_pr", "status": "pending"}
+    trig = dataclasses.replace(_issue_trigger(), repository=job_eval.REPO, number=123)
+
+    async def task():
+        return await apis._spawn_harness_skill("cicada", "ent_eval_component", snap, "created",
+                                             _StubNotifier(), role="cicada")
+
+    if entry == "task":
+        outcome = asyncio.run(task())
+        assert outcome.ok is (mismatch is None)
+        assert ("pull_request_link:" in outcome.stdout) is (mismatch is None)
+    else:
+        coroutine = SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(trig, _empty_spec_state())
+        if mismatch:
+            with pytest.raises(delivery.FlyDeliveryEnded):
+                asyncio.run(coroutine)
+        else:
+            assert asyncio.run(coroutine) == record["pr_url"]
+    assert reads and "headRefOid" in reads[0][-1]
+    receipt = delivery._delivery_ledger().delivery_receipts()["owner/repo#123"]
+    assert receipt["status"] == ("unknown" if mismatch else "opened")
+    importlib.reload(delivery)
+    monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES")
+    assert not asyncio.run(task()).ok
+    with pytest.raises(delivery.FlyDeliveryEnded):
+        asyncio.run(SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(trig, _empty_spec_state()))
+    assert len(launches) == 1
 
 
 @pytest.mark.parametrize("mutation", ["forget_receipt", "duplicate_remote"])

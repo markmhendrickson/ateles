@@ -1618,6 +1618,8 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
             rows = data.get("entities") if isinstance(data, dict) else None
             if not isinstance(rows, list):
                 raise ValueError("result query answer is not an entity page")
+            if len(rows) > 1:
+                raise ValueError("result query is ambiguous")
             for row in rows:
                 if not isinstance(row, dict):
                     raise ValueError("result query row is not an object")
@@ -1626,6 +1628,7 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
                     snap = snap["snapshot"]
                 if isinstance(snap, dict) and snap.get("run_id") == run_id:
                     return snap
+                raise ValueError("result query record does not match the run")
             well_formed_empty = True
         except (httpx.HTTPError, ValueError) as exc:
             log.debug(f"[fly] result read attempt {attempt + 1} failed: {type(exc).__name__}")
@@ -1683,7 +1686,7 @@ def validate_delivery_receipt(key: str, entry: Any) -> None:
     if status in {"opened", "updated"}:
         repo = key.split("#", 1)[0]
         if (not commit or type(number) is not int or number <= 0
-                or url != f"https://github.com/{repo}/pull/{number}"):
+                or url.lower() != f"https://github.com/{repo}/pull/{number}"):
             raise FlyLedgerError("delivery receipt artifact is incomplete")
     elif number is not None or url:
         raise FlyLedgerError("delivery receipt status conflicts with its artifact")

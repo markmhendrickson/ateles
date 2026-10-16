@@ -907,7 +907,8 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
                  and isinstance(result.fly_delivery_commit, str)
                  and re.fullmatch(r"[0-9a-f]{40}", result.fly_delivery_commit) is not None
                  and type(result.fly_pr_number) is int and result.fly_pr_number > 0
-                 and result.fly_pr_url == f"https://github.com/{plan.repository}/pull/{result.fly_pr_number}")
+                 and isinstance(result.fly_pr_url, str)
+                 and result.fly_pr_url.lower() == f"https://github.com/{plan.repository.lower()}/pull/{result.fly_pr_number}")
         if valid:
             owner, repo = plan.repository.split("/")
             parsed = ParsedRef(kind="pr", owner=owner, repo=repo, number=result.fly_pr_number)
