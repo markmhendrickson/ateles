@@ -57,6 +57,16 @@ def _agent_def() -> AgentDefinition:
         prompt_markdown="Dispatcher.",
         tool_allowlist="*",  # the broadest allowlist: confinement must not rely on it
         aauth_sub="apis@ateles-swarm",
+        raw={
+            "entity_id": "ent_test",
+            "entity_type": "agent_definition",
+            "snapshot": {
+                "name": "apis",
+                "status": "active",
+                "prompt_markdown": "Dispatcher.",
+                "tool_allowlist": "*",
+            },
+        },
     )
 
 
@@ -103,6 +113,7 @@ def _run(tmp_path, **kw):
 
     instance = MagicMock()
     instance.load.return_value = _agent_def()
+    instance.load_for_lens.return_value = _agent_def()
     skill_runner._agent_def_cache.clear()
     args = dict(
         provider="claude",

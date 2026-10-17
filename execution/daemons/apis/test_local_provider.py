@@ -443,7 +443,11 @@ def test_pinned_local_is_the_only_candidate():
 
 def _agent_def():
     return AgentDefinition(entity_id="ent_test", name="cicada", prompt_markdown="You are Cicada.",
-                           tool_allowlist="Bash,Read,Edit", aauth_sub="cicada@ateles-swarm")
+                           tool_allowlist="Bash,Read,Edit", aauth_sub="cicada@ateles-swarm",
+                           raw={"entity_id": "ent_test", "entity_type": "agent_definition",
+                                "snapshot": {"name": "cicada", "status": "active",
+                                             "prompt_markdown": "You are Cicada.",
+                                             "tool_allowlist": "Bash,Read,Edit"}})
 
 
 def _stub_agent_def():
@@ -478,6 +482,7 @@ class _Spawns:
 def _run(spawns, events, *, prompt="rebase onto main", **kwargs):
     loader = MagicMock()
     loader.return_value.load.return_value = _agent_def()
+    loader.return_value.load_for_lens.return_value = _agent_def()
     with (
         patch("skill_runner.AgentLoader", loader),
         patch("skill_runner.CLAUDE_BIN", "/bin/claude"),

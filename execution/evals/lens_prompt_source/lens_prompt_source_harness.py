@@ -340,10 +340,10 @@ def run_scenario(scenario: dict, data: dict, monkeypatch, tmp_path: Path) -> dic
                 "role": role,
                 "task": task,
                 "cwd_head": _git("rev-parse", "HEAD", cwd=cwd),
-                "definition_entity_id": definition.entity_id,
-                "definition_prompt": definition.prompt_markdown,
-                "definition_tools": definition.tool_allowlist,
-                "definition_status": definition.status,
+                "definition_entity_id": getattr(definition, "entity_id", None),
+                "definition_prompt": getattr(definition, "prompt_markdown", None),
+                "definition_tools": getattr(definition, "tool_allowlist", None),
+                "definition_status": getattr(definition, "status", None),
             }
         )
         text = _verdict(data["lens"], head)
@@ -352,7 +352,38 @@ def run_scenario(scenario: dict, data: dict, monkeypatch, tmp_path: Path) -> dic
         )
         return SkillResult(role, True, 0, text, "", provider="codex")
 
-    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _scripted_reviewer)
+    shared_entry = scenario.get("shared_admission_entry")
+    if shared_entry is None:
+        monkeypatch.setattr(hlr.dispatch_role, "dispatch", _scripted_reviewer)
+    else:
+        assert shared_entry in ("dispatch", "run_skill")
+        original_dispatch = hlr.dispatch_role.dispatch
+
+        async def _scripted_attempt(skill, task, **kwargs):
+            role = kwargs.pop("role")
+            return await _scripted_reviewer(role, task, **kwargs)
+
+        async def _route(skill, attempt, **kwargs):
+            return await attempt("codex")
+
+        async def _exported_entry(role, task, **kwargs):
+            # Exercise a real exported caller that did not pre-admit a role.
+            # The initial CLI preflight still happened; change only the caller
+            # handoff and (for outage cases) the synthetic record availability.
+            kwargs.pop("verified_agent_definition")
+            if scenario.get("record_unavailable_after_preflight"):
+                fake.mode = "unreachable"
+            if shared_entry == "dispatch":
+                return await original_dispatch(role, task, **kwargs)
+            return await skill_runner.run_skill(role, task, role=role, **kwargs)
+
+        monkeypatch.setattr(skill_runner, "_run_skill_once", _scripted_attempt)
+        monkeypatch.setattr(skill_runner, "_run_provider_attempts", _route)
+        monkeypatch.setattr(
+            skill_runner, "_provider_binaries", lambda: {"codex": "/bin/false"}
+        )
+        monkeypatch.setattr(skill_runner, "_fly_routing", lambda *a: (frozenset(), ()))
+        monkeypatch.setattr(hlr.dispatch_role, "dispatch", _exported_entry)
 
     brief = tmp_path / "lens_brief.md"
     brief.write_text(

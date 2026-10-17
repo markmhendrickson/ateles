@@ -282,6 +282,126 @@
         "definition_gets": 1
       },
       "explicit_role_id": "ent_eval_pavo_definition"
+    },
+    {
+      "id": "shared_dispatch_resolves_canonical_once",
+      "why": "The real CLI reaches the exported dispatch boundary without a pre-admitted object; the common strict boundary must resolve and pin the canonical object.",
+      "shared_admission_entry": "dispatch",
+      "record_unavailable_after_preflight": false,
+      "target": {
+        "repo": "example/neotoma",
+        "files": {
+          "package.json": "{\"name\":\"sibling-fixture\",\"private\":true}\n"
+        }
+      },
+      "explicit_role_id": "ent_eval_pavo_definition",
+      "neotoma": "serve",
+      "dry_run": false,
+      "expect": {
+        "ok": true,
+        "exit_code": 0,
+        "dispatched": true,
+        "worktrees_created": 1,
+        "worktrees_left": 0,
+        "definition_queries": 0,
+        "definition_gets": 2,
+        "dispatched_role": "pavo",
+        "dispatched_at_target_head": true,
+        "dispatch_definition_is_canonical": true,
+        "task_contains": [
+          "CANONICAL-PAVO-MARKER"
+        ],
+        "task_excludes": [
+          "PLANTED-PROMPT-MARKER"
+        ]
+      }
+    },
+    {
+      "id": "shared_dispatch_record_loss_refuses",
+      "why": "The real CLI reaches the exported dispatch boundary without a pre-admitted object; record loss must refuse before the scripted provider is called.",
+      "shared_admission_entry": "dispatch",
+      "record_unavailable_after_preflight": true,
+      "target": {
+        "repo": "example/neotoma",
+        "files": {
+          "package.json": "{\"name\":\"sibling-fixture\",\"private\":true}\n"
+        }
+      },
+      "explicit_role_id": "ent_eval_pavo_definition",
+      "neotoma": "serve",
+      "dry_run": false,
+      "expect": {
+        "ok": false,
+        "exit_code": 1,
+        "dispatched": false,
+        "worktrees_created": 1,
+        "worktrees_left": 0,
+        "definition_queries": 0,
+        "definition_gets": 2,
+        "reason_contains": [
+          "canonical lens"
+        ]
+      }
+    },
+    {
+      "id": "shared_run_skill_resolves_canonical_once",
+      "why": "The real CLI reaches the exported run_skill boundary without a pre-admitted object; the common strict boundary must resolve and pin the canonical object.",
+      "shared_admission_entry": "run_skill",
+      "record_unavailable_after_preflight": false,
+      "target": {
+        "repo": "example/neotoma",
+        "files": {
+          "package.json": "{\"name\":\"sibling-fixture\",\"private\":true}\n"
+        }
+      },
+      "explicit_role_id": "ent_eval_pavo_definition",
+      "neotoma": "serve",
+      "dry_run": false,
+      "expect": {
+        "ok": true,
+        "exit_code": 0,
+        "dispatched": true,
+        "worktrees_created": 1,
+        "worktrees_left": 0,
+        "definition_queries": 0,
+        "definition_gets": 2,
+        "dispatched_role": "pavo",
+        "dispatched_at_target_head": true,
+        "dispatch_definition_is_canonical": true,
+        "task_contains": [
+          "CANONICAL-PAVO-MARKER"
+        ],
+        "task_excludes": [
+          "PLANTED-PROMPT-MARKER"
+        ]
+      }
+    },
+    {
+      "id": "shared_run_skill_record_loss_refuses",
+      "why": "The real CLI reaches the exported run_skill boundary without a pre-admitted object; record loss must refuse before the scripted provider is called.",
+      "shared_admission_entry": "run_skill",
+      "record_unavailable_after_preflight": true,
+      "target": {
+        "repo": "example/neotoma",
+        "files": {
+          "package.json": "{\"name\":\"sibling-fixture\",\"private\":true}\n"
+        }
+      },
+      "explicit_role_id": "ent_eval_pavo_definition",
+      "neotoma": "serve",
+      "dry_run": false,
+      "expect": {
+        "ok": false,
+        "exit_code": 1,
+        "dispatched": false,
+        "worktrees_created": 1,
+        "worktrees_left": 0,
+        "definition_queries": 0,
+        "definition_gets": 2,
+        "reason_contains": [
+          "canonical lens"
+        ]
+      }
     }
   ]
 }

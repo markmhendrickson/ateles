@@ -48,6 +48,10 @@ def test_the_eval_covers_every_required_behaviour():
         "definition_absent_refuses_in_dry_run",
         "unknown_name_scope_refuses_before_checkout",
         "explicit_id_reviews_with_unknown_name_scope",
+        "shared_dispatch_resolves_canonical_once",
+        "shared_dispatch_record_loss_refuses",
+        "shared_run_skill_resolves_canonical_once",
+        "shared_run_skill_record_loss_refuses",
     }
     assert required <= set(IDS)
 

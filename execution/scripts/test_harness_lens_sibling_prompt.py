@@ -135,3 +135,215 @@ def test_provider_attempt_never_reloads_generic_definition(monkeypatch, bad):
     )
     assert not result.ok
     assert ("absent or changed" if bad else "binary unavailable") in result.error
+
+
+@pytest.mark.parametrize("boundary", ["dispatch", "run_skill"])
+@pytest.mark.parametrize("bad", ["outage", "wrong_role", "missing_tools", "status"])
+def test_shared_local_review_admits_before_any_provider_work(
+    monkeypatch, boundary, bad
+):
+    """Exercise the exported boundary, not a missing executable or skill."""
+    role = definition()
+    transport = []
+    effects = []
+    monkeypatch.setenv("PAVO_AGENT_DEFINITION_ID", role.entity_id)
+
+    def read(self, method, url, body=None):
+        transport.append((method, url))
+        if bad == "outage":
+            raise OSError("synthetic record outage")
+        import copy
+
+        data = copy.deepcopy(role.raw)
+        if bad == "wrong_role":
+            data["snapshot"]["name"] = "other"
+        elif bad == "missing_tools":
+            del data["snapshot"]["tool_allowlist"]
+        else:
+            data["snapshot"]["status"] = "retired"
+        return data
+
+    async def provider(*args, **kwargs):
+        effects.append("provider")
+        return skill_runner.SkillResult("pavo", True, 0, "inert", "")
+
+    async def attempts(skill, attempt, **kwargs):
+        return await attempt("codex")
+
+    monkeypatch.setattr(AgentLoader, "_neotoma", read)
+    monkeypatch.setattr(skill_runner, "_run_skill_once", provider)
+    monkeypatch.setattr(skill_runner, "_run_provider_attempts", attempts)
+    monkeypatch.setattr(
+        skill_runner, "_provider_binaries", lambda: {"codex": "/bin/false"}
+    )
+    monkeypatch.setattr(skill_runner, "_fly_routing", lambda *a: (frozenset(), ()))
+    monkeypatch.setattr(
+        runner.dispatch_role,
+        "run_skill",
+        provider if boundary == "dispatch" else skill_runner.run_skill,
+    )
+    entry = (
+        runner.dispatch_role.dispatch
+        if boundary == "dispatch"
+        else skill_runner.run_skill
+    )
+    result = asyncio.run(entry("pavo", "task", provider="codex", local_review=True))
+    assert not result.ok
+    assert "canonical lens" in result.error
+    assert len(transport) == 1
+    assert effects == []
+
+
+@pytest.mark.parametrize("supplied", [None, "mutated"])
+def test_attempt_refuses_unadmitted_review_before_generic_or_binary(
+    monkeypatch, supplied
+):
+    calls = []
+    role = definition() if supplied else None
+    if role:
+        role.tool_allowlist = ["*"]
+    monkeypatch.setattr(
+        skill_runner,
+        "_load_agent_def",
+        lambda name: calls.append("generic") or definition(),
+    )
+    monkeypatch.setattr(
+        skill_runner,
+        "_provider_binaries",
+        lambda: calls.append("binary") or {"codex": None},
+    )
+    result = asyncio.run(
+        skill_runner._run_skill_once(
+            "pavo",
+            "task",
+            provider="codex",
+            local_review=True,
+            verified_agent_definition=role,
+        )
+    )
+    assert not result.ok
+    assert "canonical lens" in result.error
+    assert calls == []
+
+
+@pytest.mark.parametrize("boundary", ["dispatch", "run_skill"])
+def test_shared_local_review_resolves_once_and_pins_all_attempts(monkeypatch, boundary):
+    role = definition()
+    loads, seen = [], []
+    monkeypatch.setenv("PAVO_AGENT_DEFINITION_ID", role.entity_id)
+
+    def read(self, method, url, body=None):
+        loads.append((method, url))
+        assert method == "GET" and url.endswith("/" + role.entity_id)
+        return role.raw
+
+    async def once(skill, task, **kwargs):
+        seen.append(kwargs["verified_agent_definition"])
+        return skill_runner.SkillResult(
+            skill, False, None, "", "", error="inert attempt"
+        )
+
+    async def attempts(skill, attempt, **kwargs):
+        await attempt("codex")
+        return await attempt("cursor")
+
+    monkeypatch.setattr(AgentLoader, "_neotoma", read)
+    monkeypatch.setattr(skill_runner, "_run_skill_once", once)
+    monkeypatch.setattr(skill_runner, "_run_provider_attempts", attempts)
+    monkeypatch.setattr(
+        skill_runner, "_provider_binaries", lambda: {"codex": "/bin/false"}
+    )
+    monkeypatch.setattr(skill_runner, "_fly_routing", lambda *a: (frozenset(), ()))
+    entry = (
+        runner.dispatch_role.dispatch
+        if boundary == "dispatch"
+        else skill_runner.run_skill
+    )
+    asyncio.run(entry("pavo", "task", provider="codex", local_review=True))
+    assert len(loads) == 1
+    assert len(seen) == 2 and seen[0] is seen[1]
+    assert seen[0].raw == role.raw
+    assert seen[0].prompt_markdown == role.prompt_markdown
+    assert seen[0].tool_allowlist == role.tool_allowlist
+
+
+def test_local_review_authority_precedes_deterministic_branch(monkeypatch):
+    calls = []
+    role = definition()
+    role.is_stub = True
+    monkeypatch.setattr(AgentLoader, "load_for_lens", lambda self: role)
+
+    def generate(*args):
+        calls.append("generator")
+        return SimpleNamespace(status="done", summary="inert", changed_files=[])
+
+    monkeypatch.setattr(
+        runner.dispatch_role.mechanical_first, "run_generators", generate
+    )
+    result = asyncio.run(
+        runner.dispatch_role.dispatch(
+            "pavo",
+            "task",
+            local_review=True,
+            work_class="regenerate_generated_files",
+            regenerate_commands=["inert"],
+        )
+    )
+    assert not result.ok
+    assert calls == []
+
+
+def test_real_confidence_caller_uses_shared_strict_admission(monkeypatch):
+    import producer_confidence
+
+    role = definition()
+    role.name = role.raw["snapshot"]["name"] = "apis"
+    loads, attempts = [], []
+    monkeypatch.setenv("APIS_AGENT_DEFINITION_ID", role.entity_id)
+    monkeypatch.setattr(
+        AgentLoader,
+        "_neotoma",
+        lambda self, method, url, body=None: loads.append((method, url)) or role.raw,
+    )
+    monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda *a: None)
+    monkeypatch.setattr(
+        skill_runner, "_provider_binaries", lambda: {"claude": "/bin/false"}
+    )
+    monkeypatch.setattr(
+        skill_runner, "_tier_bound_binaries", lambda binaries, *a, **kw: binaries
+    )
+    monkeypatch.setattr(skill_runner, "_fly_routing", lambda *a: (frozenset(), ()))
+
+    async def once(skill, prompt, **kwargs):
+        attempts.append(kwargs)
+        return skill_runner.SkillResult(
+            skill, True, 0, '{"confidence":0.5}', "", provider="claude"
+        )
+
+    async def route(skill, attempt, **kwargs):
+        assert kwargs["provider"] == skill_runner.INFERENCE_ONLY_PROVIDER
+        return await attempt(kwargs["provider"])
+
+    monkeypatch.setattr(skill_runner, "_run_skill_once", once)
+    monkeypatch.setattr(skill_runner, "_run_provider_attempts", route)
+    result = asyncio.run(
+        producer_confidence._default_runner("score", SimpleNamespace(tier="mid"))
+    )
+    assert result[0]
+    assert len(loads) == len(attempts) == 1
+    assert attempts[0]["verified_agent_definition"].raw == role.raw
+    assert attempts[0]["inference_only"] and attempts[0]["local_review"]
+    assert attempts[0]["provider"] == skill_runner.INFERENCE_ONLY_PROVIDER
+
+
+def test_generic_nonlocal_definition_path_remains_compatible(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        skill_runner,
+        "_load_agent_def",
+        lambda name: calls.append("generic") or definition(),
+    )
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"codex": None})
+    result = asyncio.run(skill_runner._run_skill_once("pavo", "task", provider="codex"))
+    assert not result.ok and "binary unavailable" in result.error
+    assert calls == ["generic"]
