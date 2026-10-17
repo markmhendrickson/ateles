@@ -1976,6 +1976,8 @@ def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
 
 
 validate_model_selector = dispatch_role.model_tiering.validate_model_selector
+validate_reasoning_effort = dispatch_role.validate_reasoning_effort
+ReasoningEffort = dispatch_role.ReasoningEffort
 _cli_model_selector = dispatch_role.model_tiering.parse_model_selector
 
 
@@ -1987,6 +1989,7 @@ def dry_run_report(
     task_text: str,
     worktree_path: Path,
     model: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     action_class: str | None = None,
 ) -> dict:
     """Everything --dry-run prints: the exact command shape, prompt size, and
@@ -1998,6 +2001,7 @@ def dry_run_report(
     against `_provider_command` in review, not a silent divergence.
     """
     model = validate_model_selector(model)
+    reasoning_effort = validate_reasoning_effort(reasoning_effort, provider=provider)
     # Use the same live tier and vendor-binding resolvers as run_skill.
     # An explicit model wins; omitting both selectors keeps the provider default.
     selected_model = model
@@ -2021,6 +2025,8 @@ def dry_run_report(
             "codex",
             "exec",
             *(["--model", selected_model] if selected_model else []),
+            *(["--config", f"model_reasoning_effort={json.dumps(reasoning_effort)}"]
+              if reasoning_effort is not None else []),
             "--sandbox",
             sandbox_mode,
             *(
@@ -2070,6 +2076,7 @@ def dry_run_report(
         "dry_run": True,
         "provider": provider,
         "model": selected_model,
+        "reasoning_effort": reasoning_effort,
         "action_class": action_class,
         "tier": selected_tier.tier if selected_tier else None,
         "repo": target.repo,
@@ -2596,6 +2603,7 @@ async def run_one(
     brief_path: Path,
     timeout: int | None,
     model: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     action_class: str | None = None,
 ) -> dict:
     """Run the lens once on one provider. Returns a JSON-serializable report.
@@ -2606,6 +2614,7 @@ async def run_one(
     gate named in the task.
     """
     model = validate_model_selector(model)
+    reasoning_effort = validate_reasoning_effort(reasoning_effort, provider=provider)
     if swarm_dispatch is None:
         reason = (
             "canonical review reader could not be imported; cannot validate "
@@ -2656,6 +2665,7 @@ async def run_one(
                 task_text=task_text,
                 worktree_path=worktree.path,
                 model=model,
+                **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
                 action_class=action_class,
             )
             dotenv_refusal = refuse_if_credential_files_in_worktree(worktree.path)
@@ -2717,6 +2727,7 @@ async def run_one(
                 task_text,
                 provider=provider,
                 model=model,
+                **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
                 action_class=action_class,
                 cwd=str(worktree.path),
                 timeout=timeout,
@@ -2930,6 +2941,7 @@ async def run_compare(
     brief_path: Path,
     timeout: int | None,
     model: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     action_class: str | None = None,
 ) -> dict:
     """Run the same lens on the same head via each of *providers* and report
@@ -2944,6 +2956,8 @@ async def run_compare(
     ``run_one``/``--provider`` after inspecting the comparison.
     """
     model = validate_model_selector(model)
+    for provider in providers:
+        validate_reasoning_effort(reasoning_effort, provider=provider)
     results = {}
     for provider in providers:
         results[provider] = await run_one(
@@ -2956,6 +2970,7 @@ async def run_compare(
             brief_path=brief_path,
             timeout=timeout,
             model=model,
+            **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
             action_class=action_class,
         )
     return {"compare": True, "lens": target.lens, "pr": target.pr, "results": results}
@@ -3023,6 +3038,11 @@ def main(argv: list[str] | None = None) -> int:
         "Omit both selectors to retain the provider's existing default.",
     )
     parser.add_argument(
+        "--reasoning-effort", choices=dispatch_role.REASONING_EFFORTS, default=None,
+        help="Explicit per-call Codex reasoning effort; requires --provider codex "
+        "(or a Codex-only comparison). Omit to preserve the existing default.",
+    )
+    parser.add_argument(
         "--action-class", default=None,
         help="Resolve a model through the existing live action_policy/vendor_binding, "
         "e.g. lens_review:arch. --model takes precedence.",
@@ -3056,6 +3076,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("one of --provider or --compare is required")
     if args.provider and args.compare:
         parser.error("--provider and --compare are mutually exclusive")
+
+    try:
+        for provider in ([args.provider] if args.provider else [p.strip() for p in args.compare.split(",") if p.strip()]):
+            validate_reasoning_effort(args.reasoning_effort, provider=provider)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     agent = args.agent
     if not agent:
@@ -3109,6 +3135,7 @@ def main(argv: list[str] | None = None) -> int:
                         brief_path=brief_path,
                         timeout=args.timeout,
                         model=args.model,
+                        **({"reasoning_effort": args.reasoning_effort} if args.reasoning_effort is not None else {}),
                         action_class=args.action_class,
                     )
                 )
@@ -3124,6 +3151,7 @@ def main(argv: list[str] | None = None) -> int:
                         brief_path=brief_path,
                         timeout=args.timeout,
                         model=args.model,
+                        **({"reasoning_effort": args.reasoning_effort} if args.reasoning_effort is not None else {}),
                         action_class=args.action_class,
                     )
                 )

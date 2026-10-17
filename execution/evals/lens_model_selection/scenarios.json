@@ -1231,6 +1231,82 @@
           "gpt-6-sol"
         ]
       }
+    },
+    {
+      "id": "explicit_effort_inert_cli",
+      "why": "The explicit effort reaches the actual guarded CLI adapter without a provider process.",
+      "inert_provider": true,
+      "args": [
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-6-sol",
+        "--reasoning-effort",
+        "high"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ],
+        "reasoning_efforts": [
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "omitted_effort_inert_cli",
+      "why": "Omission leaves the actual adapter on its previous effort default.",
+      "inert_provider": true,
+      "args": [
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-6-sol"
+      ],
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ],
+        "reasoning_efforts": [
+          null
+        ]
+      }
+    },
+    {
+      "id": "effort_mixed_provider_refuses",
+      "why": "A comparison cannot run one adapter then silently lose an unsupported setting on another.",
+      "inert_provider": true,
+      "args": [
+        "--compare",
+        "codex,cursor",
+        "--reasoning-effort",
+        "high"
+      ],
+      "expect": {
+        "exit_code": 2,
+        "launches": 0,
+        "worktrees": 0
+      }
+    },
+    {
+      "id": "effort_guard_refusal_inert",
+      "why": "An explicit effort does not bypass existing review guards.",
+      "inert_provider": true,
+      "guard_refuses": true,
+      "args": [
+        "--provider",
+        "codex",
+        "--reasoning-effort",
+        "high"
+      ],
+      "expect": {
+        "exit_code": 1,
+        "launches": 0
+      }
     }
   ]
 }
