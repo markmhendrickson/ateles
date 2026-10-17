@@ -1,0 +1,5 @@
+[
+  {"id": "intact", "fault": "none", "ready": true},
+  {"id": "removed-deny", "fault": "remove_ref_deny", "ready": false},
+  {"id": "injected-command", "fault": "inject_command", "ready": false}
+]

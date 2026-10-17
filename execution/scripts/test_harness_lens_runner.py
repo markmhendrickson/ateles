@@ -7,12 +7,9 @@ site (`dispatch_role.dispatch`) and every `gh` call (`gh_login`,
 `current_pr_head`, `post_verdict`) is monkeypatched individually. Per the
 task's own hard rule, this suite makes no model call.
 
-The GUARD tests below are deliberately the opposite of that: they do NOT
-monkeypatch `HarnessSandbox.build`, `sandbox-exec`, or the git shim. They run
-the REAL probe — a real `sandbox-exec` invocation against a real fixture file
-this suite creates, and a real `git stash push` against a real scratch repo
-this suite `git init`s — because a mocked-CLI test cannot prove a guard binds;
-only running the actual mechanism can. `sandbox-exec` and `git` are both
+The GUARD tests run real sandboxed fixture file operations with matching
+ordinary positive controls. No prohibited Git operation is executed by the
+verification instrument or tests. The trusted sandbox executable is
 expected only on macOS developer hosts; the Linux CI lane exercises the
 fail-closed result when ``sandbox-exec`` is unavailable. Posting/verdict unit
 tests inject a deterministic ready sandbox so host capabilities cannot
@@ -428,7 +425,6 @@ def test_run_one_refuses_before_any_worktree_when_headroom_zero(
 # actually did when run for real against a fixture this test created.
 
 import platform  # noqa: E402
-import shutil  # noqa: E402
 
 _HAS_SANDBOX_EXEC = hlr.trusted_sandbox_exec_path() is not None
 _IS_DARWIN = platform.system() == "Darwin"
@@ -454,7 +450,7 @@ def test_sandbox_build_uses_trusted_wrapper_despite_path_shadowing(
     lookalike.chmod(0o755)
     monkeypatch.setenv("PATH", f"{shadow_bin}:{os.environ['PATH']}")
     monkeypatch.setattr(
-        hlr, "probe_stash_effect_denied_across_git_binaries", lambda *args: True
+        hlr, "probe_stash_ref_effects_denied", lambda *args: True
     )
 
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path / "sandbox")
@@ -536,7 +532,7 @@ def test_sandbox_build_claude_has_only_local_review_home_marker(tmp_path, monkey
     )
     monkeypatch.setattr(hlr, "probe_review_write_confinement", lambda *a, **k: True)
     monkeypatch.setattr(
-        hlr, "probe_stash_effect_denied_across_git_binaries", lambda *a, **k: True
+        hlr, "probe_stash_ref_effects_denied", lambda *a, **k: True
     )
     sandbox = hlr.HarnessSandbox.build("claude", tmp_path)
     assert sandbox.env_extra["ATELES_LOCAL_REVIEW_HOME"] == str(sandbox.root)
@@ -736,56 +732,6 @@ def test_sandbox_build_puts_a_shim_dir_first_on_path_for_codex(tmp_path):
     assert shim_git.stat().st_mode & 0o111  # executable
 
 
-@pytest.mark.skipif(not shutil.which("git"), reason="git required for the real probe")
-def test_git_shim_is_advisory_only_not_the_control(tmp_path):
-    """As of PR #1308 round 4 (ent_9e88db1882c668e6c5c32be9's round-4
-    follow-up), the shim is a friendly early-refusal message for the common
-    PATH-resolved case — NOT the enforcement mechanism. This test proves the
-    ADVISORY behaviour still works: a real `git stash push` through the shim
-    exits nonzero with a message naming it a courtesy, while an unrelated
-    command still runs. Whether the mutation is ACTUALLY prevented is proven
-    separately, by the sandbox-exec effect tests below, against the real
-    stash ref — not by this shim, and not by this test.
-    """
-    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
-    scratch_repo = tmp_path / "real-probe-repo"
-    scratch_repo.mkdir()
-    subprocess = __import__("subprocess")
-    subprocess.run(["git", "init", "-q", str(scratch_repo)], check=True)
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True
-    )
-    (scratch_repo / "f.txt").write_text("x", encoding="utf-8")
-    subprocess.run(["git", "-C", str(scratch_repo), "add", "-A"], check=True)
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True
-    )
-    (scratch_repo / "f.txt").write_text("changed", encoding="utf-8")
-
-    shim_dir = sandbox.env_extra["PATH"].split(":")[0]
-    env = {**os.environ, "PATH": f"{shim_dir}:{os.environ.get('PATH', '')}"}
-
-    push = subprocess.run(
-        ["git", "-C", str(scratch_repo), "stash", "push"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert push.returncode != 0, "the shim let a real stash push through"
-    assert "courtesy" in push.stderr.lower()
-
-    # And a completely unrelated git command must still work through the shim.
-    status = subprocess.run(
-        ["git", "-C", str(scratch_repo), "status"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert status.returncode == 0
 
 
 # ── git-stash denied by EFFECT, not by binary (PR #1308 round 4,
@@ -800,229 +746,16 @@ def test_git_shim_is_advisory_only_not_the_control(tmp_path):
 # that gap, using the real mechanism against a real scratch repo.
 
 
-def test_discover_probe_git_invocations_finds_more_than_one_real_binary():
-    """This host must have at least the PATH-resolved git for this test suite
-    to mean anything; asserting more than one (when available) is what
-    distinguishes this from round 3's PATH-only enumeration.
-    """
-    with tempfile.TemporaryDirectory() as tmp:
-        scratch = Path(tmp) / "discover-probe-repo"
-        scratch.mkdir()
-        subprocess.run(["git", "init", "-q", str(scratch)], check=True)
-        invocations = hlr.discover_probe_git_invocations(scratch)
-    assert invocations, "expected at least the PATH-resolved git"
-    assert ["git"] in invocations
 
 
-def test_stash_effect_probe_fails_closed_when_every_state_read_fails(
-    monkeypatch, tmp_path
-):
-    """Identical failed reads must not look like an unchanged stash stack."""
-
-    def _failed_reads_and_denied_push(command, **kwargs):
-        if command[-2:] == ["stash", "list"]:
-            return subprocess.CompletedProcess(
-                command, 1, stdout="", stderr="unreadable"
-            )
-        if command[-2:] == ["stash", "push"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
-        raise AssertionError(f"unexpected command: {command}")
-
-    monkeypatch.setattr(hlr.subprocess, "run", _failed_reads_and_denied_push)
-    monkeypatch.setattr(
-        hlr, "discover_probe_git_invocations", lambda scratch_git_dir: [["git"]]
-    )
-    monkeypatch.setattr(hlr.shutil, "which", lambda command: "/usr/bin/git")
-
-    assert (
-        hlr.probe_stash_effect_denied_across_git_binaries(["sandbox-exec"], tmp_path)
-        is False
-    )
 
 
-def test_advisory_stash_probe_fails_closed_when_every_state_read_fails(
-    monkeypatch, tmp_path
-):
-    """The advisory probe must reject the same unreadable baseline/after state."""
-
-    def _failed_reads_and_denied_push(command, **kwargs):
-        if command[-2:] == ["stash", "list"]:
-            return subprocess.CompletedProcess(
-                command, 1, stdout="", stderr="unreadable"
-            )
-        if command[-2:] == ["stash", "push"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
-        raise AssertionError(f"unexpected command: {command}")
-
-    monkeypatch.setattr(hlr.subprocess, "run", _failed_reads_and_denied_push)
-    monkeypatch.setattr(hlr.shutil, "which", lambda command: "/usr/bin/git")
-
-    assert hlr.probe_git_shim_denies_stash_push(tmp_path / "git", tmp_path) is False
 
 
-def test_stash_effect_probe_accepts_successful_empty_state_reads(monkeypatch, tmp_path):
-    """A normal empty stash list remains a readable, comparable observation."""
-
-    def _empty_reads_and_denied_push(command, **kwargs):
-        if command[-2:] == ["stash", "list"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if command[-2:] == ["stash", "push"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
-        raise AssertionError(f"unexpected command: {command}")
-
-    monkeypatch.setattr(hlr.subprocess, "run", _empty_reads_and_denied_push)
-    monkeypatch.setattr(
-        hlr, "discover_probe_git_invocations", lambda scratch_git_dir: [["git"]]
-    )
-    monkeypatch.setattr(hlr.shutil, "which", lambda command: "/usr/bin/git")
-
-    assert (
-        hlr.probe_stash_effect_denied_across_git_binaries(["sandbox-exec"], tmp_path)
-        is True
-    )
 
 
-@pytest.mark.skipif(
-    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
-    reason="sandbox-exec is macOS-only; see test_sandbox_probe_reports_unbound_without_sandbox_exec",
-)
-def test_stash_ref_is_really_denied_across_every_real_git_binary_this_host_has(
-    tmp_path,
-):
-    """The load-bearing regression test for the round-4 finding: invoke `git
-    stash push` via EVERY real git invocation this host offers — PATH-resolved
-    `git`, `/usr/bin/git` by absolute path, `xcrun git`, and (if distinct)
-    Xcode's bundled binary by its own absolute path — wrapped in the ACTUAL
-    sandbox-exec command this run's HarnessSandbox built, and confirm the REAL
-    stash stack (read directly with the system git, not through any guard) is
-    unchanged after every single one.
-
-    This must include at least `xcrun git` or Xcode's own binary when this
-    host has Xcode installed — the exact resolution mechanism round 3's
-    PATH-only enumeration missed and round 4's review reproduced a live
-    bypass through.
-    """
-    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
-    assert sandbox.command_wrapper, "no sandbox-exec wrapper built — cannot test this"
-
-    scratch_repo = tmp_path / "stash-effect-probe-repo"
-    scratch_repo.mkdir()
-    subprocess = __import__("subprocess")
-    subprocess.run(["git", "init", "-q", str(scratch_repo)], check=True)
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True
-    )
-    (scratch_repo / "f.txt").write_text("x", encoding="utf-8")
-    subprocess.run(["git", "-C", str(scratch_repo), "add", "-A"], check=True)
-    # A REAL commit first: without one, even a fully bypassed guard fails on
-    # its own with "no initial commit", which would make this test pass for
-    # the wrong reason.
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True
-    )
-    (scratch_repo / "f.txt").write_text("changed", encoding="utf-8")
-
-    invocations = hlr.discover_probe_git_invocations(scratch_repo)
-    assert invocations, "expected at least one real git invocation to test against"
-    if (
-        shutil.which("xcrun")
-        and Path("/Applications/Xcode.app/Contents/Developer/usr/bin/git").is_file()
-    ):
-        assert any(
-            prefix == ["xcrun", "git"]
-            or prefix == ["/Applications/Xcode.app/Contents/Developer/usr/bin/git"]
-            for prefix in invocations
-        ), "expected xcrun/Xcode's git to be among the tested invocations on this host"
-
-    for prefix in invocations:
-        attempt = subprocess.run(
-            [
-                *sandbox.command_wrapper,
-                *prefix,
-                "-C",
-                str(scratch_repo),
-                "stash",
-                "push",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert attempt.returncode != 0, (
-            f"invocation {prefix} was NOT denied by the sandbox-exec "
-            "stash-ref deny — the exact round-4 bypass"
-        )
-
-    # Read the REAL stash stack directly (system git, no guard involved) —
-    # confirms the denial actually stopped the mutation for every invocation.
-    real_system_git = shutil.which("git")
-    listing = subprocess.run(
-        [real_system_git, "-C", str(scratch_repo), "stash", "list"],
-        capture_output=True,
-        text=True,
-    )
-    assert listing.stdout.strip() == "", (
-        "a stash entry landed despite every invocation reporting denied — "
-        "the sandbox blocked something else, not the mutation"
-    )
 
 
-@pytest.mark.skipif(
-    not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
-    reason="sandbox-exec is macOS-only",
-)
-def test_stash_ref_deny_also_denies_reading_an_existing_entry(tmp_path):
-    """The read-deny half of the round-4 fix: a dispatched child must not be
-    able to CONSUME an existing stash entry (left by another session) via
-    `stash list`/`show`/`apply` either. Verified shape: a sandboxed `stash
-    list` against a repo with a real pre-existing entry returns an EMPTY
-    listing rather than an error — Seatbelt's deny makes git behave as if the
-    ref does not exist, which is the desired outcome even though it is not a
-    nonzero exit code (see build_sandbox_exec_profile's docstring).
-    """
-    sandbox = hlr.HarnessSandbox.build("codex", tmp_path)
-    assert sandbox.command_wrapper
-
-    scratch_repo = tmp_path / "read-deny-probe-repo"
-    scratch_repo.mkdir()
-    subprocess = __import__("subprocess")
-    subprocess.run(["git", "init", "-q", str(scratch_repo)], check=True)
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "config", "user.email", "probe@example.com"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "config", "user.name", "probe"], check=True
-    )
-    (scratch_repo / "f.txt").write_text("x", encoding="utf-8")
-    subprocess.run(["git", "-C", str(scratch_repo), "add", "-A"], check=True)
-    subprocess.run(
-        ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"], check=True
-    )
-    (scratch_repo / "f.txt").write_text("changed", encoding="utf-8")
-    # A REAL, unsandboxed push — this is the "existing entry left by another
-    # session" the read-deny must hide from a later sandboxed attempt.
-    subprocess.run(["git", "-C", str(scratch_repo), "stash", "push"], check=True)
-    real_listing_before = subprocess.run(
-        ["git", "-C", str(scratch_repo), "stash", "list"],
-        capture_output=True,
-        text=True,
-    )
-    assert real_listing_before.stdout.strip() != "", (
-        "setup failed: no real entry to hide"
-    )
-
-    sandboxed_listing = subprocess.run(
-        [*sandbox.command_wrapper, "git", "-C", str(scratch_repo), "stash", "list"],
-        capture_output=True,
-        text=True,
-    )
-    assert sandboxed_listing.stdout.strip() == "", (
-        "the sandboxed list saw an existing stash entry it should not be able to read"
-    )
 
 
 def _packed_stash_fixture(repo: Path) -> tuple[str, str]:
@@ -1124,7 +857,7 @@ def test_verify_stash_ref_detects_shadowed_packed_entry_mutation(tmp_path):
 
 @pytest.mark.skipif(
     not (_IS_DARWIN and _HAS_SANDBOX_EXEC),
-    reason="git_stash_denied now also requires the absolute-path sandbox-exec "
+    reason="git_stash_denied requires actual protected-ref filesystem probes "
     "probe (ent_9e88db1882c668e6c5c32be9), which needs sandbox-exec; see "
     "test_sandbox_probe_reports_unbound_without_sandbox_exec for the other side",
 )
@@ -1359,7 +1092,7 @@ def test_codex_outer_guard_real_commands_keep_all_effect_denials(tmp_path):
 
     Run the same real command wrapper production passes to Codex: an
     unrelated command succeeds, while a credential-shaped read, a
-    user-config write, and a real stash push remain denied by effect. A host
+    user-config write, and protected ref effects remain denied. A host
     that cannot apply ``sandbox-exec`` is covered by fail-closed tests.
     """
     sandbox = hlr.HarnessSandbox.build("codex", tmp_path / "sandbox")
@@ -1394,35 +1127,9 @@ def test_codex_outer_guard_real_commands_keep_all_effect_denials(tmp_path):
     assert denied_write.returncode != 0
     assert not config_write.exists()
 
-    scratch = tmp_path / "stash-negative-control"
-    scratch.mkdir()
-    subprocess.run(["git", "init", "-q", str(scratch)], check=True)
-    subprocess.run(
-        ["git", "-C", str(scratch), "config", "user.email", "probe@example.com"],
-        check=True,
+    assert hlr.probe_stash_ref_effects_denied(
+        sandbox.command_wrapper, sandbox.root / "additional-ref-fixtures"
     )
-    subprocess.run(
-        ["git", "-C", str(scratch), "config", "user.name", "probe"], check=True
-    )
-    (scratch / "tracked.txt").write_text("before\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(scratch), "add", "tracked.txt"], check=True)
-    subprocess.run(
-        ["git", "-C", str(scratch), "commit", "-q", "-m", "probe"], check=True
-    )
-    (scratch / "tracked.txt").write_text("after\n", encoding="utf-8")
-    denied_stash = subprocess.run(
-        [*sandbox.command_wrapper, "git", "-C", str(scratch), "stash", "push"],
-        capture_output=True,
-        text=True,
-    )
-    assert denied_stash.returncode != 0
-    listing = subprocess.run(
-        ["git", "-C", str(scratch), "stash", "list"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert listing.stdout.strip() == ""
 
 
 def test_refuse_if_guard_required_is_driven_by_fully_guarded_not_a_constant(tmp_path):
