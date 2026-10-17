@@ -155,8 +155,8 @@ def run_scenario(scenario, tmp_path, *, mutation="none", role_fault=None):
 
         mp.setattr(skill_runner, "_load_agent_def", definition)
         mp.setattr(active_runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
-        # Strict lens preflight resolves at its real transport boundary. Generic
-        # direct-dispatch fixtures above retain their existing loader semantics.
+        # Local review fixtures supply data at the real canonical transport.
+        # Private-attempt positives explicitly pre-admit at their caller below.
         mp.setenv("PAVO_AGENT_DEFINITION_ID", "ent_eval_pavo")
 
         def canonical_response(loader, method, url, body=None):
@@ -286,6 +286,9 @@ def run_scenario(scenario, tmp_path, *, mutation="none", role_fault=None):
                         if entry == "dispatch":
                             call = active_runner.dispatch_role.dispatch("pavo", task, **kwargs)
                         elif entry in {"run_skill", "run_once"}:
+                            if entry == "run_once" and scenario.get("pre_admit_role", False):
+                                kwargs["verified_agent_definition"] = asyncio.run(
+                                    skill_runner._admit_local_review_definition("pavo", None))
                             fn = skill_runner.run_skill if entry == "run_skill" else skill_runner._run_skill_once
                             call = fn("pavo", task, role="pavo", **kwargs)
                         else:
@@ -355,6 +358,11 @@ def check(scenario, obs):
                     or result.get("posted") is not False
                     or "canonical review reader" not in result.get("reason", "")):
                 failures.append("missing truthful pre-inference reader refusal")
+    if exp.get("canonical_role_refusal"):
+        if obs["definition_loads"] or obs["events"] or obs["provider_calls"]:
+            failures.append("unadmitted attempt reached definition or provider effects")
+        if not report or report.get("ok") is not False or "not admitted" not in report.get("reason", ""):
+            failures.append("missing truthful pre-attempt canonical refusal")
     if "dry_model" in exp:
         result = reports[0]
         if not result or result.get("model") != exp["dry_model"]:

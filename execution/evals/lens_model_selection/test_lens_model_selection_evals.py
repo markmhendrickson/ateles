@@ -75,3 +75,20 @@ def test_strict_role_transport_fault_refuses_before_setup(tmp_path, role_fault):
     assert not obs["dispatch_calls"]
     assert not obs["provider_calls"]
     assert not obs["events"]
+
+
+@pytest.mark.parametrize("scenario_id", ["run_once_omitted", "run_once_explicit"])
+def test_private_attempt_positive_has_strict_canonical_caller_admission(tmp_path, scenario_id):
+    obs = harness.run_scenario(BY_ID[scenario_id], tmp_path)
+    assert harness.check(BY_ID[scenario_id], obs) == [], obs
+    assert obs["canonical_transport_reads"] == [{"method": "GET", "entity_id": "ent_eval_pavo"}]
+    assert len(obs["provider_calls"]) == 1
+
+
+@pytest.mark.parametrize("role_fault", ["wrong_identity", "retired", "missing_tools"])
+def test_private_attempt_caller_refuses_bad_canonical_transport(tmp_path, role_fault):
+    obs = harness.run_scenario(BY_ID["run_once_omitted"], tmp_path, role_fault=role_fault)
+    assert obs["exit_code"] != 0
+    assert len(obs["canonical_transport_reads"]) == 1
+    assert not obs["events"]
+    assert not obs["provider_calls"]
