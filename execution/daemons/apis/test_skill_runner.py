@@ -2874,6 +2874,85 @@ class TestDispatchFailureDiagnostics:
 
     # ── E. secret redaction in persisted output ───────────────────────────────
 
+    @pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process-tree contract")
+    @pytest.mark.parametrize("cancel", [False, True])
+    def test_timeout_bounds_inherited_pipes_from_owned_detached_descendant(self, tmp_path, cancel):
+        """A provider child may create its own session while inheriting pipes."""
+        launcher = tmp_path / "provider-wrapper"
+        pid_file = tmp_path / "owned-pids.json"
+        launcher.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys, subprocess, time, json\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+            "start_new_session=True)\n"
+            "with open(os.environ['OWNED_PID_FILE'], 'w') as f: "
+            "json.dump([os.getpid(), child.pid], f)\n"
+            "print('untrusted partial artifact', flush=True)\n"
+            "time.sleep(60)\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        loader = MagicMock()
+        loader.load.return_value = _make_def(prompt_markdown="Role: Cicada.")
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        result = None
+        deadline_expired = False
+        survivors = []
+        cancelled = False
+
+        async def invoke():
+            nonlocal result, deadline_expired, survivors, cancelled
+            try:
+                task = asyncio.create_task(skill_runner.run_skill(
+                    "cicada", "fixture", role="cicada", timeout=1))
+                if cancel:
+                    for _ in range(50):
+                        if os.path.isfile(pid_file):
+                            break
+                        await asyncio.sleep(0.01)
+                    task.cancel()
+                result = await asyncio.wait_for(task, timeout=4)
+            except asyncio.TimeoutError:
+                deadline_expired = True
+            except asyncio.CancelledError:
+                cancelled = True
+            finally:
+                # Cleanup is scoped to PIDs reported by this exact fixture,
+                # including the deliberately failing pre-repair instrument.
+                if os.path.isfile(pid_file):
+                    with open(pid_file) as stream:
+                        pids = json.load(stream)
+                    # Measure before test cleanup; cleanup cannot make a
+                    # broken production mechanism appear to kill descendants.
+                    for pid in pids:
+                        state = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                                               capture_output=True, text=True).stdout.strip()
+                        if state and not state.startswith("Z"):
+                            survivors.append(pid)
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+        try:
+            with (patch("skill_runner.AgentLoader", return_value=loader),
+                  patch("skill_runner._write_harness_event"),
+                  patch("skill_runner.CLAUDE_BIN", str(launcher)),
+                  patch.object(Path, "exists", return_value=True),
+                  patch.object(Path, "read_text", return_value="skill body"),
+                  patch.dict(os.environ, {"OWNED_PID_FILE": str(pid_file)})):
+                asyncio.run(invoke())
+            assert not deadline_expired, "timeout cleanup hung on descendant-owned output pipes"
+            if cancel:
+                assert cancelled and result is None
+            else:
+                assert result is not None and not result.ok
+                assert "timed out" in result.error
+                assert result.stdout == "" and result.stderr == ""
+            assert survivors == [], "owned descendant survived production cleanup"
+            assert unrelated.poll() is None
+        finally:
+            unrelated.kill()
+            unrelated.wait()
+
     def test_secrets_are_redacted_from_the_failure_log(self, tmp_path) -> None:
         # Deliberately not a real token shape, and not bound to a name the
         # repo's gitleaks `protected-patterns` rule treats as a credential.
