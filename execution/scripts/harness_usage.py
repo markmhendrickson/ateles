@@ -142,6 +142,25 @@ def _gate_view(provider: str, headroom: float) -> dict[str, object]:
     return view
 
 
+def usage_report() -> dict[str, dict[str, object]]:
+    """Per-provider headroom, cooling, windows and the frontier-dispatch verdict.
+
+    The one place ``show`` and any other reader (such as the operator's
+    checkpoint-resolution command) take the pace status from.
+    """
+    values = harness_router.configured_headroom()
+    return {
+        provider: {
+            "headroom": values[provider],
+            "live": harness_router.live_headroom(provider),
+            "cooling": _cooling_view(provider),
+            "windows": harness_router.usage_windows(provider),
+            "usage_gate": _gate_view(provider, values[provider]),
+        }
+        for provider in harness_router.configured_providers()
+    }
+
+
 def _refresh_providers() -> int:
     """Refresh every configured provider from its native subscription CLI."""
     app_codex = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
@@ -282,22 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         if until is None:
             parser.error(f"unparseable --until: {args.until!r}")
         harness_router.record_exhausted(args.provider, until)
-    values = harness_router.configured_headroom()
-    print(
-        json.dumps(
-            {
-                provider: {
-                    "headroom": values[provider],
-                    "live": harness_router.live_headroom(provider),
-                    "cooling": _cooling_view(provider),
-                    "windows": harness_router.usage_windows(provider),
-                    "usage_gate": _gate_view(provider, values[provider]),
-                }
-                for provider in harness_router.configured_providers()
-            },
-            indent=2,
-        )
-    )
+    print(json.dumps(usage_report(), indent=2))
     return 0
 
 
