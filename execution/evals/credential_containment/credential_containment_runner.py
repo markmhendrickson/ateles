@@ -168,6 +168,18 @@ def run_launch(scenario: dict, tmp_root: Path, monkeypatch) -> LaunchTrace:
         if entry not in sys.path:
             sys.path.insert(0, entry)
     import harness_lens_runner as hlr
+    from lib.daemon_runtime.agent_loader import AgentDefinition, AgentLoader
+
+    # Synthetic canonical authority; the launch eval exercises containment,
+    # not live role retrieval or provider authorization.
+    def role_fixture(loader):
+        snap = {"name": loader.agent_name, "status": "active",
+                "prompt_markdown": "Synthetic lens role", "tool_allowlist": ["Read"]}
+        return AgentDefinition(entity_id="ent_fixture", name=loader.agent_name,
+            status="active", prompt_markdown=snap["prompt_markdown"],
+            tool_allowlist=snap["tool_allowlist"], raw={"entity_id": "ent_fixture",
+                "entity_type": "agent_definition", "snapshot": snap})
+    monkeypatch.setattr(AgentLoader, "load_for_lens", role_fixture)
 
     trace = LaunchTrace()
     files = list(scenario["files"])
@@ -175,9 +187,6 @@ def run_launch(scenario: dict, tmp_root: Path, monkeypatch) -> LaunchTrace:
     def fake_create(self, *, head):
         self._created = True
         self.path.mkdir(parents=True, exist_ok=True)
-        agents = self.path / "docs" / "agents"
-        agents.mkdir(parents=True, exist_ok=True)
-        (agents / "pavo.md").write_text("# lens prompt\n", encoding="utf-8")
         for relative in files:
             target = self.path / relative
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -549,6 +549,67 @@ class AgentDefinition:
         return self.agent_grant == "service"
 
 
+def validate_lens_definition(definition: AgentDefinition, expected_name: str) -> None:
+    """Validate explicit canonical authority without the generic loader defaults.
+
+    The strict review path is opt-in. Missing tools/status must not inherit the
+    generic dataclass's active/wildcard defaults, including at provider retries.
+    Planned/proposed/draft retain their existing visible warning semantics.
+    """
+    if (
+        not isinstance(definition, AgentDefinition)
+        or definition.is_stub
+        or not isinstance(definition.entity_id, str)
+        or not definition.entity_id.strip()
+        or definition.name != expected_name
+        or not isinstance(definition.prompt_markdown, str)
+        or not definition.prompt_markdown.strip()
+    ):
+        raise ValueError("canonical lens role has invalid identity or prompt")
+    data = definition.raw
+    snap = data.get("snapshot") if isinstance(data, dict) else None
+    if not isinstance(snap, dict):
+        raise ValueError("canonical lens role has no explicit snapshot")
+    if (
+        data.get("entity_id") != definition.entity_id
+        or data.get("entity_type") != "agent_definition"
+        or snap.get("name") != expected_name
+        or snap.get("prompt_markdown") != definition.prompt_markdown
+        or snap.get("status") != definition.status
+        or "tool_allowlist" not in snap
+        or snap["tool_allowlist"] != definition.tool_allowlist
+    ):
+        raise ValueError("canonical lens authority is absent or changed")
+    if (
+        not isinstance(definition.status, str)
+        or definition.status not in RUNNING_STATUSES | WARNING_STATUSES
+    ):
+        raise ValueError("canonical lens status does not admit execution")
+    raw_tools = definition.tool_allowlist
+    if isinstance(raw_tools, str):
+        text = raw_tools.strip()
+        if text.startswith("["):
+            try:
+                raw_tools = json.loads(text)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("canonical lens tools are malformed") from exc
+        elif not text:
+            raise ValueError("canonical lens tools are empty")
+    elif not isinstance(raw_tools, list):
+        raise ValueError("canonical lens tools are malformed")
+    if isinstance(raw_tools, list) and (
+        not raw_tools
+        or any(not isinstance(tool, str) or not tool.strip() for tool in raw_tools)
+    ):
+        raise ValueError("canonical lens tools are empty or malformed")
+    if not isinstance(raw_tools, (str, list)):
+        raise ValueError("canonical lens tools are malformed")
+    if not definition.tools:
+        raise ValueError("canonical lens tools are empty")
+    if definition.status in WARNING_STATUSES:
+        log.warning("[%s] canonical lens role status=%s", expected_name, definition.status)
+
+
 class AgentLoader:
     """
     Load an agent_definition entity from Neotoma by agent name.
@@ -583,6 +644,124 @@ class AgentLoader:
 
         # Fall back to name search
         return self._load_by_name()
+
+    def load_for_lens(self) -> AgentDefinition:
+            """Resolve a review role with proven identity and complete search coverage.
+
+            This opt-in path keeps the generic dispatch loader's existing fallback
+            behavior unchanged. The guarded lens caller refuses every stub before
+            model dispatch, including a failed or ambiguous lookup here.
+            """
+            explicit_id = os.environ.get(f"{self._prefix}_AGENT_DEFINITION_ID", "")
+            if explicit_id:
+                return self._load_by_id_for_lens(explicit_id)
+            return self._load_by_name_for_lens()
+
+    def _load_by_id_for_lens(self, entity_id: str) -> AgentDefinition:
+            try:
+                data = self._neotoma("GET", f"{NEOTOMA_BASE_URL}/entities/{entity_id}")
+                if not isinstance(data, dict) or data.get("entity_id") != entity_id:
+                    return self._stub("explicit lens role response has wrong entity id")
+                if data.get("entity_type") != "agent_definition":
+                    return self._stub("explicit lens role is not an agent_definition")
+                snap = data.get("snapshot")
+                if not isinstance(snap, dict) or snap.get("name") != self.agent_name:
+                    return self._stub("explicit lens role has missing or wrong name")
+                return self._parse_for_lens(entity_id, data)
+            except Exception as exc:
+                return self._stub(
+                    f"GET /entities/{entity_id} failed: {type(exc).__name__}: {exc}"
+                )
+
+    def _load_by_name_for_lens(self) -> AgentDefinition:
+            body = {
+                "entity_type": "agent_definition",
+                "snapshot_filters": {"name": {"op": "eq", "value": self.agent_name}},
+                "limit": 100,
+                "include_snapshots": True,
+            }
+            try:
+                data = self._neotoma("POST", f"{NEOTOMA_BASE_URL}/entities/query", body)
+                if not isinstance(data, dict) or not isinstance(data.get("entities"), list):
+                    return self._stub("lens role search has no valid entity list")
+                entities = data["entities"]
+                total = data.get("total")
+                contract = data.get("read_contract")
+                contract = contract if isinstance(contract, dict) else {}
+                coverage = contract.get("coverage")
+                coverage = coverage if isinstance(coverage, dict) else {}
+                contract_total = coverage.get("total")
+                contract_total = contract_total if isinstance(contract_total, dict) else {}
+                continuation = coverage.get("continuation")
+                continuation = continuation if isinstance(continuation, dict) else {}
+                scope = contract.get("applied_scope")
+                scope = scope if isinstance(scope, dict) else {}
+                predicates = scope.get("predicates")
+                mode = contract.get("mode")
+                mode = mode if isinstance(mode, dict) else {}
+                if (
+                    isinstance(total, bool)
+                    or not isinstance(total, int)
+                    or total < 0
+                    or total != len(entities)
+                    or mode.get("actual") != "structured"
+                    or scope.get("entity_types") != ["agent_definition"]
+                    or not isinstance(predicates, list)
+                    or not any(
+                        isinstance(item, dict)
+                        and item.get("field") == "name"
+                        and item.get("op") == "eq"
+                        for item in predicates
+                    )
+                    or coverage.get("state") != "complete"
+                    or coverage.get("scope_exhausted") is not True
+                or isinstance(coverage.get("returned_count"), bool)
+                or not isinstance(coverage.get("returned_count"), int)
+                    or coverage.get("returned_count") != len(entities)
+                    or contract_total.get("relation") != "exact"
+                or isinstance(contract_total.get("value"), bool)
+                or not isinstance(contract_total.get("value"), int)
+                    or contract_total.get("value") != total
+                    or continuation.get("kind") != "none"
+                    or data.get("next_cursor")
+                    or data.get("has_more")
+                    or data.get("next_page_token")
+                ):
+                    return self._stub("lens role search coverage is incomplete or unknown")
+                matches = []
+                for ent in entities:
+                    if not isinstance(ent, dict) or not isinstance(ent.get("entity_id"), str):
+                        return self._stub("lens role search returned a malformed entity")
+                    outer = ent.get("snapshot")
+                    if not isinstance(outer, dict):
+                        return self._stub("lens role search returned no snapshot")
+                    snap = outer.get("snapshot", outer)
+                    if not isinstance(snap, dict):
+                        return self._stub("lens role search returned a malformed snapshot")
+                    if snap.get("name") == self.agent_name:
+                        matches.append((ent["entity_id"], snap))
+                if len(matches) != 1:
+                    return self._stub(
+                        f"lens role {self.agent_name!r} has {len(matches)} exact matches"
+                    )
+                entity_id, snap = matches[0]
+                return self._parse_for_lens(entity_id, {"snapshot": snap})
+            except Exception as exc:
+                return self._stub(
+                    f"POST /entities/query failed: {type(exc).__name__}: {exc}"
+                )
+
+    def _parse_for_lens(self, entity_id: str, data: dict) -> AgentDefinition:
+        from copy import deepcopy
+
+        definition = self._parse(entity_id, data)
+        # Name results carry identity in their row; preserve that verified
+        # binding and keep source authority separate from mutable tool arrays.
+        definition.raw = deepcopy(data)
+        definition.raw["entity_id"] = entity_id
+        definition.raw["entity_type"] = "agent_definition"
+        validate_lens_definition(definition, self.agent_name)
+        return definition
 
     def _neotoma(self, method: str, url: str, body: "dict | None" = None) -> dict:
         """Fetch JSON from Neotoma, returning the parsed body.
