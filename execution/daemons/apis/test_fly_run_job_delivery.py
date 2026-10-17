@@ -51,13 +51,32 @@ ROLE_TOKEN = "lanius-own-neotoma-token-0099"
 def _genv(home):
     return {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "LC_ALL": "C"}
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "LC_ALL": "C",
+            **rd.git_config_environment()}
 
 
 def git(cwd, *args, home):
     done = subprocess.run(["git", *args], cwd=cwd, env=_genv(home), capture_output=True)
     assert done.returncode == 0, done.stderr.decode()
     return done.stdout.decode().strip()
+
+
+def test_job_fixture_git_disables_only_automatic_housekeeping(monkeypatch, tmp_path):
+    seen = []
+
+    def completed_git(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, b"fixture\n", b"")
+
+    monkeypatch.setattr(subprocess, "run", completed_git)
+    assert git(tmp_path, "commit", "-qm", "fixture", home=tmp_path) == "fixture"
+    assert len(seen) == 1
+    env = seen[0]
+    pairs = [(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"])
+             for i in range(int(env.get("GIT_CONFIG_COUNT", "0")))]
+    assert pairs == [("maintenance.auto", "false"), ("gc.auto", "0")]
+    assert env["GIT_AUTHOR_NAME"] == env["GIT_COMMITTER_NAME"] == "t"
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == os.devnull
 
 
 def _deadline_in(seconds: float) -> str:

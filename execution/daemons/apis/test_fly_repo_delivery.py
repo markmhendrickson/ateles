@@ -43,7 +43,8 @@ AUTHOR = ("cicada", "cicada@agents.example.invalid")
 def _env(home):
     return {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "LC_ALL": "C"}
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "LC_ALL": "C",
+            **rd.git_config_environment()}
 
 
 def git(cwd, *args, home, input=None):
@@ -453,6 +454,109 @@ def test_the_git_environment_inherits_nothing(monkeypatch, tmp_path):
     assert pairs["transfer.fsckObjects"] == "true" and pairs["protocol.allow"] == "never"
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_NO_REPLACE_OBJECTS"] == "1"
     assert TOKEN not in str(env)
+
+
+def _config_pairs(env):
+    return [(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"])
+            for i in range(int(env.get("GIT_CONFIG_COUNT", "0")))]
+
+
+def _assert_job_git_settings(env):
+    pairs = _config_pairs(env)
+    assert pairs[-2:] == [("maintenance.auto", "false"), ("gc.auto", "0")]
+    assert dict(pairs)["maintenance.auto"] == "false"
+    assert dict(pairs)["gc.auto"] == "0"
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["accepted", "refused"])
+def test_delivery_git_callers_keep_housekeeping_inside_the_call(monkeypatch, tmp_path, refused):
+    """All Git effects are inert; exercise the actual delivery callers."""
+    work = rd.prepare_work(tmp_path.resolve() / "work", run_id="inert-git")
+    base, head = "1" * 40, "2" * 40
+    calls = []
+
+    def completed_git(argv, **kwargs):
+        # No real subprocess fallback, even when the configuration is mutated.
+        args = argv[1:]
+        if args[:1] == ["-C"]:
+            args = args[2:]
+        operation = args[0]
+        assert operation in {"init", "fetch", "symbolic-ref", "rev-parse", "bundle",
+                             "merge-base", "rev-list", "diff-tree", "update-ref"}
+        calls.append((list(args), dict(kwargs["env"])))
+        out, code = b"", 0
+        if operation == "init":
+            work.origin.mkdir()
+        elif operation == "rev-parse":
+            if args[-1] == rd.QUARANTINE_REF and "-q" in args:
+                code = 1  # The quarantine ref has been removed.
+            else:
+                out = (base if args[-1] == "refs/heads/main^{commit}" else head).encode() + b"\n"
+        elif args[:2] == ["bundle", "create"]:
+            (work.export / rd.BUNDLE_NAME).write_bytes(b"inert bundle")
+        elif args[:2] == ["bundle", "list-heads"]:
+            out = f"{head} refs/heads/{BRANCH}\n".encode()
+        elif operation == "rev-list" and "--objects" not in args and "--min-parents=2" not in args:
+            out = head.encode() + b"\n"
+        elif operation == "diff-tree" and refused:
+            out = f":000000 100644 {'0' * 40} {head} A\0.gitmodules\0".encode()
+        return subprocess.CompletedProcess(argv, code, out, b"")
+
+    monkeypatch.setattr(rd.subprocess, "run", completed_git)
+    assert rd.clone_origin(work, url="https://example.invalid/owner/repo.git",
+                           base_branch="main", token=TOKEN) == base
+    work.checkout.mkdir()
+    work.export.mkdir()
+    assert rd.export_agent_work(work, branch=BRANCH, base=base, ident=None)
+    if refused:
+        with pytest.raises(rd.RepoWorkError, match="submodule definition"):
+            rd.import_agent_work(work, branch=BRANCH, base=base)
+    else:
+        assert rd.import_agent_work(work, branch=BRANCH, base=base).head == head
+    assert not (work.job / rd.IMPORT_COPY_NAME).exists()
+    assert sum(args[0] == "fetch" for args, _ in calls) == 2
+    assert any(args[:2] == ["bundle", "create"] for args, _ in calls)
+    assert any(args[:2] == ["bundle", "list-heads"] for args, _ in calls)
+    assert any(rd.auth_config(TOKEN)[0] in _config_pairs(env) for _, env in calls)
+    for _, env in calls:
+        _assert_job_git_settings(env)
+        pairs = dict(_config_pairs(env))
+        assert pairs["core.hooksPath"] == "/dev/null"
+        assert pairs["credential.helper"] == "" and pairs["core.fsmonitor"] == "false"
+        assert pairs["transfer.fsckObjects"] == pairs["fetch.fsckObjects"] == "true"
+        assert pairs["protocol.allow"] == "never"
+        assert pairs[f"protocol.{env['GIT_ALLOW_PROTOCOL']}.allow"] == "always"
+        assert env["GIT_CONFIG_NOSYSTEM"] == env["GIT_NO_REPLACE_OBJECTS"] == "1"
+
+
+def test_caller_config_cannot_enable_automatic_housekeeping(monkeypatch, tmp_path):
+    seen = []
+
+    def completed_git(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(rd.subprocess, "run", completed_git)
+    env = rd.git_env(tmp_path, allow="file", config=[("maintenance.auto", "true"),
+                     ("gc.auto", "1"), ("fixture.setting", "preserved")])
+    rd._git(["status", "--porcelain"], env=env, category=rd.IMPORT_FAILED, reason="fixture")
+    assert len(seen) == 1
+    _assert_job_git_settings(seen[0])
+    assert dict(_config_pairs(seen[0]))["fixture.setting"] == "preserved"
+
+
+def test_fixture_git_keeps_its_hook_semantics_without_background_housekeeping(monkeypatch, tmp_path):
+    seen = []
+
+    def completed_git(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, b"fixture\n", b"")
+
+    monkeypatch.setattr(subprocess, "run", completed_git)
+    assert git(tmp_path, "commit", "-qm", "fixture", home=tmp_path) == "fixture"
+    assert len(seen) == 1
+    _assert_job_git_settings(seen[0])
+    assert "core.hooksPath" not in dict(_config_pairs(seen[0]))
 
 
 def test_the_origin_repository_is_private_to_root(world):
