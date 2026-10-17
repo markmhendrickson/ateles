@@ -27,5 +27,18 @@
   {"id":"checker-invalid-binding","entrypoint":"check","check_raw":"{\"member-marker\":{\"tier-marker\":\"value-marker\"}}","expect":"invalid"},
   {"id":"checker-valid-stale-warning","entrypoint":"check","check_raw":"{\"member-marker\":\"mid\"}","expect":"valid"},
   {"id":"checker-valid-escaped-pair","entrypoint":"check","check_raw":"{\"bu\\u0069ld\":\"top\"}","extra_raw":"{\"codex\":{\"to\\u0070\":\"value-marker\"}}","expect":"valid"},
-  {"id":"checker-home-expansion-failure","entrypoint":"check","check_path":"~selected-path-marker-no-such-home","expect":"invalid"}
+  {"id":"checker-home-expansion-failure","entrypoint":"check","check_path":"~selected-path-marker-no-such-home","expect":"invalid"},
+  {"id":"checker-dispatch-null","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":null}}","failure":"binding","reason_contains":"dispatch refused","expect":"invalid"},
+  {"id":"checker-dispatch-boolean","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":false}}","failure":"binding","reason_contains":"dispatch refused","expect":"invalid"},
+  {"id":"checker-dispatch-number","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":7}}","failure":"binding","reason_contains":"dispatch refused","expect":"invalid"},
+  {"id":"checker-dispatch-array","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":[]}}","failure":"binding","reason_contains":"dispatch refused","expect":"invalid"},
+  {"id":"checker-dispatch-object","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":{}}}","failure":"binding","reason_contains":"dispatch refused","expect":"invalid"},
+  {"id":"checker-dispatch-empty","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":\"\"}}","failure":"binding","reason_contains":"dispatch refused","expect":"invalid"},
+  {"id":"checker-dispatch-blank","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":\" \"}}","failure":"binding","reason_contains":"dispatch refused","expect":"invalid"},
+  {"id":"checker-dispatch-reserved-astra","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":\"gpt-6-astra\"}}","failure":"binding","reason_contains":"explicit operator override","expect":"invalid"},
+  {"id":"checker-dispatch-reserved-fable","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":\"gpt-6-fable\"}}","failure":"binding","reason_contains":"explicit operator override","expect":"invalid"},
+  {"id":"checker-dispatch-valid","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":\"selected-model\"}}","model":"selected-model","expect":"valid"},
+  {"id":"checker-dispatch-normalized","entrypoint":"binding-parity","binding_raw":"{\" CODEX \":{\" TOP \":\"gpt-6-sol\",\" MID \":\" selected-model \"}}","model":"selected-model","expect":"valid"},
+  {"id":"checker-explicit-override-null","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":null}}","model_override":"gpt-6-astra","model":"gpt-6-astra","expect":"invalid"},
+  {"id":"checker-explicit-override-reserved","entrypoint":"binding-parity","binding_raw":"{\"codex\":{\"top\":\"gpt-6-sol\",\"mid\":\"gpt-6-fable\"}}","model_override":"gpt-6-astra","model":"gpt-6-astra","expect":"invalid"}
 ]

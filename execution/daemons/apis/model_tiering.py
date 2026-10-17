@@ -1004,20 +1004,25 @@ def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str
     else:
         from harness_router import FRONTIER_PROVIDERS as PROVIDERS  # lazy: import-light
 
+        try:
+            normalized = _normalize_vendor_binding(data)
+            for provider, tiers in normalized.items():
+                for tier in tiers:
+                    model_for_tier(provider, tier, binding=normalized)
+        except ValueError:
+            errors.append(
+                _config_error("vendor_binding has an invalid model or binding; dispatch refused")
+            )
         for provider, tiers in data.items():
             name = str(provider).strip().lower()
             if name not in PROVIDERS:
                 errors.append(
                     _config_error("vendor_binding names an unsupported harness provider")
                 )
-            for tier, model in tiers.items():
+            for tier in tiers:
                 if str(tier).strip().lower() not in TIERS:
                     errors.append(
                         _config_error("vendor_binding names an unknown tier")
-                    )
-                if not str(model).strip():
-                    errors.append(
-                        _config_error("vendor_binding has an empty model")
                     )
             if DEFAULT_TIER not in {str(t).strip().lower() for t in tiers}:
                 errors.append(

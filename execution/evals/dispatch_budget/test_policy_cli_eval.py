@@ -31,6 +31,7 @@ dispatch_role.ATELES_REPO = skill_runner.ATELES_REPO = repo
 dispatch_role._load_agent_def = skill_runner._load_agent_def = lambda name: role
 skill_runner._provider_binaries = lambda: {"codex": context["binary"], "claude": None, "cursor": None}
 skill_runner._write_harness_event = lambda **kwargs: None
+skill_runner._load_active_policy_prompt = lambda role: ""
 if context["failure"] == "unreadable":
     real_read = Path.read_text
     def read(path, *args, **kwargs):
@@ -92,7 +93,10 @@ def test_agent_policy_cli_scenario(tmp_path, case):
     envelope = json.loads(done.stdout)
     if failure:
         assert done.returncode == 1 and envelope["ok"] is False
-        assert "model tiering configuration" in envelope["reason"]
+        if "reason_contains" in case:
+            assert case["reason_contains"] in envelope["reason"]
+        else:
+            assert "model tiering configuration" in envelope["reason"]
         assert not invocation.exists(), "refused policy reached provider child"
         assert str(policy) not in done.stdout and str(binding) not in done.stdout
         assert "synthetic private configuration data" not in done.stdout
@@ -100,6 +104,8 @@ def test_agent_policy_cli_scenario(tmp_path, case):
         assert done.returncode == 0 and envelope["ok"] is True, envelope
         argv = json.loads(invocation.read_text())
         assert argv[argv.index("--model") + 1] == case["model"]
+    if case.get("entrypoint") == "binding-parity":
+        _check_configuration_cli(tmp_path, {**case, "check_raw": case["binding_raw"]})
 
 
 

@@ -354,6 +354,105 @@ def test_cli_refuses_unhonorable_cap_before_child(captured_codex_dispatches, mon
     assert not captured_codex_dispatches
 
 
+@pytest.mark.parametrize("model,valid", [
+    pytest.param(None, False, id="null"),
+    pytest.param(False, False, id="boolean"),
+    pytest.param(7, False, id="number"),
+    pytest.param([], False, id="array"),
+    pytest.param({}, False, id="object"),
+    pytest.param("", False, id="empty"),
+    pytest.param(" ", False, id="blank"),
+    pytest.param("two models", False, id="whitespace"),
+    pytest.param("-model", False, id="flag"),
+    pytest.param("bad\nmodel", False, id="newline"),
+    pytest.param("bad\x00model", False, id="control"),
+    pytest.param("gpt-6-astra", False, id="reserved-astra"),
+    pytest.param("gpt-6-fable", False, id="reserved-fable"),
+    pytest.param("GPT-6-ASTRA", False, id="reserved-case"),
+    pytest.param("selected-model", True, id="ordinary"),
+    pytest.param(" gpt-5.6-terra ", True, id="normalized"),
+    pytest.param("gpt-6-sol", True, id="protected-top"),
+])
+def test_preinstall_binding_matches_actual_dispatch(
+    captured_codex_dispatches, monkeypatch, tmp_path, capsys, model, valid
+):
+    """One raw selected record reaches the checker and real dispatch path."""
+    import model_tiering
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR", raising=False)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    selected = tmp_path / "selected-binding-marker.json"
+    binding = {"codex": {"top": "gpt-6-sol", "mid": model}}
+    selected.write_text(json.dumps(binding))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(selected))
+
+    rc = dispatch_role.main([
+        "--role", "pavo", "--task", "offline binding contract",
+        "--provider", "codex", "--json",
+    ])
+    envelope = json.loads(capsys.readouterr().out)
+    assert rc == (0 if valid else 1) and envelope["ok"] is valid
+    assert len(captured_codex_dispatches) == int(valid)
+    if valid:
+        command = captured_codex_dispatches[0]["cmd"]
+        assert command[command.index("--model") + 1] == model.strip()
+
+    kind, raw, errors, warnings = model_tiering.check_config_file(selected)
+    assert kind == "vendor-binding" and raw == binding
+    assert bool(errors) is not valid
+    assert str(selected) not in "\n".join(errors + warnings)
+    assert "selected-binding-marker" not in "\n".join(errors + warnings)
+    assert all("invalid configuration" in error and "--check" in error for error in errors)
+    assert model_tiering.main(["--check", str(selected)]) == (0 if valid else 1)
+    output = capsys.readouterr().out
+    assert str(selected) not in output and "selected-binding-marker" not in output
+
+
+@pytest.mark.parametrize("binding", [
+    {"codex": {"top": "gpt-6-sol", "mid": "selected-model", " MID ": "other-model"}},
+    {"codex": {"top": "gpt-6-sol", "mid": "selected-model"},
+     " CODEX ": {"top": "gpt-6-sol"}},
+])
+def test_preinstall_normalized_binding_collisions_match_dispatch(
+    captured_codex_dispatches, monkeypatch, tmp_path, binding
+):
+    import model_tiering
+
+    selected = tmp_path / "binding.json"
+    selected.write_text(json.dumps(binding))
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(selected))
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "offline binding contract", "--provider", "codex",
+    ]) == 1
+    assert not captured_codex_dispatches
+    assert model_tiering.check_config_file(selected)[2]
+
+
+@pytest.mark.parametrize("model", [None, "gpt-6-fable"])
+def test_preinstall_refusal_preserves_explicit_override(
+    captured_codex_dispatches, monkeypatch, tmp_path, model
+):
+    import model_tiering
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR", raising=False)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    selected = tmp_path / "binding.json"
+    selected.write_text(json.dumps({"codex": {"top": "gpt-6-sol", "mid": model}}))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(selected))
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "offline explicit contract", "--provider", "codex",
+        "--model", "gpt-6-astra",
+    ]) == 0
+    assert len(captured_codex_dispatches) == 1
+    command = captured_codex_dispatches[0]["cmd"]
+    assert command[command.index("--model") + 1] == "gpt-6-astra"
+    assert model_tiering.check_config_file(selected)[2]
+
+
 @pytest.mark.parametrize("github_token", [None, ""])
 def test_programmatic_github_delivery_refuses_missing_credential_binding(
     captured_codex_dispatches,
