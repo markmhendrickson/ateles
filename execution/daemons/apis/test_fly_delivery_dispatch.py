@@ -399,11 +399,19 @@ def test_delivery_record_rejects_wrong_repository_and_malformed_status(monkeypat
 from test_fly_runner import fly_env  # noqa: E402,F401 -- fixture
 
 
+@pytest.fixture
+def token_component_owner(monkeypatch):
+    """Static owner for the explicit token lifecycle components, no liveness probe."""
+    monkeypatch.setattr(fly_runner, "this_process_owner", lambda identity: {
+        "id": identity, "pid": 123, "start": "synthetic-start", "host": "synthetic-host"})
+
+
 @pytest.mark.parametrize("outcome", ["success", "refused", "unknown", "cancelled"])
 @pytest.mark.usefixtures("fly_env")
-def test_delivery_token_is_job_only_minted_at_launch_and_revoked(monkeypatch, outcome):
+def test_delivery_token_is_job_only_minted_at_launch_and_revoked(monkeypatch, outcome, token_component_owner):
     from test_fly_runner import FakeFly, make_executor, _files, MINTED
 
+    plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
     minted = []
     monkeypatch.setattr(fly_runner, "LOGIN_PROVIDERS", frozenset({"codex", "cursor"}))
     fake = FakeFly()
@@ -431,29 +439,37 @@ def test_delivery_token_is_job_only_minted_at_launch_and_revoked(monkeypatch, ou
         stdin=b"commit the change",
         timeout=60,
         needs_github=False,
-        delivery={"branch": BRANCH},
+        delivery=plan.spec(),
     )
     assert minted == []
 
+    @fly_runner.completion_scope
+    async def run_owned():
+        fly_runner.expect_delivery_plan(plan)
+        return await executor.run(job)
+
     async def collect(handle):
+        # This component exercises token ownership, not producer admission.
+        if outcome == "success":
+            return 0, b"", b""
         if outcome == "cancelled":
             raise asyncio.CancelledError()
         handle.job.outcome_unknown = True
         return 1, b"", b"unknown"
 
-    if outcome in {"cancelled", "unknown"}:
+    if outcome in {"success", "cancelled", "unknown"}:
         monkeypatch.setattr(executor, "_collect", collect)
     if outcome == "refused":
         with pytest.raises(fly_runner.FlyIneligible):
-            asyncio.run(executor.run(job))
+            asyncio.run(run_owned())
         assert not fake.calls("POST", "/machines")
         assert revoked == []
     elif outcome == "cancelled":
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(executor.run(job))
+            asyncio.run(run_owned())
         assert revoked == [MINTED]
     else:
-        asyncio.run(executor.run(job))
+        asyncio.run(run_owned())
         assert revoked == [MINTED]
     assert minted == [(REPO, 60)] and read_mints == []
     assert job.secrets == {}
@@ -466,6 +482,31 @@ def test_delivery_token_is_job_only_minted_at_launch_and_revoked(monkeypatch, ou
             == MINTED.encode()
         )
         assert MINTED.encode() not in files["/run/job/stdin"]
+
+
+@pytest.mark.usefixtures("fly_env")
+def test_delivery_executor_without_scope_refuses_before_job_effects(token_component_owner):
+    from test_fly_runner import FakeFly, make_executor
+
+    fake = FakeFly()
+    executor, read_mints, revoked = make_executor(fake)
+    delivery_mints = []
+
+    def mint(*args, **kwargs):
+        delivery_mints.append(True)
+        raise AssertionError("scope refusal must precede token minting")
+
+    executor._mint_delivery = mint
+    plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
+    job = fly_runner.FlyJob("run-without-scope", "cicada", "claude", REPO, [], b"", 60,
+                            False, delivery=plan.spec())
+    assert not executor.ledger.path.exists()
+    with pytest.raises(fly_runner.FlyResultUnreadable, match="completion scope is absent"):
+        asyncio.run(executor.run(job))
+    assert delivery_mints == read_mints == revoked == []
+    assert fake.requests == []
+    assert not executor.ledger.path.exists()
+    assert not job.launch_requested
 
 
 def test_matching_fields_without_runner_origin_stay_unconfirmed():
