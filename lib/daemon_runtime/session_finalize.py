@@ -28,6 +28,11 @@ from datetime import datetime, timezone
 
 import httpx
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 log = logging.getLogger("daemon_runtime.finalize")
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -256,7 +261,7 @@ def _post_store(body: dict) -> dict | None:
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=20,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return resp.json()
@@ -308,7 +313,7 @@ def _entity_readback_matches(
         response = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{entity_id}",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         response.raise_for_status()
         data = response.json()
@@ -338,7 +343,7 @@ def _relationship_readback_matches(
         response = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{source_entity_id}/relationships",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         response.raise_for_status()
         return any(
@@ -434,7 +439,7 @@ def _query_entity_rows(
                 "limit": 25,
                 "include_snapshots": True,
             },
-            timeout=20,
+            timeout=neotoma_timeout(),
         )
         response.raise_for_status()
         return response.json().get("entities", [])
@@ -600,7 +605,7 @@ def finalize_session(**kwargs) -> bool:
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=20,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return True
@@ -621,7 +626,7 @@ def load_end_skill() -> str | None:
         resp = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{END_SKILL_ID}",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         data = resp.json()

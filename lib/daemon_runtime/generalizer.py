@@ -68,6 +68,7 @@ import httpx
 
 try:  # package import (production) and bare import (in-dir pytest) both work
     from .drift import DriftCluster, DriftSignal, cluster_signals, contradicts
+    from .neotoma_timeout import neotoma_timeout
     from .agent_loader import policy_binds_agent
     from .neotoma_signed import (
         AAuthSigningError,
@@ -79,6 +80,7 @@ try:  # package import (production) and bare import (in-dir pytest) both work
     )
 except ImportError:  # pragma: no cover
     from drift import DriftCluster, DriftSignal, cluster_signals, contradicts
+    from neotoma_timeout import neotoma_timeout  # type: ignore
     from agent_loader import policy_binds_agent
     from neotoma_signed import (
         AAuthSigningError,
@@ -301,7 +303,7 @@ def _headers(bearer: str) -> dict[str, str]:
 async def _post(path: str, body: dict, bearer: str) -> dict | None:
     """Bearer POST for READS only (`entities/query`). Writes use `_write`."""
     try:
-        async with httpx.AsyncClient(headers=_headers(bearer), timeout=15) as client:
+        async with httpx.AsyncClient(headers=_headers(bearer), timeout=neotoma_timeout()) as client:
             resp = await client.post(f"{NEOTOMA_BASE_URL}/{path}", json=body)
             if resp.status_code >= 400:
                 log.warning(f"{path} -> HTTP {resp.status_code}: {resp.text[:200]}")

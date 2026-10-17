@@ -44,6 +44,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import urllib.request
@@ -59,6 +60,11 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib import github_app_token as _github_app_token  # noqa: E402
+from lib.daemon_runtime.degraded_load import (  # noqa: E402
+    DEGRADED_CLAUDE_BUILTINS,
+    MINIMAL_READ_ALLOWLIST,
+    classify_load_failure,
+)
 from lib.credential_scrub import (  # noqa: E402
     AGENT_CHILD_MARKER_ENV,
     is_generation_credential,
@@ -552,17 +558,50 @@ def _notify_dropped_allowlist_rules(
 
 
 # ── Agent-definition cache ─────────────────────────────────────────────────────
-# Per-role cache within the process lifetime. AgentLoader.load() makes a
-# synchronous HTTP call to Neotoma; caching avoids refetching on every task
-# dispatch for the same role.
+# Keep healthy definitions for the process lifetime. A failed load may be a
+# transient Neotoma timeout, so its stub gets a bounded revalidation window.
 _agent_def_cache: dict[str, AgentDefinition] = {}
+_agent_def_retry_after: dict[str, float] = {}
+_agent_def_role_locks: dict[str, threading.Lock] = {}
+_agent_def_locks_guard = threading.Lock()
+_AGENT_DEF_STUB_RETRY_SECONDS = 60.0
+_agent_def_clock = time.monotonic
+
+
+def _agent_def_role_lock(role: str) -> threading.Lock:
+    with _agent_def_locks_guard:
+        return _agent_def_role_locks.setdefault(role, threading.Lock())
 
 
 def _load_agent_def(role: str) -> AgentDefinition:
-    """Load (and cache) an AgentDefinition for the given role name."""
-    if role not in _agent_def_cache:
-        _agent_def_cache[role] = AgentLoader(role).load()
-    return _agent_def_cache[role]
+    """Cache healthy roles; retry a degraded role at most once per minute."""
+    with _agent_def_role_lock(role):
+        cached = _agent_def_cache.get(role)
+        degraded = cached is not None and (
+            cached.is_stub or not (cached.prompt_markdown or "").strip()
+        )
+        if cached is not None and not degraded:
+            return cached
+        if degraded and _agent_def_clock() < _agent_def_retry_after.get(role, 0):
+            return cached
+        try:
+            loaded = AgentLoader(role).load()
+        except Exception as exc:
+            if cached is None:
+                raise
+            log.warning("[apis] role %r revalidation failed: %s", role, exc)
+            _agent_def_retry_after[role] = (
+                _agent_def_clock() + _AGENT_DEF_STUB_RETRY_SECONDS
+            )
+            return cached
+        _agent_def_cache[role] = loaded
+        if loaded.is_stub or not (loaded.prompt_markdown or "").strip():
+            _agent_def_retry_after[role] = (
+                _agent_def_clock() + _AGENT_DEF_STUB_RETRY_SECONDS
+            )
+        else:
+            _agent_def_retry_after.pop(role, None)
+        return loaded
 
 
 def _load_active_policy_prompt(role: str) -> str:
@@ -1390,6 +1429,10 @@ class SkillResult:
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
     provider: str = ""
     attempted_providers: tuple[str, ...] = ()
+    # True only when this attempt ran without a loaded role definition. Callers
+    # must never turn such output into an attributed gate sign-off.
+    degraded_load: bool = False
+    load_error: str = ""  # safe failure class, never a raw transport exception
     # Set only when the runner independently established that a zero-exit
     # child encountered one canonical delivery denial and no provider
     # capacity/auth/launch diagnostic.  Callers must not infer this from the
@@ -1434,6 +1477,9 @@ class SkillResult:
 
 class _LocalSpawnError(Exception):
     """The local CLI could not be started (an OSError from the spawn)."""
+
+
+DEGRADED_TOOL_FLOOR_UNAVAILABLE = "degraded_tool_floor_unavailable"
 
 
 # ── Harness adapters + capacity detection ─────────────────────────────────────
@@ -2607,7 +2653,7 @@ async def _run_skill_once(
         # wrong would silently skip the undefined-role alerting AND let a
         # stub's synthesized aauth_sub receive AAuth signing-key injection
         # further down (`if not degraded and agent_def.aauth_sub:`).
-        degraded = not (agent_def.prompt_markdown or "").strip()
+        degraded = agent_def.is_stub or not (agent_def.prompt_markdown or "").strip()
     else:
         # Fetch policy at dispatch time: unlike the stable agent definition,
         # active rules may change between tasks and must not inherit the
@@ -2621,11 +2667,13 @@ async def _run_skill_once(
         )
 
     if degraded:
+        load_error = classify_load_failure(agent_def.load_error)
         _title_hint = prompt[:80].replace("\n", " ")
         warn_msg = (
-            f"Role {_role!r} ran DEGRADED (no agent_definition loaded) "
+            f"⚠ DEGRADED role {_role!r}: definition {load_error}; "
             f"for task {task_entity_id or '(unknown)'!r}. "
-            "Dispatching with SKILL.md and any available live policy."
+            "Provider outcome pending; no role output established. "
+            "Check Neotoma availability and ATELES_NEOTOMA_TIMEOUT."
         )
         log.warning(f"[apis] {warn_msg}")
         # A role with no agent_definition is ONE fact about that ROLE, not one
@@ -2643,36 +2691,76 @@ async def _run_skill_once(
             _should_notify = shared_ledger().note_undefined_role(str(_role))
         except Exception as exc:  # noqa: BLE001 — dedup must never block the warning
             log.debug(f"[apis] undefined-role dedup unavailable: {exc}")
-        if notifier is not None and _should_notify:
+        def _report_degraded_outcome(outcome: str, *, output_exists: bool) -> None:
+            message = (
+                f"Role {_role!r} definition {load_error}; {provider} {skill} "
+                f"for task {task_entity_id or '(unknown)'}: {outcome}; "
+                f"output exists: {'yes' if output_exists else 'no'}. "
+                "Check Neotoma availability; retry after a healthy "
+                "role-definition reload."
+            )
+            log.warning("[apis] %s", message)
+            if notifier is None or not _should_notify:
+                return
             try:
                 from lib.notify import Priority
 
                 notifier.send(
-                    f"Role {_role!r} has no agent_definition — every task routed "
-                    "to it runs DEGRADED (SKILL.md only). Reported once per role.",
-                    priority=Priority.WARN,
+                    message,
+                    priority=Priority.BLOCKER,
                     handler="apis",
                 )
             except Exception as exc:
                 log.debug(f"[apis] notifier.send failed: {exc}")
 
-        # Stage 5: degraded harness_event
-        try:
-            await asyncio.to_thread(
-                _write_harness_event,
-                task_entity_id=task_entity_id,
-                agent_session_id=agent_session_id,
-                role=_role,
-                agent_sub=agent_def.aauth_sub,
-                event_type="subprocess",
-                tool_name=f"{provider}:{skill}",
-                success="partial",
-                input_summary=_title_hint,
-                output_summary="degraded_generic_subagent",
-                resolved_tier=resolved_tier,
+        async def _record_preflight_refusal(outcome: str) -> None:
+            # A role-wide alert may be deduplicated, but each task needs a
+            # terminal event. No child was launched, so do not write a partial
+            # subprocess event that the timeline interprets as runner_started.
+            try:
+                await asyncio.to_thread(
+                    _write_harness_event,
+                    task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
+                    role=_role,
+                    agent_sub=agent_def.aauth_sub,
+                    event_type="subprocess",
+                    tool_name=f"{provider}:{skill}",
+                    success="false",
+                    input_summary=_title_hint,
+                    output_summary=f"degraded_generic_subagent: {outcome}; {load_error}",
+                    resolved_tier=resolved_tier,
+                )
+            except Exception as exc:
+                log.debug(f"[apis] degraded refusal harness_event write failed: {exc}")
+
+        # These adapters have no per-dispatch tool allowlist that binds a
+        # degraded child. Keep healthy dispatches unchanged; refuse only the
+        # child whose role authority could not be loaded.
+        if provider != "claude":
+            msg = (
+                f"{provider} launch failed: {DEGRADED_TOOL_FLOOR_UNAVAILABLE}: "
+                "role definition unavailable "
+                "and this adapter cannot bind the fallback tool floor"
             )
-        except Exception as exc:
-            log.debug(f"[apis] degraded harness_event write failed: {exc}")
+            log.error("[apis] %s", msg)
+            _report_degraded_outcome("refused before launch; no role output", output_exists=False)
+            await _record_preflight_refusal("refused before launch; no role output")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                degraded_load=True, load_error=load_error,
+            )
+        if fly_runner.wants_fly(runner, action_class):
+            msg = (
+                f"{provider} launch failed: {DEGRADED_TOOL_FLOOR_UNAVAILABLE}: "
+                "Fly degraded child authority is not bound"
+            )
+            _report_degraded_outcome("Fly refused before launch; no role output", output_exists=False)
+            await _record_preflight_refusal("Fly refused before launch; no role output")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                degraded_load=True, load_error=load_error,
+            )
 
     # ── Build provider command ─────────────────────────────────────────────────
     # A dispatch carrying the GitHub contract is one whose task involves
@@ -2800,6 +2888,16 @@ async def _run_skill_once(
         with os.fdopen(fd, "w") as _f:
             json.dump({"mcpServers": {}}, _f)
         cmd += ["--mcp-config", _mcp_tmp_path, "--strict-mcp-config"]
+    elif provider == "claude" and degraded:
+        # The definition read failed: no Neotoma MCP server is needed for the
+        # read-only fallback and no inherited server may restore authority.
+        fd, _mcp_tmp_path = tempfile.mkstemp(
+            suffix=".json", prefix="apis_degraded_mcp_"
+        )
+        os.chmod(_mcp_tmp_path, 0o600)
+        with os.fdopen(fd, "w") as _f:
+            json.dump({"mcpServers": {}}, _f)
+        cmd += ["--mcp-config", _mcp_tmp_path, "--strict-mcp-config"]
     elif provider == "claude":
         _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
         # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
@@ -2904,7 +3002,7 @@ async def _run_skill_once(
             list(CODEX_GATE_REQUIRED_READ_TOOLS),
         )
 
-    tools = agent_def.tools  # property: list[str]; ['*'] means all
+    tools = list(MINIMAL_READ_ALLOWLIST) if degraded else agent_def.tools
     # ateles#795, Falco's REQUEST_CHANGES on PR #1181: for a gate-owning run,
     # `correct` goes on the CLI's DENY list, never relying on the additive
     # allowlist alone. `--disallowed-tools` takes precedence over
@@ -2936,7 +3034,7 @@ async def _run_skill_once(
         allowed_list = [
             tool for tool in tools if not (local_review and tool.startswith("mcp__"))
         ]
-        if not local_review and "mcp__mcpsrv_neotoma__*" not in allowed_list:
+        if not local_review and not degraded and "mcp__mcpsrv_neotoma__*" not in allowed_list:
             allowed_list.append("mcp__mcpsrv_neotoma__*")
         # ateles#795: name the two read-only gate tools explicitly even though
         # the `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them —
@@ -2947,10 +3045,19 @@ async def _run_skill_once(
         # `correct()` of `gate_status` must NOT be pre-approved — and, for a
         # gate-owning run, is additionally on the deny list below regardless
         # of the wildcard.
-        if not local_review:
+        if not local_review and not degraded:
             allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
+        if degraded:
+            # --allowed-tools is an additive permission grant, not a tool
+            # availability boundary. The actual floor is the restricted CLI
+            # mode plus an explicit built-in set and strict empty MCP config.
+            cmd += [
+                "--restricted", "--tools", ",".join(DEGRADED_CLAUDE_BUILTINS),
+                "--permission-mode", "dontAsk", "--permission-prompts", "none",
+                "--setting-sources", "",
+            ]
         log.info(
             f"[apis] Spawning via {provider}: "
             f"<{_role}:agent_def+{skill}.SKILL.md> "
@@ -3025,6 +3132,10 @@ async def _run_skill_once(
             tool_name=f"{provider}:{skill}",
             success="partial",  # "partial" = in-flight / started
             input_summary=prompt[:200],
+            output_summary=(
+                f"degraded_generic_subagent ⚠ DEGRADED {load_error}"
+                if degraded else ""
+            ),
             resolved_tier=resolved_tier,
         )
     except Exception as exc:
@@ -3039,6 +3150,19 @@ async def _run_skill_once(
         local_review_home=local_review_home or None,
         inference_only=inference_only,
     )
+    if degraded:
+        # A denylist misses the next credential added to launchd. Preserve
+        # only process basics and subscription login for this read-only child;
+        # record, GitHub, signing and plugin credentials never enter its env.
+        degraded_env_keys = {
+            "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
+            "LC_CTYPE", "TERM", "NO_COLOR", "CLAUDE_CODE_OAUTH_TOKEN",
+            "SSL_CERT_FILE", "SSL_CERT_DIR", AGENT_CHILD_MARKER_ENV,
+        }
+        subprocess_env = {
+            key: value for key, value in subprocess_env.items()
+            if key in degraded_env_keys
+        }
     if local_cfg is not None:
         # Local inference: point the CLI at the loopback proxy and strip any
         # frontier OAuth credential so it cannot be sent there.
@@ -3063,7 +3187,7 @@ async def _run_skill_once(
     if include_github_contract:
         subprocess_env.pop("GITHUB_TOKEN", None)
         subprocess_env.pop("GH_TOKEN", None)
-    if github_token:
+    if github_token and not degraded:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
 
@@ -3495,6 +3619,8 @@ async def _run_skill_once(
             stdout=_stdout_text,
             stderr=_stderr_text,
             provider=provider,
+            degraded_load=degraded,
+            load_error=classify_load_failure(agent_def.load_error) if degraded else "",
             error=(
                 _delivery_denial
                 if (_delivery_denial and returncode == 0)
@@ -3513,6 +3639,10 @@ async def _run_skill_once(
             remote_run_id=_fly_job.run_id if _fly_job is not None else "",
             remote_machine_state=_fly_job.remote_state if _fly_job is not None else "",
         )
+        if degraded:
+            _report_degraded_outcome(
+                "restricted child ran", output_exists=bool(result.stdout or result.stderr)
+            )
         if _fly_job is not None and _fly_job.remote_state == "unconfirmed":
             log.warning(
                 f"[apis] {skill}: remote run {_fly_job.run_id} finished and its result was "
@@ -3553,7 +3683,7 @@ async def _run_skill_once(
                     tool_name=f"{provider}:{skill}",
                     success="true",
                     output_summary=(
-                        f"provider={provider} {len(result.stdout)}B stdout rc=0"
+                        f"{'⚠ DEGRADED ' if degraded else ''}provider={provider} {len(result.stdout)}B stdout rc=0"
                         f" {_usage.summary()}{_fly_note}"
                     ),
                     duration_ms=duration_ms,
@@ -4304,10 +4434,13 @@ async def _run_provider_attempts(
         gate_preflight_refusal = (
             launch_failure and GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
         )
+        degraded_floor_refusal = (
+            launch_failure and DEGRADED_TOOL_FLOOR_UNAVAILABLE in result.error
+        )
 
         if result.ok and failure_kind is None:
             return result
-        if gate_preflight_refusal:
+        if gate_preflight_refusal or degraded_floor_refusal:
             # No child started, so an unpinned review may safely try the next
             # deny-capable adapter without cooling Codex for unrelated work.
             # A pinned run, or one with no alternative, retains the precise
@@ -4316,8 +4449,8 @@ async def _run_provider_attempts(
                 return result
             last_result = result
             log.warning(
-                f"[apis] {skill}: {selected} gate-owner preflight refused; "
-                "trying next deny-capable provider without cooldown"
+                f"[apis] {skill}: {selected} tool preflight refused; "
+                "trying next eligible provider without cooldown"
             )
             continue
         if selected == local_provider.LOCAL_PROVIDER:

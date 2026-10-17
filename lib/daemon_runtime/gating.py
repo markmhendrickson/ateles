@@ -57,6 +57,11 @@ from pathlib import Path
 
 import httpx
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 log = logging.getLogger(__name__)
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -430,7 +435,7 @@ def _fetch_entity(entity_id: str) -> dict | None:
         resp = httpx.get(
             url,
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return resp.json()
@@ -447,7 +452,7 @@ def _fetch_entity_observations(entity_id: str, *, limit: int = 100) -> list[dict
             f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             params={"limit": limit},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -472,7 +477,7 @@ def fetch_entity_observations_strict(entity_id: str, *, limit: int = 100) -> lis
             f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             params={"limit": limit},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -1091,13 +1096,13 @@ def write_checkpoint_brief(
             )
         store_url = f"{NEOTOMA_BASE_URL.rstrip('/')}/store"
         if encoded_request_body is None:
-            resp = httpx.post(store_url, headers=headers, json=body, timeout=15)
+            resp = httpx.post(store_url, headers=headers, json=body, timeout=neotoma_timeout())
         else:
             resp = httpx.post(
                 store_url,
                 headers=headers,
                 content=encoded_request_body,
-                timeout=15,
+                timeout=neotoma_timeout(),
             )
         resp.raise_for_status()
         data = resp.json()
@@ -1243,7 +1248,7 @@ def write_producer_assessment(
             f"{NEOTOMA_BASE_URL.rstrip('/')}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         ents = resp.json().get("entities") or []
@@ -1445,7 +1450,7 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
             f"{NEOTOMA_BASE_URL}/correct",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         response_body = resp.json()
@@ -1514,7 +1519,7 @@ def _transition_checkpoint_status(
             f"{NEOTOMA_BASE_URL}/correct",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         data = _fetch_entity(checkpoint_entity_id)
@@ -1620,7 +1625,7 @@ def query_entities(
             f"{NEOTOMA_BASE_URL.rstrip('/')}/entities/query",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=30,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -1717,7 +1722,7 @@ def mark_task_declined(task_entity_id: str, *, reason: str, handler: str) -> boo
             f"{NEOTOMA_BASE_URL}/correct",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         log.info(f"[gating] task {task_entity_id} marked declined ({reason})")

@@ -305,10 +305,11 @@ class TestAFormatOnlyRejectionIsVisible:
         d = tsd._pr_dispatcher_with_stubs(
             monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=[]
         )
+        d.config.auto_rereview_on_push = True
 
         async def fake_run_skill(skill, prompt, **kwargs):
             if skill == "lanius":
-                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear\nGATE_PENDING: arch", "")
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: blocked\nGATE_PENDING: arch", "")
             if skill == "waxwing":
                 return SkillResult(skill, True, 0, waxwing_stdout, "")
             return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
@@ -320,7 +321,9 @@ class TestAFormatOnlyRejectionIsVisible:
         monkeypatch.setattr(
             SwarmDispatcher, "_surface_unreadable_gate_verdicts", record, raising=False
         )
-        _run(d._handle_pr(tsd._trigger(body="Closes #80.")))
+        _run(d._handle_pr(tsd._trigger(
+            body="Closes #80.", kind="pr_synchronize", action="synchronize",
+        )))
         return surfaced, signed
 
     def test_panel_call_site_surfaces_a_format_only_rejection(self, monkeypatch):

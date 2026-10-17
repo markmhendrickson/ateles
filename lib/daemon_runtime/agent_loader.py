@@ -7,11 +7,21 @@ or tool_allowlist is a Neotoma correct() call — no code commit.
 
 If Neotoma is unreachable the loader returns a STUB definition rather than
 raising, so a daemon does not crash on a transient outage. A stub is a FAILURE,
-not a degraded success: it carries an empty ``prompt_markdown`` and a wildcard
-``tool_allowlist``, so an agent dispatched on one runs with no role instructions
-and unrestricted tools. Every stub is logged at ERROR and flagged
-``is_stub=True`` with a ``load_error`` reason. Callers MUST check ``is_stub``
-before treating a definition as loaded.
+not a degraded success: it carries an empty ``prompt_markdown``, so an agent
+dispatched on one runs with no role instructions. Every stub is logged at ERROR,
+escalated to the operator via the notifier, and flagged ``is_stub=True`` with a
+``load_error`` reason. Callers MUST check ``is_stub`` before treating a
+definition as loaded.
+
+A stub's ``tool_allowlist`` is ``STUB_TOOL_ALLOWLIST`` (read-only), NOT the
+wildcard it granted until ateles#669. A failed read must never widen an agent's
+authority: the old fallback meant a network timeout produced an agent with
+unrestricted tools, which is the opposite of what an allowlist is for.
+
+Timeouts come from ``neotoma_timeout()`` — one value for the whole runtime,
+overridable with ``ATELES_NEOTOMA_TIMEOUT``. The previous hardcoded 10s expired
+against a production instance answering in 20-32s, so nearly every load became a
+stub (ateles#669).
 
 Status enforcement (ateles#562). ``agent_definition.status`` used to be read,
 logged, and then ignored — setting an agent to ``retired`` had no runtime
@@ -38,6 +48,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -45,8 +56,12 @@ import httpx
 
 try:  # package import (normal daemon runtime) with script-import fallback
     from . import neotoma_signed as ns
+    from .neotoma_timeout import neotoma_timeout
+    from .degraded_load import MINIMAL_READ_ALLOWLIST, format_escalation_message
 except ImportError:  # pragma: no cover
     import neotoma_signed as ns  # type: ignore
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+    from degraded_load import MINIMAL_READ_ALLOWLIST, format_escalation_message  # type: ignore
 
 log = logging.getLogger(__name__)
 
@@ -188,7 +203,7 @@ def policy_binds_agent_by_edge(
 
 def fetch_governs_edges(
     base_url: str = "",
-    timeout: float = 10.0,
+    timeout: float | None = None,
     *,
     _request: "callable | None" = None,
 ) -> dict[str, frozenset[str]]:
@@ -216,6 +231,7 @@ def fetch_governs_edges(
     request this module makes.
     """
     url = f"{(base_url or NEOTOMA_BASE_URL).rstrip('/')}/list_relationships"
+    timeout = neotoma_timeout() if timeout is None else timeout
     body = {"relationship_type": AGENT_POLICY_GOVERNS_EDGE, "limit": 500}
     if _request is not None:
         data = _request(url, body, timeout)
@@ -239,7 +255,7 @@ def fetch_governs_edges(
 def resolve_agent_definition_id(
     agent_sub: str,
     base_url: str = "",
-    timeout: float = 10.0,
+    timeout: float | None = None,
     *,
     _request: "callable | None" = None,
 ) -> str | None:
@@ -264,6 +280,7 @@ def resolve_agent_definition_id(
     name = agent_sub.split("@", 1)[0].strip().lower()
     if not name:
         return None
+    timeout = neotoma_timeout() if timeout is None else timeout
     url = f"{(base_url or NEOTOMA_BASE_URL).rstrip('/')}/entities/query"
     body = {
         "entity_type": "agent_definition",
@@ -417,6 +434,47 @@ WARNING_STATUSES = frozenset({"planned", "proposed", "draft"})
 # unregistered daemon look fully configured.
 UNDEFINED_STATUS = "undefined"
 
+# Tool allowlist granted to a STUB definition — a load that FAILED (ateles#669).
+#
+# This used to be "*". That made a network timeout widen an agent's authority:
+# `tools` returned ["*"], `skill_runner` then skipped `--allowed-tools`
+# entirely, and the child ran unrestricted. A tool allowlist exists to deny, so
+# standing in for an unreadable one with the universal grant inverts its
+# meaning. Privilege must never be a fallback value.
+#
+# The replacement is deliberately read-only. A degraded agent can still read
+# code and report what it found — enough to diagnose, and enough that a slow
+# Neotoma does not halt the swarm outright — but it cannot write files, push
+# commits, send mail, or take any outward action while running without the role
+# instructions that would tell it how. Anything beyond reading requires a
+# definition that actually loaded.
+#
+# Neotoma's own MCP tools are NOT included: the read that would authorize them
+# is the read that just failed, and a stub must not self-authorize against the
+# store it could not reach.
+STUB_TOOL_ALLOWLIST = MINIMAL_READ_ALLOWLIST
+
+
+def _escalate(message: str) -> None:
+    """Surface a failed agent_definition load to the operator.
+
+    A stub load is a swarm-wide degradation — every agent loaded this way runs
+    without its role instructions — and for months it was only a WARNING in a
+    log nobody reads (ateles#669). This raises it to the notifier so it lands
+    where the operator actually looks.
+
+    Import is deferred and every failure swallowed: notification is strictly
+    best-effort, and a missing or broken notifier must never turn a degraded
+    load into a crashed daemon. The ERROR log has already been written by the
+    caller, so nothing is lost if this path fails.
+    """
+    try:
+        from lib.notify import Notifier, Priority
+
+        Notifier().send(message, priority=Priority.BLOCKER, handler="agent_loader")
+    except Exception as exc:  # noqa: BLE001 — best-effort by design
+        log.error("degraded_load notifier escalation failed: %s", type(exc).__name__)
+
 
 def evaluate_status(status: str) -> tuple[StatusAction, str]:
     """Map an agent_definition.status to an action and a human-readable reason.
@@ -513,6 +571,10 @@ class AgentDefinition:
           - a comma-separated string (legacy / hand-authored shape)
         """
         raw = self.tool_allowlist
+        if self.is_stub:
+            # A failed definition read never inherits the healthy legacy
+            # empty-or-unknown -> wildcard coercion.
+            return list(MINIMAL_READ_ALLOWLIST)
         if raw is None:
             return ["*"]
         # Array shape (canonical entity storage): list/tuple of tool names.
@@ -593,9 +655,12 @@ class AgentLoader:
         signing can never reduce availability. Raises on transport error — callers
         already handle that.
         """
+        timeout = neotoma_timeout()
         if ns.via_cli_enabled() and ns.agent_identity(self.agent_name):
             try:
-                status, data = ns.signed_request(method, url, body, agent_name=self.agent_name)
+                status, data = ns.signed_request(
+                    method, url, body, agent_name=self.agent_name, timeout=timeout
+                )
                 if 200 <= status < 300:
                     return data
                 log.warning(
@@ -606,9 +671,9 @@ class AgentLoader:
                     f"[{self.agent_name}] signed request failed ({exc}); falling back to bearer"
                 )
         if method.upper() == "GET":
-            resp = httpx.get(url, headers=_auth_headers(), timeout=10)
+            resp = httpx.get(url, headers=_auth_headers(), timeout=timeout)
         else:
-            resp = httpx.post(url, json=body, headers=_auth_headers(), timeout=10)
+            resp = httpx.post(url, json=body, headers=_auth_headers(), timeout=timeout)
         resp.raise_for_status()
         return resp.json()
 
@@ -687,11 +752,15 @@ class AgentLoader:
     def _stub(self, reason: str = "unknown") -> AgentDefinition:
         """Fallback definition for a FAILED load — never a successful one.
 
-        A stub has an EMPTY prompt_markdown and a WILDCARD tool_allowlist. An
-        agent dispatched on one runs with no role instructions and unrestricted
-        tools. That must never present as a normal load, so the stub is logged
-        at ERROR and marked ``is_stub`` with the failure reason attached for the
-        caller to branch on.
+        A stub has an EMPTY prompt_markdown, so an agent dispatched on one runs
+        with no role instructions. That must never present as a normal load, so
+        the stub is logged at ERROR, escalated to the operator, and marked
+        ``is_stub`` with the failure reason attached for the caller to branch on.
+
+        Its tool_allowlist is ``STUB_TOOL_ALLOWLIST`` — read-only — and NOT the
+        wildcard it used to be (ateles#669). Dispatch remains possible so a slow
+        Neotoma cannot halt the swarm, but a failed read can no longer widen an
+        agent's authority beyond looking at things.
 
         Its status is UNDEFINED_STATUS, not "active" (ateles#562). A stub is an
         absence of information; reporting it as active made an unregistered
@@ -699,20 +768,47 @@ class AgentLoader:
         downstream status check. UNDEFINED_STATUS WARNs rather than refusing, so
         a transient Neotoma outage still cannot invent an outage of its own.
         """
-        log.error(
-            f"[{self.agent_name}] agent_definition load FAILED ({reason}) — "
-            "falling back to a STUB with an EMPTY prompt and wildcard tools. "
-            "Any agent dispatched on this definition has no role instructions."
+        msg = format_escalation_message(
+            self.agent_name, reason, neotoma_timeout()
         )
+        log.error(msg)
+        _escalate(msg)
+        self._post_degraded_escalation(msg)
         return AgentDefinition(
             name=self.agent_name,
             aauth_sub=f"{self.agent_name}@ateles-swarm",
             agent_grant="service",
-            tool_allowlist="*",
+            tool_allowlist=list(STUB_TOOL_ALLOWLIST),
             status=UNDEFINED_STATUS,
             is_stub=True,
             load_error=reason,
         )
+
+    def _post_degraded_escalation(self, message: str) -> None:
+        """Record one operator escalation per role/day through the usual auth path."""
+        day = datetime.now(timezone.utc).date().isoformat()
+        body = {
+            "entities": [{
+                "entity_type": "escalation",
+                "title": f"agent_loader degraded_load: {self.agent_name}",
+                "body": message,
+                "severity": "error",
+                "source_agent": f"{self.agent_name}@ateles-swarm",
+                "status": "open",
+                "tags": ["agent_loader", "degraded_load", self.agent_name],
+            }],
+            "idempotency_key": f"agent-loader-degraded-{self.agent_name}-{day}",
+            "observation_source": "workflow_state",
+        }
+        try:
+            result = self._neotoma("POST", f"{NEOTOMA_BASE_URL}/store", body)
+            if not isinstance(result, dict) or not result.get("success"):
+                raise RuntimeError("escalation store did not confirm success")
+        except Exception as exc:  # best effort, never widen the fallback grant
+            log.error(
+                "[%s] degraded_load escalation store failed: %s",
+                self.agent_name, type(exc).__name__,
+            )
 
     def load_active_policies(self) -> list[dict]:
         """

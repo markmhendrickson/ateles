@@ -32,6 +32,8 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib.daemon_runtime import AgentDefinition  # noqa: E402
+from lib.daemon_runtime.agent_loader import STUB_TOOL_ALLOWLIST  # noqa: E402
+from lib.daemon_runtime.degraded_load import format_escalation_message  # noqa: E402
 
 # Import module-level objects so we can patch them in-place
 import skill_runner  # noqa: E402
@@ -183,6 +185,27 @@ class TestAgentDefCache:
             # AgentLoader should only have been instantiated once
             assert MockLoader.call_count == 1
 
+    def test_failed_load_revalidates_after_cooldown_and_caches_recovery(
+        self, monkeypatch
+    ) -> None:
+        clock = [100.0]
+        monkeypatch.setattr(skill_runner, "_agent_def_clock", lambda: clock[0], raising=False)
+        stub = _stub_def("monedula")
+        healthy = _make_def(name="monedula")
+        with patch("skill_runner.AgentLoader") as MockLoader:
+            MockLoader.return_value.load.side_effect = [stub, stub, healthy]
+            assert skill_runner._load_agent_def("monedula") is stub
+            assert skill_runner._load_agent_def("monedula") is stub
+            assert MockLoader.call_count == 1  # outage does not cause a read storm
+            clock[0] += 61.0
+            assert skill_runner._load_agent_def("monedula") is stub
+            assert skill_runner._load_agent_def("monedula") is stub
+            assert MockLoader.call_count == 2  # prolonged outage is still bounded
+            clock[0] += 61.0
+            assert skill_runner._load_agent_def("monedula") is healthy
+            assert skill_runner._load_agent_def("monedula") is healthy
+            assert MockLoader.call_count == 3
+
 
 class TestActivePolicyCarrier:
     def test_policy_is_rendered_fresh_for_every_dispatch(self) -> None:
@@ -223,6 +246,12 @@ class TestRunSkill:
 
     def _run(self, coro):
         return asyncio.run(coro)
+
+    def test_definition_load_alert_does_not_claim_a_child_ran(self) -> None:
+        message = format_escalation_message("gryllus", "timed out", 45)
+        assert "dispatch outcome pending provider selection" in message
+        assert "no role output established" in message
+        assert "dispatched with" not in message
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -437,6 +466,215 @@ class TestRunSkill:
         assert len(degraded_calls) >= 1, (
             "Expected at least one harness_event with output_summary='degraded_generic_subagent'"
         )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_spawn_keeps_restricted_tools(self, MockLoader, _event, monkeypatch) -> None:
+        """The assembled command must not restore the missing role's authority."""
+        stub = _stub_def()
+        stub.tool_allowlist = list(STUB_TOOL_ALLOWLIST)
+        MockLoader.return_value.load.return_value = stub
+        monkeypatch.setenv("FUTURE_SERVICE_CREDENTIAL", "test-only-value")
+        captured: list[str] = []
+        captured_env: dict[str, str] = {}
+        captured_mcp: dict = {}
+        notifier = MagicMock()
+
+        async def fake_exec(*cmd, **_kwargs):
+            captured.extend(cmd)
+            captured_env.update(_kwargs["env"])
+            with open(cmd[cmd.index("--mcp-config") + 1], encoding="utf-8") as cfg:
+                captured_mcp.update(json.load(cfg))
+            proc = MagicMock(returncode=0)
+
+            async def communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("unroutable_ledger.shared_ledger") as ledger,
+        ):
+            ledger.return_value.note_undefined_role.return_value = True
+            result = self._run(skill_runner.run_skill(
+                "gryllus", "work", role="gryllus", task_entity_id="ent_test",
+                notifier=notifier,
+            ))
+
+        assert result.ok
+        assert result.degraded_load
+        allowed = captured[captured.index("--allowed-tools") + 1].split(",")
+        assert "mcp__mcpsrv_neotoma__*" not in allowed
+        assert "*" not in allowed
+        assert "Read" in allowed
+        assert "Bash" not in allowed
+        assert "--restricted" in captured
+        assert captured[captured.index("--tools") + 1] == ",".join(skill_runner.DEGRADED_CLAUDE_BUILTINS)
+        assert "--strict-mcp-config" in captured
+        assert captured_mcp == {"mcpServers": {}}
+        assert captured[captured.index("--permission-mode") + 1] == "dontAsk"
+        assert "GITHUB_TOKEN" not in captured_env
+        assert "NEOTOMA_BEARER_TOKEN" not in captured_env
+        assert "FUTURE_SERVICE_CREDENTIAL" not in captured_env
+        notices = [str(call.args[0]) for call in notifier.send.call_args_list]
+        assert any("restricted child ran" in msg and "output exists: yes" in msg
+                   and "gryllus" in msg and "ent_test" in msg for msg in notices)
+
+    @pytest.mark.parametrize("provider", ["codex", "cursor"])
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_unbound_adapter_refuses_before_spawn(
+        self, MockLoader, _event, monkeypatch, provider
+    ) -> None:
+        MockLoader.return_value.load.return_value = _stub_def()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", provider)
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM", f'{{"{provider}": 1.0}}')
+        harness_router.reset_state()
+        notifier = MagicMock()
+        with (
+            patch.object(skill_runner, f"{provider.upper()}_BIN", f"/usr/bin/{provider}"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec") as spawn,
+            patch("unroutable_ledger.shared_ledger") as ledger,
+        ):
+            ledger.return_value.note_undefined_role.return_value = True
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus", "work", role="gryllus", provider=provider,
+                    task_entity_id="ent_test", notifier=notifier,
+                )
+            )
+        assert not result.ok
+        assert result.degraded_load
+        assert "fallback tool floor" in result.error
+        spawn.assert_not_called()
+        notices = [str(call.args[0]) for call in notifier.send.call_args_list]
+        assert any("refused before launch" in msg and "no role output" in msg
+                   and provider in msg and "ent_test" in msg for msg in notices)
+
+    @pytest.mark.parametrize("provider", ["codex", "cursor"])
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_refusal_records_terminal_event_for_each_task(
+        self, MockLoader, event, monkeypatch, provider
+    ) -> None:
+        """Role-wide paging dedupe cannot leave either task looking in flight."""
+        MockLoader.return_value.load.return_value = _stub_def()
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", provider)
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM", f'{{"{provider}": 1.0}}')
+        harness_router.reset_state()
+        with (
+            patch.object(skill_runner, f"{provider.upper()}_BIN", f"/usr/bin/{provider}"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec") as spawn,
+            patch("unroutable_ledger.shared_ledger") as ledger,
+        ):
+            ledger.return_value.note_undefined_role.side_effect = [True, False]
+            for task_id in ("ent_first", "ent_second"):
+                result = self._run(skill_runner.run_skill(
+                    "gryllus", "work", role="gryllus", provider=provider,
+                    task_entity_id=task_id,
+                ))
+                assert not result.ok and result.degraded_load
+        spawn.assert_not_called()
+        task_events = [call.kwargs for call in event.call_args_list
+                       if call.kwargs.get("task_entity_id") in {"ent_first", "ent_second"}
+                       and call.kwargs.get("event_type") == "subprocess"]
+        assert {e["task_entity_id"] for e in task_events} == {"ent_first", "ent_second"}
+        assert all(e["success"] == "false" for e in task_events)
+        assert all("refused before launch" in e["output_summary"] for e in task_events)
+        assert not any(e["success"] == "partial" for e in task_events)
+        from execution.mcp.ateles.server import _runner_entry
+
+        timeline = [_runner_entry({"fields": e}) for e in task_events]
+        assert [entry["kind"] for entry in timeline] == ["runner_ended", "runner_ended"]
+        assert all(entry["outcome"] == "failed" for entry in timeline)
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_fly_child_reports_refusal_before_launch(
+        self, MockLoader, event, monkeypatch
+    ) -> None:
+        MockLoader.return_value.load.return_value = _stub_def()
+        notifier = MagicMock()
+        monkeypatch.setattr(skill_runner.fly_runner, "wants_fly", lambda *a: True)
+        with (
+            patch.object(skill_runner, "CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec") as spawn,
+            patch("unroutable_ledger.shared_ledger") as ledger,
+        ):
+            ledger.return_value.note_undefined_role.return_value = True
+            result = self._run(skill_runner.run_skill(
+                "gryllus", "work", role="gryllus", provider="claude",
+                runner="fly", task_entity_id="ent_test", notifier=notifier,
+            ))
+        assert not result.ok and result.degraded_load
+        spawn.assert_not_called()
+        subprocess_events = [call.kwargs for call in event.call_args_list
+                             if call.kwargs.get("event_type") == "subprocess"]
+        assert len(subprocess_events) == 1
+        assert subprocess_events[0]["success"] == "false"
+        assert "Fly refused before launch" in subprocess_events[0]["output_summary"]
+        notices = [str(call.args[0]) for call in notifier.send.call_args_list]
+        assert any("Fly" in msg and "refused before launch" in msg
+                   and "no role output" in msg and "ent_test" in msg
+                   for msg in notices)
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_codex_dispatch_recovers_after_transient_definition_timeout(
+        self, MockLoader, _event, monkeypatch
+    ) -> None:
+        """One failed role read cannot require a daemon restart to dispatch."""
+        clock = [100.0]
+        monkeypatch.setattr(skill_runner, "_agent_def_clock", lambda: clock[0], raising=False)
+        MockLoader.return_value.load.side_effect = [
+            _stub_def(),
+            _make_def(prompt_markdown="Recovered canonical role."),
+        ]
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+        monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"codex": 1.0}')
+        harness_router.reset_state()
+        spawned = []
+
+        async def fake_exec(*cmd, **kwargs):
+            spawned.append(cmd)
+            proc = MagicMock(returncode=0)
+
+            async def communicate(input=None):
+                return b"review complete", b""
+
+            proc.communicate = communicate
+            return proc
+
+        with (
+            patch.object(skill_runner, "CODEX_BIN", "/usr/bin/codex"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill content"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            first = self._run(
+                skill_runner.run_skill("gryllus", "work", role="gryllus", provider="codex")
+            )
+            assert not first.ok and first.degraded_load
+            assert spawned == []
+            clock[0] += 61.0
+            second = self._run(
+                skill_runner.run_skill("gryllus", "work", role="gryllus", provider="codex")
+            )
+
+        assert second.ok and not second.degraded_load
+        assert len(spawned) == 1
+        assert MockLoader.return_value.load.call_count == 2
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -2180,7 +2418,10 @@ class TestAnthropicAuthPrecedence:
 
     def _spawn_and_capture_env(self, env_overrides: dict) -> dict:
         instance = MagicMock()
-        instance.load.return_value = _stub_def()
+        # These precedence tests concern a configured role. A degraded role
+        # has a separate read-only environment floor that always strips
+        # publication and metered API credentials.
+        instance.load.return_value = _make_def()
         captured: dict = {}
 
         async def fake_exec(*cmd, **kwargs):
