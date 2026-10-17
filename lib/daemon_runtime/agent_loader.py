@@ -472,6 +472,14 @@ def enforce_status_or_exit(agent_def: "AgentDefinition", daemon_name: str) -> No
         log.warning(f"[{daemon_name}] Status check: {reason}")
 
 
+class LensLoadFailure(str, Enum):
+    """Safe strict-role failure classes; never derived from exception text."""
+
+    UNAVAILABLE = "unavailable"
+    MISSING_OR_AMBIGUOUS = "missing_or_ambiguous"
+    INADMISSIBLE = "inadmissible"
+
+
 @dataclass
 class AgentDefinition:
     """Snapshot of an agent_definition entity from Neotoma."""
@@ -503,6 +511,8 @@ class AgentDefinition:
     # never succeeded" — the same distinction execution/mcp/ateles/server.py
     # records via _last_transport_error.
     load_error: str = ""
+    # Strict-load diagnostics only; generic loads retain the original default.
+    load_error_category: LensLoadFailure | None = None
 
     @property
     def tools(self) -> list[str]:
@@ -657,17 +667,15 @@ class AgentLoader:
         try:
             data = self._neotoma("GET", f"{NEOTOMA_BASE_URL}/entities/{entity_id}")
             if not isinstance(data, dict) or data.get("entity_id") != entity_id:
-                return self._stub("explicit lens role response has wrong entity id")
+                return self._lens_stub("explicit lens role response has wrong entity id")
             if data.get("entity_type") != "agent_definition":
-                return self._stub("explicit lens role is not an agent_definition")
+                return self._lens_stub("explicit lens role is not an agent_definition")
             snap = data.get("snapshot")
             if not isinstance(snap, dict) or snap.get("name") != self.agent_name:
-                return self._stub("explicit lens role has missing or wrong name")
+                return self._lens_stub("explicit lens role has missing or wrong name")
             return self._parse_for_lens(entity_id, data)
         except Exception as exc:
-            return self._stub(
-                f"GET /entities/{entity_id} failed: {type(exc).__name__}: {exc}"
-            )
+            return self._lens_exception_stub(exc)
 
     def _load_by_name_for_lens(self) -> AgentDefinition:
         body = {
@@ -692,7 +700,7 @@ class AgentLoader:
         try:
             data = self._neotoma("POST", f"{NEOTOMA_BASE_URL}/entities/query", body)
             if not isinstance(data, dict) or not isinstance(data.get("entities"), list):
-                return self._stub("lens role search has no valid entity list")
+                return self._lens_stub("lens role search has no valid entity list")
             entities = data["entities"]
             total = data.get("total")
             contract = data.get("read_contract")
@@ -729,7 +737,7 @@ class AgentLoader:
                 or not isinstance(options.get("applied"), list)
                 or sorted(options["applied"]) != sorted(body)
             ):
-                return self._stub(
+                return self._lens_stub(
                     "lens role search does not prove the exact requested scope"
                 )
             if (
@@ -757,7 +765,7 @@ class AgentLoader:
                 or data.get("has_more")
                 or data.get("next_page_token")
             ):
-                return self._stub("lens role search coverage is incomplete or unknown")
+                return self._lens_stub("lens role search coverage is incomplete or unknown")
             matches = []
             for ent in entities:
                 if (
@@ -766,27 +774,54 @@ class AgentLoader:
                     or not ent["entity_id"].strip()
                     or ent.get("entity_type") != "agent_definition"
                 ):
-                    return self._stub(
+                    return self._lens_stub(
                         "lens role search returned an invalid identity or type"
                     )
                 outer = ent.get("snapshot")
                 if not isinstance(outer, dict):
-                    return self._stub("lens role search returned no snapshot")
+                    return self._lens_stub("lens role search returned no snapshot")
                 snap = outer.get("snapshot", outer)
                 if not isinstance(snap, dict) or snap.get("name") != self.agent_name:
-                    return self._stub(
+                    return self._lens_stub(
                         "lens role search returned a row outside its requested name"
                     )
                 matches.append({**ent, "snapshot": snap})
             if len(matches) != 1:
-                return self._stub(
-                    f"lens role {self.agent_name!r} has {len(matches)} exact matches"
+                return self._lens_stub(
+                    "canonical role registration is missing or ambiguous",
+                    LensLoadFailure.MISSING_OR_AMBIGUOUS,
                 )
             return self._parse_for_lens(matches[0]["entity_id"], matches[0])
         except Exception as exc:
-            return self._stub(
-                f"POST /entities/query failed: {type(exc).__name__}: {exc}"
+            return self._lens_exception_stub(exc)
+
+    def _lens_stub(
+        self, reason: str, category: LensLoadFailure | None = LensLoadFailure.INADMISSIBLE
+    ) -> AgentDefinition:
+        definition = self._stub(reason)
+        definition.load_error_category = category
+        return definition
+
+    def _lens_exception_stub(self, exc: Exception) -> AgentDefinition:
+        # Classify at the typed failure boundary. Do not expose exception text,
+        # URLs or payloads through strict-load diagnostics or infer a fallback.
+        if isinstance(exc, httpx.HTTPStatusError):
+            if exc.response.status_code == 404 and exc.request.method == "GET":
+                return self._lens_stub(
+                    "canonical role record was not found",
+                    LensLoadFailure.MISSING_OR_AMBIGUOUS,
+                )
+            return self._lens_stub(
+                "canonical source request was refused or unavailable",
+                LensLoadFailure.UNAVAILABLE,
             )
+        if isinstance(exc, httpx.RequestError):
+            return self._lens_stub(
+                "canonical source transport is unavailable", LensLoadFailure.UNAVAILABLE
+            )
+        if isinstance(exc, (ValueError, TypeError, KeyError)):
+            return self._lens_stub("canonical role response is inadmissible")
+        return self._lens_stub("canonical role load failed", None)
 
     def _parse_for_lens(self, entity_id: str, data: dict) -> AgentDefinition:
         from copy import deepcopy

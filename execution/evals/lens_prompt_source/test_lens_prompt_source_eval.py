@@ -52,6 +52,10 @@ def test_the_eval_covers_every_required_behaviour():
         "shared_dispatch_record_loss_refuses",
         "shared_run_skill_resolves_canonical_once",
         "shared_run_skill_record_loss_refuses",
+        "ambiguous_definition_refuses_with_actionable_category",
+        "retired_definition_refuses_with_actionable_category",
+        "missing_tools_refuses_with_actionable_category",
+        "explicit_missing_definition_refuses_with_actionable_category",
     }
     assert required <= set(IDS)
 

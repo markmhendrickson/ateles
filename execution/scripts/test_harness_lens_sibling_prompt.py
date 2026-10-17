@@ -347,3 +347,74 @@ def test_generic_nonlocal_definition_path_remains_compatible(monkeypatch):
     result = asyncio.run(skill_runner._run_skill_once("pavo", "task", provider="codex"))
     assert not result.ok and "binary unavailable" in result.error
     assert calls == ["generic"]
+
+
+@pytest.mark.parametrize(
+    "failure,category",
+    [
+        ("connection", "source unavailable"),
+        ("timeout", "source unavailable"),
+        ("not_found", "missing or ambiguous"),
+        ("query_not_found", "source unavailable"),
+        ("access", "source unavailable"),
+        ("server", "source unavailable"),
+        ("malformed", "metadata inadmissible"),
+        ("unexpected", None),
+    ],
+)
+def test_canonical_refusal_category_is_safe_and_actionable(
+    monkeypatch, caplog, failure, category
+):
+    import httpx
+
+    monkeypatch.setenv("PAVO_AGENT_DEFINITION_ID", "ent_synthetic_role")
+    sentinel = "SYNTHETIC-PRIVATE-DETAIL-MUST-NOT-REACH-CLI"
+
+    def fail(*args, **kwargs):
+        if failure == "connection":
+            raise httpx.ConnectError(sentinel)
+        if failure == "timeout":
+            raise httpx.ReadTimeout(sentinel)
+        if failure in ("not_found", "query_not_found", "server", "access"):
+            status = 404 if failure in ("not_found", "query_not_found") else 503
+            if failure == "access":
+                status = 403
+            method = "POST" if failure == "query_not_found" else "GET"
+            response = httpx.Response(
+                status, request=httpx.Request(method, "https://example.invalid/role")
+            )
+            raise httpx.HTTPStatusError(
+                sentinel, request=response.request, response=response
+            )
+        if failure == "unexpected":
+            raise RuntimeError(sentinel)
+        raise ValueError(sentinel)
+
+    monkeypatch.setattr(AgentLoader, "_neotoma", fail)
+    with pytest.raises(runner.LensRoleUnavailable) as exc:
+        runner.read_agent_definition("pavo")
+    if category is None:
+        assert str(exc.value) == "canonical lens role could not be loaded"
+    else:
+        assert category in str(exc.value)
+    assert sentinel not in str(exc.value)
+    assert sentinel not in caplog.text
+
+
+@pytest.mark.parametrize("category", [None, "unrecognized", [], {}])
+def test_unknown_refusal_category_never_infers_authority(monkeypatch, category):
+    role = definition()
+    role.is_stub = True
+    role.load_error = "SYNTHETIC-PRIVATE-DETAIL-MUST-NOT-REACH-CLI"
+    role.load_error_category = category
+    monkeypatch.setattr(AgentLoader, "load_for_lens", lambda self: role)
+    with pytest.raises(runner.LensRoleUnavailable) as exc:
+        runner.read_agent_definition("pavo")
+    assert str(exc.value) == "canonical lens role could not be loaded"
+
+
+def test_canonical_diagnostic_preserves_valid_object_identity(monkeypatch):
+    role = definition()
+    monkeypatch.setattr(AgentLoader, "load_for_lens", lambda self: role)
+    assert runner.read_agent_definition("pavo") is role
+    assert getattr(role, "load_error_category", None) is None

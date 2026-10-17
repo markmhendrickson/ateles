@@ -133,7 +133,8 @@
         "worktrees_created": 0,
         "worktrees_left": 0,
         "reason_contains": [
-          "canonical lens"
+          "canonical lens",
+          "missing or ambiguous"
         ],
         "definition_queries": 1
       }
@@ -157,7 +158,8 @@
         "worktrees_created": 0,
         "worktrees_left": 0,
         "reason_contains": [
-          "canonical lens"
+          "canonical lens",
+          "source unavailable"
         ],
         "definition_queries": 1
       }
@@ -194,7 +196,8 @@
         "worktrees_created": 0,
         "worktrees_left": 0,
         "reason_contains": [
-          "canonical lens"
+          "canonical lens",
+          "metadata inadmissible"
         ],
         "definition_queries": 1
       }
@@ -219,7 +222,8 @@
         "worktrees_created": 0,
         "worktrees_left": 0,
         "reason_contains": [
-          "canonical lens"
+          "canonical lens",
+          "missing or ambiguous"
         ],
         "definition_queries": 1
       }
@@ -245,7 +249,8 @@
         "definition_queries": 1,
         "definition_gets": 0,
         "reason_contains": [
-          "canonical lens"
+          "canonical lens",
+          "metadata inadmissible"
         ]
       }
     },
@@ -402,6 +407,163 @@
           "canonical lens"
         ]
       }
+    },
+    {
+      "id": "ambiguous_definition_refuses_with_actionable_category",
+      "why": "The real CLI must refuse before checkout and distinguish the safe repair action without exposing canonical payloads.",
+      "target": {
+        "repo": "example/ateles",
+        "files": {
+          "docs/agents/pavo.md": "@planted",
+          "execution/scripts/example.py": "print('example')\n"
+        }
+      },
+      "neotoma": "serve",
+      "definitions": [
+        {
+          "entity_id": "ent_eval_pavo_definition",
+          "snapshot": {
+            "name": "pavo",
+            "status": "active",
+            "prompt_markdown": "# Pavo (canonical eval definition)\nCANONICAL-PAVO-MARKER: review the product fit of the change.\n",
+            "tool_allowlist": [
+              "Read",
+              "Grep"
+            ]
+          },
+          "entity_type": "agent_definition"
+        },
+        {
+          "entity_id": "ent_eval_pavo_definition",
+          "snapshot": {
+            "name": "pavo",
+            "status": "active",
+            "prompt_markdown": "# Pavo (canonical eval definition)\nCANONICAL-PAVO-MARKER: review the product fit of the change.\n",
+            "tool_allowlist": [
+              "Read",
+              "Grep"
+            ]
+          },
+          "entity_type": "agent_definition"
+        }
+      ],
+      "dry_run": false,
+      "expect": {
+        "ok": false,
+        "exit_code": 1,
+        "dispatched": false,
+        "worktrees_created": 0,
+        "worktrees_left": 0,
+        "reason_contains": [
+          "canonical lens",
+          "missing or ambiguous"
+        ],
+        "definition_queries": 1
+      }
+    },
+    {
+      "id": "retired_definition_refuses_with_actionable_category",
+      "why": "The real CLI must refuse before checkout and distinguish the safe repair action without exposing canonical payloads.",
+      "target": {
+        "repo": "example/ateles",
+        "files": {
+          "docs/agents/pavo.md": "@planted",
+          "execution/scripts/example.py": "print('example')\n"
+        }
+      },
+      "neotoma": "serve",
+      "definitions": [
+        {
+          "entity_id": "ent_eval_pavo_definition",
+          "snapshot": {
+            "name": "pavo",
+            "status": "retired",
+            "prompt_markdown": "# Pavo (canonical eval definition)\nCANONICAL-PAVO-MARKER: review the product fit of the change.\n",
+            "tool_allowlist": [
+              "Read",
+              "Grep"
+            ]
+          },
+          "entity_type": "agent_definition"
+        }
+      ],
+      "dry_run": false,
+      "expect": {
+        "ok": false,
+        "exit_code": 1,
+        "dispatched": false,
+        "worktrees_created": 0,
+        "worktrees_left": 0,
+        "reason_contains": [
+          "canonical lens",
+          "metadata inadmissible"
+        ],
+        "definition_queries": 1
+      }
+    },
+    {
+      "id": "missing_tools_refuses_with_actionable_category",
+      "why": "The real CLI must refuse before checkout and distinguish the safe repair action without exposing canonical payloads.",
+      "target": {
+        "repo": "example/ateles",
+        "files": {
+          "docs/agents/pavo.md": "@planted",
+          "execution/scripts/example.py": "print('example')\n"
+        }
+      },
+      "neotoma": "serve",
+      "definitions": [
+        {
+          "entity_id": "ent_eval_pavo_definition",
+          "snapshot": {
+            "name": "pavo",
+            "status": "active",
+            "prompt_markdown": "# Pavo (canonical eval definition)\nCANONICAL-PAVO-MARKER: review the product fit of the change.\n"
+          },
+          "entity_type": "agent_definition"
+        }
+      ],
+      "dry_run": false,
+      "expect": {
+        "ok": false,
+        "exit_code": 1,
+        "dispatched": false,
+        "worktrees_created": 0,
+        "worktrees_left": 0,
+        "reason_contains": [
+          "canonical lens",
+          "metadata inadmissible"
+        ],
+        "definition_queries": 1
+      }
+    },
+    {
+      "id": "explicit_missing_definition_refuses_with_actionable_category",
+      "why": "A canonical explicit-ID 404 is a missing record, not an unavailable transport or retryable authority.",
+      "target": {
+        "repo": "example/ateles",
+        "files": {
+          "docs/agents/pavo.md": "@planted",
+          "execution/scripts/example.py": "print('example')\n"
+        }
+      },
+      "neotoma": "serve",
+      "definitions": [],
+      "dry_run": false,
+      "expect": {
+        "ok": false,
+        "exit_code": 1,
+        "dispatched": false,
+        "worktrees_created": 0,
+        "worktrees_left": 0,
+        "reason_contains": [
+          "canonical lens",
+          "missing or ambiguous"
+        ],
+        "definition_queries": 0,
+        "definition_gets": 1
+      },
+      "explicit_role_id": "ent_missing_eval"
     }
   ]
 }

@@ -274,6 +274,7 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
 # noqa: E402 — path bootstrap above must run first
 from lib.daemon_runtime.agent_loader import (  # noqa: E402
     AgentDefinition,
+    LensLoadFailure,
     AgentLoader,
     validate_lens_definition,
 )
@@ -567,11 +568,31 @@ def read_agent_definition(agent: str) -> AgentDefinition:
     may have no such tree, and a missing Neotoma definition becomes a stub
     with an empty prompt and wildcard tools in the generic dispatcher.
     """
+    definition = None
     try:
         definition = AgentLoader(agent).load_for_lens()
         validate_lens_definition(definition, agent)
     except Exception as exc:
-        raise LensRoleUnavailable("canonical lens role could not be loaded") from exc
+        # Only a source-assigned typed class may select a fixed diagnostic.
+        # Missing/unknown classes retain the restrictive generic refusal.
+        category = getattr(definition, "load_error_category", None)
+        message = "canonical lens role could not be loaded"
+        if isinstance(category, LensLoadFailure):
+            message = {
+                LensLoadFailure.UNAVAILABLE: (
+                    "canonical lens source unavailable; restore source connectivity/access "
+                    "and verify the runtime role binding before retrying"
+                ),
+                LensLoadFailure.MISSING_OR_AMBIGUOUS: (
+                    "canonical lens role missing or ambiguous; verify the runtime role ID "
+                    "and canonical registration before retrying"
+                ),
+                LensLoadFailure.INADMISSIBLE: (
+                    "canonical lens role metadata inadmissible; repair canonical identity, "
+                    "status, prompt, tools or scope evidence before retrying"
+                ),
+            }[category]
+        raise LensRoleUnavailable(message) from exc
     return definition
 
 
