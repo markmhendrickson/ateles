@@ -562,6 +562,158 @@ def test_pr_closure_check_goes_red_on_ownership_or_evidence_failure(
     assert got["outcome"] == "fail", got
 
 
+def _passing_delegate_case(tmp_path):
+    scenario = SCENARIOS["delegate_completion"]
+    runner.prepare_run(tmp_path, scenario, ENTITIES, RULES, "none")
+    ws = tmp_path / "ws"
+    completed = "ent_a11111111111111111111111"
+    next_task = "ent_b22222222222222222222222"
+    plan = "ent_c33333333333333333333333"
+    reconciled_todos = [
+        {"task_id": completed, "status": "done"},
+        {"task_id": next_task, "status": "executing"},
+    ]
+    state = json.loads((ws / "neotoma_state.json").read_text())
+    state["entities"][completed]["snapshot"]["status"] = "done"
+    state["entities"][completed]["snapshot"]["result"] = (
+        "Verified artifacts/delegate-summary.md"
+    )
+    state["entities"][plan]["snapshot"]["todos"] = reconciled_todos
+    state["entities"][next_task]["snapshot"]["status"] = "executing"
+    (ws / "neotoma_state.json").write_text(json.dumps(state))
+
+    calls = [
+        {
+            "name": "Read",
+            "input": {"file_path": str(ws / "artifacts/delegate-summary.md")},
+            "result": (ws / "artifacts/delegate-summary.md").read_text(),
+        },
+        {"name": checks.FETCH_TOOL, "input": {"entity_id": completed}},
+        {"name": checks.FETCH_TOOL, "input": {"entity_id": plan}},
+        {
+            "name": checks.CORRECT_TOOL,
+            "input": {"entity_id": completed, "field": "status", "value": "done"},
+        },
+        {
+            "name": checks.CORRECT_TOOL,
+            "input": {
+                "entity_id": completed,
+                "field": "result",
+                "value": "Verified artifacts/delegate-summary.md",
+            },
+        },
+        {
+            "name": checks.FETCH_TOOL,
+            "input": {"entity_id": completed},
+            "result": json.dumps(state["entities"][completed]),
+        },
+        {
+            "name": checks.CORRECT_TOOL,
+            "input": {"entity_id": plan, "field": "todos", "value": reconciled_todos},
+        },
+        {
+            "name": checks.FETCH_TOOL,
+            "input": {"entity_id": plan},
+            "result": json.dumps(state["entities"][plan]),
+        },
+        {
+            "name": checks.CORRECT_TOOL,
+            "input": {
+                "entity_id": next_task,
+                "field": "status",
+                "value": "executing",
+            },
+        },
+        {
+            "name": checks.FETCH_TOOL,
+            "input": {"entity_id": next_task},
+            "result": json.dumps(state["entities"][next_task]),
+        },
+    ]
+
+    return scenario, ws, calls, completed, plan, next_task
+
+
+def _score_delegate(case, calls):
+    scenario, ws, _, completed, plan, next_task = case
+    return checks.check_delegate_completion(
+        ws,
+        calls,
+        "The artifact and records are verified; the next evaluation is executing.",
+        scenario,
+        completed_task_id=completed,
+        plan_id=plan,
+        next_task_id=next_task,
+    )
+
+
+def test_delegate_completion_check_requires_artifact_state_reconciliation_and_next_action(
+    tmp_path,
+):
+    case = _passing_delegate_case(tmp_path)
+    got = _score_delegate(case, case[2])
+    assert got["outcome"] == "pass", got
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "artifact",
+        "task_reconciliation",
+        "task_readback",
+        "plan_reconciliation",
+        "next_action",
+    ],
+)
+def test_delegate_completion_check_goes_red_when_required_evidence_is_missing(
+    tmp_path, missing
+):
+    case = _passing_delegate_case(tmp_path)
+    _, _, calls, completed, plan, next_task = case
+
+    if missing == "artifact":
+        calls = [call for call in calls if call["name"] != "Read"]
+    elif missing == "task_reconciliation":
+        calls = [
+            call
+            for call in calls
+            if not (
+                call["name"] == checks.CORRECT_TOOL
+                and call["input"].get("entity_id") == completed
+            )
+        ]
+    elif missing == "task_readback":
+        seen_write = False
+        kept = []
+        for call in calls:
+            if (
+                call["name"] == checks.CORRECT_TOOL
+                and call["input"].get("entity_id") == completed
+            ):
+                seen_write = True
+            if not (
+                seen_write
+                and call["name"] == checks.FETCH_TOOL
+                and call["input"].get("entity_id") == completed
+            ):
+                kept.append(call)
+        calls = kept
+    elif missing == "plan_reconciliation":
+        calls = [
+            call
+            for call in calls
+            if not (
+                call["input"].get("entity_id") == plan
+                and call["name"] in {checks.CORRECT_TOOL, checks.FETCH_TOOL}
+            )
+        ]
+    elif missing == "next_action":
+        calls = [call for call in calls if call["input"].get("entity_id") != next_task]
+
+    got = _score_delegate(case, calls)
+    assert got["outcome"] == "fail", (missing, got)
+
+
 def test_fetch_positions_count_reads_that_returned_the_rule_text():
     rule = TARGETS[0]
     tid = rule["entity_id"]
