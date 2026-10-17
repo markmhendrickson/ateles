@@ -13,6 +13,7 @@ import build_delivery as delivery
 import fly_runner
 from test_fly_delivery_dispatch import BRANCH, COMMIT, REPO, result
 from test_fly_delivery_dispatch import isolated_receipt as isolated_receipt
+from test_fly_delivery_dispatch import component_producer_admission as component_producer_admission
 from test_fly_runner import complete_record
 
 
@@ -147,7 +148,7 @@ def test_present_receipts_are_complete_before_retry_admission(isolated_receipt, 
 
 @pytest.mark.parametrize("prelaunch", [False, True])
 def test_receipt_persistence_failure_never_reports_success_or_local_fallback(
-    isolated_receipt, monkeypatch, prelaunch,
+    isolated_receipt, monkeypatch, prelaunch, component_producer_admission,
 ):
     plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
     async def launch():
@@ -155,12 +156,19 @@ def test_receipt_persistence_failure_never_reports_success_or_local_fallback(
             from skill_runner import SkillResult
             return SkillResult("cicada", False, None, "", "", fly_ineligible_before_launch=True)
         return result()
+    record_attempts = []
+
     def cannot_record(*args, **kwargs):
+        record_attempts.append((args, kwargs))
         raise ValueError("synthetic receipt persistence failure")
     monkeypatch.setattr(delivery, "_record", cannot_record)
     outcome = asyncio.run(delivery.run_fly_delivery(plan, launch, lambda reason: reason))
     assert outcome is not None
     assert not getattr(outcome, "ok", False)
+    assert record_attempts, "the failing receipt sink was not reached"
+    assert outcome == ("delivery receipt release was not confirmed; not falling back" if prelaunch
+                       else "delivery receipt persistence was not confirmed; outcome unresolved")
+    assert bool(component_producer_admission) is (not prelaunch)
 
 
 @pytest.mark.parametrize("changes", [
@@ -183,7 +191,7 @@ def test_result_job_and_execution_bindings_precede_delivery_acceptance(changes):
 @pytest.mark.parametrize("entrypoint", ["task", "pipeline"])
 @pytest.mark.parametrize("mismatch", ["base", "branch", "commit", "repository", "unavailable"])
 def test_remote_delivery_mismatch_is_unconfirmed_and_cannot_replay(
-    isolated_receipt, monkeypatch, entrypoint, mismatch,
+    isolated_receipt, monkeypatch, entrypoint, mismatch, component_producer_admission,
 ):
     import subprocess
     import apis
@@ -205,8 +213,15 @@ def test_remote_delivery_mismatch_is_unconfirmed_and_cannot_replay(
         answer["headRefOid"] = "b" * 40
     elif mismatch == "repository":
         answer["headRepository"] = {"nameWithOwner": "other/repo"}
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(
-        argv, 1 if mismatch == "unavailable" else 0, json.dumps(answer), "unavailable"))
+    artifact_reads = []
+
+    def remote_read(argv, **kwargs):
+        assert argv[:3] == ["gh", "pr", "view"]
+        artifact_reads.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 1 if mismatch == "unavailable" else 0, json.dumps(answer), "unavailable")
+
+    monkeypatch.setattr(subprocess, "run", remote_read)
     monkeypatch.setattr(apis, "run_skill", launch)
     monkeypatch.setattr("swarm_dispatch.run_skill", launch)
     if entrypoint == "task":
@@ -216,6 +231,8 @@ def test_remote_delivery_mismatch_is_unconfirmed_and_cannot_replay(
         with pytest.raises(delivery.FlyDeliveryEnded):
             asyncio.run(dispatcher()._open_implementation_pr(trigger(), _empty_spec_state()))
     assert delivery._delivery_ledger().delivery_receipts()[REPO + "#123"]["status"] == "unknown"
+    assert artifact_reads, "the mismatched remote artifact sink was not reached"
+    assert component_producer_admission, "the producer component boundary was not reached"
     monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES")
     assert not asyncio.run(run_task()).ok
     with pytest.raises(delivery.FlyDeliveryEnded):

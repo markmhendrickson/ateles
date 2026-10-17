@@ -53,6 +53,23 @@ def isolated_receipt(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", remote_read)
 
 
+@pytest.fixture
+def component_producer_admission(monkeypatch, request):
+    """Only the legacy artifact/receipt component's producer boundary.
+
+    This explicit per-test stand-in supplies no origin evidence. Genuine
+    test_common_ executor/consumer controls must retain real admission.
+    """
+    assert not request.node.originalname.startswith("test_common_")
+    calls = []
+
+    async def admitted(result, plan=None):
+        calls.append((result, plan))
+
+    monkeypatch.setattr(fly_runner, "require_delivery_admission", admitted)
+    return calls
+
+
 def remote_pr():
     return {"number": 99, "url": f"https://github.com/{REPO}/pull/99",
             "baseRefName": "main", "headRefName": BRANCH, "headRefOid": COMMIT,
@@ -125,7 +142,9 @@ def test_default_off_is_pinned_even_when_fly_itself_is_configured(monkeypatch):
 
 
 @pytest.mark.parametrize("entry", ["task", "pipeline"])
-def test_both_entries_pass_the_delivery_spec_without_local_grants(monkeypatch, entry):
+def test_both_entries_pass_the_delivery_spec_without_local_grants(
+    monkeypatch, entry, component_producer_admission
+):
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
     calls = []
 
@@ -169,6 +188,8 @@ def test_both_entries_pass_the_delivery_spec_without_local_grants(monkeypatch, e
         assert "OPEN AN IMPLEMENTATION PULL REQUEST" not in prompt
         assert "PREPARE THE PR TEXT" in prompt
     assert delivery.active_build(REPO, 123) is None
+    assert len(component_producer_admission) >= 2
+    assert delivery._delivery_ledger().delivery_receipts()[REPO + "#123"]["status"] == "opened"
 
 
 @pytest.mark.parametrize(
@@ -177,14 +198,15 @@ def test_both_entries_pass_the_delivery_spec_without_local_grants(monkeypatch, e
 )
 @pytest.mark.parametrize("entry", ["task", "pipeline"])
 def test_terminal_delivery_cannot_repeat_after_restart_or_optout(
-    monkeypatch, status, entry
+    monkeypatch, status, entry, component_producer_admission
 ):
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
     launches = []
 
     async def run(*a, **kw):
         launches.append(kw)
-        return result(status)
+        # The existing receipt grammar forbids a commit for no_changes.
+        return result(status, fly_delivery_commit="" if status == "no_changes" else COMMIT)
 
     async def never(*a, **kw):
         raise AssertionError("terminal delivery fell back locally")
@@ -199,6 +221,10 @@ def test_terminal_delivery_cannot_repeat_after_restart_or_optout(
             asyncio.run(
                 dispatcher()._open_implementation_pr(trigger(), _empty_spec_state())
             )
+    # Reach the original terminal report, rather than passing because an
+    # earlier admission refusal changed every status to unknown.
+    assert delivery._delivery_ledger().delivery_receipts()[REPO + "#123"]["status"] == status
+    assert bool(component_producer_admission) is (status == "no_changes")
     # Reload discards process state. The receipt, not an in-memory cooldown,
     # must prevent a second delivery through either launch entrance.
     importlib.reload(delivery)
@@ -571,26 +597,45 @@ def test_remote_unknown_flag_alone_never_clears_the_delivery_binding():
 
 
 def test_runner_pr_reaches_existing_artifact_gate_and_verified_task_completion(
-    monkeypatch, dispatch_env
+    monkeypatch, dispatch_env, common_admission_executor
 ):
     _, _, store = dispatch_env
+    _, jobs, reads, _ = common_admission_executor
+    real_build_job = fly_runner.build_job
+
+    def fixed_run(**kwargs):
+        job = real_build_job(**kwargs)
+        job.run_id = "run-123"
+        return job
+
+    monkeypatch.setattr(fly_runner, "build_job", fixed_run)
+    original_run = apis.run_skill
+    artifact_reads = []
     eid = "ent_eval_success_task"
     snapshot = task_snapshot()
     store.rows[eid] = snapshot.copy()
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
     async def run(*a, **kw):
-        got = result()
+        got = await original_run(*a, **kw)
+        assert got.ok, got.error
         got.stdout = "[cicada] pull_request_link: BLOCKED before runner delivery"
         return got
+
+    def artifact(*args, **kwargs):
+        artifact_reads.append((args, kwargs))
+        return "exists"
+
     monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
     monkeypatch.setattr(apis, "run_skill", run)
-    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **kw: "exists")
+    monkeypatch.setattr(apis, "resolve_artifact_ref", artifact)
     monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
     asyncio.run(apis.dispatch_task(eid, snapshot, "approved", _StubNotifier(), gate_override=True))
     assert store.rows[eid]["status"] == "done", store.rows[eid]
     saved = store.rows[eid]["result"]
     assert f"[cicada] pull_request_link: https://github.com/{REPO}/pull/99\n" in saved
     assert COMMIT in saved and "run-123" in saved
+    assert len(jobs) == 1 and len(reads) >= 4
+    assert artifact_reads, "the original task artifact gate was not reached"
 
 
 @pytest.fixture
