@@ -1744,6 +1744,18 @@ def expect_delivery_plan(plan, *, task_id=None):
     scope.expect_plan(plan, task_id)
 
 
+def task_delivery_started(*, task_id):
+    """Whether the original task scope owns a launched delivery obligation.
+
+    Capture before awaited artifact reads. A mutable result report cannot
+    remove it; a closed task scope remains restrictive. Prelaunch/local
+    fallback has no launched job and retains its ordinary artifact path.
+    """
+    scope = _COMPLETION_SCOPE.get()
+    return bool(scope is not None and scope.task_id == task_id and (
+        scope.closed or scope.job is not None and scope.job.launch_requested))
+
+
 async def require_task_delivery_admission(result, *, task_id, repository):
     scope = _COMPLETION_SCOPE.get()
     if (scope is None or scope.task_id != task_id or scope.plan_identity is None
@@ -1774,12 +1786,12 @@ def _result_read_contract(data, run_id):
             or coverage.get("state") != "complete" or coverage.get("reasons") != []
             or type(total.get("value")) is not int
             or total != {"value": 1, "relation": "exact", "unit": "entities"}
+            or type(coverage.get("returned_count")) is not int
             or coverage.get("returned_count") != 1
             or coverage.get("scope_exhausted") is not True
             or contract.get("request_options", {}).get("ignored") != []
-            or not any(p.get("field") == "run_id" and p.get("op") == "eq"
-                       and p.get("value") == predicate for p in scope.get("predicates", [])
-                       if isinstance(p, dict))):
+            or scope.get("predicates") != [
+                {"field": "run_id", "op": "eq", "value": predicate}]):
         raise FlyResultUnreadable("result collection coverage is not complete")
 
 

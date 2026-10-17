@@ -2319,6 +2319,12 @@ async def dispatch_task(
             )
             raise
 
+        from fly_runner import task_delivery_started
+
+        # The original task/job scope, rather than a later mutable report,
+        # decides whether final completion still requires Fly admission.
+        fly_delivery_started = task_delivery_started(task_id=entity_id)
+
         # ── Deliverable gate (ateles#1155) ───────────────────────────────────
         # A harness exiting 0 is process success, not deliverable success.
         # Cicada could exit 0 having written `[cicada] pull_request_link:
@@ -2712,7 +2718,7 @@ async def dispatch_task(
                 TaskStatus.VERIFIED.value if run_session else TaskStatus.EXECUTING.value
             )
             if artifact is not None:
-                if getattr(result, "fly_delivery_status", ""):
+                if fly_delivery_started:
                     from fly_runner import FlyResultUnreadable, require_task_delivery_admission
 
                     try:

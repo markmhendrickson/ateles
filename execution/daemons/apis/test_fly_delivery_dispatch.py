@@ -805,8 +805,11 @@ def test_common_admission_loss_blocks_both_real_consumers(
     assert receipt["status"] == "unknown", "missing admission became a successful receipt"
 
 
-@pytest.mark.parametrize("entry", ["task", "pipeline"])
-@pytest.mark.parametrize("failure", ["closed", "foreign_job"])
+@pytest.mark.parametrize("entry,failure", [
+    ("task", "closed"), ("pipeline", "closed"),
+    ("task", "foreign_job"), ("pipeline", "foreign_job"),
+    ("task", "scalar_cleared"),
+])
 def test_common_late_loss_at_both_final_consumers(
     monkeypatch, dispatch_env, common_admission_executor, entry, failure
 ):
@@ -816,7 +819,10 @@ def test_common_late_loss_at_both_final_consumers(
     monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
     monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
     def lose():
-        if failure == "closed":
+        if failure in {"closed", "scalar_cleared"}:
+            if failure == "scalar_cleared":
+                # Alter the report only after the artifact header was built.
+                jobs[0]._fly_admission.result.fly_delivery_status = ""
             jobs[0]._fly_admission.scope.close()
         else:
             import copy
@@ -860,6 +866,41 @@ def test_common_ordinary_routing_preserved(monkeypatch, mode):
         test_default_off_is_pinned_even_when_fly_itself_is_configured(monkeypatch)
     else:
         test_prelaunch_refusal_is_the_only_local_fallback(monkeypatch)
+
+
+@pytest.mark.parametrize("mode", ["default_off", "prelaunch"])
+def test_common_unlaunched_local_result_keeps_final_task_completion(
+    monkeypatch, dispatch_env, mode
+):
+    _, _, store = dispatch_env
+    calls, artifact_reads = [], []
+    if mode == "prelaunch":
+        monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+
+    async def run(*args, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("runner") == "fly":
+            return SkillResult("cicada", False, None, "", "", fly_ineligible_before_launch=True)
+        return SkillResult("cicada", True, 0,
+            f"[cicada] pull_request_link: https://github.com/{REPO}/pull/99\n", "")
+
+    def artifact(*args, **kwargs):
+        artifact_reads.append(True)
+        return "exists"
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr(apis, "_token_for_agent_on_repo", lambda *args: "synthetic-component-token")
+    monkeypatch.setattr(apis, "resolve_artifact_ref", artifact)
+    monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
+    eid = "ent_synthetic_local_completion"
+    snapshot = task_snapshot()
+    store.rows[eid] = snapshot.copy()
+    asyncio.run(apis.dispatch_task(eid, snapshot, "approved", _StubNotifier(), gate_override=True))
+    assert store.rows[eid]["status"] == "done", store.rows[eid]
+    assert artifact_reads
+    assert len(calls) == (2 if mode == "prelaunch" else 1)
+    assert delivery.fly_delivery_blocker(REPO + "#123") == ""
 
 
 def test_common_default_origin_still_refuses_matching_fields():

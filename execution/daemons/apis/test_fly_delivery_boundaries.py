@@ -17,7 +17,7 @@ from test_fly_delivery_dispatch import component_producer_admission as component
 from test_fly_runner import complete_record
 
 
-@pytest.mark.parametrize("defect", [None, "duplicate", "partial", "boolean_count", "missing_winner", "mixed_winner", "owner", "thumbprint", "grant", "schema", "issuer", "wrong_issuer", "store_alias", "wrong_type", "unknown_bound", "signed_bool_exit", "signed_numeric_probe", "signed_numeric_timeout", "signed_finite_number", "snapshot_bool_exit"])
+@pytest.mark.parametrize("defect", [None, "duplicate", "partial", "boolean_count", "missing_winner", "mixed_winner", "owner", "thumbprint", "grant", "schema", "issuer", "wrong_issuer", "store_alias", "wrong_type", "unknown_bound", "signed_bool_exit", "signed_numeric_probe", "signed_numeric_timeout", "signed_finite_number", "snapshot_bool_exit", "extra_predicate", "contradictory_run", "mixed_predicates", "null_predicates", "duplicate_predicate", "boolean_returned"])
 def test_common_canonical_admission_uses_actual_endpoint_shapes(monkeypatch, defect):
     from test_fly_runner import canonical_delivery_fixture
 
@@ -59,6 +59,20 @@ def test_common_canonical_admission_uses_actual_endpoint_shapes(monkeypatch, def
         responses["/agents/grants/ent_synthetic_grant"]["grant"]["capabilities"][0]["entity_types"] = ["unrelated_type"]
     elif defect == "unknown_bound":
         responses["/agents/grants/ent_synthetic_grant"]["grant"]["unrecognized_permission_field"] = True
+    elif defect in {"extra_predicate", "contradictory_run", "mixed_predicates", "null_predicates", "duplicate_predicate"}:
+        predicates = query["read_contract"]["applied_scope"]["predicates"]
+        if defect == "extra_predicate":
+            predicates.append({"field": "probe_ok", "op": "eq", "value": {"kind": "sha256", "value": "b" * 64}})
+        elif defect == "contradictory_run":
+            predicates.append({**predicates[0], "value": {"kind": "sha256", "value": "b" * 64}})
+        elif defect == "mixed_predicates":
+            predicates.append(None)
+        elif defect == "null_predicates":
+            query["read_contract"]["applied_scope"]["predicates"] = None
+        else:
+            predicates.append(dict(predicates[0]))
+    elif defect == "boolean_returned":
+        query["read_contract"]["coverage"]["returned_count"] = True
     elif defect == "signed_bool_exit":
         observation["observations"][0]["fields"]["exit_code"] = False
     elif defect == "signed_numeric_probe":
@@ -75,6 +89,9 @@ def test_common_canonical_admission_uses_actual_endpoint_shapes(monkeypatch, def
     def transport(request):
         requests.append(request)
         assert request.url.host == "canonical.invalid"
+        if request.url.path == "/entities/query":
+            assert json.loads(request.content)["snapshot_filters"] == {
+                "run_id": {"op": "eq", "value": job.run_id}}
         return httpx.Response(200, json=responses[request.url.path])
 
     async def acquire():
