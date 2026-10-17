@@ -32,6 +32,32 @@ FILES = (
 _EMPTY_CALLS = {"dict", "list", "tuple", "set", "str", "frozenset"}
 
 ALLOWLIST: dict[str, str] = {
+    "execution/daemons/apis/fly_runner.py:FlyExecutor._read_delivery_canonical:os.environ.get('NEOTOMA_BASE_URL', '')":
+        'an absent canonical base is refused before creating the HTTP client; no result is admitted',
+    "execution/daemons/apis/fly_runner.py:FlyExecutor._read_delivery_canonical:os.environ.get('NEOTOMA_BEARER_TOKEN', '')":
+        'an absent canonical bearer is refused before creating the HTTP client; no result is admitted',
+    "execution/daemons/apis/fly_runner.py:FlyLedger.delivery_receipts:raw.get('deliveries', {})":
+        'only legacy pre-delivery absence is empty after locked snapshot validation; malformed present receipts are refused',
+    "execution/daemons/apis/fly_runner.py:_read_canonical_delivery:obs.get('provenance', {})":
+        'absent signer provenance already fails attribution; an issuer-bound grant also refuses a missing issuer',
+    "execution/daemons/apis/fly_runner.py:_read_canonical_delivery:schema.get('schema_definition', {})":
+        'an absent schema definition yields no protected fields and is refused by the active-schema predicate',
+    "execution/daemons/apis/fly_runner.py:_read_canonical_delivery:schema.get('schema_definition', {}).get('fields', {})":
+        'an absent field map cannot contain the required protected fields, so canonical admission refuses',
+    "execution/daemons/apis/fly_runner.py:_result_read_contract:contract.get('applied_scope', {})":
+        'an absent scope lacks the exact authenticated owner/type/run population and is refused',
+    "execution/daemons/apis/fly_runner.py:_result_read_contract:contract.get('coverage', {})":
+        'an absent coverage object lacks complete population evidence and is refused',
+    "execution/daemons/apis/fly_runner.py:_result_read_contract:contract.get('mode', {})":
+        'an absent mode cannot be structured and the collection contract is refused',
+    "execution/daemons/apis/fly_runner.py:_result_read_contract:contract.get('request_options', {})":
+        'an absent request-options object has no explicit empty ignored list and is refused',
+    "execution/daemons/apis/fly_runner.py:_result_read_contract:coverage.get('total', {})":
+        'an absent total lacks the exact integer-one population evidence and is refused',
+    "execution/daemons/apis/fly_runner.py:validate_delivery_receipt:entry.get('commit', '')":
+        'terminal uncertain receipts may omit a commit; opened/updated and pushed outcomes explicitly require one',
+    "execution/daemons/apis/fly_runner.py:validate_delivery_receipt:entry.get('pr_url', '')":
+        'terminal uncertain receipts may omit a PR URL; successful artifact receipts explicitly require the exact URL',
     "execution/daemons/apis/fly_runner.py:FlyLedger._snapshot:raw.get('deliveries', {})":
         'an older pre-delivery ledger has no bindings; present malformed bindings fail closed',
     "execution/daemons/apis/fly_runner.py:FlyLedger.record_delivery:data.setdefault('deliveries', {})":
