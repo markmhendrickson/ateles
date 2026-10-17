@@ -16,7 +16,7 @@ from test_fly_delivery_dispatch import isolated_receipt as isolated_receipt
 from test_fly_runner import complete_record
 
 
-@pytest.mark.parametrize("defect", [None, "duplicate", "partial", "boolean_count", "missing_winner", "mixed_winner", "owner", "thumbprint", "grant", "schema", "issuer", "wrong_issuer", "store_alias", "wrong_type", "unknown_bound"])
+@pytest.mark.parametrize("defect", [None, "duplicate", "partial", "boolean_count", "missing_winner", "mixed_winner", "owner", "thumbprint", "grant", "schema", "issuer", "wrong_issuer", "store_alias", "wrong_type", "unknown_bound", "signed_bool_exit", "signed_numeric_probe", "signed_numeric_timeout", "signed_finite_number", "snapshot_bool_exit"])
 def test_common_canonical_admission_uses_actual_endpoint_shapes(monkeypatch, defect):
     from test_fly_runner import canonical_delivery_fixture
 
@@ -58,6 +58,17 @@ def test_common_canonical_admission_uses_actual_endpoint_shapes(monkeypatch, def
         responses["/agents/grants/ent_synthetic_grant"]["grant"]["capabilities"][0]["entity_types"] = ["unrelated_type"]
     elif defect == "unknown_bound":
         responses["/agents/grants/ent_synthetic_grant"]["grant"]["unrecognized_permission_field"] = True
+    elif defect == "signed_bool_exit":
+        observation["observations"][0]["fields"]["exit_code"] = False
+    elif defect == "signed_numeric_probe":
+        observation["observations"][0]["fields"]["probe_ok"] = 1
+    elif defect == "signed_numeric_timeout":
+        observation["observations"][0]["fields"]["timed_out"] = 0
+    elif defect == "signed_finite_number":
+        observation["observations"][0]["fields"]["exit_code"] = 0.0
+    elif defect == "snapshot_bool_exit":
+        query["entities"][0]["snapshot"]["exit_code"] = False
+        observation["observations"][0]["fields"]["exit_code"] = False
     requests = []
 
     def transport(request):
@@ -69,7 +80,7 @@ def test_common_canonical_admission_uses_actual_endpoint_shapes(monkeypatch, def
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
             return await fly_runner._read_canonical_delivery(client, "https://canonical.invalid", job, binding)
 
-    if defect not in {None, "issuer", "store_alias"}:
+    if defect not in {None, "issuer", "store_alias", "signed_finite_number"}:
         with pytest.raises(fly_runner.FlyResultUnreadable):
             asyncio.run(acquire())
     else:

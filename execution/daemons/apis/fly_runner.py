@@ -1662,6 +1662,28 @@ def _delivery_identity(job):
             json.dumps(job.delivery, sort_keys=True, allow_nan=False))
 
 
+def _same_result_value(left, right):
+    """JSON value equality without Python's boolean/number aliasing.
+
+    Finite integer/float representations retain the schema's numeric
+    semantics. This compares existing values; it serializes or hashes none.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left is right
+    if type(left) in {int, float} and type(right) in {int, float}:
+        return (not isinstance(left, float) or math.isfinite(left)) and (
+            not isinstance(right, float) or math.isfinite(right)) and left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _same_result_value(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_result_value(a, b) for a, b in zip(left, right))
+    return (left is None and right is None) or isinstance(left, str) and left == right
+
+
 class _DeliveryAdmission:
     """Executor-owned and deliberately absent from any public/wire dataclass."""
     def __init__(self, executor, job, scope, origin, canonical):
@@ -1691,7 +1713,7 @@ class _DeliveryAdmission:
             if result.remote_run_id != self.job.run_id:
                 raise FlyResultUnreadable("delivery result differs from its original run")
             record = self.canonical["row"]["snapshot"]
-            if any(getattr(result, attr) != record.get(key) for attr, key in (
+            if any(not _same_result_value(getattr(result, attr), record.get(key)) for attr, key in (
                     ("fly_delivery_status", "delivery_status"),
                     ("fly_delivery_branch", "delivery_branch"),
                     ("fly_delivery_commit", "delivery_commit"),
@@ -1702,7 +1724,7 @@ class _DeliveryAdmission:
                     or plan.spec() != self.job.delivery):
                 raise FlyResultUnreadable("delivery differs from the original parent plan")
         fresh = await self.executor._read_delivery_canonical(self.job, self.origin)
-        if fresh != self.canonical:
+        if not _same_result_value(fresh, self.canonical):
             raise FlyResultUnreadable("delivery canonical admission changed")
         self.scope.require_current()
 
@@ -1803,6 +1825,10 @@ async def _read_canonical_delivery(client, base, job, binding):
     record, winners = row.get("snapshot"), row.get("provenance")
     if not isinstance(record, dict) or not isinstance(winners, dict):
         raise FlyResultUnreadable("delivery snapshot or winners are missing")
+    try:
+        validate("result_record", record)
+    except FlyInvalid:
+        raise FlyResultUnreadable("canonical delivery runtime field types are invalid") from None
     if any(record.get(k) != value for k, value in (
             ("run_id", job.run_id), ("role", job.role), ("provider", job.provider),
             ("repository", job.repository), ("machine_id", job.machine_id))):
@@ -1836,7 +1862,8 @@ async def _read_canonical_delivery(client, base, job, binding):
             break
         if len(batch) != 100:
             raise FlyResultUnreadable("delivery observations page is incomplete")
-    if len(observations) != total or row.get("observation_count") != total:
+    if (len(observations) != total or type(row.get("observation_count")) is not int
+            or row["observation_count"] != total):
         raise FlyResultUnreadable("delivery observations changed or are incomplete")
     ids = [o.get("id") for o in observations if isinstance(o, dict)]
     if len(ids) != total or len(set(ids)) != total or any(not isinstance(i, str) for i in ids):
@@ -1845,7 +1872,7 @@ async def _read_canonical_delivery(client, base, job, binding):
     if (obs is None or obs.get("user_id") != binding["owner"]
             or obs.get("entity_id") != row["entity_id"]
             or not isinstance(obs.get("fields"), dict)
-            or any(obs["fields"].get(k) != record[k] for k in protected)
+            or any(not _same_result_value(obs["fields"].get(k), record[k]) for k in protected)
             or not check_observation_attribution(observations, winner, binding["sub"], binding["thumbprint"]).ok):
         raise FlyResultUnreadable("delivery winning observation is not attributable")
     grant = (await request("GET", "/agents/grants/" + quote(binding["grant_id"], safe=""))).get("grant")
@@ -2929,7 +2956,7 @@ class FlyExecutor:
                     raise FlyResultUnreadable("delivery completion scope is absent")
                 origin = await self._read_delivery_origin(handle)
                 canonical = await self._read_delivery_canonical(job, origin)
-                if canonical["row"]["snapshot"] != record:
+                if not _same_result_value(canonical["row"]["snapshot"], record):
                     raise FlyResultUnreadable("delivery record differs from admitted acquisition")
                 admission = _DeliveryAdmission(self, job, scope, origin, canonical)
                 job._fly_admission = admission
@@ -2964,7 +2991,8 @@ class FlyExecutor:
         async with httpx.AsyncClient(timeout=30.0, headers={"Authorization": f"Bearer {token}"}) as client:
             first = await _read_canonical_delivery(client, base, job, origin.get("binding"))
             second = await _read_canonical_delivery(client, base, job, origin.get("binding"))
-        if first != second or first["row"]["snapshot"] != origin["record"]:
+        if (not _same_result_value(first, second)
+                or not _same_result_value(first["row"]["snapshot"], origin["record"])):
             raise FlyResultUnreadable("canonical delivery changed or differs from origin")
         return second
 
@@ -2998,7 +3026,7 @@ class FlyExecutor:
             admission = getattr(job, "_fly_admission", None)
             if (type(admission) is not _DeliveryAdmission or admission.executor is not self
                     or admission.job is not job or admission.origin is None
-                    or admission.canonical["row"]["snapshot"] != record):
+                    or not _same_result_value(admission.canonical["row"]["snapshot"], record)):
                 job.outcome_unknown = True
                 raise FlyResultUnreadable("canonical runner-origin proof unavailable; delivery unconfirmed")
             admission.scope.require_current()
