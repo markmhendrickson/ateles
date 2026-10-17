@@ -2,7 +2,7 @@
 
 Four assertions, each guarding a distinct failure mode:
 
-1. Happy path — the hook prints the reminder, including the five numbered
+1. Happy path — the hook prints the reminder, including the four numbered
    rules, and exits 0. Substrings from REMINDER, not full-string equality,
    so the test survives future wording tweaks to the rule text.
 2. Fail-open — the `__main__` guard (lines 68-72) must swallow ANY exception
@@ -51,7 +51,9 @@ class TestHappyPath:
         assert code == 0
         assert "[working-method]" in out
         assert "1. DISPATCH" in out
-        assert "5. PROCEED" in out
+        assert "4. PROCEED" in out
+        assert "MATERIAL STATE CHANGE" in out
+        assert "final answer self-contained" in out
 
     def test_main_does_not_inject_a_second_decision_cadence(self, capsys):
         code = hook.main()

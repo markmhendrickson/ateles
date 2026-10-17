@@ -83,6 +83,10 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_rule_index.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/reporting_contract.py\""
           }
         ]
       }
@@ -122,12 +126,17 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/decision_shape_gate.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/report_quality_gate.py\""
           }
         ]
       }
     ]
   },
   "env": {
-    "ATELES_DECISION_SHAPE_ENFORCE": "1"
+    "ATELES_DECISION_SHAPE_ENFORCE": "1",
+    "ATELES_REPORTING_QUALITY_ENFORCE": "1"
   }
 }
