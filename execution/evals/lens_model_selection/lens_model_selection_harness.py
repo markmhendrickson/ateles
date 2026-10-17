@@ -31,7 +31,7 @@ for path in (ROOT, ROOT / "execution/scripts", ROOT / "execution/daemons/apis"):
 import harness_lens_runner as runner  # noqa: E402
 import model_tiering  # noqa: E402
 import skill_runner  # noqa: E402
-from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
+from lib.daemon_runtime.agent_loader import AgentDefinition, AgentLoader  # noqa: E402
 
 HEAD = "a" * 40
 MUTATIONS = ("none", "no_validation", "drop_model", "drop_action_class")
@@ -82,7 +82,8 @@ def _reader_runtime(mp, *, missing_dependency):
                     "canonical_reader_available": module.swarm_dispatch is not None}
 
 
-def run_scenario(scenario, tmp_path, *, mutation="none"):
+def run_scenario(scenario, tmp_path, *, mutation="none", role_fault=None):
+    assert role_fault in {None, "wrong_identity", "retired", "missing_tools"}
     assert mutation in MUTATIONS
     active_runner = runner
     trace = tmp_path / "provider-calls.jsonl"
@@ -109,7 +110,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
     brief = tmp_path / "brief.md"
     brief.write_text("Review this synthetic fixture; write only the requested verdict.\n")
     obs = {"dispatch_calls": [], "events": [], "provider_calls": [], "definition_loads": [],
-           "worktree_preparations": [], "sandbox_builds": []}
+           "worktree_preparations": [], "sandbox_builds": [], "canonical_transport_reads": []}
     stdout, stderr = io.StringIO(), io.StringIO()
 
     with pytest.MonkeyPatch.context() as mp:
@@ -154,6 +155,29 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
 
         mp.setattr(skill_runner, "_load_agent_def", definition)
         mp.setattr(active_runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
+        # Strict lens preflight resolves at its real transport boundary. Generic
+        # direct-dispatch fixtures above retain their existing loader semantics.
+        mp.setenv("PAVO_AGENT_DEFINITION_ID", "ent_eval_pavo")
+
+        def canonical_response(loader, method, url, body=None):
+            assert method == "GET" and url.endswith("/entities/ent_eval_pavo")
+            obs["definition_loads"].append(loader.agent_name)
+            obs["canonical_transport_reads"].append({"method": method, "entity_id": "ent_eval_pavo"})
+            response = {
+                "entity_id": "ent_eval_pavo", "entity_type": "agent_definition",
+                "snapshot": {"name": "pavo", "status": "active",
+                             "prompt_markdown": "Synthetic review role.",
+                             "tool_allowlist": ["Read"]},
+            }
+            if role_fault == "wrong_identity":
+                response["entity_id"] = "ent_eval_other"
+            elif role_fault == "retired":
+                response["snapshot"]["status"] = "retired"
+            elif role_fault == "missing_tools":
+                del response["snapshot"]["tool_allowlist"]
+            return response
+
+        mp.setattr(AgentLoader, "_neotoma", canonical_response)
         mp.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
         mp.setattr(skill_runner, "_write_harness_event", lambda **kw: obs["events"].append(kw))
         mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top"})

@@ -218,6 +218,7 @@ import model_tiering  # noqa: E402
 import mechanical_first  # noqa: E402
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
+    AgentDefinition,
     SkillResult,
     _load_agent_def,
     run_skill,
@@ -257,6 +258,7 @@ async def dispatch(
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
     local_review: bool = False,
+    verified_agent_definition: AgentDefinition | None = None,
     work_class: str | None = None,
     github_delivery: bool = False,
     github_token: str | None = None,
@@ -316,6 +318,8 @@ async def dispatch(
     ``local_review`` selects the inference-only environment: no ambient
     GitHub/Neotoma publication authority or credential fallback reaches the
     child. The caller, not the child, owns any later publication.
+    ``verified_agent_definition`` carries the strict canonical local-review
+    preflight object through shared provider attempts, without a cache reload.
     ``github_delivery`` states that this task must commit, push, or open a pull
     request. It reuses ``run_skill``'s existing GitHub-contract path, which both
     injects the delivery contract and enables Codex network for this dispatch.
@@ -347,6 +351,7 @@ async def dispatch(
         command_wrapper=command_wrapper,
         codex_outer_sandboxed=codex_outer_sandboxed,
         local_review=local_review,
+        verified_agent_definition=verified_agent_definition,
         work_class=work_class,
         github_token=github_token,
         include_github_contract=github_delivery,

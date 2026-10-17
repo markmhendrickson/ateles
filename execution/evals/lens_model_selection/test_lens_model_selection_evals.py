@@ -60,3 +60,18 @@ def test_direct_cli_uses_fixture_checkout_without_ambient_skills(monkeypatch, tm
     scenario = BY_ID[scenario_id]
     obs = harness.run_scenario(scenario, tmp_path)
     assert harness.check(scenario, obs) == [], obs
+
+
+@pytest.mark.parametrize("role_fault", ["wrong_identity", "retired", "missing_tools"])
+def test_strict_role_transport_fault_refuses_before_setup(tmp_path, role_fault):
+    """The fixture supplies transport data; real strict admission still decides."""
+    scenario = BY_ID["explicit_sol_reaches_guarded_child"]
+    obs = harness.run_scenario(scenario, tmp_path, role_fault=role_fault)
+    assert obs["canonical_transport_reads"] == [{"method": "GET", "entity_id": "ent_eval_pavo"}]
+    assert obs["exit_code"] == 1
+    assert obs["report"]["ok"] is False
+    assert not obs["worktree_preparations"]
+    assert not obs["sandbox_builds"]
+    assert not obs["dispatch_calls"]
+    assert not obs["provider_calls"]
+    assert not obs["events"]

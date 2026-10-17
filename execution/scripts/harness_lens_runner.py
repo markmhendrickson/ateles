@@ -272,6 +272,11 @@ for _p in (str(REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 # noqa: E402 — path bootstrap above must run first
+from lib.daemon_runtime.agent_loader import (  # noqa: E402
+    AgentDefinition,
+    AgentLoader,
+    validate_lens_definition,
+)
 import dispatch_role  # noqa: E402
 from lib.credential_templates import (  # noqa: E402
     is_placeholder_template,
@@ -551,16 +556,28 @@ def render_lens_task(target: LensTarget, brief_path: Path) -> str:
     return f"{launch}\n---\n\n{brief}"
 
 
-def read_agent_prompt(worktree: Path, agent: str) -> str:
-    """Read docs/agents/<agent>.md from the worktree (i.e. from TARGET HEAD's
-    own tree state at fetch time — the worktree is created from origin, and
-    docs/agents is generated from Neotoma on origin/main, per the lens brief's
-    own instruction to read it from ``origin/main`` rather than the PR branch).
+class LensRoleUnavailable(ValueError):
+    """Canonical review authority could not be established."""
+
+
+def read_agent_definition(agent: str) -> AgentDefinition:
+    """Load a verified Ateles role from the dispatcher's canonical source.
+
+    Never fall back to a target repository's prompt mirror: a sibling checkout
+    may have no such tree, and a missing Neotoma definition becomes a stub
+    with an empty prompt and wildcard tools in the generic dispatcher.
     """
-    path = worktree / "docs" / "agents" / f"{agent}.md"
-    if not path.is_file():
-        raise FileNotFoundError(f"{path} does not exist — unknown lens agent {agent!r}")
-    return path.read_text(encoding="utf-8")
+    try:
+        definition = AgentLoader(agent).load_for_lens()
+        validate_lens_definition(definition, agent)
+    except Exception as exc:
+        raise LensRoleUnavailable("canonical lens role could not be loaded") from exc
+    return definition
+
+
+def read_agent_prompt(agent: str) -> str:
+    """Resolve canonical review instructions independently of the target tree."""
+    return read_agent_definition(agent).prompt_markdown
 
 
 def final_child_instruction(verdict_path: Path) -> str:
@@ -2616,6 +2633,8 @@ async def run_one(
             "refusal_reason": reason, "no_model_call_made": True, "posted": False,
         }
     check_headroom(provider)
+    verified_role = read_agent_definition(target.agent)
+    agent_prompt = verified_role.prompt_markdown
 
     worktree_path = (
         scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
@@ -2625,8 +2644,7 @@ async def run_one(
 
     if dry_run:
         # A dry run still creates nothing model-facing, but it DOES need the
-        # real agent prompt to report an accurate prompt_chars figure, and
-        # that prompt lives in a worktree at TARGET HEAD. Building the
+        # canonical prompt resolved before checkout for prompt_chars. Building the
         # worktree is a `git worktree add` (explicitly allowed by every
         # relevant guard) and is removed again before returning. The refusal
         # (if any) is reported alongside the rest rather than short-circuited,
@@ -2641,7 +2659,6 @@ async def run_one(
                 review_worktree=worktree.path,
                 verdict_path=verdict_path,
             )
-            agent_prompt = read_agent_prompt(worktree.path, target.agent)
             task_text = (
                 render_lens_task(target, brief_path)
                 + "\n\n---\n\n"
@@ -2687,7 +2704,6 @@ async def run_one(
         refusal = refuse_if_guard_required(sandbox)
         if refusal:
             return {"ok": False, "provider": provider, "reason": refusal}
-        agent_prompt = read_agent_prompt(worktree.path, target.agent)
         task_text = (
             render_lens_task(target, brief_path)
             + "\n\n---\n\n"
@@ -2726,6 +2742,7 @@ async def run_one(
                 command_wrapper=sandbox.command_wrapper,
                 codex_outer_sandboxed=sandbox.codex_outer_sandbox_probed,
                 local_review=True,
+                verified_agent_definition=verified_role,
             )
         except Exception as dispatch_error:
             stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
@@ -3129,7 +3146,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         except HeadroomExhausted as exc:
             report = {"ok": False, "reason": str(exc)}
-        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        except (LensRoleUnavailable, FileNotFoundError, subprocess.CalledProcessError) as exc:
             report = {"ok": False, "reason": str(exc)}
 
     if args.json:

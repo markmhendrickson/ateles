@@ -2219,6 +2219,7 @@ async def _run_skill_once(
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
     local_review: bool = False,
+    verified_agent_definition: AgentDefinition | None = None,
     work_class: str | None = None,
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
@@ -2397,7 +2398,18 @@ async def _run_skill_once(
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
-    agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    if verified_agent_definition is not None:
+        from lib.daemon_runtime.agent_loader import validate_lens_definition
+
+        try:
+            if not local_review:
+                raise ValueError("pinned lens authority requires local review")
+            validate_lens_definition(verified_agent_definition, _role)
+        except ValueError as exc:
+            return SkillResult(skill, False, None, "", "", error=str(exc), provider=provider)
+        agent_def = verified_agent_definition
+    else:
+        agent_def = await asyncio.to_thread(_load_agent_def, _role)
 
     binary = _provider_binaries().get(provider)
     if binary is None:
@@ -3750,6 +3762,7 @@ async def run_skill(
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
     local_review: bool = False,
+    verified_agent_definition: AgentDefinition | None = None,
     work_class: str | None = None,
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
@@ -3880,6 +3893,7 @@ async def run_skill(
             command_wrapper=command_wrapper,
             codex_outer_sandboxed=codex_outer_sandboxed,
             local_review=local_review,
+            verified_agent_definition=verified_agent_definition,
             agent_session_id=agent_session_id,
             work_class=work_class,
             action_class=action_class,
