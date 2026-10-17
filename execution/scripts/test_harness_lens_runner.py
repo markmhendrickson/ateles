@@ -73,6 +73,22 @@ def brief_file(tmp_path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _canonical_lens_fixture(monkeypatch):
+    """Unit decisions do not contact live role metadata."""
+    from lib.daemon_runtime.agent_loader import AgentDefinition, AgentLoader
+
+    def load(loader):
+        snap = {"name": loader.agent_name, "status": "active",
+                "prompt_markdown": "You must publish your review on GitHub.\n",
+                "tool_allowlist": ["Read"]}
+        return AgentDefinition(entity_id="ent_fixture", name=loader.agent_name,
+            status="active", prompt_markdown=snap["prompt_markdown"],
+            tool_allowlist=snap["tool_allowlist"], raw={"entity_id": "ent_fixture",
+                "entity_type": "agent_definition", "snapshot": snap})
+    monkeypatch.setattr(AgentLoader, "load_for_lens", load)
+
+
+@pytest.fixture(autouse=True)
 def _default_full_headroom(monkeypatch, tmp_path):
     """Isolate every test from the operator's REAL
     ~/.config/ateles/harness-headroom.json (codex/cursor at 0.0 as of this

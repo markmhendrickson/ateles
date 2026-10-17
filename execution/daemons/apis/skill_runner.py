@@ -565,6 +565,18 @@ def _load_agent_def(role: str) -> AgentDefinition:
     return _agent_def_cache[role]
 
 
+async def _admit_local_review_definition(
+    role: str, definition: AgentDefinition | None
+) -> AgentDefinition:
+    """Resolve once at an entry boundary; retain strict canonical authority."""
+    from lib.daemon_runtime.agent_loader import validate_lens_definition
+
+    if definition is None:
+        definition = await asyncio.to_thread(AgentLoader(role).load_for_lens)
+    validate_lens_definition(definition, role)
+    return definition
+
+
 def _load_active_policy_prompt(role: str) -> str:
     """Render the role's live Neotoma policy without caching it locally."""
     try:
@@ -2219,6 +2231,7 @@ async def _run_skill_once(
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
     local_review: bool = False,
+    verified_agent_definition: AgentDefinition | None = None,
     work_class: str | None = None,
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
@@ -2397,7 +2410,22 @@ async def _run_skill_once(
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
-    agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    if local_review or verified_agent_definition is not None:
+        from lib.daemon_runtime.agent_loader import validate_lens_definition
+
+        try:
+            if not local_review:
+                raise ValueError("pinned lens authority requires local review")
+            if verified_agent_definition is None:
+                raise ValueError("canonical lens role was not admitted before attempt")
+            validate_lens_definition(verified_agent_definition, _role)
+        except ValueError as exc:
+            return SkillResult(
+                skill, False, None, "", "", error=str(exc), provider=provider
+            )
+        agent_def = verified_agent_definition
+    else:
+        agent_def = await asyncio.to_thread(_load_agent_def, _role)
 
     binary = _provider_binaries().get(provider)
     if binary is None:
@@ -3750,6 +3778,7 @@ async def run_skill(
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
     local_review: bool = False,
+    verified_agent_definition: AgentDefinition | None = None,
     work_class: str | None = None,
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
@@ -3781,7 +3810,10 @@ async def run_skill(
 
     ``local_review`` selects a child environment with inference authority but
     no ambient GitHub or Neotoma publication authority. The parent retains and
-    independently applies any publication gate.
+    independently applies any publication gate. It also admits strict canonical
+    role authority before provider selection: a missing object is resolved once,
+    and the same validated object is pinned through every attempt. The generic
+    cached/degraded loader remains available only to non-local-review calls.
 
     The first candidate is selected with smooth weighted round-robin using the
     operator-supplied headroom estimates. Capacity, authentication, and launch
@@ -3843,6 +3875,17 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if local_review or verified_agent_definition is not None:
+        try:
+            if not local_review:
+                raise ValueError("pinned lens authority requires local review")
+            verified_agent_definition = await _admit_local_review_definition(
+                (role or skill).lower(), verified_agent_definition
+            )
+        except ValueError as exc:
+            return SkillResult(
+                skill, False, None, "", "", error=str(exc), provider=provider or ""
+            )
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
@@ -3880,6 +3923,7 @@ async def run_skill(
             command_wrapper=command_wrapper,
             codex_outer_sandboxed=codex_outer_sandboxed,
             local_review=local_review,
+            verified_agent_definition=verified_agent_definition,
             agent_session_id=agent_session_id,
             work_class=work_class,
             action_class=action_class,

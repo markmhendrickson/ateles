@@ -31,7 +31,7 @@ for path in (ROOT, ROOT / "execution/scripts", ROOT / "execution/daemons/apis"):
 import harness_lens_runner as runner  # noqa: E402
 import model_tiering  # noqa: E402
 import skill_runner  # noqa: E402
-from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
+from lib.daemon_runtime.agent_loader import AgentDefinition, AgentLoader  # noqa: E402
 
 HEAD = "a" * 40
 MUTATIONS = ("none", "no_validation", "drop_model", "drop_action_class")
@@ -82,7 +82,8 @@ def _reader_runtime(mp, *, missing_dependency):
                     "canonical_reader_available": module.swarm_dispatch is not None}
 
 
-def run_scenario(scenario, tmp_path, *, mutation="none"):
+def run_scenario(scenario, tmp_path, *, mutation="none", role_fault=None):
+    assert role_fault in {None, "wrong_identity", "retired", "missing_tools"}
     assert mutation in MUTATIONS
     active_runner = runner
     trace = tmp_path / "provider-calls.jsonl"
@@ -109,7 +110,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
     brief = tmp_path / "brief.md"
     brief.write_text("Review this synthetic fixture; write only the requested verdict.\n")
     obs = {"dispatch_calls": [], "events": [], "provider_calls": [], "definition_loads": [],
-           "worktree_preparations": [], "sandbox_builds": []}
+           "worktree_preparations": [], "sandbox_builds": [], "canonical_transport_reads": []}
     stdout, stderr = io.StringIO(), io.StringIO()
 
     with pytest.MonkeyPatch.context() as mp:
@@ -154,6 +155,29 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
 
         mp.setattr(skill_runner, "_load_agent_def", definition)
         mp.setattr(active_runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
+        # Local review fixtures supply data at the real canonical transport.
+        # Private-attempt positives explicitly pre-admit at their caller below.
+        mp.setenv("PAVO_AGENT_DEFINITION_ID", "ent_eval_pavo")
+
+        def canonical_response(loader, method, url, body=None):
+            assert method == "GET" and url.endswith("/entities/ent_eval_pavo")
+            obs["definition_loads"].append(loader.agent_name)
+            obs["canonical_transport_reads"].append({"method": method, "entity_id": "ent_eval_pavo"})
+            response = {
+                "entity_id": "ent_eval_pavo", "entity_type": "agent_definition",
+                "snapshot": {"name": "pavo", "status": "active",
+                             "prompt_markdown": "Synthetic review role.",
+                             "tool_allowlist": ["Read"]},
+            }
+            if role_fault == "wrong_identity":
+                response["entity_id"] = "ent_eval_other"
+            elif role_fault == "retired":
+                response["snapshot"]["status"] = "retired"
+            elif role_fault == "missing_tools":
+                del response["snapshot"]["tool_allowlist"]
+            return response
+
+        mp.setattr(AgentLoader, "_neotoma", canonical_response)
         mp.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
         mp.setattr(skill_runner, "_write_harness_event", lambda **kw: obs["events"].append(kw))
         mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top"})
@@ -262,6 +286,9 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                         if entry == "dispatch":
                             call = active_runner.dispatch_role.dispatch("pavo", task, **kwargs)
                         elif entry in {"run_skill", "run_once"}:
+                            if entry == "run_once" and scenario.get("pre_admit_role", False):
+                                kwargs["verified_agent_definition"] = asyncio.run(
+                                    skill_runner._admit_local_review_definition("pavo", None))
                             fn = skill_runner.run_skill if entry == "run_skill" else skill_runner._run_skill_once
                             call = fn("pavo", task, role="pavo", **kwargs)
                         else:
@@ -331,6 +358,11 @@ def check(scenario, obs):
                     or result.get("posted") is not False
                     or "canonical review reader" not in result.get("reason", "")):
                 failures.append("missing truthful pre-inference reader refusal")
+    if exp.get("canonical_role_refusal"):
+        if obs["definition_loads"] or obs["events"] or obs["provider_calls"]:
+            failures.append("unadmitted attempt reached definition or provider effects")
+        if not report or report.get("ok") is not False or "not admitted" not in report.get("reason", ""):
+            failures.append("missing truthful pre-attempt canonical refusal")
     if "dry_model" in exp:
         result = reports[0]
         if not result or result.get("model") != exp["dry_model"]:
