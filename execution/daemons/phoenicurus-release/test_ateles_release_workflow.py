@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -214,3 +215,33 @@ def test_actual_run_blocks_bind_notes_and_skip_empty_history(tmp_path, prev, cou
 def test_actual_run_blocks_refuse_wrong_checked_out_source(tmp_path):
     with pytest.raises(subprocess.CalledProcessError):
         run_preparation(tmp_path, actual_sha="b" * 40)
+
+
+@pytest.mark.parametrize("mutation", ["write", "publisher", "secret", "reusable_job"])
+def test_actual_workflow_contract_rejects_privileged_mutations(mutation):
+    document = deepcopy(_load(WORKFLOW.read_text()))
+    if mutation == "write":
+        document["permissions"]["contents"] = "write"
+    elif mutation == "publisher":
+        document["jobs"]["prepare"]["steps"].append(
+            {"name": "Publish", "run": "gh release create candidate"}
+        )
+    elif mutation == "secret":
+        document["jobs"]["prepare"]["steps"][1]["env"]["GH_TOKEN"] = (
+            "${{ secrets.GITHUB_TOKEN }}"
+        )
+    else:
+        document["jobs"]["publish"] = {"uses": "./.github/workflows/publish.yml"}
+    with pytest.raises(AssertionError):
+        preparation_contract(document)
+
+
+def test_actual_run_blocks_refuse_an_indirect_script(tmp_path):
+    document = deepcopy(_load(WORKFLOW.read_text()))
+    tag_step = document["jobs"]["prepare"]["steps"][1]
+    tag_step["run"] = tag_step["run"].replace("tag_utils.py", "publish.py")
+    # The same shell runner reaches the finite Python command boundary; it
+    # cannot execute the substituted script or read any publication credential.
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        run_preparation(tmp_path, document=document)
+    assert "Refused indirect script" in error.value.stderr
