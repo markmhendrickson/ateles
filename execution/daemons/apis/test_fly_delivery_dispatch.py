@@ -890,12 +890,24 @@ def test_common_admission_loss_blocks_both_real_consumers(
     ("task", "foreign_job"), ("pipeline", "foreign_job"),
     ("task", "scalar_cleared"),
     ("task", "lost_settlement"), ("pipeline", "lost_settlement"),
+    ("task", "settlement_lost_during_read"), ("pipeline", "settlement_lost_during_read"),
 ])
 def test_common_late_loss_at_both_final_consumers(
     monkeypatch, dispatch_env, common_admission_executor, entry, failure
 ):
     _, _, store = dispatch_env
-    _, jobs, _, _ = common_admission_executor
+    executor, jobs, _, state = common_admission_executor
+    if failure == "settlement_lost_during_read":
+        original_read = executor._read_delivery_canonical
+
+        async def read_with_loss(job, origin):
+            fresh = await original_read(job, origin)
+            if state.pop("lose_settlement_during_read", False):
+                jobs[0]._fly_admission._settled_by = None
+                state["settlement_loss_hits"] = state.get("settlement_loss_hits", 0) + 1
+            return fresh
+
+        monkeypatch.setattr(executor, "_read_delivery_canonical", read_with_loss)
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
     monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
     monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
@@ -908,6 +920,8 @@ def test_common_late_loss_at_both_final_consumers(
         elif failure == "lost_settlement":
             # Earlier acceptance cannot replace this final consumer's check.
             jobs[0]._fly_admission._settled_by = None
+        elif failure == "settlement_lost_during_read":
+            state["lose_settlement_during_read"] = True
         else:
             import copy
 
@@ -942,6 +956,8 @@ def test_common_late_loss_at_both_final_consumers(
         with pytest.raises(delivery.FlyDeliveryEnded, match="admission changed"):
             asyncio.run(dispatcher()._open_implementation_pr(trigger(), _empty_spec_state()))
     assert len(jobs) == 1
+    if failure == "settlement_lost_during_read":
+        assert state["settlement_loss_hits"] == 1
 
 
 @pytest.mark.parametrize("mode", ["default_off", "prelaunch"])

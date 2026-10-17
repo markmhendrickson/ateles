@@ -1742,6 +1742,8 @@ class _DeliveryAdmission:
         if not _same_result_value(fresh, self.canonical):
             raise FlyResultUnreadable("delivery canonical admission changed")
         self.scope.require_current()
+        if result is not None:
+            self.require_settled()
 
 
 async def require_delivery_admission(result, plan=None):
