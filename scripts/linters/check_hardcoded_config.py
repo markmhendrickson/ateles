@@ -33,11 +33,20 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
 
 SUPPRESS = "config-source-ok"
+
+# The operator handle that makes a deploy target operator-specific. Sourced
+# from env so a fork checks for its own handle rather than this repo's owner.
+# The default is the repo owner's GitHub login, which is already this repo's
+# public identity (and allowlisted in .gitleaks.toml as the operator's own
+# identity, not third-party PII) — the leak this linter guards against is a
+# *deploy target* naming their instance, not the handle itself.
+OPERATOR_HANDLE = os.environ.get("ATELES_OPERATOR_HANDLE", "markmhendrickson")
 
 # Default runtime trees to scan when no files are passed.
 DEFAULT_DIRS = ("lib", "execution/daemons", "execution/scripts")
@@ -61,7 +70,9 @@ CHECKS: list[tuple[re.Pattern[str], str, str]] = [
         "read from COTINGA_CALENDAR_IDS / an env calendar list, not a literal",
     ),
     (
-        re.compile(r"\b[A-Z]{2}[0-9]{2}(?:[ ]?[A-Z0-9]{4}){3,7}(?:[ ]?[A-Z0-9]{1,3})?\b"),
+        re.compile(
+            r"\b[A-Z]{2}[0-9]{2}(?:[ ]?[A-Z0-9]{4}){3,7}(?:[ ]?[A-Z0-9]{1,3})?\b"
+        ),
         "IBAN literal",
         "read from env or contacts.parquet / Neotoma payment_profile, never hardcode",
     ),
@@ -73,6 +84,28 @@ CHECKS: list[tuple[re.Pattern[str], str, str]] = [
         "Bitcoin address literal",
         "read from <PREFIX>_BTC_ADDRESS env (Neotoma payment_profile), use a "
         "<placeholder> in examples",
+    ),
+    (
+        # Deploy targets: Fly app names and *.fly.dev hosts that embed the
+        # operator handle. Added after a hardcoded Fly app name reached main in
+        # a public repo (PR #655) — the four checks above are all *contact*
+        # patterns, so a deploy target matched none of them and landed clean.
+        #
+        # Anchored on OPERATOR_HANDLE rather than on "any Fly app name", which
+        # is not a recognisable shape: `neotoma-sandbox` and
+        # `neotoma-sandbox.fly.dev` are shared project infrastructure that
+        # names no operator, and flagging them would train the suppression
+        # comment into a reflex. The handle is what makes a value
+        # operator-specific.
+        re.compile(
+            r"\b[a-z0-9-]*" + re.escape(OPERATOR_HANDLE) + r"[a-z0-9-]*\.fly\.dev\b"
+            r"|[\"'][a-z0-9-]*-" + re.escape(OPERATOR_HANDLE) + r"[a-z0-9-]*[\"']",
+            re.IGNORECASE,
+        ),
+        "operator-specific deploy target literal (Fly app / host)",
+        "resolve at runtime from env (e.g. NEOTOMA_FLY_APP) or a local "
+        "fly.toml — a Neotoma deployment_configuration is canonical but is "
+        "unreadable during the outages this class of code runs in",
     ),
 ]
 
