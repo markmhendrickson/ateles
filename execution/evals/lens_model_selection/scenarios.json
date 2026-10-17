@@ -3,7 +3,7 @@
   "scenarios": [
     {
       "id": "omitted_selectors_preserve_default",
-      "why": "Omission retains existing provider-default behavior.",
+      "why": "Omitted selectors use the canonical task_dispatch mid policy without an explicit model override.",
       "args": [
         "--provider",
         "codex"
@@ -12,7 +12,7 @@
         "exit_code": 0,
         "launches": 1,
         "models": [
-          null
+          "gpt-5.6-terra"
         ]
       }
     },
@@ -72,7 +72,7 @@
     },
     {
       "id": "omitted_selectors_comparison_preserves_defaults",
-      "why": "Comparison retains default selection for each provider when selectors are omitted.",
+      "why": "Comparison resolves the canonical task_dispatch mid policy independently for each provider.",
       "args": [
         "--compare",
         "codex,cursor"
@@ -81,8 +81,8 @@
         "exit_code": 0,
         "launches": 2,
         "models": [
-          null,
-          null
+          "gpt-5.6-terra",
+          "gpt-5.6-terra-medium"
         ]
       }
     },
@@ -1141,6 +1141,188 @@
           "gpt-6-sol"
         ]
       }
+    },
+    {
+      "id": "binding_nested_dispatch_cli",
+      "why": "A selected invalid binding refuses before the provider boundary.",
+      "args": [],
+      "entrypoint": "dispatch_cli",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": null
+      },
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "models": []
+      }
+    },
+    {
+      "id": "binding_blank_dispatch_cli",
+      "why": "A selected invalid binding refuses before the provider boundary.",
+      "args": [],
+      "entrypoint": "dispatch_cli",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": {
+          "mid": " "
+        }
+      },
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "models": []
+      }
+    },
+    {
+      "id": "binding_nested_dispatch",
+      "why": "A selected invalid binding refuses before the provider boundary.",
+      "args": [],
+      "entrypoint": "dispatch",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": null
+      },
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "models": []
+      }
+    },
+    {
+      "id": "binding_blank_dispatch",
+      "why": "A selected invalid binding refuses before the provider boundary.",
+      "args": [],
+      "entrypoint": "dispatch",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": {
+          "mid": " "
+        }
+      },
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "models": []
+      }
+    },
+    {
+      "id": "binding_nested_run_skill",
+      "why": "A selected invalid binding refuses before the provider boundary.",
+      "args": [],
+      "entrypoint": "run_skill",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": null
+      },
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "models": []
+      }
+    },
+    {
+      "id": "binding_blank_run_skill",
+      "why": "A selected invalid binding refuses before the provider boundary.",
+      "args": [],
+      "entrypoint": "run_skill",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": {
+          "mid": " "
+        }
+      },
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "models": []
+      }
+    },
+    {
+      "id": "binding_nested_run_once",
+      "why": "A selected invalid binding refuses before the provider boundary.",
+      "args": [],
+      "entrypoint": "run_once",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": null
+      },
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "models": []
+      }
+    },
+    {
+      "id": "binding_blank_run_once",
+      "why": "A selected invalid binding refuses before the provider boundary.",
+      "args": [],
+      "entrypoint": "run_once",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": {
+          "mid": " "
+        }
+      },
+      "expect": {
+        "exit_code": 1,
+        "launches": 0,
+        "models": []
+      }
+    },
+    {
+      "id": "binding_positive_absent",
+      "why": "Binding validation preserves ordinary omission, selection and explicit overrides.",
+      "args": [],
+      "entrypoint": "dispatch_cli",
+      "action_class": "task_dispatch",
+      "vendor_binding": null,
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          null
+        ]
+      }
+    },
+    {
+      "id": "binding_positive_selected",
+      "why": "Binding validation preserves ordinary omission, selection and explicit overrides.",
+      "args": [],
+      "entrypoint": "dispatch_cli",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": {
+          "mid": "fixture-model"
+        }
+      },
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "fixture-model"
+        ]
+      }
+    },
+    {
+      "id": "binding_positive_override",
+      "why": "Binding validation preserves ordinary omission, selection and explicit overrides.",
+      "args": [],
+      "entrypoint": "dispatch_cli",
+      "action_class": "task_dispatch",
+      "vendor_binding": {
+        "codex": {
+          "mid": " "
+        }
+      },
+      "expect": {
+        "exit_code": 0,
+        "launches": 1,
+        "models": [
+          "gpt-6-sol"
+        ]
+      },
+      "model": "gpt-6-sol"
     },
     {
       "id": "reader_unavailable_codex",

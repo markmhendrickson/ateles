@@ -2429,9 +2429,12 @@ async def _run_skill_once(
     resolved_model = model
     if resolved_model is None and (action_class is not None or resolved_tier is not None):
         if resolved_tier is None:
-            resolved_tier = model_tiering.resolve_tier(
-                action_class, signals=escalation_signals
-            )
+            try:
+                resolved_tier = model_tiering.resolve_tier(
+                    action_class, signals=escalation_signals
+                )
+            except model_tiering.InvalidTierPolicyError as exc:
+                return SkillResult(skill, False, None, "", "", error=str(exc), provider=provider)
     # claude-local runs the model its own local_provider config names (its
     # command is built separately and takes no --model), so vendor_binding
     # has nothing to resolve for it: the tier is still recorded on its events,
@@ -2444,7 +2447,11 @@ async def _run_skill_once(
     ):
         try:
             resolved_model = model_tiering.model_for_tier(provider, resolved_tier.tier)
-        except model_tiering.UnboundTierError as exc:
+            if resolved_tier.max_tier and not resolved_model:
+                raise model_tiering.UnboundTierError(
+                    "explicit tier cap requires a bound model; ambient model refused"
+                )
+        except (model_tiering.UnboundTierError, model_tiering.InvalidTierPolicyError) as exc:
             msg = str(exc)
             log.error(f"[apis] {skill} dispatch refused — {msg}")
             try:
@@ -3858,9 +3865,12 @@ async def run_skill(
 
     precomputed_tier: model_tiering.ResolvedTier | None = resolved_tier
     if precomputed_tier is None and model is None and action_class is not None:
-        precomputed_tier = model_tiering.resolve_tier(
-            action_class, signals=escalation_signals
-        )
+        try:
+            precomputed_tier = model_tiering.resolve_tier(
+                action_class, signals=escalation_signals
+            )
+        except model_tiering.InvalidTierPolicyError as exc:
+            return SkillResult(skill, False, None, "", "", error=str(exc), provider=provider)
     fly_bound, fly_extra = _fly_routing(runner, action_class)
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
@@ -3925,16 +3935,20 @@ async def run_skill(
         and not local_review
         and local_provider.is_eligible(work_class, local_provider.load_config())
     )
+    try:
+        tier_binaries = _tier_bound_binaries(
+            _provider_binaries(), precomputed_tier, provider,
+            fly_bound=fly_bound, fly_extra=fly_extra,
+        )
+    except model_tiering.InvalidTierPolicyError as exc:
+        return SkillResult(skill, False, None, "", "", error=str(exc), provider=provider)
     return await _run_provider_attempts(
         skill,
         attempt,
         fallback_models_for=(
             (lambda names: {name: model for name in names}) if model else None
         ),
-        binaries=_tier_bound_binaries(
-            _provider_binaries(), precomputed_tier, provider,
-            fly_bound=fly_bound, fly_extra=fly_extra,
-        ),
+        binaries=tier_binaries,
         provider=provider,
         role=role,
         task_entity_id=task_entity_id,
@@ -4007,7 +4021,7 @@ def _local_fallback_models(providers: list[str]) -> dict[str, str]:
     for name in providers:
         try:
             model = model_tiering.model_for_tier(name, LOCAL_FALLBACK_TIER)
-        except model_tiering.UnboundTierError:
+        except (model_tiering.UnboundTierError, model_tiering.InvalidTierPolicyError):
             continue
         if model:
             models[name] = model

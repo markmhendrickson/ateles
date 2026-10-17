@@ -76,6 +76,10 @@ def _isolated(monkeypatch, tmp_path):
         "APIS_HARNESS_MIN_HEADROOM",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "policy.json"))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "binding.json"))
+    monkeypatch.delenv("APIS_ACTION_POLICY", raising=False)
+    monkeypatch.delenv("APIS_VENDOR_BINDING", raising=False)
     hr.reset_state()
     yield
     hr.reset_state()
@@ -104,7 +108,22 @@ def _native(outcome: str):
 
 
 def _apply(event: dict, tmp_path: Path) -> None:
-    if event["op"] == "refresh":
+    if event["op"] == "tier_dispatch":
+        (tmp_path / "policy.json").write_text(json.dumps(event["policy"]))
+        (tmp_path / "binding.json").write_text(json.dumps({"codex": {"mid": "mid-model", "top": "top-model"}}))
+        resolved = model_tiering.resolve_tier(event["action_class"], signals=model_tiering.EscalationSignals(
+            changed_files=("lib/auth/check.py",), diff_lines_changed=900,
+            prior_blocking_finding=True, new_blocking_finding=True,
+            review_round=3, prior_attempt_failed=True, diff_unreadable=True,
+        ))
+        requested = model_tiering.model_for_tier("codex", resolved.tier)
+        model_tiering.record_dispatch(skill="eval", provider="codex", resolved=resolved, model=requested)
+        model_tiering.record_dispatch_usage(
+            dispatch_id="eval", skill="eval", provider="codex", resolved=resolved,
+            requested_model=requested,
+            usage=dispatch_usage.DispatchUsage(provider="codex", model=requested, model_source="reported"),
+        )
+    elif event["op"] == "refresh":
         binary = _install_fake_codex(tmp_path, event["codex"])
         usage_probe.refresh_usage_if_stale(
             {"codex": binary},
@@ -141,7 +160,16 @@ def _apply(event: dict, tmp_path: Path) -> None:
 
 def _check(assertion: dict, capsys) -> None:
     kind = assertion["type"]
-    if kind == "gate":
+    if kind == "tier_audit":
+        rows = [json.loads(line) for line in model_tiering.tier_ledger_path().read_text().splitlines()]
+        dispatch, usage = rows
+        assert dispatch["tier"] == assertion["tier"]
+        assert dispatch["source"] == assertion["source"]
+        assert len(dispatch["escalation_reasons"]) == assertion["reason_count"]
+        assert dispatch["model"] == assertion["model"]
+        assert usage["model"] == dispatch["model"] and usage["model_source"] == "reported"
+        assert dispatch["max_tier"] == assertion["cap"]
+    elif kind == "gate":
         gate = hr.usage_gate("codex", now_wall=NOW + assertion["at"])
         assert gate is not None
         assert gate.allowed is assertion["allowed"], gate.message

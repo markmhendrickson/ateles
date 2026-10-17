@@ -5,8 +5,8 @@
     "mechanical": "haiku"
   },
   "codex": {
-    "top": "gpt-6-astra",
-    "mid": "gpt-6-sol",
+    "top": "gpt-6-sol",
+    "mid": "gpt-5.6-terra",
     "mechanical": "gpt-6-luna"
   }
 }

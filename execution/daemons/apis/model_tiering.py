@@ -15,8 +15,9 @@ daemon restart, matching ``harness_router.configured_headroom`` and
 ``local_provider.load_config``):
 
 ``action_policy``
-    Maps an action CLASS (e.g. ``lens_review:security``, ``build``,
-    ``carry_forward``) to a ``min_tier`` — one of ``TIERS`` below. A class
+    Maps an action CLASS to a scalar minimum tier or an object with
+    ``min_tier`` and ``max_tier`` (one of ``TIERS`` below). Explicit bounds
+    are validated together; invalid or contradictory bounds refuse dispatch. A class
     absent from the map is UNRESOLVED, not "no floor": callers must fail to
     the highest tier rather than guess (see ``resolve_tier``). This mirrors
     ``action_policy.min_tier`` in the foundation design; until an
@@ -30,11 +31,9 @@ daemon restart, matching ``harness_router.configured_headroom`` and
 
 Fail-closed, deliberately asymmetric from ``harness_router``/``local_provider``
 (which fail closed to "provider ineligible"): here, an unreadable policy or
-binding fails UP to the strongest tier, never to the provider's ambient
-default and never to silence. The operator's ruling is that dispatch must
-never again run un-tiered by accident (that is the incident this policy
-exists to close), so "config is missing" and "config says be careful" resolve
-to the same runner behaviour.
+binding is refused before dispatch. Genuinely absent configuration remains
+unresolved and retains the strongest-tier fallback for unmapped classes.
+Selected configuration must validate before its policy is used.
 
 Example config: ``docs/examples/model-tiering/`` holds a committed,
 operator-neutral ``action-policy.json`` (kept equal to
@@ -44,7 +43,7 @@ Validate any live file before installing it with
 ``execution/scripts/harness_usage.py tiers`` reports dispatches per tier and
 ``harness_usage.py spend`` reports what they spent.
 
-Escalation signals (below) can only RAISE the resolved tier, never lower it —
+Escalation signals raise the resolved tier, subject to an explicit policy max_tier —
 they are cheap, deterministic, measured facts about the dispatch (diff size,
 a security-sensitive path, a prior blocking finding, a repeated round, a
 failed prior attempt), not a classifier's guess.
@@ -177,63 +176,97 @@ def _higher_tier(a: str, b: str) -> str:
     return a if _tier_index(a) >= _tier_index(b) else b
 
 
-def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> dict:
-    """File-then-env JSON read, matching ``harness_router.configured_headroom``
-    and ``local_provider``'s config precedence exactly: an operator can change
-    either without restarting Apis, and a stale file always wins over env so a
-    forgotten export cannot silently override a maintained file.
+def reject_duplicate_members(pairs):
+    """Build one JSON object without silently replacing an earlier member."""
+    out: dict = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate JSON member")
+        out[key] = value
+    return out
 
-    Malformed or unreadable input degrades to ``{}`` (unresolved), never
-    raises — same posture as every other Apis policy reader. Unlike headroom,
-    an empty result here does NOT mean "permissive default": callers resolve
-    an unresolved class to ``DEFAULT_TIER``, not to "no floor".
+
+def _decode_config(raw: str) -> object:
+    return json.loads(raw, object_pairs_hook=reject_duplicate_members)
+
+
+def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> dict | None:
+    """Read the selected source, with file priority over environment JSON.
+
+    A genuinely missing file allows the environment source (or unconfigured
+    defaults). Once a source exists, it must be readable UTF-8 JSON object
+    data. Refusal never includes its path, contents or raw exception text.
     """
+    def refuse():
+        raise InvalidTierPolicyError(
+            f"invalid model tiering configuration ({env_var}); dispatch refused"
+        ) from None
+
     configured_path = os.environ.get(file_env_var, "").strip()
     path = Path(configured_path).expanduser() if configured_path else default_path
-    file_raw = ""
-    if path.is_file():
-        try:
-            file_raw = path.read_text(encoding="utf-8").strip()
-        except OSError:
-            pass
-    env_raw = os.environ.get(env_var, "").strip()
-    # Labelled explicitly (not inferred by comparing values) so identical
-    # malformed content in the file and the env var still names the file
-    # first, correctly, rather than misattributing based on a value match.
-    for raw, label in ((file_raw, f"file {path}"), (env_raw, env_var)):
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if path.is_symlink():
+            refuse()
+        raw = os.environ.get(env_var, "").strip()
         if not raw:
-            continue
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError):
-            log.warning(
-                f"[apis] model_tiering: malformed JSON in {label}; ignoring"
-            )
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return {}
+            return None
+    except (OSError, UnicodeError, ValueError):
+        refuse()
+    try:
+        parsed = _decode_config(raw)
+    except (TypeError, ValueError):
+        refuse()
+    if not isinstance(parsed, dict):
+        refuse()
+    return parsed
 
 
-def configured_action_policy() -> dict[str, str]:
+class InvalidTierPolicyError(ValueError):
+    """Selected tiering configuration or an explicit bound cannot be honored."""
+
+
+def _policy_bounds(entry: object) -> tuple[str, str | None]:
+    if isinstance(entry, str):
+        floor = entry.strip().lower()
+        if floor in TIERS:
+            return floor, None
+    elif isinstance(entry, dict):
+        if set(entry) <= {"min_tier", "max_tier"}:
+            floor = entry.get("min_tier")
+            ceiling = entry.get("max_tier")
+            if (isinstance(floor, str) and floor in TIERS
+                    and isinstance(ceiling, str) and ceiling in TIERS
+                    and _tier_index(floor) <= _tier_index(ceiling)):
+                return floor, ceiling
+        raise InvalidTierPolicyError("invalid explicit action_policy tier bounds; dispatch refused")
+    raise ValueError("unknown action_policy tier")
+
+
+def configured_action_policy() -> dict[str, str | dict[str, str]]:
     """Return the action-class -> min_tier map, normalized to known tiers.
 
-    An entry naming an unrecognized tier is dropped (logged), never coerced —
-    a typo'd tier name must not silently become the weakest tier.
+    Unknown scalar tiers retain the legacy fail-up posture. Explicit bounds
+    are preserved even when malformed so resolution refuses rather than
+    silently discarding a declared spending ceiling.
     """
     raw = _read_json_config(
         _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH
-    )
-    out: dict[str, str] = {}
-    for action_class, tier in raw.items():
-        tier_name = str(tier).strip().lower()
-        if tier_name in TIERS:
-            out[str(action_class)] = tier_name
+    ) or {}
+    out: dict[str, str | dict[str, str]] = {}
+    for action_class, entry in raw.items():
+        try:
+            floor, ceiling = _policy_bounds(entry)
+        except InvalidTierPolicyError:
+            # Preserve malformed explicit bounds so resolving THIS class refuses;
+            # dropping its cap would let an expensive ambient/top model run.
+            out[str(action_class)] = entry
+        except ValueError:
+            log.warning("[apis] model_tiering: unknown tier for %r; ignoring", action_class)
         else:
-            log.warning(
-                f"[apis] model_tiering: action_policy class {action_class!r} "
-                f"names unrecognized tier {tier!r}; ignoring this entry "
-                f"(unresolved classes fail to {DEFAULT_TIER!r})"
+            out[str(action_class)] = (
+                {"min_tier": floor, "max_tier": ceiling} if ceiling else floor
             )
     return out
 
@@ -250,19 +283,36 @@ def configured_vendor_binding() -> dict[str, dict[str, str]]:
     raw = _read_json_config(
         _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH
     )
+    return {} if raw is None else _normalize_vendor_binding(raw)
+
+
+def _normalize_vendor_binding(raw: object) -> dict[str, dict[str, str]]:
+    """Normalize a selected binding without dropping invalid declarations."""
+    def refuse():
+        raise InvalidTierPolicyError("invalid vendor_binding configuration; dispatch refused") from None
+
+    if not isinstance(raw, dict) or not raw:
+        refuse()
     out: dict[str, dict[str, str]] = {}
     for provider, tiers in raw.items():
-        if not isinstance(tiers, dict):
-            continue
-        provider_name = str(provider).strip().lower()
+        if not isinstance(provider, str) or not provider.strip() or not isinstance(tiers, dict) or not tiers:
+            refuse()
+        provider_name = provider.strip().lower()
+        if provider_name in out:
+            refuse()
         resolved: dict[str, str] = {}
         for tier, model in tiers.items():
-            tier_name = str(tier).strip().lower()
-            model_name = str(model).strip()
-            if tier_name in TIERS and model_name:
-                resolved[tier_name] = model_name
-        if resolved:
-            out[provider_name] = resolved
+            if not isinstance(tier, str) or tier.strip().lower() not in TIERS or not isinstance(model, str):
+                refuse()
+            tier_name = tier.strip().lower()
+            if tier_name in resolved:
+                refuse()
+            try:
+                model_name = validate_model_selector(model.strip())
+            except ValueError:
+                refuse()
+            resolved[tier_name] = model_name
+        out[provider_name] = resolved
     return out
 
 
@@ -359,16 +409,17 @@ class ResolvedTier:
     """The tier a dispatch should run at, and how that was decided."""
 
     tier: str
-    source: str  # "policy" | "class_default" | "unresolved_class" | "escalated"
+    source: str  # policy | class_default | unresolved_class | escalated | capped
     action_class: str
     escalation_reasons: tuple[str, ...] = ()
+    max_tier: str | None = None
 
 
 def resolve_tier(
     action_class: str,
     *,
     signals: "EscalationSignals | None" = None,
-    policy: dict[str, str] | None = None,
+    policy: dict[str, object] | None = None,
 ) -> ResolvedTier:
     """Resolve the tier ``action_class`` must run at, per the module contract.
 
@@ -383,8 +434,9 @@ def resolve_tier(
     unresolved-but-escalated class still reports its escalation reasons.
     """
     active_policy = configured_action_policy() if policy is None else policy
-    base_tier = active_policy.get(action_class)
-    if base_tier is None:
+    entry = active_policy.get(action_class)
+    ceiling = None
+    if entry is None:
         # A class the operator has not mapped. For the few classes that have a
         # deliberate code default (CLASS_DEFAULT_TIERS) that default applies;
         # for every other class this fails UP to the strongest tier.
@@ -395,15 +447,27 @@ def resolve_tier(
         else:
             source = "class_default"
     else:
-        source = "policy"
+        try:
+            base_tier, ceiling = _policy_bounds(entry)
+        except InvalidTierPolicyError:
+            raise
+        except ValueError:
+            base_tier = DEFAULT_TIER
+            source = "unresolved_class"
+        else:
+            source = "policy"
     escalated_tier, reasons = escalate(base_tier, signals, action_class)
     if reasons:
         source = "escalated"
+    if ceiling and _tier_index(escalated_tier) > _tier_index(ceiling):
+        escalated_tier = ceiling
+        source = "capped"
     return ResolvedTier(
         tier=escalated_tier,
         source=source,
         action_class=action_class,
         escalation_reasons=tuple(reasons),
+        max_tier=ceiling,
     )
 
 
@@ -419,7 +483,7 @@ def resolve_tier(
 # module's own tests pin, rather than re-deriving the mapping from prose. It
 # is exported specifically so an operator or a future config-generation
 # script can start from it; nothing in this module reads it implicitly.
-DEFAULT_ACTION_POLICY_HINT: dict[str, str] = {
+DEFAULT_ACTION_POLICY_HINT: dict[str, str | dict[str, str]] = {
     "lens_review:security": "top",
     "lens_review:arch": "top",
     "build": "top",
@@ -427,6 +491,11 @@ DEFAULT_ACTION_POLICY_HINT: dict[str, str] = {
     "lens_review:pm": "mid",
     "lens_review:qa": "mid",
     "lens_review:ux": "mid",
+    "lens_review:content": {"min_tier": "mid", "max_tier": "mid"},
+    "panel_aggregation": {"min_tier": "mid", "max_tier": "mid"},
+    "lens_review:eng": "mid",
+    "lens_review:legal": "mid",
+    "task_dispatch": "mid",
     "issue_triage": "mid",
     "carry_forward_check": "mid",
     "repair_diagnosed": "mid",
@@ -444,10 +513,8 @@ DEFAULT_ACTION_POLICY_HINT: dict[str, str] = {
 # ``run_skill(action_class=...)``. Names come from the operator ruling and
 # ``DEFAULT_ACTION_POLICY_HINT`` above. ``issue_triage`` was ruled mid on
 # 2026-09-29 (``issue_triage_and_backfill_run_mid``). The two below the line
-# are classes no ruling names: they are deliberately absent from the committed
-# example policy, so they resolve ``unresolved_class -> top`` (fail-closed)
-# until the operator rules on them, and every dispatch of one is visible as
-# ``tiering=top(unresolved_class)``.
+# are also part of the 2026-10-16 ruling. Reference policy remains explicit;
+# deployments that omit a class still resolve it fail-closed to top.
 
 ACTION_BUILD = "build"
 ACTION_SECURITY_FIX = "security_fix"
@@ -461,15 +528,15 @@ ACTION_ISSUE_TRIAGE = "issue_triage"  # Lanius new-issue protocol and entity bac
 # run at `top`, so a config that maps it up or leaves it unmapped can only
 # ever switch it off, never make it expensive.
 ACTION_CONFIDENCE_SCORING = "confidence_scoring"
-# Not named by any ruling — unmapped on purpose, so they run at ``top``:
+# Operator-approved mid classes (2026-10-16); caps live in action_policy:
 ACTION_PANEL_AGGREGATION = "panel_aggregation"  # Vanellus verdict aggregation
 ACTION_TASK_DISPATCH_FALLBACK = "task_dispatch"  # queue task with no action_type
 
 LENS_REVIEW_PREFIX = "lens_review:"
 
 # Lenses ``review_panel.LENSES`` seats today, plus ``eng`` (an issue-spec
-# section). ``legal``, ``content`` and ``eng`` have no entry in the ruling, so
-# their ``lens_review:`` classes are left unmapped and run at ``top``.
+# section). The 2026-10-16 ruling maps legal/content/eng explicitly to mid;
+# content additionally carries a maximum in the policy.
 KNOWN_LENSES: tuple[str, ...] = (
     "pm", "arch", "ux", "legal", "qa", "security", "content",
     # Issue-spec sections only: Cicada authors the Engineering section.
@@ -486,6 +553,7 @@ DISPATCH_ACTION_CLASSES: tuple[str, ...] = (
     ACTION_CI_LOG_TRIAGE,
     ACTION_ISSUE_TRIAGE,
     ACTION_PANEL_AGGREGATION,
+    ACTION_TASK_DISPATCH_FALLBACK,
     *(f"{LENS_REVIEW_PREFIX}{lens}" for lens in KNOWN_LENSES),
 )
 
@@ -535,10 +603,15 @@ def model_for_tier(
     providers — silently run an unconfigured provider un-tiered while the
     dispatch's own ``harness_event`` still records ``tier_source="policy"``
     as though the floor were honored. That is exactly the incident this
-    module exists to close (module docstring): unreadable/unresolved must
-    fail to the strongest tier, never to silence.
+    module exists to close (module docstring): selected invalid configuration
+    and unresolved bindings must refuse automatic dispatch.
     """
-    active_binding = configured_vendor_binding() if binding is None else binding
+    if binding is None:
+        active_binding = configured_vendor_binding()
+    else:
+        # An explicitly supplied empty snapshot retains the existing API's
+        # unconfigured meaning; selected source objects are validated above.
+        active_binding = {} if isinstance(binding, dict) and not binding else _normalize_vendor_binding(binding)
     if not active_binding:
         return None
     normalized_provider = provider.strip().lower()
@@ -559,6 +632,8 @@ def model_for_tier(
             f"{_VENDOR_BINDING_ENV} or {_VENDOR_BINDING_FILE_ENV} rather than "
             "falling back silently"
         )
+    if any(name in model.lower() for name in ("astra", "fable")):
+        raise UnboundTierError("model requires an explicit operator override; automatic routing refused")
     return model
 
 
@@ -652,6 +727,7 @@ def record_dispatch(
         "source": source,
         "model": model or "",
         "escalation_reasons": list(resolved.escalation_reasons) if resolved else [],
+        "max_tier": resolved.max_tier if resolved else None,
     }
     _append_ledger_row(row)
     return marker
@@ -866,6 +942,8 @@ def _classify_config(data: object) -> str | None:
     values), or None when the shape is neither or empty."""
     if not isinstance(data, dict) or not data:
         return None
+    if any(isinstance(v, dict) and ("min_tier" in v or "max_tier" in v) for v in data.values()):
+        return "action-policy"
     if all(isinstance(v, str) for v in data.values()):
         return "action-policy"
     if all(isinstance(v, dict) for v in data.values()):
@@ -873,44 +951,47 @@ def _classify_config(data: object) -> str | None:
     return None
 
 
+def _config_error(reason: str) -> str:
+    return (
+        f"invalid configuration: {reason}; correct the selected configuration "
+        "and rerun --check"
+    )
+
+
 def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str]]:
     """Validate one config file strictly. Returns ``(kind, data, errors, warnings)``.
 
-    Stricter than the runtime loaders on purpose: the loaders drop a bad entry
-    and carry on (so a typo can never crash a daemon), which means a typo only
-    shows up as a class quietly running at ``top``. This is where a typo is
-    caught before the file is installed.
+    Catch invalid input before installation; the runtime loaders also refuse
+    invalid selected configuration. Diagnostics describe the problem without
+    repeating selected paths, members, values or raw exceptions.
     """
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        return None, {}, [f"cannot read {path}: {exc}"], warnings
-    except ValueError as exc:
-        return None, {}, [f"{path}: not valid JSON ({exc})"], warnings
+        data = _decode_config(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None, {}, [_config_error("selected file cannot be read")], warnings
+    except ValueError:
+        return None, {}, [_config_error("selected file is not valid JSON")], warnings
     kind = _classify_config(data)
     if kind is None:
         return None, {}, [
-            f"{path}: neither an action_policy ({{class: tier}}) nor a "
-            "vendor_binding ({provider: {tier: model}}) object, or empty"
+            _config_error("expected a nonempty action_policy or vendor_binding object")
         ], warnings
 
     if kind == "action-policy":
         for klass, tier in data.items():
             if not str(klass).strip():
-                errors.append("action_policy has an empty class name")
-            if str(tier).strip().lower() not in TIERS:
-                errors.append(
-                    f"action_policy class {klass!r} names unknown tier {tier!r} "
-                    f"(valid: {', '.join(TIERS)}); the runtime would drop this "
-                    f"entry and run the class at {DEFAULT_TIER!r}"
-                )
+                errors.append(_config_error("action_policy has an empty class name"))
+            try:
+                _policy_bounds(tier)
+            except ValueError:
+                errors.append(_config_error("action_policy has an unknown tier or invalid bounds; dispatch refused"))
         unmapped = [c for c in DISPATCH_ACTION_CLASSES if c not in data]
         if unmapped:
             warnings.append(
-                "classes with no entry resolve to "
-                f"{DEFAULT_TIER!r} (fail-closed): {', '.join(unmapped)}"
+                f"{len(unmapped)} classes with no entry resolve to "
+                f"{DEFAULT_TIER!r} (fail-closed)"
             )
         stale = [
             c for c in data
@@ -918,33 +999,37 @@ def check_config_file(path: Path) -> tuple[str | None, dict, list[str], list[str
         ]
         if stale:
             warnings.append(
-                "classes no Apis call site passes (harmless, but dead): "
-                + ", ".join(stale)
+                f"{len(stale)} classes are unused by Apis call sites (harmless, but dead)"
             )
     else:
         from harness_router import FRONTIER_PROVIDERS as PROVIDERS  # lazy: import-light
 
+        try:
+            normalized = _normalize_vendor_binding(data)
+            for provider, tiers in normalized.items():
+                for tier in tiers:
+                    model_for_tier(provider, tier, binding=normalized)
+        except ValueError:
+            errors.append(
+                _config_error("vendor_binding has an invalid model or binding; dispatch refused")
+            )
         for provider, tiers in data.items():
             name = str(provider).strip().lower()
             if name not in PROVIDERS:
                 errors.append(
-                    f"vendor_binding provider {provider!r} is not a frontier "
-                    f"harness provider ({', '.join(PROVIDERS)})"
+                    _config_error("vendor_binding names an unsupported harness provider")
                 )
-            for tier, model in tiers.items():
+            for tier in tiers:
                 if str(tier).strip().lower() not in TIERS:
                     errors.append(
-                        f"vendor_binding {provider!r} names unknown tier {tier!r}"
-                    )
-                if not str(model).strip():
-                    errors.append(
-                        f"vendor_binding {provider!r} tier {tier!r} has an empty model"
+                        _config_error("vendor_binding names an unknown tier")
                     )
             if DEFAULT_TIER not in {str(t).strip().lower() for t in tiers}:
                 errors.append(
-                    f"vendor_binding {provider!r} binds no {DEFAULT_TIER!r} "
-                    "model, but every escalation and every unmapped class "
-                    "resolves there — the provider could run nothing"
+                    _config_error(
+                        f"vendor_binding binds no {DEFAULT_TIER!r} model; "
+                        "escalations and unmapped classes cannot run"
+                    )
                 )
     return kind, data, errors, warnings
 
@@ -956,7 +1041,15 @@ def check_cross(policy: dict, binding: dict) -> list[str]:
     (skill_runner's pre-selection filter), which is legal, so this reports it
     as an error only when NO provider binds the tier — that dispatch would fail.
     """
-    needed = {str(t).strip().lower() for t in policy.values()} | {DEFAULT_TIER}
+    needed = {DEFAULT_TIER}
+    for entry in policy.values():
+        try:
+            floor, ceiling = _policy_bounds(entry)
+        except ValueError:
+            continue  # check_config_file reports malformed entries
+        needed.add(floor)
+        if ceiling:
+            needed.add(ceiling)
     needed &= set(TIERS)
     errors: list[str] = []
     for tier in sorted(needed, key=_tier_index):
@@ -990,22 +1083,29 @@ def main(argv: list[str] | None = None) -> int:
 
     exit_code = 0
     loaded: dict[str, dict] = {}
-    for raw in args.check:
-        path = Path(raw).expanduser()
-        kind, data, errors, warnings = check_config_file(path)
+    for index, raw in enumerate(args.check, 1):
+        label = f"configuration {index}"
+        try:
+            path = Path(raw).expanduser()
+        except (OSError, RuntimeError, ValueError):
+            kind, data, errors, warnings = (
+                None, {}, [_config_error("selected path cannot be prepared")], []
+            )
+        else:
+            kind, data, errors, warnings = check_config_file(path)
         for msg in errors:
-            print(f"ERROR {path}: {msg}")
+            print(f"ERROR {label}: {msg}")
         for msg in warnings:
-            print(f"warn  {path}: {msg}")
+            print(f"warn  {label}: {msg}")
         if errors or kind is None:
             exit_code = 1
-            print(f"FAIL  {path}")
+            print(f"FAIL  {label}")
             continue
         loaded[kind] = data
-        print(f"ok    {path} ({kind}, {len(data)} entries)")
+        print(f"ok    {label} ({kind}, {len(data)} entries)")
     if "action-policy" in loaded and "vendor-binding" in loaded:
         for msg in check_cross(loaded["action-policy"], loaded["vendor-binding"]):
-            print(f"ERROR cross-check: {msg}")
+            print(f"ERROR cross-check: {_config_error(msg)}")
             exit_code = 1
     return exit_code
 

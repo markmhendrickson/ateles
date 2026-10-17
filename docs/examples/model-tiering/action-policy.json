@@ -6,6 +6,17 @@
   "lens_review:pm": "mid",
   "lens_review:qa": "mid",
   "lens_review:ux": "mid",
+  "lens_review:content": {
+    "min_tier": "mid",
+    "max_tier": "mid"
+  },
+  "panel_aggregation": {
+    "min_tier": "mid",
+    "max_tier": "mid"
+  },
+  "lens_review:eng": "mid",
+  "lens_review:legal": "mid",
+  "task_dispatch": "mid",
   "issue_triage": "mid",
   "carry_forward_check": "mid",
   "repair_diagnosed": "mid",

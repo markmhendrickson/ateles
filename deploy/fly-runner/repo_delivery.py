@@ -313,6 +313,24 @@ def auth_config(token: str) -> list[tuple[str, str]]:
     return [("http.https://github.com/.extraheader", f"AUTHORIZATION: basic {basic}")]
 
 
+_JOB_GIT_CONFIG = (("maintenance.auto", "false"), ("gc.auto", "0"))
+
+
+def git_config_environment(config: list[tuple[str, str]] = ()) -> dict[str, str]:
+    """Serialize per-call Git settings, keeping automatic housekeeping off.
+
+    Job repositories are disposable. A Git command must not leave automatic
+    maintenance running after its synchronous caller returns. Append these
+    fixed settings last so caller configuration cannot re-enable that work.
+    """
+    settings = [*config, *_JOB_GIT_CONFIG]
+    env = {"GIT_CONFIG_COUNT": str(len(settings))}
+    for i, (key, value) in enumerate(settings):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    return env
+
+
 def git_env(home: Path, *, allow: str, config: list[tuple[str, str]] = ()) -> dict[str, str]:
     """A git environment built from scratch: no system or global config, no
     replace objects, no prompts, hooks off, only the named transports."""
@@ -338,11 +356,8 @@ def git_env(home: Path, *, allow: str, config: list[tuple[str, str]] = ()) -> di
         "GIT_ALLOW_PROTOCOL": allow,
         "GIT_ASKPASS": "",
         "SSH_ASKPASS": "",
-        "GIT_CONFIG_COUNT": str(len(settings)),
     }
-    for i, (key, value) in enumerate(settings):
-        env[f"GIT_CONFIG_KEY_{i}"] = key
-        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    env.update(git_config_environment(settings))
     return env
 
 

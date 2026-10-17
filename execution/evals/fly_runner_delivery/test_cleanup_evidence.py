@@ -37,6 +37,22 @@ def test_actual_eval(tmp_path, monkeypatch):
     fixture = {"prior_cleanup_failure": False, "faults": [],
                "original_cleanup": "not_attempted", "planting": "not_started",
                "errors": []}
+    if INJECT == "clear_refused":
+        original_clear = target.runner.rd._clear
+        def clear_refused(root):
+            if fixture["original_cleanup"] == "started":
+                raise PermissionError(errno.EACCES, "synthetic_private_fixture_error", str(root))
+            return original_clear(root)
+        monkeypatch.setattr(target.runner.rd, "_clear", clear_refused)
+    original_clear_step = target.runner.rd._clear
+    def capture_clear(root):
+        try:
+            return original_clear_step(root)
+        except (OSError, ValueError, TypeError, UnicodeError) as exc:
+            if fixture["original_cleanup"] == "started" and not fixture["errors"]:
+                fixture["errors"].append(cleanup_error(exc))
+            raise
+    monkeypatch.setattr(target.runner.rd, "_clear", capture_clear)
     def controlled(root):
         if INJECT == "plant_refused":
             def failed_write(path, *args, **kwargs):
@@ -76,8 +92,9 @@ def test_actual_eval(tmp_path, monkeypatch):
                 fixture["original_cleanup"] = "refused"
             elif fixture["planting"] == "started":
                 fixture["planting"] = "refused"
-            fixture["errors"] = [cleanup_error(
-                exc, boundary_error=target.runner.rd.RepoWorkError)]
+            if not fixture["errors"]:
+                fixture["errors"] = [cleanup_error(
+                    exc, boundary_error=target.runner.rd.RepoWorkError)]
             if isinstance(exc, target.runner.rd.RepoWorkError):
                 raise
             # Fixture-only normalization; explicit stage assertions still fail.
@@ -214,6 +231,9 @@ def test_fixture_stage_refusal_is_bounded_and_cannot_pass(tmp_path, scenario, ca
     assert proof["planting"] == ("not_started" if inject == "original_refused" else "refused")
     assert len(proof["errors"]) == 1
     assert set(proof["errors"][0]) == {"type", "errno"}
+    assert proof["errors"] == ([{"type": "RepoWorkError", "errno": None}]
+                               if inject == "original_refused" else
+                               [{"type": "PermissionError", "errno": 13}])
     if case == "root_lstat":
         assert proof["faults"] and details["incomplete"]
     elif inject == "plant_refused":
@@ -244,3 +264,22 @@ def test_completed_planting_with_different_root_still_fails(tmp_path, scenario):
     assert details["root"]["kind"] == "directory"
     with pytest.raises(AssertionError, match="diagnostic fixture stage evidence"):
         _assert_cleanup_fixture(result, "root_file", False)
+
+
+@pytest.mark.parametrize("scenario", ["delivery_pushes_and_opens_a_pull_request",
+                                      "refused_import_pushes_nothing"])
+@pytest.mark.parametrize("case", ["root_file", "root_lstat"])
+def test_fixture_keeps_cleanup_error_before_boundary_normalization(tmp_path, scenario, case):
+    result = _run_cleanup_fixture(tmp_path, case, False, scenario, inject="clear_refused")
+    done, output, details, proof, runtime = result
+    assert done.returncode == 1 and "1 failed" in output
+    assert proof["original_cleanup"] == "refused" and proof["planting"] == "not_started"
+    assert proof["errors"] == [{"type": "PermissionError", "errno": 13}]
+    assert "diagnostic fixture stage failure" in output
+    assert all(value not in output for value in (
+        "synthetic_private_fixture_error", "synthetic_private_cleanup_filename",
+        "synthetic_private_cleanup_content", str(runtime)))
+    if case == "root_lstat":
+        assert proof["faults"] and details["incomplete"]
+    with pytest.raises(AssertionError, match="diagnostic fixture stage evidence"):
+        _assert_cleanup_fixture(result, case, False)

@@ -303,13 +303,13 @@ def test_lanius_verdict_retry_escalates_as_a_failed_prior_attempt(
     assert "prior_attempt_failed" in resolved.escalation_reasons
 
 
-def test_vanellus_aggregation_names_a_class_and_runs_top(monkeypatch, world):
+def test_vanellus_aggregation_names_a_class_and_caps_at_mid(monkeypatch, world):
     rec = _run_handle_pr(monkeypatch, world)
     vanellus = rec.only("vanellus")
     assert vanellus["action_class"] == "panel_aggregation"
     resolved = tier_of(vanellus)
-    assert resolved.tier == "top"
-    assert resolved.source == "unresolved_class"
+    assert resolved.tier == "mid"
+    assert resolved.source in {"policy", "capped"}
 
 
 # ── _redispatch_missing_lens ─────────────────────────────────────────────────
@@ -572,9 +572,9 @@ def test_issue_pipeline_sections_run_at_their_lens_tier(monkeypatch, world):
     # The Security / Arch section is the arch lens: stays top.
     assert rec.only("waxwing")["action_class"] == "lens_review:arch"
     assert tier_of(rec.only("waxwing")).tier == "top"
-    # The Engineering section is not a class the ruling names: fails to top.
+    # Engineering is an explicitly mid class under the 2026-10-16 ruling.
     assert rec.only("cicada")["action_class"] == "lens_review:eng"
-    assert tier_of(rec.only("cicada")).source == "unresolved_class"
+    assert (tier_of(rec.only("cicada")).tier, tier_of(rec.only("cicada")).source) == ("mid", "policy")
 
 
 def test_open_implementation_pr_is_a_build_on_top(monkeypatch, world):
@@ -737,10 +737,10 @@ def test_queue_task_falls_back_to_the_agents_inferred_class(monkeypatch, world):
     assert (resolved.tier, resolved.source) == ("top", "unresolved_class")
 
 
-def test_queue_task_with_no_recognizable_class_fails_to_top(monkeypatch, world):
+def test_queue_task_with_no_recognizable_class_uses_mid_task_dispatch(monkeypatch, world):
     kwargs = _spawn(monkeypatch, "someagent", {"title": "t", "body": "b"})
     assert kwargs["action_class"] == "task_dispatch"
-    assert tier_of(kwargs).tier == "top"
+    assert tier_of(kwargs).tier == "mid"
 
 
 # ── coverage guard: no run_skill site may omit action_class ──────────────────

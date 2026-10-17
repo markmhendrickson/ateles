@@ -143,9 +143,8 @@ def test_dispatch_forwards_action_class_and_model(monkeypatch) -> None:
     assert seen["model"] == "claude-opus-5-thinking-high"
 
 
-def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
-    """A caller naming neither must leave run_skill's tiering inputs at their
-    no-op defaults — exact prior CLI behaviour, no regression."""
+def test_dispatch_defaults_to_canonical_task_class(monkeypatch) -> None:
+    """An omitted class must be tiered rather than inherit the ambient model."""
     seen: dict = {}
 
     async def _capture(skill, prompt, **kwargs):
@@ -155,7 +154,7 @@ def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
     monkeypatch.setattr(dispatch_role, "run_skill", _capture)
 
     asyncio.run(dispatch_role.dispatch("cicada", "do the thing"))
-    assert seen["action_class"] is None
+    assert seen["action_class"] == "task_dispatch"
     assert seen["model"] is None
 
 
@@ -312,16 +311,146 @@ def test_cli_explicit_model_overrides_action_class(
     assert cmd[cmd.index("--model") + 1] == "explicit-override"
 
 
-def test_cli_no_action_class_leaves_argv_without_model_flag(
-    captured_codex_dispatches,
-) -> None:
-    """No --action-class and no --model: exact prior behaviour, no --model
-    flag at all — the no-op default this whole feature must preserve."""
-    rc = dispatch_role.main(["--role", "cicada", "--task", "do the thing"])
-
-    assert rc == 0
+def test_cli_omitted_class_uses_mid_binding(captured_codex_dispatches, monkeypatch):
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "mid-model"}}')
+    assert dispatch_role.main(["--role", "cicada", "--task", "do the thing"]) == 0
     cmd = captured_codex_dispatches[0]["cmd"]
-    assert "--model" not in cmd
+    assert cmd[cmd.index("--model") + 1] == "mid-model"
+
+
+@pytest.mark.parametrize("action,expected", [
+    ("lens_review:content", "mid-model"), ("panel_aggregation", "mid-model"),
+    ("lens_review:security", "top-model"), ("lens_review:arch", "top-model"),
+    ("lens_review:pm", "top-model"),
+])
+def test_cli_capped_and_protected_dispatch_effects(captured_codex_dispatches, monkeypatch, action, expected):
+    import model_tiering
+    monkeypatch.setenv("APIS_ACTION_POLICY", json.dumps(model_tiering.DEFAULT_ACTION_POLICY_HINT))
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "mid-model", "top": "top-model"}}')
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "review", "--action-class", action,
+        "--review-round", "3", "--prior-blocking-finding", "--new-blocking-finding",
+        "--changed-file", "lib/auth/check.py", "--diff-lines", "900",
+        "--prior-attempt-failed",
+    ]) == 0
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == expected
+
+
+@pytest.mark.parametrize("policy,binding", [
+    ({"min_tier": "mid", "max_tier": "bogus"}, {}),
+    ({"min_tier": "top", "max_tier": "mid"}, {}),
+    ({"min_tier": "mid", "max_tier": "mid"}, {}),
+    ({"min_tier": "mid", "max_tier": "mid"}, {"codex": {"top": "top-model"}}),
+    ({"min_tier": "mid", "max_tier": "mid"}, {"codex": {"mid": "gpt-6-astra"}}),
+])
+def test_cli_refuses_unhonorable_cap_before_child(captured_codex_dispatches, monkeypatch, policy, binding):
+    monkeypatch.setenv("APIS_ACTION_POLICY", json.dumps({"panel_aggregation": policy}))
+    monkeypatch.setenv("APIS_VENDOR_BINDING", json.dumps(binding))
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "review", "--action-class", "panel_aggregation",
+    ]) != 0
+    assert not captured_codex_dispatches
+
+
+@pytest.mark.parametrize("model,valid", [
+    pytest.param(None, False, id="null"),
+    pytest.param(False, False, id="boolean"),
+    pytest.param(7, False, id="number"),
+    pytest.param([], False, id="array"),
+    pytest.param({}, False, id="object"),
+    pytest.param("", False, id="empty"),
+    pytest.param(" ", False, id="blank"),
+    pytest.param("two models", False, id="whitespace"),
+    pytest.param("-model", False, id="flag"),
+    pytest.param("bad\nmodel", False, id="newline"),
+    pytest.param("bad\x00model", False, id="control"),
+    pytest.param("gpt-6-astra", False, id="reserved-astra"),
+    pytest.param("gpt-6-fable", False, id="reserved-fable"),
+    pytest.param("GPT-6-ASTRA", False, id="reserved-case"),
+    pytest.param("selected-model", True, id="ordinary"),
+    pytest.param(" gpt-5.6-terra ", True, id="normalized"),
+    pytest.param("gpt-6-sol", True, id="protected-top"),
+])
+def test_preinstall_binding_matches_actual_dispatch(
+    captured_codex_dispatches, monkeypatch, tmp_path, capsys, model, valid
+):
+    """One raw selected record reaches the checker and real dispatch path."""
+    import model_tiering
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR", raising=False)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    selected = tmp_path / "selected-binding-marker.json"
+    binding = {"codex": {"top": "gpt-6-sol", "mid": model}}
+    selected.write_text(json.dumps(binding))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(selected))
+
+    rc = dispatch_role.main([
+        "--role", "pavo", "--task", "offline binding contract",
+        "--provider", "codex", "--json",
+    ])
+    envelope = json.loads(capsys.readouterr().out)
+    assert rc == (0 if valid else 1) and envelope["ok"] is valid
+    assert len(captured_codex_dispatches) == int(valid)
+    if valid:
+        command = captured_codex_dispatches[0]["cmd"]
+        assert command[command.index("--model") + 1] == model.strip()
+
+    kind, raw, errors, warnings = model_tiering.check_config_file(selected)
+    assert kind == "vendor-binding" and raw == binding
+    assert bool(errors) is not valid
+    assert str(selected) not in "\n".join(errors + warnings)
+    assert "selected-binding-marker" not in "\n".join(errors + warnings)
+    assert all("invalid configuration" in error and "--check" in error for error in errors)
+    assert model_tiering.main(["--check", str(selected)]) == (0 if valid else 1)
+    output = capsys.readouterr().out
+    assert str(selected) not in output and "selected-binding-marker" not in output
+
+
+@pytest.mark.parametrize("binding", [
+    {"codex": {"top": "gpt-6-sol", "mid": "selected-model", " MID ": "other-model"}},
+    {"codex": {"top": "gpt-6-sol", "mid": "selected-model"},
+     " CODEX ": {"top": "gpt-6-sol"}},
+])
+def test_preinstall_normalized_binding_collisions_match_dispatch(
+    captured_codex_dispatches, monkeypatch, tmp_path, binding
+):
+    import model_tiering
+
+    selected = tmp_path / "binding.json"
+    selected.write_text(json.dumps(binding))
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(selected))
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "offline binding contract", "--provider", "codex",
+    ]) == 1
+    assert not captured_codex_dispatches
+    assert model_tiering.check_config_file(selected)[2]
+
+
+@pytest.mark.parametrize("model", [None, "gpt-6-fable"])
+def test_preinstall_refusal_preserves_explicit_override(
+    captured_codex_dispatches, monkeypatch, tmp_path, model
+):
+    import model_tiering
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR", raising=False)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    selected = tmp_path / "binding.json"
+    selected.write_text(json.dumps({"codex": {"top": "gpt-6-sol", "mid": model}}))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(selected))
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "offline explicit contract", "--provider", "codex",
+        "--model", "gpt-6-astra",
+    ]) == 0
+    assert len(captured_codex_dispatches) == 1
+    command = captured_codex_dispatches[0]["cmd"]
+    assert command[command.index("--model") + 1] == "gpt-6-astra"
+    assert model_tiering.check_config_file(selected)[2]
 
 
 @pytest.mark.parametrize("github_token", [None, ""])
@@ -1030,3 +1159,221 @@ def test_a_cooled_result_envelope_carries_cooled_until(
     env = _envelope(capsys)
     assert env["cooled_until"] == "2026-09-29T12:30+02:00"
     assert "cooled until" in env["reason"]
+
+
+@pytest.mark.parametrize("failure", ["file_json", "file_read", "file_utf8", "file_empty", "file_shape", "env_json"])
+def test_cli_selected_policy_failure_refuses_before_child(
+    captured_codex_dispatches, monkeypatch, tmp_path, capsys, failure,
+):
+    path = tmp_path / "declared-policy.json"
+    path.write_text('{"panel_aggregation":{"min_tier":"mid","max_tier":"mid"}}')
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(path))
+    # A valid alternate source must not replace the selected declared file.
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"panel_aggregation":"top"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"mid-model","top":"top-model"}}')
+    if failure == "file_read":
+        real = Path.read_text
+        def read(p, *args, **kwargs):
+            if p == path:
+                raise PermissionError("synthetic private config failure")
+            return real(p, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", read)
+    elif failure == "file_utf8":
+        path.write_bytes(b"\xff")
+    elif failure == "env_json":
+        path.unlink()
+        monkeypatch.setenv("APIS_ACTION_POLICY", "{invalid")
+    else:
+        path.write_text({"file_json": "{invalid", "file_empty": "", "file_shape": "[]"}[failure])
+    assert dispatch_role.main([
+        "--role", "pavo", "--task", "review", "--action-class", "panel_aggregation",
+        "--review-round", "3", "--prior-blocking-finding", "--json",
+    ]) == 1
+    assert captured_codex_dispatches == []
+    envelope = _envelope(capsys)
+    assert "model tiering configuration" in envelope["reason"]
+    assert "synthetic private" not in envelope["reason"]
+
+
+@pytest.mark.parametrize("action,model", [
+    ("lens_review:content", "gpt-5.6-terra"), ("panel_aggregation", "gpt-5.6-terra"),
+    ("lens_review:eng", "gpt-5.6-terra"), ("lens_review:legal", "gpt-5.6-terra"),
+    ("task_dispatch", "gpt-5.6-terra"), ("lens_review:security", "gpt-6-sol"),
+    ("lens_review:arch", "gpt-6-sol"),
+])
+def test_cli_committed_reference_policy_reaches_distinct_models(
+    captured_codex_dispatches, monkeypatch, action, model,
+):
+    examples = Path(__file__).resolve().parents[3] / "docs/examples/model-tiering"
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(examples / "action-policy.json"))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(examples / "vendor-binding.json"))
+    assert dispatch_role.main(["--role", "pavo", "--task", "review", "--action-class", action]) == 0
+    argv = captured_codex_dispatches[0]["cmd"]
+    assert argv[argv.index("--model") + 1] == model
+
+
+def test_cli_help_describes_default_tier_resolution_and_override(capsys):
+    assert dispatch_role.main(["--help"]) == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "task_dispatch" in help_text and "minimum tier" in help_text
+    assert "measured signals" in help_text and "--model" in help_text
+    assert "provider's ambient default" not in help_text
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once"])
+@pytest.mark.parametrize("broken", ["policy", "binding"])
+def test_policy_source_failure_returns_refusal_across_real_entrances(
+    captured_codex_dispatches, monkeypatch, entrypoint, broken,
+):
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"panel_aggregation":{"min_tier":"mid","max_tier":"mid"}}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"mid-model","top":"top-model"}}')
+    monkeypatch.setenv("APIS_ACTION_POLICY" if broken == "policy" else "APIS_VENDOR_BINDING", "{invalid")
+    if entrypoint == "cli":
+        assert dispatch_role.main(["--role", "pavo", "--task", "review",
+                                   "--action-class", "panel_aggregation"]) == 1
+    elif entrypoint == "dispatch":
+        result = asyncio.run(dispatch_role.dispatch("pavo", "review", action_class="panel_aggregation"))
+        assert result.ok is False and "model tiering configuration" in result.error
+    else:
+        call = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+        result = asyncio.run(call("pavo", "review", provider="codex", action_class="panel_aggregation"))
+        assert result.ok is False and "model tiering configuration" in result.error
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once", "lookup", "filter"])
+@pytest.mark.parametrize("binding", [
+    {}, {"codex": "invalid"}, {"codex": None}, {"codex": {}},
+    {"codex": {"mid": " "}}, {"codex": {"mid": None}},
+    {"codex": {"unknown": "model"}}, {" ": {"mid": "model"}},
+])
+@pytest.mark.parametrize("source", ["env", "file"])
+def test_selected_binding_requires_valid_model_before_entrypoint(
+    captured_codex_dispatches, monkeypatch, tmp_path, entrypoint, binding, source,
+):
+    import model_tiering
+
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    path = tmp_path / "binding.json"
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(path))
+    if source == "file":
+        path.write_text(json.dumps(binding))
+        monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"alternate"}}')
+    else:
+        monkeypatch.setenv("APIS_VENDOR_BINDING", json.dumps(binding))
+
+    if entrypoint == "lookup":
+        with pytest.raises(model_tiering.InvalidTierPolicyError):
+            model_tiering.model_for_tier("codex", "mid")
+    elif entrypoint == "filter":
+        with pytest.raises(model_tiering.InvalidTierPolicyError):
+            skill_runner._tier_bound_binaries(
+                {"codex": "/unused"}, model_tiering.resolve_tier("task_dispatch"), None,
+            )
+    elif entrypoint == "cli":
+        assert dispatch_role.main(["--role", "pavo", "--task", "review"]) == 1
+    else:
+        if entrypoint == "dispatch":
+            call = dispatch_role.dispatch("pavo", "review")
+        else:
+            fn = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+            call = fn("pavo", "review", provider="codex", action_class="task_dispatch")
+        result = asyncio.run(call)
+        assert not result.ok and "configuration" in result.error
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once"])
+@pytest.mark.parametrize("configuration,expected", [
+    ("absent", None), ("valid", "selected-model"), ("override", "explicit-model"),
+])
+def test_binding_entrypoint_preserves_positive_selection_contract(
+    captured_codex_dispatches, monkeypatch, tmp_path, entrypoint, configuration, expected,
+):
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "missing.json"))
+    monkeypatch.delenv("APIS_VENDOR_BINDING", raising=False)
+    kwargs = {}
+    if configuration == "valid":
+        monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"selected-model"}}')
+    elif configuration == "override":
+        monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":" "}}')
+        kwargs["model"] = expected
+    if entrypoint == "cli":
+        argv = ["--role", "pavo", "--task", "review"]
+        if kwargs:
+            argv += ["--model", expected]
+        assert dispatch_role.main(argv) == 0
+    else:
+        if entrypoint == "dispatch":
+            call = dispatch_role.dispatch("pavo", "review", **kwargs)
+        else:
+            fn = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+            call = fn("pavo", "review", provider="codex", action_class="task_dispatch", **kwargs)
+        assert asyncio.run(call).ok
+    assert len(captured_codex_dispatches) == 1
+    argv = captured_codex_dispatches[0]["cmd"]
+    if expected is None:
+        assert "--model" not in argv
+    else:
+        assert argv[argv.index("--model") + 1] == expected
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once", "lookup", "filter"])
+@pytest.mark.parametrize("source", ["env", "file"])
+@pytest.mark.parametrize("broken", ["policy", "binding"])
+def test_ambiguous_config_refuses_at_dispatch_boundary(
+    captured_codex_dispatches, monkeypatch, tmp_path, entrypoint, source, broken,
+):
+    import model_tiering
+
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"selected-model","top":"other-model"}}')
+    prefix = "APIS_ACTION_POLICY" if broken == "policy" else "APIS_VENDOR_BINDING"
+    raw = ('{"task_dispatch":"mid","task_dispatch":"top"}' if broken == "policy"
+           else '{"codex":{"mid":"selected-model","mid":"other-model"}}')
+    if source == "file":
+        path = tmp_path / "selected.json"
+        path.write_text(raw)
+        monkeypatch.setenv(prefix + "_FILE", str(path))
+    else:
+        monkeypatch.setenv(prefix, raw)
+    if entrypoint in {"lookup", "filter"}:
+        with pytest.raises(model_tiering.InvalidTierPolicyError):
+            tier = model_tiering.resolve_tier("task_dispatch")
+            if entrypoint == "lookup":
+                model_tiering.model_for_tier("codex", tier.tier)
+            else:
+                skill_runner._tier_bound_binaries({"codex": "/unused"}, tier, None)
+    elif entrypoint == "cli":
+        assert dispatch_role.main(["--role", "pavo", "--task", "fixture"]) == 1
+    else:
+        if entrypoint == "dispatch":
+            call = dispatch_role.dispatch("pavo", "fixture")
+        else:
+            fn = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+            call = fn("pavo", "fixture", provider="codex", action_class="task_dispatch")
+        assert not asyncio.run(call).ok
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "dispatch", "run_skill", "once"])
+def test_explicit_override_keeps_its_config_contract(
+    captured_codex_dispatches, monkeypatch, entrypoint,
+):
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"task_dispatch":"mid","task_dispatch":"top"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex":{"mid":"first","mid":"second"}}')
+    if entrypoint == "cli":
+        assert dispatch_role.main(["--role", "pavo", "--task", "fixture",
+                                   "--model", "explicit-model"]) == 0
+    else:
+        if entrypoint == "dispatch":
+            call = dispatch_role.dispatch("pavo", "fixture", model="explicit-model")
+        else:
+            fn = skill_runner.run_skill if entrypoint == "run_skill" else skill_runner._run_skill_once
+            call = fn("pavo", "fixture", provider="codex", action_class="task_dispatch",
+                      model="explicit-model")
+        assert asyncio.run(call).ok
+    assert len(captured_codex_dispatches) == 1
+    argv = captured_codex_dispatches[0]["cmd"]
+    assert argv[argv.index("--model") + 1] == "explicit-model"

@@ -325,10 +325,11 @@ async def dispatch(
     work remains under the sandbox's network denial.
 
     ``action_class``/``model`` (operator ruling 2026-09-29, model_tiering.py):
-    forwarded unchanged to ``run_skill``. ``action_class`` resolves a tier from
+    forwarded to ``run_skill``. Omitted action classes use ``task_dispatch``.
+    ``action_class`` resolves a tier from
     the live action_policy/vendor_binding config; ``model`` overrides that
-    resolution outright. Neither is required — an orchestrating session's
-    one-off dispatch that names no ``action_class`` runs exactly as before.
+    resolution outright. A one-off dispatch therefore uses the canonical
+    fallback class instead of the provider's ambient default.
 
     ``integration_base`` / ``integration_mode`` (work class ``rebase``) and
     ``regenerate_commands`` (work class ``regenerate_generated_files``) opt the
@@ -350,7 +351,7 @@ async def dispatch(
         work_class=work_class,
         github_token=github_token,
         include_github_contract=github_delivery,
-        action_class=action_class,
+        action_class=action_class or model_tiering.ACTION_TASK_DISPATCH_FALLBACK,
         escalation_signals=escalation_signals,
         model=model,
     )
@@ -734,8 +735,9 @@ def main(argv: list[str] | None = None) -> int:
             "'carry_forward_check'. Resolves a minimum tier from the live "
             "action_policy config, escalated by measured signals, then a "
             "model from the live vendor_binding config for the chosen "
-            "provider. Omit to leave model selection exactly as before "
-            "(the provider's ambient default)."
+            "provider. Omit to use 'task_dispatch': its scalar minimum tier "
+            "still escalates on measured signals. --model explicitly overrides "
+            "automatic tier resolution."
         ),
     )
     parser.add_argument(

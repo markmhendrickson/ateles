@@ -7,6 +7,7 @@ Offline: the real job entrypoint, a local bare remote, a stand-in GitHub API.
 from __future__ import annotations
 
 import dataclasses
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,23 @@ sys.path.insert(0, str(HERE))
 import fly_delivery_eval as runner  # noqa: E402
 
 SCENARIOS = runner.load_scenarios()
+
+
+def test_eval_git_disables_automatic_housekeeping_at_the_call_boundary(monkeypatch, tmp_path):
+    seen = []
+
+    def completed_git(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, b"fixture\n", b"")
+
+    monkeypatch.setattr(runner.subprocess, "run", completed_git)
+    assert runner._git(tmp_path, "commit", "-qm", "fixture", home=tmp_path) == "fixture"
+    assert len(seen) == 1
+    env = seen[0]
+    pairs = [(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"])
+             for i in range(int(env.get("GIT_CONFIG_COUNT", "0")))]
+    assert pairs == [("maintenance.auto", "false"), ("gc.auto", "0")]
+    assert env["GIT_AUTHOR_NAME"] == env["GIT_COMMITTER_NAME"] == "t"
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s["id"] for s in SCENARIOS])

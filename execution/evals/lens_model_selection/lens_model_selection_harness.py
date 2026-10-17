@@ -34,7 +34,7 @@ import skill_runner  # noqa: E402
 from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
 
 HEAD = "a" * 40
-MUTATIONS = ("none", "no_validation", "drop_model", "drop_action_class")
+MUTATIONS = ("none", "no_validation", "drop_model", "drop_action_class", "drop_binding_validation")
 BINDING = {
     "codex": {"top": "gpt-6-sol", "mid": "gpt-5.6-terra"},
     "cursor": {"top": "gpt-5.6-sol-high", "mid": "gpt-5.6-terra-medium"},
@@ -156,8 +156,16 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(active_runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
         mp.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
         mp.setattr(skill_runner, "_write_harness_event", lambda **kw: obs["events"].append(kw))
-        mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top"})
-        mp.setattr(model_tiering, "configured_vendor_binding", lambda: BINDING)
+        mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top", "task_dispatch": "mid"})
+        if "vendor_binding" in scenario:
+            mp.setenv("APIS_VENDOR_BINDING_FILE", str(tmp_path / "absent-binding.json"))
+            mp.delenv("APIS_VENDOR_BINDING", raising=False)
+            if scenario["vendor_binding"] is not None:
+                mp.setenv("APIS_VENDOR_BINDING", json.dumps(scenario["vendor_binding"]))
+        else:
+            mp.setattr(model_tiering, "configured_vendor_binding", lambda: BINDING)
+        if mutation == "drop_binding_validation":
+            mp.setattr(model_tiering, "configured_vendor_binding", lambda: {})
 
         def create(worktree, *, head):
             obs["worktree_preparations"].append(head)

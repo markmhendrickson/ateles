@@ -242,5 +242,86 @@
         "cause_contains": "UnicodeDecodeError"
       }
     ]
+  },
+  "capped_content": {
+    "meta": {
+      "id": "dispatch_budget.capped_content",
+      "purpose": "Bound automatic escalation through canonical policy and preserve model/tier audit evidence"
+    },
+    "events": [
+      {
+        "op": "tier_dispatch",
+        "action_class": "lens_review:content",
+        "policy": {
+          "lens_review:content": {
+            "min_tier": "mid",
+            "max_tier": "mid"
+          }
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "tier_audit",
+        "tier": "mid",
+        "source": "capped",
+        "model": "mid-model",
+        "cap": "mid",
+        "reason_count": 7
+      }
+    ]
+  },
+  "capped_aggregation": {
+    "meta": {
+      "id": "dispatch_budget.capped_aggregation",
+      "purpose": "Bound automatic escalation through canonical policy and preserve model/tier audit evidence"
+    },
+    "events": [
+      {
+        "op": "tier_dispatch",
+        "action_class": "panel_aggregation",
+        "policy": {
+          "panel_aggregation": {
+            "min_tier": "mid",
+            "max_tier": "mid"
+          }
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "tier_audit",
+        "tier": "mid",
+        "source": "capped",
+        "model": "mid-model",
+        "cap": "mid",
+        "reason_count": 7
+      }
+    ]
+  },
+  "blocking_pm": {
+    "meta": {
+      "id": "dispatch_budget.blocking_pm",
+      "purpose": "Bound automatic escalation through canonical policy and preserve model/tier audit evidence"
+    },
+    "events": [
+      {
+        "op": "tier_dispatch",
+        "action_class": "lens_review:pm",
+        "policy": {
+          "lens_review:pm": "mid"
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "tier_audit",
+        "tier": "top",
+        "source": "escalated",
+        "model": "top-model",
+        "cap": null,
+        "reason_count": 5
+      }
+    ]
   }
 }

@@ -60,14 +60,16 @@ def test_vendor_binding_file_beats_env(monkeypatch, tmp_path) -> None:
     }
 
 
-def test_malformed_action_policy_json_degrades_to_empty(monkeypatch) -> None:
+def test_malformed_action_policy_json_refuses(monkeypatch) -> None:
     monkeypatch.setenv("APIS_ACTION_POLICY", "{not json")
-    assert model_tiering.configured_action_policy() == {}
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_action_policy()
 
 
-def test_malformed_vendor_binding_json_degrades_to_empty(monkeypatch) -> None:
+def test_malformed_vendor_binding_json_refuses(monkeypatch) -> None:
     monkeypatch.setenv("APIS_VENDOR_BINDING", "{not json")
-    assert model_tiering.configured_vendor_binding() == {}
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_vendor_binding()
 
 
 def test_action_policy_drops_unrecognized_tier_name(monkeypatch) -> None:
@@ -78,14 +80,13 @@ def test_action_policy_drops_unrecognized_tier_name(monkeypatch) -> None:
     assert model_tiering.configured_action_policy() == {"build": "top"}
 
 
-def test_vendor_binding_drops_unrecognized_tier_name(monkeypatch) -> None:
+def test_vendor_binding_refuses_unrecognized_tier_name(monkeypatch) -> None:
     monkeypatch.setenv(
         "APIS_VENDOR_BINDING",
         json.dumps({"cursor": {"top": "opus-thing", "bogus": "x"}}),
     )
-    assert model_tiering.configured_vendor_binding() == {
-        "cursor": {"top": "opus-thing"}
-    }
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_vendor_binding()
 
 
 def test_vendor_binding_lowercases_provider_and_tier(monkeypatch) -> None:
@@ -97,9 +98,10 @@ def test_vendor_binding_lowercases_provider_and_tier(monkeypatch) -> None:
     }
 
 
-def test_vendor_binding_drops_provider_whose_value_is_not_an_object(monkeypatch) -> None:
+def test_vendor_binding_refuses_provider_whose_value_is_not_an_object(monkeypatch) -> None:
     monkeypatch.setenv("APIS_VENDOR_BINDING", json.dumps({"cursor": "not-a-map"}))
-    assert model_tiering.configured_vendor_binding() == {}
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_vendor_binding()
 
 
 # ── resolve_tier: policy-driven, fail-closed to the top tier ────────────────
@@ -474,3 +476,156 @@ def test_tier_counts_reasons_tolerate_rows_without_them(tmp_path, monkeypatch):
                       "action_class": "build", "escalation_reasons": "oops"}) + "\n"
     )
     assert model_tiering.tier_counts(with_reasons=True)["by_reason"] == {}
+
+
+def test_missing_policy_file_still_uses_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build":"top"}')
+    assert model_tiering.configured_action_policy() == {"build": "top"}
+
+
+def test_present_empty_object_policy_keeps_file_priority(monkeypatch, tmp_path):
+    path = tmp_path / "policy.json"
+    path.write_text("{}")
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(path))
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build":"mid"}')
+    assert model_tiering.configured_action_policy() == {}
+
+
+@pytest.mark.parametrize("source", ["directory", "dangling_link"])
+def test_existing_unreadable_source_never_uses_environment(monkeypatch, tmp_path, source):
+    path = tmp_path / "policy.json"
+    if source == "directory":
+        path.mkdir()
+    else:
+        path.symlink_to(tmp_path / "missing-target")
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(path))
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"build":"mid"}')
+    with pytest.raises(model_tiering.InvalidTierPolicyError):
+        model_tiering.configured_action_policy()
+
+
+AMBIGUOUS_CONFIGS = [
+    ("policy", '{"build":"mid","build":"top"}'),
+    ("policy", '{"build":"mid","build":"mid"}'),
+    ("policy", '{"build":"mid","bu\\u0069ld":"top"}'),
+    ("policy", '{"build":{"min_tier":"mid","max_tier":"mid","max_tier":"top"}}'),
+    ("binding", '{"codex":{"mid":"first"},"codex":{"mid":"second"}}'),
+    ("binding", '{"codex":{"mid":"first","mid":"second"}}'),
+    ("binding", '{"codex":{"mid":"first","mid":"first"}}'),
+    ("binding", '{"codex":{"mid":"first","m\\u0069d":"second"}}'),
+]
+
+
+@pytest.mark.parametrize("kind,raw", AMBIGUOUS_CONFIGS)
+@pytest.mark.parametrize("source", ["file", "env"])
+def test_selected_config_requires_unique_members(monkeypatch, tmp_path, kind, raw, source):
+    prefix = "APIS_ACTION_POLICY" if kind == "policy" else "APIS_VENDOR_BINDING"
+    path = tmp_path / "selected.json"
+    monkeypatch.setenv(prefix + "_FILE", str(path))
+    if source == "file":
+        path.write_text(raw)
+        monkeypatch.setenv(prefix, '{"build":"mid"}' if kind == "policy"
+                           else '{"codex":{"mid":"alternate"}}')
+    else:
+        monkeypatch.setenv(prefix, raw)
+    load = (model_tiering.configured_action_policy if kind == "policy"
+            else model_tiering.configured_vendor_binding)
+    with pytest.raises(model_tiering.InvalidTierPolicyError) as raised:
+        load()
+    assert str(path) not in str(raised.value)
+    assert "first" not in str(raised.value)
+
+
+@pytest.mark.parametrize("kind,raw", AMBIGUOUS_CONFIGS)
+def test_preinstall_check_rejects_ambiguous_objects(tmp_path, capsys, kind, raw):
+    path = tmp_path / "selected.json"
+    path.write_text(raw)
+    detected, data, errors, _ = model_tiering.check_config_file(path)
+    assert detected is None and data == {} and errors
+    assert model_tiering.main(["--check", str(path)]) == 1
+    assert "FAIL" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind,raw,expected", [
+    ("policy", '{"bu\\u0069ld":"mid"}', {"build": "mid"}),
+    ("binding", '{"codex":{"m\\u0069d":"selected-model","top":"other-model"}}',
+     {"codex": {"mid": "selected-model", "top": "other-model"}}),
+])
+def test_unique_escaped_members_remain_valid(monkeypatch, tmp_path, capsys, kind, raw, expected):
+    path = tmp_path / "selected.json"
+    path.write_text(raw)
+    prefix = "APIS_ACTION_POLICY" if kind == "policy" else "APIS_VENDOR_BINDING"
+    monkeypatch.setenv(prefix + "_FILE", str(path))
+    load = (model_tiering.configured_action_policy if kind == "policy"
+            else model_tiering.configured_vendor_binding)
+    assert load() == expected
+    assert not model_tiering.check_config_file(path)[2]
+    assert model_tiering.main(["--check", str(path)]) == 0
+
+
+CHECKER_PRIVATE_MARKERS = ("selected-path-marker", "member-marker", "value-marker", "tier-marker")
+CHECKER_INVALID_INPUTS = [
+    None,
+    '{"member-marker":"value-marker","member-marker":"other"}',
+    '{"member-marker":"value-marker"',
+    '["value-marker"]',
+    '{}',
+    '{"member-marker":"tier-marker"}',
+    '{"member-marker":{"tier-marker":"value-marker"}}',
+    '{"codex":{"top":"value-marker","top":"other"}}',
+]
+
+
+@pytest.mark.parametrize("raw", CHECKER_INVALID_INPUTS)
+def test_checker_diagnostics_are_value_free_and_actionable(tmp_path, capsys, raw):
+    path = tmp_path / "selected-path-marker.json"
+    if raw is not None:
+        path.write_text(raw)
+    _, _, errors, warnings = model_tiering.check_config_file(path)
+    assert errors
+    returned = "\n".join(errors + warnings)
+    assert not any(value in returned for value in CHECKER_PRIVATE_MARKERS)
+    assert all("invalid configuration" in value and "correct" in value and "--check" in value
+               for value in errors)
+    assert model_tiering.main(["--check", str(path)]) == 1
+    output = capsys.readouterr().out
+    assert not any(value in output for value in (*CHECKER_PRIVATE_MARKERS, str(path)))
+    assert "ERROR configuration 1" in output and "FAIL  configuration 1" in output
+    assert "invalid configuration" in output and "correct" in output and "--check" in output
+
+
+def test_checker_valid_warning_retains_data_without_reprinting_members(tmp_path, capsys):
+    path = tmp_path / "selected-path-marker.json"
+    path.write_text('{"member-marker":"mid"}')
+    kind, data, errors, warnings = model_tiering.check_config_file(path)
+    assert kind == "action-policy" and data == {"member-marker": "mid"}
+    assert not errors and warnings
+    assert "member-marker" not in "\n".join(warnings)
+    assert model_tiering.main(["--check", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "selected-path-marker" not in output and "member-marker" not in output
+    assert "ok    configuration 1 (action-policy, 1 entries)" in output
+
+
+def test_checker_multiple_inputs_use_stable_indices_and_keep_kinds(tmp_path, capsys):
+    policy, binding = tmp_path / "selected-path-marker.json", tmp_path / "other-path-marker.json"
+    policy.write_text('{"build":"top"}')
+    binding.write_text('{"codex":{"top":"value-marker"}}')
+    assert model_tiering.main(["--check", str(policy), str(binding)]) == 0
+    output = capsys.readouterr().out
+    assert "ok    configuration 1 (action-policy, 1 entries)" in output
+    assert "ok    configuration 2 (vendor-binding, 1 entries)" in output
+    assert not any(value in output for value in (*CHECKER_PRIVATE_MARKERS, "other-path-marker"))
+
+
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError, ValueError])
+def test_checker_path_preparation_failure_is_bounded(tmp_path, monkeypatch, capsys, error_type):
+    def refuse(path):
+        raise error_type("member-marker")
+    monkeypatch.setattr(Path, "expanduser", refuse)
+    assert model_tiering.main(["--check", "~selected-path-marker"]) == 1
+    output = capsys.readouterr().out
+    assert "ERROR configuration 1" in output and "FAIL  configuration 1" in output
+    assert "invalid configuration" in output and "correct" in output and "--check" in output
+    assert not any(value in output for value in (*CHECKER_PRIVATE_MARKERS, "Traceback"))
