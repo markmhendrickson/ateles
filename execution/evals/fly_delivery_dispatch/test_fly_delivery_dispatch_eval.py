@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import importlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -31,6 +32,7 @@ import fly_delivery_eval as job_eval  # noqa: E402
 import skill_runner  # noqa: E402
 import fly_runner  # noqa: E402
 from test_fly_runner import FakeFly, make_executor, FLY_TOKEN  # noqa: E402
+from test_fly_delivery_dispatch import component_producer_admission as component_producer_admission  # noqa: E402
 from test_swarm_dispatch import (  # noqa: E402
     SwarmDispatcher,
     _StubNotifier,
@@ -41,6 +43,69 @@ from test_swarm_dispatch import (  # noqa: E402
 
 SCENARIOS = json.loads((HERE / "fixtures/scenarios.json").read_text())["scenarios"]
 JOBS = {s["id"]: s for s in job_eval.load_scenarios()}
+
+
+@pytest.fixture
+def offline_dispatch_eval(monkeypatch, tmp_path, request):
+    """Only the two selected offline eval families; no producer-origin evidence."""
+    assert request.node.originalname in {
+        "test_dispatch_scenario", "test_remote_pr_contract_after_actual_agent_delivery"}
+    monkeypatch.setattr(fly_runner, "this_process_owner", lambda identity: {
+        "id": identity, "pid": 123, "start": "synthetic-start", "host": "synthetic-host"})
+    monkeypatch.setattr(delivery, "_inflight", {})
+    monkeypatch.setattr(delivery, "_release_hook", None)
+    for name, filename in {
+        "APIS_FLY_LEDGER_FILE": "fly-ledger.json",
+        "APIS_TIER_LEDGER_FILE": "tier.jsonl",
+        "APIS_HARNESS_USAGE_FILE": "usage.json",
+        "APIS_ACTION_POLICY_FILE": "action.json",
+        "APIS_VENDOR_BINDING_FILE": "vendor.json",
+        "APIS_CLAUDE_LOCAL_CONFIG": "local-provider.json",
+    }.items():
+        monkeypatch.setenv(name, str(tmp_path / filename))
+    monkeypatch.setenv("APIS_USAGE_GATE", "off")
+    monkeypatch.setenv("APIS_USAGE_PROBE", "off")
+    monkeypatch.setattr(skill_runner, "DISPATCH_FAILURE_LOG_DIR", tmp_path / "dispatch-failures")
+    deadlines = []
+
+    class InertDeadline:
+        cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    def arm_deadline(*args, **kwargs):
+        timer = InertDeadline()
+        deadlines.append(timer)
+        return timer
+
+    def unexpected_abort(*args, **kwargs):
+        raise AssertionError("offline component unexpectedly reached root process cleanup")
+
+    monkeypatch.setattr(job_eval.run_job, "arm_hard_deadline", arm_deadline)
+    monkeypatch.setattr(job_eval.run_job, "stop_and_exit", unexpected_abort)
+    original_genv = job_eval._genv
+
+    def owned_git_env(home):
+        home = Path(home).resolve()
+        assert home.is_relative_to(tmp_path.resolve())
+        env = original_genv(home)
+        settings = [
+            ("core.hooksPath", os.devnull), ("core.fsmonitor", "false"),
+            ("credential.helper", ""), ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"), ("protocol.allow", "never"),
+            ("protocol.file.allow", "always"),
+        ]
+        env.update(GIT_CONFIG_COUNT=str(len(settings)), GIT_TERMINAL_PROMPT="0",
+                   GIT_ALLOW_PROTOCOL="file", GIT_ASKPASS="", SSH_ASKPASS="")
+        for i, (key, value) in enumerate(settings):
+            env[f"GIT_CONFIG_KEY_{i}"] = key
+            env[f"GIT_CONFIG_VALUE_{i}"] = value
+        return env
+
+    monkeypatch.setattr(job_eval, "_genv", owned_git_env)
+    yield
+    assert deadlines and all(timer.cancelled for timer in deadlines)
 
 
 @dataclasses.dataclass
@@ -242,6 +307,7 @@ def judge(scenario, trace):
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s["id"] for s in SCENARIOS])
+@pytest.mark.usefixtures("offline_dispatch_eval")
 def test_dispatch_scenario(scenario, tmp_path, monkeypatch):
     trace = run_scenario(scenario, tmp_path, monkeypatch)
     assert judge(scenario, trace) == []
@@ -249,7 +315,10 @@ def test_dispatch_scenario(scenario, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("entry", ["task", "pipeline"])
 @pytest.mark.parametrize("mismatch", [None, "base", "branch", "commit"])
-def test_remote_pr_contract_after_actual_agent_delivery(tmp_path, monkeypatch, entry, mismatch):
+@pytest.mark.usefixtures("offline_dispatch_eval")
+def test_remote_pr_contract_after_actual_agent_delivery(
+    tmp_path, monkeypatch, entry, mismatch, component_producer_admission
+):
     """Completion component control, not an authenticated producer admission.
 
     The real job/agent/git/PR effects supply the outcome, then an explicit
@@ -267,28 +336,28 @@ def test_remote_pr_contract_after_actual_agent_delivery(tmp_path, monkeypatch, e
     monkeypatch.setenv(delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "receipts.json"))
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
     monkeypatch.setattr(delivery, "_new_branch", lambda label: (branch, "eval", "eval"))
-    launches, reads = [], []
+    launches, reads, completed = [], [], []
     answer = {"number": record["pr_number"], "url": record["pr_url"],
               "baseRefName": "other" if mismatch == "base" else "main",
               "headRefName": "other" if mismatch == "branch" else branch,
               "headRefOid": "b" * 40 if mismatch == "commit" else commit,
               "headRepository": {"nameWithOwner": job_eval.REPO}}
-    real_run = subprocess.run
-
     def gh_read(argv, *args, **kwargs):
         if argv[:3] == ["gh", "pr", "view"]:
             reads.append(argv)
             return subprocess.CompletedProcess(argv, 0, json.dumps(answer), "")
-        return real_run(argv, *args, **kwargs)
+        raise AssertionError("unexpected subprocess after the component job completed")
 
     async def completed_component(skill, prompt, **kwargs):
         launches.append(kwargs)
-        return skill_runner.SkillResult(
+        result = skill_runner.SkillResult(
             skill, True, 0, "", "", remote_run_id=record["run_id"],
             fly_delivery_status=record["delivery_status"], fly_delivery_branch=branch,
             fly_delivery_commit=commit, fly_pr_number=record["pr_number"],
             fly_pr_url=record["pr_url"],
         )
+        completed.append(result)
+        return result
 
     monkeypatch.setattr(subprocess, "run", gh_read)
     monkeypatch.setattr(apis, "run_skill", completed_component)
@@ -313,6 +382,13 @@ def test_remote_pr_contract_after_actual_agent_delivery(tmp_path, monkeypatch, e
         else:
             assert asyncio.run(coroutine) == record["pr_url"]
     assert reads and "headRefOid" in reads[0][-1]
+    assert all(argv[:6] == ["gh", "pr", "view", str(record["pr_number"]), "--repo", job_eval.REPO]
+               for argv in reads)
+    assert len(completed) == 1 and component_producer_admission
+    assert all(result is completed[0] and plan is not None
+               and plan.repository == job_eval.REPO and plan.branch == branch
+               and plan.spec() == launches[0]["fly_delivery"]
+               for result, plan in component_producer_admission)
     receipt = delivery._delivery_ledger().delivery_receipts()["owner/repo#123"]
     assert receipt["status"] == ("unknown" if mismatch else "opened")
     importlib.reload(delivery)
