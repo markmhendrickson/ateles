@@ -2,7 +2,17 @@
 
 **Status:** Design (Phase 6)
 **Tasks:** `ent_1e11760c9761d67cc66baa86` (enforcement design, p1) + `ent_872bf00817aba111cdda441a` (canonical artifact taxonomy, p2)
-**Plan:** `ent_99ace4dd6673aa36ed08b1fe` (Ateles Agent Swarm Architecture)
+**Plan:** `ent_81aadb43caf2fa493361e8ed` (lay-the-foundation-master). This
+document was originally filed under `ent_99ace4dd6673aa36ed08b1fe`, which was
+superseded for new work on 2026-09-21 and accepts no new todos or decisions.
+
+> **No default plan binding.** A session resolves the plan for ITS OWN
+> workstream; there is no fallback default, because binding every session to
+> one plan regardless of workstream is the mis-binding the 2026-09-21 decision
+> removed. `_session_integrity.py` keeps `SUPERSEDED_PLAN_ID` defined **only**
+> as a substring probe for `_mentions_plan()` — a session touching that plan is
+> still touching a plan. Do not "clean up" that constant as unused: removing it
+> silently weakens the probe.
 
 > This document specifies how **every write-bearing session** — whether human-in-the-loop (Claude Code, Cursor, Codex) or autonomous (ateles daemons/agents) — is *mechanically required* to (a) link to at least one plan that it keeps current, (b) store its turns as `conversation` + `agent_message` entities related `PART_OF` the plan, and (c) link any derived artifacts it produces back to both the conversation (`REFERS_TO`) and the plan (`PART_OF`). It also defines the **canonical artifact taxonomy** the linkage invariant consumes (satisfying the dependency task in one place).
 
