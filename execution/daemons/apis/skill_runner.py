@@ -50,6 +50,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal, get_args
 
 # ── Path bootstrap (mirrors apis.py so this module is importable standalone) ──
 _DAEMON_DIR = Path(__file__).resolve().parent
@@ -1941,6 +1942,31 @@ def _delivery_failure_reason(*texts: str) -> str | None:
 INFERENCE_ONLY_PROVIDER = "claude"
 
 
+# A per-call request, never a global default or a model/provider selector.
+# These levels are supported by the explicitly selected Sol model family;
+# the native client remains responsible for a particular model's capabilities.
+ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
+REASONING_EFFORTS = get_args(ReasoningEffort)
+
+
+def validate_reasoning_effort(
+    effort: ReasoningEffort | None, *, provider: str | None,
+) -> ReasoningEffort | None:
+    """Preserve omission; refuse an invalid or unhonourable explicit request.
+
+    An explicit request requires a pinned Codex adapter. Unpinned dispatch
+    could fail over to an adapter without this setting, silently dropping the
+    caller's request. No provider selection or fallback changes on omission.
+    """
+    if effort is None:
+        return None
+    if not isinstance(effort, str) or effort not in REASONING_EFFORTS:
+        raise ValueError("invalid reasoning effort; choose " + ", ".join(REASONING_EFFORTS))
+    if provider != "codex":
+        raise ValueError("reasoning effort requires provider='codex'; refusing unsupported or unpinned provider")
+    return effort
+
+
 def _provider_command(
     provider: str,
     binary: str,
@@ -1951,6 +1977,7 @@ def _provider_command(
     network: bool = False,
     codex_outer_sandboxed: bool = False,
     model: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> tuple[list[str], bytes | None]:
     """Build one provider's noninteractive command and initial stdin payload.
 
@@ -1977,6 +2004,7 @@ def _provider_command(
     guesses a model alias in that case.
     """
     model = model_tiering.validate_model_selector(model)
+    reasoning_effort = validate_reasoning_effort(reasoning_effort, provider=provider)
     if provider == "claude":
         return (
             [
@@ -2023,6 +2051,8 @@ def _provider_command(
                 binary,
                 "exec",
                 *(["--model", model] if model else []),
+                *(["--config", f"model_reasoning_effort={json.dumps(reasoning_effort)}"]
+                  if reasoning_effort is not None else []),
                 "--sandbox",
                 sandbox_mode,
                 *network_flags,
@@ -2223,6 +2253,7 @@ async def _run_skill_once(
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     model: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     precomputed_tier: "model_tiering.ResolvedTier | None" = None,
     inference_only: bool = False,
     runner: str | None = None,
@@ -2361,6 +2392,7 @@ async def _run_skill_once(
     provider rather than accepting a wrong local answer as ``ok``.
     """
     model = model_tiering.validate_model_selector(model)
+    reasoning_effort = validate_reasoning_effort(reasoning_effort, provider=provider)
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
 
@@ -2736,6 +2768,7 @@ async def _run_skill_once(
             network=include_github_contract,
             codex_outer_sandboxed=codex_outer_sandboxed,
             model=resolved_model,
+            **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
         )
     if command_wrapper:
         # Prepended to the REAL argv that create_subprocess_exec below will
@@ -3754,6 +3787,7 @@ async def run_skill(
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     model: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     resolved_tier: "model_tiering.ResolvedTier | None" = None,
     inference_only: bool = False,
     runner: str | None = None,
@@ -3770,6 +3804,11 @@ async def run_skill(
     validated is the tier that runs. ``inference_only``: run with no tools
     (see ``INFERENCE_ONLY_PROVIDER``); requires ``local_review`` and a pinned
     ``provider`` of that adapter.
+
+    ``reasoning_effort``: explicit per-call native Codex setting. Requires
+    ``provider="codex"`` and is forwarded unchanged to every attempt; omission
+    preserves prior provider/config behavior. It never selects a model or
+    changes the isolated child configuration or the guard contract.
 
     ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
     attempt — see that function's docstring. Unrelated to provider selection;
@@ -3843,6 +3882,7 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    reasoning_effort = validate_reasoning_effort(reasoning_effort, provider=provider)
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
@@ -3885,6 +3925,7 @@ async def run_skill(
             action_class=action_class,
             escalation_signals=escalation_signals,
             model=fallback_model or model,
+            **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
             precomputed_tier=precomputed_tier,
             inference_only=inference_only,
             runner=runner,

@@ -60,3 +60,9 @@ def test_direct_cli_uses_fixture_checkout_without_ambient_skills(monkeypatch, tm
     scenario = BY_ID[scenario_id]
     obs = harness.run_scenario(scenario, tmp_path)
     assert harness.check(scenario, obs) == [], obs
+
+
+def test_effort_eval_detects_removed_forwarding(tmp_path):
+    scenario = BY_ID['explicit_effort_inert_cli']
+    obs = harness.run_scenario(scenario, tmp_path, mutation='drop_reasoning_effort')
+    assert 'actual provider reasoning effort argv differs' in harness.check(scenario, obs)

@@ -34,7 +34,7 @@ import skill_runner  # noqa: E402
 from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
 
 HEAD = "a" * 40
-MUTATIONS = ("none", "no_validation", "drop_model", "drop_action_class")
+MUTATIONS = ("none", "no_validation", "drop_model", "drop_action_class", "drop_reasoning_effort")
 BINDING = {
     "codex": {"top": "gpt-6-sol", "mid": "gpt-5.6-terra"},
     "cursor": {"top": "gpt-5.6-sol-high", "mid": "gpt-5.6-terra-medium"},
@@ -185,6 +185,32 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                 unavailable_guards=() if ready else ("synthetic guard refusal",),
             )
 
+        if scenario.get("inert_provider"):
+            # Drive the actual CLI/dispatch/adapter with a closed in-process
+            # substitute at the OS boundary. No executable is launched.
+            from types import SimpleNamespace
+            import re
+
+            async def inert_exec(*argv, **kwargs):
+                async def communicate(input=None):
+                    payload = input.decode()
+                    env = kwargs["env"]
+                    config = next((arg for arg in argv if arg.startswith("model_reasoning_effort=")), None)
+                    obs["provider_calls"].append({
+                        "argv": list(argv),
+                        "model": argv[argv.index("--model") + 1] if "--model" in argv else None,
+                        "reasoning_effort": json.loads(config.split("=", 1)[1]) if config else None,
+                        "local_review": env.get("GIT_CONFIG_NOSYSTEM") == "1" and env.get("GIT_TERMINAL_PROMPT") == "0",
+                        "github_credential_present": bool(env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")),
+                    })
+                    path = re.search(r"It must only write the verdict to (.+?) using", payload).group(1)
+                    verdict = f"<!-- review:pm commit={HEAD} -->\n**🤖 Pavo — Ateles swarm, pm review**\n**SIGNED_OFF**\n\nSynthetic eval verdict.\n"
+                    Path(path).write_text(verdict)
+                    return verdict.encode(), b""
+                return SimpleNamespace(returncode=0, communicate=communicate)
+
+            mp.setattr(skill_runner.asyncio, "create_subprocess_exec", inert_exec)
+
         mp.setattr(active_runner, "current_pr_head", lambda **kw: HEAD)
         # --post is absent; any accidental publication must fail the eval.
         def no_publication(**kw):
@@ -202,8 +228,10 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                 kw.pop("model", None)
             elif mutation == "drop_action_class":
                 kw.pop("action_class", None)
+            elif mutation == "drop_reasoning_effort":
+                kw.pop("reasoning_effort", None)
             obs["dispatch_calls"].append({k: kw.get(k) for k in (
-                "provider", "model", "action_class", "local_review", "seated_reviewer", "task_entity_id"
+                "provider", "model", "reasoning_effort", "action_class", "local_review", "seated_reviewer", "task_entity_id"
             )})
             return await real_dispatch(role, task, **kw)
 
@@ -295,6 +323,8 @@ def check(scenario, obs):
         failures.append(f"dispatches {len(obs['dispatch_calls'])}, expected {exp['dispatches']}")
     if "models" in exp and [c["model"] for c in obs["provider_calls"]] != exp["models"]:
         failures.append("actual provider model argv differs")
+    if "reasoning_efforts" in exp and [c.get("reasoning_effort") for c in obs["provider_calls"]] != exp["reasoning_efforts"]:
+        failures.append("actual provider reasoning effort argv differs")
     for expected_key, observed_key in (("worktrees", "worktree_preparations"),
                                        ("sandboxes", "sandbox_builds")):
         if expected_key in exp and len(obs[observed_key]) != exp[expected_key]:
