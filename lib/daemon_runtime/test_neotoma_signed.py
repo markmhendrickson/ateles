@@ -4,16 +4,41 @@ Stdlib-only (unittest) so it runs in minimal daemon environments without pytest.
 """
 
 import json
+import concurrent.futures
+import select
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import neotoma_signed as ns  # noqa: E402
+
+
+def _identity_after_virtual_second(agent_name, *, sub=None, keys_dir=None):
+    (Path(keys_dir) / "prepared").write_text("prepared")
+    return {"key": "synthetic-unused", "sub": sub or "synthetic", "kid": "synthetic"}
+
+
+_REAL_POPEN = subprocess.Popen
+
+
+def _popen_at_control(*args, **kwargs):
+    """An OS barrier immediately before a real helper process is created."""
+    ready = os.open(os.environ["ATELES_SIGNED_TEST_READY"], os.O_WRONLY)
+    os.write(ready, str(os.getpid()).encode())
+    os.close(ready)
+    release = os.open(os.environ["ATELES_SIGNED_TEST_RELEASE"], os.O_RDONLY)
+    try:
+        os.read(release, 1)
+    finally:
+        os.close(release)
+    return _REAL_POPEN(*args, **kwargs)
 
 
 class NeotomaSignedTest(unittest.TestCase):
@@ -59,39 +84,254 @@ class NeotomaSignedTest(unittest.TestCase):
         self.assertEqual(ns.agent_identity("apus")["sub"], "custom@x")
 
     def test_signed_request_parses_helper_output(self):
-        self._write_key("apus")
-        helper_out = json.dumps(
-            {"status": 200, "ok": True, "body": json.dumps({"entities": [{"id": "e1"}]})}
-        )
-
-        def fake_run(cmd, **kw):
-            self.assertTrue(kw["env"]["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"].endswith("apus.jwk.json"))
-            self.assertEqual(kw["env"]["NEOTOMA_AAUTH_SUB"], "apus@ateles-swarm")
-            return subprocess.CompletedProcess(cmd, 0, stdout=helper_out, stderr="")
-
-        with mock.patch.object(ns.subprocess, "run", side_effect=fake_run):
-            status, data = ns.signed_request(
-                "POST", "http://x/entities/query", {"q": 1}, agent_name="apus"
-            )
-        self.assertEqual(status, 200)
-        self.assertEqual(data, {"entities": [{"id": "e1"}]})
+        root, effect = self._real_helper_fixture()
+        os.environ["ATELES_SIGNED_TEST_BODY"] = json.dumps({"entities": [{"id": "e1"}]})
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            status, data = ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus")
+        self.assertEqual((status, data), (200, {"entities": [{"id": "e1"}]}))
+        observed = json.loads(effect.read_text())
+        self.assertEqual(observed["sub"], "apus@ateles-swarm")
+        self.assertTrue(observed["key"].endswith("apus.jwk.json"))
 
     def test_signed_request_raises_on_helper_error(self):
-        self._write_key("apus")
-        out = json.dumps({"error": "cliSignedFetch not found"})
-        with mock.patch.object(
-            ns.subprocess, "run",
-            return_value=subprocess.CompletedProcess([], 1, stdout=out, stderr=""),
-        ):
-            with self.assertRaises(RuntimeError) as cm:
-                ns.signed_request("GET", "http://x/health", agent_name="apus")
-        self.assertIn("cliSignedFetch not found", str(cm.exception))
+        root, _ = self._real_helper_fixture()
+        os.environ["ATELES_SIGNED_TEST_ERROR"] = "fetch failed"
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("GET", "http://fixture.invalid", agent_name="apus")
+        self.assertEqual(caught.exception.code, "transport_error")
 
     def test_signed_request_no_key_raises(self):
         ns.AAUTH_KEYS_DIR = str(Path(self._tmp.name) / "empty")
         with self.assertRaises(RuntimeError) as cm:
             ns.signed_request("GET", "http://x", agent_name="ghost")
         self.assertIn("no AAuth key", str(cm.exception))
+
+    def test_launch_timeout_is_recomputed_after_preparation(self):
+        root, effect = self._real_helper_fixture()
+
+        def clock():
+            return 101.0 if (self.keys / "prepared").exists() else 100.0
+
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            ns, "agent_identity", _identity_after_virtual_second
+        ):
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://fixture.invalid", {}, timeout=10,
+                                  deadline=100.5, clock=clock)
+        self.assertEqual(caught.exception.code, "expired")
+        self.assertFalse(effect.exists())
+
+    def test_expired_request_never_starts_preparation_or_transport(self):
+        with mock.patch.object(ns.multiprocessing, "get_context") as context:
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://unused.invalid", {},
+                                  deadline=time.monotonic() - 1)
+        self.assertEqual(caught.exception.code, "expired")
+        context.assert_not_called()
+
+    def test_abandoned_request_never_starts_preparation_or_transport(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        with mock.patch.object(ns.multiprocessing, "get_context") as context:
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://unused.invalid", {}, cancelled=cancelled)
+        self.assertEqual(caught.exception.code, "expired")
+        context.assert_not_called()
+
+    def _real_helper_fixture(self):
+        root = Path(self._tmp.name) / "helper-fixture"
+        module = root / "dist" / "cli" / "aauth_signer.js"
+        module.parent.mkdir(parents=True)
+        (root / "package.json").write_text('{"type":"module"}')
+        module.write_text(
+            'import fs from "node:fs";\n'
+            'export async function cliSignedFetch(url, options) {\n'
+            '  if (process.env.ATELES_SIGNED_TEST_ERROR) throw new Error(process.env.ATELES_SIGNED_TEST_ERROR);\n'
+            '  fs.writeFileSync(process.env.ATELES_SIGNED_TEST_EFFECT,\n'
+            '    JSON.stringify({pid: process.pid, method: options.method, sub: process.env.NEOTOMA_AAUTH_SUB, key: process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH}));\n'
+            '  return {status: 200, ok: true, text: async () => process.env.ATELES_SIGNED_TEST_BODY || "{}"};\n'
+            '}\n'
+        )
+        effect = root / "effect.json"
+        os.environ["ATELES_SIGNED_TEST_EFFECT"] = str(effect)
+        self._write_key("apus")
+        return root, effect
+
+    def test_real_helper_fixture_records_success(self):
+        root, effect = self._real_helper_fixture()
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            result = ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus")
+        self.assertEqual(result, (200, {}))
+        self.assertGreater(json.loads(effect.read_text())["pid"], 0)
+
+    def test_direct_caller_is_bounded_during_real_process_start(self):
+        root, effect = self._real_helper_fixture()
+        context = ns.multiprocessing.get_context("spawn")
+        entered, release = threading.Event(), threading.Event()
+        real_process = context.Process
+        failures = []
+        children = []
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        permits = threading.BoundedSemaphore(1)
+
+        def process(*args, **kwargs):
+            child = real_process(*args, **kwargs)
+            children.append(child)
+            start = child.start
+
+            def delayed_start():
+                entered.set()
+                release.wait(3)
+                del child.start
+                start()
+
+            child.start = delayed_start
+            return child
+
+        def request():
+            try:
+                ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                  timeout=0.2)
+            except (ns.SignedRequestError, subprocess.TimeoutExpired) as exc:
+                failures.append(exc)
+
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            context, "Process", side_effect=process
+        ), mock.patch.object(ns.multiprocessing, "get_context", return_value=context), mock.patch.object(
+            ns, "_signed_pool", pool, create=True
+        ), mock.patch.object(ns, "_signed_permits", permits, create=True):
+            caller = threading.Thread(target=request)
+            caller.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                caller.join(0.5)
+                self.assertFalse(caller.is_alive(), "process creation held the direct caller")
+                self.assertTrue(failures)
+                with self.assertRaises(ns.SignedRequestError) as busy:
+                    ns.signed_request("GET", "http://fixture.invalid", agent_name="apus", timeout=0.1)
+                self.assertEqual(busy.exception.code, "busy")
+            finally:
+                release.set()
+                caller.join(3)
+                pool.shutdown(wait=True)
+        self.assertFalse(effect.exists())
+        self.assertTrue(children and all(child.pid and not child.is_alive() for child in children))
+        self.assertTrue(permits.acquire(blocking=False), "startup cleanup retained its permit")
+        permits.release()
+
+    def test_start_error_recovers_the_same_worker(self):
+        root, effect = self._real_helper_fixture()
+        context = ns.multiprocessing.get_context("spawn")
+        real_process = context.Process
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        permits = threading.BoundedSemaphore(1)
+
+        def process(*args, **kwargs):
+            child = real_process(*args, **kwargs)
+            child.start = mock.Mock(side_effect=OSError("synthetic startup failure"))
+            return child
+
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            ns, "_signed_pool", pool
+        ), mock.patch.object(ns, "_signed_permits", permits):
+            try:
+                with mock.patch.object(context, "Process", side_effect=process), mock.patch.object(
+                    ns.multiprocessing, "get_context", return_value=context
+                ):
+                    with self.assertRaises(OSError):
+                        ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus")
+                pool.submit(lambda: None).result(timeout=2)
+                self.assertEqual(ns.signed_request("POST", "http://fixture.invalid", {},
+                                                   agent_name="apus"), (200, {}))
+                self.assertTrue(effect.exists())
+            finally:
+                pool.shutdown(wait=True)
+
+    def _helper_creation_control(self, *, cancel, loader=False):
+        root, effect = self._real_helper_fixture()
+        ready, release = root / "ready", root / "release"
+        os.mkfifo(ready)
+        os.mkfifo(release)
+        os.environ["ATELES_SIGNED_TEST_READY"] = str(ready)
+        os.environ["ATELES_SIGNED_TEST_RELEASE"] = str(release)
+        ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
+        release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+        cancelled = threading.Event()
+        errors = []
+        fallback = []
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        permits = threading.BoundedSemaphore(1)
+        real_request = ns.signed_request
+        import agent_loader as al
+
+        def budgeted_request(*args, **kwargs):
+            kwargs.update(timeout=1, cancelled=cancelled)
+            return real_request(*args, **kwargs)
+
+        def bearer(*args, **kwargs):
+            fallback.append(True)
+            return mock.Mock(raise_for_status=lambda: None, json=lambda: {"synthetic_fallback": True})
+
+        def request():
+            try:
+                if loader:
+                    al.AgentLoader("apus")._neotoma("POST", "http://fixture.invalid", {})
+                else:
+                    real_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                 timeout=1, cancelled=cancelled)
+            except (ns.SignedRequestError, subprocess.TimeoutExpired) as exc:
+                errors.append(exc)
+
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            ns.subprocess, "Popen", _popen_at_control
+        ), mock.patch.object(ns, "_signed_pool", pool, create=True), mock.patch.object(
+            ns, "_signed_permits", permits, create=True
+        ), mock.patch.object(al, "ns", ns), mock.patch.object(
+            ns, "signed_request", budgeted_request
+        ), mock.patch.object(al.httpx, "post", side_effect=bearer), mock.patch.dict(
+            os.environ, {"NEOTOMA_AAUTH_VIA_CLI": "1"}
+        ):
+            caller = threading.Thread(target=request)
+            caller.start()
+            try:
+                self.assertTrue(select.select([ready_fd], [], [], 2)[0], "real startup seam not reached")
+                worker_pid = int(os.read(ready_fd, 100))
+                self.assertGreater(worker_pid, 0)
+                if cancel:
+                    cancelled.set()
+                caller.join(1.5)
+                bounded = not caller.is_alive()
+            finally:
+                os.write(release_fd, b"1")
+                caller.join(3)
+                pool.shutdown(wait=True)
+                os.close(ready_fd)
+                os.close(release_fd)
+        self.assertTrue(bounded, "helper creation held the direct caller")
+        self.assertTrue(fallback if loader else errors, "abandoned attempt was accepted")
+        self.assertFalse(effect.exists(), "an abandoned attempt produced a real helper effect")
+
+    def test_cancelled_attempt_has_no_effect_at_process_boundary(self):
+        self._helper_creation_control(cancel=True)
+
+    def test_expired_attempt_has_no_effect_at_process_boundary(self):
+        self._helper_creation_control(cancel=False)
+
+    def test_loader_signed_path_is_bounded_during_helper_creation(self):
+        self._helper_creation_control(cancel=False, loader=True)
+
+    def test_loader_signed_path_uses_the_existing_helper(self):
+        import agent_loader as al
+        root, effect = self._real_helper_fixture()
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            al, "ns", ns
+        ), mock.patch.dict(os.environ, {"NEOTOMA_AAUTH_VIA_CLI": "1"}), mock.patch.object(
+            al.httpx, "post"
+        ) as bearer:
+            self.assertEqual(al.AgentLoader("apus")._neotoma("POST", "http://fixture.invalid", {}), {})
+        self.assertTrue(effect.exists())
+        bearer.assert_not_called()
 
     # ── ateles#795 constraint 2: explicit subject, never ambient ──────────────
 
@@ -118,28 +358,15 @@ class NeotomaSignedTest(unittest.TestCase):
         self.assertEqual(ns.agent_identity("apus")["sub"], "apus@ateles-swarm")
 
     def test_signed_request_explicit_sub_reaches_the_subprocess_env(self):
-        """`sign_off`'s explicit subject must reach NEOTOMA_AAUTH_SUB in the
-        subprocess env — not the daemon process's own ambient value."""
+        root, effect = self._real_helper_fixture()
         self._write_key("waxwing", kid="waxwing-kid")
         os.environ["NEOTOMA_AAUTH_SUB"] = "apis@ateles-swarm"
-        helper_out = json.dumps({"status": 200, "ok": True, "body": "{}"})
-
-        seen_env = {}
-
-        def fake_run(cmd, **kw):
-            seen_env.update(kw["env"])
-            return subprocess.CompletedProcess(cmd, 0, stdout=helper_out, stderr="")
-
-        with mock.patch.object(ns.subprocess, "run", side_effect=fake_run):
-            ns.signed_request(
-                "POST",
-                "http://x/correct",
-                {"f": 1},
-                agent_name="waxwing",
-                sub="waxwing@ateles-swarm",
-            )
-        self.assertEqual(seen_env["NEOTOMA_AAUTH_SUB"], "waxwing@ateles-swarm")
-        self.assertNotEqual(seen_env["NEOTOMA_AAUTH_SUB"], "apis@ateles-swarm")
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="waxwing",
+                              sub="waxwing@ateles-swarm")
+        observed = json.loads(effect.read_text())
+        self.assertEqual(observed["sub"], "waxwing@ateles-swarm")
+        self.assertNotEqual(observed["sub"], "apis@ateles-swarm")
 
 
 class CheckObservationAttributionTest(unittest.TestCase):

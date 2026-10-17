@@ -144,3 +144,19 @@ def _fly_runner_off_and_isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "isolated-fly-ledger.json"))
     monkeypatch.setattr(fly_runner, "_EXECUTOR", None)
     fly_runner._LOGIN_LOCKS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_retry_backoff(monkeypatch):
+    """A retried signed write waits 1 s and 3 s in production; never in a test.
+
+    The sleep is replaced by one that returns at once, so a test of a persistent
+    failure takes no wall-clock time. Tests of the backoff itself replace it again
+    with one that records the delays.
+    """
+    import gate_waive
+
+    async def _instant(delay):
+        return None
+
+    monkeypatch.setattr(gate_waive, "_retry_sleep", _instant)

@@ -417,7 +417,9 @@ class TestHistoryDoesNotEndOnAFailedSignOff:
         _run(store.sign_off("o/r", 795, "pm", "pavo", HEAD))
 
         order = [f for f, _, _ in rec.writes]
-        assert order == ["owner_history", GATE_STATUS_FIELD, "owner_history"], order
+        # The refused gate write is retried (same key), so collapse its repeats.
+        collapsed = [f for i, f in enumerate(order) if i == 0 or f != order[i - 1]]
+        assert collapsed == ["owner_history", GATE_STATUS_FIELD, "owner_history"], order
 
     def test_a_successful_sign_off_writes_no_failure_note(self, monkeypatch):
         rec = _Record({"pm": "pending"})
@@ -447,7 +449,7 @@ class TestConcurrentSignOffsAreSerialised:
         )
         store = _wire(monkeypatch, rec)
 
-        async def paced(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        async def paced(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             result = rec.apply(body, sub)
             if sub == "accipiter@ateles-swarm" and body["field"] == GATE_STATUS_FIELD:
                 await asyncio.sleep(0.05)  # B's window: A loads here
@@ -505,7 +507,7 @@ class TestNextRunReprovesSignedOff:
         landed = threading.Event()
         release = threading.Event()
 
-        def slow(method, url, body=None, agent_name="", timeout=20, *, sub=None):
+        def slow(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
             result = rec.apply(body, sub)
             if body["field"] == GATE_STATUS_FIELD:
                 landed.set()
