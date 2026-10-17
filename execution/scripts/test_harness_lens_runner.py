@@ -1530,10 +1530,15 @@ def test_dry_run_makes_no_model_call_and_reports_command(
             scratch_root=tmp_path,
             brief_path=brief_file,
             timeout=None,
+            model="preview-model",
+            action_class="lens_review:pm",
         )
     )
 
     assert dispatch_called is False
+    assert report["model"] == "preview-model"
+    assert report["action_class"] == "lens_review:pm"
+    assert report["example_command"][report["example_command"].index("--model") + 1] == "preview-model"
     assert report["dry_run"] is True
     assert report["ok"] is (report["would_refuse"] is None)
     assert report["no_model_call_made"] is True
@@ -1725,6 +1730,147 @@ def test_validate_verdict_refuses_rather_than_invent_a_check_if_reader_missing(
     check = hlr.validate_verdict(SIGNED_OFF_VERDICT, lens_agent="pavo")
     assert check.ok is False
     assert "cannot validate" in check.reason
+
+
+def _reader_preflight_module(monkeypatch, *, missing_dependency):
+    """Import the real reader in a fresh runner, with one dependency withheld."""
+    import builtins
+    import importlib.util
+
+    denied_imports = []
+    if missing_dependency:
+        original_import = builtins.__import__
+
+        def without_aiohttp(name, *args, **kwargs):
+            if name == "aiohttp" or name.startswith("aiohttp."):
+                denied_imports.append(name)
+                raise ModuleNotFoundError("fixture dependency unavailable", name="aiohttp")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_aiohttp)
+        monkeypatch.delitem(sys.modules, "swarm_dispatch", raising=False)
+        monkeypatch.delitem(sys.modules, "github_gateway", raising=False)
+
+    name = "reader_preflight_fixture_runner"
+    spec = importlib.util.spec_from_file_location(name, hlr.__file__)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    assert (module.swarm_dispatch is None) == missing_dependency
+    if missing_dependency:
+        assert denied_imports, "the actual reader dependency import must fail"
+    else:
+        assert Path(module.swarm_dispatch.__file__).resolve() == (
+            _DAEMON_DIR / "swarm_dispatch.py"
+        ).resolve()
+    return module
+
+
+@pytest.mark.parametrize("missing_dependency", [False, True])
+@pytest.mark.parametrize("wrong_head", [False, True])
+def test_reader_preflight_cli_before_inference(
+    monkeypatch, tmp_path, brief_file, capsys, missing_dependency, wrong_head
+):
+    """Only the provider effect is synthetic; reader/import/CLI remain real."""
+    module = _reader_preflight_module(
+        monkeypatch, missing_dependency=missing_dependency
+    )
+    calls = []
+    worktrees = []
+
+    def create(self, *, head):
+        worktrees.append(head)
+        self.path.mkdir(parents=True)
+        agents = self.path / "docs" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "pavo.md").write_text("Fixture role prompt\n", encoding="utf-8")
+
+    def ready(cls, provider, root, **kwargs):
+        # Dependency sequencing tests must not run real credential/OS probes.
+        return module.HarnessSandbox(
+            provider=provider, root=root, env_extra={},
+            command_wrapper=["/usr/bin/sandbox-exec", "-f", str(root / "fixture.sb")],
+            credential_read_denied=True, credential_binding_protected=True,
+            user_config_write_denied=True, git_stash_denied=True,
+            review_write_confined=True, authentication_ready=True,
+            unavailable_guards=(),
+        )
+
+    async def provider(role, task, **kwargs):
+        calls.append(role)
+        verdict = SIGNED_OFF_VERDICT
+        if wrong_head:
+            verdict = verdict.replace(SAMPLE_HEAD, "b" * 40)
+        (Path(kwargs["cwd"]) / "pm1_verdict.md").write_text(verdict, encoding="utf-8")
+        return SkillResult(
+            ok=True, skill="fixture", provider="codex", returncode=0,
+            stdout=verdict, stderr="",
+        )
+
+    monkeypatch.setattr(module.Worktree, "create", create)
+    monkeypatch.setattr(module.Worktree, "remove", lambda self: None)
+    monkeypatch.setattr(module.HarnessSandbox, "build", classmethod(ready))
+    monkeypatch.setattr(module, "check_headroom", lambda provider: None)
+    monkeypatch.setattr(module, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+    monkeypatch.setattr(module, "capture_stash_ref_state", lambda path: None)
+    monkeypatch.setattr(module, "verify_stash_ref_unchanged_after_dispatch", lambda *args: None)
+    monkeypatch.setattr(module.dispatch_role, "dispatch", provider)
+
+    rc = module.main([
+        "--repo", "owner/example", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--agent", "pavo", "--provider", "codex",
+        "--model", "gpt-6-sol", "--brief", str(brief_file), "--json",
+    ])
+    report = json.loads(capsys.readouterr().out)
+    if missing_dependency:
+        assert calls == [], "unavailable canonical reader must stop before provider"
+        assert worktrees == [], "dependency refusal must precede review preparation"
+        assert rc == 1 and report["ok"] is False
+        assert "canonical review reader" in report["reason"]
+    else:
+        assert calls == ["pavo"], report
+        assert report["ok"] is (not wrong_head)
+        assert rc == (1 if wrong_head else 0)
+        if wrong_head:
+            assert "commit mismatch" in report["refusal_reason"]
+        else:
+            assert report["lens_verdict"] == "signed_off"
+
+
+def test_reader_preflight_missing_dependency_cli_subprocess(tmp_path, brief_file):
+    """A fresh script runtime refuses before any review-worktree preparation."""
+    driver = r'''
+import builtins, json, sys
+sys.path.insert(0, sys.argv[1])
+original_import = builtins.__import__
+blocked = []
+def without_dependency(name, *args, **kwargs):
+    if name == "aiohttp" or name.startswith("aiohttp."):
+        blocked.append(name)
+        raise ModuleNotFoundError("fixture dependency unavailable", name="aiohttp")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = without_dependency
+import harness_lens_runner as runner
+assert runner.swarm_dispatch is None and blocked
+runner.check_headroom = lambda provider: None
+def must_not_prepare(self, *, head):
+    raise AssertionError("reader preflight happened after review preparation")
+runner.Worktree.create = must_not_prepare
+rc = runner.main([
+    "--repo", "owner/example", "--pr", "1", "--head", "a" * 40,
+    "--lens", "pm", "--provider", "codex", "--brief", sys.argv[2], "--json",
+])
+assert rc == 1
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", driver, str(_SCRIPTS_DIR), str(brief_file)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert report["no_model_call_made"] is True
+    assert "canonical review reader" in report["reason"]
 
 
 # ── Posting gate: never posts an unreadable verdict, never posts under --compare --
@@ -3808,8 +3954,12 @@ def test_lens_by_name_agent_mapping_matches_registry_for_pm_and_arch():
 # ── Worktree lifecycle: guards reach the real dispatch boundary -----------------
 
 
+@pytest.mark.parametrize("model,action_class", [
+    (None, None), ("review-model", None), (None, "lens_review:arch"),
+    ("review-model", "lens_review:arch"),
+])
 def test_run_one_passes_sandbox_env_extra_to_dispatch(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, model, action_class
 ):
     seen = {}
 
@@ -3871,9 +4021,13 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
             scratch_root=tmp_path,
             brief_path=brief_file,
             timeout=None,
+            model=model,
+            action_class=action_class,
         )
     )
 
+    assert seen["model"] == model
+    assert seen["action_class"] == action_class
     assert "CODEX_HOME" in seen["env_extra"]
     assert seen["command_wrapper"]
     assert seen["command_wrapper"][0] == "/usr/bin/sandbox-exec"
@@ -4463,3 +4617,139 @@ def test_the_real_sandbox_reads_templates_and_still_denies_credentials(tmp_path)
     assert hlr.refuse_if_credential_files_in_worktree(project) is None
     for template in templates:
         assert not _hook.is_credential_path(str(template))
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "cursor"])
+@pytest.mark.parametrize("model,action_class,want", [
+    (None, None, None), ("explicit-review", None, "explicit-review"),
+    (None, "lens_review:arch", "bound-review"),
+    ("explicit-review", "lens_review:arch", "explicit-review"),
+])
+def test_dry_run_model_selection_uses_dispatch_resolver(
+    monkeypatch, tmp_path, target, mock_ready_sandbox, provider, model, action_class, want
+):
+    calls = []
+    tiering = hlr.dispatch_role.model_tiering
+    real_resolve = tiering.resolve_tier
+
+    def resolve(action, **kwargs):
+        calls.append(action)
+        return real_resolve(action, policy={"lens_review:arch": "top"})
+
+    monkeypatch.setattr(tiering, "resolve_tier", resolve)
+    monkeypatch.setattr(tiering, "model_for_tier", lambda p, tier: "bound-review")
+    sandbox = hlr.HarnessSandbox.build(provider, tmp_path)
+    report = hlr.dry_run_report(
+        target, provider=provider, sandbox=sandbox, task_text="review",
+        worktree_path=tmp_path, model=model, action_class=action_class,
+    )
+    assert report["model"] == want
+    assert report["action_class"] == action_class
+    assert calls == ([action_class] if model is None and action_class else [])
+    command = report["example_command"]
+    assert ("--model" in command) == bool(want)
+    if want:
+        assert command[command.index("--model") + 1] == want
+    assert report["no_model_call_made"] is True
+
+
+@pytest.mark.parametrize("mode,providers", [
+    (["--provider", "codex"], ["codex"]),
+    (["--compare", "codex,cursor"], ["codex", "cursor"]),
+])
+@pytest.mark.parametrize("selectors,model,action_class", [
+    ([], None, None),
+    (["--model", "explicit-review", "--action-class", "lens_review:arch"],
+     "explicit-review", "lens_review:arch"),
+])
+def test_cli_forwards_model_selectors_to_every_provider(
+    monkeypatch, brief_file, mode, providers, selectors, model, action_class
+):
+    seen = []
+
+    async def capture(target, **kwargs):
+        seen.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(hlr, "run_one", capture)
+    assert hlr.main([
+        "--repo", "owner/repository", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--brief", str(brief_file), *mode, *selectors,
+    ]) == 0
+    assert [call["provider"] for call in seen] == providers
+    assert all(call["model"] == model for call in seen)
+    assert all(call["action_class"] == action_class for call in seen)
+
+
+def test_dry_run_reports_unbound_model_as_refusal(
+    monkeypatch, tmp_path, target, mock_ready_sandbox
+):
+    tiering = hlr.dispatch_role.model_tiering
+    real_resolve = tiering.resolve_tier
+    monkeypatch.setattr(tiering, "resolve_tier", lambda action: real_resolve(action, policy={}))
+
+    def unbound(*args):
+        raise tiering.UnboundTierError("no model bound for review")
+
+    monkeypatch.setattr(tiering, "model_for_tier", unbound)
+    report = hlr.dry_run_report(
+        target, provider="codex", sandbox=hlr.HarnessSandbox.build("codex", tmp_path),
+        task_text="review", worktree_path=tmp_path, action_class="lens_review:arch",
+    )
+    assert report["ok"] is False
+    assert report["would_refuse"] == "no model bound for review"
+    assert "--model" not in report["example_command"]
+    assert report["no_model_call_made"] is True
+
+
+@pytest.mark.parametrize("model", [
+    "", "   ", "gpt 6", "gpt-6-sol\n", "--help", "\u200b", 0, False, [], {},
+])
+@pytest.mark.parametrize("entrypoint", ["run_one", "run_compare", "dry_run_report"])
+def test_model_selector_contract_rejects_invalid_direct_inputs_before_setup(
+    monkeypatch, tmp_path, target, brief_file, model, entrypoint
+):
+    import asyncio
+
+    def unexpected_setup(*args, **kwargs):
+        raise AssertionError("invalid selector reached setup")
+
+    monkeypatch.setattr(hlr, "check_headroom", unexpected_setup)
+    with pytest.raises(ValueError, match="model"):
+        if entrypoint == "dry_run_report":
+            hlr.dry_run_report(
+                target, provider="codex", sandbox=None, task_text="review",
+                worktree_path=tmp_path, model=model, action_class="lens_review:arch",
+            )
+        else:
+            kwargs = dict(
+                dry_run=False, post=False, repo_worktree_name="ateles",
+                scratch_root=tmp_path, brief_path=brief_file, timeout=None,
+                model=model, action_class="lens_review:arch",
+            )
+            if entrypoint == "run_compare":
+                asyncio.run(hlr.run_compare(target, providers=[], **kwargs))
+            else:
+                asyncio.run(hlr.run_one(target, provider="codex", **kwargs))
+
+
+@pytest.mark.parametrize("model", ["", "  ", "gpt 6", "gpt-6-sol\n", "--help", "\u200b"])
+def test_cli_model_selector_contract_refuses_invalid_inputs_before_dispatch(
+    monkeypatch, brief_file, model
+):
+    async def unexpected_dispatch(*args, **kwargs):
+        raise AssertionError("invalid selector reached dispatch")
+
+    monkeypatch.setattr(hlr, "run_one", unexpected_dispatch)
+    with pytest.raises(SystemExit) as exc:
+        hlr.main([
+            "--repo", "owner/repository", "--pr", "1", "--head", SAMPLE_HEAD,
+            "--lens", "pm", "--provider", "codex", "--brief", str(brief_file),
+            "--model=" + model,
+        ])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("model", [None, "gpt-6-sol", "gpt-5.6-terra", "provider/custom-v1:latest"])
+def test_model_selector_contract_preserves_omission_and_valid_identifiers(model):
+    assert hlr.validate_model_selector(model) == model
