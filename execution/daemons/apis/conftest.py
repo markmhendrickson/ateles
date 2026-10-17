@@ -105,6 +105,34 @@ def _isolate_lens_comment_identities(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _default_github_write_credential(monkeypatch):
+    """Give every test the write credential a deployed dispatcher has, with no App.
+
+    The dispatcher's GitHub writes are skipped, with a WARNING, when no write
+    credential is usable (ateles#1381), so a test of what a write DOES needs
+    one. The fallback is applied inside `_resolve_github_write_token` rather than
+    through the environment, so it never changes which agent-token variables the
+    lens-identity lookups see. A fixture value, never a real token; the host's
+    real App is switched off so a test can never mint one. A test of the App
+    path or of the no-credential path restores the real resolver itself
+    (`REAL_RESOLVE_GITHUB_WRITE_TOKEN`).
+    """
+    import swarm_dispatch
+
+    real = swarm_dispatch._resolve_github_write_token
+    monkeypatch.setattr(
+        swarm_dispatch,
+        "_resolve_github_write_token",
+        lambda repo, app_token: real(repo, app_token) or "pat-conftest-fixture",
+    )
+    monkeypatch.setattr(swarm_dispatch, "_REAL_RESOLVE_GITHUB_WRITE_TOKEN", real, raising=False)
+    # Disable only dispatcher token minting. The shared helper also resolves
+    # per-lens Apps; mocking it globally erases those identities in their tests.
+    monkeypatch.setattr(swarm_dispatch, "_app_write_configured", lambda: False)
+    swarm_dispatch._clear_app_write_token_cache()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_build_worktrees(monkeypatch, tmp_path):
     """Never let a test add a real worktree to the operator's real clones.
 
