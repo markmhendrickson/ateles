@@ -1067,6 +1067,9 @@ def main(argv: list[str] | None = None) -> int:
             "stdout": result.stdout,
             "stderr": result.stderr,
             **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
+            # A configuration the operator must repair (not a wait).
+            **({"configuration_repair": result.configuration_repair}
+               if getattr(result, "configuration_repair", "") else {}),
             **({"output_truncated": True} if getattr(result, "output_truncated", False) else {}),
             # Every Fly run reports its identity and machine state, whether
             # its outcome is known or not: cleanup and outcome are separate.
