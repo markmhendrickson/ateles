@@ -105,11 +105,29 @@ def search_response():
                 "include_deleted": False,
                 "include_snapshots": True,
                 "pagination": {"kind": "keyset", "limit": 100, "offset": 0},
-                "predicates": [{"field": "name", "op": "eq", "value": {
-                    "kind": "sha256", "value": hashlib.sha256(json.dumps("pavo").encode()).hexdigest()}}],
+                "predicates": [
+                    {
+                        "field": "name",
+                        "op": "eq",
+                        "value": {
+                            "kind": "sha256",
+                            "value": hashlib.sha256(
+                                json.dumps("pavo").encode()
+                            ).hexdigest(),
+                        },
+                    }
+                ],
             },
-            "request_options": {"applied": ["entity_type", "snapshot_filters", "include_snapshots", "limit"],
-                                "normalized": [], "ignored": []},
+            "request_options": {
+                "applied": [
+                    "entity_type",
+                    "snapshot_filters",
+                    "include_snapshots",
+                    "limit",
+                ],
+                "normalized": [],
+                "ignored": [],
+            },
             "coverage": {
                 "kind": "predicate_population",
                 "state": "complete",
@@ -124,7 +142,9 @@ def search_response():
     }
 
 
-def test_mutating_parsed_tool_array_cannot_rewrite_source_authority(loader, monkeypatch):
+def test_mutating_parsed_tool_array_cannot_rewrite_source_authority(
+    loader, monkeypatch
+):
     data = response()
     monkeypatch.setattr(loader, "_neotoma", lambda *args: data)
     definition = loader.load_for_lens()
@@ -185,9 +205,22 @@ def test_name_lookup_requires_unique_exhaustive_scope(monkeypatch, case):
     assert seen[0]["snapshot_filters"] == {"name": {"op": "eq", "value": "pavo"}}
 
 
-@pytest.mark.parametrize("case", ["wrong_row_type", "missing_row_type", "extra_predicate", "wrong_value",
-                                "missing_value", "wrong_value_kind", "merged_scope", "deleted_scope",
-                                "missing_snapshots", "nonzero_offset", "ignored_scope_option"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "wrong_row_type",
+        "missing_row_type",
+        "extra_predicate",
+        "wrong_value",
+        "missing_value",
+        "wrong_value_kind",
+        "merged_scope",
+        "deleted_scope",
+        "missing_snapshots",
+        "nonzero_offset",
+        "ignored_scope_option",
+    ],
+)
 def test_name_lookup_refuses_unbound_scope_and_row_type(monkeypatch, case):
     monkeypatch.delenv("PAVO_AGENT_DEFINITION_ID", raising=False)
     data = search_response()
@@ -197,9 +230,17 @@ def test_name_lookup_refuses_unbound_scope_and_row_type(monkeypatch, case):
     elif case == "missing_row_type":
         del data["entities"][0]["entity_type"]
     elif case == "extra_predicate":
-        scope["predicates"].append({"field": "status", "op": "eq", "value": {"kind": "sha256", "value": "other"}})
+        scope["predicates"].append(
+            {
+                "field": "status",
+                "op": "eq",
+                "value": {"kind": "sha256", "value": "other"},
+            }
+        )
     elif case == "wrong_value":
-        scope["predicates"][0]["value"]["value"] = hashlib.sha256(json.dumps("other").encode()).hexdigest()
+        scope["predicates"][0]["value"]["value"] = hashlib.sha256(
+            json.dumps("other").encode()
+        ).hexdigest()
     elif case == "missing_value":
         del scope["predicates"][0]["value"]
     elif case == "wrong_value_kind":
@@ -213,7 +254,9 @@ def test_name_lookup_refuses_unbound_scope_and_row_type(monkeypatch, case):
     elif case == "nonzero_offset":
         scope["pagination"]["offset"] = 100
     elif case == "ignored_scope_option":
-        data["read_contract"]["request_options"]["ignored"] = [{"name": "snapshot_filters", "reason": "unsupported_on_surface"}]
+        data["read_contract"]["request_options"]["ignored"] = [
+            {"name": "snapshot_filters", "reason": "unsupported_on_surface"}
+        ]
     loader = AgentLoader("pavo")
     monkeypatch.setattr(loader, "_neotoma", lambda *args: data)
     assert loader.load_for_lens().is_stub

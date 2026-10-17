@@ -46,6 +46,8 @@ def test_the_eval_covers_every_required_behaviour():
         "neotoma_unreachable_refuses_despite_target_prompt",
         "empty_prompt_definition_refuses",
         "definition_absent_refuses_in_dry_run",
+        "unknown_name_scope_refuses_before_checkout",
+        "explicit_id_reviews_with_unknown_name_scope",
     }
     assert required <= set(IDS)
 

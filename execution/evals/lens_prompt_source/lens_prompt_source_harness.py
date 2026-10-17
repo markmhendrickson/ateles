@@ -6,12 +6,12 @@ Drives the real ``harness_lens_runner.main`` CLI end to end for each scenario in
 * a real git target repository (bare origin + clone under a scenario ``HOME``)
   holding the scenario's files, so the runner's own ``Worktree.create`` fetches
   and checks out the exact head with real git;
-* the real ``skill_runner._load_agent_def`` -> ``AgentLoader`` path, reading a
-  stand-in Neotoma at the HTTP layer (``httpx.post``/``httpx.get``), so the
-  canonical definition is resolved the way production resolves it;
+* the real strict ``AgentLoader.load_for_lens`` preflight, reading a stand-in
+  Neotoma at the HTTP layer (``httpx.post``/``httpx.get``), with typed identity
+  and exact requested-scope evidence;
 * a scripted reviewer in place of the model: it records the task it was given,
-  the role, its working directory and the head checked out there, re-resolves
-  the role the way dispatch does, and writes a well-formed verdict file.
+  the role, working directory, checked-out head and definition actually pinned
+  in dispatch kwargs, then writes a well-formed verdict file without reloading.
 
 Stubbed, and why: the provider sandbox build (``sandbox-exec`` exists only on
 macOS, and the guard probes have their own tests), the model call, and the
@@ -21,6 +21,7 @@ live PR-head read (a ``gh`` network call).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import subprocess
@@ -49,6 +50,16 @@ agent_loader = sys.modules[skill_runner.AgentLoader.__module__]
 
 FAKE_NEOTOMA = "https://neotoma.eval.invalid"
 _GIT_ID = ["-c", "user.name=lens-eval", "-c", "user.email=lens-eval@example.invalid"]
+
+
+def _predicate_value(value):
+    """EntityReadContract v1's source-defined JSON value commitment."""
+    return {
+        "kind": "sha256",
+        "value": hashlib.sha256(
+            json.dumps(value, ensure_ascii=False).encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 def load() -> dict:
@@ -82,7 +93,11 @@ class FakeNeotoma:
         ):
             search = body.get("snapshot_filters", {}).get("name", {}).get("value", "")
             entities = [
-                {"entity_id": d["entity_id"], "snapshot": {"snapshot": d["snapshot"]}}
+                {
+                    "entity_id": d["entity_id"],
+                    "entity_type": d["entity_type"],
+                    "snapshot": {"snapshot": d["snapshot"]},
+                }
                 for d in self.definitions
                 if search == d["snapshot"].get("name")
             ]
@@ -94,17 +109,52 @@ class FakeNeotoma:
                     "entities": entities,
                     "total": len(entities),
                     "read_contract": {
+                        "version": "1",
+                        "surface": "entity_collection",
                         "mode": {"actual": "structured"},
                         "applied_scope": {
+                            "owner": "authenticated",
                             "entity_types": ["agent_definition"],
-                            "predicates": [{"field": "name", "op": "eq"}],
+                            "include_merged": False,
+                            "include_deleted": False,
+                            "include_snapshots": True,
+                            "pagination": {"kind": "keyset", "offset": 0, "limit": 100},
+                            "predicates": [
+                                {
+                                    "field": "name",
+                                    "op": "eq",
+                                    "value": _predicate_value(search),
+                                }
+                            ],
+                        },
+                        "request_options": {
+                            "applied": list(body),
+                            "normalized": [],
+                            "ignored": [],
                         },
                         "coverage": {
-                            "state": "complete",
-                            "scope_exhausted": True,
+                            "kind": "predicate_population",
+                            "state": "unknown"
+                            if self.mode == "unknown_scope"
+                            else "complete",
+                            "reasons": ["unsupported_continuation"]
+                            if self.mode == "unknown_scope"
+                            else [],
+                            "page_exhausted": True,
+                            "scope_exhausted": None
+                            if self.mode == "unknown_scope"
+                            else True,
                             "returned_count": len(entities),
-                            "total": {"relation": "exact", "value": len(entities)},
-                            "continuation": {"kind": "none"},
+                            "total": {
+                                "relation": "exact",
+                                "value": len(entities),
+                                "unit": "entities",
+                            },
+                            "continuation": {
+                                "kind": "unsupported"
+                                if self.mode == "unknown_scope"
+                                else "none"
+                            },
                         },
                     },
                 },
@@ -115,6 +165,9 @@ class FakeNeotoma:
         self.queries.append({"method": "GET", "url": url})
         if self.mode == "unreachable":
             raise httpx.ConnectError("eval: the record is unreachable")
+        for definition in self.definitions:
+            if url == f"{FAKE_NEOTOMA}/entities/{definition['entity_id']}":
+                return self._response("GET", url, 200, definition)
         return self._response("GET", url, 404, {"error": "not served by the eval"})
 
 
@@ -247,6 +300,8 @@ def run_scenario(scenario: dict, data: dict, monkeypatch, tmp_path: Path) -> dic
     home = tmp_path / "home"
     home.mkdir()
     _isolate(monkeypatch, tmp_path, home)
+    if scenario.get("explicit_role_id"):
+        monkeypatch.setenv("PAVO_AGENT_DEFINITION_ID", scenario["explicit_role_id"])
     _ready_sandbox(monkeypatch, tmp_path)
 
     repo = scenario["target"]["repo"]
@@ -287,6 +342,8 @@ def run_scenario(scenario: dict, data: dict, monkeypatch, tmp_path: Path) -> dic
                 "cwd_head": _git("rev-parse", "HEAD", cwd=cwd),
                 "definition_entity_id": definition.entity_id,
                 "definition_prompt": definition.prompt_markdown,
+                "definition_tools": definition.tool_allowlist,
+                "definition_status": definition.status,
             }
         )
         text = _verdict(data["lens"], head)
@@ -338,6 +395,7 @@ def run_scenario(scenario: dict, data: dict, monkeypatch, tmp_path: Path) -> dic
             for q in fake.queries
             if q["method"] == "POST" and q["url"].endswith("/entities/query")
         ),
+        "definition_gets": sum(1 for q in fake.queries if q["method"] == "GET"),
     }
 
 
@@ -375,6 +433,11 @@ def check(scenario: dict, data: dict, obs: dict) -> list[str]:
         obs["definition_queries"] == exp["definition_queries"],
         f"definition_queries={obs['definition_queries']}, expected {exp['definition_queries']}",
     )
+    if "definition_gets" in exp:
+        want(
+            obs["definition_gets"] == exp["definition_gets"],
+            "wrong explicit-ID read count",
+        )
     for needle in exp.get("reason_contains", []):
         want(needle in str(report.get("reason", "")), f"reason lacks {needle!r}")
 
@@ -393,6 +456,14 @@ def check(scenario: dict, data: dict, obs: dict) -> list[str]:
                 d["definition_entity_id"] == canonical["entity_id"]
                 and d["definition_prompt"] == canonical["snapshot"]["prompt_markdown"],
                 "dispatch resolved a different definition than the canonical one",
+            )
+            want(
+                d["definition_tools"] == canonical["snapshot"]["tool_allowlist"],
+                "canonical tools changed",
+            )
+            want(
+                d["definition_status"] == canonical["snapshot"]["status"],
+                "canonical status changed",
             )
         for needle in exp.get("task_contains", []):
             want(needle in d["task"], f"task lacks {needle!r}")
