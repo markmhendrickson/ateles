@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """
+DEPRECATED (2026-07): BlackHole local capture is retired; recording now runs
+through Audio Hijack + the Tyto daemon (see execution/scripts/audio_hijack_control.sh).
+Kept for reference/fallback only.
+
 Record system audio (e.g. from BlackHole) and optionally your microphone to one WAV.
 
 Use with a virtual audio device (e.g. BlackHole 2ch on macOS) and a Multi-Output
