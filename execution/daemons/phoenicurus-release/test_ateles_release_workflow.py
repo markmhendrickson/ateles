@@ -213,8 +213,24 @@ def test_actual_run_blocks_bind_notes_and_skip_empty_history(tmp_path, prev, cou
 
 
 def test_actual_run_blocks_refuse_wrong_checked_out_source(tmp_path):
-    with pytest.raises(subprocess.CalledProcessError):
-        run_preparation(tmp_path, actual_sha="b" * 40)
+    observed_sha = "b" * 40
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        run_preparation(tmp_path, actual_sha=observed_sha)
+    assert error.value.returncode == 1
+    assert f"checkout SHA {observed_sha}" in error.value.stderr
+    assert f"expected SOURCE_SHA {SHA}" in error.value.stderr
+    assert "Changelog preparation stopped" in error.value.stderr
+    assert "No changelog artifact was created" in error.value.stderr
+    assert "Verify the source commit and checkout" in error.value.stderr
+    assert "re-run preparation for that source" in error.value.stderr
+    assert not (tmp_path / "ateles-release-notes/notes.md").exists()
+    assert not (tmp_path / "tag.output").exists()
+    assert not (tmp_path / "check.output").exists()
+    calls = [
+        json.loads(line)
+        for line in (tmp_path / "commands.jsonl").read_text().splitlines()
+    ]
+    assert calls == [["rev-parse", "HEAD"]]
 
 
 @pytest.mark.parametrize("mutation", ["write", "publisher", "secret", "reusable_job"])
