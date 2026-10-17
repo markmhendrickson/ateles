@@ -69,9 +69,8 @@ def test_unreliable_statuses_warn_rather_than_halt(status):
 
 
 @pytest.mark.parametrize("status", ["", "  ", "wat", "someday-maybe"])
-def test_unknown_or_empty_status_warns_never_refuses(status):
-    """An unanticipated value is missing information, not grounds for an outage."""
-    assert evaluate_status(status)[0] is StatusAction.WARN
+def test_unknown_or_empty_status_refuses(status):
+    assert evaluate_status(status)[0] is StatusAction.REFUSE
 
 
 def test_refuse_and_warn_are_distinct_states():
@@ -92,10 +91,10 @@ def test_stub_status_is_undefined_not_active():
     On origin/main `_stub()` returned status="active" with tool_allowlist="*",
     so a daemon with NO agent_definition looked fully configured in logs.
     """
-    stub = AgentLoader("nonexistent-agent")._stub()
+    stub = AgentLoader("nonexistent-agent")._undefined_definition("not_found")
     assert stub.status == UNDEFINED_STATUS
     assert stub.status != "active"
-    assert evaluate_status(stub.status)[0] is StatusAction.WARN
+    assert evaluate_status(stub.status)[0] is StatusAction.REFUSE
 
 
 # ── enforce_status_or_exit: the effect, not the mapping ───────────────────────

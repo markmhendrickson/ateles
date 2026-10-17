@@ -1539,9 +1539,9 @@ def test_denial_store_startup_fails_closed_when_unconfigured(monkeypatch):
 async def test_main_refuses_to_start_without_denial_store(monkeypatch):
     monkeypatch.delenv("APIS_CHECKPOINT_DENIAL_DIR", raising=False)
     monkeypatch.setattr(
-        apis.AgentLoader,
-        "load",
-        lambda self: pytest.fail("startup advanced past denial-store validation"),
+        apis,
+        "load_agent_definition_or_exit",
+        lambda name: pytest.fail("startup advanced past denial-store validation"),
     )
 
     with pytest.raises(RuntimeError, match="APIS_CHECKPOINT_DENIAL_DIR"):
