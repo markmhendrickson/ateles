@@ -250,7 +250,13 @@ from lib.daemon_runtime import (  # noqa: E402
     resolve_policy_for_agent,
     write_checkpoint_brief,
 )
+from lib.daemon_runtime.action_type import (  # noqa: E402
+    AGENT_ACTION_TYPE_PRIOR,
+    ResolvedActionType,
+    resolve_gate_action_type,
+)
 from lib.daemon_runtime.gating import (  # noqa: E402
+    ExecutionPolicy,
     checkpoint_already_dispatched,
     checkpoints_for_task,
     close_checkpoint_without_release,
@@ -349,18 +355,14 @@ SUBSCRIBE_ENTITY_TYPES = ["task", "checkpoint_brief"]
 # Coarse action_type per resolved skill — feeds the execution gate's blast-radius
 # classification. Conservative: anything that opens PRs, releases, pays, or posts
 # publicly is high blast. An explicit task.action_type field overrides this.
+# The map itself lives in lib.daemon_runtime.action_type (ateles#682) so the MCP
+# `route_task` preview reads the SAME prior the gate does; this name is the same
+# dict object, kept because tests and the vocabulary check address it here.
 # Values MUST match the execution_policy's high/low_blast_action_types vocabulary
 # (default policy ent_dfce6edecefe3eb7fc9e0337) or the gate mis-classifies blast
 # radius. PR open and merge both map to the policy's "open_or_merge_pr"; "release"
 # is treated as high blast via blast_radius_default + the policy's publish set.
-_AGENT_ACTION_TYPE: dict[str, str] = {
-    "cicada": "open_or_merge_pr",
-    "vanellus": "open_or_merge_pr",
-    "struthio": "publish",
-    "monedula": "payment",
-    "fringilla": "compute_only_analysis",
-    "corvus": "send_external_comms",
-}
+_AGENT_ACTION_TYPE: dict[str, str] = AGENT_ACTION_TYPE_PRIOR
 
 
 def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
@@ -383,6 +385,46 @@ def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
     if skill:
         return _AGENT_ACTION_TYPE.get(skill.lower())
     return None
+
+
+def _resolve_gate_action_type(
+    skill: str | None, snapshot: dict, policy: ExecutionPolicy
+) -> ResolvedActionType:
+    """The action_type the GATE classifies blast radius from (ateles#682).
+
+    Declared value (passed through untouched) -> per-agent prior -> escalation by
+    what the task's own text says it does, and ONLY escalation: the text's
+    high-blast type replaces the prior only when it is strictly stricter than the
+    prior under `policy`, the effective policy the gate will evaluate with, and a
+    never-auto-executable prior is never replaced. Task text can never lower
+    anything. See lib.daemon_runtime.action_type.
+
+    The policy is a required argument so the dispatch gate, the checkpoint
+    re-issue path and the release re-check cannot each quietly compare under a
+    different one.
+
+    Deliberately NOT what `_infer_action_type` returns, and deliberately not
+    used where that one is: model-tier selection (`_dispatch_action_class`) and
+    the build-delivery grant key on the agent's class and must not move when the
+    gate's reading of a task's text does.
+    """
+    return resolve_gate_action_type(
+        skill,
+        snapshot,
+        _AGENT_ACTION_TYPE,
+        verdict=lambda at: policy.blast_radius_for(at).value,
+    )
+
+
+def _dispatch_action_class(skill: str | None, snapshot: dict) -> str:
+    """The action class model-tier selection and the delivery grant key on.
+
+    Unchanged from before ateles#682: `_infer_action_type`, falling back to the
+    task-dispatch class. Named so the decoupling from the gate's resolver is a
+    visible seam with a test on it, not an accident of which function a line
+    happens to call.
+    """
+    return _infer_action_type(skill, snapshot) or model_tiering.ACTION_TASK_DISPATCH_FALLBACK
 
 
 def _confidence_is_explicit(snapshot: dict) -> bool:
@@ -783,10 +825,7 @@ async def _spawn_harness_skill(
     # (explicit `action_type` wins, else the per-agent default). A class the
     # live action_policy does not map resolves to `top`, so a task with no
     # recognizable class never silently runs cheap.
-    action_class = (
-        _infer_action_type(skill, snapshot)
-        or model_tiering.ACTION_TASK_DISPATCH_FALLBACK
-    )
+    action_class = _dispatch_action_class(skill, snapshot)
 
     # A builder task cleared to deliver (the `open_or_merge_pr` class — the one
     # the gate holds for the operator) gets what delivery needs, exactly as the
@@ -848,6 +887,34 @@ async def _spawn_harness_skill(
             **delivery,
         )
     return result
+
+
+CONFIDENCE_DRIVERS_MISSING = (
+    "[COPY: confidence not supplied; inspect task spec or ask creator to add "
+    "confidence_drivers]"
+)
+_CONFIDENCE_DRIVERS_MAX = 600
+
+
+def _confidence_drivers_text(snapshot: dict) -> str:
+    """The creator's own statement of what limits confidence, for the operator.
+
+    A held task says "low confidence" or "never scored"; the creator may already
+    have written WHY in `confidence_drivers`. The operator deciding the
+    checkpoint should read it on the brief or the notification, not go digging
+    in the task. Absent or blank, the line says so explicitly instead of
+    vanishing, so a missing explanation is visible as missing. Collapsed to one
+    line and bounded: this is rendered into a notification.
+    """
+    raw = snapshot.get("confidence_drivers")
+    if isinstance(raw, (list, tuple)):
+        raw = "; ".join(str(item) for item in raw if str(item).strip())
+    text = " ".join(str(raw).split()) if raw is not None else ""
+    if not text:
+        return CONFIDENCE_DRIVERS_MISSING
+    if len(text) > _CONFIDENCE_DRIVERS_MAX:
+        text = text[: _CONFIDENCE_DRIVERS_MAX - 1].rstrip() + "…"
+    return text
 
 
 def _shown_confidence(confidence: float, source: str) -> str:
@@ -1924,7 +1991,8 @@ async def dispatch_task(
     # Skipped when re-dispatching an operator-approved checkpoint.
     if not gate_override:
         policy = resolve_policy_for_agent(skill)
-        action_type = _infer_action_type(skill, snapshot)
+        resolved_action = _resolve_gate_action_type(skill, snapshot, policy)
+        action_type = resolved_action.value
         # ateles#902: populate confidence ahead of the read. When no producer
         # scored this task, this mechanically scores it (per confidence_rubric
         # ent_22fd6f25159f1f2689726780) instead of the gate reading an absent
@@ -2051,7 +2119,8 @@ async def dispatch_task(
                 )
         log.info(
             f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
-            f"action={action_type} blast={decision.blast_radius.value} "
+            f"action={action_type} ({resolved_action.source}) "
+            f"blast={decision.blast_radius.value} "
             f"conf={confidence:.2f}/{decision.threshold:.2f}"
             f"{' (unscored)' if confidence_unscored else ''} "
             f"→ {decision.action.value} ({decision.reason})"
@@ -2094,6 +2163,7 @@ async def dispatch_task(
                             scoring_note,
                             confidence_capped_from,
                         )
+                        + f" Confidence drivers: {_confidence_drivers_text(snapshot)}"
                     ),
                     handler=DAEMON_NAME,
                     user_id=tenant_id,
@@ -2131,6 +2201,7 @@ async def dispatch_task(
                     ).strip()
                     + "\n"
                 ).lstrip("\n")
+                + f"  drivers={_confidence_drivers_text(snapshot)}\n"
                 + f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
@@ -2975,8 +3046,8 @@ def _task_gate_context(task_snapshot: dict):
             except (ValueError, TypeError):
                 tags = []
         skill = _resolve_skill(tags, assigned_to=assigned_to)
-    action_type = _infer_action_type(skill or "", task_snapshot)
     policy = resolve_policy_for_agent(skill)
+    action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
     decision = evaluate_gate(
         confidence=_read_confidence(task_snapshot),
         action_type=action_type,
@@ -3050,7 +3121,8 @@ def _file_fresh_checkpoint(
         plan_summary=plan_summary
         or (
             "The task authorization context changed after the prior approval. "
-            f"Current action: {action_type or 'unknown'}. {decision.reason}."
+            f"Current action: {action_type or 'unknown'}. {decision.reason}. "
+            f"Confidence drivers: {_confidence_drivers_text(task_snapshot)}"
         ),
         handler=DAEMON_NAME,
         user_id=tenant_id,
@@ -3704,7 +3776,10 @@ async def handle_checkpoint_brief(
                 task_tags = []
         safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
 
-    current_action_type = _infer_action_type(safety_skill or "", task_snapshot)
+    current_policy = resolve_policy_for_agent(safety_skill)
+    current_action_type = _resolve_gate_action_type(
+        safety_skill or "", task_snapshot, current_policy
+    ).value
     if current_action_type == "operator_only":
         log.warning(
             f"[{DAEMON_NAME}] checkpoint {entity_id} references operator-only task "
@@ -3750,7 +3825,6 @@ async def handle_checkpoint_brief(
         return False
 
     auth_action_type = str(authorization.get("action_type") or "").strip().lower()
-    current_policy = resolve_policy_for_agent(safety_skill)
     if not current_policy.loaded:
         _require_fresh_release_authority(
             entity_id,

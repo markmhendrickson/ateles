@@ -28,6 +28,9 @@ def test_scenarios_are_unique_and_cover_the_required_contract():
         'dry_run_default', 'dry_run_class', 'dry_run_explicit',
         'invalid_empty_live', 'invalid_empty_dry', 'invalid_empty_compare',
         'guard_refusal_still_prevents_child',
+        'reader_unavailable_codex', 'reader_unavailable_cursor',
+        'reader_unavailable_compare', 'reader_unavailable_dry_run',
+        'reader_available_exact_head_positive',
     } <= BY_ID.keys()
 
 

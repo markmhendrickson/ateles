@@ -2600,11 +2600,21 @@ async def run_one(
 ) -> dict:
     """Run the lens once on one provider. Returns a JSON-serializable report.
 
-    Raises HeadroomExhausted before anything else (no worktree, no dispatch)
+    Refuse an unavailable canonical reader before review preparation or inference.
+    Raises HeadroomExhausted before creating a worktree or dispatching
     when the provider's configured headroom is exactly 0 — the operator-reset
     gate named in the task.
     """
     model = validate_model_selector(model)
+    if swarm_dispatch is None:
+        reason = (
+            "canonical review reader could not be imported; cannot validate "
+            "verdicts — refusing before a model call"
+        )
+        return {
+            "ok": False, "provider": provider, "reason": reason,
+            "refusal_reason": reason, "no_model_call_made": True, "posted": False,
+        }
     check_headroom(provider)
 
     worktree_path = (
