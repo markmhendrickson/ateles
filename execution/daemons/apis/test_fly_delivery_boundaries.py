@@ -7,11 +7,77 @@ from pathlib import Path
 
 import pytest
 
+import httpx
+
 import build_delivery as delivery
 import fly_runner
 from test_fly_delivery_dispatch import BRANCH, COMMIT, REPO, result
 from test_fly_delivery_dispatch import isolated_receipt as isolated_receipt
 from test_fly_runner import complete_record
+
+
+@pytest.mark.parametrize("defect", [None, "duplicate", "partial", "boolean_count", "missing_winner", "mixed_winner", "owner", "thumbprint", "grant", "schema", "issuer", "wrong_issuer", "store_alias", "wrong_type", "unknown_bound"])
+def test_common_canonical_admission_uses_actual_endpoint_shapes(monkeypatch, defect):
+    from test_fly_runner import canonical_delivery_fixture
+
+    job = fly_runner.FlyJob("synthetic-run", "cicada", "claude", "owner/repo", [], b"", 60, False,
+                           delivery={"branch": "cicada/synthetic"})
+    job.machine_id = "synthetic-machine"
+    record = complete_record(job.run_id, role=job.role, provider=job.provider,
+        repository=job.repository, machine_id=job.machine_id, delivery_status="opened",
+        delivery_reason="", delivery_branch=job.delivery["branch"], delivery_commit="a" * 40,
+        pr_number=9, pr_url="https://github.com/owner/repo/pull/9")
+    binding, responses = canonical_delivery_fixture(record)
+    query = responses["/entities/query"]
+    observation = responses["/entities/ent_synthetic_result/observations"]
+    if defect == "duplicate":
+        query["entities"].append(query["entities"][0].copy())
+    elif defect == "partial":
+        query["read_contract"]["coverage"]["state"] = "partial"
+    elif defect == "boolean_count":
+        query["total"] = True
+    elif defect == "missing_winner":
+        query["entities"][0]["provenance"].pop("probe_ok")
+    elif defect == "mixed_winner":
+        query["entities"][0]["provenance"]["probe_ok"] = "other-observation"
+    elif defect == "owner":
+        observation["observations"][0]["user_id"] = "foreign-owner"
+    elif defect == "thumbprint":
+        observation["observations"][0]["provenance"]["agent_thumbprint"] = "foreign-key"
+    elif defect == "grant":
+        responses["/agents/grants/ent_synthetic_grant"]["grant"]["status"] = "revoked"
+    elif defect == "schema":
+        responses["/schemas/fly_runner_result"]["schema_definition"]["fields"].pop("delivery_status")
+    elif defect in {"issuer", "wrong_issuer"}:
+        responses["/agents/grants/ent_synthetic_grant"]["grant"]["match_iss"] = "https://issuer.invalid"
+        observation["observations"][0]["provenance"]["agent_iss"] = (
+            "https://foreign.invalid" if defect == "wrong_issuer" else "https://issuer.invalid")
+    elif defect == "store_alias":
+        responses["/agents/grants/ent_synthetic_grant"]["grant"]["capabilities"][0]["op"] = "store_structured"
+    elif defect == "wrong_type":
+        responses["/agents/grants/ent_synthetic_grant"]["grant"]["capabilities"][0]["entity_types"] = ["unrelated_type"]
+    elif defect == "unknown_bound":
+        responses["/agents/grants/ent_synthetic_grant"]["grant"]["unrecognized_permission_field"] = True
+    requests = []
+
+    def transport(request):
+        requests.append(request)
+        assert request.url.host == "canonical.invalid"
+        return httpx.Response(200, json=responses[request.url.path])
+
+    async def acquire():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            return await fly_runner._read_canonical_delivery(client, "https://canonical.invalid", job, binding)
+
+    if defect not in {None, "issuer", "store_alias"}:
+        with pytest.raises(fly_runner.FlyResultUnreadable):
+            asyncio.run(acquire())
+    else:
+        got = asyncio.run(acquire())
+        assert got["row"]["snapshot"] == record
+        assert got["observations"][0]["id"] == "obs_synthetic"
+        assert got["grant"]["grant_id"] == binding["grant_id"]
+        assert len(requests) == 4
 
 
 @pytest.mark.parametrize("rows", [

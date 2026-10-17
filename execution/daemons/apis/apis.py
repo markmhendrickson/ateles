@@ -685,6 +685,7 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
+@build_delivery.completion_scope
 async def _spawn_harness_skill(
     skill: str,
     entity_id: str,
@@ -828,6 +829,9 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
     )
     if plan is None:
         return None
+    from fly_runner import expect_delivery_plan
+
+    expect_delivery_plan(plan, task_id=entity_id)
     with contextlib.ExitStack() as stack:
         fly_prompt = f"{prompt}\n\n{build_delivery.fly_delivery_instructions(plan)}"
         if key:
@@ -849,6 +853,17 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
         summary = build_delivery.fly_delivery_summary(result)
         log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
         if result.ok and not result.remote_outcome_unknown and result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
+            from fly_runner import FlyResultUnreadable, require_delivery_admission
+
+            try:
+                await require_delivery_admission(result, plan)
+            except FlyResultUnreadable:
+                result.ok = False
+                result.remote_outcome_unknown = True
+                result.fly_delivery_status = "unknown"
+                result.fly_pr_url = ""
+                result.error = "delivery admission changed before artifact synthesis"
+                return result
             # The runner opens the PR after the model exits. Its read-back
             # supplies the artifact header the existing resolving gate verifies.
             result.stdout = (
@@ -2191,6 +2206,7 @@ async def dispatch_task(
         )
         return
 
+    @build_delivery.completion_scope
     async def _finish_dispatch() -> None:
         # E1/E2: this run's thread. run_key keys it to the attempt so SSE
         # replays reuse it while a genuine retry opens a fresh run.
@@ -2696,6 +2712,16 @@ async def dispatch_task(
                 TaskStatus.VERIFIED.value if run_session else TaskStatus.EXECUTING.value
             )
             if artifact is not None:
+                if getattr(result, "fly_delivery_status", ""):
+                    from fly_runner import FlyResultUnreadable, require_task_delivery_admission
+
+                    try:
+                        await require_task_delivery_admission(
+                            result, task_id=entity_id,
+                            repository=_dispatch_repo_from_snapshot(snapshot))
+                    except FlyResultUnreadable:
+                        _artifact_fail(TaskStatus.BLOCKED, "Fly delivery admission changed before completion", stage="blocked")
+                        return
                 header, identity, note, stored_line, shape = artifact
                 # `complete_task_with_result` writes `result` before `status`
                 # AND reads both back: the exact header line must be the stored

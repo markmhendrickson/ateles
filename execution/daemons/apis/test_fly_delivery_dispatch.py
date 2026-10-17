@@ -591,3 +591,231 @@ def test_runner_pr_reaches_existing_artifact_gate_and_verified_task_completion(
     saved = store.rows[eid]["result"]
     assert f"[cicada] pull_request_link: https://github.com/{REPO}/pull/99\n" in saved
     assert COMMIT in saved and "run-123" in saved
+
+
+@pytest.fixture
+def common_admission_executor(monkeypatch, tmp_path):
+    """Synthetic origin/read seams; real executor, skill and consumers.
+
+    These fixture values are not installed producer authority. Production's
+    origin acquisition remains unavailable, with no configuration override.
+    """
+    import httpx
+    import time
+    from test_fly_runner import FakeFly, canonical_delivery_fixture, complete_record, make_executor
+    from lib.daemon_runtime import AgentDefinition
+
+    monkeypatch.setenv("APIS_FLY_APP", "runner-app")
+    monkeypatch.setenv("APIS_FLY_API_TOKEN", "synthetic-fly-token")
+    monkeypatch.setenv("APIS_FLY_IMAGE", "fixture-image")
+    monkeypatch.setenv("APIS_FLY_REGION", "ams")
+    monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "synthetic-role-token")
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://canonical.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-controller-token")
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
+    monkeypatch.setattr(fly_runner, "LOGIN_PROVIDERS", frozenset())
+    monkeypatch.setattr(skill_runner, "CLAUDE_BIN", "/fixture/claude")
+    skill = tmp_path / ".claude/skills/cicada"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Synthetic builder\n")
+    monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: AgentDefinition(
+        entity_id="fixture-definition", name=role, prompt_markdown="Build the fixture.",
+        tool_allowlist="*", aauth_sub="fixture-builder"))
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
+    monkeypatch.setattr("lib.activity._store_activity_log", lambda *a, **kw: None)
+    monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda *a: None)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/fixture/claude"})
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "absent-headroom.json"))
+    monkeypatch.setattr(fly_runner, "this_process_owner", lambda identity: {
+        "id": identity, "pid": 123, "start": "synthetic-start", "host": "synthetic-host"})
+    jobs, acquisitions, state = [], [], {}
+    real_build_job = fly_runner.build_job
+
+    def build_job(**kwargs):
+        job = real_build_job(**kwargs)
+        jobs.append(job)
+        return job
+
+    monkeypatch.setattr(fly_runner, "build_job", build_job)
+    executor, _, _ = make_executor(FakeFly(), clock=time.time)
+    executor._mint_delivery = lambda *a, **kw: fly_runner.DeliveryToken(
+        "synthetic-installation-token", executor._clock() + 3600, REPO)
+
+    def record():
+        job = jobs[-1]
+        return complete_record(job.run_id, role=job.role, provider=job.provider,
+            repository=job.repository, machine_id=job.machine_id, delivery_status="opened",
+            delivery_reason="", delivery_branch=job.delivery["branch"], delivery_commit=COMMIT,
+            pr_number=99, pr_url=f"https://github.com/{REPO}/pull/99")
+
+    async def read(run_id):
+        return record()
+
+    async def origin(handle):
+        binding, _ = canonical_delivery_fixture(record())
+        return {"regime": "controller_independent_platform_readback", "record": record(), "binding": binding}
+
+    def canonical_http(request):
+        acquisitions.append(request.url.path)
+        _, responses = canonical_delivery_fixture(record())
+        if state.get("changed_winner"):
+            responses["/entities/query"]["entities"][0]["provenance"]["probe_ok"] = "obs_other"
+        assert request.url.host == "canonical.invalid"
+        assert request.url.path in responses
+        return httpx.Response(200, json=responses[request.url.path])
+
+    original_client = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        kwargs.setdefault("transport", httpx.MockTransport(canonical_http))
+        return original_client(*args, **kwargs)
+
+    executor._read_result = read
+    monkeypatch.setattr(executor, "_read_delivery_origin", origin, raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    real_run = skill_runner.run_skill
+
+    async def run(*args, **kwargs):
+        return await real_run(*args, **{**kwargs, "provider": "claude"})
+
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    return executor, jobs, acquisitions, state
+
+
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+def test_common_admission_reaches_both_real_consumers(
+    monkeypatch, dispatch_env, common_admission_executor, entry
+):
+    _, _, store = dispatch_env
+    executor, jobs, reads, _ = common_admission_executor
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **kw: "exists")
+    monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
+    if entry == "task":
+        eid = "ent_synthetic_admission_task"
+        snapshot = task_snapshot()
+        store.rows[eid] = snapshot.copy()
+        asyncio.run(apis.dispatch_task(eid, snapshot, "approved", _StubNotifier(), gate_override=True))
+        assert store.rows[eid]["status"] == "done", store.rows[eid]
+        assert f"pull_request_link: https://github.com/{REPO}/pull/99" in store.rows[eid]["result"]
+    else:
+        assert asyncio.run(dispatcher()._open_implementation_pr(trigger(), _empty_spec_state())) == f"https://github.com/{REPO}/pull/99"
+    assert len(jobs) == 1 and len(reads) >= 4
+    assert jobs[0]._fly_admission.scope.closed
+    assert jobs[0]._fly_admission.origin is None
+
+
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+@pytest.mark.parametrize("loss", ["missing", "closed", "foreign", "copied", "lost_origin", "changed_winner"])
+def test_common_admission_loss_blocks_both_real_consumers(
+    monkeypatch, dispatch_env, common_admission_executor, entry, loss
+):
+    import copy
+
+    _, _, store = dispatch_env
+    _, jobs, _, state = common_admission_executor
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    original_run = apis.run_skill
+
+    async def lose(*args, **kwargs):
+        got = await original_run(*args, **kwargs)
+        assert got.ok, got.error
+        admission = got._fly_admission
+        if loss == "missing":
+            del got._fly_admission
+        elif loss == "closed":
+            admission.scope.close()
+        elif loss == "foreign":
+            admission.scope = fly_runner._CompletionScope()
+        elif loss == "copied":
+            got._fly_admission = copy.copy(admission)
+        elif loss == "lost_origin":
+            admission.origin = None
+        else:
+            state["changed_winner"] = True
+        return got
+
+    monkeypatch.setattr(apis, "run_skill", lose)
+    monkeypatch.setattr("swarm_dispatch.run_skill", lose)
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **kw: "exists")
+    monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
+    if entry == "task":
+        eid = "ent_synthetic_refused_task"
+        snapshot = task_snapshot()
+        store.rows[eid] = snapshot.copy()
+        asyncio.run(apis.dispatch_task(eid, snapshot, "approved", _StubNotifier(), gate_override=True))
+        assert store.rows[eid]["status"] != "done", store.rows[eid]
+        assert "pull_request_link: https://" not in store.rows[eid].get("result", "")
+    else:
+        with pytest.raises(delivery.FlyDeliveryEnded):
+            asyncio.run(dispatcher()._open_implementation_pr(trigger(), _empty_spec_state()))
+    assert len(jobs) == 1
+    receipt = delivery._delivery_ledger().delivery_receipts()[REPO + "#123"]
+    assert receipt["status"] == "unknown", "missing admission became a successful receipt"
+
+
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+@pytest.mark.parametrize("failure", ["closed", "foreign_job"])
+def test_common_late_loss_at_both_final_consumers(
+    monkeypatch, dispatch_env, common_admission_executor, entry, failure
+):
+    _, _, store = dispatch_env
+    _, jobs, _, _ = common_admission_executor
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
+    monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
+    def lose():
+        if failure == "closed":
+            jobs[0]._fly_admission.scope.close()
+        else:
+            import copy
+
+            admission = jobs[0]._fly_admission
+            # Otherwise self-consistent, current and same-scope evidence for
+            # a DIFFERENT job object must not replace the parent's original.
+            foreign = copy.copy(jobs[0])
+            foreign._fly_admission = admission
+            admission.job = foreign
+
+    if entry == "task":
+        def lose_at_artifact(*args, **kwargs):
+            lose()
+            return "exists"
+
+        monkeypatch.setattr(apis, "resolve_artifact_ref", lose_at_artifact)
+        eid = "ent_synthetic_late_loss"
+        snapshot = task_snapshot()
+        store.rows[eid] = snapshot.copy()
+        asyncio.run(apis.dispatch_task(eid, snapshot, "approved", _StubNotifier(), gate_override=True))
+        assert store.rows[eid]["status"] != "done", "closed scope reached final task completion"
+    else:
+        original_wrapper = delivery.run_fly_delivery
+
+        async def lose_after_wrapper(*args, **kwargs):
+            got = await original_wrapper(*args, **kwargs)
+            assert got.ok
+            lose()
+            return got
+
+        monkeypatch.setattr(delivery, "run_fly_delivery", lose_after_wrapper)
+        with pytest.raises(delivery.FlyDeliveryEnded, match="admission changed"):
+            asyncio.run(dispatcher()._open_implementation_pr(trigger(), _empty_spec_state()))
+    assert len(jobs) == 1
+
+
+@pytest.mark.parametrize("mode", ["default_off", "prelaunch"])
+def test_common_ordinary_routing_preserved(monkeypatch, mode):
+    if mode == "default_off":
+        test_default_off_is_pinned_even_when_fly_itself_is_configured(monkeypatch)
+    else:
+        test_prelaunch_refusal_is_the_only_local_fallback(monkeypatch)
+
+
+def test_common_default_origin_still_refuses_matching_fields():
+    test_matching_fields_without_runner_origin_stay_unconfirmed()

@@ -41,7 +41,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import copy
+import functools
 import fcntl
 import json
 import logging
@@ -1588,6 +1590,299 @@ class FlyResultUnreadable(Exception):
     outcome is unknown, which is different from a record that is absent."""
 
 
+_COMPLETION_SCOPE = contextvars.ContextVar("fly_completion_scope", default=None)
+
+
+class _CompletionScope:
+    def __init__(self):
+        self.task = asyncio.current_task()
+        self.closed = False
+        self.admissions = []
+        self.plan_identity = None
+        self.task_id = None
+        self.job = None
+        self.job_identity = None
+
+    def expect_plan(self, plan, task_id=None):
+        self.require_current()
+        expected = (plan.repository, json.dumps(plan.spec(), sort_keys=True, allow_nan=False))
+        if self.plan_identity is not None and self.plan_identity != expected:
+            raise FlyResultUnreadable("completion scope already belongs to another plan")
+        if task_id is not None:
+            if self.task_id is not None and self.task_id != task_id:
+                raise FlyResultUnreadable("completion scope already belongs to another task")
+            self.task_id = task_id
+        self.plan_identity = expected
+
+    def bind_job(self, job):
+        self.require_current()
+        identity = _delivery_identity(job)
+        if self.plan_identity != (job.repository, identity[-1]):
+            raise FlyResultUnreadable("delivery job has no original parent plan")
+        if self.job is not None and self.job is not job and self.job.launch_requested:
+            raise FlyResultUnreadable("completion scope already launched another job")
+        self.job, self.job_identity = job, identity
+
+    def require_current(self):
+        if self.closed or self.task is not asyncio.current_task():
+            raise FlyResultUnreadable("delivery completion scope is not current")
+
+    def close(self):
+        self.closed = True
+        for admission in self.admissions:
+            admission.clear()
+        self.admissions.clear()
+        self.job = self.job_identity = self.plan_identity = self.task = None
+
+
+def completion_scope(function):
+    """Keep private evidence in the original enclosing completion coroutine.
+
+    Nested calls reuse the scope, but inherited contexts in another task do
+    not. No identity, grant, or origin authority is created by this scope.
+    """
+    @functools.wraps(function)
+    async def wrapped(*args, **kwargs):
+        current = _COMPLETION_SCOPE.get()
+        if current is not None:
+            current.require_current()
+            return await function(*args, **kwargs)
+        scope = _CompletionScope()
+        token = _COMPLETION_SCOPE.set(scope)
+        try:
+            return await function(*args, **kwargs)
+        finally:
+            scope.close()
+            _COMPLETION_SCOPE.reset(token)
+    return wrapped
+
+
+def _delivery_identity(job):
+    return (job.run_id, job.role, job.provider, job.repository,
+            json.dumps(job.delivery, sort_keys=True, allow_nan=False))
+
+
+class _DeliveryAdmission:
+    """Executor-owned and deliberately absent from any public/wire dataclass."""
+    def __init__(self, executor, job, scope, origin, canonical):
+        scope.require_current()
+        self.executor, self.job, self.scope = executor, job, scope
+        self.identity = _delivery_identity(job)
+        self.origin = origin
+        self.canonical = canonical
+        self.result = None
+        scope.admissions.append(self)
+
+    def clear(self):
+        self.origin = self.canonical = self.result = None
+        self.executor = self.job = None
+
+    async def require_current(self, result=None, plan=None):
+        self.scope.require_current()
+        if (_COMPLETION_SCOPE.get() is not self.scope or self.origin is None
+                or self.executor is None or _delivery_identity(self.job) != self.identity
+                or self.scope.job is not self.job or self.scope.job_identity != self.identity
+                or getattr(self.job, "_fly_admission", None) is not self
+                or not any(a is self for a in self.scope.admissions)):
+            raise FlyResultUnreadable("delivery admission lost its original execution")
+        if result is not None:
+            if self.result is not result or getattr(result, "_fly_admission", None) is not self:
+                raise FlyResultUnreadable("delivery result is not the original executor result")
+            if result.remote_run_id != self.job.run_id:
+                raise FlyResultUnreadable("delivery result differs from its original run")
+            record = self.canonical["row"]["snapshot"]
+            if any(getattr(result, attr) != record.get(key) for attr, key in (
+                    ("fly_delivery_status", "delivery_status"),
+                    ("fly_delivery_branch", "delivery_branch"),
+                    ("fly_delivery_commit", "delivery_commit"),
+                    ("fly_pr_number", "pr_number"), ("fly_pr_url", "pr_url"))):
+                raise FlyResultUnreadable("delivery report differs from admitted observation")
+        if plan is not None:
+            if (plan.repository != self.job.repository
+                    or plan.spec() != self.job.delivery):
+                raise FlyResultUnreadable("delivery differs from the original parent plan")
+        fresh = await self.executor._read_delivery_canonical(self.job, self.origin)
+        if fresh != self.canonical:
+            raise FlyResultUnreadable("delivery canonical admission changed")
+        self.scope.require_current()
+
+
+async def require_delivery_admission(result, plan=None):
+    """Scalar reports, copied objects and persisted receipts never admit."""
+    admission = getattr(result, "_fly_admission", None)
+    if type(admission) is not _DeliveryAdmission:
+        raise FlyResultUnreadable("delivery has no original executor admission")
+    await admission.require_current(result, plan)
+
+
+def expect_delivery_plan(plan, *, task_id=None):
+    scope = _COMPLETION_SCOPE.get()
+    if scope is None:
+        raise FlyResultUnreadable("delivery parent completion scope is absent")
+    scope.expect_plan(plan, task_id)
+
+
+async def require_task_delivery_admission(result, *, task_id, repository):
+    scope = _COMPLETION_SCOPE.get()
+    if (scope is None or scope.task_id != task_id or scope.plan_identity is None
+            or scope.plan_identity[0] != repository):
+        raise FlyResultUnreadable("delivery does not belong to the completing task")
+    await require_delivery_admission(result)
+
+
+def _result_read_contract(data, run_id):
+    """Validate the existing collection contract; never invent a certificate."""
+    import hashlib
+
+    contract = data.get("read_contract")
+    if not isinstance(contract, dict):
+        raise FlyResultUnreadable("result collection has no read contract")
+    scope = contract.get("applied_scope", {})
+    coverage = contract.get("coverage", {})
+    total = coverage.get("total", {})
+    predicate = {"kind": "sha256", "value": hashlib.sha256(
+        json.dumps(run_id, ensure_ascii=False).encode()).hexdigest()}
+    if (contract.get("version") != "1" or contract.get("surface") != "entity_collection"
+            or contract.get("mode", {}).get("actual") != "structured"
+            or scope.get("owner") != "authenticated"
+            or scope.get("entity_types") != [RESULT_ENTITY_TYPE]
+            or scope.get("include_merged") is not False
+            or scope.get("include_snapshots") is not True
+            or coverage.get("kind") != "predicate_population"
+            or coverage.get("state") != "complete" or coverage.get("reasons") != []
+            or type(total.get("value")) is not int
+            or total != {"value": 1, "relation": "exact", "unit": "entities"}
+            or coverage.get("returned_count") != 1
+            or coverage.get("scope_exhausted") is not True
+            or contract.get("request_options", {}).get("ignored") != []
+            or not any(p.get("field") == "run_id" and p.get("op") == "eq"
+                       and p.get("value") == predicate for p in scope.get("predicates", [])
+                       if isinstance(p, dict))):
+        raise FlyResultUnreadable("result collection coverage is not complete")
+
+
+async def _read_canonical_delivery(client, base, job, binding):
+    """Bounded acquisition using existing owner-scoped canonical endpoints.
+
+    The service reports a read interval, not a common atomic view. Repeated
+    full acquisition and version comparison detects drift; it cannot mint
+    an atomic certificate or substitute for independently acquired origin.
+    """
+    from urllib.parse import quote
+    from lib.daemon_runtime.neotoma_signed import check_observation_attribution
+
+    async def request(method, path, **kwargs):
+        response = await client.request(method, base + path, **kwargs)
+        if response.status_code != 200:
+            raise FlyResultUnreadable("canonical delivery read was refused")
+        value = response.json()
+        if not isinstance(value, dict):
+            raise FlyResultUnreadable("canonical delivery answer is not an object")
+        return value
+
+    required_binding = ("owner", "grant_id", "sub", "thumbprint")
+    if (not isinstance(binding, dict)
+            or any(not isinstance(binding.get(k), str) or not binding[k] for k in required_binding)):
+        raise FlyResultUnreadable("delivery producer binding is unavailable")
+    page = await request("POST", "/entities/query", json={
+        "entity_type": RESULT_ENTITY_TYPE, "limit": 2, "offset": 0,
+        "sort_by": "entity_id", "sort_order": "asc", "include_snapshots": True,
+        "include_merged": False, "snapshot_filters": {"run_id": {"op": "eq", "value": job.run_id}},
+    })
+    _result_read_contract(page, job.run_id)
+    rows = page.get("entities")
+    if (not isinstance(rows, list) or len(rows) != 1
+            or type(page.get("total")) is not int or page["total"] != 1):
+        raise FlyResultUnreadable("delivery result is not unique")
+    row = rows[0]
+    if (not isinstance(row, dict) or row.get("entity_type") != RESULT_ENTITY_TYPE
+            or not isinstance(row.get("entity_id"), str)
+            or not isinstance(row.get("entity_version"), str)):
+        raise FlyResultUnreadable("delivery result identity is incomplete")
+    entity_id = quote(row["entity_id"], safe="")
+    record, winners = row.get("snapshot"), row.get("provenance")
+    if not isinstance(record, dict) or not isinstance(winners, dict):
+        raise FlyResultUnreadable("delivery snapshot or winners are missing")
+    if any(record.get(k) != value for k, value in (
+            ("run_id", job.run_id), ("role", job.role), ("provider", job.provider),
+            ("repository", job.repository), ("machine_id", job.machine_id))):
+        raise FlyResultUnreadable("canonical delivery differs from the original job")
+    protected = ("run_id", "role", "provider", "repository", "machine_id", "exit_code",
+                 "timed_out", "refused", "probe_ok", "delivery_status", "delivery_reason",
+                 "delivery_branch", "delivery_commit")
+    if record.get("delivery_status") in {"opened", "updated"}:
+        protected += ("pr_number", "pr_url")
+    if any(k not in record or record[k] is None for k in protected):
+        raise FlyResultUnreadable("delivery protected fields are absent")
+    if any(not isinstance(winners.get(k), str) for k in protected):
+        raise FlyResultUnreadable("delivery winners are missing or malformed")
+    winner_ids = {winners[k] for k in protected}
+    if len(winner_ids) != 1 or any(winners.get(k) not in winner_ids for k in protected):
+        raise FlyResultUnreadable("delivery protected fields have mixed winners")
+    winner = next(iter(winner_ids))
+    if not winner or "," in winner:
+        raise FlyResultUnreadable("delivery winner is merged or empty")
+    observations, total = [], None
+    for offset in range(0, 1000, 100):
+        answer = await request("GET", f"/entities/{entity_id}/observations", params={"limit": 100, "offset": offset})
+        batch, count = answer.get("observations"), answer.get("total")
+        if (not isinstance(batch, list) or type(count) is not int or not 0 < count <= 1000
+                or answer.get("limit") != 100 or answer.get("offset") != offset
+                or total is not None and total != count):
+            raise FlyResultUnreadable("delivery observations coverage is unknown")
+        total = count
+        observations.extend(batch)
+        if len(observations) >= total:
+            break
+        if len(batch) != 100:
+            raise FlyResultUnreadable("delivery observations page is incomplete")
+    if len(observations) != total or row.get("observation_count") != total:
+        raise FlyResultUnreadable("delivery observations changed or are incomplete")
+    ids = [o.get("id") for o in observations if isinstance(o, dict)]
+    if len(ids) != total or len(set(ids)) != total or any(not isinstance(i, str) for i in ids):
+        raise FlyResultUnreadable("delivery observations repeat or are malformed")
+    obs = next((o for o in observations if o["id"] == winner), None)
+    if (obs is None or obs.get("user_id") != binding["owner"]
+            or obs.get("entity_id") != row["entity_id"]
+            or not isinstance(obs.get("fields"), dict)
+            or any(obs["fields"].get(k) != record[k] for k in protected)
+            or not check_observation_attribution(observations, winner, binding["sub"], binding["thumbprint"]).ok):
+        raise FlyResultUnreadable("delivery winning observation is not attributable")
+    grant = (await request("GET", "/agents/grants/" + quote(binding["grant_id"], safe=""))).get("grant")
+    if (not isinstance(grant, dict) or grant.get("grant_id") != binding["grant_id"]
+            or grant.get("user_id") != binding["owner"] or grant.get("status") != "active"
+            or grant.get("match_sub") != binding["sub"]
+            or grant.get("match_thumbprint") != binding["thumbprint"]):
+        raise FlyResultUnreadable("delivery producer grant is not admitted")
+    known_grant_fields = {"grant_id", "user_id", "label", "capabilities", "status", "notes",
+        "last_used_at", "import_source", "created_at", "last_observation_at", "match_sub",
+        "match_iss", "match_thumbprint", "linked_github_login", "linked_github_user_id",
+        "linked_github_verified_at"}
+    issuer = grant.get("match_iss")
+    if (set(grant) - known_grant_fields or issuer is not None and (
+            not isinstance(issuer, str) or not issuer or obs.get("provenance", {}).get("agent_iss") != issuer)):
+        raise FlyResultUnreadable("delivery grant has unsupported bounds or issuer")
+    capabilities = grant.get("capabilities")
+    if (not isinstance(capabilities, list) or any(
+        not isinstance(c, dict) or set(c) - {"op", "entity_types", "repos", "relationship_types"}
+        for c in capabilities) or not any(
+        isinstance(c, dict) and c.get("op") in {"store", "store_structured"}
+        and isinstance(c.get("entity_types"), list)
+        and (RESULT_ENTITY_TYPE in c["entity_types"] or "*" in c["entity_types"])
+        for c in capabilities
+    )):
+        raise FlyResultUnreadable("delivery producer grant lacks result permission")
+    # Exclude audit-use timestamps: they may legitimately change on reads;
+    # permission/identity changes must not be excluded.
+    permission = {k: grant.get(k) for k in ("grant_id", "user_id", "status", "match_sub", "match_iss", "match_thumbprint", "capabilities")}
+    schema = await request("GET", "/schemas/" + RESULT_ENTITY_TYPE)
+    fields = schema.get("schema_definition", {}).get("fields", {})
+    if (schema.get("active") is not True or schema.get("entity_type") != RESULT_ENTITY_TYPE
+            or not isinstance(fields, dict) or any(k not in fields for k in protected)):
+        raise FlyResultUnreadable("active delivery schema lacks protected fields")
+    return {"row": row, "observations": observations, "grant": permission}
+
+
 async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport | None = None,
                              attempts: int = 3, delay: float = 2.0) -> dict | None:  # fmt: skip
     """The run's result record; None when a well-formed answer says there is
@@ -2234,6 +2529,11 @@ class FlyExecutor:
         whether the machine was confirmed terminated.
         """
         # Before any credential, ledger write or machine call.
+        if job.delivery is not None:
+            scope = _COMPLETION_SCOPE.get()
+            if scope is None:
+                raise FlyResultUnreadable("delivery completion scope is absent")
+            scope.bind_job(job)
         self.config.require_valid_limits()
         tokens = _TokenOwner(self._revoke)
         launch = _LaunchState()
@@ -2623,6 +2923,17 @@ class FlyExecutor:
             if not record:
                 job.outcome_unknown = True
                 return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
+            if job.delivery is not None:
+                scope = _COMPLETION_SCOPE.get()
+                if scope is None:
+                    raise FlyResultUnreadable("delivery completion scope is absent")
+                origin = await self._read_delivery_origin(handle)
+                canonical = await self._read_delivery_canonical(job, origin)
+                if canonical["row"]["snapshot"] != record:
+                    raise FlyResultUnreadable("delivery record differs from admitted acquisition")
+                admission = _DeliveryAdmission(self, job, scope, origin, canonical)
+                job._fly_admission = admission
+                await admission.require_current()
             return self._result_from_record(job, record)
         except asyncio.CancelledError:
             raise
@@ -2633,6 +2944,29 @@ class FlyExecutor:
                 f"fly runner: the result of run {job.run_id} could not be read "
                 f"({type(exc).__name__}); the run's outcome is unknown"
             ).encode()
+
+    async def _read_delivery_origin(self, handle):
+        # Neither shared child signatures nor machine settlement establish
+        # exclusive producer/platform custody. No installed regime exists in
+        # this source boundary. A future separately admitted acquisition must
+        # replace this refusal; no config switch or child proof enables it.
+        raise FlyResultUnreadable("canonical runner-origin proof unavailable; delivery unconfirmed")
+
+    async def _read_delivery_canonical(self, job, origin):
+        if (not isinstance(origin, dict) or origin.get("regime") not in {
+                "exclusive_pilot_producer", "controller_independent_platform_readback"}
+                or not isinstance(origin.get("record"), dict)):
+            raise FlyResultUnreadable("delivery origin acquisition is unavailable")
+        base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
+        token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+        if not base or not token:
+            raise FlyResultUnreadable("canonical delivery access is unavailable")
+        async with httpx.AsyncClient(timeout=30.0, headers={"Authorization": f"Bearer {token}"}) as client:
+            first = await _read_canonical_delivery(client, base, job, origin.get("binding"))
+            second = await _read_canonical_delivery(client, base, job, origin.get("binding"))
+        if first != second or first["row"]["snapshot"] != origin["record"]:
+            raise FlyResultUnreadable("canonical delivery changed or differs from origin")
+        return second
 
     def _result_from_record(self, job: FlyJob, record: dict) -> tuple[int, bytes, bytes]:
         """The CLI's result, from a VALIDATED record. A record that is not
@@ -2661,12 +2995,14 @@ class FlyExecutor:
                         or got["delivery_branch"] != job.delivery["branch"]
                         or re.fullmatch(r"[0-9a-f]{40}", got["delivery_commit"]) is None):
                     raise FlyResultUnreadable("delivery artifact does not match its job")
-            # A flattened result has no admitted runner-origin evidence. The
-            # canonical attribution/runner isolation dependency must be proved
-            # before this seam can accept delivery completion or safe retry.
-            # Do not synthesize proof from the consistency fields above.
-            job.outcome_unknown = True
-            raise FlyResultUnreadable("canonical runner-origin proof unavailable; delivery unconfirmed")
+            admission = getattr(job, "_fly_admission", None)
+            if (type(admission) is not _DeliveryAdmission or admission.executor is not self
+                    or admission.job is not job or admission.origin is None
+                    or admission.canonical["row"]["snapshot"] != record):
+                job.outcome_unknown = True
+                raise FlyResultUnreadable("canonical runner-origin proof unavailable; delivery unconfirmed")
+            admission.scope.require_current()
+            job.delivery_result = got
         if record["probe_ok"] is False:
             log.error(f"[fly] run={job.run_id} credential probe failed: {record['refused']}")
         stdout = redact_nonces(record["stdout"])

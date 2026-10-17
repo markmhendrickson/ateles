@@ -53,6 +53,40 @@ def complete_record(run_id: str, **fields) -> dict:
     return record
 
 
+def canonical_delivery_fixture(record):
+    """Existing API response shapes with synthetic owner/grant/observation."""
+    import hashlib
+
+    binding = {"owner": "synthetic-owner", "grant_id": "ent_synthetic_grant",
+               "sub": "synthetic-producer", "thumbprint": "synthetic-thumbprint"}
+    observation = {"id": "obs_synthetic", "entity_id": "ent_synthetic_result",
+        "user_id": binding["owner"], "fields": dict(record),
+        "provenance": {"agent_sub": binding["sub"], "agent_thumbprint": binding["thumbprint"],
+                       "attribution_tier": "software"}}
+    row = {"entity_id": "ent_synthetic_result", "entity_type": "fly_runner_result",
+        "entity_version": "synthetic-version", "observation_count": 1,
+        "snapshot": dict(record), "provenance": {k: observation["id"] for k in record}}
+    contract = {"version": "1", "surface": "entity_collection", "mode": {"actual": "structured"},
+        "applied_scope": {"owner": "authenticated", "entity_types": ["fly_runner_result"],
+            "include_merged": False, "include_snapshots": True, "predicates": [{"field": "run_id", "op": "eq",
+                "value": {"kind": "sha256", "value": hashlib.sha256(json.dumps(record["run_id"]).encode()).hexdigest()}}]},
+        "request_options": {"ignored": []}, "coverage": {"kind": "predicate_population",
+            "state": "complete", "reasons": [], "total": {"value": 1, "relation": "exact", "unit": "entities"},
+            "returned_count": 1, "scope_exhausted": True},
+        "coherence": {"kind": "read_interval", "common_view": False}}
+    responses = {
+        "/entities/query": {"entities": [row], "total": 1, "read_contract": contract},
+        "/entities/ent_synthetic_result/observations": {"observations": [observation], "total": 1, "limit": 100, "offset": 0},
+        "/agents/grants/ent_synthetic_grant": {"grant": {"grant_id": binding["grant_id"],
+            "user_id": binding["owner"], "status": "active", "match_sub": binding["sub"],
+            "match_thumbprint": binding["thumbprint"], "match_iss": None,
+            "capabilities": [{"op": "store", "entity_types": ["fly_runner_result"]}]}},
+        "/schemas/fly_runner_result": {"entity_type": "fly_runner_result", "active": True,
+            "schema_version": "1.1.0", "schema_definition": {"fields": {k: {} for k in record}}},
+    }
+    return binding, responses
+
+
 def _present(machine: dict) -> dict:
     """A machine as the Machines API answers for it: always with a version
     and a config object (the double fills them in) unless a test marks the

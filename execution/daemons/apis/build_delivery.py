@@ -53,6 +53,8 @@ from pathlib import Path
 from typing import Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
+from fly_runner import completion_scope
+
 log = logging.getLogger("apis.build_delivery")
 
 # Roles that implement an issue and open a PR for it. Reviewers and merge
@@ -866,6 +868,7 @@ def _reserve_delivery(plan: FlyDeliveryPlan) -> bool:
         raise ValueError(str(exc)) from None
 
 
+@completion_scope
 async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
     """Run *launch* (the builder's ``run_skill`` call with the delivery spec)
     under the durable record. Returns the dispatch's SkillResult, ``blocked(
@@ -882,6 +885,9 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
     except (OSError, ValueError):
         return blocked("the Fly delivery record could not be written; not launching")
     try:
+        from fly_runner import expect_delivery_plan
+
+        expect_delivery_plan(plan)
         result = await launch()
     except BaseException:
         # The launch may have happened: keep it recorded, as unknown.
@@ -898,6 +904,18 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
         except (OSError, ValueError):
             return blocked("delivery receipt release was not confirmed; not falling back")
         return None if result.fly_ineligible_before_launch else result
+    if result.ok:
+        from fly_runner import FlyResultUnreadable, require_delivery_admission
+
+        try:
+            await require_delivery_admission(result, plan)
+        except FlyResultUnreadable:
+            result.ok = False
+            result.remote_outcome_unknown = True
+            result.fly_delivery_status = "unknown"
+            result.fly_delivery_reason = "delivery producer admission could not be confirmed"
+            result.fly_pr_number = None
+            result.fly_pr_url = ""
     if result.fly_delivery_status in {"opened", "updated"}:
         from lib.daemon_runtime.artifact_contract import ParsedRef
         from lib.daemon_runtime.artifact_resolver import resolve_artifact_ref
@@ -922,6 +940,18 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
             result.remote_outcome_unknown = True
             result.fly_delivery_status = "unknown"
             result.fly_delivery_reason = "delivery artifact could not be confirmed"
+            result.fly_pr_number = None
+            result.fly_pr_url = ""
+    if result.ok:
+        # GitHub effect resolution above awaited a separate read. Canonical
+        # admission must still hold immediately before receipt success.
+        try:
+            await require_delivery_admission(result, plan)
+        except FlyResultUnreadable:
+            result.ok = False
+            result.remote_outcome_unknown = True
+            result.fly_delivery_status = "unknown"
+            result.fly_delivery_reason = "delivery admission changed before receipt"
             result.fly_pr_number = None
             result.fly_pr_url = ""
     try:

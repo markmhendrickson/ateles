@@ -3254,6 +3254,11 @@ async def _run_skill_once(
             if _fly_job is not None:
                 try:
                     returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                    if _fly_job.delivery is not None and returncode == 0:
+                        admission = getattr(_fly_job, "_fly_admission", None)
+                        if type(admission) is not fly_runner._DeliveryAdmission:
+                            raise fly_runner.FlyResultUnreadable("delivery admission is absent")
+                        await admission.require_current()
                 except fly_runner.FlyRefusal as exc:
                     msg = f"fly runner refused: {exc}"
                     log.warning(f"[apis] {skill} dispatch deferred — {msg}")
@@ -3567,6 +3572,14 @@ async def _run_skill_once(
                 "its reservation is kept for the reaper"
             )
 
+        if _fly_job is not None and _fly_job.delivery is not None and result.ok:
+            admission = getattr(_fly_job, "_fly_admission", None)
+            if type(admission) is not fly_runner._DeliveryAdmission:
+                raise fly_runner.FlyResultUnreadable("delivery admission is absent")
+            await admission.require_current()
+            admission.result = result
+            result._fly_admission = admission
+
         # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────
         # Checked regardless of exit code: the CLI logs "Ignoring --allowedTools
         # rule" and continues, so a drop can coexist with rc=0. One batched alert
@@ -3672,6 +3685,8 @@ async def _run_skill_once(
                     log_path=failure_log_path,
                 )
 
+        if _fly_job is not None and _fly_job.delivery is not None and result.ok:
+            await fly_runner.require_delivery_admission(result)
         return result
 
     finally:
@@ -3777,6 +3792,7 @@ def _local_fallback_refusal(provider: str, *, pinned: bool) -> str | None:
     return provider_exclusion_reason(provider, _provider_binaries())
 
 
+@fly_runner.completion_scope
 async def run_skill(
     skill: str,
     prompt: str,
