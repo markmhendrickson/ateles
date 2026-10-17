@@ -1927,8 +1927,23 @@ def test_timeout_keeps_the_remote_run_identity_and_state(fly_env, seam, monkeypa
     assert spawned == [] and revoked == [MINTED]
 
 
+@pytest.fixture
+def settlement_component_isolation(monkeypatch, request, tmp_path):
+    """Static owner/activity sink only for the two ordinary cleanup components."""
+    assert request.node.originalname in {
+        "test_a_recorded_result_with_unconfirmed_cleanup_keeps_its_remote_fields",
+        "test_a_settlement_on_an_unusable_ledger_keeps_the_result_and_the_reservation",
+    }
+    monkeypatch.setattr(fly_runner, "this_process_owner", lambda identity: {
+        "id": identity, "pid": 123, "start": "synthetic-start", "host": "synthetic-host"})
+    monkeypatch.setattr("lib.activity._store_activity_log", lambda *args, **kwargs: None)
+    config_path = tmp_path / "absent-local-provider.json"
+    assert not config_path.exists()
+    monkeypatch.setenv("APIS_CLAUDE_LOCAL_CONFIG", str(config_path))
+
+
 def test_a_recorded_result_with_unconfirmed_cleanup_keeps_its_remote_fields(
-    fly_env, seam, monkeypatch
+    fly_env, seam, monkeypatch, settlement_component_isolation
 ):
     spawned, fake_exec = seam
     fake = FakeFly()
@@ -3534,7 +3549,9 @@ def test_a_run_id_already_reserved_is_never_overwritten(fly_env, tmp_path):
             config, run_id="r1", owner="t", max_run_seconds=600, now=_NOW)
 
 
-def test_a_settlement_on_an_unusable_ledger_keeps_the_result_and_the_reservation(fly_env):
+def test_a_settlement_on_an_unusable_ledger_keeps_the_result_and_the_reservation(
+    fly_env, settlement_component_isolation
+):
     """A completed run whose ledger became unusable: its result still comes
     back, its machine state says unconfirmed, and nothing is released."""
     fake = FakeFly()

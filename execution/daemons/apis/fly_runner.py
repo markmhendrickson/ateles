@@ -1693,11 +1693,25 @@ class _DeliveryAdmission:
         self.origin = origin
         self.canonical = canonical
         self.result = None
+        self._settled_by = None
         scope.admissions.append(self)
 
     def clear(self):
         self.origin = self.canonical = self.result = None
-        self.executor = self.job = None
+        self.executor = self.job = self._settled_by = None
+
+    def _confirm_settlement(self, executor, job):
+        self.scope.require_current()
+        if executor is not self.executor or job is not self.job:
+            raise FlyResultUnreadable("settlement differs from the original executor job")
+        self._settled_by = (executor, job)
+
+    def require_settled(self):
+        self.scope.require_current()
+        held = self._settled_by
+        if (type(held) is not tuple or len(held) != 2
+                or held[0] is not self.executor or held[1] is not self.job):
+            raise FlyResultUnreadable("delivery settlement was not confirmed by its executor")
 
     async def require_current(self, result=None, plan=None):
         self.scope.require_current()
@@ -1708,6 +1722,7 @@ class _DeliveryAdmission:
                 or not any(a is self for a in self.scope.admissions)):
             raise FlyResultUnreadable("delivery admission lost its original execution")
         if result is not None:
+            self.require_settled()
             if self.result is not result or getattr(result, "_fly_admission", None) is not self:
                 raise FlyResultUnreadable("delivery result is not the original executor result")
             if result.remote_run_id != self.job.run_id:
@@ -2586,7 +2601,12 @@ class FlyExecutor:
                 try:
                     if launch.reserved and launch.requested:
                         confirmed = await self._settle(job.run_id)
-                        job.remote_state = "terminated" if confirmed else "unconfirmed"
+                        settled = confirmed is True if job.delivery is not None else bool(confirmed)
+                        job.remote_state = "terminated" if settled else "unconfirmed"
+                        admission = getattr(job, "_fly_admission", None)
+                        if (confirmed is True and job.delivery is not None
+                                and type(admission) is _DeliveryAdmission):
+                            admission._confirm_settlement(self, job)
                     elif launch.reserved:
                         await self._release_unstarted(job.run_id, launch)
                         self._launched.pop(job.run_id, None)  # provably never started

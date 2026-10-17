@@ -726,6 +726,15 @@ def common_admission_executor(monkeypatch, tmp_path):
 
     monkeypatch.setattr(fly_runner, "build_job", build_job)
     executor, _, _ = make_executor(FakeFly(), clock=time.time)
+    original_settle = executor._settle
+
+    async def settle(run_id):
+        if "settlement" in state:
+            state.setdefault("settlement_calls", []).append(run_id)
+            return state["settlement"]
+        return await original_settle(run_id)
+
+    monkeypatch.setattr(executor, "_settle", settle)
     executor._mint_delivery = lambda *a, **kw: fly_runner.DeliveryToken(
         "synthetic-installation-token", executor._clock() + 3600, REPO)
 
@@ -794,6 +803,36 @@ def test_common_admission_reaches_both_real_consumers(
     assert len(jobs) == 1 and len(reads) >= 4
     assert jobs[0]._fly_admission.scope.closed
     assert jobs[0]._fly_admission.origin is None
+    assert jobs[0]._fly_admission._settled_by is None
+
+
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+@pytest.mark.parametrize("confirmation", [False, None, "unknown"])
+def test_common_unconfirmed_settlement_blocks_both_consumers(
+    monkeypatch, dispatch_env, common_admission_executor, entry, confirmation
+):
+    _, _, store = dispatch_env
+    executor, jobs, reads, state = common_admission_executor
+    state["settlement"] = confirmation
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    monkeypatch.setattr(apis, "_spawn_harness_skill", _REAL_SPAWN)
+    monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **kw: "exists")
+    monkeypatch.setattr("lib.daemon_runtime.task_lifecycle._correct", store.field)
+    if entry == "task":
+        eid = "ent_synthetic_unconfirmed_settlement"
+        snapshot = task_snapshot()
+        store.rows[eid] = snapshot.copy()
+        asyncio.run(apis.dispatch_task(eid, snapshot, "approved", _StubNotifier(), gate_override=True))
+        assert store.rows[eid]["status"] != "done", store.rows[eid]
+    else:
+        with pytest.raises(delivery.FlyDeliveryEnded):
+            asyncio.run(dispatcher()._open_implementation_pr(trigger(), _empty_spec_state()))
+    assert len(jobs) == 1 and len(reads) >= 4
+    assert state["settlement_calls"] == [jobs[0].run_id]
+    assert jobs[0].remote_state == "unconfirmed"
+    assert jobs[0].run_id in executor.ledger.snapshot()["in_flight"]
+    receipt = delivery._delivery_ledger().delivery_receipts()[REPO + "#123"]
+    assert receipt["status"] == "unknown"
 
 
 @pytest.mark.parametrize("entry", ["task", "pipeline"])
@@ -850,6 +889,7 @@ def test_common_admission_loss_blocks_both_real_consumers(
     ("task", "closed"), ("pipeline", "closed"),
     ("task", "foreign_job"), ("pipeline", "foreign_job"),
     ("task", "scalar_cleared"),
+    ("task", "lost_settlement"), ("pipeline", "lost_settlement"),
 ])
 def test_common_late_loss_at_both_final_consumers(
     monkeypatch, dispatch_env, common_admission_executor, entry, failure
@@ -865,6 +905,9 @@ def test_common_late_loss_at_both_final_consumers(
                 # Alter the report only after the artifact header was built.
                 jobs[0]._fly_admission.result.fly_delivery_status = ""
             jobs[0]._fly_admission.scope.close()
+        elif failure == "lost_settlement":
+            # Earlier acceptance cannot replace this final consumer's check.
+            jobs[0]._fly_admission._settled_by = None
         else:
             import copy
 

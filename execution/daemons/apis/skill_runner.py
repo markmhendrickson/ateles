@@ -3258,6 +3258,7 @@ async def _run_skill_once(
                         admission = getattr(_fly_job, "_fly_admission", None)
                         if type(admission) is not fly_runner._DeliveryAdmission:
                             raise fly_runner.FlyResultUnreadable("delivery admission is absent")
+                        admission.require_settled()
                         await admission.require_current()
                 except fly_runner.FlyRefusal as exc:
                     msg = f"fly runner refused: {exc}"
