@@ -292,7 +292,6 @@ from lib.daemon_runtime.artifact_contract import (  # noqa: E402
     artifact_gate_reason,
     body_shape_for_dispatch,
     classify_artifact_body,
-    classify_gh_ref_failure,
     complete_reference_url,
     eng_spec_has_content,
     pr_url,
@@ -303,7 +302,6 @@ from lib.daemon_runtime.artifact_contract import (  # noqa: E402
     parse_github_ref,
     role_required_artifact,
     stdout_tail_for_reason,
-    trim_on_word,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
@@ -675,60 +673,12 @@ def _text_identity(text: str) -> str:
 
 
 def resolve_artifact_ref(parsed: ParsedRef, *, repo: str | None = None) -> str:
-    """Ask GitHub whether a parsed PR/commit exists, via argv ``gh``.
+    # Keep the existing injectable Apis seam; delivery callers share the same
+    # resolver with an exact remote PR expectation before reporting completion.
+    from lib.daemon_runtime.artifact_resolver import resolve_artifact_ref as resolve
 
-    Never ``shell=True`` and never an HTTP probe. Returns a TRI-STATE string:
-    ``"exists"``, ``"absent"`` (GitHub answered that it is not there), or
-    ``"unavailable"`` (a rate limit, 5xx, auth error, timeout, OSError or any
-    non-zero exit that is not a clear not-found). "Unavailable" is not "absent":
-    it says nothing about the ref, and calling it absent would mark a task that
-    has a real PR FAILED, which the stall watchdog re-runs (a second PR).
-
-    Injectable: tests monkeypatch this to avoid live GitHub calls; a bool return
-    from a stub is read as exists / absent (see `_normalize_ref_check`).
-    """
-    import subprocess
-
-    owner = parsed.owner or ""
-    name = parsed.repo or ""
-    if repo and "/" in repo and (not owner or not name):
-        owner, name = repo.split("/", 1)
-    if parsed.kind == "pr":
-        if not owner or not name or parsed.number is None:
-            return "unavailable"
-        cmd = [
-            "gh", "pr", "view", str(parsed.number),
-            "--repo", f"{owner}/{name}", "--json", "number",
-        ]
-    elif parsed.kind == "sha":
-        if not owner or not name or not parsed.sha:
-            return "unavailable"
-        cmd = [
-            "gh", "api", f"repos/{owner}/{name}/commits/{parsed.sha}",
-            "--jq", ".sha",
-        ]
-    else:
-        return "unavailable"
-    verdict = "unavailable"
-    for attempt in range(_RESOLVE_ATTEMPTS):
-        stderr = ""
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, check=False
-            )
-            stderr = proc.stderr or ""
-            verdict = classify_gh_ref_failure(proc.returncode, stderr)
-        except (OSError, subprocess.TimeoutExpired):
-            verdict = "unavailable"
-        if verdict != "unavailable":
-            break
-        # A 404 means the repository is missing or not visible to this identity;
-        # asking again a second later cannot change that.
-        if "http 404" in stderr.lower():
-            break
-        if attempt + 1 < _RESOLVE_ATTEMPTS:
-            time.sleep(_RESOLVE_RETRY_DELAY_SECONDS)
-    return verdict
+    return resolve(parsed, repo=repo, attempts=_RESOLVE_ATTEMPTS,
+                   retry_delay=_RESOLVE_RETRY_DELAY_SECONDS)
 
 
 def _normalize_ref_check(value) -> str:
@@ -777,6 +727,7 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
+@build_delivery.completion_scope
 async def _spawn_harness_skill(
     skill: str,
     entity_id: str,
@@ -847,6 +798,23 @@ async def _spawn_harness_skill(
                 "names no repository — running without worktree or network"
             )
         else:
+            blocker = build_delivery.fly_delivery_blocker(
+                build_delivery.fly_delivery_key(repository, key, entity_id)
+            )
+            if blocker:
+                return SkillResult(skill, False, None, "", "", error=blocker,
+                                   fly_delivery_status="unknown")
+            # Opted onto Fly (APIS_FLY_RUNNER_CLASSES lists the delivery class):
+            # the job runner clones, builds and delivers on a Fly machine, and
+            # no local worktree is made. Not eligible before launch (including
+            # a refused token mint): the local path below runs, as without Fly.
+            fly_result = await _run_fly_delivery_task(
+                skill, prompt, entity_id=entity_id, role=role, repository=repository,
+                key=key, run_agent_session_id=run_agent_session_id, notifier=notifier,
+                action_class=action_class,
+            )  # fmt: skip
+            if fly_result is not None:
+                return fly_result
             try:
                 worktree = await build_delivery.prepare_build_worktree(
                     repository, f"task-{entity_id[-8:]}"
@@ -915,6 +883,65 @@ def _confidence_drivers_text(snapshot: dict) -> str:
     if len(text) > _CONFIDENCE_DRIVERS_MAX:
         text = text[: _CONFIDENCE_DRIVERS_MAX - 1].rstrip() + "…"
     return text
+
+
+async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, role: str | None,
+                                 repository: str, key, run_agent_session_id: str | None,
+                                 notifier, action_class: str):  # fmt: skip
+    """A task-routed build delivered on Fly, or None to run it locally."""
+    plan = build_delivery.plan_fly_delivery(
+        repository, f"task-{entity_id[-8:]}",
+        key=build_delivery.fly_delivery_key(repository, key, entity_id),
+        issue_number=key[1] if key else None,
+    )
+    if plan is None:
+        return None
+    from fly_runner import expect_delivery_plan
+
+    expect_delivery_plan(plan, task_id=entity_id)
+    with contextlib.ExitStack() as stack:
+        fly_prompt = f"{prompt}\n\n{build_delivery.fly_delivery_instructions(plan)}"
+        if key:
+            claim = stack.enter_context(build_delivery.claim_build(*key, f"task:{entity_id}"))
+            fly_prompt += f"\n\n{build_delivery.tracking_instructions(claim)}"
+
+        async def launch():
+            return await run_skill(
+                skill, fly_prompt, role=role or skill, task_entity_id=entity_id,
+                agent_session_id=run_agent_session_id or "", notifier=notifier,
+                action_class=action_class, repository=repository, runner="fly",
+                fly_delivery=plan.spec(),
+            )  # fmt: skip
+
+        result = await build_delivery.run_fly_delivery(
+            plan, launch, lambda reason: SkillResult(
+                skill, False, None, "", "", error=reason, fly_delivery_status="unknown"))
+    if result is not None and result.fly_delivery_status:
+        summary = build_delivery.fly_delivery_summary(result)
+        log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
+        if result.ok and not result.remote_outcome_unknown and result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
+            from fly_runner import FlyResultUnreadable, require_delivery_admission
+
+            try:
+                await require_delivery_admission(result, plan)
+            except FlyResultUnreadable:
+                result.ok = False
+                result.remote_outcome_unknown = True
+                result.fly_delivery_status = "unknown"
+                result.fly_pr_url = ""
+                result.error = "delivery admission changed before artifact synthesis"
+                return result
+            # The runner opens the PR after the model exits. Its read-back
+            # supplies the artifact header the existing resolving gate verifies.
+            result.stdout = (
+                f"{result.stdout.rstrip()}\n{summary}\n"
+                f"[{role or skill}] pull_request_link: {result.fly_pr_url}\n"
+            )
+            result.ok = True
+        else:
+            result.ok = False
+            result.error = summary
+    return result
 
 
 def _shown_confidence(confidence: float, source: str) -> str:
@@ -2250,6 +2277,7 @@ async def dispatch_task(
         )
         return
 
+    @build_delivery.completion_scope
     async def _finish_dispatch() -> None:
         # E1/E2: this run's thread. run_key keys it to the attempt so SSE
         # replays reuse it while a genuine retry opens a fresh run.
@@ -2361,6 +2389,12 @@ async def dispatch_task(
                 f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}"
             )
             raise
+
+        from fly_runner import task_delivery_started
+
+        # The original task/job scope, rather than a later mutable report,
+        # decides whether final completion still requires Fly admission.
+        fly_delivery_started = task_delivery_started(task_id=entity_id)
 
         # ── Deliverable gate (ateles#1155) ───────────────────────────────────
         # A harness exiting 0 is process success, not deliverable success.
@@ -2558,6 +2592,11 @@ async def dispatch_task(
             # The stored result is the header line as redacted, and the read-back
             # compares against that same string.
             stored_line = header.matched_line
+            if getattr(result, "fly_delivery_status", ""):
+                # Reference parsing requires exactly one URL in the header.
+                # Keep the runner metadata in the persisted result, alongside
+                # that verified reference, without changing the header body.
+                stored_line += "\n" + build_delivery.fly_delivery_summary(result)
 
             if shape == "eng_spec_section" and not eng_spec_has_content(header.body):
                 # A bare token names no authored section.
@@ -2750,6 +2789,16 @@ async def dispatch_task(
                 TaskStatus.VERIFIED.value if run_session else TaskStatus.EXECUTING.value
             )
             if artifact is not None:
+                if fly_delivery_started:
+                    from fly_runner import FlyResultUnreadable, require_task_delivery_admission
+
+                    try:
+                        await require_task_delivery_admission(
+                            result, task_id=entity_id,
+                            repository=_dispatch_repo_from_snapshot(snapshot))
+                    except FlyResultUnreadable:
+                        _artifact_fail(TaskStatus.BLOCKED, "Fly delivery admission changed before completion", stage="blocked")
+                        return
                 header, identity, note, stored_line, shape = artifact
                 # `complete_task_with_result` writes `result` before `status`
                 # AND reads both back: the exact header line must be the stored
@@ -2840,6 +2889,28 @@ async def dispatch_task(
                 key_suffix=trigger,
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+        elif getattr(result, "fly_delivery_status", ""):
+            reason = result.error or build_delivery.fly_delivery_summary(result)
+            _run_stage("assistant", reason, stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            set_task_status(
+                entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value, reason=reason,
+                result=reason, key_suffix=trigger,
+            )
+            try:
+                saved = fetch_task_snapshot(entity_id) or {}
+                held = (normalize_status(saved.get("status")) == TaskStatus.BLOCKED.value
+                        and saved.get("result") == reason)
+            except Exception:
+                held = False
+            notice = reason if held else (
+                f"{reason} Task result/status could not be verified; durable Fly receipt "
+                "still refuses another delivery. Reconcile the record."
+            )
+            notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} → {skill} Fly delivery ended")
         elif getattr(result, "remote_outcome_unknown", False):
             # ateles#1456: the remote run may have done its work. BLOCKED, not
             # FAILED: the watchdog retries FAILED tasks and leaves BLOCKED ones

@@ -53,6 +53,40 @@ def complete_record(run_id: str, **fields) -> dict:
     return record
 
 
+def canonical_delivery_fixture(record):
+    """Existing API response shapes with synthetic owner/grant/observation."""
+    import hashlib
+
+    binding = {"owner": "synthetic-owner", "grant_id": "ent_synthetic_grant",
+               "sub": "synthetic-producer", "thumbprint": "synthetic-thumbprint"}
+    observation = {"id": "obs_synthetic", "entity_id": "ent_synthetic_result",
+        "user_id": binding["owner"], "fields": dict(record),
+        "provenance": {"agent_sub": binding["sub"], "agent_thumbprint": binding["thumbprint"],
+                       "attribution_tier": "software"}}
+    row = {"entity_id": "ent_synthetic_result", "entity_type": "fly_runner_result",
+        "entity_version": "synthetic-version", "observation_count": 1,
+        "snapshot": dict(record), "provenance": {k: observation["id"] for k in record}}
+    contract = {"version": "1", "surface": "entity_collection", "mode": {"actual": "structured"},
+        "applied_scope": {"owner": "authenticated", "entity_types": ["fly_runner_result"],
+            "include_merged": False, "include_snapshots": True, "predicates": [{"field": "run_id", "op": "eq",
+                "value": {"kind": "sha256", "value": hashlib.sha256(json.dumps(record["run_id"]).encode()).hexdigest()}}]},
+        "request_options": {"ignored": []}, "coverage": {"kind": "predicate_population",
+            "state": "complete", "reasons": [], "total": {"value": 1, "relation": "exact", "unit": "entities"},
+            "returned_count": 1, "scope_exhausted": True},
+        "coherence": {"kind": "read_interval", "common_view": False}}
+    responses = {
+        "/entities/query": {"entities": [row], "total": 1, "read_contract": contract},
+        "/entities/ent_synthetic_result/observations": {"observations": [observation], "total": 1, "limit": 100, "offset": 0},
+        "/agents/grants/ent_synthetic_grant": {"grant": {"grant_id": binding["grant_id"],
+            "user_id": binding["owner"], "status": "active", "match_sub": binding["sub"],
+            "match_thumbprint": binding["thumbprint"], "match_iss": None,
+            "capabilities": [{"op": "store", "entity_types": ["fly_runner_result"]}]}},
+        "/schemas/fly_runner_result": {"entity_type": "fly_runner_result", "active": True,
+            "schema_version": "1.1.0", "schema_definition": {"fields": {k: {} for k in record}}},
+    }
+    return binding, responses
+
+
 def _present(machine: dict) -> dict:
     """A machine as the Machines API answers for it: always with a version
     and a config object (the double fills them in) unless a test marks the
@@ -1893,8 +1927,23 @@ def test_timeout_keeps_the_remote_run_identity_and_state(fly_env, seam, monkeypa
     assert spawned == [] and revoked == [MINTED]
 
 
+@pytest.fixture
+def settlement_component_isolation(monkeypatch, request, tmp_path):
+    """Static owner/activity sink only for the two ordinary cleanup components."""
+    assert request.node.originalname in {
+        "test_a_recorded_result_with_unconfirmed_cleanup_keeps_its_remote_fields",
+        "test_a_settlement_on_an_unusable_ledger_keeps_the_result_and_the_reservation",
+    }
+    monkeypatch.setattr(fly_runner, "this_process_owner", lambda identity: {
+        "id": identity, "pid": 123, "start": "synthetic-start", "host": "synthetic-host"})
+    monkeypatch.setattr("lib.activity._store_activity_log", lambda *args, **kwargs: None)
+    config_path = tmp_path / "absent-local-provider.json"
+    assert not config_path.exists()
+    monkeypatch.setenv("APIS_CLAUDE_LOCAL_CONFIG", str(config_path))
+
+
 def test_a_recorded_result_with_unconfirmed_cleanup_keeps_its_remote_fields(
-    fly_env, seam, monkeypatch
+    fly_env, seam, monkeypatch, settlement_component_isolation
 ):
     spawned, fake_exec = seam
     fake = FakeFly()
@@ -3500,7 +3549,9 @@ def test_a_run_id_already_reserved_is_never_overwritten(fly_env, tmp_path):
             config, run_id="r1", owner="t", max_run_seconds=600, now=_NOW)
 
 
-def test_a_settlement_on_an_unusable_ledger_keeps_the_result_and_the_reservation(fly_env):
+def test_a_settlement_on_an_unusable_ledger_keeps_the_result_and_the_reservation(
+    fly_env, settlement_component_isolation
+):
     """A completed run whose ledger became unusable: its result still comes
     back, its machine state says unconfirmed, and nothing is released."""
     fake = FakeFly()
