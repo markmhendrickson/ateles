@@ -36,6 +36,34 @@ FALLBACK = gating.ExecutionPolicy(entity_id="fallback", loaded=False)
 VERDICT = _verdict_for(FALLBACK)
 
 
+@pytest.mark.parametrize("text", ["Transfer €", "Transfer € now", "Transfer €50", "Transfer\u00a0€\u200b"])
+def test_symbol_ending_transfer_phrase_escalates(text):
+    result = resolve_gate_action_type("fringilla", {"title": text}, verdict=VERDICT)
+    assert (result.value, result.source) == ("payment", "content")
+
+
+@pytest.mark.parametrize("first,last", [("payment", "publish"), ("publish", "payment")])
+@pytest.mark.parametrize("strictness", ["high", "never"])
+def test_every_recognized_candidate_is_compared_under_effective_policy(first, last, strictness):
+    policy = gating.ExecutionPolicy(
+        entity_id="candidate-order", loaded=True,
+        low_blast_action_types=frozenset({"compute_only_analysis", first}),
+        high_blast_action_types=frozenset({last} if strictness == "high" else ()),
+    )
+    result = resolve_gate_action_type(
+        "fringilla", {"title": "Transfer money then publish the page"},
+        verdict=_verdict_for(policy),
+    )
+    assert (result.value, result.source) == (last, "content")
+    assert policy.blast_radius_for(result.value).value == strictness
+
+
+def test_equal_candidate_rank_keeps_existing_pattern_order():
+    assert resolve_gate_action_type(
+        "fringilla", {"title": "Publish the page then transfer money"}, verdict=VERDICT,
+    ).value == "payment"
+
+
 def _r(skill, **snap):
     return resolve_gate_action_type(skill, snap, verdict=VERDICT)
 

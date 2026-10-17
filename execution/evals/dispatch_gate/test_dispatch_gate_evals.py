@@ -84,6 +84,7 @@ CONTENT_IDS = {
     "content_effective_never_prior_preserved", "content_unicode_body_escalates",
     "content_unicode_description_escalates", "content_drivers_supplied",
     "content_drivers_missing", "content_preview_raw_policy_parity",
+    "content_symbol_transfer_holds", "content_strictest_policy_candidate_holds",
 }
 
 

@@ -862,6 +862,81 @@
       "preview": {
         "task_description": "implement a new feature"
       }
+    },
+    {
+      "id": "content_symbol_transfer_holds",
+      "why": "Every recognized content action must be classified under the effective policy before dispatch or preview.",
+      "task": {
+        "title": "Transfer €",
+        "body": "Local task details.",
+        "description": "",
+        "action_type": null,
+        "assigned_to": "fringilla",
+        "confidence": 0.99
+      },
+      "policy": {
+        "high_blast_action_types": [
+          "payment"
+        ],
+        "low_blast_action_types": [
+          "compute_only_analysis"
+        ]
+      },
+      "preview": {
+        "task_description": "Transfer €"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "payment",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        },
+        "preview": {
+          "action_type": "payment",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "content_strictest_policy_candidate_holds",
+      "why": "Every recognized content action must be classified under the effective policy before dispatch or preview.",
+      "task": {
+        "title": "Transfer money then publish the page",
+        "body": "Local task details.",
+        "description": "",
+        "action_type": null,
+        "assigned_to": "fringilla",
+        "confidence": 0.99
+      },
+      "policy": {
+        "high_blast_action_types": [
+          "publish"
+        ],
+        "low_blast_action_types": [
+          "payment",
+          "compute_only_analysis"
+        ]
+      },
+      "preview": {
+        "task_description": "Transfer money then publish the page"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "publish",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        },
+        "preview": {
+          "action_type": "publish",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        }
+      }
     }
   ]
 }
