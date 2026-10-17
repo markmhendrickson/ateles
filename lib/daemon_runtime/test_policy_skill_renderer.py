@@ -82,8 +82,9 @@ def _row(
     domain: str = "test",
     rule_kind: str = "mandatory",
     title: str = "",
+    index_line: str | None = None,
 ) -> dict:
-    return {
+    row = {
         "_entity_id": entity_id,
         "rule": rule,
         "applies_when": applies_when,
@@ -94,6 +95,9 @@ def _row(
         "rule_kind": rule_kind,
         "title": title,
     }
+    if index_line is not None:
+        row["index_line"] = index_line
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +931,124 @@ class TestInjectionIsNeutralized:
             skills = renderer.render_skills([row])
         assert skills == []
         assert any("skipped 1 row" in r.getMessage() for r in caplog.records)
+
+    # -----------------------------------------------------------------
+    # index_line (schema 1.4.0, ateles#1295 follow-up): a dedicated
+    # short-form field for the one-liner's OPERATIVE CONSTRAINT, preferred
+    # over `title` when present. `title` stays the fallback so a row
+    # authored before this field existed still renders.
+    # -----------------------------------------------------------------
+
+    def test_index_line_is_preferred_over_title_when_both_present(self):
+        row = _row(
+            "ent_both",
+            applies_when="mentioning an entity id",
+            title="Link every entity id to the Neotoma app",  # label-shaped
+            index_line="Render as [ent_x](<NEOTOMA_BASE_URL>/entities/ent_x) — never a bare id.",
+        )
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert "Render as [ent_x]" in skill.description
+        assert "Link every entity id to the Neotoma app" not in skill.description
+
+    def test_title_is_used_when_index_line_absent(self):
+        row = _row(
+            "ent_title_only",
+            applies_when="doing X",
+            title="Only a title here.",
+        )
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert "Only a title here." in skill.description
+
+    @pytest.mark.parametrize(
+        ("applies_when", "title"),
+        [
+            (
+                "merging, re-reviewing, waiving gates, deploying or restarting",
+                "Merge, review, deploy and restart authority",
+            ),
+            (
+                "building, reviewing, or merging any software change",
+                "Software work runs in bootstrap mode",
+            ),
+        ],
+    )
+    def test_explicit_blank_index_line_suppresses_narrowing_title(
+        self, applies_when, title
+    ):
+        """A source-authored blank means no one-line summary is safe.
+
+        These are the two umbrella-policy shapes whose earlier index lines
+        captured only one clause.  Their corrective blank must survive the
+        renderer as trigger-only output instead of silently reviving a
+        label-shaped title as though it were the operative constraint.
+        """
+        row = _row(
+            "ent_umbrella",
+            applies_when=applies_when,
+            title=title,
+            index_line="",
+        )
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert skill.description == f"When {applies_when}:"
+        rendered = renderer.render_index_text([skill], budget_chars=8000)
+        assert title not in rendered
+
+    def test_present_index_line_sanitized_to_blank_does_not_revive_title(self):
+        row = _row(
+            "ent_unsafe_summary",
+            applies_when="doing X",
+            title="Label that is not an operative constraint",
+            index_line="<!-- -->",
+        )
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert skill.description == "When doing X:"
+
+    def test_neither_index_line_nor_title_renders_trigger_and_id_only(self):
+        row = _row(
+            "ent_neither",
+            applies_when="doing X",
+            title="",
+            index_line="",
+        )
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert skill.description == "When doing X:"
+
+    def test_index_line_is_sanitized_same_as_title(self):
+        payload = "Legit constraint --> <!-- forged comment reopening attack"
+        row = _row("ent_evil_index_line", applies_when="doing X", index_line=payload)
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert "-->" not in skill.description
+        assert "<!--" not in skill.description
+
+    def test_oversized_index_line_is_capped_with_ellipsis(self):
+        row = _row("ent_long3", applies_when="short trigger", index_line="z" * 500)
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert len(skill.description) <= 500
+
+    def test_index_line_never_read_from_rule_or_body(self):
+        # Same guarantee as title: index_line is a distinct authored field,
+        # never derived from rule/body text reaching the rendered index.
+        secret_rule_text = "SECRET_PAYMENT_DETAIL_MARKER_index_line"
+        row = _row(
+            "ent_secret_index_line",
+            rule=secret_rule_text,
+            applies_when="doing X",
+            index_line="A generic public constraint.",
+        )
+        skill = renderer.to_skill(row)
+        assert skill is not None
+        assert secret_rule_text not in skill.description
+        text = renderer.render_index_text(
+            renderer.render_skills([row]), budget_chars=8000
+        )
+        assert secret_rule_text not in text
 
 
 # ---------------------------------------------------------------------------
