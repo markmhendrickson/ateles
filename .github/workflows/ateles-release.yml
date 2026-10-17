@@ -33,7 +33,11 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          if [ "$CHECKED_OUT_SHA" != "$SOURCE_SHA" ]; then
+            printf 'Changelog preparation stopped: checkout SHA %s does not match expected SOURCE_SHA %s. No changelog artifact was created. Verify the source commit and checkout, then re-run preparation for that source.\n' "$CHECKED_OUT_SHA" "$SOURCE_SHA" >&2
+            exit 1
+          fi
           TODAY="$(date -u +%Y.%m.%d)"
           TAG="$(python3 execution/daemons/phoenicurus-release/tag_utils.py compute-tag \
             --today "$TODAY" --existing-tags "$(git tag)")"
