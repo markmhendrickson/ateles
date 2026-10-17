@@ -109,6 +109,16 @@ def search_response():
     }
 
 
+def test_mutating_parsed_tool_array_cannot_rewrite_source_authority(loader, monkeypatch):
+    data = response()
+    monkeypatch.setattr(loader, "_neotoma", lambda *args: data)
+    definition = loader.load_for_lens()
+    definition.tool_allowlist.append("*")
+    assert definition.raw["snapshot"]["tool_allowlist"] == ["Read"]
+    with pytest.raises(ValueError, match="absent or changed"):
+        validate_lens_definition(definition, "pavo")
+
+
 @pytest.mark.parametrize(
     "case",
     [
