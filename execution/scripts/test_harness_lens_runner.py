@@ -1732,6 +1732,147 @@ def test_validate_verdict_refuses_rather_than_invent_a_check_if_reader_missing(
     assert "cannot validate" in check.reason
 
 
+def _reader_preflight_module(monkeypatch, *, missing_dependency):
+    """Import the real reader in a fresh runner, with one dependency withheld."""
+    import builtins
+    import importlib.util
+
+    denied_imports = []
+    if missing_dependency:
+        original_import = builtins.__import__
+
+        def without_aiohttp(name, *args, **kwargs):
+            if name == "aiohttp" or name.startswith("aiohttp."):
+                denied_imports.append(name)
+                raise ModuleNotFoundError("fixture dependency unavailable", name="aiohttp")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_aiohttp)
+        monkeypatch.delitem(sys.modules, "swarm_dispatch", raising=False)
+        monkeypatch.delitem(sys.modules, "github_gateway", raising=False)
+
+    name = "reader_preflight_fixture_runner"
+    spec = importlib.util.spec_from_file_location(name, hlr.__file__)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    assert (module.swarm_dispatch is None) == missing_dependency
+    if missing_dependency:
+        assert denied_imports, "the actual reader dependency import must fail"
+    else:
+        assert Path(module.swarm_dispatch.__file__).resolve() == (
+            _DAEMON_DIR / "swarm_dispatch.py"
+        ).resolve()
+    return module
+
+
+@pytest.mark.parametrize("missing_dependency", [False, True])
+@pytest.mark.parametrize("wrong_head", [False, True])
+def test_reader_preflight_cli_before_inference(
+    monkeypatch, tmp_path, brief_file, capsys, missing_dependency, wrong_head
+):
+    """Only the provider effect is synthetic; reader/import/CLI remain real."""
+    module = _reader_preflight_module(
+        monkeypatch, missing_dependency=missing_dependency
+    )
+    calls = []
+    worktrees = []
+
+    def create(self, *, head):
+        worktrees.append(head)
+        self.path.mkdir(parents=True)
+        agents = self.path / "docs" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "pavo.md").write_text("Fixture role prompt\n", encoding="utf-8")
+
+    def ready(cls, provider, root, **kwargs):
+        # Dependency sequencing tests must not run real credential/OS probes.
+        return module.HarnessSandbox(
+            provider=provider, root=root, env_extra={},
+            command_wrapper=["/usr/bin/sandbox-exec", "-f", str(root / "fixture.sb")],
+            credential_read_denied=True, credential_binding_protected=True,
+            user_config_write_denied=True, git_stash_denied=True,
+            review_write_confined=True, authentication_ready=True,
+            unavailable_guards=(),
+        )
+
+    async def provider(role, task, **kwargs):
+        calls.append(role)
+        verdict = SIGNED_OFF_VERDICT
+        if wrong_head:
+            verdict = verdict.replace(SAMPLE_HEAD, "b" * 40)
+        (Path(kwargs["cwd"]) / "pm1_verdict.md").write_text(verdict, encoding="utf-8")
+        return SkillResult(
+            ok=True, skill="fixture", provider="codex", returncode=0,
+            stdout=verdict, stderr="",
+        )
+
+    monkeypatch.setattr(module.Worktree, "create", create)
+    monkeypatch.setattr(module.Worktree, "remove", lambda self: None)
+    monkeypatch.setattr(module.HarnessSandbox, "build", classmethod(ready))
+    monkeypatch.setattr(module, "check_headroom", lambda provider: None)
+    monkeypatch.setattr(module, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+    monkeypatch.setattr(module, "capture_stash_ref_state", lambda path: None)
+    monkeypatch.setattr(module, "verify_stash_ref_unchanged_after_dispatch", lambda *args: None)
+    monkeypatch.setattr(module.dispatch_role, "dispatch", provider)
+
+    rc = module.main([
+        "--repo", "owner/example", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--agent", "pavo", "--provider", "codex",
+        "--model", "gpt-6-sol", "--brief", str(brief_file), "--json",
+    ])
+    report = json.loads(capsys.readouterr().out)
+    if missing_dependency:
+        assert calls == [], "unavailable canonical reader must stop before provider"
+        assert worktrees == [], "dependency refusal must precede review preparation"
+        assert rc == 1 and report["ok"] is False
+        assert "canonical review reader" in report["reason"]
+    else:
+        assert calls == ["pavo"], report
+        assert report["ok"] is (not wrong_head)
+        assert rc == (1 if wrong_head else 0)
+        if wrong_head:
+            assert "commit mismatch" in report["refusal_reason"]
+        else:
+            assert report["lens_verdict"] == "signed_off"
+
+
+def test_reader_preflight_missing_dependency_cli_subprocess(tmp_path, brief_file):
+    """A fresh script runtime refuses before any review-worktree preparation."""
+    driver = r'''
+import builtins, json, sys
+sys.path.insert(0, sys.argv[1])
+original_import = builtins.__import__
+blocked = []
+def without_dependency(name, *args, **kwargs):
+    if name == "aiohttp" or name.startswith("aiohttp."):
+        blocked.append(name)
+        raise ModuleNotFoundError("fixture dependency unavailable", name="aiohttp")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = without_dependency
+import harness_lens_runner as runner
+assert runner.swarm_dispatch is None and blocked
+runner.check_headroom = lambda provider: None
+def must_not_prepare(self, *, head):
+    raise AssertionError("reader preflight happened after review preparation")
+runner.Worktree.create = must_not_prepare
+rc = runner.main([
+    "--repo", "owner/example", "--pr", "1", "--head", "a" * 40,
+    "--lens", "pm", "--provider", "codex", "--brief", sys.argv[2], "--json",
+])
+assert rc == 1
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", driver, str(_SCRIPTS_DIR), str(brief_file)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert report["no_model_call_made"] is True
+    assert "canonical review reader" in report["reason"]
+
+
 # ── Posting gate: never posts an unreadable verdict, never posts under --compare --
 
 

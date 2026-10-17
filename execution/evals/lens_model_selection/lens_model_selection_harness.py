@@ -10,6 +10,8 @@ network service is contacted, and no GitHub publication path is enabled.
 from __future__ import annotations
 
 import asyncio
+import builtins
+import importlib.util
 import contextlib
 import io
 import json
@@ -49,8 +51,40 @@ def _executable(path, body):
     return path
 
 
+def _reader_runtime(mp, *, missing_dependency):
+    """Use the real CLI import boundary, withholding only a reader dependency."""
+    denied = []
+    with pytest.MonkeyPatch.context() as imports:
+        if missing_dependency:
+            original_import = builtins.__import__
+
+            def without_aiohttp(name, *args, **kwargs):
+                if name == "aiohttp" or name.startswith("aiohttp."):
+                    denied.append(name)
+                    raise ModuleNotFoundError("fixture dependency unavailable", name="aiohttp")
+                return original_import(name, *args, **kwargs)
+
+            imports.setattr(builtins, "__import__", without_aiohttp)
+            imports.delitem(sys.modules, "swarm_dispatch", raising=False)
+            imports.delitem(sys.modules, "github_gateway", raising=False)
+        name = "lens_eval_reader_runtime"
+        spec = importlib.util.spec_from_file_location(name, runner.__file__)
+        module = importlib.util.module_from_spec(spec)
+        mp.setitem(sys.modules, name, module)
+        spec.loader.exec_module(module)
+    if missing_dependency:
+        assert denied and module.swarm_dispatch is None
+    else:
+        assert Path(module.swarm_dispatch.__file__).resolve() == (
+            ROOT / "execution/daemons/apis/swarm_dispatch.py"
+        ).resolve()
+    return module, {"dependency_import_denied": bool(denied),
+                    "canonical_reader_available": module.swarm_dispatch is not None}
+
+
 def run_scenario(scenario, tmp_path, *, mutation="none"):
     assert mutation in MUTATIONS
+    active_runner = runner
     trace = tmp_path / "provider-calls.jsonl"
     child = _executable(tmp_path / "fixture-provider", f'''
         import json, os, re, sys
@@ -74,7 +108,8 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
     ''')
     brief = tmp_path / "brief.md"
     brief.write_text("Review this synthetic fixture; write only the requested verdict.\n")
-    obs = {"dispatch_calls": [], "events": [], "provider_calls": [], "definition_loads": []}
+    obs = {"dispatch_calls": [], "events": [], "provider_calls": [], "definition_loads": [],
+           "worktree_preparations": [], "sandbox_builds": []}
     stdout, stderr = io.StringIO(), io.StringIO()
 
     with pytest.MonkeyPatch.context() as mp:
@@ -100,26 +135,32 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
             "GH_TOKEN": "eval-only-not-a-credential",
         }.items():
             mp.setenv(key, value)
-        mp.setattr(runner.harness_router, "_cooldown_until", {})
-        mp.setattr(runner.harness_router, "_current_weights", {})
+        if "reader_dependency" in scenario:
+            state = scenario["reader_dependency"]
+            assert state in {"available", "missing_aiohttp"}
+            active_runner, obs["reader_runtime"] = _reader_runtime(
+                mp, missing_dependency=state == "missing_aiohttp")
+        mp.setattr(active_runner.harness_router, "_cooldown_until", {})
+        mp.setattr(active_runner.harness_router, "_current_weights", {})
         mp.setattr(skill_runner, "CODEX_BIN", str(child))
         mp.setattr(skill_runner, "CURSOR_BIN", str(child))
         mp.setattr(skill_runner, "ATELES_REPO", ROOT)
-        mp.setattr(runner.dispatch_role, "ATELES_REPO", ROOT)
+        mp.setattr(active_runner.dispatch_role, "ATELES_REPO", ROOT)
         mp.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
-        mp.setattr(runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
+        mp.setattr(active_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         def definition(role):
             obs["definition_loads"].append(role)
             return AgentDefinition(name=role, prompt_markdown="Synthetic review role.", tool_allowlist=[])
 
         mp.setattr(skill_runner, "_load_agent_def", definition)
-        mp.setattr(runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
+        mp.setattr(active_runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
         mp.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
         mp.setattr(skill_runner, "_write_harness_event", lambda **kw: obs["events"].append(kw))
         mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top"})
         mp.setattr(model_tiering, "configured_vendor_binding", lambda: BINDING)
 
         def create(worktree, *, head):
+            obs["worktree_preparations"].append(head)
             assert head == HEAD
             worktree.path.mkdir(parents=True)
             agents = worktree.path / "docs/agents"
@@ -128,12 +169,13 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
             worktree._created = True
 
         def sandbox(cls, provider, scratch, **kw):
+            obs["sandbox_builds"].append(provider)
             home = tmp_path / (provider + "-home")
             home.mkdir(exist_ok=True)
             profile = home / "profile.sb"
             profile.write_text("synthetic OS-probe fixture\n")
             ready = not scenario.get("guard_refuses", False)
-            return runner.HarnessSandbox(
+            return active_runner.HarnessSandbox(
                 provider=provider, root=home,
                 env_extra={"CODEX_HOME": str(home), "ATELES_LOCAL_REVIEW_HOME": str(home)},
                 command_wrapper=[str(wrapper), "-f", str(profile)],
@@ -143,17 +185,17 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                 unavailable_guards=() if ready else ("synthetic guard refusal",),
             )
 
-        mp.setattr(runner, "current_pr_head", lambda **kw: HEAD)
+        mp.setattr(active_runner, "current_pr_head", lambda **kw: HEAD)
         # --post is absent; any accidental publication must fail the eval.
         def no_publication(**kw):
             raise AssertionError("unexpected publication attempt")
 
-        mp.setattr(runner, "post_verdict", no_publication)
-        mp.setattr(runner.Worktree, "create", create)
-        mp.setattr(runner.Worktree, "remove", lambda worktree: None)
-        mp.setattr(runner.HarnessSandbox, "build", classmethod(sandbox))
-        mp.setattr(runner, "capture_stash_ref_state", lambda path: runner.StashRefState(None, None))
-        real_dispatch = runner.dispatch_role.dispatch
+        mp.setattr(active_runner, "post_verdict", no_publication)
+        mp.setattr(active_runner.Worktree, "create", create)
+        mp.setattr(active_runner.Worktree, "remove", lambda worktree: None)
+        mp.setattr(active_runner.HarnessSandbox, "build", classmethod(sandbox))
+        mp.setattr(active_runner, "capture_stash_ref_state", lambda path: active_runner.StashRefState(None, None))
+        real_dispatch = active_runner.dispatch_role.dispatch
 
         async def dispatch(role, task, **kw):
             if mutation == "drop_model":
@@ -165,9 +207,9 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
             )})
             return await real_dispatch(role, task, **kw)
 
-        mp.setattr(runner.dispatch_role, "dispatch", dispatch)
+        mp.setattr(active_runner.dispatch_role, "dispatch", dispatch)
         if mutation == "no_validation":
-            mp.setattr(runner, "validate_model_selector", lambda model: model)
+            mp.setattr(active_runner, "validate_model_selector", lambda model: model)
             mp.setattr(model_tiering, "validate_model_selector", lambda model: model)
         argv = [
             "--repo", "eval-owner/eval-repo", "--pr", "1", "--head", HEAD,
@@ -179,10 +221,10 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
             try:
                 entry = scenario.get("entrypoint", "lens_cli")
                 if entry == "lens_cli":
-                    obs["exit_code"] = runner.main(argv)
+                    obs["exit_code"] = active_runner.main(argv)
                 else:
                     provider = scenario.get("provider", "codex")
-                    task = runner.final_child_instruction(tmp_path / "verdict.md")
+                    task = active_runner.final_child_instruction(tmp_path / "verdict.md")
                     model = scenario.get("model")
                     action_class = scenario.get("action_class", "lens_review:arch")
                     if entry == "dispatch_cli":
@@ -191,7 +233,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                                        "--action-class", action_class, "--task-entity-id", "ent_eval_task", "--json"]
                         if "model" in scenario:
                             direct_args += ["--model=" + model]
-                        obs["exit_code"] = runner.dispatch_role.main(direct_args)
+                        obs["exit_code"] = active_runner.dispatch_role.main(direct_args)
                     elif entry == "review_prompt":
                         mp.setenv("APIS_REVIEW_MODELS", json.dumps({provider: model}))
                         result = asyncio.run(skill_runner.run_review_prompt(role="pavo", prompt=task, timeout=5))
@@ -211,14 +253,14 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                         obs["exit_code"] = rc
                         print(json.dumps({"ok": rc == 0}))
                     else:
-                        ready = sandbox(runner.HarnessSandbox, provider, tmp_path)
+                        ready = sandbox(active_runner.HarnessSandbox, provider, tmp_path)
                         kwargs = dict(provider=provider, model=model, action_class=action_class,
                                       cwd=str(tmp_path), timeout=5, task_entity_id="ent_eval_task",
                                       local_review=True, env_extra=ready.env_extra,
                                       command_wrapper=ready.command_wrapper,
                                       codex_outer_sandboxed=provider == "codex")
                         if entry == "dispatch":
-                            call = runner.dispatch_role.dispatch("pavo", task, **kwargs)
+                            call = active_runner.dispatch_role.dispatch("pavo", task, **kwargs)
                         elif entry in {"run_skill", "run_once"}:
                             fn = skill_runner.run_skill if entry == "run_skill" else skill_runner._run_skill_once
                             call = fn("pavo", task, role="pavo", **kwargs)
@@ -253,6 +295,10 @@ def check(scenario, obs):
         failures.append(f"dispatches {len(obs['dispatch_calls'])}, expected {exp['dispatches']}")
     if "models" in exp and [c["model"] for c in obs["provider_calls"]] != exp["models"]:
         failures.append("actual provider model argv differs")
+    for expected_key, observed_key in (("worktrees", "worktree_preparations"),
+                                       ("sandboxes", "sandbox_builds")):
+        if expected_key in exp and len(obs[observed_key]) != exp[expected_key]:
+            failures.append(f"{observed_key} {len(obs[observed_key])}, expected {exp[expected_key]}")
     for call in obs["dispatch_calls"]:
         if scenario.get("entrypoint", "lens_cli") == "lens_cli" and (not call["local_review"] or call["seated_reviewer"]):
             failures.append("dispatch lost its local review boundary")
@@ -267,10 +313,24 @@ def check(scenario, obs):
     report = obs["report"]
     reports = list(report["results"].values()) if report and report.get("compare") else [report]
     for result in reports:
-        if exp["exit_code"] == 0 and (not result or not result.get("ok")):
+        if exp["exit_code"] == 0 and not exp.get("reader_refusal") and (not result or not result.get("ok")):
             failures.append("native CLI result did not pass its guards/validation")
         if result and result.get("posted"):
             failures.append("eval attempted publication")
+    if "reader_dependency" in scenario:
+        missing = scenario["reader_dependency"] == "missing_aiohttp"
+        runtime = obs.get("reader_runtime", {})
+        if runtime.get("dependency_import_denied") != missing or runtime.get("canonical_reader_available") != (not missing):
+            failures.append("real reader dependency import control did not bind")
+    if exp.get("reader_refusal"):
+        if obs["definition_loads"] or obs["events"]:
+            failures.append("unavailable reader reached definition/event effects")
+        for result in reports:
+            if (not result or result.get("ok") is not False
+                    or result.get("no_model_call_made") is not True
+                    or result.get("posted") is not False
+                    or "canonical review reader" not in result.get("reason", "")):
+                failures.append("missing truthful pre-inference reader refusal")
     if "dry_model" in exp:
         result = reports[0]
         if not result or result.get("model") != exp["dry_model"]:
