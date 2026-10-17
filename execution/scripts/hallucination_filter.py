@@ -28,6 +28,21 @@ Four signals, ordered by observed catch rate on two days of real chunks:
 3. ``caption_boilerplate`` — "thank you for watching", "please subscribe" and
    variants, in several languages. Artifacts of the YouTube-caption training
    corpus that dominates Whisper's training data.
+3b. ``non_speech_cue`` — a whole chunk that is nothing but a bracketed or
+   starred sound-effect caption: ``*music*``, ``[Music]``, ``(applause)``,
+   ``♪ music ♪``, ``[BLANK_AUDIO]``. Added 2026-09-16 (ateles#777 re-measure):
+   "*sad music*" at -44.0 dB and a bare "Thank you." at -45.8 dB both cleared
+   the -50 dB RMS gate on a 73:54 session; "Thank you." was already caught by
+   ``caption_boilerplate``, but "*sad music*" passed every existing signal
+   untouched — none of them looks at *delimiter structure*, only at the words
+   inside. This is the same training-corpus artifact as boilerplate (Whisper's
+   YouTube-caption corpus wraps non-verbal sound in brackets or asterisks as a
+   captioning convention) but the tell is the WRAPPER, not any particular word,
+   so it generalizes to whatever gets described inside the brackets — "music",
+   "laughter", "applause", "wind blowing", "sirens", in any language — without
+   naming any of them. A chunk must be delimited start-to-end (only whitespace
+   outside the wrapper) to fire; "the music started to play" is an ordinary
+   sentence with the word "music" in it, not a caption, and is untouched.
 4. ``too_short_for_window`` — a 30s window yielding "P" or "you". Not speech.
 5. ``foreign_diacritic`` — a Latin-script fabrication betrayed by a letter that
    does not occur in any language the session could plausibly be in. Observed
@@ -316,6 +331,44 @@ def is_caption_boilerplate(text: str) -> bool:
     return boilerplate_chars >= BOILERPLATE_DOMINANCE_RATIO * len(stripped)
 
 
+# --- 3b. Non-speech cue (bracketed/starred sound-effect caption) -----------
+
+# The whole chunk must be ONE delimited span, start to end (only whitespace
+# may sit outside it). "the music started to play" is a real sentence that
+# happens to contain the word "music"; "*music*" or "[Music]" on its own is
+# Whisper's caption-convention notation for a sound with no words in it. The
+# distinguishing feature is the wrapper enclosing the ENTIRE utterance, not any
+# word choice inside it — so this generalizes across languages without naming
+# what the cue describes ("music", "laughter", "applause", "wind", "sirens",
+# …), unlike a phrase list.
+#
+# Musical notes (♪ … ♪) are matched as their own delimiter pair because Whisper
+# emits them undoubled around caption text rather than as a matched bracket.
+#
+# One OR MORE cues, not exactly one: Whisper's decoding loop that produces
+# degenerate repetition elsewhere (see REPETITION_THRESHOLD above) does the
+# same thing to a cue — "*sad music* *sad music*" was observed verbatim on
+# ateles#777's own re-measurement audio (local whisper-cli, 2026-09-16). A
+# chunk of nothing but repeated cues, in any count, is still nothing but cues.
+_ONE_CUE_RE = (
+    r"\*[^*\n]{1,80}\*"               # *music*
+    r"|\[[^\[\]\n]{1,80}\]"           # [Music] / [BLANK_AUDIO]
+    r"|\([^()\n]{1,80}\)"             # (applause)
+    r"|♪[^♪\n]{0,80}♪?"               # ♪ music ♪ / ♪ music
+)
+_NON_SPEECH_CUE_RE = re.compile(
+    rf"^\s*(?:(?:{_ONE_CUE_RE})\s*)+$"
+)
+
+
+def is_non_speech_cue(text: str) -> bool:
+    """True when the chunk is nothing but a bracketed/starred sound caption."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return bool(_NON_SPEECH_CUE_RE.match(stripped))
+
+
 # --- 4. Too short for the window -------------------------------------------
 
 # A 30s window that decodes to "P" carries no speech. Scaled by window length so
@@ -518,6 +571,14 @@ def screen_transcription(
     if is_caption_boilerplate(stripped):
         return FilterVerdict(
             True, "caption_boilerplate", stripped[:60],
+        )
+
+    # 3b. Non-speech cue — a bracketed/starred sound-effect caption, the whole
+    # chunk and nothing else (ateles#777 re-measure: "*sad music*" cleared
+    # every prior signal).
+    if is_non_speech_cue(stripped):
+        return FilterVerdict(
+            True, "non_speech_cue", stripped[:60],
         )
 
     # 4a. No letters at all — an emoji run, not speech.
