@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import package_rule_inventory_inputs as inputs
+import render_rule_inventory as renderer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "evals" / "credential_containment"))
 import credential_containment_runner as packet_eval  # noqa: E402
@@ -25,7 +26,7 @@ def canonical_source(root):
 def observe_reads(monkeypatch, target, *, before_leaf=None, leaf_name="CLAUDE.md"):
     identity = (target.stat().st_dev, target.stat().st_ino)
     reads = []
-    path_read, fd_read, fd_open = Path.read_bytes, os.read, os.open
+    path_read, text_read, fd_read, fd_open = Path.read_bytes, Path.read_text, os.read, os.open
 
     def read_path(path):
         if before_leaf and path.name == leaf_name:
@@ -34,6 +35,12 @@ def observe_reads(monkeypatch, target, *, before_leaf=None, leaf_name="CLAUDE.md
         if (info.st_dev, info.st_ino) == identity:
             reads.append("path")
         return path_read(path)
+
+    def read_text(path, *args, **kwargs):
+        info = path.stat()
+        if (info.st_dev, info.st_ino) == identity:
+            reads.append("text")
+        return text_read(path, *args, **kwargs)
 
     def read_fd(fd, size):
         info = os.fstat(fd)
@@ -47,6 +54,7 @@ def observe_reads(monkeypatch, target, *, before_leaf=None, leaf_name="CLAUDE.md
         return fd_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_bytes", read_path)
+    monkeypatch.setattr(Path, "read_text", read_text)
     monkeypatch.setattr(os, "read", read_fd)
     monkeypatch.setattr(os, "open", open_fd)
     return reads
@@ -499,3 +507,95 @@ def test_actual_cli_process_refuses_before_external_reads(packet, tmp_path, oper
     assert str(root) not in result.stderr
     if case == "swap":
         assert evidence["swaps"] == [True]
+
+
+
+def test_followup_collect_keeps_inventory_authority(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    source = root / "source.txt"
+    source.write_text("ordinary selected input")
+    authority = root / "inputs.json"
+    authority.write_text(json.dumps({"roots": {"selected": str(root)},
+        "files": [{"root": "selected", "path": "source.txt"}]}))
+    original = authority.read_bytes()
+    reads = observe_reads(monkeypatch, source)
+    monkeypatch.setattr(sys, "argv", ["package_rule_inventory_inputs.py",
+        "--inventory-root", str(root), "--inventory", "inputs.json",
+        "--collect-manifest", "inputs.json"])
+    result = inputs.main()
+    assert reads == [], "namespace refusal must precede selected content reads"
+    assert result == 2
+    assert authority.read_bytes() == original
+
+
+def test_followup_collect_keeps_overlapping_selected_input(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    selected = root / "selected"
+    selected.mkdir()
+    source = selected / "record.txt"
+    source.write_text("ordinary selected input")
+    original = source.read_bytes()
+    (root / "inputs.json").write_text(json.dumps({"roots": {"nested": str(selected)},
+        "files": [{"root": "nested", "path": "record.txt"}]}))
+    reads = observe_reads(monkeypatch, source)
+    refused = False
+    try:
+        inputs.collect_packet(root, "inputs.json", "selected/record.txt")
+    except inputs.InputBoundaryError:
+        refused = True
+    assert reads == [], "namespace refusal must precede selected content reads"
+    assert refused
+    assert source.read_bytes() == original
+
+
+def renderer_fixture(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    source, home = root / "source", root / "home"
+    source.mkdir()
+    home.mkdir()
+    (source / "CLAUDE.md").write_text("- **Retain** an ordinary selected rule.\n")
+    monkeypatch.setenv(renderer.CANONICAL_REPOSITORY_ROOTS_ENV, "")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(renderer, "read_entities", lambda *args, **kwargs: ([], []))
+    output = root / "output.md"
+    monkeypatch.setattr(sys, "argv", ["render_rule_inventory.py",
+        "--repository-input-root", str(source), "--output", str(output)])
+    return source, home, output
+
+
+@pytest.mark.parametrize("entry", ["reader", "cli"])
+@pytest.mark.parametrize("selected", ["CLAUDE.md", ".claude/skills/example/SKILL.md",
+                                       ".claude/hooks/example.py"])
+def test_followup_renderer_refuses_before_selected_alias_read(
+    tmp_path, monkeypatch, entry, selected,
+):
+    source, home, _ = renderer_fixture(tmp_path, monkeypatch)
+    outside = tmp_path.resolve() / "ordinary-outside.txt"
+    outside.write_text("- **Always** retain the ordinary synthetic rule.\n")
+    leaf = source / selected
+    leaf.parent.mkdir(parents=True, exist_ok=True)
+    if leaf.exists():
+        leaf.unlink()
+    leaf.symlink_to(outside)
+    reads = observe_reads(monkeypatch, outside)
+    if entry == "reader":
+        refused = False
+        try:
+            renderer.read_file_stores(home, source)
+        except inputs.InputBoundaryError:
+            refused = True
+    else:
+        refused = renderer.main() == 3
+    assert reads == [], "unselected synthetic content was read"
+    assert refused
+
+
+@pytest.mark.parametrize("entry", ["reader", "cli"])
+def test_followup_renderer_ordinary_input_remains_usable(tmp_path, monkeypatch, entry):
+    source, home, output = renderer_fixture(tmp_path, monkeypatch)
+    if entry == "reader":
+        statements, stores = renderer.read_file_stores(home, source)
+        assert statements and stores
+    else:
+        assert renderer.main() == 0
+        assert output.is_file()
