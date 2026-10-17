@@ -36,6 +36,7 @@ REPO_ROOT = HERE.parents[2]
 HOOK = REPO_ROOT / ".claude" / "hooks" / "credential_read_guard.py"
 SCENARIOS = HERE / "fixtures" / "scenarios.json"
 PACKAGER = REPO_ROOT / "execution/scripts/package_rule_inventory_inputs.py"
+RENDERER = REPO_ROOT / "execution/scripts/render_rule_inventory.py"
 
 # Fake secret values planted in the workspace. They must never appear in any
 # output the guard produces, allowed or denied.
@@ -271,14 +272,14 @@ def judge_launch(scenario: dict, trace: LaunchTrace) -> list[str]:
     return problems
 
 
-_PACKET_CLI_OBSERVER = '''import json,os,runpy,sys
+_PACKET_CLI_OBSERVER = '''import errno,json,os,runpy,sys
 from pathlib import Path
 context=json.loads(Path(sys.argv[1]).read_text())
 external=Path(context["external"])
 identity=(external.stat().st_dev, external.stat().st_ino)
 reads=[];swaps=[];owned=set()
 original_read,original_open,original_close=os.read,os.open,os.close
-original_path_read=Path.read_bytes
+original_path_read,original_text_read=Path.read_bytes,Path.read_text
 def read_fd(fd,size):
     info=os.fstat(fd)
     if (info.st_dev,info.st_ino)==identity: reads.append("descriptor")
@@ -287,16 +288,21 @@ def read_path(path):
     info=path.stat()
     if (info.st_dev,info.st_ino)==identity: reads.append("path")
     return original_path_read(path)
+def read_text(path,*args,**kwargs):
+    info=path.stat()
+    if (info.st_dev,info.st_ino)==identity: reads.append("text")
+    return original_text_read(path,*args,**kwargs)
 def open_fd(path,flags,*args,**kwargs):
-    if context.get("swap") and path=="a.txt" and kwargs.get("dir_fd") is not None and not swaps:
-        leaf=Path(context["root"])/"a.txt"
+    if context.get("swap") and path==context.get("leaf","a.txt") and kwargs.get("dir_fd") is not None and not swaps:
+        leaf=Path(context["root"])/context.get("leaf","a.txt")
         leaf.unlink();leaf.symlink_to(external);swaps.append(True)
     fd=original_open(path,flags,*args,**kwargs);owned.add(fd);return fd
 def close_fd(fd):
     owned.discard(fd);return original_close(fd)
-os.read=read_fd;os.open=open_fd;os.close=close_fd;Path.read_bytes=read_path
+os.read=read_fd;os.open=open_fd;os.close=close_fd;Path.read_bytes=read_path;Path.read_text=read_text
 if context.get("wrong_owner"):
     current=os.geteuid();os.geteuid=lambda: current+1
+sys.path.insert(0,str(Path(context["script"]).parent))
 sys.argv=[context["script"],*context["args"]]
 rc=0
 try:
@@ -304,19 +310,27 @@ try:
 except SystemExit as exc:
     rc=exc.code
 finally:
-    Path(context["observation"]).write_text(json.dumps({"external_reads":reads,"swaps":swaps,"owned_fds_remaining":len(owned)}))
+    # fdopen and file objects close without calling the Python os.close wrapper.
+    remaining=[]
+    for fd in owned:
+        try: os.fstat(fd)
+        except OSError as exc:
+            if exc.errno != errno.EBADF: raise
+        else: remaining.append(fd)
+    Path(context["observation"]).write_text(json.dumps({"external_reads":reads,"swaps":swaps,"owned_fds_remaining":len(remaining)}))
 raise SystemExit(rc)
 '''
 
 
-def run_packet_cli(root, tmp_path, outside, operation, *, swap=False, wrong_owner=False, script=None):
+def run_packet_cli(root, tmp_path, outside, operation, *, swap=False, wrong_owner=False,
+                   script=None, args=None, leaf="a.txt"):
     script = PACKAGER if script is None else script
     observation = tmp_path / "observation.json"
     context = tmp_path / "context.json"
     context.write_text(json.dumps({
         "script": str(script), "root": str(root), "external": str(outside),
-        "swap": swap, "wrong_owner": wrong_owner, "observation": str(observation),
-        "args": ["--inventory-root", str(root), "--inventory", "inputs.json",
+        "swap": swap, "wrong_owner": wrong_owner, "observation": str(observation), "leaf": leaf,
+        "args": args if args is not None else ["--inventory-root", str(root), "--inventory", "inputs.json",
                  "--" + operation + "-manifest", "manifest.json"],
     }))
     result = subprocess.run([sys.executable, "-I", "-c", _PACKET_CLI_OBSERVER, str(context)],
@@ -344,6 +358,11 @@ def run_packet(scenario: dict, tmp_root: Path, script: Path = PACKAGER) -> dict:
         (root / "nested").mkdir()
         (root / "a.txt").rename(root / "nested/a.txt")
         inventory["files"][0]["path"] = "nested/a.txt"
+    if scenario["plant"] == "overlap_output":
+        nested = root / "nested"
+        nested.mkdir()
+        (root / "a.txt").rename(nested / "a.txt")
+        inventory["roots"]["packet"] = str(nested)
     (root / "inputs.json").write_text(json.dumps(inventory))
     operation, plant = scenario["operation"], scenario["plant"]
     preparation = None
@@ -370,8 +389,18 @@ def run_packet(scenario: dict, tmp_root: Path, script: Path = PACKAGER) -> dict:
         value = json.loads(manifest.read_text())
         value["files"][0]["path"] = str(outside)
         manifest.write_text(json.dumps(value))
+    args = None
+    if plant in {"inventory_output", "overlap_output"}:
+        destination = "inputs.json" if plant == "inventory_output" else "nested/a.txt"
+        args = ["--inventory-root", str(root), "--inventory", "inputs.json",
+                "--collect-manifest", destination]
+        outside = root / ("nested/a.txt" if plant == "overlap_output" else "a.txt")
+        # Admission must precede even declared content reads.
+    before = (root / "inputs.json").read_bytes()
     result, observation = run_packet_cli(root, tmp_root, outside, operation,
-                                        swap=plant == "swap", wrong_owner=plant == "ownership", script=script)
+                                        swap=plant == "swap", wrong_owner=plant == "ownership", script=script, args=args)
+    if plant == "inventory_output":
+        observation["authority_unchanged"] = (root / "inputs.json").read_bytes() == before
     return {"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
             "preparation": preparation, "root": str(root), **observation}
 
@@ -385,6 +414,8 @@ def judge_packet(scenario: dict, trace: dict) -> list[str]:
         problems.append("content outside the declared inventory was read")
     if trace["owned_fds_remaining"]:
         problems.append("input descriptors remained open")
+    if trace.get("authority_unchanged") is False:
+        problems.append("inventory authority was changed")
     prepared = trace["preparation"]
     if prepared and (prepared["exit_code"] or prepared["external_reads"] or prepared["owned_fds_remaining"]):
         problems.append("ordinary preparation did not complete safely")
@@ -395,6 +426,64 @@ def judge_packet(scenario: dict, trace: dict) -> list[str]:
         problems.append("a refused CLI action reported success or exposed its root")
     if scenario["plant"] == "swap" and trace["swaps"] != [True]:
         problems.append("the controlled file swap was not reached")
+    return problems
+
+
+
+def run_renderer(scenario: dict, tmp_root: Path, script: Path = RENDERER) -> dict:
+    """Exercise the existing offline renderer CLI with owned selected inputs."""
+    tmp_root.mkdir(parents=True)
+    root, cache = tmp_root / "source", tmp_root / "cache"
+    root.mkdir()
+    cache.mkdir()
+    # These are the renderer's existing offline cache inputs, not role substitutes.
+    for kind in ("standing_rule", "agent_policy", "task_policy"):
+        (cache / (kind + ".json")).write_text(json.dumps({"entities": []}))
+    selected = scenario.get("selected", "CLAUDE.md")
+    leaf = root / selected
+    leaf.parent.mkdir(parents=True, exist_ok=True)
+    leaf.write_text("- **Always** preserve an ordinary synthetic rule.\n")
+    outside = tmp_root / "outside.txt"
+    outside.write_text("- **Never** acquire the unselected synthetic rule.\n")
+    plant = scenario["plant"]
+    if plant in {"leaf", "hardlink", "fifo"}:
+        leaf.unlink()
+        if plant == "leaf":
+            leaf.symlink_to(outside)
+        elif plant == "hardlink":
+            os.link(outside, leaf)
+        else:
+            os.mkfifo(leaf)
+            outside = leaf
+    elif plant == "parent":
+        leaf.parent.rename(root / "saved")
+        outside = root / "saved" / leaf.name
+        leaf.parent.symlink_to(root / "saved", target_is_directory=True)
+    output = tmp_root / "render.md"
+    args = ["--repository-input-root", str(root), "--cache", str(cache), "--output", str(output)]
+    result, observation = run_packet_cli(root, tmp_root, outside, "render", script=script,
+                                        args=args, leaf=selected, swap=plant == "swap",
+                                        wrong_owner=plant == "ownership")
+    return {"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
+            "root": str(root), "output_exists": output.is_file(), **observation}
+
+
+def judge_renderer(scenario: dict, trace: dict) -> list[str]:
+    problems = []
+    allowed = scenario["expect"] == "allow"
+    expected = 0 if allowed else 3
+    if trace["exit_code"] != expected:
+        problems.append(f"expected exit {expected}, got {trace['exit_code']}")
+    if trace["external_reads"]:
+        problems.append("unselected content was read")
+    if trace["owned_fds_remaining"]:
+        problems.append("input descriptors remained open")
+    if trace["output_exists"] != allowed:
+        problems.append("render publication did not match admission")
+    if not allowed and (trace["root"] in trace["stderr"] or "boundary rejected" not in trace["stderr"]):
+        problems.append("refusal diagnostic was missing or exposed its root")
+    if scenario["plant"] == "swap" and trace["swaps"] != [True]:
+        problems.append("controlled file swap was not reached")
     return problems
 
 
@@ -412,6 +501,10 @@ def main() -> int:
             failed += bool(problems)
         for scenario in scenarios["packet"]:
             problems = judge_packet(scenario, run_packet(scenario, Path(tmp).resolve() / scenario["id"]))
+            print(("FAIL " if problems else "ok   ") + scenario["id"], *problems)
+            failed += bool(problems)
+        for scenario in scenarios["renderer"]:
+            problems = judge_renderer(scenario, run_renderer(scenario, Path(tmp).resolve() / scenario["id"]))
             print(("FAIL " if problems else "ok   ") + scenario["id"], *problems)
             failed += bool(problems)
     return 1 if failed else 0

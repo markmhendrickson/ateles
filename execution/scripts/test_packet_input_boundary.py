@@ -599,3 +599,80 @@ def test_followup_renderer_ordinary_input_remains_usable(tmp_path, monkeypatch, 
     else:
         assert renderer.main() == 0
         assert output.is_file()
+
+
+@pytest.mark.parametrize("entry", ["reader", "entities", "cli"])
+@pytest.mark.parametrize("plant", ["dangling", "hardlink", "fifo", "swap", "oversized", "parent"])
+def test_followup_renderer_shared_boundary_classes(tmp_path, monkeypatch, entry, plant):
+    entity_reader = renderer.read_entities
+    source, home, _ = renderer_fixture(tmp_path, monkeypatch)
+    # The entity reader is exercised directly with a no-request collaborator.
+    calls = []
+    monkeypatch.setattr(renderer, "neotoma_query", lambda *args: calls.append(args))
+    if entry == "entities":
+        monkeypatch.setattr(renderer, "read_entities", entity_reader)
+    outside = tmp_path.resolve() / "ordinary-sentinel.txt"
+    outside.write_text("ordinary synthetic outside input")
+    leaf = source / "CLAUDE.md"
+    trigger = None
+    if plant == "dangling":
+        leaf.unlink()
+        leaf.symlink_to(tmp_path / "missing")
+    elif plant == "hardlink":
+        leaf.unlink()
+        os.link(outside, leaf)
+    elif plant == "fifo":
+        leaf.unlink()
+        os.mkfifo(leaf)
+    elif plant == "swap":
+        def trigger():
+            if not leaf.is_symlink():
+                leaf.unlink()
+                leaf.symlink_to(outside)
+    elif plant == "oversized":
+        monkeypatch.setattr(inputs, "MAX_FILE_BYTES", 8)
+        outside = leaf
+    else:
+        (source / "docs").mkdir()
+        (source / "docs/foundation").symlink_to(tmp_path, target_is_directory=True)
+    reads = observe_reads(monkeypatch, outside, before_leaf=trigger)
+    if entry == "cli":
+        assert renderer.main() == 3
+    else:
+        with pytest.raises(inputs.InputBoundaryError):
+            if entry == "reader":
+                renderer.read_file_stores(home, source)
+            else:
+                renderer.read_entities(None, source)
+    assert reads == []
+    assert calls == []
+
+
+def test_followup_packet_keeps_admitted_output_root(packet, monkeypatch):
+    root, other, _ = packet
+    saved = root.with_name("saved")
+    original = inputs._packet_records
+
+    def replace_root(files, roots):
+        records = original(files, roots)
+        root.rename(saved)
+        root.mkdir()
+        return records
+
+    monkeypatch.setattr(inputs, "_packet_records", replace_root)
+    with pytest.raises(inputs.InputBoundaryError, match="changed_input"):
+        inputs.collect_packet(root, "inputs.json", "manifest.json")
+    assert not (root / "manifest.json").exists()
+    assert not (saved / "manifest.json").exists()
+
+
+def test_followup_renderer_root_parent_alias_is_not_normalized(tmp_path, monkeypatch):
+    source, _, _ = renderer_fixture(tmp_path, monkeypatch)
+    alias = tmp_path.resolve() / "alias"
+    alias.symlink_to(source.parent, target_is_directory=True)
+    monkeypatch.setattr(sys, "argv", ["render_rule_inventory.py",
+        "--repository-input-root", str(alias / source.name),
+        "--output", str(tmp_path / "render.md")])
+    reads = observe_reads(monkeypatch, source / "CLAUDE.md")
+    assert renderer.main() == 3
+    assert reads == []

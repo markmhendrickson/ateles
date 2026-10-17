@@ -268,42 +268,47 @@ def _write_rooted(root: Path, relative: str, data: bytes, *, limit: int | None =
     if len(data) > (MAX_FILE_BYTES if limit is None else limit):
         raise InputBoundaryError("oversized")
     with _directory_root(root) as (root_fd, root_chain):
-        with _relative_parent(root_fd, relative, create=True) as (parent, name, chain):
-            temporary = ".input-" + uuid.uuid4().hex
-            fd = None
-            created_identity = None
-            try:
-                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                             | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=parent)
-                created_identity = _identity(os.fstat(fd))
-                view = memoryview(data)
-                while view:
-                    written = os.write(fd, view)
-                    if written <= 0:
-                        raise InputBoundaryError("invalid_root")
-                    view = view[written:]
-                os.fsync(fd)
-                info = os.fstat(fd)
-                if info.st_nlink != 1 or info.st_uid != os.geteuid():
-                    raise InputBoundaryError("changed_input")
-                _unchanged(root_chain + chain + [(parent, temporary, created_identity)])
-                os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
-                _unchanged(root_chain + chain + [(parent, name, created_identity)])
-            except OSError as exc:
-                raise _open_error(exc) from None
-            finally:
-                if fd is not None:
-                    os.close(fd)
-                if created_identity is not None:
-                    try:
-                        info = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
-                        if _identity(info) == created_identity:
-                            os.unlink(temporary, dir_fd=parent)
-                        else:
-                            raise InputBoundaryError("changed_input")
-                    except OSError as exc:
-                        if exc.errno != errno.ENOENT:
-                            raise _open_error(exc) from None
+        _write_descriptor(root_fd, root_chain, relative, data)
+
+
+def _write_descriptor(root_fd, root_chain, relative, data):
+    """Write through the same held root used for namespace admission."""
+    with _relative_parent(root_fd, relative, create=True) as (parent, name, chain):
+        temporary = ".input-" + uuid.uuid4().hex
+        fd = None
+        created_identity = None
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=parent)
+            created_identity = _identity(os.fstat(fd))
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise InputBoundaryError("invalid_root")
+                view = view[written:]
+            os.fsync(fd)
+            info = os.fstat(fd)
+            if info.st_nlink != 1 or info.st_uid != os.geteuid():
+                raise InputBoundaryError("changed_input")
+            _unchanged(root_chain + chain + [(parent, temporary, created_identity)])
+            os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+            _unchanged(root_chain + chain + [(parent, name, created_identity)])
+        except OSError as exc:
+            raise _open_error(exc) from None
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if created_identity is not None:
+                try:
+                    info = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+                    if _identity(info) == created_identity:
+                        os.unlink(temporary, dir_fd=parent)
+                    else:
+                        raise InputBoundaryError("changed_input")
+                except OSError as exc:
+                    if exc.errno != errno.ENOENT:
+                        raise _open_error(exc) from None
 
 
 def _candidate_paths(source: Path) -> list[Path]:
@@ -356,6 +361,33 @@ def _read_regular_file(root: Path, path: Path, *, limit: int | None = None) -> t
         raise InputBoundaryError("undeclared_path")
     return relative, _read_rooted(root, relative,
                                   limit=MAX_FILE_BYTES if limit is None else min(MAX_FILE_BYTES, limit))
+
+
+
+def read_repository_inputs(root: Path) -> dict[str, bytes]:
+    """Acquire the bounded repository corpus once, through the shared reader.
+
+    Local rendering permits absent optional inputs; present inputs still have
+    exactly the same custody requirements as a packaged candidate.
+    """
+    contents = {}
+    total = 0
+    with _directory_root(root) as (fd, chain):
+        for path in _candidate_paths(root):
+            if len(contents) >= MAX_FILES:
+                raise InputBoundaryError("oversized")
+            relative = path.relative_to(root).as_posix()
+            try:
+                data = _read_descriptor(fd, relative, chain,
+                                        limit=min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
+            except InputBoundaryError as exc:
+                if exc.reason == "missing_exact_inputs" and relative in EXACT_INPUTS:
+                    continue
+                raise
+            total += len(data)
+            contents[relative] = data
+        _unchanged(chain)
+    return contents
 
 
 def _is_iso_date(value: object) -> bool:
@@ -614,17 +646,52 @@ def _json_object(pairs):
 
 
 def _json_input(root: Path, relative: str):
+    with _directory_root(root) as (fd, chain):
+        return _json_descriptor(fd, chain, relative)
+
+
+def _json_descriptor(fd, chain, relative):
     try:
-        return json.loads(_read_rooted(root, relative, limit=MAX_MANIFEST_BYTES).decode("utf-8"),
+        return json.loads(_read_descriptor(fd, relative, chain, limit=MAX_MANIFEST_BYTES).decode("utf-8"),
                           object_pairs_hook=_json_object)
     except (UnicodeError, ValueError, RecursionError):
         raise InputBoundaryError("malformed_manifest") from None
 
 
+
+def _namespace_identity(root_fd, relative, root_chain):
+    """Metadata only: recognize existing aliases without opening their content."""
+    try:
+        with _relative_parent(root_fd, relative) as (parent, name, chain):
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            _unchanged(root_chain + chain)
+            return _identity(info)
+    except FileNotFoundError:
+        return None
+    except InputBoundaryError as exc:
+        if exc.reason == "missing_exact_inputs":
+            return None
+        raise
+    except OSError as exc:
+        raise _open_error(exc) from None
+
+
 @contextmanager
 def _packet_inputs(inventory_root: Path, inventory: str, manifest: str):
     _relative_parts(manifest)
-    data = _json_input(inventory_root, inventory)
+    _relative_parts(inventory)
+    if manifest == inventory:
+        raise InputBoundaryError("invalid_inventory")
+    with _directory_root(inventory_root) as (inventory_fd, inventory_chain):
+        data = _json_descriptor(inventory_fd, inventory_chain, inventory)
+        with _packet_namespace(inventory_root, inventory, manifest, data,
+                               inventory_fd, inventory_chain) as admitted:
+            yield admitted
+        _unchanged(inventory_chain)
+
+
+@contextmanager
+def _packet_namespace(inventory_root, inventory, manifest, data, inventory_fd, inventory_chain):
     if not isinstance(data, dict) or set(data) != {"roots", "files"}:
         raise InputBoundaryError("invalid_inventory")
     roots, files = data["roots"], data["files"]
@@ -650,7 +717,25 @@ def _packet_inputs(inventory_root: Path, inventory: str, manifest: str):
     with ExitStack() as stack:
         opened = {name: stack.enter_context(_directory_root(Path(path)))
                   for name, path in roots.items()}
-        yield files, opened
+        # Compare the complete output namespace before reading selected content.
+        # Canonical roots may overlap even when their inventory names differ.
+        output = inventory_root / manifest
+        protected = [inventory_root / inventory] + [
+            Path(roots[entry["root"]]) / entry["path"] for entry in files
+        ]
+        if output in protected:
+            raise InputBoundaryError("invalid_inventory")
+        out_fd, out_chain = inventory_fd, inventory_chain
+        output_identity = _namespace_identity(out_fd, manifest, out_chain)
+        for entry in files:
+            fd, chain = opened[entry["root"]]
+            if (output_identity is not None and output_identity ==
+                    _namespace_identity(fd, entry["path"], chain)):
+                raise InputBoundaryError("invalid_inventory")
+        if (output_identity is not None and output_identity ==
+                _namespace_identity(out_fd, inventory, out_chain)):
+            raise InputBoundaryError("invalid_inventory")
+        yield files, opened, (inventory_fd, inventory_chain)
         for _, chain in opened.values():
             _unchanged(chain)
 
@@ -669,17 +754,19 @@ def _packet_records(files, roots):
 
 def collect_packet(inventory_root: Path, inventory: str, manifest: str) -> None:
     """Hash only declared root-relative files; inventory supplies the authority."""
-    with _packet_inputs(inventory_root, inventory, manifest) as (files, roots):
+    with _packet_inputs(inventory_root, inventory, manifest) as (files, roots, (fd, chain)):
         records = _packet_records(files, roots)
         output = {"kind": "explicit-inputs", "schema": 1, "files": records}
-        _write_rooted(inventory_root, manifest,
-                      (json.dumps(output, sort_keys=True) + "\n").encode(), limit=MAX_MANIFEST_BYTES)
+        data = (json.dumps(output, sort_keys=True) + "\n").encode()
+        if len(data) > MAX_MANIFEST_BYTES:
+            raise InputBoundaryError("oversized")
+        _write_descriptor(fd, chain, manifest, data)
 
 
 def verify_packet(inventory_root: Path, inventory: str, manifest: str) -> None:
     """A stored manifest cannot grant new roots or paths during verification."""
-    with _packet_inputs(inventory_root, inventory, manifest) as (files, roots):
-        data = _json_input(inventory_root, manifest)
+    with _packet_inputs(inventory_root, inventory, manifest) as (files, roots, (fd, chain)):
+        data = _json_descriptor(fd, chain, manifest)
         if (not isinstance(data, dict) or set(data) != {"kind", "schema", "files"}
                 or data["kind"] != "explicit-inputs" or type(data["schema"]) is not int or data["schema"] != 1
                 or not isinstance(data["files"], list) or len(data["files"]) != len(files)):

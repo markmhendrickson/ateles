@@ -139,3 +139,19 @@ def test_refusal_document_is_json_serializable_and_value_free(workspace):
     json.dumps({"decision": outcome.decision, "reason": outcome.reason})
     for secret in runner.FAKE_SECRET_VALUES:
         assert secret not in outcome.reason
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS["renderer"], ids=lambda row: row["id"])
+def test_renderer_scenario(scenario, tmp_path):
+    trace = runner.run_renderer(scenario, tmp_path / "run")
+    assert runner.judge_renderer(scenario, trace) == [], scenario["id"]
+
+
+def test_renderer_judge_rejects_observed_read_and_false_publication(tmp_path):
+    scenario = next(s for s in SCENARIOS["renderer"] if s["plant"] == "leaf")
+    trace = runner.run_renderer(scenario, tmp_path / "run")
+    trace["external_reads"] = ["text"]
+    trace["output_exists"] = True
+    problems = runner.judge_renderer(scenario, trace)
+    assert any("content" in p for p in problems)
+    assert any("publication" in p for p in problems)

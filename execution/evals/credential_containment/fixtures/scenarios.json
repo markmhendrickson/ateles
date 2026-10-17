@@ -284,7 +284,9 @@
     {"id":"packet_verify_ownership","operation":"verify","plant":"ownership","expect":"refuse"},
     {"id":"packet_collect_swap","operation":"collect","plant":"swap","expect":"refuse"},
     {"id":"packet_verify_swap","operation":"verify","plant":"swap","expect":"refuse"},
-    {"id":"packet_manifest_scope","operation":"verify","plant":"manifest_scope","expect":"refuse"}
+    {"id":"packet_manifest_scope","operation":"verify","plant":"manifest_scope","expect":"refuse"},
+    {"id":"packet_inventory_output","operation":"collect","plant":"inventory_output","expect":"refuse"},
+    {"id":"packet_overlap_output","operation":"collect","plant":"overlap_output","expect":"refuse"}
   ],
   "launch": [
     {
@@ -344,5 +346,61 @@
       "dry_run": false,
       "expect": "launch"
     }
-  ]
+  ],
+  "renderer": [
+  {
+    "id": "renderer_none",
+    "plant": "none",
+    "expect": "allow",
+    "selected": "CLAUDE.md"
+  },
+  {
+    "id": "renderer_leaf",
+    "plant": "leaf",
+    "expect": "refuse",
+    "selected": "CLAUDE.md"
+  },
+  {
+    "id": "renderer_hardlink",
+    "plant": "hardlink",
+    "expect": "refuse",
+    "selected": "CLAUDE.md"
+  },
+  {
+    "id": "renderer_fifo",
+    "plant": "fifo",
+    "expect": "refuse",
+    "selected": "CLAUDE.md"
+  },
+  {
+    "id": "renderer_parent",
+    "plant": "parent",
+    "expect": "refuse",
+    "selected": ".claude/skills/example/SKILL.md"
+  },
+  {
+    "id": "renderer_swap",
+    "plant": "swap",
+    "expect": "refuse",
+    "selected": "CLAUDE.md"
+  },
+  {
+    "id": "renderer_ownership",
+    "plant": "ownership",
+    "expect": "refuse",
+    "selected": "CLAUDE.md"
+  },
+  {
+    "id": "renderer_hook_leaf",
+    "plant": "leaf",
+    "expect": "refuse",
+    "selected": ".claude/hooks/example.py"
+  },
+  {
+    "id": "renderer_loader_leaf",
+    "plant": "leaf",
+    "expect": "refuse",
+    "selected": "lib/daemon_runtime/agent_loader.py"
+  }
+]
 }
