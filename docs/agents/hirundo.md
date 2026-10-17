@@ -32,6 +32,22 @@ canonical_context_entities:
   - swarm_roster
   - vendor_binding
   - constitution
+observation_ids:
+  name: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  description: 5db489f7-ea9f-7578-8955-5d0468278d61
+  tier: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  genus: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  status: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  aauth_sub: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  agent_grant: unknown
+  observation_source_default: 09048354-b38a-b260-d774-9950a80a3445
+  harness_preferences: unknown
+  triggers: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  tool_allowlist: 044a1dc5-a7c3-293f-dd85-66c0c1e2dbe0
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  prompt_markdown: 4eba00fc-d536-07a5-60fa-447dfb4228ce
 ---
 
 # hirundo

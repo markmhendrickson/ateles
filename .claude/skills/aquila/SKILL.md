@@ -14,6 +14,12 @@ triggers:
   - strategy gut-check
   - challenge my thinking on neotoma
 user_invocable: true
+observation_ids:
+  name: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  description: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  triggers: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  user_invocable: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  prompt_markdown: 73bd3446-e050-b6e4-46b9-7db0d55cc556
 ---
 
 <!-- Claude Code adapter for agent `aquila`. Canonical file: docs/agents/aquila.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

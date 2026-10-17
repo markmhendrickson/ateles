@@ -5,6 +5,12 @@ entity_id: ent_c5c8d28bd420ca094f9d5a48
 entity_type: agent_definition
 name: neotoma-agent
 description: Neotoma-repo automation daemon. Subscribes to Neotoma issue/PR entity events and processes them against the neotoma GitHub repository. Phase 1 skeleton — full automation in Phase 3.
+observation_ids:
+  name: dc32ad1d-7b9d-aea6-210d-0e74086cacd0
+  description: 690a4dac-5b9b-7e12-6d87-efce5f0a307e
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 00ba60fe-392a-c7d5-3c08-f06255b0c12e
 ---
 
 <!-- Claude Code adapter for agent `neotoma-agent`. Canonical file: docs/agents/neotoma-agent.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

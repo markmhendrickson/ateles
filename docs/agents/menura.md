@@ -14,6 +14,22 @@ observation_source_default: llm_summary
 tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
+observation_ids:
+  name: d9c13075-789a-4617-9916-5b1e5c3c65cd
+  description: c85fd2af-d676-c004-b8e8-d2d8b7bbfff7
+  tier: d9c13075-789a-4617-9916-5b1e5c3c65cd
+  genus: d9c13075-789a-4617-9916-5b1e5c3c65cd
+  status: d9c13075-789a-4617-9916-5b1e5c3c65cd
+  aauth_sub: d9c13075-789a-4617-9916-5b1e5c3c65cd
+  agent_grant: d9c13075-789a-4617-9916-5b1e5c3c65cd
+  observation_source_default: 9fddab0d-c6df-8fd5-5892-64eb33cd60db
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: d18a65a5-1d75-a5d6-66a3-428f2f06b093
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: unknown
+  prompt_markdown: 3662898a-23d6-53a9-4703-26fd4df4419c
 ---
 
 # menura

@@ -5,6 +5,12 @@ entity_id: ent_affecbbecf52edb633c534f8
 entity_type: agent_definition
 name: tyto
 description: "Screenshot watcher + recording transcription + analysis daemon. (1) Polls TYTO_SCREENSHOTS_DIR for new image files and stores screenshot entities in Neotoma. (2) Polls the configured meeting-recording directories for new Audio Hijack or platform-native captures, pairs matching microphone and system tracks, waits for content to settle, and runs transcribe_audio.py. Routing follows the audio: paired or multi-channel recordings use ElevenLabs when configured; mono or unknown-channel recordings use local whisper-cli. Explicit backend and RECORD_MEETING_DIARIZE overrides win. The metered OpenAI Whisper API is never a fallback and is reachable only by explicit backend selection. (3) Polls TYTO_VOICE_MEMOS_DIR for new supported Voice Memo files, seeds the pre-existing archive as handled, requires size and mtime stability, transcribes new memos locally, and preserves failed arrivals in a durable retry journal until transcription succeeds. Piculet remains the separate import pipeline; overlap is surfaced rather than silently reassigning ownership. (4) After transcription, invokes the configured analysis harness with the meeting-processing skill and feedback analysis when applicable, preserving raw material, resolving matter and participants, reconciling the graph, and extracting insights, decisions, and action items. It creates recommended follow-up artifacts backed by tasks but sends no outbound prose. Sends a notification on each stage and names the transcription backend. Set TYTO_ANALYZE_ENABLED=0 to disable analysis."
+observation_ids:
+  name: d6add6ba-c6ca-1634-e9d1-fc2a64bf7324
+  description: dc8e0fd9-b525-b715-bd41-630a4505bd1f
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 863bbe2c-0ebb-2b55-21f9-068655c0f90f
 ---
 
 <!-- Claude Code adapter for agent `tyto`. Canonical file: docs/agents/tyto.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
