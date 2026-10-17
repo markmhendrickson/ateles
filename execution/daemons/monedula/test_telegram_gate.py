@@ -1010,3 +1010,127 @@ def test_unset_principal_blocks_payment_and_escalates(
     # The escalation must say WHY, or the operator gets an alarm with no cause.
     entity, _ = escalation_posts[0]
     assert "principal" in (entity["title"] + entity["body"]).lower()
+
+
+# ── The same fail-open, one caller away: telegram_long_poll_once ────────────
+#
+# #1044 closed the principal fail-open in `telegram_poll_approval` but left the
+# byte-identical guard standing in `telegram_long_poll_once`:
+#
+#     if allowed_user_id and user_id != allowed_user_id:
+#
+# A vulnerability fixed on the path that was audited, and left on the path that
+# was not, is still a live vulnerability — the guard binds to a call site, not
+# to the bug. These pin both paths to the same rule.
+
+
+def _legacy_poll_with(monkeypatch, payload: dict, *, allowed: str, tmp_path):
+    """`_poll_with`'s sibling for the legacy str|None poller."""
+    monkeypatch.setattr(monedula, "TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.setattr(monedula, "TELEGRAM_ALLOWED_USER_ID", allowed)
+    monkeypatch.setattr(monedula, "TG_OFFSET_FILE", tmp_path / ".offset")
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode()
+
+    monkeypatch.setattr(
+        monedula.urllib.request, "urlopen", lambda url, timeout=None: _FakeResponse()
+    )
+    return monedula.telegram_long_poll_once(timeout_sec=10)
+
+
+def test_legacy_poll_unset_principal_does_not_authorize_anyone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Unset principal ⇒ the legacy poller returns no reply either.
+
+    RED before this change: returned the string "attended all" from user id
+    99999, because the falsy principal short-circuited the comparison.
+    """
+    assert _legacy_poll_with(monkeypatch, _msg(99999), allowed="", tmp_path=tmp_path) is None
+
+
+def test_legacy_poll_malformed_principal_does_not_authorize_anyone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A non-numeric principal denies, and does not raise ValueError either."""
+    assert (
+        _legacy_poll_with(monkeypatch, _msg(99999), allowed="not-a-number", tmp_path=tmp_path)
+        is None
+    )
+
+
+def test_legacy_poll_wrong_user_still_does_not_approve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Positive control: a configured principal still rejects an impostor."""
+    assert (
+        _legacy_poll_with(monkeypatch, _msg(99999), allowed="67890", tmp_path=tmp_path)
+        is None
+    )
+
+
+def test_legacy_poll_configured_operator_still_gets_their_reply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The other positive control: the operator is still admitted.
+
+    Without this, a guard that simply refused everything would satisfy the
+    three tests above while breaking the poller outright.
+    """
+    assert (
+        _legacy_poll_with(monkeypatch, _msg(67890), allowed="67890", tmp_path=tmp_path)
+        == "attended all"
+    )
+
+
+def test_legacy_poll_message_with_no_sender_id_does_not_approve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Telegram omits `from` on channel posts — absence is not a match."""
+    assert (
+        _legacy_poll_with(monkeypatch, _msg(None), allowed="67890", tmp_path=tmp_path)
+        is None
+    )
+
+
+# ── Malformed TELEGRAM_CHAT_ID: escalate, never crash ────────────────────────
+
+
+def test_malformed_chat_id_is_channel_error_not_an_uncaught_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed chat id must reach the escalation path, not kill the run.
+
+    `chat_id = int(TELEGRAM_CHAT_ID)` raised ValueError out of the poll loop,
+    so the one mechanism built to make a broken gate loud (#554) was skipped
+    by precisely the misconfiguration that should have triggered it.
+
+    RED before this change with `ValueError: invalid literal for int()`.
+    """
+    monkeypatch.setattr(monedula, "TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "not-an-id")
+    monkeypatch.setattr(monedula, "TELEGRAM_ALLOWED_USER_ID", "67890")
+
+    result = monedula.telegram_poll_approval(timeout_sec=10)
+
+    assert result.kind == "channel_error"
+    assert "TELEGRAM_CHAT_ID" in result.error_detail
+
+
+def test_malformed_chat_id_does_not_crash_the_legacy_poller_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monedula, "TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(monedula, "TELEGRAM_CHAT_ID", "not-an-id")
+    monkeypatch.setattr(monedula, "TELEGRAM_ALLOWED_USER_ID", "67890")
+
+    assert monedula.telegram_long_poll_once(timeout_sec=10) is None
