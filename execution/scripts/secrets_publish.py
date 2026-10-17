@@ -37,8 +37,17 @@ def publish_file(manifest: dict, name: str, environment: str | None) -> int:
             continue
         try:
             pairs[env_var] = sl.op_read(ref)
-        except Exception as exc:  # noqa: BLE001 — surface, never leak value
-            print(f"[{name}] {env_var}: FAILED to read from 1Password ({exc})")
+        except sl.SecretsToolError as exc:
+            # SecretsToolError is value-free by construction, so it prints whole.
+            print(f"[{name}] {env_var}: FAILED to read from 1Password — {exc}")
+            return 1
+        except Exception as exc:  # noqa: BLE001
+            # Anything else may have captured `op` output or the value itself
+            # somewhere in its message; report the TYPE only.
+            print(
+                f"[{name}] {env_var}: FAILED to read from 1Password "
+                f"({type(exc).__name__}; detail withheld — it can carry the value)"
+            )
             return 1
 
     if not pairs:
