@@ -146,8 +146,8 @@ class ResolvedActionType:
 
 
 # ── HIGH-blast signals ───────────────────────────────────────────────────────
-# The first match wins, ordered most-consequential first so a
-# task that both pays someone and opens a PR is classified by the payment.
+# Pattern order is the stable tie-breaker. The gate compares every match under
+# its effective policy; callers without a policy retain the first-match result.
 # Narrow multi-word phrases on purpose (see execution/daemons/apis/routing.py):
 # a bare common word is how a silent misclassification is born.
 _HIGH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -155,8 +155,9 @@ _HIGH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"\b(send (a |the )?payment|make (a |the )?payment|pay (the |a |an )"
             r"(invoice|rent|wage|salary|bill|instructor|teacher|therapist)|"
-            r"transfer (funds|money|eur|€|\d)|issue (a |the )?refund|"
-            r"execute (the |a )?payout|remit(tance)? to|wire transfer)\b",
+            r"transfer (funds|money|eur|\d)|issue (a |the )?refund|"
+            r"execute (the |a )?payout|remit(tance)? to|wire transfer)\b|"
+            r"\btransfer €(?=\W|$|\d)",
             re.I,
         ),
         "payment",
@@ -230,22 +231,26 @@ def _normalize_text(*parts: object) -> str:
     return _WHITESPACE.sub(" ", _FORMAT_CHARS.sub("", folded)).strip()
 
 
-def infer_action_type_from_text(*fields: object) -> str | None:
+def infer_action_type_from_text(*fields: object, verdict: Verdict | None = None) -> str | None:
     """The high-blast type the task's own text names, or ``None``.
 
     Every text field the caller passes (title, body AND description) is read, in
     full — nothing is truncated and no field is ignored because another is
     present, because a phrase missed in a late or secondary field is a missed
-    escalation. Returns ``None`` when no high-blast phrase matches. Never returns
-    a LOW type, an alias, or ``operator_only``.
+    escalation. With an effective ``verdict``, choose the strictest recognized
+    action; ties preserve pattern order. Without it, keep the first match for
+    compatibility. Returns ``None`` when no phrase matches. Only the established
+    action vocabulary is emitted, never an alias or ``operator_only``.
     """
     text = _normalize_text(*fields)
     if not text:
         return None
-    for pattern, action in _HIGH_PATTERNS:
-        if pattern.search(text):
-            return action
-    return None
+    matches = [action for pattern, action in _HIGH_PATTERNS if pattern.search(text)]
+    if not matches:
+        return None
+    if verdict is None:
+        return matches[0]
+    return max(matches, key=lambda action: _RANK[verdict(action)])
 
 
 #: ``action_type | None -> "low" | "high" | "never"`` under the EFFECTIVE policy;
@@ -279,7 +284,8 @@ def resolve_gate_action_type(
 
     if verdict is not None:
         text_type = infer_action_type_from_text(
-            snapshot.get("title"), snapshot.get("body"), snapshot.get("description")
+            snapshot.get("title"), snapshot.get("body"), snapshot.get("description"),
+            verdict=verdict,
         )
         if text_type is not None:
             current = verdict(prior)
