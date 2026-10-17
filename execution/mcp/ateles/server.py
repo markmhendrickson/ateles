@@ -529,7 +529,10 @@ def _checkpoint_resolver_authority(
     checkpoint_id: str, checkpoint_record: dict
 ) -> tuple[str, str, str] | None:
     """Return the authenticated resolver subject, key pin, and tenant."""
-    from lib.daemon_runtime.gating import read_authenticated_checkpoint_authorization
+    from lib.daemon_runtime.gating import (
+        read_authenticated_checkpoint_authorization,
+        read_verified_entity_owner,
+    )
 
     authority = read_authenticated_checkpoint_authorization(
         checkpoint_id, checkpoint_record
@@ -538,14 +541,15 @@ def _checkpoint_resolver_authority(
         return None
     required_sub = str(authority.get("required_approver_sub") or "").strip()
     required_jkt = str(authority.get("required_approver_jkt") or "").strip()
-    tenant_id = str(authority.get("user_id") or "").strip()
-    snapshot_tenant = str(_snapshot_of(checkpoint_record).get("user_id") or "").strip()
+    tenant_id = authority.get("user_id")
     if (
         not required_sub
         or "@" not in required_sub
         or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
-        or not tenant_id
-        or snapshot_tenant != tenant_id
+        or not isinstance(tenant_id, str)
+        or read_verified_entity_owner(
+            checkpoint_id, checkpoint_record, expected_user_id=tenant_id
+        ) is None
     ):
         return None
     return required_sub, required_jkt, tenant_id
@@ -1279,8 +1283,18 @@ async def _resolve_checkpoint(
         )
         task_data = _get(f"/entities/{task_id}") if task_id else None
         task_snap = _snapshot_of(task_data or {})
-        brief_user_id = resolved_snap.get("user_id")
-        task_user_id = task_snap.get("user_id")
+        from lib.daemon_runtime.gating import read_verified_entity_owner
+
+        brief_user_id = read_verified_entity_owner(
+            checkpoint_id, consumed_data, expected_user_id=checkpoint_user_id
+        )
+        task_user_id = (
+            read_verified_entity_owner(
+                task_id, task_data, expected_user_id=checkpoint_user_id
+            )
+            if task_id
+            else None
+        )
         same_tenant = bool(
             brief_user_id
             and task_user_id

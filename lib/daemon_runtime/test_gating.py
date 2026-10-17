@@ -60,6 +60,87 @@ def _default() -> ExecutionPolicy:
     return ExecutionPolicy(entity_id="default", loaded=False)
 
 
+def test_fetch_entity_user_id_requires_exact_consistent_observation_ownership(
+    monkeypatch,
+):
+    owner = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    observations = [{"user_id": owner}, {"user_id": owner}]
+    monkeypatch.setattr(
+        gating_module, "_fetch_entity_observations", lambda _entity_id: observations
+    )
+    assert gating_module.fetch_entity_user_id("ent_checkpoint") == owner
+    for invalid in (None, "", " " + owner, owner.upper(), 42):
+        observations[1] = {"user_id": invalid}
+        assert gating_module.fetch_entity_user_id("ent_checkpoint") is None
+    observations[1] = {}
+    assert gating_module.fetch_entity_user_id("ent_checkpoint") is None
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("matching", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        ("later_conflict", None),
+        ("later_missing", None),
+        ("missing_page", None),
+        ("drifting_total", None),
+        ("wrong_offset", None),
+        ("duplicate_row", None),
+        ("failed_page", None),
+        ("drifting_first_page", None),
+    ],
+)
+def test_fetch_entity_user_id_requires_complete_stable_pages(
+    monkeypatch, mode, expected
+):
+    owner = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    first = [{"id": f"obs-{index}", "user_id": owner} for index in range(100)]
+    last = {"id": "obs-100", "user_id": owner}
+    if mode == "later_conflict":
+        last["user_id"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    elif mode == "later_missing":
+        last.pop("user_id")
+    elif mode == "duplicate_row":
+        last["id"] = first[0]["id"]
+    calls = []
+
+    class Response:
+        def __init__(self, data):
+            self.data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.data
+
+    def get(url, *, headers, params, timeout):
+        offset = params.get("offset", 0)
+        calls.append(offset)
+        if mode == "failed_page" and offset == 100:
+            raise OSError("second page unavailable")
+        observations = first if offset == 0 else [last]
+        if mode == "drifting_first_page" and offset == 0 and calls.count(0) > 1:
+            observations = [{**first[0], "id": "obs-new"}, *first[1:]]
+        if mode == "missing_page" and offset == 100:
+            observations = []
+        return Response(
+            {
+                "observations": observations,
+                "total": 102 if mode == "drifting_total" and offset == 100 else 101,
+                "limit": 100,
+                "offset": 0 if mode == "wrong_offset" and offset == 100 else offset,
+            }
+        )
+
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module.httpx, "get", get)
+    assert gating_module.fetch_entity_user_id("ent_checkpoint") == expected
+    assert calls[:2] == [0, 100]
+    if mode in {"matching", "later_conflict", "later_missing", "drifting_first_page"}:
+        assert calls == [0, 100, 0]
+
+
 def test_high_conf_low_blast_auto_executes():
     d = evaluate_gate(confidence=0.9, action_type="local_edit", policy=_default())
     assert d.action == GateAction.AUTO_EXECUTE
