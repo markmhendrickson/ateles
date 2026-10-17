@@ -1,6 +1,8 @@
 """Strict lens admission is separate from generic compatibility defaults."""
 
 import copy
+import hashlib
+import json
 
 import pytest
 
@@ -93,16 +95,29 @@ def search_response():
         "entities": [row],
         "total": 1,
         "read_contract": {
+            "version": "1",
+            "surface": "entity_collection",
             "mode": {"actual": "structured"},
             "applied_scope": {
+                "owner": "authenticated",
                 "entity_types": ["agent_definition"],
-                "predicates": [{"field": "name", "op": "eq"}],
+                "include_merged": False,
+                "include_deleted": False,
+                "include_snapshots": True,
+                "pagination": {"kind": "keyset", "limit": 100, "offset": 0},
+                "predicates": [{"field": "name", "op": "eq", "value": {
+                    "kind": "sha256", "value": hashlib.sha256(json.dumps("pavo").encode()).hexdigest()}}],
             },
+            "request_options": {"applied": ["entity_type", "snapshot_filters", "include_snapshots", "limit"],
+                                "normalized": [], "ignored": []},
             "coverage": {
+                "kind": "predicate_population",
                 "state": "complete",
+                "reasons": [],
+                "page_exhausted": True,
                 "scope_exhausted": True,
                 "returned_count": 1,
-                "total": {"relation": "exact", "value": 1},
+                "total": {"relation": "exact", "value": 1, "unit": "entities"},
                 "continuation": {"kind": "none"},
             },
         },
@@ -168,3 +183,37 @@ def test_name_lookup_requires_unique_exhaustive_scope(monkeypatch, case):
     result = loader.load_for_lens()
     assert result.is_stub is (case != "complete")
     assert seen[0]["snapshot_filters"] == {"name": {"op": "eq", "value": "pavo"}}
+
+
+@pytest.mark.parametrize("case", ["wrong_row_type", "missing_row_type", "extra_predicate", "wrong_value",
+                                "missing_value", "wrong_value_kind", "merged_scope", "deleted_scope",
+                                "missing_snapshots", "nonzero_offset", "ignored_scope_option"])
+def test_name_lookup_refuses_unbound_scope_and_row_type(monkeypatch, case):
+    monkeypatch.delenv("PAVO_AGENT_DEFINITION_ID", raising=False)
+    data = search_response()
+    scope = data["read_contract"]["applied_scope"]
+    if case == "wrong_row_type":
+        data["entities"][0]["entity_type"] = "task"
+    elif case == "missing_row_type":
+        del data["entities"][0]["entity_type"]
+    elif case == "extra_predicate":
+        scope["predicates"].append({"field": "status", "op": "eq", "value": {"kind": "sha256", "value": "other"}})
+    elif case == "wrong_value":
+        scope["predicates"][0]["value"]["value"] = hashlib.sha256(json.dumps("other").encode()).hexdigest()
+    elif case == "missing_value":
+        del scope["predicates"][0]["value"]
+    elif case == "wrong_value_kind":
+        scope["predicates"][0]["value"]["kind"] = "literal"
+    elif case == "merged_scope":
+        scope["include_merged"] = True
+    elif case == "deleted_scope":
+        scope["include_deleted"] = True
+    elif case == "missing_snapshots":
+        scope["include_snapshots"] = False
+    elif case == "nonzero_offset":
+        scope["pagination"]["offset"] = 100
+    elif case == "ignored_scope_option":
+        data["read_contract"]["request_options"]["ignored"] = [{"name": "snapshot_filters", "reason": "unsupported_on_surface"}]
+    loader = AgentLoader("pavo")
+    monkeypatch.setattr(loader, "_neotoma", lambda *args: data)
+    assert loader.load_for_lens().is_stub
