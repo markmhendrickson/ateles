@@ -585,6 +585,8 @@ def review_record_config_text(
     if provider == "cursor":
         if deny_correct:
             raise ValueError("reviewer record carrier cannot enforce the gate-owner deny")
+        if "*" not in tools and f"{CODEX_NEOTOMA_TOOL_PREFIX}*" not in tools:
+            raise ValueError("reviewer record carrier cannot enforce restricted MCP tools")
         return json.dumps({"mcpServers": {CODEX_NEOTOMA_SERVER_ID: server}}) + "\n"
     if provider != "codex":
         raise ValueError("reviewer record carrier is not supported")

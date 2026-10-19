@@ -181,7 +181,7 @@ def test_parsed_loader_subject_cannot_replace_missing_canonical_subject():
         server_config(role)
 
 
-def test_both_carriers_keep_role_tools_and_legitimate_write_tool():
+def test_carriers_preserve_supported_role_tools_and_legitimate_write_tool():
     import json
     import tomllib
 
@@ -192,7 +192,10 @@ def test_both_carriers_keep_role_tools_and_legitimate_write_tool():
     assert server["required"] is True
     assert server["enabled_tools"] == ["retrieve_entities", "store"]
     assert "disabled_tools" not in server
-    cursor = json.loads(skill_runner.review_record_config_text("cursor", config, role.tools, deny_correct=False))
+    with pytest.raises(ValueError, match="restricted MCP tools"):
+        skill_runner.review_record_config_text("cursor", config, role.tools, deny_correct=False)
+    cursor = json.loads(skill_runner.review_record_config_text(
+        "cursor", config, ["mcp__mcpsrv_neotoma__*"], deny_correct=False))
     assert cursor == {"mcpServers": {"mcpsrv_neotoma": config}}
     with pytest.raises(ValueError):
         skill_runner.review_record_config_text("unknown", config, role.tools, deny_correct=False)
