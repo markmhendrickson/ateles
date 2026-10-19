@@ -150,7 +150,7 @@ def server_config(role=None, **overrides):
 def test_existing_signed_bridge_config_has_no_alternate_principal_or_new_gate():
     config = server_config()
     assert config["command"] == "/synthetic/bin/neotoma"
-    assert config["args"] == ["mcp", "proxy", "--aauth", "--fail-closed", "--session-preflight",
+    assert config["args"] == ["mcp", "proxy", "--aauth", "--fail-closed",
                               "--downstream-url", "https://record.example.test/mcp"]
     assert config["env"]["NEOTOMA_AAUTH_SUB"] == "synthetic-reviewer@example.test"
     assert config["env"]["MCP_PROXY_BEARER_TOKEN"] == ""
@@ -187,15 +187,15 @@ def test_both_carriers_keep_role_tools_and_legitimate_write_tool():
 
     role = signed_role()
     config = server_config(role)
-    codex = tomllib.loads(skill_runner.review_record_config_text("codex", config, role.tools))
+    codex = tomllib.loads(skill_runner.review_record_config_text("codex", config, role.tools, deny_correct=False))
     server = codex["mcp_servers"]["mcpsrv_neotoma"]
     assert server["required"] is True
     assert server["enabled_tools"] == ["retrieve_entities", "store"]
     assert "disabled_tools" not in server
-    cursor = json.loads(skill_runner.review_record_config_text("cursor", config, role.tools))
+    cursor = json.loads(skill_runner.review_record_config_text("cursor", config, role.tools, deny_correct=False))
     assert cursor == {"mcpServers": {"mcpsrv_neotoma": config}}
     with pytest.raises(ValueError):
-        skill_runner.review_record_config_text("unknown", config, role.tools)
+        skill_runner.review_record_config_text("unknown", config, role.tools, deny_correct=False)
 
 
 def identity_proof():
@@ -235,3 +235,17 @@ def test_identity_proof_refuses_wrong_or_revoked_binding(group, field, value):
     with pytest.raises(ValueError, match="unverified"):
         skill_runner.validate_review_record_identity(
             session, subject="reviewer", issuer="issuer", thumbprint="synthetic-thumbprint", grant=grant)
+
+
+def test_existing_subtractive_gate_deny_survives_record_config():
+    import tomllib
+
+    role = signed_role()
+    config = server_config(role)
+    rendered = skill_runner.review_record_config_text(
+        "codex", config, role.tools, deny_correct=True)
+    server = tomllib.loads(rendered)["mcp_servers"]["mcpsrv_neotoma"]
+    assert server["disabled_tools"] == list(skill_runner.CODEX_GATE_DENIED_TOOLS)
+    assert "store" in server["enabled_tools"]
+    with pytest.raises(ValueError, match="gate-owner deny"):
+        skill_runner.review_record_config_text("cursor", config, role.tools, deny_correct=True)

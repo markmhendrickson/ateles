@@ -554,7 +554,7 @@ def review_record_server_config(
     return {
         "command": str(binary),
         "args": [
-            "mcp", "proxy", "--aauth", "--fail-closed", "--session-preflight",
+            "mcp", "proxy", "--aauth", "--fail-closed",
             "--downstream-url", base_url.rstrip("/") + "/mcp",
         ],
         "env": {
@@ -569,15 +569,22 @@ def review_record_server_config(
             "MCP_PROXY_AGENT_LABEL": "",
             "MCP_PROXY_AUTOSTART": "0",
             "MCP_PROXY_LOG_FILE": "",
-            "MCP_PROXY_SESSION_PREFLIGHT_BASE": base_url.rstrip("/"),
+            # The CLI's startup tier probe is unsigned. It would refuse an
+            # authenticated instance before the signed MCP handshake; verify
+            # get_session_identity on that signed connection instead.
+            "MCP_PROXY_SESSION_PREFLIGHT": "0",
             "NEOTOMA_AAUTH_AUTHORITY_OVERRIDE": "",
         },
     }
 
 
-def review_record_config_text(provider: str, server: dict, tools: list[str]) -> str:
+def review_record_config_text(
+    provider: str, server: dict, tools: list[str], *, deny_correct: bool,
+) -> str:
     """Render the existing providers' isolated config without adding authority."""
     if provider == "cursor":
+        if deny_correct:
+            raise ValueError("reviewer record carrier cannot enforce the gate-owner deny")
         return json.dumps({"mcpServers": {CODEX_NEOTOMA_SERVER_ID: server}}) + "\n"
     if provider != "codex":
         raise ValueError("reviewer record carrier is not supported")
@@ -591,6 +598,8 @@ def review_record_config_text(provider: str, server: dict, tools: list[str]) -> 
         enabled = [tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX)
                    for tool in tools if tool.startswith(CODEX_NEOTOMA_TOOL_PREFIX)]
         lines.append(f"enabled_tools = {json.dumps(enabled)}")
+    if deny_correct:
+        lines.append(f"disabled_tools = {json.dumps(list(CODEX_GATE_DENIED_TOOLS))}")
     lines += ["", f"[mcp_servers.{CODEX_NEOTOMA_SERVER_ID}.env]"]
     lines += [f"{key} = {json.dumps(value)}" for key, value in server["env"].items()]
     return "\n".join(lines) + "\n"
