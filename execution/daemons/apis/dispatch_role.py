@@ -218,8 +218,11 @@ import model_tiering  # noqa: E402
 import mechanical_first  # noqa: E402
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
+    AgentDefinition,
     SkillResult,
+    _admit_local_review_definition,
     _load_agent_def,
+    local_review_context_error,
     run_skill,
 )
 
@@ -257,6 +260,7 @@ async def dispatch(
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
     local_review: bool = False,
+    verified_agent_definition: AgentDefinition | None = None,
     work_class: str | None = None,
     github_delivery: bool = False,
     github_token: str | None = None,
@@ -316,6 +320,11 @@ async def dispatch(
     ``local_review`` selects the inference-only environment: no ambient
     GitHub/Neotoma publication authority or credential fallback reaches the
     child. The caller, not the child, owns any later publication.
+    ``verified_agent_definition`` carries the strict canonical local-review
+    preflight object through shared provider attempts, without a cache reload.
+    Local reviews without that object resolve it through the same strict
+    loader before any deterministic or provider work; they never use the
+    generic definition cache or degraded fallback.
     ``github_delivery`` states that this task must commit, push, or open a pull
     request. It reuses ``run_skill``'s existing GitHub-contract path, which both
     injects the delivery contract and enables Codex network for this dispatch.
@@ -336,6 +345,20 @@ async def dispatch(
     them every class runs on the model path exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if local_review or verified_agent_definition is not None:
+        try:
+            if not local_review:
+                raise ValueError("pinned lens authority requires local review")
+            verified_agent_definition = await _admit_local_review_definition(
+                role.lower(), verified_agent_definition
+            )
+            context_error = local_review_context_error(verified_agent_definition)
+            if context_error:
+                raise ValueError(context_error)
+        except ValueError as exc:
+            return SkillResult(
+                role, False, None, "", "", error=str(exc), provider=provider or ""
+            )
     run_kwargs = dict(
         role=role,
         task_entity_id=task_entity_id,
@@ -347,6 +370,7 @@ async def dispatch(
         command_wrapper=command_wrapper,
         codex_outer_sandboxed=codex_outer_sandboxed,
         local_review=local_review,
+        verified_agent_definition=verified_agent_definition,
         work_class=work_class,
         github_token=github_token,
         include_github_contract=github_delivery,

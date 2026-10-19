@@ -230,11 +230,24 @@ class TestRunSkill:
         self, MockLoader, mock_write_harness, monkeypatch, tmp_path
     ) -> None:
         fake_def = _make_def(
-            prompt_markdown="Review only.",
-            tool_allowlist="Read,Bash,mcp__mcpsrv_neotoma__*",
+            name="pavo",
+            prompt_markdown="Review local source only; no record context required.",
+            tool_allowlist="Read,Bash",
         )
+        fake_def.raw = {
+            "entity_id": fake_def.entity_id,
+            "entity_type": "agent_definition",
+            "snapshot": {
+                "name": fake_def.name,
+                "status": fake_def.status,
+                "prompt_markdown": fake_def.prompt_markdown,
+                "tool_allowlist": fake_def.tool_allowlist,
+                "context_entity_types": [],
+            },
+        }
         instance = MagicMock()
         instance.load.return_value = fake_def
+        instance.load_for_lens.return_value = fake_def
         MockLoader.return_value = instance
         for key, value in {
             "GITHUB_TOKEN": "fake-github",

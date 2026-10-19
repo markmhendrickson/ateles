@@ -50,13 +50,26 @@ def _router(monkeypatch, tmp_path):
     harness_router.reset_state()
 
 
-def _agent_def() -> AgentDefinition:
+def _agent_def(tool_allowlist="*") -> AgentDefinition:
     return AgentDefinition(
         entity_id="ent_test",
         name="apis",
         prompt_markdown="Dispatcher.",
-        tool_allowlist="*",  # the broadest allowlist: confinement must not rely on it
+        # Default stays broad: inference-only confinement must not rely on
+        # stripping record tools from the canonical synthetic role.
+        tool_allowlist=tool_allowlist,
         aauth_sub="apis@ateles-swarm",
+        raw={
+            "entity_id": "ent_test",
+            "entity_type": "agent_definition",
+            "snapshot": {
+                "name": "apis",
+                "status": "active",
+                "prompt_markdown": "Dispatcher.",
+                "tool_allowlist": tool_allowlist,
+                "context_entity_types": [],
+            },
+        },
     )
 
 
@@ -78,7 +91,7 @@ def canaries(monkeypatch, tmp_path):
     return {"home": ambient_home, "marker": marker, "codex": tmp_path / "ambient-codex"}
 
 
-def _run(tmp_path, **kw):
+def _run(tmp_path, *, tool_allowlist="*", **kw):
     """Run `run_skill` with the process launch captured; return (result, cap)."""
     cap: dict = {"launched": False}
     review_home = tmp_path / "scratch"
@@ -102,7 +115,8 @@ def _run(tmp_path, **kw):
         return proc
 
     instance = MagicMock()
-    instance.load.return_value = _agent_def()
+    instance.load.return_value = _agent_def(tool_allowlist)
+    instance.load_for_lens.return_value = _agent_def(tool_allowlist)
     skill_runner._agent_def_cache.clear()
     args = dict(
         provider="claude",
@@ -122,7 +136,9 @@ def _run(tmp_path, **kw):
         patch.object(Path, "read_text", return_value="skill content"),
         patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
     ):
-        result = asyncio.run(skill_runner.run_skill("apis", "score this", role="apis", **args))
+        result = asyncio.run(
+            skill_runner.run_skill("apis", "score this", role="apis", **args)
+        )
     return result, cap, review_home
 
 
@@ -185,8 +201,33 @@ def test_unpinned_inference_only_never_reaches_another_provider(tmp_path, canari
 
 
 def test_ordinary_runs_are_unchanged(tmp_path, canaries):
-    """Without the flag the command is built exactly as before."""
-    result, cap, _ = _run(tmp_path, inference_only=False)
+    """A record-free local review keeps the ordinary tool-command contract.
+
+    This is still local_review=True. A wildcard record-dependent role cannot
+    be a success fixture while its own record transport remains unqualified.
+    """
+    result, cap, _ = _run(tmp_path, inference_only=False, tool_allowlist="Read,Bash")
     assert result.ok
+    assert cap["launched"] is True
     assert "--tools" not in cap["cmd"]
     assert "--allowed-tools" in cap["cmd"]
+
+
+def test_ordinary_record_dependent_local_review_refuses_before_launch(
+    tmp_path, canaries
+):
+    """Changing the inference flag cannot silently erase canonical MCP duties."""
+    result, cap, _ = _run(tmp_path, inference_only=False)
+    assert result.ok is False
+    assert cap["launched"] is False
+    assert "canonical reviewer record context unavailable" in (result.error or "")
+
+
+def test_ordinary_nonreview_dispatch_does_not_take_local_context_refusal(
+    tmp_path, canaries
+):
+    """The new prerequisite is scoped to local review, not every dispatch."""
+    result, cap, _ = _run(tmp_path, inference_only=False, local_review=False)
+    assert result.ok
+    assert cap["launched"] is True
+    assert "--tools" not in cap["cmd"]

@@ -50,6 +50,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # ── Path bootstrap (mirrors apis.py so this module is importable standalone) ──
 _DAEMON_DIR = Path(__file__).resolve().parent
@@ -480,6 +481,170 @@ def neotoma_token_for_agent(role: str) -> tuple[str, bool]:
     return os.environ.get("NEOTOMA_BEARER_TOKEN", ""), False
 
 
+def local_review_context_error(definition: AgentDefinition) -> str | None:
+    """Refuse a review whose canonical record prerequisites cannot be supplied.
+
+    These declarations identify dependencies, not a per-step authority ceiling.
+    Operational entity types describe a role's portfolio and are deliberately
+    not treated as required reads. The current isolated adapter has no record
+    transport. Neither adding a tool name nor finding a bearer proves that the
+    record admits each request under the reviewing principal's current grant.
+    Keep this refusal until that existing transport and record boundary have
+    been qualified together; do not substitute the seated/shared-token mode.
+    """
+    if not isinstance(definition.raw, dict):
+        return "canonical reviewer context declaration is malformed"
+    snapshot = definition.raw.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return "canonical reviewer context declaration is malformed"
+    declared = snapshot.get("context_entity_types", [])
+    if isinstance(declared, str):
+        try:
+            declared = json.loads(declared)
+        except (ValueError, TypeError):
+            return "canonical reviewer context declaration is malformed"
+    if not isinstance(declared, list) or any(
+        not isinstance(kind, str) or not kind.strip() for kind in declared
+    ):
+        return "canonical reviewer context declaration is malformed"
+    record_tools = any(
+        tool == "*" or tool.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+        for tool in definition.tools
+    )
+    if declared or record_tools:
+        return (
+            "canonical reviewer record context unavailable: the isolated review "
+            "adapter has no qualified own-principal Neotoma transport with "
+            "record-side admission on every read and write; refusing before "
+            "model work. Tool exposure, a successful read, or a shared bearer "
+            "does not establish that boundary"
+        )
+    return None
+
+
+def review_record_server_config(
+    definition: AgentDefinition, *, binary: Path, key_path: Path,
+    base_url: str, issuer: str, key_id: str,
+) -> dict:
+    """Configure the existing signed stdio bridge for exactly one role.
+
+    Pure preparation only: this does not qualify record admission, read a key,
+    launch a bridge or enable it in an isolated review. The shared preflight
+    above remains binding until the record-side prerequisite is delivered.
+    Both harnesses accept this existing MCP server command/args/env shape.
+    """
+    from lib.daemon_runtime.agent_loader import validate_lens_definition
+
+    validate_lens_definition(definition, definition.name)
+    snapshot = definition.raw.get("snapshot") if isinstance(definition.raw, dict) else None
+    sub = snapshot.get("aauth_sub") if isinstance(snapshot, dict) else None
+    # AgentLoader's generic parsed subject may be synthesized. Only the actual
+    # canonical declaration is evidence here; never construct a sub from name.
+    if not isinstance(sub, str) or not sub.strip() or sub != definition.aauth_sub:
+        raise ValueError("canonical reviewer identity is not explicitly bound")
+    endpoint = urlsplit(base_url)
+    if (
+        endpoint.scheme != "https" or not endpoint.hostname
+        or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment
+        or endpoint.path not in ("", "/")
+    ):
+        raise ValueError("reviewer record origin is not an explicit HTTPS origin")
+    if not binary.is_absolute() or not key_path.is_absolute() or not issuer or not key_id:
+        raise ValueError("reviewer signed transport binding is incomplete")
+    return {
+        "command": str(binary),
+        "args": [
+            "mcp", "proxy", "--aauth", "--fail-closed",
+            "--downstream-url", base_url.rstrip("/") + "/mcp",
+        ],
+        "env": {
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH": str(key_path),
+            "NEOTOMA_AAUTH_SUB": sub,
+            "NEOTOMA_AAUTH_ISS": issuer,
+            "NEOTOMA_AAUTH_KID": key_id,
+            # Explicit empty values suppress every ambient alternate principal
+            # and authority remapping recognized by the existing CLI bridge.
+            "MCP_PROXY_BEARER_TOKEN": "",
+            "MCP_PROXY_CONNECTION_ID": "",
+            "MCP_PROXY_AGENT_LABEL": "",
+            "MCP_PROXY_AUTOSTART": "0",
+            "MCP_PROXY_LOG_FILE": "",
+            # The CLI's startup tier probe is unsigned. It would refuse an
+            # authenticated instance before the signed MCP handshake; verify
+            # get_session_identity on that signed connection instead.
+            "MCP_PROXY_SESSION_PREFLIGHT": "0",
+            "NEOTOMA_AAUTH_AUTHORITY_OVERRIDE": "",
+        },
+    }
+
+
+def review_record_config_text(
+    provider: str, server: dict, tools: list[str], *, deny_correct: bool,
+) -> str:
+    """Render the existing providers' isolated config without adding authority."""
+    if provider == "cursor":
+        if deny_correct:
+            raise ValueError("reviewer record carrier cannot enforce the gate-owner deny")
+        if "*" not in tools and f"{CODEX_NEOTOMA_TOOL_PREFIX}*" not in tools:
+            raise ValueError("reviewer record carrier cannot enforce restricted MCP tools")
+        return json.dumps({"mcpServers": {CODEX_NEOTOMA_SERVER_ID: server}}) + "\n"
+    if provider != "codex":
+        raise ValueError("reviewer record carrier is not supported")
+    lines = [
+        'cli_auth_credentials_store = "file"', "",
+        f"[mcp_servers.{CODEX_NEOTOMA_SERVER_ID}]",
+        f"command = {json.dumps(server['command'])}",
+        f"args = {json.dumps(server['args'])}", "required = true",
+    ]
+    if "*" not in tools and f"{CODEX_NEOTOMA_TOOL_PREFIX}*" not in tools:
+        enabled = [tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX)
+                   for tool in tools if tool.startswith(CODEX_NEOTOMA_TOOL_PREFIX)]
+        lines.append(f"enabled_tools = {json.dumps(enabled)}")
+    if deny_correct:
+        lines.append(f"disabled_tools = {json.dumps(list(CODEX_GATE_DENIED_TOOLS))}")
+    lines += ["", f"[mcp_servers.{CODEX_NEOTOMA_SERVER_ID}.env]"]
+    lines += [f"{key} = {json.dumps(value)}" for key, value in server["env"].items()]
+    return "\n".join(lines) + "\n"
+
+
+def validate_review_record_identity(
+    session: dict, *, subject: str, issuer: str, thumbprint: str, grant: dict,
+) -> None:
+    """Check the identity returned over the SAME signed MCP connection.
+
+    This is an identity prerequisite, not proof of every-read enforcement.
+    In particular the existing proxy's unsigned /session tier preflight is
+    insufficient. No caller flag or token label substitutes for these fields.
+    """
+    if not isinstance(session, dict) or not isinstance(grant, dict):
+        raise ValueError("reviewer record identity or grant is unverified")
+    attribution, admission = session.get("attribution"), session.get("aauth")
+    if not isinstance(attribution, dict) or not isinstance(admission, dict):
+        raise ValueError("reviewer record identity or grant is unverified")
+    if (
+        not all(isinstance(value, str) and value for value in (subject, issuer, thumbprint))
+        or attribution.get("tier") not in ("software", "hardware")
+        or attribution.get("agent_sub") != subject
+        or attribution.get("agent_iss") != issuer
+        or attribution.get("agent_thumbprint") != thumbprint
+        or admission.get("verified") is not True
+        or admission.get("admitted") is not True
+        or not isinstance(admission.get("grant_id"), str)
+        or not admission["grant_id"]
+        or grant.get("entity_id") != admission["grant_id"]
+        or grant.get("entity_type") != "agent_grant"
+    ):
+        raise ValueError("reviewer record identity or grant is unverified")
+    binding = grant.get("snapshot")
+    if not isinstance(binding, dict) or (
+        binding.get("status") != "active"
+        or binding.get("match_sub") != subject
+        or binding.get("match_iss") != issuer
+        or binding.get("match_thumbprint") != thumbprint
+    ):
+        raise ValueError("reviewer record identity or grant is unverified")
+
+
 def gate_writeback_identity_error(role: str, *, is_own_identity: bool) -> str | None:
     """Why *role* cannot record its own gate verdict, or None when it can.
 
@@ -563,6 +728,18 @@ def _load_agent_def(role: str) -> AgentDefinition:
     if role not in _agent_def_cache:
         _agent_def_cache[role] = AgentLoader(role).load()
     return _agent_def_cache[role]
+
+
+async def _admit_local_review_definition(
+    role: str, definition: AgentDefinition | None
+) -> AgentDefinition:
+    """Resolve once at an entry boundary; retain strict canonical authority."""
+    from lib.daemon_runtime.agent_loader import validate_lens_definition
+
+    if definition is None:
+        definition = await asyncio.to_thread(AgentLoader(role).load_for_lens)
+    validate_lens_definition(definition, role)
+    return definition
 
 
 def _load_active_policy_prompt(role: str) -> str:
@@ -2219,6 +2396,7 @@ async def _run_skill_once(
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
     local_review: bool = False,
+    verified_agent_definition: AgentDefinition | None = None,
     work_class: str | None = None,
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
@@ -2397,7 +2575,27 @@ async def _run_skill_once(
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
-    agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    if local_review or verified_agent_definition is not None:
+        from lib.daemon_runtime.agent_loader import validate_lens_definition
+
+        try:
+            if not local_review:
+                raise ValueError("pinned lens authority requires local review")
+            if verified_agent_definition is None:
+                raise ValueError("canonical lens role was not admitted before attempt")
+            validate_lens_definition(verified_agent_definition, _role)
+        except ValueError as exc:
+            return SkillResult(
+                skill, False, None, "", "", error=str(exc), provider=provider
+            )
+        agent_def = verified_agent_definition
+        context_error = None if inference_only else local_review_context_error(agent_def)
+        if context_error:
+            return SkillResult(
+                skill, False, None, "", "", error=context_error, provider=provider
+            )
+    else:
+        agent_def = await asyncio.to_thread(_load_agent_def, _role)
 
     binary = _provider_binaries().get(provider)
     if binary is None:
@@ -3750,6 +3948,7 @@ async def run_skill(
     command_wrapper: list[str] | None = None,
     codex_outer_sandboxed: bool = False,
     local_review: bool = False,
+    verified_agent_definition: AgentDefinition | None = None,
     work_class: str | None = None,
     action_class: str | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
@@ -3781,7 +3980,10 @@ async def run_skill(
 
     ``local_review`` selects a child environment with inference authority but
     no ambient GitHub or Neotoma publication authority. The parent retains and
-    independently applies any publication gate.
+    independently applies any publication gate. It also admits strict canonical
+    role authority before provider selection: a missing object is resolved once,
+    and the same validated object is pinned through every attempt. The generic
+    cached/degraded loader remains available only to non-local-review calls.
 
     The first candidate is selected with smooth weighted round-robin using the
     operator-supplied headroom estimates. Capacity, authentication, and launch
@@ -3843,6 +4045,23 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if local_review or verified_agent_definition is not None:
+        try:
+            if not local_review:
+                raise ValueError("pinned lens authority requires local review")
+            verified_agent_definition = await _admit_local_review_definition(
+                (role or skill).lower(), verified_agent_definition
+            )
+            context_error = (
+                None if inference_only
+                else local_review_context_error(verified_agent_definition)
+            )
+            if context_error:
+                raise ValueError(context_error)
+        except ValueError as exc:
+            return SkillResult(
+                skill, False, None, "", "", error=str(exc), provider=provider or ""
+            )
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
@@ -3880,6 +4099,7 @@ async def run_skill(
             command_wrapper=command_wrapper,
             codex_outer_sandboxed=codex_outer_sandboxed,
             local_review=local_review,
+            verified_agent_definition=verified_agent_definition,
             agent_session_id=agent_session_id,
             work_class=work_class,
             action_class=action_class,
