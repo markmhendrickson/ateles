@@ -286,7 +286,7 @@ from lib.credential_templates import (  # noqa: E402
 import harness_router  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
-from skill_runner import SkillResult  # noqa: E402
+from skill_runner import SkillResult, local_review_context_error  # noqa: E402
 
 try:
     import swarm_dispatch  # noqa: E402
@@ -2653,8 +2653,15 @@ async def run_one(
             "ok": False, "provider": provider, "reason": reason,
             "refusal_reason": reason, "no_model_call_made": True, "posted": False,
         }
-    check_headroom(provider)
     verified_role = read_agent_definition(target.agent)
+    context_error = local_review_context_error(verified_role)
+    if context_error:
+        return {
+            "ok": False, "provider": provider, "reason": context_error,
+            "refusal_reason": context_error, "no_model_call_made": True,
+            "posted": False,
+        }
+    check_headroom(provider)
     agent_prompt = verified_role.prompt_markdown
 
     worktree_path = (

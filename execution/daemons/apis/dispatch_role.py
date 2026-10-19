@@ -222,6 +222,7 @@ from skill_runner import (  # noqa: E402
     SkillResult,
     _admit_local_review_definition,
     _load_agent_def,
+    local_review_context_error,
     run_skill,
 )
 
@@ -351,6 +352,9 @@ async def dispatch(
             verified_agent_definition = await _admit_local_review_definition(
                 role.lower(), verified_agent_definition
             )
+            context_error = local_review_context_error(verified_agent_definition)
+            if context_error:
+                raise ValueError(context_error)
         except ValueError as exc:
             return SkillResult(
                 role, False, None, "", "", error=str(exc), provider=provider or ""
