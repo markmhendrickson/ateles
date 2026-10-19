@@ -1635,6 +1635,17 @@ class _CompletionScope:
         self.job = self.job_identity = self.plan_identity = self.task = None
 
 
+def independent_completion_context():
+    """Copy ambient context for independent work without parent evidence.
+
+    Only an explicit independent dispatch boundary uses this: ordinary child
+    tasks keep inheriting the scope and must still be refused by its owner check.
+    """
+    context = contextvars.copy_context()
+    context.run(_COMPLETION_SCOPE.set, None)
+    return context
+
+
 def completion_scope(function):
     """Keep private evidence in the original enclosing completion coroutine.
 

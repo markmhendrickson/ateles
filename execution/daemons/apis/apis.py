@@ -1412,7 +1412,14 @@ async def start_deferred_recovery(notifier: Notifier) -> dict:
 
 
 def _spawn_background(coro, name: str) -> None:
-    task = asyncio.get_running_loop().create_task(coro, name=name)
+    # A release sweep starts independent dispatches, not nested completion of
+    # the build whose release triggered it. Preserve ambient tracing context,
+    # but never transport that build's private completion evidence.
+    from fly_runner import independent_completion_context
+
+    task = asyncio.get_running_loop().create_task(
+        coro, name=name, context=independent_completion_context()
+    )
     _background_dispatch_tasks.add(task)
     task.add_done_callback(_background_dispatch_done)
 

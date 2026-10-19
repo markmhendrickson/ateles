@@ -128,6 +128,87 @@ def trigger():
     )
 
 
+
+@pytest.mark.parametrize("parent_closed", [False, True])
+def test_common_recovery_dispatch_has_its_own_completion_scope(parent_closed):
+    import contextvars
+
+    marker = contextvars.ContextVar("recovery_test_trace")
+    parent_plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
+    child_plan = dataclasses.replace(
+        parent_plan, branch="cicada/recovery-124", key=REPO + "#124", issue_number=124
+    )
+    scopes = {}
+
+    async def drive():
+        proceed = asyncio.Event()
+        tasks = []
+
+        @fly_runner.completion_scope
+        async def child():
+            await proceed.wait()
+            scope = fly_runner._COMPLETION_SCOPE.get()
+            scopes["child"] = scope
+            assert scope is not scopes["parent"]
+            assert scope.admissions == [] and scope.plan_identity is None
+            assert scope.job is None and scope.task_id is None
+            assert marker.get() == "original-trace"
+            with pytest.raises(fly_runner.FlyResultUnreadable, match="not current"):
+                scopes["parent"].require_current()
+            fly_runner.expect_delivery_plan(child_plan, task_id="ent_recovery_child")
+            assert scope.task_id == "ent_recovery_child"
+            scopes["child_identity"] = scope.plan_identity
+
+        @fly_runner.completion_scope
+        async def parent():
+            scope = fly_runner._COMPLETION_SCOPE.get()
+            scopes["parent"] = scope
+            fly_runner.expect_delivery_plan(parent_plan, task_id="ent_recovery_parent")
+            marker.set("original-trace")
+            before = set(apis._background_dispatch_tasks)
+            apis._spawn_background(child(), "test-independent-recovery")
+            tasks.extend(set(apis._background_dispatch_tasks) - before)
+            assert len(tasks) == 1
+            if not parent_closed:
+                proceed.set()
+                await tasks[0]
+                scope.require_current()
+                assert not scope.closed
+                assert scope.task_id == "ent_recovery_parent"
+                assert scope.plan_identity != scopes["child_identity"]
+
+        await parent()
+        assert scopes["parent"].closed
+        proceed.set()
+        await tasks[0]
+        assert scopes["child"].closed
+        assert fly_runner._COMPLETION_SCOPE.get() is None
+
+    asyncio.run(drive())
+
+
+def test_common_completion_scope_still_refuses_plain_child_inheritance():
+    scopes = []
+
+    @fly_runner.completion_scope
+    async def nested():
+        scopes.append(fly_runner._COMPLETION_SCOPE.get())
+
+    @fly_runner.completion_scope
+    async def parent():
+        original = fly_runner._COMPLETION_SCOPE.get()
+        await nested()
+        assert scopes == [original]
+        with pytest.raises(fly_runner.FlyResultUnreadable, match="not current"):
+            await asyncio.create_task(nested())
+        assert scopes == [original], "an inherited child reached the completion body"
+        original.require_current()
+        return original
+
+    closed = asyncio.run(parent())
+    assert closed.closed
+
+
 def test_default_off_is_pinned_even_when_fly_itself_is_configured(monkeypatch):
     monkeypatch.setenv("APIS_FLY_APP", "runner-test")
     assert (
