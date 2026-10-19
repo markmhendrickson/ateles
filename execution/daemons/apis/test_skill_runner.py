@@ -231,8 +231,8 @@ class TestRunSkill:
     ) -> None:
         fake_def = _make_def(
             name="pavo",
-            prompt_markdown="Review only.",
-            tool_allowlist="Read,Bash,mcp__mcpsrv_neotoma__*",
+            prompt_markdown="Review local source only; no record context required.",
+            tool_allowlist="Read,Bash",
         )
         fake_def.raw = {
             "entity_id": fake_def.entity_id,
@@ -242,6 +242,7 @@ class TestRunSkill:
                 "status": fake_def.status,
                 "prompt_markdown": fake_def.prompt_markdown,
                 "tool_allowlist": fake_def.tool_allowlist,
+                "context_entity_types": [],
             },
         }
         instance = MagicMock()
