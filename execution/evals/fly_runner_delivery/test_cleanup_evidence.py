@@ -27,7 +27,8 @@ def test_actual_eval(tmp_path, monkeypatch):
     original_lstat = Path.lstat
     original_listdir = os.listdir
     original_walk = os.walk
-    from execution.daemons.apis.fly_cleanup_test_support import cleanup_error
+    from execution.daemons.apis.fly_cleanup_test_support import (
+        capture_original_cleanup, cleanup_error)
     filename = "synthetic_private_cleanup_filename"
     original_write = Path.write_text
     if INJECT == "original_refused":
@@ -36,7 +37,7 @@ def test_actual_eval(tmp_path, monkeypatch):
                                                 "synthetic_private_fixture_error")
     fixture = {"prior_cleanup_failure": False, "faults": [],
                "original_cleanup": "not_attempted", "planting": "not_started",
-               "errors": []}
+               "errors": [], "original_causes": []}
     def controlled(root):
         if INJECT == "plant_refused":
             def failed_write(path, *args, **kwargs):
@@ -50,7 +51,8 @@ def test_actual_eval(tmp_path, monkeypatch):
                 raise target.runner.rd.RepoWorkError(target.runner.rd.WORK_FAILED,
                                                     "synthetic prior cleanup refusal")
             fixture["original_cleanup"] = "started"
-            original(root)
+            capture_original_cleanup(root, original, target.runner.rd, monkeypatch,
+                                     fixture["original_causes"])
             fixture["original_cleanup"] = "returned"
             fixture["planting"] = "started"
             if CASE == "root_file":
@@ -133,6 +135,7 @@ def test_actual_eval(tmp_path, monkeypatch):
             pytest.fail("diagnostic fixture stage failure: " + json.dumps({
                 "original_cleanup": fixture["original_cleanup"],
                 "planting": fixture["planting"], "errors": fixture["errors"],
+                "original_causes": fixture["original_causes"],
                 "cleanup": trace.cleanup}), pytrace=False)
         return trace
     monkeypatch.setattr(target.runner, "run_scenario", capture)
@@ -157,9 +160,11 @@ def _assert_cleanup_fixture(result, case, prior_cleanup_failure):
     stage_evidence = "diagnostic fixture stage evidence: " + json.dumps({
         "original_cleanup": proof["original_cleanup"],
         "planting": proof["planting"], "errors": proof["errors"],
+        "original_causes": proof["original_causes"],
         "cleanup": details})
     if not prior_cleanup_failure:
         assert proof["original_cleanup"] == "returned" and proof["planting"] == "completed", stage_evidence
+        assert proof["original_causes"] == [], stage_evidence
     assert done.returncode == 1 and "1 failed" in output
     assert "the work directory was left behind" in output
     assert '"leftovers":' in output and '"root":' in output
@@ -214,6 +219,12 @@ def test_fixture_stage_refusal_is_bounded_and_cannot_pass(tmp_path, scenario, ca
     assert proof["planting"] == ("not_started" if inject == "original_refused" else "refused")
     assert len(proof["errors"]) == 1
     assert set(proof["errors"][0]) == {"type", "errno"}
+    if inject == "original_refused":
+        assert proof["original_causes"] == [{
+            "phase": "cleanup", "type": "RepoWorkError", "errno": None,
+            "category": "work_failed", "status": None}]
+    else:
+        assert proof["original_causes"] == []
     if case == "root_lstat":
         assert proof["faults"] and details["incomplete"]
     elif inject == "plant_refused":
@@ -244,3 +255,125 @@ def test_completed_planting_with_different_root_still_fails(tmp_path, scenario):
     assert details["root"]["kind"] == "directory"
     with pytest.raises(AssertionError, match="diagnostic fixture stage evidence"):
         _assert_cleanup_fixture(result, "root_file", False)
+
+
+def _synthetic_cleanup_target(phase, error):
+    """Function-only seams: no filesystem cleanup, subprocess or job import."""
+    from functools import wraps
+    from types import SimpleNamespace
+
+    class RepoWorkError(Exception):
+        def __init__(self, category, reason, status=""):
+            self.category, self.status = category, status
+            super().__init__(reason)
+
+    normalized = []
+    calls = []
+
+    def boundary(category):
+        def decorate(function):
+            @wraps(function)
+            def guarded(*args, **kwargs):
+                try:
+                    return function(*args, **kwargs)
+                except RepoWorkError:
+                    raise
+                except (OSError, ValueError, TypeError, UnicodeError) as exc:
+                    normalized.append(exc)
+                raise RepoWorkError(category, "fixed boundary message", "os_error") from None
+            return guarded
+        return decorate
+
+    def step(name, value):
+        calls.append(name)
+        if phase == name:
+            raise error
+        return value
+
+    target = SimpleNamespace(
+        RepoWorkError=RepoWorkError, WORK_ROOT_REFUSED="work_root_refused",
+        _boundary=boundary,
+        check_work_root=boundary("work_root_refused")(
+            lambda root: step("guard", root)),
+        os=SimpleNamespace(listdir=lambda root: step("list", ["entry"])),
+        _remove=lambda path: step("remove", None))
+    returned = object()
+
+    @boundary("work_failed")
+    def cleanup(root):
+        target.check_work_root(root)
+        for name in target.os.listdir(root):
+            target._remove(root / name)
+        return returned
+
+    return target, cleanup, normalized, calls, returned
+
+
+@pytest.mark.parametrize("phase", ["guard", "list", "remove"])
+def test_original_cleanup_cause_precedes_boundary_normalization(monkeypatch, phase):
+    from execution.daemons.apis.fly_cleanup_test_support import capture_original_cleanup
+
+    error = PermissionError(13, "synthetic_private_message", "synthetic_private_path")
+    target, cleanup, normalized, calls, _ = _synthetic_cleanup_target(phase, error)
+    original = (target.check_work_root, target.os.listdir, target._remove)
+    causes = []
+    with pytest.raises(target.RepoWorkError):
+        capture_original_cleanup(Path("fixture"), cleanup, target, monkeypatch, causes)
+    assert normalized == [error] and normalized[0] is error
+    assert causes == [{"phase": phase, "type": "PermissionError", "errno": 13,
+                       "category": None, "status": None}]
+    assert calls[-1] == phase
+    assert (target.check_work_root, target.os.listdir, target._remove) == original
+    assert "synthetic_private" not in json.dumps(causes)
+
+
+def test_original_cleanup_cause_retains_only_closed_refusal_metadata(monkeypatch):
+    from execution.daemons.apis.fly_cleanup_test_support import capture_original_cleanup
+
+    target, _, _, _, _ = _synthetic_cleanup_target(None, None)
+    error = target.RepoWorkError("work_failed", "synthetic_private_message", "os_error")
+
+    def refused(root):
+        raise error
+
+    causes = []
+    with pytest.raises(target.RepoWorkError) as caught:
+        capture_original_cleanup(Path("fixture"), refused, target, monkeypatch, causes)
+    assert caught.value is error
+    assert causes == [{"phase": "cleanup", "type": "RepoWorkError", "errno": None,
+                       "category": "work_failed", "status": "os_error"}]
+    error.category = error.status = "synthetic_private_value"
+    causes = []
+    with pytest.raises(target.RepoWorkError):
+        capture_original_cleanup(Path("fixture"), refused, target, monkeypatch, causes)
+    assert causes[0]["category"] is causes[0]["status"] is None
+    assert "synthetic_private" not in json.dumps(causes)
+
+
+def test_original_cleanup_cause_is_separate_from_later_observation_fault(monkeypatch):
+    from execution.daemons.apis.fly_cleanup_test_support import (
+        capture_original_cleanup, cleanup_error)
+
+    error = PermissionError(13, "synthetic_private_original")
+    target, cleanup, _, _, _ = _synthetic_cleanup_target("remove", error)
+    causes = []
+    with pytest.raises(target.RepoWorkError):
+        capture_original_cleanup(Path("fixture"), cleanup, target, monkeypatch, causes)
+    later = {"phase": "entry_lstat", **cleanup_error(
+        PermissionError(13, "synthetic_private_later"))}
+    assert causes[0]["phase"] == "remove" and later["phase"] == "entry_lstat"
+    assert causes[0]["errno"] == later["errno"] == 13
+    assert len(causes) == 1
+    assert "synthetic_private" not in json.dumps([causes, later])
+
+
+def test_original_cleanup_cause_success_preserves_return_and_restores_seams(monkeypatch):
+    from execution.daemons.apis.fly_cleanup_test_support import capture_original_cleanup
+
+    target, cleanup, normalized, calls, returned = _synthetic_cleanup_target(None, None)
+    original = (target.check_work_root, target.os.listdir, target._remove)
+    causes = []
+    assert capture_original_cleanup(
+        Path("fixture"), cleanup, target, monkeypatch, causes) is returned
+    assert causes == [] and normalized == [] and calls == ["guard", "list", "remove"]
+    assert (target.check_work_root, target.os.listdir, target._remove) == original

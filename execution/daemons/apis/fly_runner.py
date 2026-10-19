@@ -41,7 +41,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import copy
+import functools
 import fcntl
 import json
 import logging
@@ -417,7 +419,23 @@ def _csv(raw: str) -> list[str]:
 # remote outcome as terminal (no retry, no re-dispatch, no failover). Only
 # these can be opted in through APIS_FLY_RUNNER_CLASSES; adding one means
 # checking every retry lane that can re-dispatch it.
-FLY_VETTED_CLASSES: frozenset[str] = frozenset({"carry_forward_check"})
+FLY_VETTED_CLASSES: frozenset[str] = frozenset({"carry_forward_check", "open_or_merge_pr"})
+# Classes that may be listed (the operator's opt-in) but are never routed by
+# class alone: only a builder's delivery path, which forces ``runner="fly"``
+# with a delivery spec, sends them to Fly. Every retry lane that can re-run a
+# builder treats a launched delivery's outcome as terminal (tested in
+# test_fly_delivery_dispatch.py), which is what vetting this class required.
+DELIVERY_ONLY_CLASSES: frozenset[str] = frozenset({"open_or_merge_pr"})
+# The job-only credential name of a delivery's GitHub token, and the stdin
+# and argv placeholders the job runner fills in (deploy/fly-runner/run_job.py
+# defines the same names; a test pins them together).
+DELIVERY_TOKEN_NAME = "ATELES_DELIVERY_GITHUB_TOKEN"
+WORKSPACE_PLACEHOLDER = "@@ATELES_JOB_WORKSPACE@@"
+PR_FILE_PLACEHOLDER = "@@ATELES_JOB_PR_FILE@@"
+DELIVERY_SPEC_KEYS = ("branch", "base_branch", "author_name", "author_email")
+# The fly_runner_result fields a delivering job's record carries.
+DELIVERY_RESULT_FIELDS = ("delivery_status", "delivery_reason", "delivery_branch",
+                          "delivery_commit", "pr_number", "pr_url")  # fmt: skip
 
 
 def runner_classes() -> frozenset[str]:
@@ -434,6 +452,12 @@ def runner_classes() -> frozenset[str]:
     return listed & FLY_VETTED_CLASSES
 
 
+def delivery_opted_in() -> bool:
+    """Whether the operator opted builder deliveries onto Fly: the delivery
+    class is listed in ``APIS_FLY_RUNNER_CLASSES``. Unset, it is False."""
+    return bool(DELIVERY_ONLY_CLASSES & runner_classes())
+
+
 def wants_fly(runner: str | None, action_class: str | None) -> bool:
     """Whether this dispatch should try the fly executor at all.
 
@@ -445,7 +469,8 @@ def wants_fly(runner: str | None, action_class: str | None) -> bool:
         return False
     if runner == "fly":
         return True
-    return bool(action_class) and action_class in runner_classes()
+    return (bool(action_class) and action_class in runner_classes()
+            and action_class not in DELIVERY_ONLY_CLASSES)  # fmt: skip
 
 
 @dataclass
@@ -673,6 +698,7 @@ class LedgerSnapshot:
     local_fallbacks: int
     entries: dict[str, dict]
     owners: dict[str, dict]
+    deliveries: dict[str, dict] = field(default_factory=dict)
 
     def outstanding_usd(self) -> float:
         """The reserved maximum cost of every reservation still held,
@@ -708,6 +734,7 @@ class LedgerSnapshot:
             "month": self.month, "day": self.day, "spend_usd": self.spend_usd,
             "launches_today": self.launches_today, "local_fallbacks": self.local_fallbacks,
             "in_flight": copy.deepcopy(self.entries), "owners": copy.deepcopy(self.owners),
+            **({"deliveries": copy.deepcopy(self.deliveries)} if self.deliveries else {}),
         }  # fmt: skip
 
 
@@ -814,13 +841,23 @@ class FlyLedger:
             if record["id"] != key:
                 raise FlyLedgerError(f"Fly ledger {name}: owner {key} names another owner")
             owners[key] = copy.deepcopy(record)
+        raw_deliveries = raw.get("deliveries", {})
+        if not isinstance(raw_deliveries, dict):
+            raise FlyLedgerError(f"Fly ledger {name}: delivery receipts are unreadable")
+        deliveries = {}
+        for key, entry in raw_deliveries.items():
+            canonical = canonical_delivery_key(key)
+            validate_delivery_receipt(canonical, entry)
+            if canonical in deliveries and deliveries[canonical] != entry:
+                raise FlyLedgerError("conflicting delivery receipts require reconciliation")
+            deliveries[canonical] = copy.deepcopy(entry)
         period = {"month": raw["month"], "day": raw["day"], "spend_usd": raw["spend_usd"],
                   "launches_today": raw["launches_today"]}  # fmt: skip
         self._roll(period, now)  # refuses a later period; resets only on a rollover
         snap = LedgerSnapshot(
             month=period["month"], day=period["day"], spend_usd=float(period["spend_usd"]),
             launches_today=period["launches_today"], local_fallbacks=raw["local_fallbacks"],
-            entries=entries, owners=owners,
+            entries=entries, owners=owners, deliveries=copy.deepcopy(deliveries),
         )
         if admission:
             if config is None:
@@ -857,8 +894,61 @@ class FlyLedger:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
+        directory = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def delivery_receipts(self) -> dict[str, dict]:
+        """Durable issue/task → run bindings, kept when accounting settles.
+
+        Retained across period rollovers: spending resets do not prove that a
+        previous job pushed nothing. The receipt contains only the executor's
+        observed result fields and never any credential.
+        """
+        if not self.path.exists():
+            return {}
+        with self._locked():
+            snap = self._snapshot(self._clock())
+            _, raw = self._read_document()
+            if isinstance(raw, dict) and raw.get("deliveries", {}) != snap.deliveries:
+                self._save(snap.document())
+                if self._snapshot(self._clock()).deliveries != snap.deliveries:
+                    raise FlyLedgerError("delivery reconciliation did not read back")
+            return snap.deliveries
+
+    def record_delivery(self, key: str, entry: dict | None, *,
+                        retryable: frozenset[str] | None = None) -> bool:
+        """Reserve/update a delivery under the same cross-process ledger lock.
+
+        With ``retryable``, this is compare-and-reserve. A read-back is required
+        before the caller may send anything to Fly. Accounting/reaper writes
+        preserve these bindings through ``LedgerSnapshot.document``.
+        """
+        key = canonical_delivery_key(key)
+        if entry is not None:
+            validate_delivery_receipt(key, entry)
+        with self._locked():
+            data = self._load()
+            receipts = data.setdefault("deliveries", {})
+            old = receipts.get(key)
+            if retryable is not None and old is not None and old["status"] not in retryable:
+                return False
+            if entry is None:
+                receipts.pop(key, None)
+            else:
+                if not isinstance(entry.get("status"), str):
+                    raise FlyLedgerError("delivery receipt has no status")
+                receipts[key] = entry
+            self._save(data)
+            if self._snapshot(self._clock()).deliveries.get(key) != entry:
+                raise FlyLedgerError("delivery receipt did not read back")
+            return True
 
     def _roll(self, data: dict, now: float) -> None:
         """Start a new period only on a genuine rollover: a VALID marker
@@ -1500,6 +1590,366 @@ class FlyResultUnreadable(Exception):
     outcome is unknown, which is different from a record that is absent."""
 
 
+_COMPLETION_SCOPE = contextvars.ContextVar("fly_completion_scope", default=None)
+
+
+class _CompletionScope:
+    def __init__(self):
+        self.task = asyncio.current_task()
+        self.closed = False
+        self.admissions = []
+        self.plan_identity = None
+        self.task_id = None
+        self.job = None
+        self.job_identity = None
+
+    def expect_plan(self, plan, task_id=None):
+        self.require_current()
+        expected = (plan.repository, json.dumps(plan.spec(), sort_keys=True, allow_nan=False))
+        if self.plan_identity is not None and self.plan_identity != expected:
+            raise FlyResultUnreadable("completion scope already belongs to another plan")
+        if task_id is not None:
+            if self.task_id is not None and self.task_id != task_id:
+                raise FlyResultUnreadable("completion scope already belongs to another task")
+            self.task_id = task_id
+        self.plan_identity = expected
+
+    def bind_job(self, job):
+        self.require_current()
+        identity = _delivery_identity(job)
+        if self.plan_identity != (job.repository, identity[-1]):
+            raise FlyResultUnreadable("delivery job has no original parent plan")
+        if self.job is not None and self.job is not job and self.job.launch_requested:
+            raise FlyResultUnreadable("completion scope already launched another job")
+        self.job, self.job_identity = job, identity
+
+    def require_current(self):
+        if self.closed or self.task is not asyncio.current_task():
+            raise FlyResultUnreadable("delivery completion scope is not current")
+
+    def close(self):
+        self.closed = True
+        for admission in self.admissions:
+            admission.clear()
+        self.admissions.clear()
+        self.job = self.job_identity = self.plan_identity = self.task = None
+
+
+def independent_completion_context():
+    """Copy ambient context for independent work without parent evidence.
+
+    Only an explicit independent dispatch boundary uses this: ordinary child
+    tasks keep inheriting the scope and must still be refused by its owner check.
+    """
+    context = contextvars.copy_context()
+    context.run(_COMPLETION_SCOPE.set, None)
+    return context
+
+
+def completion_scope(function):
+    """Keep private evidence in the original enclosing completion coroutine.
+
+    Nested calls reuse the scope, but inherited contexts in another task do
+    not. No identity, grant, or origin authority is created by this scope.
+    """
+    @functools.wraps(function)
+    async def wrapped(*args, **kwargs):
+        current = _COMPLETION_SCOPE.get()
+        if current is not None:
+            current.require_current()
+            return await function(*args, **kwargs)
+        scope = _CompletionScope()
+        token = _COMPLETION_SCOPE.set(scope)
+        try:
+            return await function(*args, **kwargs)
+        finally:
+            scope.close()
+            _COMPLETION_SCOPE.reset(token)
+    return wrapped
+
+
+def _delivery_identity(job):
+    return (job.run_id, job.role, job.provider, job.repository,
+            json.dumps(job.delivery, sort_keys=True, allow_nan=False))
+
+
+def _same_result_value(left, right):
+    """JSON value equality without Python's boolean/number aliasing.
+
+    Finite integer/float representations retain the schema's numeric
+    semantics. This compares existing values; it serializes or hashes none.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left is right
+    if type(left) in {int, float} and type(right) in {int, float}:
+        return (not isinstance(left, float) or math.isfinite(left)) and (
+            not isinstance(right, float) or math.isfinite(right)) and left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _same_result_value(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_result_value(a, b) for a, b in zip(left, right))
+    return (left is None and right is None) or isinstance(left, str) and left == right
+
+
+class _DeliveryAdmission:
+    """Executor-owned and deliberately absent from any public/wire dataclass."""
+    def __init__(self, executor, job, scope, origin, canonical):
+        scope.require_current()
+        self.executor, self.job, self.scope = executor, job, scope
+        self.identity = _delivery_identity(job)
+        self.origin = origin
+        self.canonical = canonical
+        self.result = None
+        self._settled_by = None
+        scope.admissions.append(self)
+
+    def clear(self):
+        self.origin = self.canonical = self.result = None
+        self.executor = self.job = self._settled_by = None
+
+    def _confirm_settlement(self, executor, job):
+        self.scope.require_current()
+        if executor is not self.executor or job is not self.job:
+            raise FlyResultUnreadable("settlement differs from the original executor job")
+        self._settled_by = (executor, job)
+
+    def require_settled(self):
+        self.scope.require_current()
+        held = self._settled_by
+        if (type(held) is not tuple or len(held) != 2
+                or held[0] is not self.executor or held[1] is not self.job):
+            raise FlyResultUnreadable("delivery settlement was not confirmed by its executor")
+
+    async def require_current(self, result=None, plan=None):
+        self.scope.require_current()
+        if (_COMPLETION_SCOPE.get() is not self.scope or self.origin is None
+                or self.executor is None or _delivery_identity(self.job) != self.identity
+                or self.scope.job is not self.job or self.scope.job_identity != self.identity
+                or getattr(self.job, "_fly_admission", None) is not self
+                or not any(a is self for a in self.scope.admissions)):
+            raise FlyResultUnreadable("delivery admission lost its original execution")
+        if result is not None:
+            self.require_settled()
+            if self.result is not result or getattr(result, "_fly_admission", None) is not self:
+                raise FlyResultUnreadable("delivery result is not the original executor result")
+            if result.remote_run_id != self.job.run_id:
+                raise FlyResultUnreadable("delivery result differs from its original run")
+            record = self.canonical["row"]["snapshot"]
+            if any(not _same_result_value(getattr(result, attr), record.get(key)) for attr, key in (
+                    ("fly_delivery_status", "delivery_status"),
+                    ("fly_delivery_branch", "delivery_branch"),
+                    ("fly_delivery_commit", "delivery_commit"),
+                    ("fly_pr_number", "pr_number"), ("fly_pr_url", "pr_url"))):
+                raise FlyResultUnreadable("delivery report differs from admitted observation")
+        if plan is not None:
+            if (plan.repository != self.job.repository
+                    or plan.spec() != self.job.delivery):
+                raise FlyResultUnreadable("delivery differs from the original parent plan")
+        fresh = await self.executor._read_delivery_canonical(self.job, self.origin)
+        if not _same_result_value(fresh, self.canonical):
+            raise FlyResultUnreadable("delivery canonical admission changed")
+        self.scope.require_current()
+        if result is not None:
+            self.require_settled()
+
+
+async def require_delivery_admission(result, plan=None):
+    """Scalar reports, copied objects and persisted receipts never admit."""
+    admission = getattr(result, "_fly_admission", None)
+    if type(admission) is not _DeliveryAdmission:
+        raise FlyResultUnreadable("delivery has no original executor admission")
+    await admission.require_current(result, plan)
+
+
+def expect_delivery_plan(plan, *, task_id=None):
+    scope = _COMPLETION_SCOPE.get()
+    if scope is None:
+        raise FlyResultUnreadable("delivery parent completion scope is absent")
+    scope.expect_plan(plan, task_id)
+
+
+def task_delivery_started(*, task_id):
+    """Whether the original task scope owns a launched delivery obligation.
+
+    Capture before awaited artifact reads. A mutable result report cannot
+    remove it; a closed task scope remains restrictive. Prelaunch/local
+    fallback has no launched job and retains its ordinary artifact path.
+    """
+    scope = _COMPLETION_SCOPE.get()
+    return bool(scope is not None and scope.task_id == task_id and (
+        scope.closed or scope.job is not None and scope.job.launch_requested))
+
+
+async def require_task_delivery_admission(result, *, task_id, repository):
+    scope = _COMPLETION_SCOPE.get()
+    if (scope is None or scope.task_id != task_id or scope.plan_identity is None
+            or scope.plan_identity[0] != repository):
+        raise FlyResultUnreadable("delivery does not belong to the completing task")
+    await require_delivery_admission(result)
+
+
+def _result_read_contract(data, run_id):
+    """Validate the existing collection contract; never invent a certificate."""
+    import hashlib
+
+    contract = data.get("read_contract")
+    if not isinstance(contract, dict):
+        raise FlyResultUnreadable("result collection has no read contract")
+    scope = contract.get("applied_scope", {})
+    coverage = contract.get("coverage", {})
+    total = coverage.get("total", {})
+    predicate = {"kind": "sha256", "value": hashlib.sha256(
+        json.dumps(run_id, ensure_ascii=False).encode()).hexdigest()}
+    if (contract.get("version") != "1" or contract.get("surface") != "entity_collection"
+            or contract.get("mode", {}).get("actual") != "structured"
+            or scope.get("owner") != "authenticated"
+            or scope.get("entity_types") != [RESULT_ENTITY_TYPE]
+            or scope.get("include_merged") is not False
+            or scope.get("include_snapshots") is not True
+            or coverage.get("kind") != "predicate_population"
+            or coverage.get("state") != "complete" or coverage.get("reasons") != []
+            or type(total.get("value")) is not int
+            or total != {"value": 1, "relation": "exact", "unit": "entities"}
+            or type(coverage.get("returned_count")) is not int
+            or coverage.get("returned_count") != 1
+            or coverage.get("scope_exhausted") is not True
+            or contract.get("request_options", {}).get("ignored") != []
+            or scope.get("predicates") != [
+                {"field": "run_id", "op": "eq", "value": predicate}]):
+        raise FlyResultUnreadable("result collection coverage is not complete")
+
+
+async def _read_canonical_delivery(client, base, job, binding):
+    """Bounded acquisition using existing owner-scoped canonical endpoints.
+
+    The service reports a read interval, not a common atomic view. Repeated
+    full acquisition and version comparison detects drift; it cannot mint
+    an atomic certificate or substitute for independently acquired origin.
+    """
+    from urllib.parse import quote
+    from lib.daemon_runtime.neotoma_signed import check_observation_attribution
+
+    async def request(method, path, **kwargs):
+        response = await client.request(method, base + path, **kwargs)
+        if response.status_code != 200:
+            raise FlyResultUnreadable("canonical delivery read was refused")
+        value = response.json()
+        if not isinstance(value, dict):
+            raise FlyResultUnreadable("canonical delivery answer is not an object")
+        return value
+
+    required_binding = ("owner", "grant_id", "sub", "thumbprint")
+    if (not isinstance(binding, dict)
+            or any(not isinstance(binding.get(k), str) or not binding[k] for k in required_binding)):
+        raise FlyResultUnreadable("delivery producer binding is unavailable")
+    page = await request("POST", "/entities/query", json={
+        "entity_type": RESULT_ENTITY_TYPE, "limit": 2, "offset": 0,
+        "sort_by": "entity_id", "sort_order": "asc", "include_snapshots": True,
+        "include_merged": False, "snapshot_filters": {"run_id": {"op": "eq", "value": job.run_id}},
+    })
+    _result_read_contract(page, job.run_id)
+    rows = page.get("entities")
+    if (not isinstance(rows, list) or len(rows) != 1
+            or type(page.get("total")) is not int or page["total"] != 1):
+        raise FlyResultUnreadable("delivery result is not unique")
+    row = rows[0]
+    if (not isinstance(row, dict) or row.get("entity_type") != RESULT_ENTITY_TYPE
+            or not isinstance(row.get("entity_id"), str)
+            or not isinstance(row.get("entity_version"), str)):
+        raise FlyResultUnreadable("delivery result identity is incomplete")
+    entity_id = quote(row["entity_id"], safe="")
+    record, winners = row.get("snapshot"), row.get("provenance")
+    if not isinstance(record, dict) or not isinstance(winners, dict):
+        raise FlyResultUnreadable("delivery snapshot or winners are missing")
+    try:
+        validate("result_record", record)
+    except FlyInvalid:
+        raise FlyResultUnreadable("canonical delivery runtime field types are invalid") from None
+    if any(record.get(k) != value for k, value in (
+            ("run_id", job.run_id), ("role", job.role), ("provider", job.provider),
+            ("repository", job.repository), ("machine_id", job.machine_id))):
+        raise FlyResultUnreadable("canonical delivery differs from the original job")
+    protected = ("run_id", "role", "provider", "repository", "machine_id", "exit_code",
+                 "timed_out", "refused", "probe_ok", "delivery_status", "delivery_reason",
+                 "delivery_branch", "delivery_commit")
+    if record.get("delivery_status") in {"opened", "updated"}:
+        protected += ("pr_number", "pr_url")
+    if any(k not in record or record[k] is None for k in protected):
+        raise FlyResultUnreadable("delivery protected fields are absent")
+    if any(not isinstance(winners.get(k), str) for k in protected):
+        raise FlyResultUnreadable("delivery winners are missing or malformed")
+    winner_ids = {winners[k] for k in protected}
+    if len(winner_ids) != 1 or any(winners.get(k) not in winner_ids for k in protected):
+        raise FlyResultUnreadable("delivery protected fields have mixed winners")
+    winner = next(iter(winner_ids))
+    if not winner or "," in winner:
+        raise FlyResultUnreadable("delivery winner is merged or empty")
+    observations, total = [], None
+    for offset in range(0, 1000, 100):
+        answer = await request("GET", f"/entities/{entity_id}/observations", params={"limit": 100, "offset": offset})
+        batch, count = answer.get("observations"), answer.get("total")
+        if (not isinstance(batch, list) or type(count) is not int or not 0 < count <= 1000
+                or answer.get("limit") != 100 or answer.get("offset") != offset
+                or total is not None and total != count):
+            raise FlyResultUnreadable("delivery observations coverage is unknown")
+        total = count
+        observations.extend(batch)
+        if len(observations) >= total:
+            break
+        if len(batch) != 100:
+            raise FlyResultUnreadable("delivery observations page is incomplete")
+    if (len(observations) != total or type(row.get("observation_count")) is not int
+            or row["observation_count"] != total):
+        raise FlyResultUnreadable("delivery observations changed or are incomplete")
+    ids = [o.get("id") for o in observations if isinstance(o, dict)]
+    if len(ids) != total or len(set(ids)) != total or any(not isinstance(i, str) for i in ids):
+        raise FlyResultUnreadable("delivery observations repeat or are malformed")
+    obs = next((o for o in observations if o["id"] == winner), None)
+    if (obs is None or obs.get("user_id") != binding["owner"]
+            or obs.get("entity_id") != row["entity_id"]
+            or not isinstance(obs.get("fields"), dict)
+            or any(not _same_result_value(obs["fields"].get(k), record[k]) for k in protected)
+            or not check_observation_attribution(observations, winner, binding["sub"], binding["thumbprint"]).ok):
+        raise FlyResultUnreadable("delivery winning observation is not attributable")
+    grant = (await request("GET", "/agents/grants/" + quote(binding["grant_id"], safe=""))).get("grant")
+    if (not isinstance(grant, dict) or grant.get("grant_id") != binding["grant_id"]
+            or grant.get("user_id") != binding["owner"] or grant.get("status") != "active"
+            or grant.get("match_sub") != binding["sub"]
+            or grant.get("match_thumbprint") != binding["thumbprint"]):
+        raise FlyResultUnreadable("delivery producer grant is not admitted")
+    known_grant_fields = {"grant_id", "user_id", "label", "capabilities", "status", "notes",
+        "last_used_at", "import_source", "created_at", "last_observation_at", "match_sub",
+        "match_iss", "match_thumbprint", "linked_github_login", "linked_github_user_id",
+        "linked_github_verified_at"}
+    issuer = grant.get("match_iss")
+    if (set(grant) - known_grant_fields or issuer is not None and (
+            not isinstance(issuer, str) or not issuer or obs.get("provenance", {}).get("agent_iss") != issuer)):
+        raise FlyResultUnreadable("delivery grant has unsupported bounds or issuer")
+    capabilities = grant.get("capabilities")
+    if (not isinstance(capabilities, list) or any(
+        not isinstance(c, dict) or set(c) - {"op", "entity_types", "repos", "relationship_types"}
+        for c in capabilities) or not any(
+        isinstance(c, dict) and c.get("op") in {"store", "store_structured"}
+        and isinstance(c.get("entity_types"), list)
+        and (RESULT_ENTITY_TYPE in c["entity_types"] or "*" in c["entity_types"])
+        for c in capabilities
+    )):
+        raise FlyResultUnreadable("delivery producer grant lacks result permission")
+    # Exclude audit-use timestamps: they may legitimately change on reads;
+    # permission/identity changes must not be excluded.
+    permission = {k: grant.get(k) for k in ("grant_id", "user_id", "status", "match_sub", "match_iss", "match_thumbprint", "capabilities")}
+    schema = await request("GET", "/schemas/" + RESULT_ENTITY_TYPE)
+    fields = schema.get("schema_definition", {}).get("fields", {})
+    if (schema.get("active") is not True or schema.get("entity_type") != RESULT_ENTITY_TYPE
+            or not isinstance(fields, dict) or any(k not in fields for k in protected)):
+        raise FlyResultUnreadable("active delivery schema lacks protected fields")
+    return {"row": row, "observations": observations, "grant": permission}
+
+
 async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport | None = None,
                              attempts: int = 3, delay: float = 2.0) -> dict | None:  # fmt: skip
     """The run's result record; None when a well-formed answer says there is
@@ -1530,6 +1980,8 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
             rows = data.get("entities") if isinstance(data, dict) else None
             if not isinstance(rows, list):
                 raise ValueError("result query answer is not an entity page")
+            if len(rows) > 1:
+                raise ValueError("result query is ambiguous")
             for row in rows:
                 if not isinstance(row, dict):
                     raise ValueError("result query row is not an object")
@@ -1538,6 +1990,7 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
                     snap = snap["snapshot"]
                 if isinstance(snap, dict) and snap.get("run_id") == run_id:
                     return snap
+                raise ValueError("result query record does not match the run")
             well_formed_empty = True
         except (httpx.HTTPError, ValueError) as exc:
             log.debug(f"[fly] result read attempt {attempt + 1} failed: {type(exc).__name__}")
@@ -1546,6 +1999,78 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
     if well_formed_empty:
         return None
     raise FlyResultUnreadable(f"result record for run {run_id} could not be read")
+
+
+DELIVERY_STATUSES = frozenset({"opened", "updated", "no_changes", "clone_failed",
+                               "not_delivered", "push_failed", "pr_failed", "no_time"})
+
+
+def canonical_delivery_key(key: str) -> str:
+    """One durable identity for both callers and preexisting receipt spellings."""
+    if not isinstance(key, str) or key.count("#") != 1:
+        raise FlyLedgerError("delivery receipt key is invalid")
+    repo, subject = key.split("#")
+    try:
+        repo = _delivery_repository(repo).lower()
+    except FlyIneligible:
+        raise FlyLedgerError("delivery receipt repository is invalid") from None
+    if subject.startswith("task:"):
+        if not subject[5:] or any(c.isspace() for c in subject):
+            raise FlyLedgerError("delivery receipt task identity is invalid")
+    elif re.fullmatch(r"[0-9]+", subject) and int(subject) > 0:
+        subject = str(int(subject))
+    else:
+        raise FlyLedgerError("delivery receipt issue identity is invalid")
+    return f"{repo}#{subject}"
+
+
+def validate_delivery_receipt(key: str, entry: Any) -> None:
+    """Validate present receipts before any replay or retry decision."""
+    statuses = DELIVERY_STATUSES | {"launching", "unknown", "unreported"}
+    if (not isinstance(entry, dict) or not isinstance(entry.get("status"), str)
+            or entry["status"] not in statuses
+            or not isinstance(entry.get("branch"), str) or not entry["branch"]
+            or not isinstance(entry.get("run_id"), str)
+            or not _finite_number(entry.get("recorded_at"), 0, MAX_RECORD_NUMBER)):
+        raise FlyLedgerError("delivery receipt is incomplete or invalid")
+    status = entry["status"]
+    if status not in {"launching", "unknown", "unreported"} and not entry["run_id"]:
+        raise FlyLedgerError("delivery receipt has no run identity")
+    if status not in {"launching", "unknown", "unreported"} and not {"commit", "reason", "pr_number", "pr_url"} <= entry.keys():
+        raise FlyLedgerError("delivery receipt outcome fields are incomplete")
+    for metadata in ("commit", "reason", "pr_url"):
+        if metadata in entry and not isinstance(entry[metadata], str):
+            raise FlyLedgerError("delivery receipt field has the wrong type")
+    commit = entry.get("commit", "")
+    if commit and re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise FlyLedgerError("delivery receipt commit is invalid")
+    number, url = entry.get("pr_number"), entry.get("pr_url", "")
+    if status in {"opened", "updated"}:
+        repo = key.split("#", 1)[0]
+        if (not commit or type(number) is not int or number <= 0
+                or url.lower() != f"https://github.com/{repo}/pull/{number}"):
+            raise FlyLedgerError("delivery receipt artifact is incomplete")
+    elif number is not None or url:
+        raise FlyLedgerError("delivery receipt status conflicts with its artifact")
+    if status in {"clone_failed", "not_delivered", "no_changes", "launching"} and commit:
+        raise FlyLedgerError("delivery receipt status conflicts with its commit")
+    if status == "pr_failed" and not commit:
+        raise FlyLedgerError("delivery receipt lacks its pushed commit")
+
+
+def delivery_result_from_record(record: dict) -> dict:
+    """A delivering job's six result fields, type-checked. A record without a
+    recognised ``delivery_status`` (for example, fields the record store does
+    not hold yet) reads as ``unreported``: never as a delivery outcome."""
+    status = record.get("delivery_status")
+    out = {"delivery_status": status if isinstance(status, str) and status in DELIVERY_STATUSES else "unreported"}
+    for name in ("delivery_reason", "delivery_branch", "delivery_commit", "pr_url"):
+        value = record.get(name)
+        out[name] = value if isinstance(value, str) else ""
+    number = record.get("pr_number")
+    out["pr_number"] = number if isinstance(number, int) and not isinstance(number, bool) \
+        and number > 0 else None  # fmt: skip
+    return out
 
 
 # ── Job assembly ─────────────────────────────────────────────────────────────
@@ -1582,6 +2107,12 @@ class FlyJob:
     # Set the moment a create/start request is sent: from then on the job
     # may have run, so any failure surfaces as an unknown outcome.
     launch_requested: bool = False
+    # A builder's delivery (branch, base_branch, author_name, author_email):
+    # the job runner clones, runs the CLI in the checkout, then pushes and
+    # opens the pull request with a delivery token minted at launch.
+    delivery: dict | None = None
+    # What the record said about the delivery (DELIVERY_RESULT_FIELDS), once read.
+    delivery_result: dict | None = None
 
     @property
     def login(self) -> bool:
@@ -1643,9 +2174,14 @@ def build_job(
     owns_pending_gate: bool = False,
     codex_outer_sandboxed: bool = False,
     config: FlyConfig | None = None,
+    delivery: dict | None = None,
 ) -> FlyJob:
     """Check eligibility and assemble the job, minus the GitHub token (which
-    is minted at launch). Raises ``FlyIneligible`` with the reason."""
+    is minted at launch). Raises ``FlyIneligible`` with the reason.
+
+    ``delivery``: a builder's delivery spec (``DELIVERY_SPEC_KEYS``). The job
+    then carries no read-class token; a delivery token for the one repository
+    is minted at launch instead, and never reaches the CLI."""
     from skill_runner import neotoma_token_env_name
 
     config = config or FlyConfig.from_env()
@@ -1723,6 +2259,10 @@ def build_job(
 
     argv = runner_argv(provider, cmd, mcp_config_path)
     argv, system_prompt = externalize_system_prompt(provider, argv)
+    if delivery is not None:
+        delivery = _check_delivery(delivery, repository=repository, stdin=stdin,
+                                   github_requested=github_requested, timeout=timeout)  # fmt: skip
+        argv = with_workspace(provider, argv)
     largest = max((len(a.encode("utf-8")) for a in argv), default=0)
     if largest > MAX_ARGV_ELEMENT_BYTES:
         # Refused before any token, reservation or machine.
@@ -1743,7 +2283,43 @@ def build_job(
         neotoma_base_url=base_url,
         probe_env_names=probe,
         system_prompt=system_prompt,
+        delivery=delivery,
     )
+
+
+def _check_delivery(delivery: Any, *, repository: str, stdin: bytes, github_requested: bool,
+                    timeout: float) -> dict:  # fmt: skip
+    """A delivery spec the job runner will accept, or ``FlyIneligible`` (the
+    builder then runs locally, as today)."""
+    if not isinstance(delivery, dict) or tuple(sorted(delivery)) != tuple(sorted(DELIVERY_SPEC_KEYS)):
+        raise FlyIneligible("the delivery spec is malformed")
+    if not all(isinstance(delivery[k], str) and delivery[k] for k in DELIVERY_SPEC_KEYS):
+        raise FlyIneligible("the delivery spec has an empty field")
+    _delivery_repository(repository)
+    if github_requested:
+        raise FlyIneligible("a delivering job carries no read-class GitHub token")
+    if not isinstance(stdin, bytes) or PR_FILE_PLACEHOLDER.encode() not in stdin:
+        raise FlyIneligible("the delivery prompt is not the Fly variant")
+    now = time.time()
+    if not delivery_fits_token_life(timeout, now + GITHUB_TOKEN_LIFETIME_SECONDS, now):
+        raise FlyIneligible(
+            f"a delivery with a {int(timeout)}s timeout could outlive its GitHub token")
+    return dict(delivery)
+
+
+def with_workspace(provider: str, argv: list[str]) -> list[str]:
+    """The CLI's workspace flag naming the job's checkout (filled in on the
+    machine): Codex ``--cd`` before its prompt-from-stdin marker, Cursor
+    ``--workspace``. Claude takes its working directory, which the runner sets."""
+    if provider == "codex":
+        if argv[-1:] != ["-"] or "--cd" in argv:
+            raise FlyIneligible("the codex command is not the expected shape for a delivery")
+        return [*argv[:-1], "--cd", WORKSPACE_PLACEHOLDER, "-"]
+    if provider == "cursor":
+        if "--workspace" in argv:
+            raise FlyIneligible("the cursor command already names a workspace")
+        return [*argv, "--workspace", WORKSPACE_PLACEHOLDER]
+    return argv
 
 
 def _b64(data: bytes | str) -> str:
@@ -1766,6 +2342,7 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         "neotoma_jwk_name": job.neotoma_jwk_name,
         "neotoma_base_url": job.neotoma_base_url,
         "probe_env_names": job.probe_env_names,
+        **({"delivery": job.delivery} if job.delivery is not None else {}),
     }
     if job.provider == "claude" and job.login:
         spec["claude_token_file"] = CLAUDE_TOKEN_FILE
@@ -1940,8 +2517,10 @@ class FlyExecutor:
         revoke: Callable[[str], None] = revoke_job_github_token,
         read_result: Callable[[str], Any] = read_result_record,
         clock: Callable[[], float] = time.time,
+        mint_delivery: Callable[..., "DeliveryToken"] = mint_delivery_github_token,
     ):
         self.config = config
+        self._mint_delivery = mint_delivery
         self.client = client or FlyMachinesClient(config)
         self.ledger = ledger or FlyLedger(config.ledger_path)
         self._mint = mint
@@ -2017,6 +2596,11 @@ class FlyExecutor:
         whether the machine was confirmed terminated.
         """
         # Before any credential, ledger write or machine call.
+        if job.delivery is not None:
+            scope = _COMPLETION_SCOPE.get()
+            if scope is None:
+                raise FlyResultUnreadable("delivery completion scope is absent")
+            scope.bind_job(job)
         self.config.require_valid_limits()
         tokens = _TokenOwner(self._revoke)
         launch = _LaunchState()
@@ -2030,7 +2614,12 @@ class FlyExecutor:
                 try:
                     if launch.reserved and launch.requested:
                         confirmed = await self._settle(job.run_id)
-                        job.remote_state = "terminated" if confirmed else "unconfirmed"
+                        settled = confirmed is True if job.delivery is not None else bool(confirmed)
+                        job.remote_state = "terminated" if settled else "unconfirmed"
+                        admission = getattr(job, "_fly_admission", None)
+                        if (confirmed is True and job.delivery is not None
+                                and type(admission) is _DeliveryAdmission):
+                            admission._confirm_settlement(self, job)
                     elif launch.reserved:
                         await self._release_unstarted(job.run_id, launch)
                         self._launched.pop(job.run_id, None)  # provably never started
@@ -2049,6 +2638,15 @@ class FlyExecutor:
             token = self._mint(job.repository, self.config.github_app_prefix)
             tokens.add(token)  # registered by the minting thread itself
             return token
+
+        return await asyncio.to_thread(mint_and_register)
+
+    async def _mint_delivery_owned(self, job: FlyJob, tokens: _TokenOwner) -> str:
+        def mint_and_register() -> str:
+            minted = self._mint_delivery(job.repository, timeout=job.timeout,
+                                         revoke=self._revoke)  # fmt: skip
+            tokens.add(minted.token)  # revoked by run() on every exit path
+            return minted.token
 
         return await asyncio.to_thread(mint_and_register)
 
@@ -2081,6 +2679,9 @@ class FlyExecutor:
     async def _launch(self, job: FlyJob, tokens: _TokenOwner, launch: _LaunchState) -> FlyHandle:
         await self.maybe_reap()
         max_run = job.timeout + APIS_DEADLINE_GRACE_SECONDS
+        if job.delivery is not None:
+            # The deadline the token's life was checked against (#1469).
+            max_run = int(delivery_run_seconds(job.timeout))
         if job.login:
             lock = _login_lock(job.provider)
             try:
@@ -2094,7 +2695,11 @@ class FlyExecutor:
                     _render_wall(self._clock() + 300),
                 ) from None
             launch.lock = lock
-        if job.needs_github:
+        if job.delivery is not None:
+            # A refused or mismatched mint raises FlyIneligible here, before
+            # any reservation or machine: the builder runs locally instead.
+            job.secrets[DELIVERY_TOKEN_NAME] = await self._mint_delivery_owned(job, tokens)
+        elif job.needs_github:
             token = await self._mint_owned(job, tokens)
             job.secrets["GITHUB_TOKEN"] = token
             job.secrets["GH_TOKEN"] = token
@@ -2390,6 +2995,17 @@ class FlyExecutor:
             if not record:
                 job.outcome_unknown = True
                 return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
+            if job.delivery is not None:
+                scope = _COMPLETION_SCOPE.get()
+                if scope is None:
+                    raise FlyResultUnreadable("delivery completion scope is absent")
+                origin = await self._read_delivery_origin(handle)
+                canonical = await self._read_delivery_canonical(job, origin)
+                if not _same_result_value(canonical["row"]["snapshot"], record):
+                    raise FlyResultUnreadable("delivery record differs from admitted acquisition")
+                admission = _DeliveryAdmission(self, job, scope, origin, canonical)
+                job._fly_admission = admission
+                await admission.require_current()
             return self._result_from_record(job, record)
         except asyncio.CancelledError:
             raise
@@ -2401,6 +3017,30 @@ class FlyExecutor:
                 f"({type(exc).__name__}); the run's outcome is unknown"
             ).encode()
 
+    async def _read_delivery_origin(self, handle):
+        # Neither shared child signatures nor machine settlement establish
+        # exclusive producer/platform custody. No installed regime exists in
+        # this source boundary. A future separately admitted acquisition must
+        # replace this refusal; no config switch or child proof enables it.
+        raise FlyResultUnreadable("canonical runner-origin proof unavailable; delivery unconfirmed")
+
+    async def _read_delivery_canonical(self, job, origin):
+        if (not isinstance(origin, dict) or origin.get("regime") not in {
+                "exclusive_pilot_producer", "controller_independent_platform_readback"}
+                or not isinstance(origin.get("record"), dict)):
+            raise FlyResultUnreadable("delivery origin acquisition is unavailable")
+        base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
+        token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+        if not base or not token:
+            raise FlyResultUnreadable("canonical delivery access is unavailable")
+        async with httpx.AsyncClient(timeout=30.0, headers={"Authorization": f"Bearer {token}"}) as client:
+            first = await _read_canonical_delivery(client, base, job, origin.get("binding"))
+            second = await _read_canonical_delivery(client, base, job, origin.get("binding"))
+        if (not _same_result_value(first, second)
+                or not _same_result_value(first["row"]["snapshot"], origin["record"])):
+            raise FlyResultUnreadable("canonical delivery changed or differs from origin")
+        return second
+
     def _result_from_record(self, job: FlyJob, record: dict) -> tuple[int, bytes, bytes]:
         """The CLI's result, from a VALIDATED record. A record that is not
         this run's, or whose fields have the wrong types, is unreadable."""
@@ -2411,6 +3051,31 @@ class FlyExecutor:
         if record["run_id"] != job.run_id:
             raise FlyResultUnreadable("result record does not belong to this run")
         rc = record["exit_code"]
+        if job.delivery is not None:
+            if (record.get("role") != job.role or record.get("provider") != job.provider
+                    or not isinstance(record.get("repository"), str)
+                    or record["repository"].lower() != job.repository.lower()):
+                raise FlyResultUnreadable("delivery record job identity differs")
+            if not record["probe_ok"]:
+                raise FlyResultUnreadable("delivery record credential probe was not successful")
+            got = delivery_result_from_record(record)
+            if (got["delivery_status"] in {"opened", "updated", "no_changes"}
+                    and (rc != 0 or record["timed_out"] or record["refused"])):
+                raise FlyResultUnreadable("delivery status conflicts with execution outcome")
+            if got["delivery_status"] in {"opened", "updated"}:
+                expected_url = f"https://github.com/{job.repository}/pull/{got['pr_number']}"
+                if (got["pr_url"] != expected_url or got["pr_number"] is None
+                        or got["delivery_branch"] != job.delivery["branch"]
+                        or re.fullmatch(r"[0-9a-f]{40}", got["delivery_commit"]) is None):
+                    raise FlyResultUnreadable("delivery artifact does not match its job")
+            admission = getattr(job, "_fly_admission", None)
+            if (type(admission) is not _DeliveryAdmission or admission.executor is not self
+                    or admission.job is not job or admission.origin is None
+                    or not _same_result_value(admission.canonical["row"]["snapshot"], record)):
+                job.outcome_unknown = True
+                raise FlyResultUnreadable("canonical runner-origin proof unavailable; delivery unconfirmed")
+            admission.scope.require_current()
+            job.delivery_result = got
         if record["probe_ok"] is False:
             log.error(f"[fly] run={job.run_id} credential probe failed: {record['refused']}")
         stdout = redact_nonces(record["stdout"])
