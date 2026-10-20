@@ -97,6 +97,7 @@ could not read is the same record the swarm's every other decision needs.
 - What stays open, and it is not this document's to close.
 - [What owning confers: the required seat](#what-owning-confers-the-required-seat).
 - [Whether one operator's several instances of the record are one record or several](#whether-one-operators-several-instances-of-the-record-are-one-record-or-several) — ruled, decision 76: several records, one identity per instance, an explicit binding that fails closed when ambiguous, and a stated non-merge rule.
+- [A client's staff member is an operator of the instance, scoped by grants](#a-clients-staff-member-is-an-operator-of-the-instance-scoped-by-grants) — ruled, decision 146: no new principal kind.
 
 A principal is any actor authority is attributed to: a human (an operator) or an agent. A principal is an
 entity in the record, so an ownership or delegation edge has somewhere to point (prior art: ReBAC as a data
@@ -326,6 +327,49 @@ registered as decision 79 — bears on the credential form and is ruled. Its dec
 as decision 80, is ruled: the tenant is matched on the grant and not derived from the subject, which leaves
 the credential form here untouched, since the several-instance case this ruling concerns is one tenant.
 
+
+### A client's staff member is an operator of the instance, scoped by grants
+
+**Ruled (decision 146, 2026-10-19, the operator's): a client's staff member is an `operator` of the instance
+they work in, scoped by grants. No new principal kind is added.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. The case is a client's own people resolving checkpoints
+in an application on that client's instance (`application.md`). It is the case decision 82 already covers:
+every instance may have several operators, so the staff member is one of them, with grants narrower than the
+instance owner's.
+
+**What the ruling states.**
+
+1. **Identity is per person.** Each staff member is their own `operator` entity, and their sign-in to the
+   instance is a credential bound to it by a `principal_binding`, as every credential binds to a principal. The
+   instance's sign-in supplies the per-person identity; the store's account value, which every writer shares on a
+   shared instance, identifies the instance and never a person, and a write whose only identity is that value
+   resolves to no principal (see *The mapping down* above).
+2. **Reach is grant data.** What a given person may resolve, view, or write is what their grants admit, at the
+   record, under decisions 41 and 97. A staff member who may resolve one class of checkpoint and nothing else
+   is an `operator` with exactly that grant. "Directs agents" in the operator's definition
+   (`vocabulary.md#operator`) is bounded by the grants, and a person who directs nothing is still the human
+   principal their sign-in identifies.
+3. **Decision 47 holds per person.** The principal that raised a checkpoint does not resolve it, and the
+   operator's marked self-resolution stays the one exception. A checkpoint that the instance's
+   operator-facing agent raises is resolved by a staff operator who is not the principal that agent counts as,
+   under the counting rule.
+4. **An approver is resolved from the instance's operator set.** Where a channel or an application must name
+   who is asked, it is resolved through the roster and the grants to the operators who hold the right to
+   resolve that class of checkpoint, never to a single configured approver. A reply addressed to one approver of
+   several is then a defect in the resolution, not a design limit.
+
+**Why this and not a distinct approver kind.** A second kind of human principal would have to be answered across
+this document, the checkpoint protocol, and every channel: what it may do, whether the counting rule counts it,
+whether it can hold an `ownership_grant`. The `operator` type already answers each, and the only thing a
+client's staff member lacks is breadth, which a grant expresses. The rejected alternative also leaves the
+instance's own operator set unable to say who may approve, since the kind would sit beside it.
+
+**Cost accepted.** The type that means "the human who directs the swarm" now also names a person who may do
+less. The reading is safe only because reach comes from grants and never from the type, which is decision 41's
+default-deny applied to a person. **What would reopen it:** a staff member who must hold something an `operator`
+cannot carry, which would be argued on what the type is missing rather than on the person's role.
+
+**Matrix.** No row changes. AU-17 already reads the raiser rule against the counting rule, which now counts each staff operator as their own interest; the rows that would test this ruling are added in a later change to `conformance_suite.md`, not here.
 
 ## Grants
 
@@ -1267,6 +1311,7 @@ using C's state under D's policy, and every hop is reconstructible.
 - A required approver is a principal, a role the roster resolves, or the principal an `ownership_grant` names on an entity the subject concerns.
 - A resolution on an `operator_only` action is the operator's decision, never the confirmation that the effect happened.
 - [The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked](#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
+- [An application resolves checkpoints and holds no approval state of its own](#an-application-resolves-checkpoints-and-holds-no-approval-state-of-its-own).
 
 An approval is an explicit yes, no, or veto by a required principal on a `checkpoint`, whose subject is
 an action held at the gate or a task the swarm cannot advance (`gates_and_workflows.md#the-checkpoint`),
@@ -1354,6 +1399,58 @@ table is carried by the roster and the channel binding, as the paragraph above a
 `team` entity exists in the design. The binding's type is decision 35, ruled 2026-09-06: one type, routing
 a field of it, the name deferred to a vocabulary pass under invariant 12
 (`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`).
+
+### An application resolves checkpoints and holds no approval state of its own
+
+**Ruled (decisions 146 and 147, 2026-10-19, the operator's).** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Who the staff are is decision 146, above under
+*Principals*; this section states what they do with the checkpoint and what an edit is.
+
+**The rules in this section.**
+
+- An application is a surface for resolving checkpoints and closing operator-facing steps; it keeps no
+  approval state.
+- The approve control resolves the checkpoint the gate wrote on the action, and the send happens at the take.
+- An edit becomes a new draft, the lint runs, and the checkpoint is resolved on that exact draft.
+
+**An application never holds an approval state of its own.** A field on a draft that reads unapproved, edited, or
+approved, which the send path then reads, is a second gate beside the action gate. It is also invisible to the
+checkpoint protocol, the audit trail, and the one queue of the instance's operators. The design states the
+opposite: the approve control in an application **resolves the checkpoint the gate wrote** on the
+`send_external_comms` action (or on whatever class the held action carries), by an operator whose grant admits
+it, attributed to that person. The send is then taken through the gate at the take, which reads the standing
+resolution, the parameters, the policy as read then, and the dedup key
+(`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`),
+exactly as in `outreach` (`workflows.md#outreach`). An application may display a state derived from the
+checkpoint and the draft; it never writes one.
+
+**An edit is consented to as a new draft (decision 147).** `outreach` already states that any change after
+consent is a new `draft` that re-enters at the lint step. A staff member editing and approving in one gesture
+needs a stated shape, and it is this:
+
+1. The edit is written as a **new draft** in the record, attributed to the staff operator who made it.
+2. The **lint runs** on that draft, and the application shows its result inline.
+3. If the lint passes, the staff member's approval **resolves the checkpoint carrying that exact draft**, whose
+   text the checkpoint shows in full. If it fails, no approval is offered, the findings are shown, and the draft
+   goes back to the step the declaration names on fail.
+
+The approval therefore consents to the text that is sent, and a draft that has been consented to cannot be
+refused afterwards for a lint it never faced. A checkpoint that carried the earlier draft is not resolved by the
+approval of the later one.
+
+**Why the lint runs before the approval and not at the take.** The alternative attaches approval to the edited
+text and runs the lint at the take, so a lint that fails after approval needs a second round with the same
+person and a consented draft can still be refused. Running it first costs about a second of latency per edit
+and keeps the `outreach` rule unchanged: the consented draft is the sent draft.
+
+**Cost accepted.** An edit-and-approve is two writes (the draft and the resolution) that the application
+presents as one gesture; if the second fails the first stands as an unconsented draft, which is visible in the
+record and sends nothing. **What would reopen it:** a lint whose runtime makes the inline wait unusable, which
+would argue for the take-time alternative on that class alone.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are an approval that carries text other
+than the draft's, and a lint-failed draft offered for approval; they are added to `conformance_suite.md` in a later
+change.
 
 ## Structural checks: quorum and separation of duties
 

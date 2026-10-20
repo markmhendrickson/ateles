@@ -1393,6 +1393,9 @@ adapter's wherever the socket is.
 - [Whether one binding type or two names an external system's instance](#whether-one-binding-type-or-two-names-an-external-systems-instance).
 - [Whether the host a daemon runs on is an external system](#whether-the-host-a-daemon-runs-on-is-an-external-system).
 - [Whether a second instance of the record is an external system](#whether-a-second-instance-of-the-record-is-an-external-system).
+- [The direction of truth for a business record class is a field of its source's binding, and moving it is a one-way event](#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event).
+- [A client instance runs a minimal runtime of its own, and its delivery never depends on swarm coordination](#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination).
+- [An environment is a separate instance of the record, and promotion replays the same governed writes in order](#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order).
 
 Whether one process hosts both is an implementation choice; the design's requirement is that they meet
 only in the record. An adapter is a daemon in the sense of `work_model.md#the-four-execution-mechanisms`:
@@ -1571,6 +1574,78 @@ configuration however the host's adapter reaches it.
 bootstrap's step 13) each read it as the addressing type this rule names, and no row reads a deployment's
 configuration. A row that tested a deployment would be the deployment side's first, and belongs with the
 deployment rules rather than with the adapters' admission obligations.
+
+### The direction of truth for a business record class is a field of its source's binding, and moving it is a one-way event
+
+**Ruled (decision 151, 2026-10-19, the operator's): the direction of truth for a business record class lives
+on that source's `vendor_binding`, with a one-way cutover event, and writes that contradict the current
+direction are held until the cutover.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`.
+
+**The rules in this section.**
+
+- Each class of business record on an instance has one authoritative side at a time.
+- The side is a field of the binding for the source, and moving it is a recorded, one-way cutover event.
+- A write that contradicts the current direction is held, and a direction that cannot be read holds every
+  write to the class.
+
+**The question.** Client businesses arrive with their records in spreadsheets: invoice books, company lists,
+price lists, policies. An application first loads them as a mirror reloaded from the source, and later makes
+the record authoritative. Between the two states an in-application edit to a mirrored row is either
+overwritten by the next reload or makes the reload refuse. The table at
+`conformance.md#direction-of-truth-per-class-of-record` covers the swarm's own classes of record, and
+`migration.md` covers carrying an instance's record into the design's types. Neither covers moving authority
+over a class of **business** records, meaning the records a client's business keeps (invoices, companies,
+receivables, price lists, policies) as against the swarm's own, from an external source to the record.
+
+**Rule 1: one authoritative side per class at a time.** For each class of business record an instance holds
+and an external system also holds, exactly one side is authoritative: the **source** (the record is a mirror,
+reloaded from it) or the **record** (the source is a legacy copy, read once at the cutover and never again as
+truth). The other side is wrong until corrected, in the words of the table above. This is principle 11 applied
+to an interval the design had not named: a second source that goes stale.
+
+**Rule 2: the direction is a field of the source's binding.** The binding that names the source also says
+whether it still governs: a `direction` per business record class it covers, with the values *source* and
+*record*, and the **cutover observation** that moved it from the first to the second. No new type is added.
+The binding is read by every writer to the class: the application's write path, which checks it before any
+edit to a row of the class, and the reload, which checks it before overwriting. A reader of one binding
+therefore answers both "where does this class come from" and "may it be edited here".
+
+**Rule 3: the cutover is a recorded, one-way event.** It is written once, as an observation on the binding
+naming the class, who made it, and when, through the gate as a governance act of the instance. The design has
+no reverse event. Returning authority to a source that was cut over from is a different act, argued on its own,
+because the record has by then accepted writes the source never saw.
+
+**Rule 4: a write that contradicts the direction is held, and an unreadable direction holds everything.** While
+the source governs, an in-application write to a mirrored row is held, and the reload proceeds. After the
+cutover, a reload from the source is held, and in-application writes proceed. *Held* here means not applied to
+the record and not discarded: it is recorded with the reason, and the writer is told which direction currently
+governs. Where the direction cannot be read (the field is absent, unrecognized, or malformed, or the binding
+does not resolve) the write path and the reload both hold every write to the class. This is fail-closed on the
+field that carries the safety meaning (principle 5), and it matches the unreadable-seal behaviour the
+hand-built applications already needed.
+
+**Why the binding and not the migration document.** The migration is a one-time move and covers the move; it
+has no mechanism that holds writes in the interval, and an interval that holds no writes is the case that
+actually occurred. Per-application code re-solves the problem in every deployment, which is the fork test's
+failure. The binding is already what the adapter reads to address the source, so the direction sits where the
+reader of the source already looks.
+
+**Cost accepted.** The binding gains a per-class field and an observation, and a class has to be declared
+before its first reload so that the field exists to be read. **What would reopen it:** a business record class
+whose authority is split by row or by field rather than by class, which would argue for the direction on a
+finer unit.
+
+**What this ruling leaves open (decision 157).** What a held write becomes when the cutover lands. *Candidates,
+unruled:* (a) it is applied as written, so the writer's intent stands; (b) it is applied only if the row it was
+made against is unchanged, and otherwise returned to the writer, which keeps the read-before-write check the
+application already makes; (c) it is discarded, with the fact that it was held kept. *Recommendation, unruled:*
+(b), because the source may have changed the row in the final reload, and applying blind is the overwrite the
+hold exists to prevent. If unanswered, held writes stay held and none is applied.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are an in-application write
+to a source-governed class, a reload into a record-governed class, and a write while the direction is
+unreadable; they are added to `conformance_suite.md` in a later change.
 
 ### Whether the host a daemon runs on is an external system
 
@@ -1998,6 +2073,119 @@ relative-to-a-deployment answer in rule 2 the common case rather than the corner
 **Matrix.** The host adapter's admission rows are unchanged: nothing here adds an action class. A
 deployment naming several instances and no controlling one is a fail-closed resolution of the same shape
 decision 76's binding already carries, read where that binding is read.
+
+### A client instance runs a minimal runtime of its own, and its delivery never depends on swarm coordination
+
+**Ruled (decision 148, 2026-10-19, the operator's): each instance an application serves has a minimal runtime
+of its own, made of its adapters, the action gate, the step runners for its declared workflows, and the
+operator-facing agent. The swarm's development and review roles stay shared.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. The operator ruled for a client's customer-service
+deployment that the client's staff work a live queue every day, and that an outage in swarm coordination must
+not stop their mail.
+
+**The rules in this section.**
+
+- An application's delivery depends on the record, its adapters, the action gate, the step runners for its
+  declared workflows, and the operator-facing agent, and on nothing else.
+- The swarm's development and review roles act on the instance only through governed writes.
+- Each instance's runtime is a deployment that names its own instance and is named by that instance's
+  `deployment_configuration`.
+
+**Delivery is the path from an inbound event to a taken action.** It reads the record, runs a step, passes the
+gate, and takes the action through an adapter. None of the swarm's coordination is on that path: not the
+dispatcher that assigns work to agents, not the review lenses that judge a change to the swarm, not the
+planning machinery. A step of a declared workflow is claimed and run by a step runner that belongs to the
+instance's runtime, and the gate that judges the action is the instance's own.
+
+**What degrades when something is absent**, stated from the rules the design already has and not as a new
+mechanism:
+
+- With the swarm's coordination absent, nothing in delivery changes. Development and review of the declarations
+  and the runtime stop, and a declaration already live keeps running.
+- With a step runner or the operator-facing agent absent, drafting and the steps it owns stop, and what they
+  would have written is absent, not guessed. A batch's steps lapse and raise their checkpoints on the ordinary
+  rules (`failure_posture.md`).
+- With an adapter absent, the actions it would take stop at the gate's hold; nothing is sent by another route.
+- With the record unreachable, nothing runs, and the application reports that it cannot read, never a stale
+  picture (decision 37).
+- Screens and the edits staff make to business records need only the record and the sign-in. Checkpoints already
+  raised stay visible in the record whatever else is absent.
+
+**The swarm's shared roles reach the instance through governed writes.** The roles that develop and review a
+client's declarations, runtime, and views are shared across instances; they are principals with grants on the
+instance and write to it as any principal does, with governance writes landing on the deployment's controlling
+instance (decision 91). No shared role holds a credential that reaches further than its grant (decision 97).
+
+**Where the runtime runs.** The runtime is a deployment of the swarm's own software (decision 90): it names its
+target host, names the instance it reads and writes, and keeps its recovery path off its own host. The
+instance's `deployment_configuration` names the runtime's command, build arguments, and verification target,
+and is the one place to retrieve before deploying it; a runtime is never deployed from memory or from a
+document alone.
+
+**The rejected alternatives.** A full swarm per client gives the most isolation at the most cost and
+maintenance per client. One shared swarm serving many records (decision 76) is the cheapest, but every
+client's delivery would share one failure domain, which contradicts the ruling. **Cost accepted:** the
+runtime's code reaches each instance by a deployment of its own, so an instance's runtime can lag the
+shared source; the deployment-freshness obligations that govern any deployed checkout apply to it unchanged.
+**What would reopen it:** a client whose isolation requirement exceeds a separate failure domain (their own
+review and development roles), which is the full-swarm alternative argued for that client.
+
+**Matrix.** No row is added here. The planted refusal this ruling calls for is a delivery that stalls when the
+swarm's coordination is stopped while the instance's own runtime is up; it is added to `conformance_suite.md`
+in a later change.
+
+### An environment is a separate instance of the record, and promotion replays the same governed writes in order
+
+**Ruled (decision 150, 2026-10-19, the operator's): an environment is a separate instance of the record with
+its own deployment configuration, and promotion replays the same governed writes in order.** Registered as ruled
+in `conformance.md#the-register-of-open-design-decisions`.
+
+**The rules in this section.**
+
+- An environment (development, demo, production, or any other the operator names) is an instance of the
+  record, and no environment flag or dimension exists inside the record.
+- A governed change proven in one environment reaches the next by replay of the same writes, in order, never by
+  hand.
+- A process bound to one environment cannot reach another's external systems.
+
+**The question.** A client deployment runs three environments, each with its own instance of the record and
+its own endpoints: development, a demo the client's staff try things in, and production. Schemas, policies,
+workflow declarations, and intake rules then have to move from the first to the second to the third. Decision
+100 covers proving a newly declared workflow before it binds production work. Decision 90 and decision 91 cover
+a deployment naming its instance and a controlling instance for governance writes. Neither says what an
+environment is or how a governed change travels between them.
+
+**Rule 1: an environment is an instance.** It has its own `deployment_configuration` naming its host, its
+instance, and its verification target (decision 90), its own bindings (so its own addresses for every external
+system), its own grants, and its own data. Demo data and production data never share a record. This is the
+several-records posture of decision 76 applied to a lifecycle, not to sensitivity: the instances do not merge,
+and an identity that spans them is one per instance.
+
+**Rule 2: promotion is replay.** A governance write, meaning a declaration, a policy value, a registry change,
+or an intake rule, is written once, reviewed, and proven in the environment where it is first taken. It reaches
+the next environment as **the same write, replayed in order**, through the target instance's own gate as a
+governance write on that deployment's controlling instance. It is never copied by hand and never edited in
+transit, so what was proven is what lands. The order is the order the writes were taken, because a later write
+may read an earlier one. Decision 100's proving maps onto the demo environment: a declaration that has run
+there has been proven where it cannot reach production. A write that fails in a target stops the replay at that
+write and raises its checkpoint there, and the writes after it are not applied.
+
+**Rule 3: a process bound to one environment cannot reach another's external systems.** A development process
+that could reach a production endpoint is an incident class of its own. The design requires the property and
+leaves the mechanism open: every address a process resolves comes from the bindings of the instance it is bound
+to (`#whether-one-binding-type-or-two-names-an-external-systems-instance`), a binding that names an address
+belonging to another environment is refused at its write, and a process that cannot determine which
+environment it is bound to fails closed (decision 76).
+
+**The rejected alternative.** One record with declarations scoped by environment has fewer instances, but
+every read and every gate check would then carry an environment dimension, and demo data would share a record
+with production data. **Cost accepted:** more instances to deploy and keep fresh, and a replay mechanism that
+does not yet exist. **What would reopen it:** an environment too small to justify an instance, which would be
+argued as a lightweight instance rather than as a flag.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are a binding in one environment
+naming another's address, and a replay whose written payload differs from the proven one; they are added to
+`conformance_suite.md` in a later change.
 
 ### Whether the instance of the record serving a swarm is an external system when the swarm operates it
 
