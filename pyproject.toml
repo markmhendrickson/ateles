@@ -20,6 +20,7 @@ dependencies = [
     "apprise>=1.7",         # notification routing (lib/notify)
     "cryptography>=42.0.0", # EC P-256 AAuth signing
     "PyJWT>=2.8.0",         # AAuth token minting
+    "agent-memory-guard>=0.3.3,<0.5",  # OWASP ASI06 memory poisoning defense (ateles#40)
 ]
 
 [project.optional-dependencies]
