@@ -692,7 +692,7 @@ reply checked mechanically, consented to by a staff operator, sent through the a
 inbound outcome, a new inbound thread on a bound mailbox, which reaches intake as a task; a new message on a
 thread already tracked is the second outcome and updates the artifact instead
 (`adapters.md#no-external-event-advances-a-step-by-itself`). At intake the instance's own seat for `classify` and
-`route` admits the thread as a customer matter or closes it with no successor, and the closing verdict carries a
+`route` admits the thread as a [business matter](vocabulary.md#business-matter) (here, a customer incident) or closes it with no successor, and the closing verdict carries a
 finding naming why, so that every exclusion names its reason and staff can disagree with it; pulling a message
 back is a new task through intake, because closed work is never reopened. `link` resolves the customer by the
 normalised sender address only, never by name or subject, and attaches a cited order only if it belongs to that
@@ -758,12 +758,14 @@ state is hydrated through the shop and carrier adapters named by their `vendor_b
 (`#what-link-attaches-and-what-it-leaves-to-hydration`).
 
 **Successors:** none. A refund or an exchange shipment is a new task, routed by its own intake and referring to
-the same customer matter (`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`).
+the same business matter (`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`).
 
 **Fast paths:** none. Every outward message passes the gate.
 
 **What a customer service application's other capabilities become.** They are not workflows, or are not yet
-reference workflows, and the reason for each is stated so a later author does not rediscover it.
+reference workflows, and the reason for each is stated so a later author does not rediscover it. The step shape
+recorded for collections and stock correction is what the one instance that needs them first used, kept so the
+next author starts from it; it gives them no standing as reference designs.
 
 - **Collections (a chase of a past-due receivable) start as a workflow created in the instance's scope under
   decision 116.** It is a near fit of `outreach` with `payment`'s separation of duties: `assemble` builds the
@@ -792,6 +794,17 @@ change, but the next client re-derives `customer_reply`. All three as reference 
 generalised from a single user. **Cost accepted:** the other two are designed only for the one instance that
 needs them, and the promotion test is a second instance, not a calendar. **What would reopen it:** a second
 instance that needs collections or stock correction, which promotes the instance's declaration to a reference.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are: a draft whose policy quote
+differs from the stored row by one character, a draft offering a remedy a policy exception excludes for the
+linked order's lines, and a draft whose date, amount, order, or shipment resolves to no linked record, each
+failing `grounding_lint`; a draft in a language other than the customer's latest message, failing the language
+check; a draft naming a third party that `link` did not attach; customer text that reached the model outside
+untrusted-content fencing; a `review` signed by the drafting agent; a send taken with sending switched off in
+the instance's `action_policy`; a draft whose read references the record no longer matches, taken instead of held;
+a sent message not read back from the mailbox; and a filing action class present on only one side of the blast
+classification, which must read as low and not as the default; they are added to `conformance_suite.md` in a
+later change.
 
 ## payment
 

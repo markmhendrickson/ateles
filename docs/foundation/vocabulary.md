@@ -619,7 +619,7 @@ swallowed. Written as one word (a verdict); the act of writing one is to sign of
 **Conclusion values:** `signed` (the step's [condition](#condition) is met), a blocking conclusion (it is not,
 and the step's `on_fail` says which earlier step opens again), and `waived` (the [operator](#operator) [principal](#principal) closed
 an unsigned required step, carrying the reason). `waived` is the only conclusion a principal other than the
-step owner may write, and only the operator principal may write it — the right is not delegable
+step owner may write, and only the operator principal holding the instance's owner seat may write it — the right is not delegable
 ([`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection)).
 **[Waiver scope](#waiver-scope):** one [batch](#batch)'s unsigned required steps, one `waived` verdict **per step**, each
 naming its step and carrying its reason — so a waived step is queryable as waived rather than recorded as a
@@ -1101,6 +1101,8 @@ outright in this design. [Effect dedup](#effect-dedup) exists so a re-claimed st
 effect that already happened, and decision 40 refuses the adjacent shape — a stored reasoning trace a later
 reader replays to reconstruct a step's judgement
 (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`).
+A reviewed [governance write](#governance-write) applied again to **another instance** of the record is not a replay: it is a
+[reissue](#reissue), a first take on that instance through its own [gate](#gate).
 **Not for:** the sense of a public essay series (*The Human Inversion*, Part 4: reading a session's
 reasoning chain months later). That sense is an as-of read over what a [verdict](#verdict) names it
 read, resolved at its `signed_at` (decision 40) — never a stored trace and never a second doing. Where
@@ -1109,6 +1111,23 @@ read, resolved at its `signed_at` (decision 40) — never a stored trace and nev
 **Never:** "replay protection" (see [effect dedup](#effect-dedup)).
 **Not for:** the essay's sense above; deterministic code replay (`docs/durable_execution_substrate.md`,
 which this design also refuses in favour of explicit persisted state machines).
+
+### reissue
+**Definition:** applying a reviewed [governance write](#governance-write), unchanged, to another instance of the
+[record](#record) as a first take there: it passes that instance's [action gate](#action-gate) afresh, is judged on
+that instance's policy and [grants](#grant) as read then, and carries its own [idempotency key](#idempotency-key)
+scoped to that instance, so a reissue that reaches an instance twice lands once.
+Nothing is redone from a stored trace and no consent-gated [action](#action) is taken again, which is what separates it
+from a [replay](#replay). Writes are reissued in the order they were first taken, because a later write may read an
+earlier one, and only writes that are the same on every instance are reissued: declarations, policy values,
+registry changes, [intake rules](#intake-rule), and bundle enablement pinned to a version or content hash. A write that fails on the
+target stops the reissue at that write and raises its [checkpoint](#checkpoint) there.
+**See:** [`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`](adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order),
+[`failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated`](failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated).
+**Never:** —
+**Not for:** [replay](#replay) (doing a prior step again from a stored trace on the same instance, which is refused);
+copying an entity by hand from one instance to another; the carrying of an instance's own record into the design's
+types, which is `migration.md`.
 
 ## Core workflows (`workflows.md`)
 
@@ -1444,8 +1463,8 @@ one boundary the design has, where an application crosses none.
 **Definition:** an instance of the [record](#record) that serves one stage of a deployment's life, such as
 development, a demo, or production, with its own `deployment_configuration`, bindings, grants, and data.
 No environment flag or dimension exists inside the record; two environments are two instances, and a governed
-change reaches the next one by [replay](#replay) of the same writes, in order.
-**See:** [`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order`](adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order).
+change reaches the next one by [reissue](#reissue) of the same writes, in order.
+**See:** [`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`](adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order).
 **Never:** —
 **Not for:** the process environment a program reads variables from; a [stage](#stage) of a workflow, which
 groups contiguous steps of one declaration; tenant (the isolation boundary, which an environment may sit
@@ -1453,17 +1472,27 @@ inside).
 
 ### business record
 **Definition:** a record an instance keeps about its owner's own business, such as an invoice, a company, a
-receivable, a price list, a policy, or a customer incident, as distinct from the swarm's own records (tasks,
+receivable, a price list, a policy, or a customer incident, as distinct from the swarm's own records ([tasks](#task),
 [batches](#batch), [verdicts](#verdict)) and from an [artifact](#artifact), which an [external system](#external-system) holds.
-A business record is shipped as a type in one of the record's bundles. A **business matter**, an incident or an
-overdue receivable, is a business record that [tasks](#task) refer to and is not itself a task. Which side of a
-class of business record is authoritative, the record or an external source, is a field of the source's
+A business record is shipped as a type in one of the record's bundles. A [business matter](#business-matter) is one
+kind. Which side of a class of business record is authoritative, the record or an external source, is a field of the source's
 [binding](#vendor_binding).
 **See:** [`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`](work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task),
 [`adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`](adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event).
 **Never:** "domain record".
 **Not for:** an [artifact](#artifact); a [domain](#domain), which is a term of the [authority](#authority) tuple and
 names a region a grant covers.
+
+### business matter
+**Definition:** a [business record](#business-record) that a client's staff organise their work around, such as a
+customer incident, an overdue receivable, or an order exception, with a lifecycle of its own and effects of its own in
+[external systems](#external-system); [tasks](#task) refer to it and it is not itself a task.
+A customer incident is a business matter of one kind, and no separate term names it. The word is chosen because
+a matter is the thing the work is about, and a [task](#task) is a unit of the work.
+**See:** [`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`](work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task).
+**Never:** "domain record"; "customer matter" as a term of its own.
+**Not for:** a [task](#task), which is the unit a [workflow](#workflow) carries and a [lease](#lease) holds; an
+[artifact](#artifact), which an external system holds.
 
 ## Planning model (`planning_model.md`)
 
@@ -1631,7 +1660,9 @@ a [separation-of-duties](#separation-of-duties) constraint. `operator_profile` i
 locale, preferences — and carries none of them. [Credentials](#credential) bind to the `operator`,
 many-to-one, as they do to any principal.
 An operator's reach is what its [grants](#grant) admit; a client's staff member is an operator of the instance they
-work in with narrower grants, and no other kind of human principal exists (decision 146).
+work in with narrower grants, and no other kind of human principal exists (decision 146). Where the design reserves
+an act to "the operator", it reserves it to the instance's owner seat, never to every operator
+(`authority_model.md#the-acts-the-design-reserves-to-the-operator-belong-to-the-instances-owner-seat-never-to-every-operator`).
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** "admin"; "forker".
 **Not for:** user when authority is meant; `operator_profile` for the principal (it is the descriptive

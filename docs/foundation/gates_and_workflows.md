@@ -300,7 +300,7 @@ evaluated on its own (below).
 **Only the operator principal may waive, and a waiver is scoped to one batch's unsigned required steps,
 written as one `waived` verdict per step.** The right is not delegable: a step owner able to write
 `waived` on its own step is the self-settable clearance this model exists to remove, restated in a conclusion
-value instead of a boolean. The scope is the batch — one invocation from the operator clears the unsigned
+value instead of a boolean. The operator principal here is the one holding the instance's owner seat, or holding a grant that names the waiver, never every `operator` of the instance (`authority_model.md#the-acts-the-design-reserves-to-the-operator-belong-to-the-instances-owner-seat-never-to-every-operator`). The scope is the batch — one invocation from the operator clears the unsigned
 required steps of one batch, which is the shape in use and costs the operator nothing — but the **record**
 is per step: one `waived` verdict for each step cleared, each attributed to the operator principal, each
 naming its step and carrying the reason. That keeps step state derived from verdicts rather than from a

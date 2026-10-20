@@ -520,6 +520,13 @@ LangGraph's resume semantics (the runtime restarts the whole node) as the patter
 consequence for the work model is that at-least-once delivery is the assumption and effect dedup is
 mandatory (`work_model.md`).
 
+**A governance write applied to another instance is not a resume by replay.** A reviewed declaration, policy
+value, registry change, or intake rule that is applied again to a different instance of the record is a
+[reissue](vocabulary.md#reissue): a first take there, through that instance's own gate, judged afresh and keyed
+to that instance. It re-executes no code from before an interruption and takes no consent-gated effect again from
+a stored trace, so this section's refusal does not reach it
+(`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`).
+
 ## Contradictions this document settles
 
 **C5, the gate-state plan's body versus its decisions.** The plan body argues for a hardcoded step list as

@@ -1,16 +1,24 @@
 # An application on an instance of the record: what it is, where its parts live, and how it is composed per instance
 
+**In plain terms:** the staff-facing screens a client uses are one program, the console, run once per instance of
+the record and set up from entities on that instance, not a new codebase per client. This document says what that
+means, where each part of it lives, and how an instance is set up.
+
 **Kind:** foundation; an authored companion that states the design and never the state of a checkout. Not
-keyed and not inlined into a review prompt (`conformance.md#scope`). **Derived from:** the operator's
-rulings of 2026-10-18, 2026-10-19, and 2026-10-20 on the application question and its sub-questions (decisions 145 to 157 in
-`conformance.md#the-register-of-open-design-decisions`), the 2026-07-09 placement rule for the four layers
-(substrate in the record's public repository, generic use-case skills in the record's bundles, swarm
-operations in this repository, proprietary vertical logic in a company's own repository), decision 15
-(adapter packaging), decisions 76 and 82 (several records; several operators per instance), decision 97
-(enforcement at the record), decision 37 (the console is the read of the record), and the principle that
-operator specifics come from context entities (the fork test, applied here to applications). Nothing in
-this document is built; what a checkout implements is `status.md`.
+keyed and not inlined into a review prompt (`conformance.md#scope`). Nothing in this document is built; what a
+checkout implements is `status.md`.
 Amendment history: `revisions.md#applicationmd`.
+
+**Derived from:**
+
+- the operator's rulings of 2026-10-18, 2026-10-19, and 2026-10-20 on the application question and its
+  sub-questions, decisions 145 to 157 in `conformance.md#the-register-of-open-design-decisions`;
+- the 2026-07-09 placement rule for the four layers: substrate in the record's public repository, generic
+  use-case skills in the record's bundles, swarm operations in this repository, proprietary vertical logic in a
+  company's own repository;
+- decision 15 (adapter packaging), decisions 76 and 82 (several records; several operators per instance),
+  decision 97 (enforcement at the record), and decision 37 (the console is the read of the record);
+- the principle that operator specifics come from context entities, the fork test, applied here to applications.
 
 ## Purpose
 
@@ -103,7 +111,8 @@ to providing it. Four requirements:
 3. Enabling a bundle is an act on the instance's own record. A swarm's absence does not stop a screen from
    rendering, and a bundle's absence does not remove workflows or the gate.
 4. Enabling or disabling a bundle is one write in an installation's series, admitted at the record under the
-   installer's grant and gated like any other write; it has no class of its own (decision 155,
+   installer's grant and gated like any other write; it has no class of its own, and the enabling write pins the
+   bundle's version or content hash, so that what the gate judges is what installs (decision 155,
    `#installing-and-upgrading-an-application`).
 
 **The two rejected placements.** All in the record's bundles would make an application independent of this
@@ -113,6 +122,10 @@ on the swarm even to show a record. **Cost accepted:** the application's behavio
 repositories' releases, so a view and the workflow that writes the record it shows can be at different
 versions on one instance; which pairs are compatible is conformance work, not a rule here. **What would reopen it:** a bundle concept that carries approval and is shown to
 pass the record's upstream test, which would first be a change to the record.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are a bundle that ships an approval
+field or a workflow, a label or module layout read from an application's code instead of an entity, and an
+approval state written by an application; they are added to `conformance_suite.md` in a later change.
 
 ## How per-instance customisation composes
 
@@ -135,14 +148,15 @@ read fails closed and the work is put to the operator (`failure_posture.md#the-r
 **Ruled (decision 149, 2026-10-19, the operator's): display labels default in the bundle's declarative views
 and are overridden per instance by a profile entity, the display profile.** The record keeps the generic type
 and field names. A label is presentation, resolved per instance and per locale, and a type is never renamed
-to change how it reads: a generic customer-matter type can read as the client's own word in the client's own
+to change how it reads: a generic incident type can read as the client's own word in the client's own
 language while remaining one type in the record, found by its generic name. The display
 profile is a context entity of the same standing as `locale_profile`, which carries jurisdiction, time zone,
 currency, and language and is not extended with labels (the rejected alternative would make each instance
 supply every label from scratch). Its type name is provisional: it is the record's to register with the
 bundle that ships the default, and this document uses `display_profile` until it does.
 
-**Customer-facing language is not display language.** What a draft addressed to a customer is written in is
+**Stated alongside the ruling, from the issue's list of what the foundation should state; not part of the option
+ruled. Customer-facing language is not display language.** What a draft addressed to a customer is written in is
 decided by one deterministic function per instance, whose inputs come from the instance's context entities
 (`locale_profile` and the customer's own latest message); it is distinct from the language staff see their
 screens in. The two vary independently: a staff screen in one language may carry a reply in another. The
@@ -154,26 +168,36 @@ on an instance; the resolution order above is what keeps that from being a secon
 would reopen it:** a label the view cannot express (a plural form, a gendered form) that forces text into
 code.
 
+**Matrix.** No row is added here. The planted refusals this ruling calls for are a label read from an
+application's code when the instance's display profile has an entry for it, and a type renamed in the record to
+change how it reads; they are added to `conformance_suite.md` in a later change.
+
 ### Module layout
 
 **Ruled (decision 154, 2026-10-19, the operator's): a `console_module` entity per module on the instance
 names the module's blocks and the record types or metrics each reads, with defaults shipped in bundles.**
 The alternative, a fixed module set in code toggled by a profile flag, is simpler and makes every new layout
 a release. Under the ruling a new client's console is entity edits, and an instance can hide or reorder
-modules without a deploy. A `console_module` is composition and never data of record: it holds no approval
+modules without a deploy. A `console_module` is composition and holds no source of truth: it holds no approval
 state and no copy of what its blocks read. Which modules and blocks exist by default, and the bundle-views
 mechanism that ships them, are the record's and the console's to design; `docs/product/console.md` is the
 specification those designs land in, and its admission of domain screens, writes by an instance's own
 operators to business records, charts, and per-instance composition is product work the ruling calls for and
 this document does not perform.
 
-**Writes by an instance's own staff to business records are internal operational writes, not actions.** A
+**Carried from the console-composition proposal, pending the console specification's amendment; not a ruling.**
+The proposal states that writes by an instance's own staff to business records are internal operational writes,
+not actions, and `docs/product/console.md` still names a narrower write surface until it is amended. A
 client's staff edit their own master data (invoices, company records, policy text, price lists) through the
 application. Each is a write to the record under that person's grant, attributed to that person, bounded by
 the grant, and made with a read-before-write concurrency check. It is not an action and needs no gate,
 because it crosses no boundary (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`). An
 outward effect that the same edit would cause, such as a message to a customer, is an action and goes through
 the gate as always.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are a `console_module` that carries
+approval state or a copy of what a block reads, and an instance's module layout taken from code; they are added to
+`conformance_suite.md` in a later change.
 
 ## Where the rest of the design lives
 
@@ -184,24 +208,27 @@ Each of the following is stated once, in the document that owns its mechanism, a
 | A client's staff member is an operator of the instance, scoped by grants; no new principal kind | decision 146 | `authority_model.md#a-clients-staff-member-is-an-operator-of-the-instance-scoped-by-grants` |
 | An application resolves checkpoints and holds no approval state; an edit becomes a new draft and the checkpoint is resolved on that exact draft | decision 147 | `authority_model.md#an-application-resolves-checkpoints-and-holds-no-approval-state-of-its-own` |
 | A client's delivery depends on a minimal runtime of its own and never on swarm coordination health | decision 148 | `adapters.md#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination` |
-| An environment is a separate instance of the record; promotion replays the same governed writes in order | decision 150 | `adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order` |
+| An environment is a separate instance of the record; promotion reissues the same governed writes in order | decision 150 | `adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order` |
 | Direction of truth for a business record class lives on its source's `vendor_binding`, with a one-way cutover event | decision 151 | `adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event` |
 | A business matter is a record that tasks refer to, not itself a task | decision 152 | `work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task` |
 | `customer_reply` is a reference workflow | decision 153 | `workflows.md#customer_reply` |
 | A business matter's open or closed state is derived from its tasks; a state is stored only where no task stands behind it | decision 156 | `work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task` |
-| A held write is applied at a cutover only if the row it was made against is unchanged, otherwise returned to its writer | decision 157 | `adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event` |
+| A held write is applied at a cutover only if the row it was made against is unchanged, otherwise returned to its writer | decision 157 | `adapters.md#a-held-write-is-applied-at-a-cutover-only-if-the-row-it-was-made-against-is-unchanged-and-otherwise-returned-to-its-writer` |
 
 ## Installing and upgrading an application
 
 **Ruled (decision 155, 2026-10-20, the operator's): installation is a series of ordinary governance writes,
-each gated on its own, and an upgrade is the replay of the same set per instance.** Registered as ruled in
+each gated on its own, and an upgrade carries the same set to each instance in turn.** The ruling words the
+upgrade as a replay of the set; the design's word is *reissue* (`vocabulary.md#reissue`), because *replay* is
+refused for a different thing (`vocabulary.md#replay`). Registered as ruled in
 `conformance.md#the-register-of-open-design-decisions`.
 
 **The rules in this section.**
 
 - Installing an application on an instance is a series of ordinary governance writes, each gated on its own.
 - No commissioned install unit and no install-specific authority exist.
-- An upgrade is the replay of the same set of writes to each instance in turn.
+- An upgrade is the reissue to each instance of the writes that are the same on every instance; per-instance
+  entities are written afresh and never carried.
 
 **Installation has no unit of its own.** Every part an application is composed of already has a governed way in:
 a declaration is a governance write the action gate judges, a binding or a profile is a context entity written
@@ -213,13 +240,50 @@ The alternative, a single commissioned unit in the shape of
 `planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`, would approve the set
 once and dependency-order its parts, at the price of a concept the gate does not need to judge a write.
 
-**An upgrade is replay.** The set of writes that installed or changed an application on one instance reaches the
-next instance as the same writes, in order, through that instance's own gate, exactly as a governed change is
-promoted between environments
-(`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order`).
-An instance at a different bundle version receives the set as written; a write that fails there stops the
-replay at that write and raises its checkpoint on that instance, and the writes after it are not applied.
+**What a new instance needs, in dependency order.** Each line names the write and where its rule lives; *reissued*
+marks a write that is the same on every instance and so travels in an upgrade, and *afresh* marks a per-instance
+entity written on each instance under its own grants and never carried.
+
+1. **The instance and its bootstrap, outside the record:** the instance itself, its address, the sign-in client
+   registration, and secrets. `deployment_configuration` names them for deploys
+   (`adapters.md#where-a-swarm-is-deployed-and-what-its-deployment-names`). Afresh.
+2. **The tenant and the owner seat:** the client's tenant, the `operator` entity of its owner, and the
+   `ownership_grant` that names the owner seat
+   (`authority_model.md#the-acts-the-design-reserves-to-the-operator-belong-to-the-instances-owner-seat-never-to-every-operator`).
+   Afresh.
+3. **Bundle enablement,** each pinned to a version or content hash (`#where-each-part-lives`). Reissued.
+4. **The staff:** one `operator` per person, its sign-in credential bound by a `principal_binding`, and the grants
+   that scope it (`authority_model.md#a-clients-staff-member-is-an-operator-of-the-instance-scoped-by-grants`).
+   Afresh.
+5. **The instance's context entities:** `locale_profile`, `brand_voice`, the display profile, and the
+   `console_module` entities (`#how-per-instance-customisation-composes`). Afresh.
+6. **Bindings for each external system,** with the direction field per business record class where a source is
+   being cut over from (`adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`). Afresh.
+7. **Policy:** the `action_policy` values, such as the one for `send_external_comms`, and the `priority_rubric`.
+   Reissued where the value is the same on every instance.
+8. **Workflow declarations,** seeded as drafts from the reference designs, proven in the demo environment, then
+   activated (`workflows.md`, `work_model.md#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`).
+   Reissued.
+9. **Intake rules** (`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`).
+   Reissued.
+10. **The instance's minimal runtime:** its `deployment_configuration` and its deployment, and the tenant-bound
+    grants that give the shared development and review roles their reach
+    (`adapters.md#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination`).
+    Afresh.
+
+**An upgrade is a reissue of the instance-independent writes.** The writes marked *reissued* above reach the next
+instance as the same writes, in order, through that instance's own gate, exactly as a governed change is promoted
+between environments (`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`). Per-instance entities (bindings, profiles, module layouts, grants,
+credentials, addresses, and secrets) are never carried: a client's settings and addressing do not leak into
+another client's instance, and a development address does not reach production. An instance at a different bundle
+version receives the set as written, each enablement pinned; a write that fails there stops the reissue at that
+write and raises its checkpoint on that instance, and the writes after it are not applied.
 
 **Cost accepted.** A large installation is many approvals, each at its own gate. **What would reopen it:** an
 installation whose number of writes makes per-write approval a burden, which would argue for the commissioned
 unit.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are an installation step applied
+without its own gate; a reissue that contains a binding, profile, grant, credential, or address; a reissue that
+continues past a failed write; and a bundle enablement that does not pin a version or content hash; they are added
+to `conformance_suite.md` in a later change.

@@ -1075,64 +1075,77 @@ own outputs would break all four.
 
 ### A business matter is a record that tasks refer to, and is not itself a task
 
-**Ruled (decision 152, 2026-10-19, the operator's): a business matter, such as a customer incident or an
-overdue receivable, is a business record that tasks `REFERS_TO`, and is not itself a task.** Registered as ruled
-in `conformance.md#the-register-of-open-design-decisions`.
+**Ruled (decision 152, 2026-10-19, the operator's): a [business matter](vocabulary.md#business-matter), such as
+a customer incident or an overdue receivable, is a business record that tasks `REFERS_TO`, and is not itself a
+task.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`.
 
-**The question.** A client's staff organise their day around a **business matter**: a customer incident, an
-overdue receivable, an order exception. The item has a lifecycle of its own (open, waiting, closed) and effects
+**The question.** A client's staff organise their day around a business matter: a customer incident, an
+overdue receivable, an order exception. The matter has a lifecycle of its own (open, waiting, closed) and effects
 of its own in external systems; closing an incident, for instance, files its mail thread out of the inbox. The
 work model's unit is the `task`, carried through declared workflows in batches, and a step's subject is always
 the batch's tasks, never an artifact
-(`#artifacts-are-records-a-batch-leaves-never-its-subject`). Nothing said how an item relates to tasks, and one
+(`#artifacts-are-records-a-batch-leaves-never-its-subject`). Nothing said how a matter relates to tasks, and one
 incident may need several pieces of work: a reply, a refund, an exchange shipment, a follow-up.
 
 **The rules in this section.**
 
 - A business matter is a business record in a bundle's type, not a `task`.
-- Each unit of work on an item is a task, entering through intake, with a `REFERS_TO` edge to the item.
-- The staff queue is a view over the item and its open tasks.
+- Each unit of work on a matter is a task, entering through intake, with a `REFERS_TO` edge to the matter.
+- The staff queue is a view over the matter and its open tasks.
+- A matter's open or closed state is derived from its tasks, and a state is stored only where no task stands
+  behind it.
 
-**The ruling.** An item is a record of a type a bundle ships (`application.md#where-each-part-lives`), which the
+**The ruling.** A matter is a record of a type a bundle ships (`application.md#where-each-part-lives`), which the
 instance's staff read and write. Every unit of work on it is a `task` of its own, created by an intake rule or by
-a step's successor, routed through intake, and linked to the item by the `REFERS_TO` edge the work model already
+a step's successor, routed through intake, and linked to the matter by the `REFERS_TO` edge the work model already
 has from a task to a record entity it concerns (`data_model.md#relationships`). The staff queue an application
-shows is a view over the item and its open tasks; it is not a second queue, and the one decision queue of the
+shows is a view over the matter and its open tasks; it is not a second queue, and the one decision queue of the
 instance's operators stays the checkpoint queue (decision 37).
 
 **What this keeps unchanged.** The work model is untouched: a task is not given a business lifecycle beside its
-batches (`#there-is-no-task-lifecycle-there-are-batches`), a parent is still never executed, and one item can
+batches (`#there-is-no-task-lifecycle-there-are-batches`), a parent is still never executed, and one matter can
 carry several tasks through several workflows without forcing child tasks. An intake rule can create the first
-task when an item is written, keyed on the item's entity type, which an intake rule may do because the type is a
-business record and not a work-model record (`#whether-an-intake-rule-may-key-on-the-work-models-own-records`).
+task when a matter is written, keyed on the matter's entity type, which an intake rule may do because the type is
+a business record and not a work-model record (`#whether-an-intake-rule-may-key-on-the-work-models-own-records`).
 
-**Why the item is not a task.** The alternative, a task with business fields in the one queue humans and agents
-share, gives one queue but a task that would carry a business lifecycle beside its batches, and an item that
+**Why the matter is not a task.** The alternative, a task with business fields in the one queue humans and agents
+share, gives one queue but a task that would carry a business lifecycle beside its batches, and a matter that
 needs several workflows would force child tasks anyway. A lifecycle that records business facts (a customer's
 case stays open while the customer waits) does not belong to the unit the swarm claims and leases.
 
-**Closing an item.** The item's closure is a state of the business record, reached when its tasks close, and
-the effect closing has in an external system (filing the thread) is an action taken through the gate by a task's
-step, not a consequence of the state change.
+**Closing a matter.** A matter's closure is derived from its tasks and never written by a step. The effect closing
+has in an external system (filing the thread) is an action taken through the gate by a task's step, not a
+consequence of the derived read.
 
 **Ruled (decision 156, 2026-10-20, the operator's): a business matter's open or closed state is derived from
 its tasks, and a state is stored only where no task stands behind it.** Registered as ruled in
 `conformance.md#the-register-of-open-design-decisions`. Principle 11 puts anything a process would otherwise have
-to keep true in a derived read, so a matter is open while any task that `REFERS_TO` it is non-terminal and closed
-when none is; no step writes that value. A state with no task behind it, such as a matter waiting on the
-customer, cannot be derived from tasks and is stored on the matter, as a business fact of the record. Where a
-stored state and the derived read can both be computed, the derived read is the check that they agree, and a
-disagreement is shown, never silently resolved. The alternative, a stored open-or-closed value written by the
-step that closes the last task, was rejected because it is state a process has to keep true. **Cost accepted:**
-the application computes the read on every view of a matter. **What would reopen it:** a matter whose open or
-closed state has no task behind it.
+to keep true in a derived read. The read, and the cases it must settle:
 
-**Cost accepted for the placement.** Two views of the same work (the item's and the task's) have to be reconciled by the
-application's read, not by the model. **What would reopen it:** an item whose every unit of work is one task and
-whose lifecycle is that task's, which would argue that the item adds nothing for that class.
+- **The derived read.** A matter is open while any task that `REFERS_TO` it is non-terminal, and closed when it
+  has at least one such task and every one is terminal. No step writes that value.
+- **A matter with no task yet.** A matter just written, before intake has created its first task, has no task
+  behind it and is read as open, never as closed: the derivation fails toward open.
+- **A stored state with no task behind it.** A state such as waiting on the customer cannot be derived from
+  tasks and is stored on the matter, as a business fact of the record. Where a stored state exists and no live
+  task contradicts it, the stored state governs what is displayed: a matter waiting on the customer, whose last
+  task has closed, shows as waiting and not as closed.
+- **A stored state kept where a task stands behind it.** The derived read is the check on the stored state: a
+  stored state that a live, non-terminal task contradicts is shown as a disagreement, and the live task governs
+  the display, so the matter reads open until the stored state is corrected.
 
-**Matrix.** No row is added here; the planted refusal this ruling calls for is an item written as a `task`, and is
-added to `conformance_suite.md` in a later change.
+The alternative, a stored open-or-closed value written by the step that closes the last task, was rejected because
+it is state a process has to keep true. **Cost accepted:** the application computes the read on every view of a
+matter. **What would reopen it:** a matter whose open or closed state has no task behind it.
+
+**Cost accepted for the placement.** Two views of the same work (the matter's and the task's) have to be reconciled
+by the application's read, not by the model. **What would reopen it:** a matter whose every unit of work is one
+task and whose lifecycle is that task's, which would argue that the matter adds nothing for that class.
+
+**Matrix.** No row is added here. The planted refusals this section calls for are a matter written as a `task`;
+a stored open-or-closed state that disagrees with the derived read being displayed over a live task; a stored
+state kept, and governing, where a live task stands behind it; a matter with no task being shown as closed; and a
+step that writes an open-or-closed value; they are added to `conformance_suite.md` in a later change.
 
 ### A task is in at most one batch at a time
 
