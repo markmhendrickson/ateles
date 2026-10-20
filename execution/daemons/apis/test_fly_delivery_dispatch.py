@@ -195,20 +195,47 @@ def test_terminal_delivery_cannot_repeat_after_restart_or_optout(
     assert len(launches) == 1
 
 
-def test_resumed_issue_pipeline_never_starts_a_second_delivery(monkeypatch):
+@pytest.mark.parametrize("opted_in", [True, False])
+@pytest.mark.parametrize("recorded", ["unknown", "opened", "inflight"])
+def test_resumed_issue_pipeline_never_starts_a_second_delivery(
+    monkeypatch, recorded, opted_in
+):
+    """The boot resume sweep re-runs an interrupted issue pipeline. When that
+    issue already has a Fly delivery on record, finished or still in flight
+    (a launching receipt left by a dispatcher killed mid-run), the re-run must
+    stop at the hand-off: no second Fly launch, no local worktree, no PR search,
+    whether or not the class is still opted in."""
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
     launches = []
 
     async def run(*a, **kw):
         launches.append(kw)
-        return result("unknown")
+        return result("opened" if recorded == "opened" else "unknown")
 
     monkeypatch.setattr("swarm_dispatch.run_skill", run)
-    d = dispatcher()
-    with pytest.raises(delivery.FlyDeliveryEnded):
-        asyncio.run(d._open_implementation_pr(trigger(), _empty_spec_state()))
-    importlib.reload(delivery)
+    if recorded == "inflight":
+        # SIGKILL mid-delivery: the reservation exists, no outcome was recorded.
+        plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
+        assert delivery._reserve_delivery(plan)
+        expected_launches = 0
+    else:
+        d = dispatcher()
+        if recorded == "opened":
+            assert asyncio.run(d._open_implementation_pr(trigger(), _empty_spec_state()))
+        else:
+            with pytest.raises(delivery.FlyDeliveryEnded):
+                asyncio.run(d._open_implementation_pr(trigger(), _empty_spec_state()))
+        expected_launches = 1
+    importlib.reload(delivery)  # a new process: only the durable receipt remains
+    if not opted_in:
+        monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES")
     fresh = dispatcher()
+
+    async def never(*a, **kw):
+        raise AssertionError("a resumed pipeline provisioned or searched locally")
+
+    monkeypatch.setattr(delivery, "prepare_build_worktree", never)
+    monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", never)
 
     async def issues(*a):
         return [dict(number=123, title="Resume", body="", labels=[], user={})]
@@ -231,7 +258,9 @@ def test_resumed_issue_pipeline_never_starts_a_second_delivery(monkeypatch):
     monkeypatch.setattr(fresh, "_handle_issue_opened", resume)
     report = asyncio.run(fresh.resume_interrupted_pipelines([REPO]))
     assert report["resumed"] == 1 and report["failed"] == 0
-    assert len(launches) == 1
+    assert len(launches) == expected_launches
+    assert any("already recorded" in m for m in fresh.notifier.sent)
+    assert delivery.active_build(REPO, 123) is None
 
 
 def test_prelaunch_refusal_is_the_only_local_fallback(monkeypatch):

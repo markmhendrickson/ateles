@@ -342,3 +342,84 @@ def test_prelaunch_modes_keep_the_existing_local_delivery(
     assert mint_calls == ([job_eval.REPO] if mode == "refused_mint" else [])
     assert not remote.requests
     assert delivery.fly_delivery_blocker("owner/repo#123") == ""
+
+
+def test_unset_setting_leaves_the_local_delivery_byte_identical(tmp_path, monkeypatch):
+    """With APIS_FLY_RUNNER_CLASSES unset (even with Fly itself configured), both
+    entrances hand run_skill exactly what they handed it before Fly delivery
+    existed: the same prompt text and the same keyword arguments, none of the
+    Fly ones. The golden file was captured from origin/main before this change."""
+    import re
+
+    golden = json.loads((HERE / "fixtures/default_off_local.json").read_text())
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "ledger.json"))
+    monkeypatch.setenv("APIS_FLY_APP", "runner-test")
+    monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+    monkeypatch.setenv("CICADA_AGENT_PAT", "placeholder-token")
+    calls = []
+
+    async def prepare(repo, label):
+        return delivery.BuildWorktree(
+            str(tmp_path / "build-worktree"),
+            f"cicada/{label}-test",
+            "0" * 40,
+            str(tmp_path / "clone"),
+            True,
+        )
+
+    async def run(skill, prompt, **kw):
+        calls.append((skill, prompt, kw))
+        return skill_runner.SkillResult(
+            skill, True, 0, "https://github.com/owner/repo/pull/7", ""
+        )
+
+    async def no_pr(*a, **kw):
+        return None
+
+    def seen(call):
+        skill, prompt, kw = call
+        kw = {k: v for k, v in kw.items() if k != "notifier"}
+        assert kw.pop("cwd") == str(tmp_path / "build-worktree")
+        kw["cwd"] = "<worktree>"
+        return {
+            "skill": skill,
+            "prompt": re.sub(r"build-run: [0-9a-f]{16}", "build-run: <run-id>", prompt),
+            "kwargs": kw,
+        }
+
+    monkeypatch.setattr(delivery, "prepare_build_worktree", prepare)
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", no_pr)
+    snap = dict(
+        title="Build",
+        description="Do it",
+        assigned_to="cicada",
+        repository="owner/repo",
+        issue_number=123,
+        action_type="open_or_merge_pr",
+        status="pending",
+        confidence=0.95,
+    )
+    assert asyncio.run(
+        apis._spawn_harness_skill(
+            "cicada", "ent_task_example", snap, "created", _StubNotifier(), role="cicada"
+        )
+    ).ok
+    trig = dataclasses.replace(
+        _issue_trigger(),
+        repository="owner/repo",
+        number=123,
+        html_url="https://github.com/owner/repo/issues/123",
+    )
+    assert (
+        asyncio.run(
+            SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
+                trig, _empty_spec_state()
+            )
+        )
+        == "https://github.com/owner/repo/pull/7"
+    )
+    assert len(calls) == 2
+    assert seen(calls[0]) == golden["task"]
+    assert seen(calls[1]) == golden["pipeline"]
