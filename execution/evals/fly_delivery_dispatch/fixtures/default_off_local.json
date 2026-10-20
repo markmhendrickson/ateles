@@ -1,0 +1,26 @@
+{
+ "_about": "What the local delivery hands to run_skill with APIS_FLY_RUNNER_CLASSES unset, for the task entrance and the issue-pipeline entrance. Captured from origin/main at 516edbf0 (before the Fly delivery routing existed). The build-run id and worktree path are normalized. Change this file only when the LOCAL delivery is changed on purpose.",
+ "pipeline": {
+  "kwargs": {
+   "action_class": "build",
+   "cwd": "<worktree>",
+   "github_token": "placeholder-token",
+   "include_github_contract": true
+  },
+  "prompt": "Invoke the cicada agent per your appended system prompt.\n\nThe Ateles swarm has assembled a full additive specification for GitHub issue owner/repo#123: A new feature\nhttps://github.com/owner/repo/issues/123\n\nAuto-build is ON and the pre-impl gates are green. Implement the specification below and OPEN AN IMPLEMENTATION PULL REQUEST so the swarm's PR gate pipeline takes over.\n\n----- ASSEMBLED SPECIFICATION -----\n## Swarm specification\n\n_This section is maintained by the Ateles swarm. Each lens agent owns exactly one subsection below; the human-written description above these markers is never modified._\n\n_(No spec sections assembled yet.)_\n\n----- END ASSEMBLED SPECIFICATION -----\n\nREADING THE SPEC — severity markers (ateles#359). The spec above was written by the review lenses, so it may contain `[BLOCKING]` and `[NON-BLOCKING]` markers. Inside THIS spec those are DEFINITION-OF-DONE items for the PR you are about to open — requirements to satisfy in your implementation — NOT findings against existing work and NOT reasons to withhold a PR. They do not mean 'the author must address them before opening'; you ARE the author, and addressing them IS the build. Some are explicitly conditional ('this becomes [BLOCKING] if X'); treat those as forward-looking notes unless the condition holds today. The pre-impl gates are already green — a marker in the spec is not an open gate. Satisfy what you can within scope, note in the PR body anything you deliberately deferred and why, and OPEN THE PR. Raise a checkpoint instead of opening a PR only if you cannot produce a working implementation at all — never merely because the spec contains the word 'blocking'.\n\nYOUR WORKTREE: your working directory is already a dedicated linked worktree on branch `cicada/issue-123-test`, created from origin/main at 000000000000. Work here; do NOT create another worktree and do not touch any other checkout.\n\nTRACKING TASK: if you file a Neotoma task to track THIS build, put the line `build-run: <run-id>` in its description, exactly once. Put it on no other task: a task carrying it is recognised as this run's own and is not dispatched again, and any other task about the issue is held until this run ends.\n\nBUILD PROTOCOL:\n  1. Build on the worktree branch above, which is already off fresh origin/main — never off a feature branch.\n  2. Implement the spec, following the Engineering section's plan and honoring the QA/Security/Legal requirements as definition-of-done.\n  3. Add/extend tests per the QA section and run them.\n  4. Open a PR whose body references the issue with `Closes #123` so gate inheritance links back to it.\n\nHARD GUARDRAIL — DO NOT MERGE. Opening the PR is the end of your handoff: the PR gate pipeline reviews it and the merge stays operator-gated. Never merge, and never force-push over main.\n\nYou are posting as your own GitHub account (`markmhendrickson-ateles-cicada`). Do NOT add an attribution header — your avatar and account name already identify you.",
+  "skill": "cicada"
+ },
+ "task": {
+  "kwargs": {
+   "action_class": "open_or_merge_pr",
+   "agent_session_id": "",
+   "cwd": "<worktree>",
+   "github_token": "placeholder-token",
+   "include_github_contract": true,
+   "role": "cicada",
+   "task_entity_id": "ent_task_example"
+  },
+  "prompt": "Invoke the cicada agent per the supplied system and skill instructions.\n\nTask ent_task_example (trigger=created): Build\n\nDo it\n\nYOUR WORKTREE: your working directory is already a dedicated linked worktree on branch `cicada/task-_example-test`, created from origin/main at 000000000000. Work here; do NOT create another worktree and do not touch any other checkout.\n\nTRACKING TASK: if you file a Neotoma task to track THIS build, put the line `build-run: <run-id>` in its description, exactly once. Put it on no other task: a task carrying it is recognised as this run's own and is not dispatched again, and any other task about the issue is held until this run ends.",
+  "skill": "cicada"
+ }
+}

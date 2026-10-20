@@ -222,6 +222,7 @@ to filter on):
         --lens pm --provider claude \\
         --brief <path-to-lens-brief> --task-entity-id ent_... \\
         [--post] [--dry-run] [--compare claude,codex]
+        [--model MODEL] [--action-class ACTION_CLASS]
 
 The one command a session runs to MONITOR it — purely from Neotoma, no
 access to this process or its stdout required — via the Neotoma MCP/REST
@@ -1974,6 +1975,10 @@ def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
 # ── dry-run rendering -------------------------------------------------------------
 
 
+validate_model_selector = dispatch_role.model_tiering.validate_model_selector
+_cli_model_selector = dispatch_role.model_tiering.parse_model_selector
+
+
 def dry_run_report(
     target: LensTarget,
     *,
@@ -1981,6 +1986,8 @@ def dry_run_report(
     sandbox: HarnessSandbox,
     task_text: str,
     worktree_path: Path,
+    model: str | None = None,
+    action_class: str | None = None,
 ) -> dict:
     """Everything --dry-run prints: the exact command shape, prompt size, and
     guard configuration — and NO model call. This mirrors, rather than calls,
@@ -1990,6 +1997,20 @@ def dry_run_report(
     drift between this preview and the real dispatch is visible as a diff
     against `_provider_command` in review, not a silent divergence.
     """
+    model = validate_model_selector(model)
+    # Use the same live tier and vendor-binding resolvers as run_skill.
+    # An explicit model wins; omitting both selectors keeps the provider default.
+    selected_model = model
+    selected_tier = None
+    model_refusal = None
+    if selected_model is None and action_class is not None:
+        selected_tier = dispatch_role.model_tiering.resolve_tier(action_class)
+        try:
+            selected_model = dispatch_role.model_tiering.model_for_tier(
+                provider, selected_tier.tier
+            )
+        except dispatch_role.model_tiering.UnboundTierError as exc:
+            model_refusal = str(exc)
     if provider == "codex":
         sandbox_mode = (
             "danger-full-access"
@@ -1999,6 +2020,7 @@ def dry_run_report(
         example_cmd = [
             "codex",
             "exec",
+            *(["--model", selected_model] if selected_model else []),
             "--sandbox",
             sandbox_mode,
             *(
@@ -2023,12 +2045,17 @@ def dry_run_report(
             "--approve-mcps",
             "--output-format",
             "text",
+            *(["--model", selected_model] if selected_model else []),
             "--workspace",
             str(worktree_path),
             "<prompt omitted — see prompt_chars>",
         ]
     else:
-        example_cmd = ["claude", "--print", "--append-system-prompt", "<system prompt>"]
+        example_cmd = [
+            "claude", "--print",
+            *(["--model", selected_model] if selected_model else []),
+            "--append-system-prompt", "<system prompt>",
+        ]
 
     # command_wrapper is prepended to the REAL argv by skill_runner
     # (see _run_skill_once's command_wrapper param) — shown here too so the
@@ -2036,12 +2063,15 @@ def dry_run_report(
     # of it that could drift.
     example_cmd = [*sandbox.command_wrapper, *example_cmd]
 
-    refusal = refuse_if_guard_required(sandbox)
+    refusal = refuse_if_guard_required(sandbox) or model_refusal
 
     report = {
         "ok": refusal is None,
         "dry_run": True,
         "provider": provider,
+        "model": selected_model,
+        "action_class": action_class,
+        "tier": selected_tier.tier if selected_tier else None,
         "repo": target.repo,
         "pr": target.pr,
         "head": target.head,
@@ -2565,13 +2595,26 @@ async def run_one(
     scratch_root: Path,
     brief_path: Path,
     timeout: int | None,
+    model: str | None = None,
+    action_class: str | None = None,
 ) -> dict:
     """Run the lens once on one provider. Returns a JSON-serializable report.
 
-    Raises HeadroomExhausted before anything else (no worktree, no dispatch)
+    Refuse an unavailable canonical reader before review preparation or inference.
+    Raises HeadroomExhausted before creating a worktree or dispatching
     when the provider's configured headroom is exactly 0 — the operator-reset
     gate named in the task.
     """
+    model = validate_model_selector(model)
+    if swarm_dispatch is None:
+        reason = (
+            "canonical review reader could not be imported; cannot validate "
+            "verdicts — refusing before a model call"
+        )
+        return {
+            "ok": False, "provider": provider, "reason": reason,
+            "refusal_reason": reason, "no_model_call_made": True, "posted": False,
+        }
     check_headroom(provider)
 
     worktree_path = (
@@ -2612,6 +2655,8 @@ async def run_one(
                 sandbox=sandbox,
                 task_text=task_text,
                 worktree_path=worktree.path,
+                model=model,
+                action_class=action_class,
             )
             dotenv_refusal = refuse_if_credential_files_in_worktree(worktree.path)
             if dotenv_refusal:
@@ -2671,6 +2716,8 @@ async def run_one(
                 target.agent,
                 task_text,
                 provider=provider,
+                model=model,
+                action_class=action_class,
                 cwd=str(worktree.path),
                 timeout=timeout,
                 task_entity_id=target.task_entity_id,
@@ -2882,6 +2929,8 @@ async def run_compare(
     scratch_root: Path,
     brief_path: Path,
     timeout: int | None,
+    model: str | None = None,
+    action_class: str | None = None,
 ) -> dict:
     """Run the same lens on the same head via each of *providers* and report
     both verdicts side by side.
@@ -2894,6 +2943,7 @@ async def run_compare(
     providers' verdicts posted runs that provider again, alone, via
     ``run_one``/``--provider`` after inspecting the comparison.
     """
+    model = validate_model_selector(model)
     results = {}
     for provider in providers:
         results[provider] = await run_one(
@@ -2905,6 +2955,8 @@ async def run_compare(
             scratch_root=scratch_root,
             brief_path=brief_path,
             timeout=timeout,
+            model=model,
+            action_class=action_class,
         )
     return {"compare": True, "lens": target.lens, "pr": target.pr, "results": results}
 
@@ -2964,6 +3016,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--timeout", type=int, default=None)
+    parser.add_argument(
+        "--model", default=None, type=_cli_model_selector,
+        help="Explicit provider model identifier without whitespace/control characters; "
+        "overrides --action-class tier selection. "
+        "Omit both selectors to retain the provider's existing default.",
+    )
+    parser.add_argument(
+        "--action-class", default=None,
+        help="Resolve a model through the existing live action_policy/vendor_binding, "
+        "e.g. lens_review:arch. --model takes precedence.",
+    )
     parser.add_argument(
         "--provider", choices=list(HARNESSES), help="Single-provider run"
     )
@@ -3045,6 +3108,8 @@ def main(argv: list[str] | None = None) -> int:
                         scratch_root=scratch_root,
                         brief_path=brief_path,
                         timeout=args.timeout,
+                        model=args.model,
+                        action_class=args.action_class,
                     )
                 )
             else:
@@ -3058,6 +3123,8 @@ def main(argv: list[str] | None = None) -> int:
                         scratch_root=scratch_root,
                         brief_path=brief_path,
                         timeout=args.timeout,
+                        model=args.model,
+                        action_class=args.action_class,
                     )
                 )
         except HeadroomExhausted as exc:

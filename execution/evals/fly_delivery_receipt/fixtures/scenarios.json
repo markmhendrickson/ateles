@@ -1,0 +1,14 @@
+{"scenarios": [
+ {"id": "dry_run_changes_nothing", "argv": ["clear", "{KEY}"], "rc": 0, "present": true, "events": [], "out": ["Dry run", "not_delivered", "run-eval"]},
+ {"id": "confirmed_clear", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 0, "present": false, "events": ["removing", "removed"], "out": ["Removed the delivery receipt"]},
+ {"id": "wrong_confirm_refuses", "argv": ["clear", "{KEY}", "--confirm", "owner/repo#999"], "rc": 1, "present": true, "events": [], "err": ["exact key"]},
+ {"id": "no_such_receipt_refuses", "argv": ["clear", "owner/repo#999", "--confirm", "owner/repo#999"], "rc": 1, "present": true, "events": [], "err": ["no delivery receipt"]},
+ {"id": "malformed_ledger_refuses", "ledger": "malformed", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 2, "unchanged": true, "events": [], "err": ["could not be read"]},
+ {"id": "first_audit_append_fails", "fault": "first_append", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 2, "present": true, "events": [], "err": ["nothing was removed"]},
+ {"id": "closing_audit_append_fails", "fault": "closing_append", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 4, "present": false, "events": ["removing"], "err": ["WAS removed", "removing"]},
+ {"id": "raised_removal_reads_back_gone", "fault": "raise_after_replace", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 6, "present": false, "events": ["removing", "removed_unconfirmed"], "err": ["NOT confirmed durable", "crash may bring it back"], "not_out": ["Removed the delivery receipt"]},
+ {"id": "removal_fails_before_replace", "fault": "raise_before_replace", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 3, "present": true, "events": ["removing", "remove_failed"], "err": ["still in the ledger"]},
+ {"id": "directory_sync_fails_at_removing", "fault": "dir_sync_removing", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 2, "present": true, "events": ["removing"], "err": ["nothing was removed"]},
+ {"id": "directory_sync_fails_at_closing", "fault": "dir_sync_closing", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 4, "present": false, "events": ["removing", "removed"], "err": ["WAS removed"]},
+ {"id": "read_back_unreadable", "fault": "readback_unreadable", "argv": ["clear", "{KEY}", "--confirm", "{KEY}"], "rc": 5, "events": ["removing"], "err": ["UNVERIFIED"], "not_out": ["Removed the delivery receipt"]}
+]}
