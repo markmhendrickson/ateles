@@ -86,7 +86,8 @@ def test_the_scenario_set_covers_the_required_cases():
             "codex_relative_workspace_resolves_to_one_absolute_path",
             "seated_codex_review_uses_the_roles_own_token",
             "seated_codex_review_without_own_token_is_refused_before_launch",
-            "seated_codex_review_with_a_blank_token_is_refused_before_launch"} <= ids
+            "seated_codex_review_with_a_blank_token_is_refused_before_launch",
+            "no_grant_role_with_every_credential_present_gets_none"} <= ids
 
 
 def test_the_judge_goes_red_when_the_child_gets_a_different_workspace(tmp_path, monkeypatch):
@@ -113,3 +114,11 @@ def test_the_judge_goes_red_when_a_seated_child_gets_the_shared_bearer(tmp_path,
     shared = hashlib.sha256(runner.SHARED_BEARER.encode()).hexdigest()
     swapped = dataclasses.replace(trace, child={**trace.child, "bearer_digest": shared})
     assert len(runner.judge(scenario, swapped)) >= 2
+
+
+def test_the_judge_goes_red_when_an_ungranted_child_keeps_a_credential(tmp_path, monkeypatch):
+    scenario = _by_id("no_grant_role_with_every_credential_present_gets_none")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    kept = dataclasses.replace(trace, child={**trace.child,
+                                             "neotoma_credential_vars": ["LANIUS_NEOTOMA_TOKEN"]})
+    assert runner.judge(scenario, kept)

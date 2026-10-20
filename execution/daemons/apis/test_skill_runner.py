@@ -5197,7 +5197,10 @@ class TestGateOwnerToolDenyAcrossProviders:
 
         assert not result.ok and launched == []
         assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
-        assert "disabled_tools must deny exactly" in result.error
+        # A fixed reason and the exception class only: the contract's own
+        # detail stays out of every surface the repair reaches.
+        assert "(RuntimeError)" in result.error
+        assert "disabled_tools must deny exactly" not in result.error
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")

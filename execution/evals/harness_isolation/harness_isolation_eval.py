@@ -64,6 +64,10 @@ report = {{"argv": sys.argv[1:], "cwd": os.path.realpath(os.getcwd())}}
 import hashlib
 _bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 report["bearer_digest"] = hashlib.sha256(_bearer.encode()).hexdigest() if _bearer else ""
+# Every Neotoma credential variable the child holds, by NAME (never a value).
+report["neotoma_credential_vars"] = sorted(
+    k for k in os.environ
+    if k.endswith("_NEOTOMA_TOKEN") or k.startswith("NEOTOMA_BEARER_TOKEN"))
 # Resolve the workspace flag as a real CLI does (against the child's own cwd)
 # and note whether a project MCP file sits at the root it would use.
 import subprocess
@@ -281,6 +285,10 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
     if trace.child is not None and trace.child.get("bearer_digest") == __import__(
             "hashlib").sha256(SHARED_BEARER.encode()).hexdigest():  # fmt: skip
         problems.append("the child was handed the shared bearer")
+    if e.get("no_neotoma_credentials") and trace.child is not None:
+        held = trace.child.get("neotoma_credential_vars")
+        if held != []:
+            problems.append(f"the child holds Neotoma credential variables {held}")
     if e.get("one_workspace"):
         child = trace.child or {}
         flag_value = child.get("workspace_flag_value")

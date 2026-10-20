@@ -278,6 +278,22 @@
         "spawned": false,
         "repair_contains": "LANIUS_NEOTOMA_TOKEN"
       }
+    },
+    {
+      "id": "no_grant_role_with_every_credential_present_gets_none",
+      "description": "A role with no Neotoma tools, while its own token, the shared bearer, the production bearer and another role's token are all present in the dispatcher's environment: the child holds none of them (names reported only) and no MCP server.",
+      "provider": "codex",
+      "tools": "Read,Bash",
+      "settings": {
+        "NEOTOMA_BEARER_TOKEN_PROD": "eval-prod-bearer-0003",
+        "PAVO_NEOTOMA_TOKEN": "eval-other-role-token-0004"
+      },
+      "expect": {
+        "exit": 0,
+        "spawned": true,
+        "child_servers": [],
+        "no_neotoma_credentials": true
+      }
     }
   ]
 }

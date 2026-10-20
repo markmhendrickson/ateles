@@ -244,8 +244,9 @@ def test_any_project_cursor_mcp_file_refuses_the_dispatch(operator_home, tmp_pat
         target.write_text(_PROJECT_FILES[content])
     with pytest.raises(skill_runner.IsolationRefusal) as exc:
         _prepare("cursor", ["*"], cwd=str(workspace))
-    assert exc.value.setting == str(target.resolve().parent.parent / ".cursor" / "mcp.json") \
-        or exc.value.setting.endswith("/.cursor/mcp.json")  # fmt: skip
+    # A fixed setting name: no local path reaches the repair.
+    assert exc.value.setting == "the workspace project's .cursor/mcp.json"
+    assert str(tmp_path) not in str(exc.value) + exc.value.setting
 
 
 def test_a_linked_worktree_checks_its_main_checkout(operator_home, tmp_path):
@@ -550,7 +551,7 @@ def test_a_relative_workspace_is_resolved_once_for_the_guard_and_the_child(
     result, checked, seen = _probe_dispatch(monkeypatch, tmp_path, provider, "ws")
     if provider == "cursor" and layout == "config-at-the-checked-root":
         assert not result.ok and "NEOTOMA" not in result.configuration_repair
-        assert result.configuration_repair.endswith("/.cursor/mcp.json)")
+        assert result.configuration_repair.endswith("(repair: the workspace project's .cursor/mcp.json)")
         return
     assert result.ok, result.error
     assert checked == [str(workspace.resolve())]
@@ -782,3 +783,129 @@ def test_claude_dispatch_is_unchanged_by_this_isolation(operator_home, monkeypat
     assert env.get("NEOTOMA_BEARER_TOKEN") == SHARED_BEARER
     header = seen_cfg["cfg"]["mcpServers"]["mcpsrv_neotoma"]["headers"]["Authorization"]
     assert header == f"Bearer {SHARED_BEARER}"
+
+
+# ── The generated home is mandatory; a caller-supplied one only by opt-in ────
+
+
+def _trusted_home(tmp_path, provider, servers):
+    home = tmp_path / f"trusted-{provider}-home"
+    if provider == "codex":
+        home.mkdir()
+        (home / "auth.json").write_text("{}")
+        (home / "config.toml").write_text("".join(
+            f'[mcp_servers.{n}]\nurl = "https://x.example.test/mcp"\n' for n in servers))
+    else:
+        (home / ".cursor").mkdir(parents=True)
+        (home / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {
+            n: {"url": "https://x.example.test/mcp"} for n in servers}}))
+    return home
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_home_in_env_extra_without_the_opt_in_is_refused(operator_home, monkeypatch, tmp_path,
+                                                           provider):  # fmt: skip
+    marker, notified = _seam(monkeypatch, tmp_path)
+    key = "CODEX_HOME" if provider == "codex" else "HOME"
+    home = _trusted_home(tmp_path, provider, ["mcpsrv_neotoma"])
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius", provider=provider,
+                                                env_extra={key: str(home)}))  # fmt: skip
+    assert not result.ok and not marker.exists()
+    assert f"(repair: env_extra {key})" in result.configuration_repair
+    assert str(home) not in result.error + result.configuration_repair
+    import harness_router
+
+    assert provider not in harness_router.cooling_providers()
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_trusted_home_with_another_server_is_refused(operator_home, monkeypatch, tmp_path,
+                                                       provider):  # fmt: skip
+    marker, _ = _seam(monkeypatch, tmp_path)
+    home = _trusted_home(tmp_path, provider, ["mcpsrv_neotoma", "client-hosted"])
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius", provider=provider,
+                                                trusted_harness_home=str(home)))  # fmt: skip
+    assert not result.ok and not marker.exists()
+    assert "(repair: trusted_harness_home)" in result.configuration_repair
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_verified_trusted_home_launches_and_is_left_in_place(operator_home, monkeypatch,
+                                                               tmp_path, provider):  # fmt: skip
+    stand_in = tmp_path / "home-stand-in"
+    record = tmp_path / "home-seen.txt"
+    stand_in.write_text("#!%s\nimport os, pathlib\npathlib.Path(%r).write_text("
+                        "os.environ.get('CODEX_HOME') or os.environ['HOME'])\nprint('ran')\n"
+                        % (sys.executable, str(record)), encoding="utf-8")  # fmt: skip
+    stand_in.chmod(0o755)
+    _seam(monkeypatch, tmp_path)
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", str(stand_in))
+    monkeypatch.setattr(skill_runner, "CURSOR_BIN", str(stand_in))
+    home = _trusted_home(tmp_path, provider, ["mcpsrv_neotoma"])
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius", provider=provider,
+                                                trusted_harness_home=str(home)))  # fmt: skip
+    assert result.ok, result.error
+    assert Path(record.read_text()) == home.resolve()
+    assert home.exists()  # the caller's home is never removed
+
+
+def test_a_trusted_home_and_a_different_env_extra_home_are_refused(operator_home, monkeypatch,
+                                                                   tmp_path):  # fmt: skip
+    marker, _ = _seam(monkeypatch, tmp_path)
+    home = _trusted_home(tmp_path, "codex", ["mcpsrv_neotoma"])
+    result = asyncio.run(skill_runner.run_skill(
+        "lanius", "task", role="lanius", provider="codex", trusted_harness_home=str(home),
+        env_extra={"CODEX_HOME": str(tmp_path / "elsewhere")}))  # fmt: skip
+    assert not result.ok and not marker.exists() and result.configuration_repair
+
+
+# ── Repairs carry a fixed reason and the exception class, nothing else ───────
+
+SENTINEL = "sentinel-7c1e"
+
+
+def _sentinel_errors():
+    return [OSError(2, f"errno text {SENTINEL}", f"/private/{SENTINEL}/path"),
+            RuntimeError(f"contract detail at /private/{SENTINEL}/config.toml")]
+
+
+def _assert_sentinel_free(result, notified, caplog):
+    texts = [result.error, result.configuration_repair, repr(result), str(result)]
+    texts += [str(n.get("stderr", "")) for n in notified]
+    texts += [r.getMessage() + str(r.exc_text or "") for r in caplog.records]
+    for text in texts:
+        assert SENTINEL not in text
+
+
+@pytest.mark.parametrize("error", _sentinel_errors(), ids=["oserror", "runtimeerror"])
+def test_a_seated_config_failure_reaches_no_surface_with_its_detail(operator_home, monkeypatch,
+                                                                     tmp_path, caplog, error):  # fmt: skip
+    caplog.set_level("DEBUG")
+
+    def broken(**k):
+        raise error
+
+    monkeypatch.setattr(skill_runner, "_prepare_codex_gate_owner_config", broken)
+    result, seen, notified = _seated(monkeypatch, tmp_path)
+    assert not result.ok and seen is None
+    assert f"({type(error).__name__})" in result.configuration_repair
+    _assert_sentinel_free(result, notified, caplog)
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+@pytest.mark.parametrize("error", _sentinel_errors(), ids=["oserror", "runtimeerror"])
+def test_an_isolated_home_failure_reaches_no_surface_with_its_detail(operator_home, monkeypatch,
+                                                                      tmp_path, caplog, provider,
+                                                                      error):  # fmt: skip
+    caplog.set_level("DEBUG")
+    marker, notified = _seam(monkeypatch, tmp_path)
+
+    def broken(*a, **k):
+        raise error
+
+    monkeypatch.setattr(skill_runner, "prepare_isolated_harness_home", broken)
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                                provider=provider))  # fmt: skip
+    assert not result.ok and not marker.exists()
+    assert f"({type(error).__name__})" in result.configuration_repair
+    _assert_sentinel_free(result, notified, caplog)

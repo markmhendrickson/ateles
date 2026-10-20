@@ -468,6 +468,9 @@ class IsolatedHarnessHome:
     config_path: Path
     servers: tuple[str, ...]
     env: dict[str, str]
+    # False for a caller-supplied ``trusted_harness_home``: verified, used,
+    # and left in place (it is the caller's).
+    owned: bool = True
 
 
 def allowed_mcp_servers(agent_tools: list[str]) -> dict[str, tuple[str, ...] | None]:
@@ -630,6 +633,38 @@ def launch_workspace_mismatch(provider: str, cmd: list[str], workspace: str) -> 
     return ""
 
 
+def verify_trusted_harness_home(provider: str, *, role: str, agent_tools: list[str], home: str,
+                                cwd: str, env_extra: dict[str, str] | None) -> IsolatedHarnessHome:  # fmt: skip
+    """A caller-supplied harness home (the explicit ``trusted_harness_home``
+    opt-in), verified like a generated one before launch: its effective MCP
+    servers must be exactly the role's allowed ones, a granted role needs its
+    own token at a valid https endpoint, and a Cursor workspace may hold no
+    project MCP configuration. Raises ``IsolationRefusal``."""
+    granted = allowed_mcp_servers(agent_tools)
+    endpoint = _role_neotoma_endpoint(role) if granted else None
+    root = Path(home).resolve(strict=True)
+    supplied = (env_extra or {}).get("CODEX_HOME" if provider == "codex" else "HOME")
+    if supplied and Path(supplied).resolve() != root:
+        raise IsolationRefusal("env_extra names a different harness home than the trusted one",
+                               setting="trusted_harness_home")  # fmt: skip
+    if provider == "cursor" and cursor_project_mcp_files(cwd):
+        raise IsolationRefusal(
+            "the dispatch's workspace has its own Cursor MCP configuration at its project "
+            "root, which would add servers to an isolated child",
+            setting="the workspace project's .cursor/mcp.json")
+    config_path = root / "config.toml" if provider == "codex" else root / ".cursor" / "mcp.json"
+    declared = effective_mcp_servers(provider, config_path)
+    if declared != set(granted):
+        raise IsolationRefusal("the trusted harness home declares other MCP servers than the "
+                               "role is granted", setting="trusted_harness_home")  # fmt: skip
+    env = {"CODEX_HOME": str(root)} if provider == "codex" else {
+        "HOME": str(root), "CURSOR_CONFIG_DIR": str(root / ".cursor")}
+    if provider == "codex" and endpoint:
+        env[ROLE_NEOTOMA_BEARER_ENV] = endpoint[1]
+    return IsolatedHarnessHome(home=root, config_path=config_path,
+                               servers=tuple(sorted(declared)), env=env, owned=False)  # fmt: skip
+
+
 def codex_config_overrides(cmd: list[str]) -> list[str]:
     """Codex flags in *cmd* that would bring MCP servers, trust or a profile
     from outside the isolated home (``-c mcp_servers...``, ``--profile``)."""
@@ -666,7 +701,8 @@ def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list
         if found:
             raise IsolationRefusal(
                 "the dispatch's workspace has its own Cursor MCP configuration at its project "
-                "root, which would add servers to an isolated child", setting=found[0])
+                "root, which would add servers to an isolated child",
+                setting="the workspace project's .cursor/mcp.json")
     tmp_value = (env_extra or {}).get("TMPDIR", "").strip()
     tmp_parent = Path(tmp_value) if tmp_value else None
     if tmp_parent is not None:
@@ -2573,6 +2609,7 @@ async def _run_skill_once(
     runner: str | None = None,
     repository: str = "",
     local_fallback_check=None,
+    trusted_harness_home: str | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -3236,10 +3273,9 @@ async def _run_skill_once(
         except (OSError, RuntimeError) as exc:
             # Never launched without its verified config: a configuration
             # repair (no cooldown; the dispatch fails over), value-free.
-            why = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
             return _isolation_refusal_result(skill, provider, IsolationRefusal(
                 f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: the seated review's isolated Codex "
-                f"config could not be created and verified ({why})",
+                f"config could not be created and verified ({type(exc).__name__})",
                 setting="Codex login (CODEX_HOME/auth.json) and NEOTOMA_BASE_URL"))
         cmd.insert(len(command_wrapper or []) + 1, "--strict-config")
         log.info(
@@ -3404,14 +3440,25 @@ async def _run_skill_once(
     # A local Codex or Cursor child never gets the operator's personal harness
     # configuration: just before it is spawned (``_run_local``), it gets a
     # generated home whose MCP servers are exactly the role's allowed ones.
-    _isolation_wanted = (
+    _ordinary_local = (
         provider in ISOLATED_PROVIDERS
         and _codex_gate_config is None  # a seated Codex review is isolated above
         and local_cfg is None
         and not local_review  # guarded lens runs bring their own isolated home
         and not inference_only
-        and not (env_extra or {}).get("CODEX_HOME" if provider == "codex" else "HOME")
     )
+    # For an ordinary local Codex or Cursor child the generated, verified home
+    # is mandatory. A caller-supplied home replaces it only through the
+    # explicit ``trusted_harness_home`` opt-in, and is verified the same way;
+    # a bare CODEX_HOME / HOME in env_extra is refused at the local launch.
+    _home_key = "CODEX_HOME" if provider == "codex" else "HOME"
+    _home_override_refusal: IsolationRefusal | None = None
+    if _ordinary_local and trusted_harness_home is None and (env_extra or {}).get(_home_key):
+        _home_override_refusal = IsolationRefusal(
+            "a caller-supplied harness home may not replace the generated, verified one",
+            setting=f"env_extra {_home_key}")
+    _isolation_wanted = _ordinary_local and trusted_harness_home is None
+    _trusted_home_wanted = _ordinary_local and trusted_harness_home is not None
 
     # ateles#109 / ateles#590 (PR #1334): inject the resolved per-agent GitHub
     # identity, if any. The fail-closed refusals for a network-enabled
@@ -3466,7 +3513,7 @@ async def _run_skill_once(
                 pass
         if _codex_gate_config is not None:
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
-        if _isolated_home is not None:
+        if _isolated_home is not None and _isolated_home.owned:
             shutil.rmtree(_isolated_home.home, ignore_errors=True)
 
     # ── Executor choice (ateles#1456) ──────────────────────────────────────────
@@ -3550,6 +3597,25 @@ async def _run_skill_once(
     async def _run_local() -> tuple[int | None, bytes, bytes]:
         nonlocal proc, _isolated_home
         spawn_cwd = cwd
+        if _home_override_refusal is not None:
+            exc = _home_override_refusal
+            raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})")
+        if _trusted_home_wanted and _isolated_home is None:
+            workspace = cwd or resolve_dispatch_workspace(os.getcwd())
+            spawn_cwd = workspace
+            try:
+                _isolated_home = verify_trusted_harness_home(
+                    provider, role=_role, agent_tools=agent_def.tools,
+                    home=trusted_harness_home, cwd=workspace, env_extra=env_extra)
+            except IsolationRefusal as exc:
+                raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})") from None
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise _LocalIsolationRefused(
+                    "the trusted harness home could not be verified "
+                    f"({type(exc).__name__})") from None
+            if provider == "cursor" and "--workspace" not in cmd:
+                cmd.extend(["--workspace", workspace])
+            subprocess_env.update(_isolated_home.env)
         if _isolation_wanted and _isolated_home is None:
             # ONE absolute workspace (resolved above, or the daemon's own
             # directory) is what the guard checks, the child's cwd and the
@@ -3576,7 +3642,11 @@ async def _run_skill_once(
             except IsolationRefusal as exc:
                 raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})") from None
             except (OSError, RuntimeError) as exc:
-                raise _LocalIsolationRefused(str(exc)) from None
+                # A fixed reason and the exception's class: never its text,
+                # which can carry local paths or system detail.
+                raise _LocalIsolationRefused(
+                    "the isolated harness home could not be prepared and verified "
+                    f"({type(exc).__name__})") from None
             except ValueError:
                 # Never let a malformed value escape as a generic error, and
                 # never echo it: it may be a credential-bearing setting.
@@ -4045,7 +4115,7 @@ async def _run_skill_once(
                 pass
         if _codex_gate_config is not None:
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
-        if _isolated_home is not None:
+        if _isolated_home is not None and _isolated_home.owned:
             shutil.rmtree(_isolated_home.home, ignore_errors=True)
 
 
@@ -4169,8 +4239,15 @@ async def run_skill(
     inference_only: bool = False,
     runner: str | None = None,
     repository: str = "",
+    trusted_harness_home: str | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    ``trusted_harness_home``: for tests and evals that need a sandbox home, an
+    explicit opt-in that replaces the generated Codex/Cursor home with this
+    one, verified the same way before launch (see
+    ``verify_trusted_harness_home``). Without it, a CODEX_HOME or HOME in
+    ``env_extra`` never replaces the generated home.
 
     ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
     attempt; see that function (ateles#1456, the Fly executor).
@@ -4300,6 +4377,7 @@ async def run_skill(
             inference_only=inference_only,
             runner=runner,
             repository=repository,
+            trusted_harness_home=trusted_harness_home,
             local_fallback_check=(
                 (lambda name: _local_fallback_refusal(name, pinned=provider is not None))
                 if selected in fly_bound else None
