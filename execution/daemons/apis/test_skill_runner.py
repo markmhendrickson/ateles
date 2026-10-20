@@ -958,7 +958,7 @@ class TestNeotomaMcpConfigInjection:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
 
         captured_cmd: list = []
@@ -995,74 +995,69 @@ class TestNeotomaMcpConfigInjection:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_mcp_config_refuses_without_the_roles_own_token(
+    def test_mcp_config_raises_when_token_unset(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """A role granted Neotoma tools with no token of its own is refused before
-        any child starts (a configuration repair). The shared bearer is never
-        substituted, even when it is set."""
+        """When NEOTOMA_BEARER_TOKEN is unset, constructing --mcp-config must
+        raise rather than silently omit the Authorization header.
+
+        Neotoma's /mcp endpoint requires auth (verified live: an unauthenticated
+        POST returns HTTP 401), so a config built without a bearer token would
+        only fail later, inside the dispatched child's own MCP handshake, far
+        from this call site. Failing fast here — matching
+        _require_neotoma_base_url's convention — attributes the failure to its
+        actual cause instead of letting it surface as a confusing error deep in
+        the child process.
+        """
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
         instance = MagicMock()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
-        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-bearer-canary")
-        monkeypatch.delenv("GRYLLUS_NEOTOMA_TOKEN", raising=False)
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
 
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
             patch("skill_runner.os.path.exists", return_value=False),
-            patch("asyncio.create_subprocess_exec",
-                  side_effect=AssertionError("no child may start")),
+            pytest.raises(RuntimeError, match="NEOTOMA_BEARER_TOKEN"),
         ):
-            result = self._run(
+            self._run(
                 skill_runner.run_skill(
                     "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
                 )
             )
-        # The role's own token is required: a configuration repair before any
-        # child, never the shared bearer.
-        assert not result.ok
-        assert "GRYLLUS_NEOTOMA_TOKEN" in result.configuration_repair
-        assert "shared-bearer-canary" not in result.error + result.configuration_repair
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_mcp_config_refuses_a_blank_role_token(
+    def test_mcp_config_raises_when_token_empty_string(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """A blank own token is refused exactly like a missing one; the shared
-        bearer is never substituted."""
+        """An empty-but-set NEOTOMA_BEARER_TOKEN must raise identically to an
+        unset one — the same silent-empty-string gap ateles#1071 fixed for
+        GH_TOKEN, but here at the Neotoma MCP config construction site."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
         instance = MagicMock()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
-        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-bearer-canary")
-        monkeypatch.setenv("GRYLLUS_NEOTOMA_TOKEN", "  ")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "")
 
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
             patch("skill_runner.os.path.exists", return_value=False),
-            patch("asyncio.create_subprocess_exec",
-                  side_effect=AssertionError("no child may start")),
+            pytest.raises(RuntimeError, match="NEOTOMA_BEARER_TOKEN"),
         ):
-            result = self._run(
+            self._run(
                 skill_runner.run_skill(
                     "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
                 )
             )
-        # The role's own token is required: a configuration repair before any
-        # child, never the shared bearer.
-        assert not result.ok
-        assert "GRYLLUS_NEOTOMA_TOKEN" in result.configuration_repair
-        assert "shared-bearer-canary" not in result.error + result.configuration_repair
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -1083,8 +1078,7 @@ class TestNeotomaMcpConfigInjection:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
-        monkeypatch.setenv("GRYLLUS_NEOTOMA_TOKEN", "secret-role-abc")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "secret-bearer-abc")
 
         captured_cmd: list = []
@@ -1136,9 +1130,13 @@ class TestNeotomaMcpConfigInjection:
         )
         cfg = written_contents[0]
         neotoma_cfg = cfg["mcpServers"]["mcpsrv_neotoma"]
-        assert neotoma_cfg["url"] == "https://neotoma.test.invalid/mcp"
-        # The role's OWN token, never the shared bearer.
-        assert neotoma_cfg.get("headers", {}).get("Authorization") == "Bearer secret-role-abc"
+        assert neotoma_cfg["url"] == "http://localhost:9180/mcp", (
+            f"Expected url 'http://localhost:9180/mcp', got {neotoma_cfg['url']!r}"
+        )
+        assert (
+            neotoma_cfg.get("headers", {}).get("Authorization")
+            == "Bearer secret-bearer-abc"
+        ), "Expected Authorization header with bearer token"
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -1206,7 +1204,7 @@ class TestNeotomaMcpConfigInjection:
         instance.load.return_value = wide_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "tok")
 
         captured_cmd: list = []
@@ -4695,15 +4693,21 @@ class TestGateOwnerIdentity:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_gate_owner_without_its_own_token_is_a_configuration_repair(
+    def test_gate_owner_without_own_mcp_identity_still_launches(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """A gate owner granted Neotoma tools with no token of its own is
-        refused before any child starts, as a configuration repair; the shared
-        bearer is never substituted. (Every role that dispatches today has its
-        own token: test_dispatching_roles_resolve_their_own_token_names.) The
-        system-of-record gate write stays the dispatcher's signed sign_off(),
-        independent of this session."""
+        """Amended ADR (ateles#795 operator decision comment): a gate owner
+        with no per-agent MCP bearer must still be allowed to launch.
+
+        This test used to assert the OPPOSITE — a hard preflight refusal —
+        back when the lens's own in-session `correct()` was the only planned
+        writeback path. The operator's amendment moves the system-of-record
+        write to the dispatcher (`gate_waive.IssueGateStore.sign_off`, signed
+        with the lens's OWN AAuth keypair, independent of this MCP session),
+        so the lens no longer needs a Neotoma identity of its own just to be
+        allowed to review. Refusing here would leave pm/arch/ux permanently
+        unable to run — the second failure mode this amendment exists to fix.
+        """
         fake_def = _make_def(
             prompt_markdown="Role: Accipiter.",
             aauth_sub="accipiter@ateles-swarm",
@@ -4746,17 +4750,27 @@ class TestGateOwnerIdentity:
                 )
             )
 
-        assert not result.ok and launched == []
-        assert "ACCIPITER_NEOTOMA_TOKEN" in result.configuration_repair
-        assert "shared-daemon-token" not in result.error + result.configuration_repair
+        assert result.ok, (
+            "A gate owner with no per-agent MCP bearer must still be allowed "
+            "to launch — the dispatcher's signed sign_off() is now the "
+            "system-of-record write, independent of this session's identity."
+        )
+        assert launched, (
+            "The review must actually run: refusing to launch is exactly the "
+            "regression this amendment closes."
+        )
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_advisory_lens_without_its_own_token_is_a_configuration_repair(
+    def test_advisory_lens_without_own_identity_still_runs(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """The same for an advisory lens: no own token, no launch, never the
-        shared bearer."""
+        """Deliberate non-regression: only GATE OWNERS are refused.
+
+        An advisory lens's whole product is a PR comment, which survives an
+        unsigned run. Refusing it too would turn one silent failure into a
+        loud outage across every panel.
+        """
         fake_def = _make_def(
             prompt_markdown="Role: Falco.",
             aauth_sub="falco@ateles-swarm",
@@ -4796,9 +4810,10 @@ class TestGateOwnerIdentity:
                 )
             )
 
-        assert not result.ok
-        assert "FALCO_NEOTOMA_TOKEN" in result.configuration_repair
-        assert "shared-daemon-token" not in result.error + result.configuration_repair
+        assert result.ok, (
+            "An advisory lens must keep running on the shared bearer — its "
+            "product (a PR comment) does not need attribution to survive."
+        )
 
 
 # ── Falco's REQUEST_CHANGES on PR #1181: deny `correct` for a gate-owning ───
@@ -5130,6 +5145,7 @@ class TestGateOwnerToolDenyAcrossProviders:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("WAXWING_NEOTOMA_TOKEN", "waxwing-own-token")
         monkeypatch.setenv("NEOTOMA_BASE_URL", "https://record.example")
         source_home = tmp_path / "source-codex-home"
         source_home.mkdir()
@@ -5598,7 +5614,7 @@ class TestModelTieringDispatch:
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         captured: dict = {}
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
 
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
@@ -5635,7 +5651,7 @@ class TestModelTieringDispatch:
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         captured: dict = {}
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv(
             "APIS_ACTION_POLICY", '{"lens_review:security": "top"}'
         )
@@ -5678,7 +5694,7 @@ class TestModelTieringDispatch:
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         captured: dict = {}
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
 
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
@@ -5709,7 +5725,7 @@ class TestModelTieringDispatch:
         instance = MagicMock()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "top"}')
         # vendor_binding configured for claude, but with no "top" tier bound.
         monkeypatch.setenv(
@@ -5759,7 +5775,7 @@ class TestModelTieringDispatch:
         instance = MagicMock()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv(
@@ -5812,7 +5828,7 @@ class TestModelTieringDispatch:
         MockLoader.return_value = instance
         ledger = tmp_path / "tier-ledger.jsonl"
         monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv(
             "APIS_VENDOR_BINDING", '{"claude": {"mid": "claude-sonnet-5"}}'
@@ -5861,7 +5877,7 @@ class TestModelTieringDispatch:
         MockLoader.return_value = instance
         ledger = tmp_path / "tier-ledger.jsonl"
         monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
 
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
@@ -6019,7 +6035,7 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv("APIS_VENDOR_BINDING", binding)
         spawned: dict = {}

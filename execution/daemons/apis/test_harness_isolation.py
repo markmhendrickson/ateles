@@ -664,24 +664,24 @@ def test_every_dispatching_role_still_launches_seated_with_its_token(operator_ho
     assert seen["NEOTOMA_BEARER_TOKEN"] == SHARED_BEARER  # its own token, equal by choice
 
 
-def test_a_seated_repair_fails_over_without_a_cooldown(operator_home, monkeypatch, tmp_path):
+def test_a_seated_repair_is_not_a_cooldown(operator_home, monkeypatch, tmp_path):
+    # Seated reviews run on Codex here (Cursor cannot deny `correct`): the
+    # repair ends the dispatch without cooling the provider.
     monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
-    # Seated reviews run on the providers that can deny `correct` (Claude and
-    # Codex); each refuses as a repair, and the dispatch moves on to the next.
-    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,claude")
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
     stand_in, record = _env_child(tmp_path)
     marker, notified = _seam(monkeypatch, tmp_path)
     monkeypatch.setattr(skill_runner, "CODEX_BIN", str(stand_in))
-    monkeypatch.setattr(skill_runner, "CLAUDE_BIN", str(stand_in))
+    monkeypatch.setattr(skill_runner, "CURSOR_BIN", str(stand_in))
     result = asyncio.run(skill_runner.run_skill("lanius", "review", role="lanius",
                                                 seated_reviewer=True))  # fmt: skip
     assert not record.exists()
-    assert set(result.attempted_providers) == {"codex", "claude"}
-    assert result.configuration_repair.count("(repair: LANIUS_NEOTOMA_TOKEN)") == 2
+    assert "codex" in result.attempted_providers
+    assert "(repair: LANIUS_NEOTOMA_TOKEN)" in result.configuration_repair
     assert "dispatch not launched: configuration repair needed" in result.error
     import harness_router
 
-    assert not ({"codex", "claude"} & set(harness_router.cooling_providers()))
+    assert not ({"codex", "cursor"} & set(harness_router.cooling_providers()))
 
 
 @pytest.mark.parametrize("provider", ["codex", "cursor"])
@@ -696,9 +696,12 @@ def test_a_local_child_holds_no_bearer_but_its_roles_own(operator_home, monkeypa
     assert SHARED_BEARER not in json.dumps(seen)
 
 
-def test_a_no_grant_role_child_holds_no_neotoma_bearer_at_all(operator_home, monkeypatch,
-                                                              tmp_path):  # fmt: skip
-    monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+def test_a_no_grant_role_child_holds_no_neotoma_credential_even_with_a_token(
+        operator_home, monkeypatch, tmp_path):  # fmt: skip
+    # The role HAS its own token (operator_home sets it) but no Neotoma tools:
+    # its child gets no Neotoma credential at all.
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN_PROD", "shared-prod-bearer-canary")
+    monkeypatch.setenv("PAVO_NEOTOMA_TOKEN", "pavo-token-canary")
     stand_in, record = _env_child(tmp_path)
     _seam(monkeypatch, tmp_path, tools="Read,Bash")
     monkeypatch.setattr(skill_runner, "CODEX_BIN", str(stand_in))
@@ -706,6 +709,76 @@ def test_a_no_grant_role_child_holds_no_neotoma_bearer_at_all(operator_home, mon
                                                 provider="codex"))  # fmt: skip
     assert result.ok, result.error
     seen = json.loads(record.read_text())
-    assert not any(k.endswith("_TOKEN") or k.startswith("NEOTOMA_BEARER") for k in seen
-                   if k != "ATELES_ROLE_NEOTOMA_TOKEN")  # fmt: skip
-    assert SHARED_BEARER not in json.dumps(seen)
+    assert [k for k in seen if k.endswith("_TOKEN") or k.startswith("NEOTOMA_BEARER")] == []
+    for value in (ROLE_TOKEN, SHARED_BEARER, "pavo-token-canary", "shared-prod-bearer-canary"):
+        assert value not in json.dumps(seen)
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+@pytest.mark.parametrize("error", [OSError("disk full"), RuntimeError("could not verify")])
+def test_an_isolated_home_that_cannot_be_built_refuses_the_launch(operator_home, monkeypatch,
+                                                                  tmp_path, provider, error):  # fmt: skip
+    marker, _ = _seam(monkeypatch, tmp_path)
+
+    def broken(*a, **k):
+        raise error
+
+    monkeypatch.setattr(skill_runner, "prepare_isolated_harness_home", broken)
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                                provider=provider))  # fmt: skip
+    assert not result.ok and not marker.exists() and result.configuration_repair
+    import harness_router
+
+    assert provider not in harness_router.cooling_providers()
+
+
+@pytest.mark.parametrize("error", [OSError("no such file"), RuntimeError("contract not proved")])
+def test_a_seated_config_that_cannot_be_built_refuses_as_a_repair(operator_home, monkeypatch,
+                                                                  tmp_path, error):  # fmt: skip
+    def broken(**k):
+        raise error
+
+    monkeypatch.setattr(skill_runner, "_prepare_codex_gate_owner_config", broken)
+    result, seen, notified = _seated(monkeypatch, tmp_path)
+    assert not result.ok and seen is None  # nothing started
+    assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.configuration_repair
+    assert "no such file" not in result.configuration_repair  # an OSError's text is not echoed
+    import harness_router
+
+    assert "codex" not in harness_router.cooling_providers()
+
+
+def test_claude_dispatch_is_unchanged_by_this_isolation(operator_home, monkeypatch, tmp_path):
+    """Claude is not isolated by this change (it is not an active swarm
+    provider): a Claude child keeps the dispatcher's environment and the
+    existing MCP configuration mechanism, as before. Isolating Claude is
+    separate work, required before Claude is reactivated; this test pins
+    today's behaviour so that work changes it deliberately."""
+    monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+    stand_in, record = _env_child(tmp_path)
+    marker, _ = _seam(monkeypatch, tmp_path)
+    monkeypatch.setattr(skill_runner, "CLAUDE_BIN", str(stand_in))
+    seen_cfg = {}
+    real_mkstemp = skill_runner.tempfile.mkstemp
+
+    def capture(*a, **k):
+        fd, path = real_mkstemp(*a, **k)
+        seen_cfg["path"] = path
+        return fd, path
+
+    monkeypatch.setattr(skill_runner.tempfile, "mkstemp", capture)
+    real_exec = asyncio.create_subprocess_exec
+
+    async def exec_and_read(*cmd, **kw):
+        if "--mcp-config" in cmd:
+            seen_cfg["cfg"] = json.loads(Path(cmd[cmd.index("--mcp-config") + 1]).read_text())
+        return await real_exec(*cmd, **kw)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_and_read)
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                                provider="claude"))  # fmt: skip
+    assert result.ok, result.error
+    env = json.loads(record.read_text())
+    assert env.get("NEOTOMA_BEARER_TOKEN") == SHARED_BEARER
+    header = seen_cfg["cfg"]["mcpServers"]["mcpsrv_neotoma"]["headers"]["Authorization"]
+    assert header == f"Bearer {SHARED_BEARER}"
