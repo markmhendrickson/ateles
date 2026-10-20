@@ -144,3 +144,20 @@ def _fly_runner_off_and_isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "isolated-fly-ledger.json"))
     monkeypatch.setattr(fly_runner, "_EXECUTOR", None)
     fly_runner._LOGIN_LOCKS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_codex_login(monkeypatch, tmp_path):
+    """A stand-in Codex login, never the host's.
+
+    Local Codex children run in an isolated harness home that links the Codex
+    login file (``auth.json``) and refuses to launch without one. A test must
+    neither depend on the host having a Codex login nor link the host's real
+    one: point ``CODEX_HOME`` at a placeholder login. Tests of other homes
+    set their own.
+    """
+    home = tmp_path / "isolated-codex-login"
+    home.mkdir()
+    (home / "auth.json").write_text("{}", encoding="utf-8")
+    (home / "auth.json").chmod(0o600)
+    monkeypatch.setenv("CODEX_HOME", str(home))

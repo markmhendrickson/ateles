@@ -121,8 +121,18 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
 
         mp.setattr(httpx.Client, "request", no_http)
         mp.setattr(httpx.AsyncClient, "request", no_async_http)
+        # A local Codex or Cursor child of a role granted Neotoma tools runs in
+        # an isolated harness home, which needs the role's own token, an https
+        # endpoint and a Codex login: placeholders here, never real values, and
+        # a stand-in login so the host's real one is never linked.
+        codex_login = tmp_path / "codex-login"
+        codex_login.mkdir(exist_ok=True)
+        (codex_login / "auth.json").write_text("{}")
         # Isolated fixture configuration; never consult operator capacity/files.
         for key, value in {
+            "PAVO_NEOTOMA_TOKEN": "eval-only-pavo-neotoma-token",
+            "NEOTOMA_BASE_URL": "https://eval.invalid",
+            "CODEX_HOME": str(codex_login),
             "APIS_HARNESS_PROVIDERS": "codex,cursor",
             "APIS_USAGE_GATED_PROVIDERS": "claude",
             "APIS_USAGE_PROBE": "off",

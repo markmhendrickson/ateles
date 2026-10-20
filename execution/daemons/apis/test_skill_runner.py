@@ -5050,6 +5050,7 @@ class TestGateOwnerToolDenyAcrossProviders:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("WAXWING_NEOTOMA_TOKEN", "waxwing-own-token")
         monkeypatch.setenv("NEOTOMA_BASE_URL", "https://record.example")
         source_home = tmp_path / "source-codex-home"
         source_home.mkdir()
@@ -5121,7 +5122,7 @@ class TestGateOwnerToolDenyAcrossProviders:
         )
         assert "correct" not in effective
         assert set(skill_runner.CODEX_GATE_REQUIRED_READ_TOOLS) <= effective
-        assert observed["bearer"] == "shared-daemon-token"
+        assert observed["bearer"] == "waxwing-own-token"  # the role's own, never shared
         assert observed["auth_is_symlink"] is True
         assert json.loads(source_auth.read_text(encoding="utf-8")) == {
             "refreshed": True
@@ -5144,6 +5145,7 @@ class TestGateOwnerToolDenyAcrossProviders:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("WAXWING_NEOTOMA_TOKEN", "waxwing-own-token")
         monkeypatch.setenv("NEOTOMA_BASE_URL", "https://record.example")
         source_home = tmp_path / "source-codex-home"
         source_home.mkdir()
@@ -5195,14 +5197,18 @@ class TestGateOwnerToolDenyAcrossProviders:
 
         assert not result.ok and launched == []
         assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
-        assert "disabled_tools must deny exactly" in result.error
+        # A fixed reason and the exception class only: the contract's own
+        # detail stays out of every surface the repair reaches.
+        assert "(RuntimeError)" in result.error
+        assert "disabled_tools must deny exactly" not in result.error
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_non_gate_codex_keeps_the_effective_codex_home(
+    def test_non_gate_codex_gets_an_isolated_home_with_the_effective_login(
         self, MockLoader, mock_write_harness, monkeypatch, tmp_path
     ) -> None:
-        """Ordinary Codex runs retain their ambient command/config behavior."""
+        """Ordinary Codex runs never use the operator's CODEX_HOME (its MCP
+        servers): they get an isolated home whose auth links to its login."""
         fake_def = _make_def(
             prompt_markdown="Role: Falco.",
             tool_allowlist="*",
@@ -5216,6 +5222,8 @@ class TestGateOwnerToolDenyAcrossProviders:
         source_home.mkdir()
         (source_home / "auth.json").write_text("{}", encoding="utf-8")
         monkeypatch.setenv("CODEX_HOME", str(source_home))
+        monkeypatch.setenv("FALCO_NEOTOMA_TOKEN", "falco-own-token")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
         skill_root = tmp_path / ".claude" / "skills" / "falco"
         skill_root.mkdir(parents=True)
         (skill_root / "SKILL.md").write_text("skill md", encoding="utf-8")
@@ -5224,6 +5232,8 @@ class TestGateOwnerToolDenyAcrossProviders:
 
         async def fake_exec(*cmd, **kwargs):
             observed["codex_home"] = kwargs["env"]["CODEX_HOME"]
+            observed["auth_target"] = str(
+                (Path(kwargs["env"]["CODEX_HOME"]) / "auth.json").resolve())
             proc = MagicMock()
             proc.returncode = 0
 
@@ -5248,7 +5258,8 @@ class TestGateOwnerToolDenyAcrossProviders:
             )
 
         assert result.ok
-        assert observed["codex_home"] == str(source_home)
+        assert observed["codex_home"] != str(source_home)
+        assert observed["auth_target"] == str((source_home / "auth.json").resolve())
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -5910,7 +5921,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv(
             "APIS_VENDOR_BINDING",
@@ -5981,7 +5993,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv(
             "APIS_VENDOR_BINDING", '{"codex": {"mid": "codex-mid-model"}}'
@@ -6103,7 +6116,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
 
         policy_path = tmp_path / "action-policy.json"
         policy_path.write_text('{"build": "mid"}')
