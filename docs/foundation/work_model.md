@@ -62,7 +62,7 @@ below; steps and gates are `gates_and_workflows.md`; reference workflows and int
 - [A batch may hold on a condition discovered mid-flight](#a-batch-may-hold-on-a-condition-discovered-mid-flight).
 - [A batch may depend on a task it created](#a-batch-may-depend-on-a-task-it-created).
 - [Artifacts are records a batch leaves, never its subject](#artifacts-are-records-a-batch-leaves-never-its-subject).
-- [A business work item is a record that tasks refer to, and is not itself a task](#a-business-work-item-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task).
+- [A business matter is a record that tasks refer to, and is not itself a task](#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task).
 - [A task is in at most one batch at a time](#a-task-is-in-at-most-one-batch-at-a-time).
 - [Parent and child tasks](#parent-and-child-tasks).
 - [A recurring task is one live instance, and its completion creates the next](#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next).
@@ -1073,13 +1073,13 @@ that only an adapter touches them, that they are never the subject of a step, an
 them reaches a step only through a principal who reads and signs. A word that also covered the swarm's
 own outputs would break all four.
 
-### A business work item is a record that tasks refer to, and is not itself a task
+### A business matter is a record that tasks refer to, and is not itself a task
 
-**Ruled (decision 152, 2026-10-19, the operator's): a business work item, such as a customer incident or an
+**Ruled (decision 152, 2026-10-19, the operator's): a business matter, such as a customer incident or an
 overdue receivable, is a business record that tasks `REFERS_TO`, and is not itself a task.** Registered as ruled
 in `conformance.md#the-register-of-open-design-decisions`.
 
-**The question.** A client's staff organise their day around a **business work item**: a customer incident, an
+**The question.** A client's staff organise their day around a **business matter**: a customer incident, an
 overdue receivable, an order exception. The item has a lifecycle of its own (open, waiting, closed) and effects
 of its own in external systems; closing an incident, for instance, files its mail thread out of the inbox. The
 work model's unit is the `task`, carried through declared workflows in batches, and a step's subject is always
@@ -1089,7 +1089,7 @@ incident may need several pieces of work: a reply, a refund, an exchange shipmen
 
 **The rules in this section.**
 
-- A business work item is a business record in a bundle's type, not a `task`.
+- A business matter is a business record in a bundle's type, not a `task`.
 - Each unit of work on an item is a task, entering through intake, with a `REFERS_TO` edge to the item.
 - The staff queue is a view over the item and its open tasks.
 
@@ -1113,7 +1113,7 @@ case stays open while the customer waits) does not belong to the unit the swarm 
 
 **Closing an item.** The item's closure is a state of the business record, reached when its tasks close, and
 the effect closing has in an external system (filing the thread) is an action taken through the gate by a task's
-step, not a side effect of the state change. *Left open (decision 156):* whether that closed state is **stored**
+step, not a consequence of the state change. *Left open (decision 156):* whether that closed state is **stored**
 on the item (written by the step that closes the last task) or **derived** as a read over the item's tasks.
 Principle 11 favours deriving anything that a process would otherwise have to keep true, and a business record
 wants its state readable without the work model; the two pull apart. *Candidates, unruled:* (a) derived, with

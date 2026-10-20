@@ -2,7 +2,7 @@
 
 **Kind:** foundation; an authored companion that states the design and never the state of a checkout. Not
 keyed and not inlined into a review prompt (`conformance.md#scope`). **Derived from:** the operator's
-rulings of 2026-10-18 and 2026-10-19 on ateles#1498 and its sub-questions (decisions 145 to 154 in
+rulings of 2026-10-18 and 2026-10-19 on the application question and its sub-questions (decisions 145 to 154 in
 `conformance.md#the-register-of-open-design-decisions`), the 2026-07-09 placement rule for the four layers
 (substrate in the record's public repository, generic use-case skills in the record's bundles, swarm
 operations in this repository, proprietary vertical logic in a company's own repository), decision 15
@@ -157,11 +157,11 @@ code.
 ### Module layout
 
 **Ruled (decision 154, 2026-10-19, the operator's): a `console_module` entity per module on the instance
-names the module's panels and the record types or metrics each reads, with defaults shipped in bundles.**
+names the module's blocks and the record types or metrics each reads, with defaults shipped in bundles.**
 The alternative, a fixed module set in code toggled by a profile flag, is simpler and makes every new layout
 a release. Under the ruling a new client's console is entity edits, and an instance can hide or reorder
 modules without a deploy. A `console_module` is composition and never data of record: it holds no approval
-state and no copy of what its panels read. Which modules and panels exist by default, and the bundle-views
+state and no copy of what its blocks read. Which modules and blocks exist by default, and the bundle-views
 mechanism that ships them, are the record's and the console's to design; `docs/product/console.md` is the
 specification those designs land in, and its admission of domain screens, writes by an instance's own
 operators to business records, charts, and per-instance composition is product work the ruling calls for and
@@ -186,7 +186,7 @@ Each of the following is stated once, in the document that owns its mechanism, a
 | A client's delivery depends on a minimal runtime of its own and never on swarm coordination health | decision 148 | `adapters.md#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination` |
 | An environment is a separate instance of the record; promotion replays the same governed writes in order | decision 150 | `adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order` |
 | Direction of truth for a business record class lives on its source's `vendor_binding`, with a one-way cutover event | decision 151 | `adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event` |
-| A business work item is a record that tasks refer to, not itself a task | decision 152 | `work_model.md#a-business-work-item-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task` |
+| A business matter is a record that tasks refer to, not itself a task | decision 152 | `work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task` |
 | `customer_reply` is a reference workflow | decision 153 | `workflows.md#customer_reply` |
 
 ## What this document does not decide
@@ -208,5 +208,5 @@ writes per install makes per-write approval a burden.
 
 **What a held write becomes at cutover (decision 157, open)** is stated with its home, in
 `adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`.
-**Whether a business work item's closed state is stored or derived from its tasks (decision 156, open)** is
-stated with its home, in `work_model.md#a-business-work-item-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`.
+**Whether a business matter's closed state is stored or derived from its tasks (decision 156, open)** is
+stated with its home, in `work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`.

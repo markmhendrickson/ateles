@@ -758,7 +758,7 @@ state is hydrated through the shop and carrier adapters named by their `vendor_b
 (`#what-link-attaches-and-what-it-leaves-to-hydration`).
 
 **Successors:** none. A refund or an exchange shipment is a new task, routed by its own intake and referring to
-the same customer matter (`work_model.md#a-business-work-item-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`).
+the same customer matter (`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`).
 
 **Fast paths:** none. Every outward message passes the gate.
 

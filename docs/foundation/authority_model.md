@@ -1440,7 +1440,7 @@ approval of the later one.
 
 **Why the lint runs before the approval and not at the take.** The alternative attaches approval to the edited
 text and runs the lint at the take, so a lint that fails after approval needs a second round with the same
-person and a consented draft can still be refused. Running it first costs about a second of latency per edit
+person and a consented draft can still be refused. Doing it first costs about a second of latency per edit
 and keeps the `outreach` rule unchanged: the consented draft is the sent draft.
 
 **Cost accepted.** An edit-and-approve is two writes (the draft and the resolution) that the application

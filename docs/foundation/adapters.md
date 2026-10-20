@@ -2093,7 +2093,7 @@ not stop their mail.
 
 **Delivery is the path from an inbound event to a taken action.** It reads the record, runs a step, passes the
 gate, and takes the action through an adapter. None of the swarm's coordination is on that path: not the
-dispatcher that assigns work to agents, not the review lenses that judge a change to the swarm, not the
+component that assigns work to agents, not the review lenses that judge a change to the swarm, not the
 planning machinery. A step of a declared workflow is claimed and run by a step runner that belongs to the
 instance's runtime, and the gate that judges the action is the instance's own.
 
@@ -2101,7 +2101,7 @@ instance's runtime, and the gate that judges the action is the instance's own.
 mechanism:
 
 - With the swarm's coordination absent, nothing in delivery changes. Development and review of the declarations
-  and the runtime stop, and a declaration already live keeps running.
+  and the runtime stop, and a declaration already live stays in force.
 - With a step runner or the operator-facing agent absent, drafting and the steps it owns stop, and what they
   would have written is absent, not guessed. A batch's steps lapse and raise their checkpoints on the ordinary
   rules (`failure_posture.md`).

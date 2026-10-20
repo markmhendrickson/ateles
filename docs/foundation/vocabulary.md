@@ -1444,7 +1444,7 @@ one boundary the design has, where an application crosses none.
 **Definition:** an instance of the [record](#record) that serves one stage of a deployment's life, such as
 development, a demo, or production, with its own `deployment_configuration`, bindings, grants, and data.
 No environment flag or dimension exists inside the record; two environments are two instances, and a governed
-change reaches the next one by replay of the same writes, in order.
+change reaches the next one by [replay](#replay) of the same writes, in order.
 **See:** [`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order`](adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order).
 **Never:** —
 **Not for:** the process environment a program reads variables from; a [stage](#stage) of a workflow, which
@@ -1454,12 +1454,12 @@ inside).
 ### business record
 **Definition:** a record an instance keeps about its owner's own business, such as an invoice, a company, a
 receivable, a price list, a policy, or a customer incident, as distinct from the swarm's own records (tasks,
-batches, verdicts) and from an [artifact](#artifact), which an [external system](#external-system) holds.
-A business record is shipped as a type in one of the record's bundles. A **business work item**, an incident or an
+[batches](#batch), [verdicts](#verdict)) and from an [artifact](#artifact), which an [external system](#external-system) holds.
+A business record is shipped as a type in one of the record's bundles. A **business matter**, an incident or an
 overdue receivable, is a business record that [tasks](#task) refer to and is not itself a task. Which side of a
 class of business record is authoritative, the record or an external source, is a field of the source's
 [binding](#vendor_binding).
-**See:** [`work_model.md#a-business-work-item-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`](work_model.md#a-business-work-item-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task),
+**See:** [`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`](work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task),
 [`adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`](adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event).
 **Never:** "domain record".
 **Not for:** an [artifact](#artifact); a [domain](#domain), which is a term of the [authority](#authority) tuple and

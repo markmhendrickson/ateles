@@ -111,6 +111,11 @@ Authored companions (design prose; **not** inlined into review prompts):
   decisions) into each harness through each carrier (protocol, integration, bundle, local file, hook): the
   payload-by-carrier matrix marking delivery guaranteed or discretionary, each harness's rung, where each
   payload binds, and the dated measured constraints.
+- [**Application**](foundation/application.md) — what an application on an instance of the record is (the
+  console, deployed once per instance and composed from that instance's entities), where each of its parts
+  lives (record bundles, this foundation, entities on the instance), and how per-instance labels, module
+  layout, and the rest compose; the rulings on staff approval, delivery independence, environments, and
+  cutover live in the documents that own their mechanisms and are indexed there.
 - [**Migration**](foundation/migration.md) — the population plan's second leg: how the record an instance
   already holds is carried into the design's types — each type's disposition (keep, re-type, derive,
   retire, introduce), the record primitive that carries it, the order and its dependencies, what is

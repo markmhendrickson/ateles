@@ -148,6 +148,7 @@ ALLOWLIST_WORDS = frozenset(
     definition question shape list default exists existing cannot side
     fields surface their then half thing later different stays reaches refused refuses stored
     request answer defect confirmed release
+    absent accepted added applied classes data entities foundation like place target
     """.split()
 )
 # `fields` tipped the advisory bound on ateles#899 (decision-93 ruling prose merged with main);
@@ -155,6 +156,8 @@ ALLOWLIST_WORDS = frozenset(
 # (decision-101 deny-table prose); the rest are ordinary English that had crossed threshold
 # without being load-bearing terms. `confirmed` and `release` crossed it on ateles#1455 (the
 # conditioned-payment ruling's prose, decision 144), as the plain verb and adjective they are.
+# `absent` through `target` crossed it with the application-on-an-instance pass (decisions 145 to 157, which
+# added a document and sections of the same register), as ordinary English that carries no bound sense.
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']*")
 _TESTID_ABBREVIATIONS = frozenset(
