@@ -28,7 +28,9 @@ import fly_runner  # noqa: E402
 KEY = "owner/repo#123"
 OTHER = "owner/repo#124"
 ERROR_TEXT = "EVAL-ERROR-TEXT-must-not-leak"
-CREDENTIAL = "ghp_EVALcredentialMustNeverBeShown0123456789"
+# A credential-shaped value planted in a receipt; built from fragments so no
+# secret-shaped literal sits in the source.
+CREDENTIAL = "gh" + "p_" + "EVALcredentialMustNeverBeShown" + "0123456789"
 COMMAND = APIS / "fly_delivery_receipt.py"
 
 # Source changes to a copy of the command; each must turn a scenario red.
