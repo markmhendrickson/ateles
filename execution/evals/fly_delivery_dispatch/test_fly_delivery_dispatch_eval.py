@@ -52,6 +52,8 @@ class Trace:
     task_replay_ok: bool
     pipeline_replay_refused: bool
     job_trace: object
+    optin_task_replay_ok: bool = True
+    optin_pipeline_refused: bool = False
 
 
 def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
@@ -199,6 +201,21 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         pipeline_refused = True
     except delivery.BuildNotStarted:
         pass
+    # Opt-in restored after the restart: the same receipt must still refuse
+    # both entrances (a changed setting never changes recovery).
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    optin_task_ok = asyncio.run(task()).ok
+    optin_refused = False
+    try:
+        asyncio.run(
+            SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
+                trig, _empty_spec_state()
+            )
+        )
+    except delivery.FlyDeliveryEnded:
+        optin_refused = True
+    except delivery.BuildNotStarted:
+        pass
     return Trace(
         launches,
         len(local),
@@ -208,6 +225,8 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         task_replay_ok,
         pipeline_refused,
         traces[0],
+        optin_task_ok,
+        optin_refused,
     )
 
 
@@ -217,6 +236,8 @@ def judge(scenario, trace):
         problems.append("a replay/fallback ran another builder")
     if trace.task_replay_ok or not trace.pipeline_replay_refused:
         problems.append("a restart forgot the delivery receipt")
+    if trace.optin_task_replay_ok or not trace.optin_pipeline_refused:
+        problems.append("restoring the opt-in after a restart replayed a delivery")
     if trace.receipt_status != scenario["status"]:
         problems.append("receipt lost the delivery outcome")
     for prompt, kw in trace.launches:

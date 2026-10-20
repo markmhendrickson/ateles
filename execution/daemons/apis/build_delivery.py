@@ -728,16 +728,26 @@ def worktree_instructions(wt: BuildWorktree) -> str:
 # launch and kept with its outcome. Every lane that can re-run a builder (the
 # swarm build handoff, the task path, the startup resume sweep that re-runs an
 # interrupted issue pipeline, the task watchdog) reaches the builder through
-# ``run_fly_delivery``, which refuses while that record says the delivery
-# launched and may have pushed. Only an outcome that provably pushed nothing
-# (``clone_failed``, ``not_delivered``) allows a new one.
+# ``run_fly_delivery``, which refuses while any record exists for the key.
+#
+# Every status that reaches the receipt is terminal, with no exception:
+# ``launching``, ``unknown`` and ``unreported`` (the outcome is not known), and
+# every status the runner reports (``opened``, ``updated``, ``no_changes``,
+# ``clone_failed``, ``not_delivered``, ``push_failed``, ``pr_failed``,
+# ``no_time``). The runner assigns all of them only after the machine has
+# launched, so none proves that nothing ran, and none is replayed or falls back
+# to the local path, whether or not the class is still opted in. The only
+# outcomes that may start over are the ones proven to be before any launch
+# (not eligible, a refused token mint, a launch request that provably did not
+# take effect); those never reach the receipt as a status, and the receipt
+# reserved for them is removed. Automatic retry of a launched failure is not
+# provided: it would be a separate, deliberate change.
 
 FLY_DELIVERY_BASE_BRANCH = "main"
 FLY_DELIVERY_AUTHOR = ("cicada (ateles swarm)", "cicada@ateles-swarm.invalid")
 # Same ledger and lock as executor admission, accounting, and reaping.
 FLY_DELIVERY_REGISTRY_ENV = "APIS_FLY_LEDGER_FILE"
-# Outcomes that pushed nothing, so a new delivery for the same key is safe.
-FLY_RETRYABLE_STATUSES = frozenset({"clone_failed", "not_delivered"})
+# No receipt status is retryable: see the note above.
 
 
 @dataclass(frozen=True)
@@ -830,7 +840,7 @@ def fly_delivery_blocker(key: str) -> str:
     except (OSError, fly_runner.FlyLedgerError):
         return ("the Fly delivery ledger could not be read, so whether a delivery for "
                 f"{key} already ran is unknown; not starting another")
-    if entry is None or entry["status"] in FLY_RETRYABLE_STATUSES:
+    if entry is None:
         return ""
     return (f"a Fly delivery for {key} is already recorded (status {entry['status']}, branch "
             f"{entry.get('branch', '?')}, run {entry.get('run_id') or 'not known'}); not "
@@ -853,7 +863,7 @@ def _reserve_delivery(plan: FlyDeliveryPlan) -> bool:
     try:
         return _delivery_ledger().record_delivery(
             plan.key, {"status": "launching", "branch": plan.branch, "run_id": "",
-                       "recorded_at": time.time()}, retryable=FLY_RETRYABLE_STATUSES,
+                       "recorded_at": time.time()}, retryable=frozenset(),
         )
     except fly_runner.FlyLedgerError as exc:
         raise ValueError(str(exc)) from None
@@ -902,8 +912,11 @@ _FLY_STATUS_TEXT = {
     "opened": "opened pull request {pr}",
     "updated": "updated pull request {pr}",
     "no_changes": "finished with no new commits on {branch}; nothing was pushed",
-    "clone_failed": "could not prepare its clone of the repository; the agent did not run",
-    "not_delivered": "pushed nothing",
+    "clone_failed": ("ended as clone_failed: the runner reported that it could not prepare its "
+                     "clone of the repository. Check {branch} on the remote before dispatching "
+                     "again"),
+    "not_delivered": ("ended as not_delivered: the runner's record reports no delivery. Check "
+                      "{branch} on the remote before dispatching again"),
     "push_failed": "did not get its push of {branch} accepted; no pull request was opened",
     "pr_failed": ("pushed {branch} ({commit}), but the pull request step did not complete; "
                   "the branch is on the remote"),

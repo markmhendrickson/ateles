@@ -33,6 +33,20 @@ _REAL_SPAWN = apis._spawn_harness_skill
 REPO = "owner/repo"
 BRANCH = "cicada/delivery-123456"
 COMMIT = "a" * 40
+# Every status a launched delivery can end with. None is retryable and none
+# permits the local path: the runner assigns each only after the machine launched.
+LAUNCHED_STATUSES = [
+    "unknown",
+    "unreported",
+    "opened",
+    "updated",
+    "no_changes",
+    "clone_failed",
+    "not_delivered",
+    "push_failed",
+    "pr_failed",
+    "no_time",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -157,7 +171,7 @@ def test_both_entries_pass_the_delivery_spec_without_local_grants(monkeypatch, e
 
 @pytest.mark.parametrize(
     "status",
-    ["unknown", "no_time", "unreported", "pr_failed", "push_failed", "no_changes"],
+    [s for s in LAUNCHED_STATUSES if s not in {"opened", "updated"}],
 )
 @pytest.mark.parametrize("entry", ["task", "pipeline"])
 def test_terminal_delivery_cannot_repeat_after_restart_or_optout(
@@ -196,7 +210,7 @@ def test_terminal_delivery_cannot_repeat_after_restart_or_optout(
 
 
 @pytest.mark.parametrize("opted_in", [True, False])
-@pytest.mark.parametrize("recorded", ["unknown", "opened", "inflight"])
+@pytest.mark.parametrize("recorded", [*LAUNCHED_STATUSES, "inflight"])
 def test_resumed_issue_pipeline_never_starts_a_second_delivery(
     monkeypatch, recorded, opted_in
 ):
@@ -210,7 +224,7 @@ def test_resumed_issue_pipeline_never_starts_a_second_delivery(
 
     async def run(*a, **kw):
         launches.append(kw)
-        return result("opened" if recorded == "opened" else "unknown")
+        return result(recorded)
 
     monkeypatch.setattr("swarm_dispatch.run_skill", run)
     if recorded == "inflight":
@@ -220,7 +234,7 @@ def test_resumed_issue_pipeline_never_starts_a_second_delivery(
         expected_launches = 0
     else:
         d = dispatcher()
-        if recorded == "opened":
+        if recorded in {"opened", "updated"}:
             assert asyncio.run(d._open_implementation_pr(trigger(), _empty_spec_state()))
         else:
             with pytest.raises(delivery.FlyDeliveryEnded):
@@ -281,6 +295,23 @@ def test_prelaunch_refusal_is_the_only_local_fallback(monkeypatch):
     assert delivery.fly_delivery_blocker(REPO + "#123") == ""
 
 
+@pytest.mark.parametrize("opted_in", [True, False])
+@pytest.mark.parametrize("status", [*LAUNCHED_STATUSES, "launching"])
+def test_blocker_refuses_every_launched_status_whatever_the_setting(
+    monkeypatch, status, opted_in
+):
+    """No receipt status is retryable and none lets a new reservation through."""
+    if opted_in:
+        monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
+    delivery._record(
+        plan.key, {"status": status, "branch": BRANCH, "run_id": "run-123"}
+    )
+    importlib.reload(delivery)
+    assert "already recorded" in delivery.fly_delivery_blocker(plan.key)
+    assert not delivery._reserve_delivery(plan)
+
+
 @pytest.mark.parametrize(
     "corrupt", ['{"deliveries": []}', '{"deliveries":{"x":{}}}', "broken"]
 )
@@ -328,7 +359,7 @@ print(d._reserve_delivery(p), flush=True)
     assert got.count("True") == 1 and got.count("False") == 3
 
 
-@pytest.mark.parametrize("status", ["unknown", "no_time", "pr_failed"])
+@pytest.mark.parametrize("status", LAUNCHED_STATUSES)
 def test_provider_failover_stops_on_a_launched_delivery(monkeypatch, status):
     attempts = []
 
@@ -513,7 +544,12 @@ def _load_dispatch_env(request):
     return request.getfixturevalue("_dispatch_env")
 
 
-@pytest.mark.parametrize("status", ["unknown", "no_time", "pr_failed"])
+# no_changes is excluded: this test replaces the spawn, and the stand-in marks
+# that result ok; the real spawn's handling is covered by the entrance tests.
+@pytest.mark.parametrize(
+    "status",
+    [s for s in LAUNCHED_STATUSES if s not in {"opened", "updated", "no_changes"}],
+)
 def test_failed_fly_task_is_blocked_with_verified_result(
     monkeypatch,
     dispatch_env,
@@ -544,10 +580,16 @@ def test_failed_fly_task_is_blocked_with_verified_result(
         "run-123" in store.rows[eid]["result"] and COMMIT in store.rows[eid]["result"]
     )
     assert notice.sent
+    if status in {"clone_failed", "not_delivered"}:
+        # The operator reads the observed status and an instruction to check the
+        # remote; the text asserts no cause and no claim that nothing was pushed.
+        text = store.rows[eid]["result"]
+        assert status in text and "Check" in text and BRANCH in text
+        assert "did not run" not in text and "pushed nothing" not in text
 
 
 @pytest.mark.parametrize("entry", ["watchdog_retry", "build_released"])
-@pytest.mark.parametrize("status", ["unknown", "no_time"])
+@pytest.mark.parametrize("status", LAUNCHED_STATUSES)
 def test_retry_and_deferred_task_entrances_read_the_durable_ledger(
     monkeypatch,
     dispatch_env,
