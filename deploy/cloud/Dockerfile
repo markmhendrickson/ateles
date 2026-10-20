@@ -1,7 +1,9 @@
-# Ateles Bucket-A (device-agnostic) daemon image.
+# Superseded VM scaffold for Bucket-A (device-agnostic) daemons.
+# Current Bucket-C jobs use deploy/fly-runner/Dockerfile and run_job.py instead;
+# this full-snapshot daemon image is not their credential boundary.
 # Task #5 of plan ent_aff87747b49e338790568af6. See deploy/cloud/README.md.
 #
-# Multi-arch: builds for arm64 (Hetzner CAX / Ampere) and amd64. Secrets are
+# Historical multi-arch VM image: arm64 and amd64. Secrets are
 # NEVER baked in — the age key + the ateles-private clone are mounted at runtime
 # and decrypted by the entrypoint (SOPS+age), so the image is safe to store in a
 # registry.
@@ -23,9 +25,8 @@ RUN curl -fsSL -o /usr/local/bin/sops \
     && chmod +x /usr/local/bin/sops \
     && sops --version
 
-# Node + the Claude CLI for headless `claude --print` (Bucket-A T4 work that is
-# NOT redirected to Bucket-C ephemeral runners). Auth comes from ANTHROPIC_API_KEY
-# materialized into the env at runtime.
+# Historical daemon-host CLI setup. This snapshot materialization is not the
+# current subscription-login runner path; see docs/cloud_hosting.md before use.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @anthropic-ai/claude-code \

@@ -1,0 +1,72 @@
+{
+  "scenarios": [
+    {
+      "id": "delivery_pushes_and_opens_a_pull_request",
+      "description": "The agent commits; the branch lands on the remote and a pull request is opened against the default branch.",
+      "agent": {"commits": 2, "pr_text": "# Fix the gate\n\nWhat changed.\n"},
+      "expect": {"rc": 0, "cli_ran": true, "status": "opened", "pushed": true, "api": ["GET", "POST"], "pr_number": 7}
+    },
+    {
+      "id": "existing_open_pull_request_is_updated_not_duplicated",
+      "description": "An open pull request already has this head: it is updated, and no second one is opened.",
+      "agent": {"pr_text": "# Fix the gate\n\nRound two.\n"},
+      "api": {"open": [12]},
+      "expect": {"rc": 0, "status": "updated", "pushed": true, "api": ["GET", "PATCH"], "pr_number": 12}
+    },
+    {
+      "id": "job_without_a_delivery_is_unchanged",
+      "description": "No delivery spec: the job runs as before, the record keeps its shape, nothing is cloned or pushed.",
+      "delivery": false,
+      "agent": {"commits": 0},
+      "expect": {"rc": 0, "cli_ran": true, "no_delivery_fields": true, "api": []}
+    },
+    {
+      "id": "clone_failure_never_runs_the_cli",
+      "description": "The repository cannot be cloned: the CLI never starts and nothing is pushed.",
+      "clone_fails": true,
+      "expect": {"rc": 94, "cli_ran": false, "status": "clone_failed", "reason_starts": "clone_failed: ", "api": []}
+    },
+    {
+      "id": "failed_cli_pushes_nothing",
+      "description": "The CLI exits non-zero: no push, no pull request.",
+      "agent": {"rc": 1},
+      "expect": {"rc": 1, "status": "not_delivered", "api": []}
+    },
+    {
+      "id": "refused_import_pushes_nothing",
+      "description": "The agent adds a submodule definition: the import is refused, nothing is pushed.",
+      "agent": {"files": {".gitmodules": "[submodule \"x\"]\n\tpath = x\n\turl = https://example.invalid/x\n"}},
+      "expect": {"rc": 0, "status": "not_delivered", "reason_starts": "import_refused: ", "api": []}
+    },
+    {
+      "id": "no_changes_pushes_nothing",
+      "description": "The agent makes no commit: no push, no pull request.",
+      "agent": {"commits": 0},
+      "expect": {"rc": 0, "status": "no_changes", "api": []}
+    },
+    {
+      "id": "no_time_pushes_nothing",
+      "description": "Too little time is left after the CLI: nothing is pushed.",
+      "no_time": true,
+      "expect": {"rc": 0, "status": "no_time", "api": []}
+    },
+    {
+      "id": "rejected_push_leaves_the_remote_head_unchanged",
+      "description": "The branch exists on the remote with other history: the push is not forced, the remote head is unchanged, no pull request.",
+      "remote_branch_exists": true,
+      "expect": {"rc": 0, "status": "push_failed", "reason_starts": "push_failed: ", "api": []}
+    },
+    {
+      "id": "pull_request_failure_keeps_the_pushed_commit",
+      "description": "The pull request API fails: the pushed commit stays on the remote and no pr_number is recorded.",
+      "api": {"fail": {"GET": 500}},
+      "expect": {"rc": 0, "status": "pr_failed", "pushed": true, "api": ["GET"], "pr_number": null}
+    },
+    {
+      "id": "token_echoed_by_the_agent_is_scrubbed",
+      "description": "The agent's output carries the token and its header: neither reaches the record.",
+      "agent": {"stdout": "leak {TOKEN} and {HEADER}\n"},
+      "expect": {"rc": 0, "status": "opened", "pushed": true, "api": ["GET", "POST"]}
+    }
+  ]
+}

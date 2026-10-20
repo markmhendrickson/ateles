@@ -16,6 +16,9 @@ on:
       # The Fly runner's own modules are tested from execution/daemons/apis/,
       # so a change to them alone must re-run this lane.
       - "deploy/fly-runner/**"
+      # The runner-image suite also checks the superseded daemon runbook's
+      # provisioning stop (#1008); removing it must trigger the blocking lane.
+      - "deploy/cloud/**"
       - "execution/local_llm/**"
       - "execution/daemons/test_*.py"
       - "execution/daemons/cotinga/**"
@@ -101,6 +104,27 @@ jobs:
       # execution/daemons/apis/** changes.
       - name: Run swarm daemon (apis) tests
         run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
+      # The Fly runner's repository delivery, run for real as root with the
+      # agent as uid 10001, in a container from the runner image's base (the
+      # same Python and git). Skipped in the step above, which is not root.
+      - name: Run Fly runner repository-delivery container test
+        run: |
+          docker run --rm \
+            -v "$PWD/deploy/fly-runner/repo_delivery.py:/r/deploy/fly-runner/repo_delivery.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_repo_delivery_container.py:/r/execution/daemons/apis/test_fly_repo_delivery_container.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_repo_delivery.py:/r/execution/daemons/apis/test_fly_repo_delivery.py:ro" \
+            -v "$PWD/execution/daemons/apis/fly_cleanup_test_support.py:/r/execution/daemons/apis/fly_cleanup_test_support.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_cleanup_assertion_output.py:/r/execution/daemons/apis/test_fly_cleanup_assertion_output.py:ro" \
+            -w /r python:3.12-slim-bookworm sh -c '
+              set -e
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq --no-install-recommends git >/dev/null
+              pip install -q pytest==8.3.3
+              out=$(python -m pytest -p no:cacheprovider -c /dev/null --rootdir /r -q -rs \
+                execution/daemons/apis/test_fly_repo_delivery_container.py \
+                execution/daemons/apis/test_fly_cleanup_assertion_output.py)
+              echo "$out"
+              echo "$out" | grep -q "3 passed"'
       # The claude-local provider's loopback normalizer (ollama_shim.py). Its
       # own step so a shim regression is attributable, and added with the suite
       # so it is not another committed-but-uncollected lane (#584, #524, #727).
