@@ -847,7 +847,9 @@ async def _spawn_harness_skill(
             )
         else:
             blocker = build_delivery.fly_delivery_blocker(
-                build_delivery.fly_delivery_key(repository, key, entity_id)
+                build_delivery.fly_delivery_key(
+                    repository, key[1] if key else None, entity_id
+                )
             )
             if blocker:
                 return SkillResult(skill, False, None, "", "", error=blocker,
@@ -905,13 +907,22 @@ async def _spawn_harness_skill(
     return result
 
 
+def _fly_receipt_key(snapshot: dict, entity_id: str) -> str:
+    """The delivery receipt key of a task: the same derivation the spawn uses."""
+    repository = _dispatch_repo_from_snapshot(snapshot)
+    if not repository:
+        return ""
+    issue = build_delivery.issue_key(snapshot, repository)
+    return build_delivery.fly_delivery_key(repository, issue[1] if issue else None, entity_id)
+
+
 async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, role: str | None,
                                  repository: str, key, run_agent_session_id: str | None,
                                  notifier, action_class: str):  # fmt: skip
     """A task-routed build delivered on Fly, or None to run it locally."""
     plan = build_delivery.plan_fly_delivery(
         repository, f"task-{entity_id[-8:]}",
-        key=build_delivery.fly_delivery_key(repository, key, entity_id),
+        key=build_delivery.fly_delivery_key(repository, key[1] if key else None, entity_id),
         issue_number=key[1] if key else None,
     )
     if plan is None:
@@ -930,11 +941,21 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                 fly_delivery=plan.spec(),
             )  # fmt: skip
 
-        result = await build_delivery.run_fly_delivery(
-            plan, launch, lambda reason: SkillResult(
-                skill, False, None, "", "", error=reason, fly_delivery_status="unknown"))
+        refusals: list[str] = []
+
+        def refused(reason):
+            refusals.append(reason)
+            return SkillResult(skill, False, None, "", "", error=reason,
+                               fly_delivery_status="unknown")  # fmt: skip
+
+        result = await build_delivery.run_fly_delivery(plan, launch, refused)
+    if refusals:
+        # Nothing was launched here: keep the refusal's own text (the recorded
+        # delivery's status, run, branch and the recovery steps).
+        log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {refusals[0]}")
+        return result
     if result is not None and result.fly_delivery_status:
-        summary = build_delivery.fly_delivery_summary(result)
+        summary = build_delivery.fly_delivery_summary(result, plan.key)
         log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
         if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
             # The runner opens the PR after the model exits. Its read-back
@@ -2907,7 +2928,9 @@ async def dispatch_task(
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
         elif getattr(result, "fly_delivery_status", ""):
-            reason = result.error or build_delivery.fly_delivery_summary(result)
+            reason = result.error or build_delivery.fly_delivery_summary(
+                result, _fly_receipt_key(snapshot, entity_id)
+            )
             _run_stage("assistant", reason, stage="blocked")
             if run_session:
                 update_run_session_status(run_session, status="failed")

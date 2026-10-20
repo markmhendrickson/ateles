@@ -67,12 +67,13 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
     launches = []
     local = []
     traces = []
-    trig = dataclasses.replace(_issue_trigger(), repository=job_eval.REPO, number=123)
+    first_repo = scenario.get("first_repo", job_eval.REPO)
+    trig = dataclasses.replace(_issue_trigger(), repository=first_repo, number=123)
     snap = dict(
         title="Build the approved change",
         assigned_to="cicada",
         description="Implement and commit",
-        repository=job_eval.REPO,
+        repository=first_repo,
         issue_number=123,
         action_type="open_or_merge_pr",
         status="pending",
@@ -142,9 +143,14 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
             **fields,
         )
 
-    async def task():
+    async def task(repo=None):
         return await apis._spawn_harness_skill(
-            "cicada", "ent_eval_task", snap, "created", _StubNotifier(), role="cicada"
+            "cicada",
+            "ent_eval_task",
+            {**snap, "repository": repo or first_repo},
+            "created",
+            _StubNotifier(),
+            role="cicada",
         )
 
     async def never(*a, **kw):
@@ -185,37 +191,36 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
             {"method": "POST", "path": "/duplicate", "body": {}, "token_ok": True}
         )
     task_replay_ok = False
-    pipeline_refused = False
+    pipeline_refused = True
+    optin_task_ok = False
+    optin_refused = True
     # Preserve the observer after reload; either entrance reaching provisioning
     # is an observable failure even though the test doubles deny the effect.
     monkeypatch.setattr(delivery, "prepare_build_worktree", never)
-    replay = asyncio.run(task())
-    task_replay_ok = replay.ok
-    try:
-        asyncio.run(
-            SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
-                trig, _empty_spec_state()
+
+    def pipeline_refuses(repo):
+        t = dataclasses.replace(trig, repository=repo)
+        try:
+            asyncio.run(
+                SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
+                    t, _empty_spec_state()
+                )
             )
-        )
-    except delivery.FlyDeliveryEnded:
-        pipeline_refused = True
-    except delivery.BuildNotStarted:
-        pass
-    # Opt-in restored after the restart: the same receipt must still refuse
-    # both entrances (a changed setting never changes recovery).
+        except delivery.FlyDeliveryEnded:
+            return True
+        except delivery.BuildNotStarted:
+            return False  # it reached for the local path
+        return False
+
+    # Every spelling of the repository, through both entrances, opted out and
+    # then (after the restart) opted back in.
+    for repo in scenario.get("replay_repos", [first_repo]):
+        task_replay_ok |= asyncio.run(task(repo)).ok
+        pipeline_refused &= pipeline_refuses(repo)
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
-    optin_task_ok = asyncio.run(task()).ok
-    optin_refused = False
-    try:
-        asyncio.run(
-            SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
-                trig, _empty_spec_state()
-            )
-        )
-    except delivery.FlyDeliveryEnded:
-        optin_refused = True
-    except delivery.BuildNotStarted:
-        pass
+    for repo in scenario.get("replay_repos", [first_repo]):
+        optin_task_ok |= asyncio.run(task(repo)).ok
+        optin_refused &= pipeline_refuses(repo)
     return Trace(
         launches,
         len(local),

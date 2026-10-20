@@ -72,12 +72,12 @@ def result(status="opened", **over):
     )
 
 
-def task_snapshot(issue=123):
+def task_snapshot(issue=123, repo=REPO):
     return dict(
         title="Implement the approved spec",
         description="Commit the change",
         assigned_to="cicada",
-        repository=REPO,
+        repository=repo,
         issue_number=issue,
         action_type="open_or_merge_pr",
         status="pending",
@@ -85,11 +85,11 @@ def task_snapshot(issue=123):
     )
 
 
-def run_task():
+def run_task(repo=REPO):
     return apis._spawn_harness_skill(
         "cicada",
         "ent_task_example",
-        task_snapshot(),
+        task_snapshot(repo=repo),
         "created",
         _StubNotifier(),
         role="cicada",
@@ -100,13 +100,37 @@ def dispatcher():
     return SwarmDispatcher(_StubNotifier(), _config())
 
 
-def trigger():
+def trigger(repo=REPO):
     return dataclasses.replace(
         _issue_trigger(),
-        repository=REPO,
+        repository=repo,
         number=123,
         html_url=f"https://github.com/{REPO}/issues/123",
     )
+
+
+def assert_recovery_text(text, status, key=None):
+    """The initial operator text for a launched delivery: status, run and
+    branch first, then the four steps in order with the exact command, and
+    the statement that re-dispatch is refused until the receipt is cleared."""
+    key = key or REPO + "#123"
+    marks = [
+        f"Status: {status}",
+        "Run: run-123",
+        f"Branch: {BRANCH}",
+        "1. Inspect the remote branch",
+        "2. Reconcile what actually happened",
+        f"3. Clear the delivery receipt for this issue: {delivery.FLY_RECEIPT_COMMAND} "
+        f"clear {key}",
+        f"--confirm {key}",
+        "4. Only then re-dispatch",
+        "any re-dispatch is refused and nothing falls back to the local path",
+    ]
+    at = [text.index(m) for m in marks]
+    assert at == sorted(at), text
+    # No cause and no claim about what the machine did beyond the record.
+    for claim in ("did not run", "pushed nothing", "nothing was pushed"):
+        assert claim not in text or status == "no_changes"
 
 
 def test_default_off_is_pinned_even_when_fly_itself_is_configured(monkeypatch):
@@ -273,7 +297,8 @@ def test_resumed_issue_pipeline_never_starts_a_second_delivery(
     report = asyncio.run(fresh.resume_interrupted_pipelines([REPO]))
     assert report["resumed"] == 1 and report["failed"] == 0
     assert len(launches) == expected_launches
-    assert any("already recorded" in m for m in fresh.notifier.sent)
+    refusal = next(m for m in fresh.notifier.sent if "already recorded" in m)
+    assert "3. Clear the delivery receipt" in refusal and delivery.FLY_RECEIPT_COMMAND in refusal
     assert delivery.active_build(REPO, 123) is None
 
 
@@ -308,7 +333,9 @@ def test_blocker_refuses_every_launched_status_whatever_the_setting(
         plan.key, {"status": status, "branch": BRANCH, "run_id": "run-123"}
     )
     importlib.reload(delivery)
-    assert "already recorded" in delivery.fly_delivery_blocker(plan.key)
+    blocker = delivery.fly_delivery_blocker(plan.key)
+    assert "already recorded" in blocker
+    assert f"Status: {status}" in blocker and "3. Clear the delivery receipt" in blocker
     assert not delivery._reserve_delivery(plan)
 
 
@@ -580,12 +607,10 @@ def test_failed_fly_task_is_blocked_with_verified_result(
         "run-123" in store.rows[eid]["result"] and COMMIT in store.rows[eid]["result"]
     )
     assert notice.sent
-    if status in {"clone_failed", "not_delivered"}:
-        # The operator reads the observed status and an instruction to check the
-        # remote; the text asserts no cause and no claim that nothing was pushed.
-        text = store.rows[eid]["result"]
-        assert status in text and "Check" in text and BRANCH in text
-        assert "did not run" not in text and "pushed nothing" not in text
+    # The stored result and the notification both carry the status, run and
+    # branch and the four recovery steps with the exact command.
+    assert_recovery_text(store.rows[eid]["result"], status)
+    assert_recovery_text(notice.sent[-1], status)
 
 
 @pytest.mark.parametrize("entry", ["watchdog_retry", "build_released"])
@@ -646,3 +671,126 @@ def test_runner_pr_reaches_existing_artifact_gate_and_verified_task_completion(
     saved = store.rows[eid]["result"]
     assert f"[cicada] pull_request_link: https://github.com/{REPO}/pull/99\n" in saved
     assert COMMIT in saved and "run-123" in saved
+
+
+# ── One receipt key, whatever each entrance's spelling of the repository ──
+
+SPELLINGS = [
+    "Owner/Repo",
+    "owner/repo",
+    "OWNER/REPO",
+    "  Owner/Repo  ",
+    "Owner/Repo.git",
+    "https://github.com/Owner/Repo",
+    "https://github.com/Owner/Repo.git",
+    "git@github.com:Owner/Repo.git",
+]
+# Spellings a delivery can actually launch under (the plan validates strictly).
+LAUNCH_SPELLINGS = ["Owner/Repo", "owner/repo"]
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+def test_every_spelling_derives_the_same_receipt_key(spelling):
+    assert delivery.fly_delivery_key(spelling, 123) == "owner/repo#123"
+    assert delivery.fly_delivery_key(spelling, "123") == "owner/repo#123"
+    assert delivery.fly_delivery_key(spelling, None, " t1 ") == "owner/repo#task:t1"
+    assert delivery.canonical_key(f"{spelling}#123") == "owner/repo#123"
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+def test_both_entrances_ask_the_ledger_for_the_same_key(monkeypatch, spelling):
+    seen = []
+
+    def blocker(key):
+        seen.append(key)
+        return "stop"
+
+    monkeypatch.setattr(delivery, "fly_delivery_blocker", blocker)
+    asyncio.run(run_task(spelling))
+    with pytest.raises(delivery.FlyDeliveryEnded):
+        asyncio.run(
+            dispatcher()._open_implementation_pr(trigger(spelling), _empty_spec_state())
+        )
+    assert seen == ["owner/repo#123", "owner/repo#123"]
+
+
+@pytest.mark.parametrize("replay_spelling", SPELLINGS)
+@pytest.mark.parametrize("launch_spelling", LAUNCH_SPELLINGS)
+@pytest.mark.parametrize("launched_by", ["task", "pipeline"])
+def test_a_delivery_launched_by_one_entrance_is_refused_by_the_other(
+    monkeypatch, launched_by, launch_spelling, replay_spelling
+):
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    launches = []
+
+    async def run(*a, **kw):
+        launches.append(kw)
+        return result("unknown")
+
+    async def never(*a, **kw):
+        raise AssertionError("the other entrance built or searched locally")
+
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    monkeypatch.setattr(delivery, "prepare_build_worktree", never)
+    monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", never)
+    if launched_by == "task":
+        assert not asyncio.run(run_task(launch_spelling)).ok
+    else:
+        with pytest.raises(delivery.FlyDeliveryEnded):
+            asyncio.run(
+                dispatcher()._open_implementation_pr(
+                    trigger(launch_spelling), _empty_spec_state()
+                )
+            )
+    importlib.reload(delivery)
+    other = "pipeline" if launched_by == "task" else "task"
+    if other == "task":
+        got = asyncio.run(run_task(replay_spelling))
+        assert not got.ok and "already recorded" in got.error
+    else:
+        with pytest.raises(delivery.FlyDeliveryEnded, match="already recorded"):
+            asyncio.run(
+                dispatcher()._open_implementation_pr(
+                    trigger(replay_spelling), _empty_spec_state()
+                )
+            )
+    assert len(launches) == 1
+    receipts = delivery._delivery_ledger().delivery_receipts()
+    assert list(receipts) == ["owner/repo#123"]
+
+
+def test_a_receipt_under_an_older_key_spelling_is_still_found():
+    """No real ledger can hold one (no class has been opted in), but a receipt
+    keyed with the repository as first spelled is found and refused anyway."""
+    delivery._delivery_ledger().record_delivery(
+        "Owner/Repo#123", {"status": "pr_failed", "branch": BRANCH, "run_id": "run-123"}
+    )
+    for spelling in SPELLINGS:
+        key = delivery.fly_delivery_key(spelling, 123)
+        assert "already recorded" in delivery.fly_delivery_blocker(key)
+    plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", "owner/repo#123", 123)
+    assert delivery.fly_delivery_blocker(plan.key)
+
+
+@pytest.mark.parametrize(
+    "status", [s for s in LAUNCHED_STATUSES if s not in {"opened", "updated"}]
+)
+def test_pipeline_notification_carries_the_recovery_steps(monkeypatch, status):
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+
+    async def run(*a, **kw):
+        return result(status)
+
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    d = dispatcher()
+    asyncio.run(
+        d._hand_off_to_build(
+            trigger(),
+            _empty_spec_state(),
+            completed=[],
+            spec_action="review",
+            spec_ready_key="spec",
+        )
+    )
+    assert_recovery_text(d.notifier.sent[-1], status)

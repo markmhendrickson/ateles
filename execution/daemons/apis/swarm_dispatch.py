@@ -6699,9 +6699,7 @@ class SwarmDispatcher:
         # name, rather than after a build that cannot deliver.
         # Check the durable receipt even after opt-out or process restart. A
         # prior Fly run may have pushed; resuming must not create a local build.
-        key = build_delivery.fly_delivery_key(
-            trigger.repository, (trigger.repository, trigger.number)
-        )
+        key = build_delivery.fly_delivery_key(trigger.repository, trigger.number)
         blocker = build_delivery.fly_delivery_blocker(key)
         if blocker:
             raise build_delivery.FlyDeliveryEnded(blocker)
@@ -6726,7 +6724,7 @@ class SwarmDispatcher:
 
                 result = await build_delivery.run_fly_delivery(plan, launch, blocked)
             if result is not None:
-                summary = build_delivery.fly_delivery_summary(result)
+                summary = build_delivery.fly_delivery_summary(result, plan.key)
                 if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
                     self.notifier.send(summary, priority=Priority.INFO, handler=DAEMON_NAME)
                     return result.fly_pr_url

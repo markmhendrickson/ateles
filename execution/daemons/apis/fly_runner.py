@@ -936,6 +936,28 @@ class FlyLedger:
                 raise FlyLedgerError("delivery receipt did not read back")
             return True
 
+    def clear_delivery(self, key: str, expected: dict) -> bool:
+        """Remove one delivery receipt, only if it still equals *expected*.
+
+        The operator's reconcile step (``fly_delivery_receipt.py``): under the
+        ledger's own lock and atomic write, nothing else is touched, and a
+        receipt that changed since it was shown is left alone (False). A
+        malformed ledger raises ``FlyLedgerError``. No code path calls this
+        automatically.
+        """
+        with self._locked():
+            data = self._load()
+            if "deliveries" not in data:
+                return False
+            receipts = data["deliveries"]
+            if receipts.get(key) != expected:
+                return False
+            receipts.pop(key)
+            self._save(data)
+            if key in self._snapshot(self._clock()).deliveries:
+                raise FlyLedgerError("delivery receipt was not removed")
+            return True
+
     def _roll(self, data: dict, now: float) -> None:
         """Start a new period only on a genuine rollover: a VALID marker
         EARLIER than the current period (or no ledger at all, ``None``). A

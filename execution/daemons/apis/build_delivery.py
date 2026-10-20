@@ -808,10 +808,45 @@ def fly_delivery_instructions(plan: FlyDeliveryPlan) -> str:
     )
 
 
-def fly_delivery_key(repository: str, issue: tuple[str, int] | None, task_id: str = "") -> str:
-    if issue:
-        return f"{issue[0]}#{issue[1]}"
-    return f"{repository}#task:{task_id}"
+def canonical_repository(repository: object) -> str:
+    """``owner/name`` as GitHub compares it: case-folded, with surrounding
+    whitespace, a ``https://github.com/`` / ``ssh://`` / ``git@github.com:``
+    form and a trailing ``.git`` removed.
+
+    The ONE place a repository is normalised for a delivery receipt. A value
+    that is not a GitHub repository in any of those forms cannot start a Fly
+    delivery (``plan_fly_delivery`` validates it strictly), so it only gets the
+    whitespace-and-case treatment and a stable key.
+    """
+    text = str(repository or "").strip()
+    if "://" in text or text.startswith("git@"):
+        remote = normalise_remote(text)
+        if remote:
+            return remote[len(_GITHUB_HOST) + 1:]
+    elif text.endswith(".git"):
+        text = text[: -len(".git")]
+    try:
+        return validate_repository(text).lower()
+    except BuildWorktreeError:
+        return text.lower()
+
+
+def fly_delivery_key(repository: object, issue_number: object = None, task_id: str = "") -> str:
+    """The ONE derivation of a delivery receipt key. Every entrance, the
+    blocker, the reservation and the record go through it, so the same
+    repository and issue are the same receipt however each lane spells them."""
+    repo = canonical_repository(repository)
+    number = _as_issue_number(issue_number)
+    if number:
+        return f"{repo}#{number}"
+    return f"{repo}#task:{str(task_id).strip()}"
+
+
+def canonical_key(key: str) -> str:
+    """*key* with its repository part re-derived by ``canonical_repository``
+    (a key built elsewhere, or read back from a ledger written earlier)."""
+    repo, sep, rest = str(key).strip().partition("#")
+    return f"{canonical_repository(repo)}{sep}{rest.strip()}"
 
 
 def _registry_path() -> Path:
@@ -826,6 +861,43 @@ def _delivery_ledger():
     return fly_runner.FlyLedger(_registry_path())
 
 
+# The supported operator action that clears one delivery receipt (dry run by
+# default; see fly_delivery_receipt.py). Nothing clears a receipt automatically.
+FLY_RECEIPT_COMMAND = "python3 execution/daemons/apis/fly_delivery_receipt.py"
+
+
+def _receipt_for(key: str, receipts: dict) -> dict | None:
+    """The receipt for the canonical *key*. A receipt written under another
+    spelling of the same repository (an older key form) is found too."""
+    if key in receipts:
+        return receipts[key]
+    for stored, entry in receipts.items():
+        if canonical_key(stored) == key:
+            return entry
+    return None
+
+
+def fly_delivery_facts(key: str, status, branch, run_id, commit=None) -> str:
+    """The status, run and branch of a recorded delivery, one scannable line."""
+    return (f"Status: {status or 'not reported'}. Run: {run_id or 'not reported'}. "
+            f"Branch: {branch or 'not reported'}. Commit: {commit or 'not reported'}. "
+            f"Key: {key}.")  # fmt: skip
+
+
+def fly_delivery_recovery(key: str) -> str:
+    """What the operator does next, in order, once a delivery is recorded."""
+    return (
+        "To recover:\n"
+        "1. Inspect the remote branch named above and the run record for the run above.\n"
+        "2. Reconcile what actually happened.\n"
+        f"3. Clear the delivery receipt for this issue: {FLY_RECEIPT_COMMAND} clear {key} "
+        f"(a dry run; to remove it, repeat with --confirm {key}).\n"
+        "4. Only then re-dispatch.\n"
+        "Until the receipt is cleared, any re-dispatch is refused and nothing falls back "
+        "to the local path."
+    )
+
+
 def fly_delivery_blocker(key: str) -> str:
     """Why a new delivery for *key* must not start, or an empty string.
 
@@ -835,22 +907,24 @@ def fly_delivery_blocker(key: str) -> str:
     """
     import fly_runner
 
+    key = canonical_key(key)
     try:
-        entry = _delivery_ledger().delivery_receipts().get(key)
+        entry = _receipt_for(key, _delivery_ledger().delivery_receipts())
     except (OSError, fly_runner.FlyLedgerError):
         return ("the Fly delivery ledger could not be read, so whether a delivery for "
                 f"{key} already ran is unknown; not starting another")
     if entry is None:
         return ""
-    return (f"a Fly delivery for {key} is already recorded (status {entry['status']}, branch "
-            f"{entry.get('branch', '?')}, run {entry.get('run_id') or 'not known'}); not "
-            "starting another. Reconcile the run and remote branch before clearing "
-            "its delivery binding in the Fly ledger")
+    return ("Fly delivery refused: a delivery for this issue or task is already recorded.\n"
+            + fly_delivery_facts(key, entry["status"], entry.get("branch"), entry.get("run_id"),
+                                 entry.get("commit")) + "\n"
+            + fly_delivery_recovery(key))
 
 
 def _record(key: str, entry: dict | None) -> None:
     import fly_runner
 
+    key = canonical_key(key)
     try:
         _delivery_ledger().record_delivery(key, entry)
     except fly_runner.FlyLedgerError as exc:
@@ -862,7 +936,7 @@ def _reserve_delivery(plan: FlyDeliveryPlan) -> bool:
 
     try:
         return _delivery_ledger().record_delivery(
-            plan.key, {"status": "launching", "branch": plan.branch, "run_id": "",
+            canonical_key(plan.key), {"status": "launching", "branch": plan.branch, "run_id": "",
                        "recorded_at": time.time()}, retryable=frozenset(),
         )
     except fly_runner.FlyLedgerError as exc:
@@ -913,24 +987,25 @@ _FLY_STATUS_TEXT = {
     "updated": "updated pull request {pr}",
     "no_changes": "finished with no new commits on {branch}; nothing was pushed",
     "clone_failed": ("ended as clone_failed: the runner reported that it could not prepare its "
-                     "clone of the repository. Check {branch} on the remote before dispatching "
-                     "again"),
-    "not_delivered": ("ended as not_delivered: the runner's record reports no delivery. Check "
-                      "{branch} on the remote before dispatching again"),
+                     "clone of the repository"),
+    "not_delivered": "ended as not_delivered: the runner's record reports no delivery",
     "push_failed": "did not get its push of {branch} accepted; no pull request was opened",
     "pr_failed": ("pushed {branch} ({commit}), but the pull request step did not complete; "
                   "the branch is on the remote"),
     "no_time": "ran out of time",
-    "unknown": ("has an UNKNOWN outcome (run {run}); it may have pushed {branch}. Check before "
-                "dispatching again"),
+    "unknown": "has an UNKNOWN outcome (run {run}); it may have pushed {branch}",
     "unreported": ("finished, but its result record carries no delivery status (run {run}); "
-                   "check {branch} on the remote before dispatching again"),
+                   "it may have pushed {branch}"),
 }
 
 
-def fly_delivery_summary(result) -> str:
+def fly_delivery_summary(result, key: str = "") -> str:
     """Operator-facing text for a Fly delivery's outcome: what the record
-    says, with the reason it gave, and no claim about why."""
+    says, with the reason it gave, and no claim about why.
+
+    Any outcome other than an opened or updated pull request starts with the
+    status, run and branch, then says what the operator does next and how
+    (``fly_delivery_recovery``) when *key* names the receipt it left."""
     status = result.fly_delivery_status
     template = _FLY_STATUS_TEXT.get(status, "ended with status {status}")
     text = "Fly delivery " + template.format(
@@ -943,8 +1018,14 @@ def fly_delivery_summary(result) -> str:
                  "pushed and no pull request was opened")  # fmt: skip
     if result.fly_delivery_reason and status not in ("opened", "updated"):
         text += f" ({result.fly_delivery_reason})"
-    return text + (
-        f". Run {result.remote_run_id or 'not reported'}; "
-        f"branch {result.fly_delivery_branch or 'not reported'}; "
-        f"commit {result.fly_delivery_commit or 'not reported'}."
-    )
+    if status in ("opened", "updated"):
+        return text + (
+            f". Run {result.remote_run_id or 'not reported'}; "
+            f"branch {result.fly_delivery_branch or 'not reported'}; "
+            f"commit {result.fly_delivery_commit or 'not reported'}."
+        )
+    head = ("Fly delivery needs operator reconciliation.\n"
+            + fly_delivery_facts(key or "not reported", status, result.fly_delivery_branch,
+                                 result.remote_run_id, result.fly_delivery_commit))
+    out = f"{head}\n{text}."
+    return out + "\n" + fly_delivery_recovery(key) if key else out
