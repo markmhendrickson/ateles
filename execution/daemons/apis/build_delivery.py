@@ -959,13 +959,10 @@ def _settle_delivery(plan: FlyDeliveryPlan, token: str, entry: dict) -> bool:
 def _release_delivery(plan: FlyDeliveryPlan, token: str) -> bool:
     """Remove this dispatch's own still-``launching`` reservation after a
     proven pre-launch outcome. False: the receipt is not this dispatch's (or no
-    longer ``launching``), so it was left untouched and nothing was cleaned up."""
-    import fly_runner
-
-    try:
-        return _delivery_ledger().release_delivery(canonical_key(plan.key), token)
-    except fly_runner.FlyLedgerError as exc:
-        raise ValueError(str(exc)) from None
+    longer ``launching``), so it was left untouched and nothing was cleaned up.
+    Any exception means the ledger state is UNCERTAIN (the write may or may not
+    have happened); the caller must not treat it as a cleanup or as ownership."""
+    return _delivery_ledger().release_delivery(canonical_key(plan.key), token)
 
 
 async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
@@ -993,18 +990,29 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
         result = await launch()
     except BaseException:
         # The launch may have happened: keep it recorded, as unknown.
-        with contextlib.suppress(OSError, ValueError):
+        with contextlib.suppress(Exception):
             _settle_delivery(plan, token, {"status": "unknown", "branch": plan.branch,
                                            "run_id": ""})  # fmt: skip
         raise
     launched = bool(result.fly_delivery_status or result.remote_run_id
                     or result.remote_outcome_unknown)
     if not launched:
-        # Nothing reached Fly: this dispatch's own reservation is removed.
+        # Nothing reached Fly: this dispatch's own reservation is removed. Only a
+        # release that RETURNS success lets the local path run. A release that
+        # raised left the ledger in an unknown state (the removal may have
+        # happened, and another dispatch may already hold the key): fail closed.
         try:
             owned = _release_delivery(plan, token)
-        except (OSError, ValueError):
-            owned = True  # unreadable: the reservation stays, which refuses a repeat
+        except Exception as exc:  # noqa: BLE001 - any failure is an uncertain state
+            kind = type(exc).__name__
+            log.warning("[apis] the delivery receipt for %s could not be confirmed after a "
+                        "failed cleanup (%s); not starting the local path", plan.key, kind)
+            if result.fly_ineligible_before_launch:
+                return blocked(
+                    f"the delivery receipt for {canonical_key(plan.key)} could not be confirmed "
+                    f"after a failed cleanup ({kind}); the local path was NOT started. Run "
+                    f"{FLY_RECEIPT_COMMAND} list, reconcile, and clear the receipt if needed.")
+            return result
         if not owned:
             log.warning("[apis] the delivery receipt for %s is no longer this dispatch's; "
                         "left untouched", plan.key)

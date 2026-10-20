@@ -896,3 +896,97 @@ def test_every_reservation_has_its_own_token():
     assert ledger.release_delivery(KEY, first)
     second = delivery._reserve_delivery(_plan())
     assert first and second and first != second
+
+
+# ── A cleanup whose outcome is uncertain never permits the local path ──
+
+LEDGER_ERROR_TEXT = "ledger-error-text-must-not-leak"
+
+
+def _fail_the_next_ledger_write(monkeypatch, point):
+    """Make the next ledger write fail before the replace, or just after it (a
+    directory-sync failure). Returns the switch the test arms."""
+    real = fly_runner.FlyLedger._save
+    armed = []
+
+    def save(self, data):
+        if not armed:
+            return real(self, data)
+        armed.clear()
+        if point == "before_replace":
+            raise OSError(LEDGER_ERROR_TEXT)
+        real(self, data)
+        raise OSError(LEDGER_ERROR_TEXT)
+
+    monkeypatch.setattr(fly_runner.FlyLedger, "_save", save)
+    return lambda: armed.append(True)
+
+
+def _ineligible_run(arm):
+    async def run(*a, **kw):
+        arm()  # the next ledger write is this dispatch's cleanup
+        return SkillResult("cicada", False, None, "", "", fly_ineligible_before_launch=True)
+
+    return run
+
+
+@pytest.mark.parametrize("point", ["before_replace", "after_replace"])
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+def test_a_failed_cleanup_never_starts_the_local_builder(monkeypatch, entry, point):
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    run = _ineligible_run(_fail_the_next_ledger_write(monkeypatch, point))
+    local = []
+
+    async def prepare(*a, **kw):
+        local.append(True)
+        raise AssertionError("the local builder was started")
+
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    monkeypatch.setattr(delivery, "prepare_build_worktree", prepare)
+    if entry == "task":
+        got = asyncio.run(run_task())
+        assert not got.ok
+        text = got.error
+    else:
+        with pytest.raises(delivery.FlyDeliveryEnded) as ended:
+            asyncio.run(
+                dispatcher()._open_implementation_pr(trigger(), _empty_spec_state())
+            )
+        text = ended.value.text
+    assert not local
+    assert "could not be confirmed after a failed cleanup (OSError)" in text
+    assert "local path was NOT started" in text
+    assert f"{delivery.FLY_RECEIPT_COMMAND} list" in text
+    receipt = delivery._delivery_ledger().delivery_receipts().get(KEY)
+    assert LEDGER_ERROR_TEXT not in text
+    assert receipt is None or receipt["token"] not in text
+    # Whatever the ledger now holds, a later dispatch cannot assume the key is free:
+    # before the replace the reservation is still there; after it, the next
+    # dispatch is the one that reserves, never this one's local builder.
+    assert (receipt is not None) == (point == "before_replace")
+
+
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+def test_a_successful_cleanup_still_allows_the_local_builder(monkeypatch, entry):
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    run = _ineligible_run(lambda: None)
+    local = []
+
+    async def prepare(*a, **kw):
+        local.append(True)
+        raise delivery.BuildWorktreeError("stand-in: the local path ran")
+
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    monkeypatch.setattr(delivery, "prepare_build_worktree", prepare)
+    if entry == "task":
+        got = asyncio.run(run_task())
+        assert not got.ok
+    else:
+        with pytest.raises(delivery.BuildNotStarted):
+            asyncio.run(
+                dispatcher()._open_implementation_pr(trigger(), _empty_spec_state())
+            )
+    assert local == [True]
+    assert KEY not in delivery._delivery_ledger().delivery_receipts()

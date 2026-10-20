@@ -568,3 +568,110 @@ def test_the_judge_goes_red_when_cleanup_is_a_blind_removal(
 ):
     got = run_interleaving(first_entry, tmp_path, monkeypatch, blind_release=True)
     assert judge_interleaving(*got)
+
+
+def run_failed_cleanup(entry, point, tmp_path, monkeypatch, *, exception_means_owned=False):
+    """A dispatch ends as a proven pre-launch outcome, but its receipt cleanup
+    fails inside the ledger (before the replace, or just after it as a directory
+    sync failure). Through the real entrance, the local builder must not start."""
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "ledger.json"))
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    monkeypatch.setenv("CICADA_AGENT_PAT", "eval-local-placeholder-token")
+    repo, local, launches, armed = job_eval.REPO, [], [], []
+    real_save = fly_runner.FlyLedger._save
+
+    def save(self, data):
+        if not armed:
+            return real_save(self, data)
+        armed.clear()
+        if point == "before_replace":
+            raise OSError("eval-ledger-error-text")
+        real_save(self, data)
+        raise OSError("eval-ledger-error-text")
+
+    async def run(skill, prompt, **kw):
+        launches.append(kw)
+        armed.append(True)  # the next ledger write is the cleanup
+        return skill_runner.SkillResult(
+            skill, False, None, "", "", fly_ineligible_before_launch=True
+        )
+
+    async def prepare(*a, **kw):
+        local.append(True)
+        raise delivery.BuildWorktreeError("eval observed the local builder")
+
+    monkeypatch.setattr(fly_runner.FlyLedger, "_save", save)
+    if exception_means_owned:
+        real_release = delivery._release_delivery
+
+        def swallow(plan, token):
+            try:
+                return real_release(plan, token)
+            except Exception:
+                return True
+
+        monkeypatch.setattr(delivery, "_release_delivery", swallow)
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    monkeypatch.setattr(delivery, "prepare_build_worktree", prepare)
+    text, refused = "", False
+    if entry == "task":
+        snap = dict(
+            title="Build",
+            assigned_to="cicada",
+            repository=repo,
+            issue_number=123,
+            action_type="open_or_merge_pr",
+        )
+        got = asyncio.run(
+            apis._spawn_harness_skill(
+                "cicada", "ent_eval_c", snap, "created", _StubNotifier(), role="cicada"
+            )
+        )
+        text, refused = got.error or "", not got.ok
+    else:
+        trig = dataclasses.replace(_issue_trigger(), repository=repo, number=123)
+        try:
+            asyncio.run(
+                SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
+                    trig, _empty_spec_state()
+                )
+            )
+        except delivery.FlyDeliveryEnded as exc:
+            text, refused = exc.text, True
+        except delivery.BuildNotStarted:
+            pass
+    return local, launches, text, refused
+
+
+def judge_failed_cleanup(local, launches, text, refused):
+    problems = []
+    if local:
+        problems.append("the local builder started after a failed cleanup")
+    if len(launches) != 1:
+        problems.append("an unexpected number of launches")
+    if not refused or "local path was NOT started" not in text:
+        problems.append("the dispatch was not refused with the uncertain-cleanup text")
+    if "(OSError)" not in text or "eval-ledger-error-text" in text:
+        problems.append("the text must carry the exception class and never its text")
+    return problems
+
+
+@pytest.mark.parametrize("point", ["before_replace", "after_replace"])
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+def test_a_failed_cleanup_never_reaches_the_local_builder(
+    entry, point, tmp_path, monkeypatch
+):
+    got = run_failed_cleanup(entry, point, tmp_path, monkeypatch)
+    assert judge_failed_cleanup(*got) == []
+
+
+@pytest.mark.parametrize("point", ["before_replace", "after_replace"])
+@pytest.mark.parametrize("entry", ["task", "pipeline"])
+def test_the_judge_goes_red_when_an_exception_counts_as_ownership(
+    entry, point, tmp_path, monkeypatch
+):
+    got = run_failed_cleanup(
+        entry, point, tmp_path, monkeypatch, exception_means_owned=True
+    )
+    assert judge_failed_cleanup(*got)
