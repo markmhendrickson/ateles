@@ -544,18 +544,28 @@ class ScreenshotWatcher:
                 path.stat().st_mtime, tz=UTC
             ).isoformat()
 
+            entity = {
+                "entity_type": "screenshot",
+                "filename": path.name,
+                "file_hash": file_hash,
+                "captured_at": captured_at,
+                "source_path": str(path),
+                "daemon": DAEMON_NAME,
+                "status": "pending_ocr",
+            }
+
+            # Screen through AMG before storing
+            if AMG_AVAILABLE:
+                try:
+                    from agent_memory_guard import PolicyViolation, SourceClass
+                    guard = NeotomaGuard()
+                    guard.screen_entity(entity, source_class=SourceClass.EXTERNAL_TOOL, daemon=DAEMON_NAME)
+                except (PolicyViolation, RuntimeError) as exc:
+                    log.warning(f"[{DAEMON_NAME}] Screenshot entity blocked by memory guard: {exc}")
+                    return None
+
             payload: dict[str, Any] = {
-                "entities": [
-                    {
-                        "entity_type": "screenshot",
-                        "filename": path.name,
-                        "file_hash": file_hash,
-                        "captured_at": captured_at,
-                        "source_path": str(path),
-                        "daemon": DAEMON_NAME,
-                        "status": "pending_ocr",
-                    }
-                ]
+                "entities": [entity]
             }
             resp = httpx.post(
                 f"{NEOTOMA_BASE_URL}/store",
