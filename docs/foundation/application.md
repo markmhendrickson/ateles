@@ -2,7 +2,7 @@
 
 **Kind:** foundation; an authored companion that states the design and never the state of a checkout. Not
 keyed and not inlined into a review prompt (`conformance.md#scope`). **Derived from:** the operator's
-rulings of 2026-10-18 and 2026-10-19 on the application question and its sub-questions (decisions 145 to 154 in
+rulings of 2026-10-18, 2026-10-19, and 2026-10-20 on the application question and its sub-questions (decisions 145 to 157 in
 `conformance.md#the-register-of-open-design-decisions`), the 2026-07-09 placement rule for the four layers
 (substrate in the record's public repository, generic use-case skills in the record's bundles, swarm
 operations in this repository, proprietary vertical logic in a company's own repository), decision 15
@@ -102,16 +102,16 @@ to providing it. Four requirements:
    console renders them. A view that ran code would move the application back into per-client programs.
 3. Enabling a bundle is an act on the instance's own record. A swarm's absence does not stop a screen from
    rendering, and a bundle's absence does not remove workflows or the gate.
-4. Whether enabling or disabling a bundle is a governance write, and which action class carries it, is not
-   settled here (decision 155).
+4. Enabling or disabling a bundle is one write in an installation's series, admitted at the record under the
+   installer's grant and gated like any other write; it has no class of its own (decision 155,
+   `#installing-and-upgrading-an-application`).
 
 **The two rejected placements.** All in the record's bundles would make an application independent of this
 foundation, but the record would gain approval and workflow concepts and a second gate would appear beside
 the action gate. All in this foundation would give one authority, but every client application would depend
 on the swarm even to show a record. **Cost accepted:** the application's behaviour is composed from two
 repositories' releases, so a view and the workflow that writes the record it shows can be at different
-versions on one instance; the conformance question that follows (which pairs are compatible) is open
-work, not a rule here. **What would reopen it:** a bundle concept that carries approval and is shown to
+versions on one instance; which pairs are compatible is conformance work, not a rule here. **What would reopen it:** a bundle concept that carries approval and is shown to
 pass the record's upstream test, which would first be a change to the record.
 
 ## How per-instance customisation composes
@@ -188,25 +188,38 @@ Each of the following is stated once, in the document that owns its mechanism, a
 | Direction of truth for a business record class lives on its source's `vendor_binding`, with a one-way cutover event | decision 151 | `adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event` |
 | A business matter is a record that tasks refer to, not itself a task | decision 152 | `work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task` |
 | `customer_reply` is a reference workflow | decision 153 | `workflows.md#customer_reply` |
+| A business matter's open or closed state is derived from its tasks; a state is stored only where no task stands behind it | decision 156 | `work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task` |
+| A held write is applied at a cutover only if the row it was made against is unchanged, otherwise returned to its writer | decision 157 | `adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event` |
 
-## What this document does not decide
+## Installing and upgrading an application
 
-**Who installs and upgrades an application on an instance, and through what governed write (decision 155,
-open).** Every part an application is composed of already has a governed way in: a declaration is a
-governance write the action gate judges, a binding or profile is a context entity written under a grant,
-and a promoted change is the same reviewed write replayed in order
+**Ruled (decision 155, 2026-10-20, the operator's): installation is a series of ordinary governance writes,
+each gated on its own, and an upgrade is the replay of the same set per instance.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`.
+
+**The rules in this section.**
+
+- Installing an application on an instance is a series of ordinary governance writes, each gated on its own.
+- No commissioned install unit and no install-specific authority exist.
+- An upgrade is the replay of the same set of writes to each instance in turn.
+
+**Installation has no unit of its own.** Every part an application is composed of already has a governed way in:
+a declaration is a governance write the action gate judges, a binding or a profile is a context entity written
+under a grant, and enabling a bundle is a write on the instance's own record admitted at the record
+(decisions 41 and 97). Installing is doing those writes, one after another, and each is gated as the write it is.
+Nothing commissions the set as a whole, and nobody holds authority to install that they do not already hold to
+make each write: who may start an installation is whoever holds the grants the writes need, attributed to them.
+The alternative, a single commissioned unit in the shape of
+`planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`, would approve the set
+once and dependency-order its parts, at the price of a concept the gate does not need to judge a write.
+
+**An upgrade is replay.** The set of writes that installed or changed an application on one instance reaches the
+next instance as the same writes, in order, through that instance's own gate, exactly as a governed change is
+promoted between environments
 (`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-replays-the-same-governed-writes-in-order`).
-What is not stated is the composite: whether installing an application is one commissioned set of those
-writes or a series of independent ones, who may start it, whether enabling a bundle is itself a governance
-write class, and what an upgrade across instances is when two instances sit at different bundle versions.
-*Candidates, unruled:* (a) installation is a set of ordinary governance writes, each gated on its own, and
-an upgrade is the replay of the same set to each instance in turn; (b) installation is a single commissioned
-unit, in the shape of `planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`,
-so the set is approved once and its parts are dependency-ordered. *Recommendation, unruled:* (a), because it
-needs no new concept and the gate already judges each write; (b) is the candidate to take if the number of
-writes per install makes per-write approval a burden.
+An instance at a different bundle version receives the set as written; a write that fails there stops the
+replay at that write and raises its checkpoint on that instance, and the writes after it are not applied.
 
-**What a held write becomes at cutover (decision 157, open)** is stated with its home, in
-`adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`.
-**Whether a business matter's closed state is stored or derived from its tasks (decision 156, open)** is
-stated with its home, in `work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`.
+**Cost accepted.** A large installation is many approvals, each at its own gate. **What would reopen it:** an
+installation whose number of writes makes per-write approval a burden, which would argue for the commissioned
+unit.

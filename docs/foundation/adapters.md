@@ -1636,12 +1636,16 @@ before its first reload so that the field exists to be read. **What would reopen
 whose authority is split by row or by field rather than by class, which would argue for the direction on a
 finer unit.
 
-**What this ruling leaves open (decision 157).** What a held write becomes when the cutover lands. *Candidates,
-unruled:* (a) it is applied as written, so the writer's intent stands; (b) it is applied only if the row it was
-made against is unchanged, and otherwise returned to the writer, which keeps the read-before-write check the
-application already makes; (c) it is discarded, with the fact that it was held kept. *Recommendation, unruled:*
-(b), because the source may have changed the row in the final reload, and applying blind is the overwrite the
-hold exists to prevent. If unanswered, held writes stay held and none is applied.
+**Ruled (decision 157, 2026-10-20, the operator's): when a cutover lands, a held write is applied only if the row
+it was made against is unchanged since; otherwise it is returned to its writer.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. A held write carries the read it was made against, the
+same read-before-write check the application already makes on every edit. At the cutover each held write is
+compared with the row as the final reload left it: unchanged, and the write is applied as written; changed, and
+it is returned to the writer, who sees what moved, and may make it again against the current row. A held write is
+never applied blind, because the source may have changed the row in the final reload and applying over that is
+the overwrite the hold exists to prevent, and it is never silently discarded, because a discard with no word to the
+writer is a drop with no reason. **Cost accepted:** a writer may be asked to redo an edit the final reload
+overtook. **What would reopen it:** a held write whose staleness cannot be read from the row it was made against.
 
 **Matrix.** No row is added here. The planted refusals this ruling calls for are an in-application write
 to a source-governed class, a reload into a record-governed class, and a write while the direction is

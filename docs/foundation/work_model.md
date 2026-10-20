@@ -1113,16 +1113,21 @@ case stays open while the customer waits) does not belong to the unit the swarm 
 
 **Closing an item.** The item's closure is a state of the business record, reached when its tasks close, and
 the effect closing has in an external system (filing the thread) is an action taken through the gate by a task's
-step, not a consequence of the state change. *Left open (decision 156):* whether that closed state is **stored**
-on the item (written by the step that closes the last task) or **derived** as a read over the item's tasks.
-Principle 11 favours deriving anything that a process would otherwise have to keep true, and a business record
-wants its state readable without the work model; the two pull apart. *Candidates, unruled:* (a) derived, with
-the item's open or closed read computed from its tasks, so nothing can drift; (b) stored, written by the closing
-step, with the derived read as the check that it agrees. *Recommendation, unruled:* (a) for the open-and-closed
-distinction and a stored value only for states with no tasks behind them (such as waiting on the customer),
-because the second kind cannot be derived from tasks. If unanswered, the open-or-closed distinction is derived and no application writes it.
+step, not a consequence of the state change.
 
-**Cost accepted.** Two views of the same work (the item's and the task's) have to be reconciled by the
+**Ruled (decision 156, 2026-10-20, the operator's): a business matter's open or closed state is derived from
+its tasks, and a state is stored only where no task stands behind it.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Principle 11 puts anything a process would otherwise have
+to keep true in a derived read, so a matter is open while any task that `REFERS_TO` it is non-terminal and closed
+when none is; no step writes that value. A state with no task behind it, such as a matter waiting on the
+customer, cannot be derived from tasks and is stored on the matter, as a business fact of the record. Where a
+stored state and the derived read can both be computed, the derived read is the check that they agree, and a
+disagreement is shown, never silently resolved. The alternative, a stored open-or-closed value written by the
+step that closes the last task, was rejected because it is state a process has to keep true. **Cost accepted:**
+the application computes the read on every view of a matter. **What would reopen it:** a matter whose open or
+closed state has no task behind it.
+
+**Cost accepted for the placement.** Two views of the same work (the item's and the task's) have to be reconciled by the
 application's read, not by the model. **What would reopen it:** an item whose every unit of work is one task and
 whose lifecycle is that task's, which would argue that the item adds nothing for that class.
 
