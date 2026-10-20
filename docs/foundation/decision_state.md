@@ -145,7 +145,7 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 152 | whether a business matter — a customer incident, an overdue receivable — … | yes | yes | unknown | nothing in the design; the work model, parent and child tasks, and the rule … |
 | 153 | how a customer-service app's agentic capabilities enter the foundation as declared workflows, … | yes | yes | unknown | nothing in the design; intake is still the only core workflow and decision 116 … |
 | 154 | where each console module's layout lives, so that a new client's console … | yes | yes | unknown | nothing in the design; decision 37 is unchanged |
-| 155 | who installs and upgrades an application on an instance, and through what … | no | no | unknown | decision 145's installation clause; nothing else |
+| 155 | who installs and upgrades an application on an instance, and through what … | no | no | unknown | nothing in the design; decision 145's placement is unchanged |
 | 156 | whether a business matter's closed state is stored on the record or … | no | no | unknown | nothing in the design; decision 152's placement is unchanged |
 | 157 | what a held write becomes when a cutover lands — decision 151 … | no | no | unknown | nothing in the design |
 
