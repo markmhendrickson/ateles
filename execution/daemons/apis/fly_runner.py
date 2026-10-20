@@ -911,30 +911,66 @@ class FlyLedger:
         with self._locked():
             return self._snapshot(self._clock()).deliveries
 
-    def record_delivery(self, key: str, entry: dict | None, *,
-                        retryable: frozenset[str] | None = None) -> bool:
-        """Reserve/update a delivery under the same cross-process ledger lock.
-
-        With ``retryable``, this is compare-and-reserve. A read-back is required
-        before the caller may send anything to Fly. Accounting/reaper writes
-        preserve these bindings through ``LedgerSnapshot.document``.
-        """
+    def _write_delivery(self, key: str, write) -> bool:
+        """Apply *write(receipts)* to the delivery receipts under the ledger lock
+        and read the result back. *write* returns False to change nothing."""
         with self._locked():
             data = self._load()
-            receipts = data.setdefault("deliveries", {})
-            old = receipts.get(key)
-            if retryable is not None and old is not None and old["status"] not in retryable:
+            if "deliveries" not in data:
+                data["deliveries"] = {}
+            receipts = data["deliveries"]
+            if not write(receipts):
                 return False
-            if entry is None:
-                receipts.pop(key, None)
-            else:
-                if not isinstance(entry.get("status"), str):
-                    raise FlyLedgerError("delivery receipt has no status")
-                receipts[key] = entry
             self._save(data)
-            if self._snapshot(self._clock()).deliveries.get(key) != entry:
+            if self._snapshot(self._clock()).deliveries.get(key) != receipts.get(key):
                 raise FlyLedgerError("delivery receipt did not read back")
             return True
+
+    def reserve_delivery(self, key: str, entry: dict) -> bool:
+        """Create the receipt for *key* if there is none (False if one exists,
+        whatever its status). A read-back is required before the caller may send
+        anything to Fly. Accounting and reaper writes preserve receipts through
+        ``LedgerSnapshot.document``."""
+        if not isinstance(entry.get("status"), str):
+            raise FlyLedgerError("delivery receipt has no status")
+
+        def write(receipts: dict) -> bool:
+            if key in receipts:
+                return False
+            receipts[key] = entry
+            return True
+
+        return self._write_delivery(key, write)
+
+    def settle_delivery(self, key: str, token: str, entry: dict) -> bool:
+        """Replace the receipt for *key* with *entry* only if the stored receipt
+        is still the reservation *token* made (compare-and-set); otherwise leave
+        it untouched and return False. *entry* carries the same token."""
+        if not isinstance(entry.get("status"), str) or entry.get("token") != token:
+            raise FlyLedgerError("delivery receipt does not carry its reservation token")
+
+        def write(receipts: dict) -> bool:
+            if key not in receipts or receipts[key].get("token") != token:
+                return False
+            receipts[key] = entry
+            return True
+
+        return self._write_delivery(key, write)
+
+    def release_delivery(self, key: str, token: str) -> bool:
+        """Remove the receipt for *key* only if it is still the reservation
+        *token* made and still ``launching`` (compare-and-remove); otherwise
+        leave it untouched and return False. For a dispatch that provably
+        launched nothing."""
+
+        def write(receipts: dict) -> bool:
+            held = receipts.get(key)
+            if held is None or held.get("token") != token or held.get("status") != "launching":
+                return False
+            receipts.pop(key)
+            return True
+
+        return self._write_delivery(key, write)
 
     def clear_delivery(self, key: str, expected: dict, *, before=None) -> bool:
         """Remove one delivery receipt, only if it still equals *expected*.

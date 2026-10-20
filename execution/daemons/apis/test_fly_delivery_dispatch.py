@@ -57,6 +57,13 @@ def isolated_receipt(monkeypatch, tmp_path):
     monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
 
 
+def seed(key, entry):
+    """Put a receipt in the ledger as an earlier dispatch would have left it."""
+    assert delivery._delivery_ledger().reserve_delivery(
+        key, {**entry, "token": "seeded-" + entry["status"]}
+    )
+
+
 def result(status="opened", **over):
     data = dict(
         fly_delivery_status=status,
@@ -329,9 +336,7 @@ def test_blocker_refuses_every_launched_status_whatever_the_setting(
     if opted_in:
         monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
     plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
-    delivery._record(
-        plan.key, {"status": status, "branch": BRANCH, "run_id": "run-123"}
-    )
+    seed(plan.key, {"status": status, "branch": BRANCH, "run_id": "run-123"})
     importlib.reload(delivery)
     blocker = delivery.fly_delivery_blocker(plan.key)
     assert "already recorded" in blocker
@@ -376,7 +381,7 @@ def test_receipt_reservation_is_atomic_across_processes(tmp_path):
 sys.path.insert(0, sys.argv[1])
 import build_delivery as d
 p = d.FlyDeliveryPlan("owner/repo", "cicada/build", "main", "owner/repo#123", 123)
-print(d._reserve_delivery(p), flush=True)
+print(bool(d._reserve_delivery(p)), flush=True)
 """
     args = [sys.executable, "-c", script, str(Path(__file__).parent)]
     children = [
@@ -552,7 +557,7 @@ def test_accounting_settlement_and_month_rollover_preserve_delivery_binding(
     now = [datetime(2026, 10, 16, tzinfo=timezone.utc).timestamp()]
     ledger._clock = lambda: now[0]
     entry = {"status": "unknown", "run_id": "run-123", "branch": BRANCH}
-    assert ledger.record_delivery(key, entry, retryable=frozenset())
+    assert ledger.reserve_delivery(key, entry)
     config = fly_runner.FlyConfig.from_env()
     ledger.reserve(config, run_id="run-123", owner="test-owner", max_run_seconds=60)
     ledger.settle("run-123", config=config, now=now[0] + 10)
@@ -625,9 +630,7 @@ def test_retry_and_deferred_task_entrances_read_the_durable_ledger(
     eid = "ent_eval_retry_task"
     snapshot = task_snapshot()
     store.rows[eid] = snapshot.copy()
-    delivery._record(
-        REPO + "#123", {"status": status, "branch": BRANCH, "run_id": "run-123"}
-    )
+    seed(REPO + "#123", {"status": status, "branch": BRANCH, "run_id": "run-123"})
 
     async def never(*a, **kw):
         raise AssertionError("retry launched a second delivery")
@@ -763,9 +766,7 @@ def test_a_delivery_launched_by_one_entrance_is_refused_by_the_other(
 def test_a_receipt_under_an_older_key_spelling_is_still_found():
     """No real ledger can hold one (no class has been opted in), but a receipt
     keyed with the repository as first spelled is found and refused anyway."""
-    delivery._delivery_ledger().record_delivery(
-        "Owner/Repo#123", {"status": "pr_failed", "branch": BRANCH, "run_id": "run-123"}
-    )
+    seed("Owner/Repo#123", {"status": "pr_failed", "branch": BRANCH, "run_id": "run-123"})
     for spelling in SPELLINGS:
         key = delivery.fly_delivery_key(spelling, 123)
         assert "already recorded" in delivery.fly_delivery_blocker(key)
@@ -794,3 +795,104 @@ def test_pipeline_notification_carries_the_recovery_steps(monkeypatch, status):
         )
     )
     assert_recovery_text(d.notifier.sent[-1], status)
+
+
+# ── A dispatch changes only the receipt it reserved ──
+
+KEY = REPO + "#123"
+
+
+def _plan():
+    return delivery.FlyDeliveryPlan(REPO, BRANCH, "main", KEY, 123)
+
+
+def _hand_the_key_to_another_dispatch():
+    """An operator cleared the first dispatch's receipt and a second dispatch
+    reserved the same key. Returns the second dispatch's token."""
+    ledger = delivery._delivery_ledger()
+    assert ledger.clear_delivery(KEY, ledger.delivery_receipts()[KEY])
+    token = delivery._reserve_delivery(_plan())
+    assert token
+    return token
+
+
+def _interleaved(outcome):
+    """Run dispatch A; while it is in flight B takes over the key; then A ends
+    with *outcome*. Returns (what A returned or raised, B's token, A's blocked
+    reasons)."""
+    state, blocked = {}, []
+
+    async def launch():
+        state["b"] = _hand_the_key_to_another_dispatch()
+        if outcome == "exception":
+            raise RuntimeError("the earlier dispatch failed late")
+        if outcome == "ineligible":
+            return SkillResult("cicada", False, None, "", "", fly_ineligible_before_launch=True)
+        if outcome == "refusal":
+            return SkillResult("cicada", False, None, "", "", error="fly runner refused")
+        return result("unknown")
+
+    def stop(reason):
+        blocked.append(reason)
+        return "blocked"
+
+    async def go():
+        try:
+            return await delivery.run_fly_delivery(_plan(), launch, stop)
+        except RuntimeError as exc:
+            return exc
+
+    return asyncio.run(go()), state["b"], blocked
+
+
+@pytest.mark.parametrize("outcome", ["ineligible", "refusal", "exception", "late_status"])
+def test_an_earlier_dispatch_cannot_change_a_later_dispatchs_receipt(outcome):
+    first, token_b, blocked = _interleaved(outcome)
+    held = delivery._delivery_ledger().delivery_receipts()[KEY]
+    assert held["token"] == token_b and held["status"] == "launching"
+    # The later dispatch still owns a live, terminal-for-everyone-else receipt.
+    assert "already recorded" in delivery.fly_delivery_blocker(KEY)
+    if outcome == "ineligible":
+        # No local path beside another dispatch's delivery.
+        assert first == "blocked" and "now belongs to another dispatch" in blocked[0]
+    elif outcome == "exception":
+        assert isinstance(first, RuntimeError) and not blocked
+    else:
+        assert first is not None and first != "blocked" and not blocked
+    # The later dispatch can still settle its own receipt.
+    assert delivery._settle_delivery(_plan(), token_b, {"status": "pr_failed", "branch": BRANCH})
+    assert delivery._delivery_ledger().delivery_receipts()[KEY]["status"] == "pr_failed"
+
+
+def test_a_single_dispatchs_prelaunch_cleanup_still_removes_its_own_reservation():
+    async def launch():
+        return SkillResult("cicada", False, None, "", "", fly_ineligible_before_launch=True)
+
+    got = asyncio.run(delivery.run_fly_delivery(_plan(), launch, lambda r: "blocked"))
+    assert got is None  # the local path may run, as for a proven pre-launch outcome
+    assert KEY not in delivery._delivery_ledger().delivery_receipts()
+    assert delivery.fly_delivery_blocker(KEY) == ""
+
+
+def test_the_ledger_changes_a_receipt_only_for_its_own_reservation():
+    ledger = delivery._delivery_ledger()
+    token = delivery._reserve_delivery(_plan())
+    assert token and delivery._reserve_delivery(_plan()) == ""
+    assert ledger.release_delivery(KEY, "someone-else") is False
+    assert ledger.settle_delivery(KEY, "someone-else", {"status": "x", "token": "someone-else"}) is False
+    with pytest.raises(fly_runner.FlyLedgerError):
+        ledger.settle_delivery(KEY, token, {"status": "unknown"})  # no token carried
+    assert ledger.delivery_receipts()[KEY]["token"] == token
+    # A receipt that left launching is no longer releasable, even by its owner.
+    assert delivery._settle_delivery(_plan(), token, {"status": "unknown", "branch": BRANCH})
+    assert ledger.release_delivery(KEY, token) is False
+    assert ledger.delivery_receipts()[KEY]["status"] == "unknown"
+    assert ledger.release_delivery("owner/repo#999", token) is False
+
+
+def test_every_reservation_has_its_own_token():
+    ledger = delivery._delivery_ledger()
+    first = delivery._reserve_delivery(_plan())
+    assert ledger.release_delivery(KEY, first)
+    second = delivery._reserve_delivery(_plan())
+    assert first and second and first != second

@@ -449,3 +449,122 @@ def test_unset_setting_leaves_the_local_delivery_byte_identical(tmp_path, monkey
     assert len(calls) == 2
     assert seen(calls[0]) == golden["task"]
     assert seen(calls[1]) == golden["pipeline"]
+
+
+def run_interleaving(first_entry, tmp_path, monkeypatch, *, blind_release=False):
+    """Dispatch A (through one real entrance) is in flight when an operator
+    clears its receipt and dispatch B (through the other real entrance)
+    reserves the same key and launches. Then A ends as a proven pre-launch
+    outcome. A may clean up only a receipt it still owns."""
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "ledger.json"))
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
+    monkeypatch.setenv("CICADA_AGENT_PAT", "eval-local-placeholder-token")
+    repo = job_eval.REPO
+    key = f"{repo}#123"
+    calls, local = [], []
+    trig = dataclasses.replace(_issue_trigger(), repository=repo, number=123)
+    snap = dict(
+        title="Build",
+        assigned_to="cicada",
+        repository=repo,
+        issue_number=123,
+        action_type="open_or_merge_pr",
+    )
+
+    def other_entrance():
+        if first_entry == "task":
+            return SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
+                trig, _empty_spec_state()
+            )
+        return apis._spawn_harness_skill(
+            "cicada", "ent_eval_b", snap, "created", _StubNotifier(), role="cicada"
+        )
+
+    async def run(skill, prompt, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            ledger = delivery._delivery_ledger()
+            assert ledger.clear_delivery(key, ledger.delivery_receipts()[key])
+            try:
+                await other_entrance()
+            except delivery.FlyDeliveryEnded:
+                pass
+            return skill_runner.SkillResult(
+                skill, False, None, "", "", fly_ineligible_before_launch=True
+            )
+        return skill_runner.SkillResult(
+            skill,
+            False,
+            1,
+            "",
+            "",
+            remote_run_id="run-b",
+            fly_delivery_status="unknown",
+            fly_delivery_branch="cicada/b",
+        )
+
+    async def prepare(*a, **kw):
+        local.append(True)
+        raise delivery.BuildWorktreeError("eval observed local fallback")
+
+    if blind_release:
+
+        def blind(plan, token):
+            ledger = delivery._delivery_ledger()
+            held = ledger.delivery_receipts()[delivery.canonical_key(plan.key)]
+            return ledger.clear_delivery(delivery.canonical_key(plan.key), held)
+
+        monkeypatch.setattr(delivery, "_release_delivery", blind)
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr("swarm_dispatch.run_skill", run)
+    monkeypatch.setattr(delivery, "prepare_build_worktree", prepare)
+    ended = False
+    if first_entry == "task":
+        first = asyncio.run(
+            apis._spawn_harness_skill(
+                "cicada", "ent_eval_a", snap, "created", _StubNotifier(), role="cicada"
+            )
+        )
+        ended = not first.ok
+    else:
+        try:
+            asyncio.run(
+                SwarmDispatcher(_StubNotifier(), _config())._open_implementation_pr(
+                    trig, _empty_spec_state()
+                )
+            )
+        except delivery.FlyDeliveryEnded:
+            ended = True
+        except delivery.BuildNotStarted:
+            pass
+    receipts = delivery._delivery_ledger().delivery_receipts()
+    return calls, local, receipts.get(key), ended
+
+
+def judge_interleaving(calls, local, receipt, ended):
+    problems = []
+    if receipt is None or receipt.get("run_id") != "run-b" or receipt["status"] != "unknown":
+        problems.append("the later dispatch lost its receipt")
+    if local:
+        problems.append("the earlier dispatch fell back to the local path")
+    if not ended:
+        problems.append("the earlier dispatch did not end as refused")
+    if len(calls) != 2:
+        problems.append("an unexpected number of launches")
+    return problems
+
+
+@pytest.mark.parametrize("first_entry", ["task", "pipeline"])
+def test_an_earlier_dispatchs_cleanup_cannot_remove_a_later_receipt(
+    first_entry, tmp_path, monkeypatch
+):
+    got = run_interleaving(first_entry, tmp_path, monkeypatch)
+    assert judge_interleaving(*got) == []
+
+
+@pytest.mark.parametrize("first_entry", ["task", "pipeline"])
+def test_the_judge_goes_red_when_cleanup_is_a_blind_removal(
+    first_entry, tmp_path, monkeypatch
+):
+    got = run_interleaving(first_entry, tmp_path, monkeypatch, blind_release=True)
+    assert judge_interleaving(*got)

@@ -33,8 +33,8 @@ def _ledger(monkeypatch, tmp_path):
     path = tmp_path / "ledger.json"
     monkeypatch.setenv(delivery.FLY_DELIVERY_REGISTRY_ENV, str(path))
     led = delivery._delivery_ledger()
-    led.record_delivery(KEY, dict(ENTRY))
-    led.record_delivery(OTHER, {**ENTRY, "status": "pr_failed", "run_id": "run-10"})
+    assert led.reserve_delivery(KEY, dict(ENTRY))
+    assert led.reserve_delivery(OTHER, {**ENTRY, "status": "pr_failed", "run_id": "run-10"})
     return led
 
 
@@ -100,7 +100,8 @@ def test_a_malformed_ledger_is_refused_untouched(ledger, text):
 
 def test_a_receipt_that_changed_since_it_was_shown_is_left_alone(ledger):
     stale = dict(ENTRY)
-    ledger.record_delivery(KEY, {**ENTRY, "status": "unknown"})
+    assert ledger.clear_delivery(KEY, stale)
+    assert ledger.reserve_delivery(KEY, {**ENTRY, "status": "unknown"})
     assert ledger.clear_delivery(KEY, stale) is False
     assert KEY in ledger.delivery_receipts()
 

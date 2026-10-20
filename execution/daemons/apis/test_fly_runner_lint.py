@@ -34,8 +34,6 @@ _EMPTY_CALLS = {"dict", "list", "tuple", "set", "str", "frozenset"}
 ALLOWLIST: dict[str, str] = {
     "execution/daemons/apis/fly_runner.py:FlyLedger._snapshot:raw.get('deliveries', {})":
         'an older pre-delivery ledger has no bindings; present malformed bindings fail closed',
-    "execution/daemons/apis/fly_runner.py:FlyLedger.record_delivery:data.setdefault('deliveries', {})":
-        'create the first binding map only after validating the existing ledger under its lock',
 
     'execution/daemons/apis/fly_runner.py:FlyExecutor._lease_for_cleanup:return None':
         'None is "no usable lease": the machine is left alone and the reservation kept',

@@ -921,24 +921,49 @@ def fly_delivery_blocker(key: str) -> str:
             + fly_delivery_recovery(key))
 
 
-def _record(key: str, entry: dict | None) -> None:
+def _new_token() -> str:
+    """A unique identity for one reservation."""
+    return secrets.token_hex(16)
+
+
+def _reserve_delivery(plan: FlyDeliveryPlan) -> str:
+    """Reserve the receipt for *plan*'s key and return this reservation's token,
+    or an empty string when a receipt already exists. The token is stored in the
+    receipt: only the holder of it may settle or release that receipt."""
     import fly_runner
 
-    key = canonical_key(key)
+    token = _new_token()
     try:
-        _delivery_ledger().record_delivery(key, entry)
+        reserved = _delivery_ledger().reserve_delivery(
+            canonical_key(plan.key),
+            {"status": "launching", "branch": plan.branch, "run_id": "", "token": token,
+             "recorded_at": time.time()},
+        )
+    except fly_runner.FlyLedgerError as exc:
+        raise ValueError(str(exc)) from None
+    return token if reserved else ""
+
+
+def _settle_delivery(plan: FlyDeliveryPlan, token: str, entry: dict) -> bool:
+    """Record *entry* as the outcome, only if the receipt is still this
+    dispatch's reservation. False: it is not (nothing was written)."""
+    import fly_runner
+
+    try:
+        return _delivery_ledger().settle_delivery(
+            canonical_key(plan.key), token, {**entry, "token": token, "recorded_at": time.time()})
     except fly_runner.FlyLedgerError as exc:
         raise ValueError(str(exc)) from None
 
 
-def _reserve_delivery(plan: FlyDeliveryPlan) -> bool:
+def _release_delivery(plan: FlyDeliveryPlan, token: str) -> bool:
+    """Remove this dispatch's own still-``launching`` reservation after a
+    proven pre-launch outcome. False: the receipt is not this dispatch's (or no
+    longer ``launching``), so it was left untouched and nothing was cleaned up."""
     import fly_runner
 
     try:
-        return _delivery_ledger().record_delivery(
-            canonical_key(plan.key), {"status": "launching", "branch": plan.branch, "run_id": "",
-                       "recorded_at": time.time()}, retryable=frozenset(),
-        )
+        return _delivery_ledger().release_delivery(canonical_key(plan.key), token)
     except fly_runner.FlyLedgerError as exc:
         raise ValueError(str(exc)) from None
 
@@ -948,37 +973,58 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
     under the durable record. Returns the dispatch's SkillResult, ``blocked(
     reason)`` when a delivery for this key is already recorded, or None when
     nothing was sent to Fly (not eligible, or the mint was refused): the
-    builder then runs its local path, as it would without Fly."""
+    builder then runs its local path, as it would without Fly.
+
+    Every write to the receipt after the reservation is a compare against the
+    reservation's token: a dispatch that no longer owns the receipt (it was
+    cleared and another dispatch reserved the key) changes nothing, and never
+    falls back to the local path."""
     reason = fly_delivery_blocker(plan.key)
     if reason:
         log.warning("[apis] %s", reason)
         return blocked(reason)
     try:
-        if not _reserve_delivery(plan):
-            return blocked("another dispatcher already reserved this Fly delivery; not launching")
+        token = _reserve_delivery(plan)
     except (OSError, ValueError):
         return blocked("the Fly delivery record could not be written; not launching")
+    if not token:
+        return blocked("another dispatcher already reserved this Fly delivery; not launching")
     try:
         result = await launch()
     except BaseException:
         # The launch may have happened: keep it recorded, as unknown.
         with contextlib.suppress(OSError, ValueError):
-            _record(plan.key, {"status": "unknown", "branch": plan.branch, "run_id": "",
-                               "recorded_at": time.time()})  # fmt: skip
+            _settle_delivery(plan, token, {"status": "unknown", "branch": plan.branch,
+                                           "run_id": ""})  # fmt: skip
         raise
     launched = bool(result.fly_delivery_status or result.remote_run_id
                     or result.remote_outcome_unknown)
     if not launched:
-        # Nothing reached Fly: no record is kept.
-        with contextlib.suppress(OSError, ValueError):
-            _record(plan.key, None)
+        # Nothing reached Fly: this dispatch's own reservation is removed.
+        try:
+            owned = _release_delivery(plan, token)
+        except (OSError, ValueError):
+            owned = True  # unreadable: the reservation stays, which refuses a repeat
+        if not owned:
+            log.warning("[apis] the delivery receipt for %s is no longer this dispatch's; "
+                        "left untouched", plan.key)
+            if result.fly_ineligible_before_launch:
+                # Another dispatch holds the key now: no local path beside it.
+                return blocked("the delivery record for this issue or task now belongs to "
+                               "another dispatch; not starting the local path")
+            return result
         return None if result.fly_ineligible_before_launch else result
-    with contextlib.suppress(OSError, ValueError):
-        _record(plan.key, {"status": result.fly_delivery_status or "unknown",
-                           "branch": plan.branch, "run_id": result.remote_run_id,
-                           "commit": result.fly_delivery_commit,
-                           "reason": result.fly_delivery_reason, "pr_number": result.fly_pr_number,
-                           "pr_url": result.fly_pr_url, "recorded_at": time.time()})  # fmt: skip
+    try:
+        settled = _settle_delivery(plan, token, {
+            "status": result.fly_delivery_status or "unknown", "branch": plan.branch,
+            "run_id": result.remote_run_id, "commit": result.fly_delivery_commit,
+            "reason": result.fly_delivery_reason, "pr_number": result.fly_pr_number,
+            "pr_url": result.fly_pr_url})  # fmt: skip
+    except (OSError, ValueError):
+        settled = True  # unreadable: the reservation stays as it was written
+    if not settled:
+        log.warning("[apis] the delivery receipt for %s is no longer this dispatch's; its "
+                    "outcome was not written over it", plan.key)
     return result
 
 
