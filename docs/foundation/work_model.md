@@ -62,6 +62,7 @@ below; steps and gates are `gates_and_workflows.md`; reference workflows and int
 - [A batch may hold on a condition discovered mid-flight](#a-batch-may-hold-on-a-condition-discovered-mid-flight).
 - [A batch may depend on a task it created](#a-batch-may-depend-on-a-task-it-created).
 - [Artifacts are records a batch leaves, never its subject](#artifacts-are-records-a-batch-leaves-never-its-subject).
+- [A business work item is a record that tasks refer to, and is not itself a task](#a-business-work-item-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task).
 - [A task is in at most one batch at a time](#a-task-is-in-at-most-one-batch-at-a-time).
 - [Parent and child tasks](#parent-and-child-tasks).
 - [A recurring task is one live instance, and its completion creates the next](#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next).
@@ -1071,6 +1072,62 @@ is what lets every rule about artifacts hold at once — that they are found by 
 that only an adapter touches them, that they are never the subject of a step, and that what happens to
 them reaches a step only through a principal who reads and signs. A word that also covered the swarm's
 own outputs would break all four.
+
+### A business work item is a record that tasks refer to, and is not itself a task
+
+**Ruled (decision 152, 2026-10-19, the operator's): a business work item, such as a customer incident or an
+overdue receivable, is a business record that tasks `REFERS_TO`, and is not itself a task.** Registered as ruled
+in `conformance.md#the-register-of-open-design-decisions`.
+
+**The question.** A client's staff organise their day around a **business work item**: a customer incident, an
+overdue receivable, an order exception. The item has a lifecycle of its own (open, waiting, closed) and effects
+of its own in external systems; closing an incident, for instance, files its mail thread out of the inbox. The
+work model's unit is the `task`, carried through declared workflows in batches, and a step's subject is always
+the batch's tasks, never an artifact
+(`#artifacts-are-records-a-batch-leaves-never-its-subject`). Nothing said how an item relates to tasks, and one
+incident may need several pieces of work: a reply, a refund, an exchange shipment, a follow-up.
+
+**The rules in this section.**
+
+- A business work item is a business record in a bundle's type, not a `task`.
+- Each unit of work on an item is a task, entering through intake, with a `REFERS_TO` edge to the item.
+- The staff queue is a view over the item and its open tasks.
+
+**The ruling.** An item is a record of a type a bundle ships (`application.md#where-each-part-lives`), which the
+instance's staff read and write. Every unit of work on it is a `task` of its own, created by an intake rule or by
+a step's successor, routed through intake, and linked to the item by the `REFERS_TO` edge the work model already
+has from a task to a record entity it concerns (`data_model.md#relationships`). The staff queue an application
+shows is a view over the item and its open tasks; it is not a second queue, and the one decision queue of the
+instance's operators stays the checkpoint queue (decision 37).
+
+**What this keeps unchanged.** The work model is untouched: a task is not given a business lifecycle beside its
+batches (`#there-is-no-task-lifecycle-there-are-batches`), a parent is still never executed, and one item can
+carry several tasks through several workflows without forcing child tasks. An intake rule can create the first
+task when an item is written, keyed on the item's entity type, which an intake rule may do because the type is a
+business record and not a work-model record (`#whether-an-intake-rule-may-key-on-the-work-models-own-records`).
+
+**Why the item is not a task.** The alternative, a task with business fields in the one queue humans and agents
+share, gives one queue but a task that would carry a business lifecycle beside its batches, and an item that
+needs several workflows would force child tasks anyway. A lifecycle that records business facts (a customer's
+case stays open while the customer waits) does not belong to the unit the swarm claims and leases.
+
+**Closing an item.** The item's closure is a state of the business record, reached when its tasks close, and
+the effect closing has in an external system (filing the thread) is an action taken through the gate by a task's
+step, not a side effect of the state change. *Left open (decision 156):* whether that closed state is **stored**
+on the item (written by the step that closes the last task) or **derived** as a read over the item's tasks.
+Principle 11 favours deriving anything that a process would otherwise have to keep true, and a business record
+wants its state readable without the work model; the two pull apart. *Candidates, unruled:* (a) derived, with
+the item's open or closed read computed from its tasks, so nothing can drift; (b) stored, written by the closing
+step, with the derived read as the check that it agrees. *Recommendation, unruled:* (a) for the open-and-closed
+distinction and a stored value only for states with no tasks behind them (such as waiting on the customer),
+because the second kind cannot be derived from tasks. If unanswered, the open-or-closed distinction is derived and no application writes it.
+
+**Cost accepted.** Two views of the same work (the item's and the task's) have to be reconciled by the
+application's read, not by the model. **What would reopen it:** an item whose every unit of work is one task and
+whose lifecycle is that task's, which would argue that the item adds nothing for that class.
+
+**Matrix.** No row is added here; the planted refusal this ruling calls for is an item written as a `task`, and is
+added to `conformance_suite.md` in a later change.
 
 ### A task is in at most one batch at a time
 

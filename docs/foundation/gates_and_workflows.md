@@ -851,10 +851,10 @@ batch which `PRODUCES` an artifact the operator authored. No new mark is added.
 **Which reference steps are which class.** The class is declared, not inferred, and the reference workflows
 declare it as follows.
 
-- `review`: `ux`, `arch`, `pr_review`, `qa`, and `legal` where they appear; outreach `review`; postmortem
+- `review`: `ux`, `arch`, `pr_review`, `qa`, and `legal` where they appear; outreach `review`; customer reply `review`; postmortem
   `pr_review`; payment `verify` and `reconcile`; release `verify_deployed`, which confirms what `release` left and
   so has its own slot, distinct from `release`'s.
-- `deterministic`: `draft_lint` of social content and `disclosure_lint` of outreach.
+- `deterministic`: `draft_lint` of social content, `disclosure_lint` of outreach, and `grounding_lint` of customer reply.
 - `work`: every other step. That includes `pm`, which states the scope and may open the issue that carries it;
   `impl`, `copy`, `draft`, `post`, `send`, `follow_up`, `prepare`, `pay`, `consent`, and the operator-only steps;
   release `criteria` and `release`; intake's five steps; the research and meeting steps; and all four steps of
