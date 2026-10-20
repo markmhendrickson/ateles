@@ -94,14 +94,18 @@ try:  # package import (production) and bare import (in-dir tests) both work
         DEFAULT_AAUTH_ISSUER,
         AAuthSigningError,
         HttpSigSigner,
+        jwk_thumbprint,
         load_http_sig_signer,
+        public_part_of,
     )
 except ImportError:  # pragma: no cover
     from aauth_httpsig import (
         DEFAULT_AAUTH_ISSUER,
         AAuthSigningError,
         HttpSigSigner,
+        jwk_thumbprint,
         load_http_sig_signer,
+        public_part_of,
     )
 
 log = logging.getLogger("daemon_runtime.neotoma_signed")
@@ -163,6 +167,11 @@ class SignedRequestError(RuntimeError):
     ``helper_signer_missing`` the helper could not load the signer it wraps;
     ``transport_error``       the helper could not reach the server (or timed out);
     ``helper_timeout``        the local helper exceeded its attempt timeout;
+    ``response_not_json``     the server answered with a body that is not JSON;
+    ``expired``               the caller's deadline passed, or the attempt was abandoned;
+    ``busy``                  every signing worker was in use (nothing was started);
+    ``identity_changed``      the signing principal differs from the one a pin recorded
+                              for this logical write (nothing was sent);
     ``helper_error``          any other error the helper reported.
 
     The message of the underlying failure is NOT part of ``code``: it can carry a
@@ -172,6 +181,46 @@ class SignedRequestError(RuntimeError):
     def __init__(self, message: str, code: str):
         super().__init__(message)
         self.code = code
+
+
+def signing_principal(ident: "dict[str, str]") -> "tuple[str, str | None]":
+    """The principal a signed write is attributed to: (sub, key thumbprint).
+
+    These are the two values the server records as ``agent_sub`` and
+    ``agent_thumbprint`` and de-duplicates an idempotency key under. The thumbprint
+    is ``None`` when the key file cannot be read, which still compares: a key that
+    was readable on the first attempt and is not on a retry is a different principal.
+    """
+    try:
+        jwk = json.loads(Path(ident["key"]).read_text())
+        thumbprint = jwk_thumbprint(public_part_of(jwk)) or None
+    except Exception:  # noqa: BLE001 — unreadable key: compared as None
+        thumbprint = None
+    return (str(ident["sub"]), thumbprint)
+
+
+class PrincipalPin:
+    """The signing principal of ONE logical write, fixed by its first attempt.
+
+    A caller that retries a write under one idempotency key passes the same pin to
+    every :func:`signed_request` attempt. Each attempt resolves the signing identity
+    afresh (inside its own spawned preparer), but the server de-duplicates per
+    principal, so a retry signed by a different principal would be a second first
+    attempt. The pin records the principal of the first attempt that resolves one;
+    a later attempt that resolves another fails with ``identity_changed`` before
+    transport is authorized, so nothing is sent.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.principal: "tuple[str, str | None] | None" = None
+
+    def admit(self, principal: "tuple[str, str | None]") -> bool:
+        with self._lock:
+            if self.principal is None:
+                self.principal = principal
+                return True
+            return self.principal == principal
 
 
 def _helper_error_code(message: object) -> str:
@@ -225,7 +274,8 @@ def _run_in_signing_worker(call):
 
 
 def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method, url, body,
-                            real_deadline, node, helper, rc_dir, environment, popen):
+                            real_deadline, node, helper, rc_dir, environment, popen,
+                            report_principal=False):
     """One owned process contains preparation, helper startup and transport."""
     try:
         os.setsid()
@@ -240,7 +290,8 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
         if body is not None:
             spec["body"] = json.dumps(body)
         request_json = json.dumps(spec)
-        sender.send(("prepared",))
+        # Only a caller that opted into a pin pays for (and sees) the principal.
+        sender.send(("prepared", signing_principal(ident)) if report_principal else ("prepared",))
         # A child created after its caller abandoned startup receives no permit
         # to transport. It can also exit without the creator returning from start.
         if not sender.poll(max(0.0, real_deadline - time.monotonic())):
@@ -273,7 +324,14 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
         if out.get("error"):
             sender.send(("error", _helper_error_code(out["error"])))
             return
-        data = json.loads(out["body"]) if out.get("body") else {}
+        try:
+            data = json.loads(out["body"]) if out.get("body") else {}
+        except json.JSONDecodeError:
+            # The server answered but the body is not JSON (a gateway's HTML error
+            # page, say). Its own code, so a caller can treat it as the uncertainty
+            # it is rather than as an unclassified helper fault.
+            sender.send(("error", "response_not_json"))
+            return
         sender.send(("result", int(out.get("status", 0)), data))
     except BaseException as exc:
         try:
@@ -296,6 +354,7 @@ def signed_request(
     deadline: float | None = None,
     cancelled: Any = None,
     clock: Any = None,
+    principal_pin: "PrincipalPin | None" = None,
 ) -> "tuple[int, dict]":
     """Perform a per-agent AAuth-signed request. Returns (status, parsed_json).
 
@@ -321,6 +380,15 @@ def signed_request(
     transport authorization only after startup and a fresh budget check; the
     helper receives request input only after its own startup check.
     ``clock`` must use the same monotonic domain as ``deadline``.
+
+    ``principal_pin`` is optional and, when omitted, changes nothing. A caller that
+    retries one logical write under one idempotency key passes the SAME
+    :class:`PrincipalPin` to each attempt: the preparer reports the principal it
+    resolved, and an attempt whose principal differs from the pinned one raises
+    ``identity_changed`` before the helper is authorized to start, so no request is
+    sent. The check compares the principal resolved by the preparer immediately
+    before transport; the helper then reads the same key file, so the only remaining
+    window is the helper's own start-up.
     """
     clock = clock or time.monotonic
     operation_deadline = min(deadline if deadline is not None else float("inf"), clock() + timeout)
@@ -378,7 +446,8 @@ def signed_request(
         child = context.Process(target=_prepare_signed_request,
                                 args=(sender, resolver, agent_name, subject, keys_dir,
                                       method, url, body, real_deadline, node, helper, rc_dir,
-                                      environment, popen), daemon=True)
+                                      environment, popen, principal_pin is not None),
+                                daemon=True)
         owned.append(child)
         try:
             check()
@@ -394,6 +463,9 @@ def signed_request(
                 if message[0] == "ready":
                     continue
                 if message[0] == "prepared":
+                    if principal_pin is not None and not principal_pin.admit(
+                            tuple(message[1]) if len(message) > 1 else None):
+                        raise SignedRequestError("signing principal changed", "identity_changed")
                     receiver.send(("run", time.monotonic() + check()))
                     continue
                 if message[0] == "error":

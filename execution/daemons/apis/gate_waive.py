@@ -263,10 +263,19 @@ def new_history_entries(current: list[dict], entries: list[dict]) -> list[dict]:
 # of the same observation, never applied twice. The retry is for the failures that
 # say "the server or the path to it was briefly unavailable" and for nothing else:
 #
-#   transport_error / helper_timeout / response_not_json   2 retries
-#   HTTP 5xx                                               2 retries
-#   HTTP 401 (a one-off token hiccup)                      1 retry
-#   every other 4xx, and every other reason code           none
+#   transport_error / helper_timeout / busy / response_not_json   2 retries
+#   HTTP 5xx                                                      2 retries
+#   HTTP 401 (a one-off token hiccup)                             1 retry
+#   every other 4xx, and every other reason code                  none
+#
+# A response body that is not JSON (`response_not_json`, for example a gateway's HTML
+# error page) is the same uncertainty as a lost response: the write may have landed.
+# Repeating it with the same idempotency key is therefore safe, and it is retried.
+#
+# A retry also requires the SAME signing principal (`neotoma_signed.PrincipalPin`):
+# the server de-duplicates per principal, so a retry signed by a different principal
+# would be a second first attempt. If the principal changed, nothing is sent and the
+# write fails closed (reason `identity_changed`, never retried).
 #
 # Backoff is short (1 s, then 3 s). The whole write is bounded by ONE DEADLINE,
 # computed when the operation starts:
@@ -286,7 +295,7 @@ SIGNED_WRITE_TOTAL_CAP_S = 45.0
 SIGNED_ATTEMPT_TIMEOUT_S = 20.0  # the signing helper's own default timeout
 BEARER_ATTEMPT_TIMEOUT_S = 30.0  # the bearer path's default HTTP timeout
 MIN_ATTEMPT_TIMEOUT_S = 2.0  # a retry is not started with less than this left
-_RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout", "busy"})
+_RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout", "busy", "response_not_json"})
 _monotonic = time.monotonic
 
 
@@ -351,7 +360,7 @@ def signed_failure_code(exc: BaseException) -> str:
 # issued by a worker that saw it, and a late one is discarded. Never retried.
 _SIGNED_FAILURE_CODES = frozenset(
     {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error", "helper_timeout",
-     "expired", "busy"}
+     "expired", "busy", "response_not_json", "identity_changed"}
 )
 
 
@@ -2147,6 +2156,7 @@ class IssueGateStore:
         lens_agent: str,
         lens_sub: str,
         deadline: float | None = None,
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> tuple[int, dict]:
         """One lens-signed `correct`, off the event loop, bounded by an ABSOLUTE deadline.
 
@@ -2211,6 +2221,7 @@ class IssueGateStore:
                 deadline=deadline,
                 cancelled=abandoned,
                 clock=_monotonic,
+                principal_pin=principal_pin,
             )
 
         permits = _signed_permits
@@ -2265,6 +2276,12 @@ class IssueGateStore:
         repo, issue_number, gate = context
         started = _monotonic()
         attempt = 0
+        # One pin for the whole logical write. Every attempt resolves the signing
+        # key afresh inside its own preparer, but the server de-duplicates the
+        # idempotency key per principal (authority_model.md, "resolved once per
+        # invocation"), so a retry must be signed by the principal the first
+        # attempt used or it is not sent (reason `identity_changed`, not retryable).
+        pin = _ns.PrincipalPin()
         while True:
             attempt += 1
             reason, shown, retries_allowed = "", "", 0
@@ -2277,6 +2294,7 @@ class IssueGateStore:
                     lens_agent=lens_agent,
                     lens_sub=lens_sub,
                     deadline=started + SIGNED_WRITE_TOTAL_CAP_S,
+                    principal_pin=pin,
                 )
             except Exception as exc:  # noqa: BLE001 — classify, never crash
                 # The exception's CLASS and a fixed reason code, plus the size of

@@ -346,6 +346,91 @@
           "reason=expired"
         ]
       }
+    },
+    {
+      "id": "a_landed_write_with_a_lost_response_is_not_retried_when_the_signing_principal_changed",
+      "why": "the server de-duplicates an idempotency key per principal. The first attempt landed and its response was lost; the lens's key then rotated. A retry would be signed by another principal and be a second first attempt, so it must not be sent: no idempotency key is sent twice, the failure is value-free (identity_changed), and the existing settle path, not a retry, restores the gate to pending and records the failure.",
+      "gates": {
+        "pm": "pending"
+      },
+      "script": {
+        "gate_status": [
+          "lost_rotate"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
+      "expect": {
+        "ok": [
+          false
+        ],
+        "verified": [
+          false
+        ],
+        "gates": {
+          "pm": "pending"
+        },
+        "max_attempts_per_key": 1,
+        "delays": [
+          1.0
+        ],
+        "log_contains": [
+          "reason=identity_changed"
+        ],
+        "log_excludes": [
+          "private detail",
+          "thumbprint",
+          "Bearer"
+        ]
+      }
+    },
+    {
+      "id": "a_response_that_is_not_json_after_a_landed_write_is_retried_with_the_same_key",
+      "why": "a gateway answering with an HTML page after the write landed is the same uncertainty as a lost response: the repeat carries the same idempotency key, is answered as a replay, and the write is applied once",
+      "gates": {
+        "pm": "pending"
+      },
+      "script": {
+        "gate_status": [
+          "not_json"
+        ]
+      },
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
+      "expect": {
+        "ok": [
+          true
+        ],
+        "verified": [
+          true
+        ],
+        "gates": {
+          "pm": "signed_off"
+        },
+        "attempts": {
+          "owner_history": 1,
+          "gate_status": 2
+        },
+        "one_key_per_field": true,
+        "delays": [
+          1.0
+        ],
+        "gate_writes_applied": 1,
+        "log_contains": [
+          "reason=response_not_json",
+          "succeeded on attempt 2"
+        ],
+        "log_excludes": [
+          "private detail",
+          "<html>"
+        ]
+      }
     }
   ]
 }

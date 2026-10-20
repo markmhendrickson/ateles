@@ -491,7 +491,7 @@ def test_a_retry_that_cannot_fit_is_not_started(monkeypatch):
 
 def _passthrough(signed):
     async def _signed_correct(self, entity_id, field_name, value, key, *, lens_agent, lens_sub,
-                              deadline=None):
+                              deadline=None, principal_pin=None):
         timeout = min(gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, deadline - gate_waive._monotonic())
         return signed("POST", "u", {}, agent_name=lens_agent, timeout=timeout, sub=lens_sub)
 
@@ -636,7 +636,7 @@ def _old_rule(monkeypatch):
     )
 
     async def old_signed_correct(self, entity_id, field_name, value, key, *, lens_agent,
-                                 lens_sub, deadline=None):
+                                 lens_sub, deadline=None, principal_pin=None):
         return gate_waive._ns.signed_request(
             "POST", "u", {}, agent_name=lens_agent,
             timeout=gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, sub=lens_sub)
@@ -880,7 +880,8 @@ def test_planted_red_computing_the_timeout_before_the_thread_only_issues_the_lat
     _tiny_real_deadline(monkeypatch)
     calls = _counting_fake(monkeypatch)
 
-    async def old(self, entity_id, field_name, value, key, *, lens_agent, lens_sub, deadline=None):
+    async def old(self, entity_id, field_name, value, key, *, lens_agent, lens_sub, deadline=None,
+                  principal_pin=None):
         timeout = min(gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, deadline - gate_waive._monotonic())
         return await asyncio.to_thread(
             gate_waive._ns.signed_request, "POST", "u", {}, agent_name=lens_agent,

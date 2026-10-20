@@ -44,6 +44,9 @@ RED = [
     ("old_cap", "a_write_whose_every_attempt_hangs_ends_inside_the_cap_counting_the_attempts"),
     ("fresh_key_per_attempt", "a_gate_write_that_landed_with_a_lost_response_is_replayed_not_applied_twice"),
     ("fresh_key_per_attempt", "a_history_entry_that_landed_with_a_lost_response_is_not_doubled"),
+    # Arch finding: the retry must not be sent under a different signing principal.
+    ("no_principal_check", "a_landed_write_with_a_lost_response_is_not_retried_when_the_signing_principal_changed"),
+    ("no_retry", "a_response_that_is_not_json_after_a_landed_write_is_retried_with_the_same_key"),
 ]
 
 
@@ -109,3 +112,19 @@ def test_descendant_eval_rejects_direct_child_only_control(tmp_path):
     assert observation["late_effect"], observation
     assert not observation["owned_pids_terminal_at_return"], observation
     assert harness.check_complete_boundary(observation), observation
+
+
+@pytest.mark.parametrize("rotate", [True, False], ids=["principal-changed", "principal-unchanged"])
+def test_real_helper_retry_is_not_sent_under_a_changed_principal(tmp_path, rotate):
+    """Real gate write, real spawned preparer, real Node helper. After a first attempt
+    that lost its response, a changed key must stop the retry before the helper starts;
+    an unchanged key must still be retried (the positive control)."""
+    observation = harness.run_identity_boundary(tmp_path, rotate=rotate)
+    assert harness.check_identity_boundary(observation, rotate=rotate) == [], observation
+
+
+def test_real_helper_identity_eval_goes_red_when_the_principal_check_is_removed(tmp_path):
+    """Planted red: with the check removed the retry reaches the helper a second time."""
+    observation = harness.run_identity_boundary(tmp_path, rotate=True, mutation=True)
+    assert observation["launches"] == 2, observation
+    assert harness.check_identity_boundary(observation, rotate=True), observation

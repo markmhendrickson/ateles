@@ -13,6 +13,9 @@ per attempt, each one of
     hang          the helper never answers: it runs until the timeout it was given
     lost          the write LANDS, then the response is lost (a transport error)
     http:<n>      the server answers with status n and applies nothing
+    not_json      the write LANDS, then the server's body is not JSON (response_not_json)
+    lost_rotate   the write LANDS, the response is lost, and the lens's signing key is
+                  rotated before the next attempt (a different signing principal)
 
 Scenarios in ``scenarios.json`` run `IssueGateStore.sign_off` unchanged; only the
 transport, the clock and the store are fakes. ``mutation`` reinstates a defect so a
@@ -42,7 +45,8 @@ gate_waive = base.gate_waive
 ns = base.ns
 GATE_STATUS_FIELD = base.GATE_STATUS_FIELD
 
-MUTATIONS = ("none", "no_retry", "retry_4xx", "fresh_key_per_attempt", "old_cap", "timeout_before_thread_only")
+MUTATIONS = ("none", "no_retry", "retry_4xx", "fresh_key_per_attempt", "old_cap", "timeout_before_thread_only",
+             "no_principal_check")
 
 
 def load() -> dict:
@@ -58,8 +62,15 @@ class FlakyStore(base.FakeIssueStore):
         self.seen_keys: set[str] = set()
         self.attempts: dict[str, list[str]] = {}  # field -> idempotency key per attempt
         self.timeouts: list[float] = []  # the timeout each hanging attempt was given
+        self.principal = ("lens@ateles-swarm", "thumbprint-before-rotation")
 
-    def transport(self, body: dict, sub: str | None, timeout: float = 20.0, clock=None) -> tuple[int, dict]:
+    def transport(self, body: dict, sub: str | None, timeout: float = 20.0, clock=None,
+                  principal_pin=None) -> tuple[int, dict]:
+        # The real preparer reports the principal it resolved, and the shared helper
+        # refuses to authorize transport when it differs from the pin. The pin class
+        # is the real one; only the key resolution is scripted.
+        if principal_pin is not None and not principal_pin.admit(self.principal):
+            raise ns.SignedRequestError("signing principal changed (private detail)", "identity_changed")
         field, key = body["field"], body.get("idempotency_key", "")
         self.attempts.setdefault(field, []).append(key)
         outcome = (self.script.get(field) or ["ok"]).pop(0) if self.script.get(field) else "ok"
@@ -82,6 +93,11 @@ class FlakyStore(base.FakeIssueStore):
             status, resp = self.apply(body, sub)
         if outcome == "lost" and status < 300:
             raise ns.SignedRequestError("response lost (private detail)", "transport_error")
+        if outcome == "lost_rotate" and status < 300:
+            self.principal = ("lens@ateles-swarm", "thumbprint-after-rotation")
+            raise ns.SignedRequestError("response lost (private detail)", "transport_error")
+        if outcome == "not_json" and status < 300:
+            raise ns.SignedRequestError("body was <html>private detail</html>", "response_not_json")
         return status, resp
 
 
@@ -108,8 +124,9 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
     with pytest.MonkeyPatch.context() as mp:
         issue_store = base._wire(mp, store, signer_fails=None)
 
-        def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
-            return store.transport(body, sub, timeout, clock)
+        def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None,
+                   principal_pin=None, **request_options):
+            return store.transport(body, sub, timeout, clock, principal_pin)
 
         mp.setattr(gate_waive._ns, "signed_request", signed)
         mp.setattr(gate_waive, "_retry_sleep", sleep, raising=False)
@@ -129,13 +146,16 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         if mutation == "timeout_before_thread_only":
             # The previous design: compute the helper timeout, hand the call to the
             # executor and await it with no deadline of its own.
-            async def old(self, entity_id, field_name, value, key, *, lens_agent, lens_sub, deadline=None):
+            async def old(self, entity_id, field_name, value, key, *, lens_agent, lens_sub, deadline=None,
+                          principal_pin=None):
                 timeout = min(gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, deadline - gate_waive._monotonic())
                 return await asyncio.to_thread(
                     gate_waive._ns.signed_request, "POST", "u", {"field": field_name, "value": value,
                     "idempotency_key": key}, agent_name=lens_agent, timeout=timeout, sub=lens_sub)
 
             mp.setattr(gate_waive.IssueGateStore, "_signed_correct", old)
+        if mutation == "no_principal_check":
+            mp.setattr(gate_waive._ns.PrincipalPin, "admit", lambda self, principal: True)
         if mutation == "no_retry":
             mp.setattr(gate_waive, "retries_for_reason", lambda code: 0)
             mp.setattr(gate_waive, "retries_for_status", lambda status: 0)
@@ -203,6 +223,10 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for field, keys in store.attempts.items():
             if len(set(keys)) != 1:
                 bad.append(f"{field}: retries changed the idempotency key: {len(set(keys))} keys")
+    if "max_attempts_per_key" in exp:
+        sent = [k for keys in store.attempts.values() for k in keys]
+        want("most times one idempotency key was sent", max((sent.count(k) for k in set(sent)), default=0),
+             exp["max_attempts_per_key"])
     if "delays" in exp:
         want("backoff delays", obs["delays"], exp["delays"])
     if "writes_issued" in exp:
@@ -541,4 +565,81 @@ def check_complete_boundary(observation):
            if observation.get(key) != value]
     if observation.get("caller_seconds", float("inf")) > 1.2:
         bad.append("caller exceeded complete-attempt allowance")
+    return bad
+
+
+def _write_rotating_helper(directory, *, rotate):
+    """A Node helper that records each launch. Its first launch loses the response
+    (a transport error after the write 'landed') and, when ``rotate``, replaces the
+    lens's key file, so the next attempt would be signed by another principal."""
+    module = directory / "dist" / "cli" / "aauth_signer.js"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text('{"type":"module"}')
+    module.write_text('''import fs from "node:fs";
+export async function cliSignedFetch(url, options) {
+  const launches = process.env.ATELES_SIGNED_EVAL_LAUNCHES;
+  const first = !fs.existsSync(launches);
+  fs.appendFileSync(launches, "launch\\n");
+  if (first) {
+    if (process.env.ATELES_SIGNED_EVAL_ROTATE === "1") {
+      fs.writeFileSync(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH,
+        JSON.stringify({kty: "EC", crv: "P-256", x: "rotated-x", y: "synthetic-y", kid: "synthetic"}));
+    }
+    throw new Error("fetch failed");
+  }
+  return {status: 200, ok: true, text: async () => "{}"};
+}
+''')
+    (directory / "synthetic.jwk.json").write_text(
+        json.dumps({"kty": "EC", "crv": "P-256", "x": "original-x", "y": "synthetic-y", "kid": "synthetic"}))
+
+
+def run_identity_boundary(directory, *, rotate=True, mutation=False):
+    """The REAL gate write -> real spawned preparer -> real Node helper, where the
+    lens's signing key changes between a first attempt (which lost its response)
+    and the retry. Offline: the key is a synthetic public JWK, the helper an inert
+    recorder. ``mutation`` removes the principal check (the planted control)."""
+    import time
+    _write_rotating_helper(directory, rotate=rotate)
+    capture = base._Capture()
+    logger = logging.getLogger("apis.gate_waive")
+    logger.addHandler(capture)
+    observation = {}
+
+    async def instant(delay):
+        return None
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ns, "AAUTH_KEYS_DIR", str(directory))
+        mp.setattr(ns, "NEOTOMA_RC_DIR", str(directory))
+        mp.setattr(gate_waive, "_retry_sleep", instant)
+        mp.setattr(gate_waive, "_monotonic", time.monotonic)
+        mp.setenv("ATELES_SIGNED_EVAL_LAUNCHES", str(directory / "launches"))
+        mp.setenv("ATELES_SIGNED_EVAL_ROTATE", "1" if rotate else "0")
+        if mutation:
+            mp.setattr(ns.PrincipalPin, "admit", lambda self, principal: True)
+        try:
+            observation["result"] = asyncio.run(
+                gate_waive.IssueGateStore("http://unused.invalid", "")._sign_off_write(
+                    "synthetic", "gate_status", {}, "synthetic-key", lens_agent="synthetic",
+                    lens_sub="synthetic@ateles-swarm", context=("synthetic", 1, "pm")))
+        finally:
+            logger.removeHandler(capture)
+    launches = directory / "launches"
+    observation["launches"] = len(launches.read_text().split()) if launches.exists() else 0
+    observation["log"] = "\n".join(capture.lines)
+    return observation
+
+
+def check_identity_boundary(observation, *, rotate):
+    if rotate:
+        expected = {"result": gate_waive.SIGN_OFF_SIGNING_FAILED, "launches": 1}
+    else:
+        expected = {"result": "", "launches": 2}
+    bad = [f"{key}: {observation.get(key)!r}" for key, value in expected.items()
+           if observation.get(key) != value]
+    if rotate and "reason=identity_changed" not in observation["log"]:
+        bad.append("the failure was not reported as identity_changed")
+    if "rotated-x" in observation["log"] or "original-x" in observation["log"]:
+        bad.append("the log carries key material")
     return bad

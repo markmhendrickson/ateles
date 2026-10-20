@@ -101,6 +101,77 @@ class NeotomaSignedTest(unittest.TestCase):
                 ns.signed_request("GET", "http://fixture.invalid", agent_name="apus")
         self.assertEqual(caught.exception.code, "transport_error")
 
+    def test_non_json_response_body_has_its_own_code(self):
+        """A server body that is not JSON (a gateway's HTML page) is not a helper fault."""
+        root, _ = self._real_helper_fixture()
+        os.environ["ATELES_SIGNED_TEST_BODY"] = "<html>502 Bad Gateway private detail</html>"
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus")
+        self.assertEqual(caught.exception.code, "response_not_json")
+        self.assertNotIn("private detail", str(caught.exception))
+
+    def _write_public_key(self, agent, x="x-one", sub=None):
+        (self.keys / f"{agent}.jwk.json").write_text(
+            json.dumps({"kty": "EC", "crv": "P-256", "x": x, "y": "y-one", "kid": "synthetic"})
+        )
+
+    def test_principal_pin_blocks_a_changed_principal_before_anything_is_sent(self):
+        """The server de-duplicates an idempotency key per principal: a retry signed
+        by another principal must not reach the helper at all."""
+        root, effect = self._real_helper_fixture()
+        self._write_public_key("apus")
+        pin = ns.PrincipalPin()
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            first = ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                      principal_pin=pin)
+            self.assertEqual(first, (200, {}))
+            self.assertIsNotNone(pin.principal[1], "the key thumbprint was not recorded")
+            effect.unlink()
+            # Same principal: admitted, and the helper runs again.
+            self.assertEqual(ns.signed_request("POST", "http://fixture.invalid", {},
+                                               agent_name="apus", principal_pin=pin), (200, {}))
+            self.assertTrue(effect.exists())
+            effect.unlink()
+            # The key rotates between attempts: a different thumbprint.
+            self._write_public_key("apus", x="x-two")
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                  principal_pin=pin)
+            self.assertEqual(caught.exception.code, "identity_changed")
+            self.assertFalse(effect.exists(), "a retry under a changed principal reached the helper")
+            # The subject changes between attempts: a different principal too.
+            self._write_public_key("apus")
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                  sub="someone-else@ateles-swarm", principal_pin=pin)
+            self.assertEqual(caught.exception.code, "identity_changed")
+            self.assertFalse(effect.exists())
+
+    def test_without_a_pin_a_changed_key_is_not_checked(self):
+        """Callers that pass no pin (the loader) keep exactly their previous behavior."""
+        root, effect = self._real_helper_fixture()
+        self._write_public_key("apus")
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus")
+            self._write_public_key("apus", x="x-two")
+            effect.unlink()
+            self.assertEqual(ns.signed_request("POST", "http://fixture.invalid", {},
+                                               agent_name="apus"), (200, {}))
+        self.assertTrue(effect.exists())
+
+    def test_principal_pin_first_resolution_wins_and_is_thread_safe(self):
+        pin = ns.PrincipalPin()
+        results = []
+        threads = [threading.Thread(target=lambda i=i: results.append(pin.admit(("sub", f"tp{i}"))))
+                   for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sum(results), 1, "exactly one principal may become the pinned one")
+        self.assertTrue(pin.admit(pin.principal))
+
     def test_signed_request_no_key_raises(self):
         ns.AAUTH_KEYS_DIR = str(Path(self._tmp.name) / "empty")
         with self.assertRaises(RuntimeError) as cm:
@@ -332,6 +403,73 @@ class NeotomaSignedTest(unittest.TestCase):
             self.assertEqual(al.AgentLoader("apus")._neotoma("POST", "http://fixture.invalid", {}), {})
         self.assertTrue(effect.exists())
         bearer.assert_not_called()
+
+    def test_loader_signed_get_without_a_body_returns_the_parsed_response(self):
+        """The loader's other request shape: a GET with no body, default limits."""
+        import agent_loader as al
+        root, effect = self._real_helper_fixture()
+        os.environ["ATELES_SIGNED_TEST_BODY"] = json.dumps({"entity": {"id": "e1"}})
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            al, "ns", ns
+        ), mock.patch.dict(os.environ, {"NEOTOMA_AAUTH_VIA_CLI": "1"}), mock.patch.object(
+            al.httpx, "get"
+        ) as bearer:
+            self.assertEqual(al.AgentLoader("apus")._neotoma("GET", "http://fixture.invalid/e1"),
+                             {"entity": {"id": "e1"}})
+        self.assertTrue(effect.exists())
+        bearer.assert_not_called()
+
+    def test_loader_falls_back_to_bearer_when_every_signing_worker_is_busy(self):
+        """Pool capacity: the loader used to start a subprocess per call with no
+        bound; the shared pool now answers `busy` at once when all workers are in
+        use, and the loader's documented fallback keeps it available."""
+        import agent_loader as al
+        self._write_key("apus")
+        taken = 0
+        try:
+            while ns._signed_permits.acquire(blocking=False):
+                taken += 1
+            self.assertGreaterEqual(taken, 1)
+            response = mock.Mock(raise_for_status=lambda: None, json=lambda: {"via": "bearer"})
+            real_request, codes = ns.signed_request, []
+
+            def observed(*args, **kwargs):
+                try:
+                    return real_request(*args, **kwargs)
+                except ns.SignedRequestError as exc:
+                    codes.append(exc.code)
+                    raise
+
+            with mock.patch.object(al, "ns", ns), mock.patch.object(
+                ns, "signed_request", observed
+            ), mock.patch.dict(
+                os.environ, {"NEOTOMA_AAUTH_VIA_CLI": "1"}
+            ), mock.patch.object(al.httpx, "get", return_value=response) as bearer:
+                self.assertEqual(al.AgentLoader("apus")._neotoma("GET", "http://fixture.invalid/e1"),
+                                 {"via": "bearer"})
+            self.assertEqual(codes, ["busy"], "the shared pool did not refuse the call")
+            bearer.assert_called_once()
+        finally:
+            for _ in range(taken):
+                ns._signed_permits.release()
+
+    def test_loader_falls_back_to_bearer_on_each_signed_failure_class(self):
+        import agent_loader as al
+        self._write_key("apus")
+        failures = [ns.SignedRequestError("x", code) for code in
+                    ("busy", "expired", "helper_timeout", "response_not_json", "transport_error",
+                     "helper_error", "no_key")]
+        failures.append(subprocess.TimeoutExpired("signed_request", 20))
+        for failure in failures:
+            with self.subTest(failure=getattr(failure, "code", type(failure).__name__)):
+                response = mock.Mock(raise_for_status=lambda: None, json=lambda: {"via": "bearer"})
+                with mock.patch.object(al, "ns", ns), mock.patch.object(
+                    ns, "signed_request", side_effect=failure
+                ), mock.patch.dict(os.environ, {"NEOTOMA_AAUTH_VIA_CLI": "1"}), mock.patch.object(
+                    al.httpx, "get", return_value=response
+                ):
+                    self.assertEqual(al.AgentLoader("apus")._neotoma("GET", "http://fixture.invalid"),
+                                     {"via": "bearer"})
 
     # ── ateles#795 constraint 2: explicit subject, never ambient ──────────────
 
