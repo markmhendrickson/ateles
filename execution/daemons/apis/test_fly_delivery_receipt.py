@@ -137,21 +137,79 @@ def test_a_failed_confirmation_audit_reports_the_verified_removal(ledger, monkey
     assert [x["stage"] for x in audit(ledger)] == ["removing"]
 
 
-def test_an_error_after_the_file_was_replaced_is_decided_by_the_read_back(
+def test_a_removal_that_raised_after_the_replace_is_never_reported_complete(
     ledger, monkeypatch
 ):
+    """A directory-sync error after the replace: the fresh read shows the receipt
+    gone, which is visibility, not durability. Exit 6, never 0."""
     real = ledger._save
 
     def save_then_fail(data):
         real(data)
-        raise OSError("fsync failed after the replace")
+        raise OSError("directory sync failed after the replace")
 
     monkeypatch.setattr(ledger, "_save", save_then_fail)
     rc, out, err = run("clear", KEY, "--confirm", KEY, ledger=ledger)
-    assert rc == 0 and "verified by reading the ledger again" in out
-    assert "not removed" not in err and KEY not in ledger.delivery_receipts()
+    assert rc == 6 and "NOT confirmed durable" in err and "crash may bring it back" in err
+    assert "Removed the delivery receipt" not in out
+    assert KEY not in ledger.delivery_receipts()
+    events = audit(ledger)
+    assert [x["stage"] for x in events] == ["removing", "removed_unconfirmed"]
+    assert events[-1]["error"] == "OSError"
+
+
+def test_the_unconfirmed_event_failing_too_still_exits_6(ledger, monkeypatch):
+    real = ledger._save
+
+    def save_then_fail(data):
+        real(data)
+        raise OSError("directory sync failed after the replace")
+
+    monkeypatch.setattr(ledger, "_save", save_then_fail)
+    monkeypatch.setattr(
+        cli, "_append_audit", failing_stage(cli._append_audit, {"removed_unconfirmed"})
+    )
+    rc, _, err = run("clear", KEY, "--confirm", KEY, ledger=ledger)
+    assert rc == 6 and "NOT confirmed durable" in err and "'removing' record" in err
+    assert [x["stage"] for x in audit(ledger)] == ["removing"]
+
+
+def test_exit_zero_needs_a_clean_removal_and_a_synced_closing_event(ledger):
+    rc, out, err = run("clear", KEY, "--confirm", KEY, ledger=ledger)
+    assert rc == 0 and err == "" and "Removed the delivery receipt" in out
     assert [x["stage"] for x in audit(ledger)] == ["removing", "removed"]
-    assert "fsync failed" in audit(ledger)[-1]["error"]
+
+
+def test_the_audit_directory_is_synced_after_the_file(ledger, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "_fsync_dir", lambda d: calls.append(Path(d)))
+    rc, _, _ = run("clear", KEY, "--confirm", KEY, ledger=ledger)
+    assert rc == 0 and calls == [ledger.path.parent, ledger.path.parent]
+
+
+def test_a_failed_directory_sync_of_the_removing_event_removes_nothing(ledger, monkeypatch):
+    def fail(directory):
+        raise OSError("directory sync failed")
+
+    monkeypatch.setattr(cli, "_fsync_dir", fail)
+    rc, out, err = run("clear", KEY, "--confirm", KEY, ledger=ledger)
+    assert rc == 2 and "nothing was removed" in err and "Removed" not in out
+    assert KEY in ledger.delivery_receipts()
+
+
+def test_a_failed_directory_sync_of_the_closing_event_exits_4(ledger, monkeypatch):
+    calls = []
+
+    def second_fails(directory):
+        calls.append(directory)
+        if len(calls) == 2:
+            raise OSError("directory sync failed")
+
+    monkeypatch.setattr(cli, "_fsync_dir", second_fails)
+    rc, out, err = run("clear", KEY, "--confirm", KEY, ledger=ledger)
+    assert rc == 4 and "WAS removed" in err and str(cli.audit_path(ledger)) in err
+    assert "Removed the delivery receipt" not in out
+    assert KEY not in ledger.delivery_receipts()
 
 
 def test_a_removal_that_fails_before_the_replace_is_recorded_as_failed(ledger, monkeypatch):

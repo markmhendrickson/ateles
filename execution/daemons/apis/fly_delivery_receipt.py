@@ -23,16 +23,26 @@ written, a ``removing`` event (who, when, the action and the full identity of
 the receipt) is appended to ``<ledger>.audit.jsonl`` and synced; if that fails
 nothing is removed. The removal is then verified by reading the ledger again
 (an error raised during or after the write is treated as uncertain, never as
-"not removed"), and a ``removed`` event (the receipt is gone) or a
-``remove_failed`` event (it is still there) is appended. No credential is read
+"not removed"), and a ``removed`` event (clean), a ``removed_unconfirmed``
+event (gone, but the removal raised) or a ``remove_failed`` event (still there)
+is appended. The audit file is synced and so is its directory. No credential is read
 or written.
 
-Exit status: 0 the receipt is verified gone and the ``removed`` event is written
-(or a dry run, or ``list``); 1 refused (no such receipt, wrong ``--confirm``, or
-the receipt changed); 2 nothing was removed (the ledger could not be read, or
-the ``removing`` event could not be written); 3 the removal failed and the
-receipt is still there; 4 the receipt WAS removed (verified) but the ``removed``
-event could not be written; 5 the final state could not be verified.
+Exit status:
+  0  clean and verified: the removal returned without an error, a fresh read shows
+     the receipt gone, and the ``removed`` event is written and synced (also a
+     dry run and ``list``)
+  1  refused: no such receipt, wrong ``--confirm``, or the receipt changed
+  2  nothing was removed: the ledger could not be read, or the ``removing`` event
+     (or its directory) could not be written and synced
+  3  the removal failed and the receipt is still there
+  4  the receipt WAS removed (verified, and the removal raised no error) but the
+     ``removed`` event could not be written; the message names the audit file
+  5  the final state could not be verified (the ledger could not be read back)
+  6  the receipt is no longer visible, but the removal raised an error (for
+     example a directory sync after the replace), so it is NOT confirmed
+     durable: a crash may bring it back. ``removed_unconfirmed`` is recorded.
+     Run ``list`` again, and run the clear again if it reappears.
 """
 
 from __future__ import annotations
@@ -71,9 +81,19 @@ def audit_path(ledger: "fly_runner.FlyLedger") -> Path:
     return ledger.path.with_name(ledger.path.name + ".audit.jsonl")
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Make a created or replaced name in *directory* durable."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _append_audit(ledger: "fly_runner.FlyLedger", line: dict) -> None:
-    """One JSON line, appended and synced. Raises OSError when it cannot be
-    written, and the caller then removes nothing."""
+    """One JSON line, appended and synced, and then its directory synced so the
+    file's name is durable too (it may have just been created). Raises OSError
+    when any of that fails, and the caller then removes nothing."""
     path = audit_path(ledger)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -81,6 +101,7 @@ def _append_audit(ledger: "fly_runner.FlyLedger", line: dict) -> None:
         fh.write(json.dumps(line, sort_keys=True) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
+    _fsync_dir(path.parent)
 
 
 def _find(receipts: dict, key: str) -> tuple[str, dict] | None:
@@ -154,7 +175,7 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
     try:
         removed = ledger.clear_delivery(stored, entry, before=announce)
     except (OSError, fly_runner.FlyLedgerError) as exc:
-        removed, problem = None, f"{type(exc).__name__}: {exc}"
+        removed, problem = None, type(exc).__name__
     if removed is False:
         print("refused: the receipt changed since it was shown; nothing removed. "
               "Run this again.", file=err)
@@ -167,32 +188,49 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
     try:
         gone = stored not in ledger.delivery_receipts()
     except (OSError, fly_runner.FlyLedgerError) as exc:
-        print(f"UNVERIFIED: the ledger could not be read back ({exc}). The 'removing' record "
+        print(f"UNVERIFIED: the ledger could not be read back ({type(exc).__name__}). The "
+              f"'removing' record "
               f"is in {audit_file}. Check the ledger before doing anything else.", file=err)
         return 5
+    # Success needs all three: the removal returned without an error (its own
+    # directory sync included), the fresh read shows the receipt gone, and the
+    # closing record is written and synced. A fresh read shows visibility, not
+    # durability, so a removal that raised is never reported as complete.
+    stage = ("remove_failed" if not gone
+             else "removed_unconfirmed" if problem else "removed")  # fmt: skip
     detail = {"error": problem} if problem else {}
     try:
-        _append_audit(ledger, {**identity, **detail, "at": when(),
-                               "stage": "removed" if gone else "remove_failed"})  # fmt: skip
+        _append_audit(ledger, {**identity, **detail, "at": when(), "stage": stage})
     except OSError as exc:
-        if gone:
-            print(f"The receipt for {stored} WAS removed (verified by reading the ledger "
-                  f"again), but the closing audit record could not be written ({exc}). The "
-                  f"'removing' record is in {audit_file}. Re-dispatch is no longer refused "
-                  "on its account.", file=err)
-            return 4
-        print(f"The receipt for {stored} is still in the ledger ({problem or 'not removed'}) "
-              f"and the 'remove_failed' record could not be written ({exc}); the 'removing' "
-              f"record is in {audit_file}.", file=err)
-        return 3
+        if not gone:
+            print(f"The receipt for {stored} is still in the ledger ({problem or 'not removed'})"
+                  f" and the 'remove_failed' record could not be written "
+                  f"({type(exc).__name__}); the 'removing' record is in {audit_file}.", file=err)
+            return 3
+        if problem:
+            print(f"The receipt for {stored} is no longer visible, but its removal is NOT "
+                  f"confirmed durable ({problem}) and the closing record could not be written "
+                  f"({type(exc).__name__}). A crash may bring it back. Run 'list' again, and "
+                  f"run the clear again if it reappears. The 'removing' record is in "
+                  f"{audit_file}.", file=err)
+            return 6
+        print(f"The receipt for {stored} WAS removed (verified by reading the ledger again), "
+              f"but the closing audit record could not be written ({type(exc).__name__}). The "
+              f"'removing' record is in {audit_file}. Re-dispatch is no longer refused on its "
+              "account.", file=err)
+        return 4
     if not gone:
         print(f"The receipt for {stored} is still in the ledger ({problem or 'not removed'}); "
               "'remove_failed' is recorded in the audit file.", file=err)
         return 3
-    note = (f" (the ledger write reported an error, {problem}; the removal was verified by "
-            "reading the ledger again)" if problem else "")
-    print(f"\nRemoved the delivery receipt for {stored}{note}. Re-dispatch is no longer "
-          "refused on its account.", file=out)
+    if problem:
+        print(f"The receipt for {stored} is no longer visible, but its removal is NOT "
+              f"confirmed durable (the ledger write raised {problem}). A crash may bring it "
+              "back. Run 'list' again, and run the clear again if it reappears. "
+              "'removed_unconfirmed' is recorded in the audit file.", file=err)
+        return 6
+    print(f"\nRemoved the delivery receipt for {stored}. Re-dispatch is no longer refused "
+          "on its account.", file=out)
     return 0
 
 
