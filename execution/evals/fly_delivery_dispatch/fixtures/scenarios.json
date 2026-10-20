@@ -1,0 +1,22 @@
+{"scenarios":[
+ {"id":"task-delivers","entry":"task","job":"delivery_pushes_and_opens_a_pull_request","status":"opened"},
+ {"id":"pipeline-delivers","entry":"pipeline","job":"delivery_pushes_and_opens_a_pull_request","status":"opened"},
+ {"id":"task-unknown-replay","entry":"task","job":"delivery_pushes_and_opens_a_pull_request","status":"unknown"},
+ {"id":"pipeline-unknown-replay","entry":"pipeline","job":"delivery_pushes_and_opens_a_pull_request","status":"unknown"},
+ {"id":"task-no-time","entry":"task","job":"no_time_pushes_nothing","status":"no_time"},
+ {"id":"pipeline-no-time","entry":"pipeline","job":"no_time_pushes_nothing","status":"no_time"},
+ {"id":"task-pr-failure","entry":"task","job":"pull_request_failure_keeps_the_pushed_commit","status":"pr_failed"},
+ {"id":"pipeline-pr-failure","entry":"pipeline","job":"pull_request_failure_keeps_the_pushed_commit","status":"pr_failed"},
+ {"id":"task-clone-failed","entry":"task","job":"clone_failure_never_runs_the_cli","status":"clone_failed"},
+ {"id":"pipeline-clone-failed","entry":"pipeline","job":"clone_failure_never_runs_the_cli","status":"clone_failed"},
+ {"id":"task-not-delivered","entry":"task","job":"failed_cli_pushes_nothing","status":"not_delivered"},
+ {"id":"pipeline-not-delivered","entry":"pipeline","job":"failed_cli_pushes_nothing","status":"not_delivered"},
+ {"id":"task-no-changes","entry":"task","job":"no_changes_pushes_nothing","status":"no_changes"},
+ {"id":"pipeline-no-changes","entry":"pipeline","job":"no_changes_pushes_nothing","status":"no_changes"},
+ {"id":"task-push-failed","entry":"task","job":"rejected_push_leaves_the_remote_head_unchanged","status":"push_failed"},
+ {"id":"pipeline-push-failed","entry":"pipeline","job":"rejected_push_leaves_the_remote_head_unchanged","status":"push_failed"},
+ {"id":"task-mixed-case-spellings","entry":"task","job":"delivery_pushes_and_opens_a_pull_request","status":"unknown","first_repo":"Owner/Repo","replay_repos":["Owner/Repo","OWNER/REPO","  Owner/Repo  ","Owner/Repo.git","https://github.com/Owner/Repo","https://github.com/Owner/Repo.git","git@github.com:Owner/Repo.git"]},
+ {"id":"task-spellings-after-not-delivered","entry":"task","job":"failed_cli_pushes_nothing","status":"not_delivered","first_repo":"owner/repo","replay_repos":["Owner/Repo","OWNER/REPO","  Owner/Repo  ","Owner/Repo.git","https://github.com/Owner/Repo","https://github.com/Owner/Repo.git","git@github.com:Owner/Repo.git"]},
+ {"id":"pipeline-mixed-case-spellings","entry":"pipeline","job":"delivery_pushes_and_opens_a_pull_request","status":"unknown","first_repo":"Owner/Repo","replay_repos":["Owner/Repo","OWNER/REPO","  Owner/Repo  ","Owner/Repo.git","https://github.com/Owner/Repo","https://github.com/Owner/Repo.git","git@github.com:Owner/Repo.git"]},
+ {"id":"pipeline-spellings-after-not-delivered","entry":"pipeline","job":"failed_cli_pushes_nothing","status":"not_delivered","first_repo":"owner/repo","replay_repos":["Owner/Repo","OWNER/REPO","  Owner/Repo  ","Owner/Repo.git","https://github.com/Owner/Repo","https://github.com/Owner/Repo.git","git@github.com:Owner/Repo.git"]}
+]}
