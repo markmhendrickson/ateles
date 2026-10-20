@@ -16,3 +16,9 @@ cfa8234cff32be66f29e04027911674b06fb1e1c:lib/capabilities/credentials.py:protect
 # value in a clone-identity test, flagged in an EARLIER commit of the PR. The later
 # commit builds it from fragments; the PR-range scan reads history.
 6d23fbed06b640d484854db5b2d54fb10004090c:execution/daemons/apis/test_build_delivery.py:pii-email:740
+# ateles PR #1475: a fake credential-shaped value planted in a receipt by the clearing
+# command's eval, flagged in an EARLIER commit of the PR. The later commit builds it
+# from fragments; the PR-range scan reads history.
+d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fly_delivery_receipt_eval.py:protected-patterns:31
+d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fly_delivery_receipt_eval.py:github-pat:31
+d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fly_delivery_receipt_eval.py:github-tokens:31

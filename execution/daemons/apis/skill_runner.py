@@ -1738,6 +1738,22 @@ class SkillResult:
     # A configuration the operator must repair before this dispatch can run
     # (not a wait): per provider, naming the setting, never a value.
     configuration_repair: str = ""
+    # A builder's Fly delivery (build_delivery.plan_fly_delivery): what the
+    # runner's record said, read back. ``fly_delivery_status`` is one of the
+    # runner's statuses, ``unknown`` (the run's outcome is unknown) or
+    # ``unreported`` (the record carries no delivery status); empty for every
+    # other dispatch. A launched delivery is terminal: never failed over,
+    # retried or re-run locally.
+    fly_delivery_status: str = ""
+    fly_delivery_reason: str = ""
+    fly_delivery_branch: str = ""
+    fly_delivery_commit: str = ""
+    fly_pr_number: int | None = None
+    fly_pr_url: str = ""
+    # Nothing was sent to Fly: the job was not eligible (including a refused
+    # delivery-token mint) or its launch provably did not take effect. A
+    # builder may then run its delivery locally, as it would without Fly.
+    fly_ineligible_before_launch: bool = False
     # A Fly run is not gated by the Mac's usage reading (operator ruling
     # 2026-10-15). When that reading WOULD have refused this provider
     # locally, what it said; empty when it would have allowed it.
@@ -1772,6 +1788,25 @@ def _isolation_refusal_result(skill: str, provider: str, exc: "IsolationRefusal"
     log.error(f"[apis] {skill} dispatch refused before launch — {msg}")
     return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
                        configuration_repair=f"{provider}: {detail}")  # fmt: skip
+
+
+def _fly_delivery_fields(job, *, unknown: bool) -> dict:
+    """The SkillResult fields of a Fly delivery: what its record said, or
+    ``unknown`` when the run's outcome is unknown. Empty for any other job."""
+    if job is None or job.delivery is None:
+        return {}
+    branch = job.delivery["branch"]
+    if unknown:
+        return {"fly_delivery_status": "unknown", "fly_delivery_branch": branch}
+    got = job.delivery_result or {"delivery_status": "unreported"}
+    return {
+        "fly_delivery_status": got["delivery_status"],
+        "fly_delivery_reason": got.get("delivery_reason") or "",
+        "fly_delivery_branch": got.get("delivery_branch") or branch,
+        "fly_delivery_commit": got.get("delivery_commit") or "",
+        "fly_pr_number": got.get("pr_number"),
+        "fly_pr_url": got.get("pr_url") or "",
+    }
 
 
 class _LocalSpawnError(Exception):
@@ -2574,6 +2609,7 @@ async def _run_skill_once(
     runner: str | None = None,
     repository: str = "",
     local_fallback_check=None,
+    fly_delivery: dict | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -3489,6 +3525,10 @@ async def _run_skill_once(
     # revokes the job's GitHub token and settles the machine on every path.
     _fly_job = None
     _fly_note = ""
+    if fly_delivery is not None:
+        # A delivery runs on Fly or not at all here: the builder, not this
+        # function, falls back to its local worktree path.
+        runner = "fly"
     _fly_forced = runner == "fly"
     _fly_reason = ""
     # Fly is configured but a cost, capacity or time limit is invalid: a
@@ -3511,6 +3551,7 @@ async def _run_skill_once(
                 cwd=cwd,
                 owns_pending_gate=owns_pending_gate,
                 codex_outer_sandboxed=codex_outer_sandboxed,
+                delivery=fly_delivery,
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
@@ -3530,7 +3571,11 @@ async def _run_skill_once(
             # must not cool the provider or fail over as if it did.
             msg = f"fly runner refused: {reason}"
             log.error(f"[apis] {skill} dispatch refused — {msg}")
-            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                fly_ineligible_before_launch=not _fly_disabled and reason.startswith(
+                    ("not eligible", "Fly launch failed")),
+            )  # fmt: skip
         if local_fallback_check is not None:
             # This provider was chosen WITHOUT the Mac's usage gate because
             # it was bound for Fly. Running locally instead, it gets the
@@ -3700,6 +3745,7 @@ async def _run_skill_once(
                         skill, False, None, "", "", error=msg, provider=provider,
                         remote_outcome_unknown=True, remote_run_id=_fly_job.run_id,
                         remote_machine_state=state,
+                        **_fly_delivery_fields(_fly_job, unknown=True),
                     )  # fmt: skip
                 finally:
                     if _fly_job is not None and _fly_job.machine_id:
@@ -3823,6 +3869,7 @@ async def _run_skill_once(
                 remote_machine_state=(
                     (_fly_job.remote_state or "unconfirmed") if _fly_job is not None else ""
                 ),
+                **_fly_delivery_fields(_fly_job, unknown=True),
             )
 
         duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
@@ -3937,6 +3984,8 @@ async def _run_skill_once(
             remote_outcome_unknown=bool(_fly_job is not None and _fly_job.outcome_unknown),
             remote_run_id=_fly_job.run_id if _fly_job is not None else "",
             remote_machine_state=_fly_job.remote_state if _fly_job is not None else "",
+            **_fly_delivery_fields(
+                _fly_job, unknown=bool(_fly_job is not None and _fly_job.outcome_unknown)),
         )
         if _fly_job is not None and _fly_job.remote_state == "unconfirmed":
             log.warning(
@@ -4185,6 +4234,7 @@ async def run_skill(
     inference_only: bool = False,
     runner: str | None = None,
     repository: str = "",
+    fly_delivery: dict | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -4288,6 +4338,8 @@ async def run_skill(
         precomputed_tier = model_tiering.resolve_tier(
             action_class, signals=escalation_signals
         )
+    if fly_delivery is not None:
+        runner = "fly"  # a delivery runs on Fly or the builder runs it locally
     fly_bound, fly_extra = _fly_routing(runner, action_class)
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
@@ -4316,6 +4368,7 @@ async def run_skill(
             inference_only=inference_only,
             runner=runner,
             repository=repository,
+            fly_delivery=fly_delivery,
             local_fallback_check=(
                 (lambda name: _local_fallback_refusal(name, pinned=provider is not None))
                 if selected in fly_bound else None
@@ -4683,6 +4736,10 @@ async def _run_provider_attempts(
         # its text: no cooldown, no failover to another provider, no retry,
         # even when an infrastructure message resembles a provider failure.
         if result.remote_outcome_unknown:
+            return result
+        # A launched Fly delivery may have pushed: whatever its status, it
+        # ends the dispatch here too. Never failed over to another provider.
+        if result.fly_delivery_status:
             return result
         if result.configuration_repair:
             # The isolated harness home was refused before any child started:
