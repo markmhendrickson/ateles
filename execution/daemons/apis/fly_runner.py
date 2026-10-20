@@ -936,14 +936,18 @@ class FlyLedger:
                 raise FlyLedgerError("delivery receipt did not read back")
             return True
 
-    def clear_delivery(self, key: str, expected: dict) -> bool:
+    def clear_delivery(self, key: str, expected: dict, *, before=None) -> bool:
         """Remove one delivery receipt, only if it still equals *expected*.
 
         The operator's reconcile step (``fly_delivery_receipt.py``): under the
         ledger's own lock and atomic write, nothing else is touched, and a
-        receipt that changed since it was shown is left alone (False). A
-        malformed ledger raises ``FlyLedgerError``. No code path calls this
-        automatically.
+        receipt that changed since it was shown is left alone (False). *before*
+        is called under the same lock once the receipt has been compared and
+        matched, and before anything is written: if it raises, nothing is
+        removed. A malformed ledger raises ``FlyLedgerError``. An exception
+        raised from the write may come after the file was replaced, so a caller
+        decides what happened by reading the ledger again. No code path calls
+        this automatically.
         """
         with self._locked():
             data = self._load()
@@ -952,6 +956,8 @@ class FlyLedger:
             receipts = data["deliveries"]
             if receipts.get(key) != expected:
                 return False
+            if before is not None:
+                before()
             receipts.pop(key)
             self._save(data)
             if key in self._snapshot(self._clock()).deliveries:

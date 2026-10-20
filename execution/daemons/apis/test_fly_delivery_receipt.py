@@ -38,10 +38,15 @@ def _ledger(monkeypatch, tmp_path):
     return led
 
 
-def run(*argv):
+def run(*argv, ledger=None):
     out, err = io.StringIO(), io.StringIO()
-    rc = cli.main(list(argv), out=out, err=err)
+    rc = cli.main(list(argv), ledger=ledger, out=out, err=err)
     return rc, out.getvalue(), err.getvalue()
+
+
+def audit(ledger):
+    path = cli.audit_path(ledger)
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
 
 
 def test_dry_run_prints_the_receipt_and_changes_nothing(ledger):
@@ -58,11 +63,13 @@ def test_confirm_removes_exactly_one_receipt_and_audits_it(ledger):
     rc, out, _ = run("clear", KEY, "--confirm", KEY)
     assert rc == 0 and "Removed" in out
     assert list(ledger.delivery_receipts()) == [OTHER]
-    lines = [json.loads(x) for x in cli.audit_path(ledger).read_text().splitlines()]
-    assert [x["stage"] for x in lines] == ["requested", "removed"]
+    lines = audit(ledger)
+    assert [x["stage"] for x in lines] == ["removing", "removed"]
     for line in lines:
         assert line["key"] == KEY and line["status"] == "not_delivered"
         assert line["by"] and line["at"] and line["run_id"] == "run-9"
+        assert line["action"] == "clear_delivery_receipt" and line["commit"] == "b" * 40
+        assert line["branch"] == ENTRY["branch"] and line["recorded_at"] == ENTRY["recorded_at"]
     assert "token" not in cli.audit_path(ledger).read_text().lower()
     assert delivery.fly_delivery_blocker(KEY) == ""
 
@@ -106,6 +113,72 @@ def test_an_audit_that_cannot_be_written_removes_nothing(ledger, monkeypatch):
     rc, _, err = run("clear", KEY, "--confirm", KEY)
     assert rc == 2 and "nothing was removed" in err
     assert KEY in ledger.delivery_receipts()
+    assert audit(ledger) == []
+
+
+def failing_stage(real, stages):
+    def append(led, line):
+        if line["stage"] in stages:
+            raise OSError("disk full")
+        return real(led, line)
+
+    return append
+
+
+def test_a_failed_confirmation_audit_reports_the_verified_removal(ledger, monkeypatch):
+    monkeypatch.setattr(
+        cli, "_append_audit", failing_stage(cli._append_audit, {"removed", "remove_failed"})
+    )
+    rc, out, err = run("clear", KEY, "--confirm", KEY)
+    assert rc == 4 and "WAS removed" in err and "verified" in err
+    assert str(cli.audit_path(ledger)) in err and "'removing' record" in err
+    assert "Removed the delivery receipt" not in out
+    assert KEY not in ledger.delivery_receipts()
+    assert [x["stage"] for x in audit(ledger)] == ["removing"]
+
+
+def test_an_error_after_the_file_was_replaced_is_decided_by_the_read_back(
+    ledger, monkeypatch
+):
+    real = ledger._save
+
+    def save_then_fail(data):
+        real(data)
+        raise OSError("fsync failed after the replace")
+
+    monkeypatch.setattr(ledger, "_save", save_then_fail)
+    rc, out, err = run("clear", KEY, "--confirm", KEY, ledger=ledger)
+    assert rc == 0 and "verified by reading the ledger again" in out
+    assert "not removed" not in err and KEY not in ledger.delivery_receipts()
+    assert [x["stage"] for x in audit(ledger)] == ["removing", "removed"]
+    assert "fsync failed" in audit(ledger)[-1]["error"]
+
+
+def test_a_removal_that_fails_before_the_replace_is_recorded_as_failed(ledger, monkeypatch):
+    def refuse(data):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(ledger, "_save", refuse)
+    rc, out, err = run("clear", KEY, "--confirm", KEY, ledger=ledger)
+    assert rc == 3 and "still in the ledger" in err and "Removed" not in out
+    assert KEY in ledger.delivery_receipts()
+    assert [x["stage"] for x in audit(ledger)] == ["removing", "remove_failed"]
+
+
+def test_a_ledger_that_cannot_be_read_back_is_reported_unverified(ledger, monkeypatch):
+    real = ledger.delivery_receipts
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("gone")
+        return real()
+
+    monkeypatch.setattr(ledger, "delivery_receipts", flaky)
+    rc, out, err = run("clear", KEY, "--confirm", KEY, ledger=ledger)
+    assert rc == 5 and "UNVERIFIED" in err and "Removed" not in out
+    assert [x["stage"] for x in audit(ledger)] == ["removing"]
 
 
 def test_concurrent_clears_remove_exactly_one_receipt_once(ledger):
@@ -133,12 +206,7 @@ def test_concurrent_clears_remove_exactly_one_receipt_once(ledger):
         codes.append(kid.returncode)
     assert codes.count(0) == 1 and set(codes) <= {0, 1}
     assert list(ledger.delivery_receipts()) == [OTHER]
-    removed = [
-        json.loads(x)
-        for x in cli.audit_path(ledger).read_text().splitlines()
-        if json.loads(x)["stage"] == "removed"
-    ]
-    assert len(removed) == 1
+    assert [x["stage"] for x in audit(ledger)] == ["removing", "removed"]
 
 
 def test_list_prints_every_receipt_and_changes_nothing(ledger):

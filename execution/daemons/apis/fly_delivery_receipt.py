@@ -14,13 +14,25 @@ Nothing clears a receipt automatically.
 
 Run it with the dispatcher's environment (it reads the same ledger file).
 ``clear`` is a dry run: it prints the receipt (key, status, run, branch, commit,
-recorded time) and what would be removed. The receipt is removed only when
-``--confirm`` repeats the exact key. The ledger's own lock and atomic write are
-used, a malformed ledger is refused, a receipt that changed since it was shown is
-left alone, and each removal appends one audit line (who, when, what was
-cleared) beside the ledger. No credential is read or written.
+recorded time) and what would be removed, and writes nothing. The receipt is
+removed only when ``--confirm`` repeats the exact key. The ledger's own lock and
+atomic write are used, a malformed ledger is refused, and a receipt that changed
+since it was shown is left alone. The audit comes first: under the ledger lock,
+after the receipt has been compared with what was shown and before anything is
+written, a ``removing`` event (who, when, the action and the full identity of
+the receipt) is appended to ``<ledger>.audit.jsonl`` and synced; if that fails
+nothing is removed. The removal is then verified by reading the ledger again
+(an error raised during or after the write is treated as uncertain, never as
+"not removed"), and a ``removed`` event (the receipt is gone) or a
+``remove_failed`` event (it is still there) is appended. No credential is read
+or written.
 
-Exit status: 0 done (or dry run), 1 refused, 2 the ledger could not be read.
+Exit status: 0 the receipt is verified gone and the ``removed`` event is written
+(or a dry run, or ``list``); 1 refused (no such receipt, wrong ``--confirm``, or
+the receipt changed); 2 nothing was removed (the ledger could not be read, or
+the ``removing`` event could not be written); 3 the removal failed and the
+receipt is still there; 4 the receipt WAS removed (verified) but the ``removed``
+event could not be written; 5 the final state could not be verified.
 """
 
 from __future__ import annotations
@@ -118,8 +130,8 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
     if build_delivery.canonical_key(args.confirm) != key:
         print("refused: --confirm must repeat the exact key; nothing changed", file=err)
         return 1
-    line = {
-        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    when = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    identity = {
         "by": getpass.getuser(),
         "action": "clear_delivery_receipt",
         "key": stored,
@@ -129,24 +141,58 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
         "commit": entry.get("commit"),
         "recorded_at": entry.get("recorded_at"),
     }
+    audit_file = audit_path(ledger)
+    announced, attempted = [], []
+
+    def announce() -> None:
+        # Under the ledger lock, after the compare, before any write.
+        attempted.append(True)
+        _append_audit(ledger, {**identity, "stage": "removing", "at": when()})
+        announced.append(True)
+
+    problem = ""
     try:
-        _append_audit(ledger, {**line, "stage": "requested"})
-        removed = ledger.clear_delivery(stored, entry)
+        removed = ledger.clear_delivery(stored, entry, before=announce)
     except (OSError, fly_runner.FlyLedgerError) as exc:
-        print(f"refused: {exc}; nothing was removed", file=err)
-        return 2
-    if not removed:
+        removed, problem = None, f"{type(exc).__name__}: {exc}"
+    if removed is False:
         print("refused: the receipt changed since it was shown; nothing removed. "
               "Run this again.", file=err)
         return 1
+    if not announced:
+        why = "the audit record could not be written" if attempted else "the ledger refused"
+        print(f"refused: {why} ({problem}); nothing was removed", file=err)
+        return 2
+    # An error during or after the write is not an answer: read the ledger again.
     try:
-        _append_audit(ledger, {**line, "stage": "removed", "at": datetime.now(
-            timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        gone = stored not in ledger.delivery_receipts()
+    except (OSError, fly_runner.FlyLedgerError) as exc:
+        print(f"UNVERIFIED: the ledger could not be read back ({exc}). The 'removing' record "
+              f"is in {audit_file}. Check the ledger before doing anything else.", file=err)
+        return 5
+    detail = {"error": problem} if problem else {}
+    try:
+        _append_audit(ledger, {**identity, **detail, "at": when(),
+                               "stage": "removed" if gone else "remove_failed"})  # fmt: skip
     except OSError as exc:
-        print(f"warning: removed, but the closing audit line could not be written ({exc})",
-              file=err)
-    print(f"\nRemoved the delivery receipt for {stored}. Re-dispatch is no longer refused "
-          "on its account.", file=out)
+        if gone:
+            print(f"The receipt for {stored} WAS removed (verified by reading the ledger "
+                  f"again), but the closing audit record could not be written ({exc}). The "
+                  f"'removing' record is in {audit_file}. Re-dispatch is no longer refused "
+                  "on its account.", file=err)
+            return 4
+        print(f"The receipt for {stored} is still in the ledger ({problem or 'not removed'}) "
+              f"and the 'remove_failed' record could not be written ({exc}); the 'removing' "
+              f"record is in {audit_file}.", file=err)
+        return 3
+    if not gone:
+        print(f"The receipt for {stored} is still in the ledger ({problem or 'not removed'}); "
+              "'remove_failed' is recorded in the audit file.", file=err)
+        return 3
+    note = (f" (the ledger write reported an error, {problem}; the removal was verified by "
+            "reading the ledger again)" if problem else "")
+    print(f"\nRemoved the delivery receipt for {stored}{note}. Re-dispatch is no longer "
+          "refused on its account.", file=out)
     return 0
 
 
