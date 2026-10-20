@@ -335,6 +335,7 @@ async def dispatch(
     dispatch into the deterministic-first path: see ``mechanical_first``. Without
     them every class runs on the model path exactly as before.
     """
+    model = model_tiering.validate_model_selector(model)
     run_kwargs = dict(
         role=role,
         task_entity_id=task_entity_id,
@@ -775,9 +776,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--model",
+        type=model_tiering.parse_model_selector,
         help=(
             "Explicit model id, overriding any --action-class tier "
-            "resolution outright. Passed as the provider's own --model flag "
+            "resolution outright. Use one non-empty identifier without "
+            "whitespace/control characters or a leading '-'. Passed as the provider's own --model flag "
             "(claude/codex/cursor); has no effect on claude-local."
         ),
     )

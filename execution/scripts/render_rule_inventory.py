@@ -1333,17 +1333,10 @@ def repository_file_dates(repository_input_root: Path) -> dict[str, str]:
     own. A checkout (local write mode) is dated from its own git history.
     Missing dates are absent, never replaced by an mtime.
     """
+    candidate_inputs.read_repository_inputs(repository_input_root)
     if (repository_input_root / candidate_inputs.MANIFEST).is_file():
         return candidate_inputs.recorded_commit_dates(repository_input_root)
-    try:
-        paths = candidate_inputs._candidate_paths(repository_input_root)
-    except candidate_inputs.InputBoundaryError:
-        return {}
-    relatives = [
-        path.relative_to(repository_input_root).as_posix()
-        for path in paths
-        if path.is_file()
-    ]
+    relatives = candidate_inputs.read_repository_inputs(repository_input_root)
     return {
         relative: value
         for relative, value in candidate_inputs.git_last_commit_dates(
@@ -1737,6 +1730,7 @@ def read_entities(
     repository_input_root: Path = REPO_ROOT,
 ) -> tuple[list[Statement], list[Store]]:
     """Read the three rule entity types, field-name agnostically."""
+    repository_inputs = candidate_inputs.read_repository_inputs(repository_input_root)
     statements: list[Statement] = []
     stores: list[Store] = []
 
@@ -1820,12 +1814,12 @@ def read_entities(
         stores.append(store)
 
     # Reachability -- ateles#1118. Populated is not delivered.
-    loader = repository_input_root / "lib" / "daemon_runtime" / "agent_loader.py"
+    loader = repository_inputs.get("lib/daemon_runtime/agent_loader.py", b"").decode("utf-8", errors="replace")
     for st in stores:
         if st.name.startswith("agent_policy"):
             filt = False
-            if loader.exists():
-                filt = 'snap.get("agent_sub")' in loader.read_text()
+            if loader:
+                filt = 'snap.get("agent_sub")' in loader
             st.reachable = "no" if filt else "unknown"
             st.reach_note = (
                 "agent_loader filters on agent_sub, empty in every row "
@@ -1880,7 +1874,7 @@ NOT_A_RULE = re.compile(
 
 
 def extract_md_rules(
-    path: Path, store_name: str, max_chars: int = 600
+    path: Path, store_name: str, max_chars: int = 600, *, content: str | None = None
 ) -> list[Statement]:
     """Per-rule extraction from a markdown instruction file.
 
@@ -1890,7 +1884,7 @@ def extract_md_rules(
     normative directive. A file is many rules, and a file count says nothing.
     """
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = (path.read_text(errors="replace") if content is None else content).splitlines()
     except OSError:
         return []
     mtime = _mtime(path)
@@ -2075,7 +2069,12 @@ def read_file_stores(
     stores: list[Store] = []
     # Repository-sourced files are dated by git, never by mtime: in a packaged
     # candidate tree every mtime is the day of the run.
+    repository_inputs = candidate_inputs.read_repository_inputs(repository_input_root)
     commit_dates = repository_file_dates(repository_input_root)
+
+    def repository_text(path):
+        relative = path.relative_to(repository_input_root).as_posix()
+        return repository_inputs[relative].decode("utf-8", errors="replace")
 
     def commit_date(path: Path) -> str:
         try:
@@ -2113,7 +2112,7 @@ def read_file_stores(
 
     # -- repo instruction files ------------------------------------------
     ateles_md = repository_input_root / "CLAUDE.md"
-    if ateles_md.exists():
+    if "CLAUDE.md" in repository_inputs:
         st = add_store(
             "ateles/CLAUDE.md",
             str(ateles_md),
@@ -2121,7 +2120,7 @@ def read_file_stores(
             reach_note="re-injected from disk at every compaction",
             from_repository=True,
         )
-        s = extract_md_rules(ateles_md, st.name)
+        s = extract_md_rules(ateles_md, st.name, content=repository_text(ateles_md))
         statements += s
         st.statements = len(s)
 
@@ -2289,7 +2288,10 @@ def read_file_stores(
         ("Skills (ateles repo)", repository_input_root / ".claude" / "skills", True),
         ("Skills (user root)", home / ".claude" / "skills", False),
     ):
-        files = sorted(root.glob("*/SKILL.md")) if root.is_dir() else []
+        files = ([repository_input_root / relative for relative in repository_inputs
+                  if relative.startswith(".claude/skills/")]
+                 if from_repository else
+                 sorted(root.glob("*/SKILL.md")) if root.is_dir() else [])
         if not files:
             continue
         withrules = [
@@ -2297,7 +2299,7 @@ def read_file_stores(
             for f in files
             if re.search(
                 r"\bNEVER\b|\bALWAYS\b|\bMUST\b|\bdo not\b",
-                f.read_text(errors="replace"),
+                repository_text(f) if from_repository else f.read_text(errors="replace"),
             )
         ]
         st = add_store(
@@ -2310,7 +2312,7 @@ def read_file_stores(
         st.rule_bearing_files = len(withrules)
         s = []
         for f in withrules:
-            s += extract_md_rules(f, st.name)
+            s += extract_md_rules(f, st.name, content=repository_text(f) if from_repository else None)
         statements += s
         st.statements = len(s)
 
@@ -2344,7 +2346,8 @@ def read_file_stores(
         st.statements = len(s)
 
     # -- hooks: rules stated as code ----------------------------------------
-    hooks = sorted((repository_input_root / ".claude" / "hooks").glob("*.py"))
+    hooks = [repository_input_root / relative for relative in repository_inputs
+             if relative.startswith(".claude/hooks/")]
     if hooks:
         st = add_store(
             "Claude Code hooks (ateles)",
@@ -2357,7 +2360,7 @@ def read_file_stores(
         )
         s = []
         for f in hooks:
-            doc = f.read_text(errors="replace")[:4000]
+            doc = repository_text(f)[:4000]
             for line in doc.splitlines():
                 t = line.strip().lstrip("#").strip()
                 if (
@@ -3143,7 +3146,6 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 3
-        repository_input_root = repository_input_root.resolve(strict=True)
     if args.expected_output:
         if not args.repository_input_root or not args.check:
             print(
@@ -3173,8 +3175,16 @@ def main() -> int:
             )
             return 3
 
-    ent_stmts, ent_stores = read_entities(cache, repository_input_root)
-    file_stmts, file_stores = read_file_stores(home, repository_input_root)
+        expected_output = candidate_output.absolute()
+
+    try:
+        # Refuse selected repository data before any entity request or render.
+        candidate_inputs.read_repository_inputs(repository_input_root)
+        ent_stmts, ent_stores = read_entities(cache, repository_input_root)
+        file_stmts, file_stores = read_file_stores(home, repository_input_root)
+    except candidate_inputs.InputBoundaryError as exc:
+        print("rule inventory input boundary rejected reason=" + exc.reason, file=sys.stderr)
+        return 3
 
     statements = ent_stmts + file_stmts
     stores = ent_stores + file_stores
@@ -3259,7 +3269,12 @@ def main() -> int:
         if not expected_output.exists():
             print("candidate rule inventory is absent", file=sys.stderr)
             return 1
-        cur = expected_output.read_text()
+        try:
+            _, expected_bytes = candidate_inputs._read_regular_file(repository_input_root, expected_output)
+            cur = expected_bytes.decode("utf-8")
+        except (candidate_inputs.InputBoundaryError, UnicodeError):
+            print("rule inventory input boundary rejected", file=sys.stderr)
+            return 3
         # The committed file is public output too. Its masked value cells are
         # the only bytes not proven equal to the screened render above, so it
         # is screened in its own right before anything is compared.

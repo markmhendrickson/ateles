@@ -2291,6 +2291,7 @@ def _provider_command(
     only when no vendor_binding is configured at all, and this module never
     guesses a model alias in that case.
     """
+    model = model_tiering.validate_model_selector(model)
     if provider == "claude":
         return (
             [
@@ -2674,6 +2675,7 @@ async def _run_skill_once(
     ground truth (where one exists) and fails the result over to a frontier
     provider rather than accepting a wrong local answer as ``ok``.
     """
+    model = model_tiering.validate_model_selector(model)
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
 
@@ -4222,6 +4224,7 @@ async def run_skill(
     (every call site that predates this) leaves routing and model selection
     exactly as before.
     """
+    model = model_tiering.validate_model_selector(model)
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
@@ -4854,7 +4857,7 @@ async def run_review_prompt(
 
     async def attempt(provider: str) -> SkillResult:
         binary = binaries[provider]
-        model = models[provider].strip()
+        model = model_tiering.validate_model_selector(models[provider].strip())
         with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
             if provider == "claude":
                 cmd = [

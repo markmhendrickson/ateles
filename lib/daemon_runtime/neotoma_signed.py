@@ -147,6 +147,36 @@ def agent_identity(
     return {"key": str(key), "sub": resolved_sub, "kid": str(kid)}
 
 
+class SignedRequestError(RuntimeError):
+    """A signed request that failed before any HTTP status came back.
+
+    ``code`` is a short, fixed, non-sensitive reason a caller may log:
+
+    ``no_key``                the agent has no signing key;
+    ``helper_non_json``       the signing helper printed something that is not JSON;
+    ``helper_signer_missing`` the helper could not load the signer it wraps;
+    ``transport_error``       the helper could not reach the server (or timed out);
+    ``helper_error``          any other error the helper reported.
+
+    The message of the underlying failure is NOT part of ``code``: it can carry a
+    body, a header or a filesystem path, and callers must never log it.
+    """
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _helper_error_code(message: object) -> str:
+    """Bucket a helper error message into a fixed code. The message is read, never kept."""
+    text = str(message or "").lower()
+    if "not found under" in text or "cannot find module" in text:
+        return "helper_signer_missing"
+    if any(w in text for w in ("fetch failed", "econn", "enotfound", "etimedout", "timeout", "terminated", "socket")):
+        return "transport_error"
+    return "helper_error"
+
+
 def signed_request(
     method: str,
     url: str,
@@ -174,7 +204,7 @@ def signed_request(
     """
     ident = agent_identity(agent_name, sub=sub)
     if ident is None:
-        raise RuntimeError(f"no AAuth key for agent {agent_name!r}")
+        raise SignedRequestError(f"no AAuth key for agent {agent_name!r}", "no_key")
     spec: dict = {"url": url, "method": method.upper(), "headers": {"content-type": "application/json"}}
     if body is not None:
         spec["body"] = json.dumps(body)
@@ -196,9 +226,11 @@ def signed_request(
     try:
         out = json.loads(proc.stdout or "{}")
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"signed_fetch returned non-JSON: {proc.stderr.strip()[:200]}") from exc
+        raise SignedRequestError(
+            f"signed_fetch returned non-JSON: {proc.stderr.strip()[:200]}", "helper_non_json"
+        ) from exc
     if out.get("error"):
-        raise RuntimeError(out["error"])
+        raise SignedRequestError(out["error"], _helper_error_code(out["error"]))
     data = json.loads(out["body"]) if out.get("body") else {}
     return int(out.get("status", 0)), data
 

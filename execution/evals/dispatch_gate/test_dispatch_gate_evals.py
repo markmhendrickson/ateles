@@ -76,3 +76,56 @@ def test_checks_go_red_if_the_score_is_rounded_before_the_gate():
     scenario = next(s for s in SCENARIOS if s["id"] == "just_below_threshold_is_held_unrounded")
     obs = harness.run_scenario(scenario, BASE, mutation="round_before_gate")
     assert harness.check(scenario, obs)
+
+
+CONTENT_IDS = {
+    "content_risky_low_prior_never_spawns", "content_report_only_preserves_cicada_prior",
+    "content_declared_unknown_action_held", "content_declared_operator_only_held",
+    "content_effective_never_prior_preserved", "content_unicode_body_escalates",
+    "content_unicode_description_escalates", "content_drivers_supplied",
+    "content_drivers_missing", "content_preview_raw_policy_parity",
+    "content_symbol_transfer_holds", "content_strictest_policy_candidate_holds",
+}
+
+
+def test_content_gate_required_eval_scenarios_are_committed():
+    assert CONTENT_IDS <= set(IDS)
+
+
+@pytest.mark.parametrize("scenario", [s for s in SCENARIOS if s["id"] in {
+    "content_risky_low_prior_never_spawns", "content_unicode_body_escalates",
+    "content_unicode_description_escalates",
+}], ids=lambda s: s["id"])
+def test_content_checks_go_red_without_content_escalation(scenario):
+    assert harness.check(scenario, harness.run_scenario(scenario, BASE, mutation="no_content"))
+
+
+def test_preview_checks_go_red_with_raw_policy_sets():
+    scenario = next(s for s in SCENARIOS if s["id"] == "content_preview_raw_policy_parity")
+    assert harness.check(scenario, harness.run_scenario(scenario, BASE, mutation="raw_preview"))
+
+
+@pytest.mark.parametrize("raw_policy", [
+    {},
+    {"high_blast_action_types": [], "low_blast_action_types": []},
+    {"high_blast_action_types": "[]", "low_blast_action_types": "[]"},
+    {"high_blast_action_types": "malformed", "low_blast_action_types": None},
+    {"blast_radius_default": " HIGH "},
+    {"blast_radius_default": "invalid"},
+    {"blast_radius_default": None},
+    {"high_blast_action_types": '[" PAYMENT "]',
+     "low_blast_action_types": [" COMPUTE_ONLY_ANALYSIS "]},
+])
+@pytest.mark.parametrize("declared", [None, "local_edit", "operator_only", "unknown_action"])
+def test_same_raw_policy_through_actual_dispatch_and_mcp(raw_policy, declared):
+    scenario = {
+        "task": {"title": "implement a new feature", "action_type": declared,
+                 "confidence": 0.99},
+        "policy": raw_policy,
+        "preview": {"task_description": "implement a new feature", "action_type": declared},
+    }
+    observed = harness.run_scenario(scenario, BASE)
+    assert observed["action"] == {
+        key: observed["preview"][key]
+        for key in ("action_type", "action_type_source", "action_blast_radius")
+    }
