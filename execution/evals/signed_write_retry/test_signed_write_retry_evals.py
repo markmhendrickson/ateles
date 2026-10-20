@@ -114,17 +114,40 @@ def test_descendant_eval_rejects_direct_child_only_control(tmp_path):
     assert harness.check_complete_boundary(observation), observation
 
 
-@pytest.mark.parametrize("rotate", [True, False], ids=["principal-changed", "principal-unchanged"])
-def test_real_helper_retry_is_not_sent_under_a_changed_principal(tmp_path, rotate):
-    """Real gate write, real spawned preparer, real Node helper. After a first attempt
-    that lost its response, a changed key must stop the retry before the helper starts;
-    an unchanged key must still be retried (the positive control)."""
-    observation = harness.run_identity_boundary(tmp_path, rotate=rotate)
-    assert harness.check_identity_boundary(observation, rotate=rotate) == [], observation
+@pytest.mark.parametrize(
+    "kwargs,blocked",
+    [({"rotate": True}, True), ({"swap": True}, True), ({}, False)],
+    ids=["key-rotated-between-attempts", "key-swapped-after-fingerprint-before-helper-read",
+         "key-unchanged-control"],
+)
+def test_real_helper_retry_is_not_sent_under_a_changed_principal(tmp_path, kwargs, blocked):
+    """Real gate write, real spawned preparer, real signed_fetch.mjs. After a first
+    attempt that lost its response, a key that changed (before the preparer, or after
+    its fingerprint and before the helper reads it) must stop the retry before anything
+    is signed or sent; an unchanged key must still be retried (the positive control)."""
+    observation = harness.run_identity_boundary(tmp_path, **kwargs)
+    assert harness.check_identity_boundary(observation, blocked=blocked) == [], observation
 
 
-def test_real_helper_identity_eval_goes_red_when_the_principal_check_is_removed(tmp_path):
-    """Planted red: with the check removed the retry reaches the helper a second time."""
-    observation = harness.run_identity_boundary(tmp_path, rotate=True, mutation=True)
+def test_the_swap_window_eval_signs_with_the_pinned_key_when_unchanged(tmp_path):
+    observation = harness.run_identity_boundary(tmp_path)
+    assert observation["signed_with"] == ["original-x", "original-x"], observation
+
+
+@pytest.mark.parametrize(
+    "kwargs,mutation",
+    [({"rotate": True}, "no_checks"), ({"swap": True}, "no_helper_check")],
+    ids=["both-checks-removed", "helper-check-removed"],
+)
+def test_real_helper_identity_eval_goes_red_when_a_check_is_removed(tmp_path, kwargs, mutation):
+    """Planted reds: with the named check(s) removed the retry reaches the signer again."""
+    observation = harness.run_identity_boundary(tmp_path, mutation=mutation, **kwargs)
     assert observation["launches"] == 2, observation
-    assert harness.check_identity_boundary(observation, rotate=True), observation
+    assert harness.check_identity_boundary(observation, blocked=True), observation
+
+
+def test_the_helper_check_alone_also_stops_a_key_rotated_between_attempts(tmp_path):
+    """Defense in depth: with the preparer's comparison removed, the helper's own key
+    check still refuses the rotated key before anything is signed."""
+    observation = harness.run_identity_boundary(tmp_path, rotate=True, mutation=True)
+    assert harness.check_identity_boundary(observation, blocked=True) == [], observation

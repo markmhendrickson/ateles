@@ -162,7 +162,8 @@ class SignedRequestError(RuntimeError):
 
     ``code`` is a short, fixed, non-sensitive reason a caller may log:
 
-    ``no_key``                the agent has no signing key;
+    ``no_key``                the agent has no signing key (or, for a pinned call, none that
+                              can be fingerprinted);
     ``helper_non_json``       the signing helper printed something that is not JSON;
     ``helper_signer_missing`` the helper could not load the signer it wraps;
     ``transport_error``       the helper could not reach the server (or timed out);
@@ -171,7 +172,8 @@ class SignedRequestError(RuntimeError):
     ``expired``               the caller's deadline passed, or the attempt was abandoned;
     ``busy``                  every signing worker was in use (nothing was started);
     ``identity_changed``      the signing principal differs from the one a pin recorded
-                              for this logical write (nothing was sent);
+                              for this logical write, as resolved by the preparer or as
+                              read by the helper just before signing (nothing was sent);
     ``helper_error``          any other error the helper reported.
 
     The message of the underlying failure is NOT part of ``code``: it can carry a
@@ -188,8 +190,8 @@ def signing_principal(ident: "dict[str, str]") -> "tuple[str, str | None]":
 
     These are the two values the server records as ``agent_sub`` and
     ``agent_thumbprint`` and de-duplicates an idempotency key under. The thumbprint
-    is ``None`` when the key file cannot be read, which still compares: a key that
-    was readable on the first attempt and is not on a retry is a different principal.
+    is ``None`` when the key file cannot be read or fingerprinted; a pinned request
+    does not proceed with such a key (see :func:`signed_request`).
     """
     try:
         jwk = json.loads(Path(ident["key"]).read_text())
@@ -226,6 +228,8 @@ class PrincipalPin:
 def _helper_error_code(message: object) -> str:
     """Bucket a helper error message into a fixed code. The message is read, never kept."""
     text = str(message or "").lower()
+    if text.strip() == "identity_changed":
+        return "identity_changed"  # the helper refused: the key it read is not the pinned one
     if "not found under" in text or "cannot find module" in text:
         return "helper_signer_missing"
     if any(w in text for w in ("fetch failed", "econn", "enotfound", "etimedout", "timeout", "terminated", "socket")):
@@ -290,8 +294,16 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
         if body is not None:
             spec["body"] = json.dumps(body)
         request_json = json.dumps(spec)
-        # Only a caller that opted into a pin pays for (and sees) the principal.
-        sender.send(("prepared", signing_principal(ident)) if report_principal else ("prepared",))
+        if report_principal:
+            principal = signing_principal(ident)
+            if principal[1] is None:
+                # A pin needs a key that can be fingerprinted, or the helper has
+                # nothing to verify the key it reads against.
+                sender.send(("error", "no_key"))
+                return
+            sender.send(("prepared", principal))
+        else:
+            sender.send(("prepared",))
         # A child created after its caller abandoned startup receives no permit
         # to transport. It can also exit without the creator returning from start.
         if not sender.poll(max(0.0, real_deadline - time.monotonic())):
@@ -300,6 +312,10 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
         if authorization[0] != "run":
             return
         real_deadline = min(real_deadline, authorization[1])
+        if len(authorization) > 2 and authorization[2]:
+            # The authorized pin's thumbprint: the helper verifies the key bytes it
+            # reads and signs with against it, and aborts before signing otherwise.
+            request_json = json.dumps(dict(spec, expect_thumbprint=authorization[2]))
         env = dict(environment, NEOTOMA_RC_DIR=rc_dir,
                    NEOTOMA_AAUTH_PRIVATE_JWK_PATH=ident["key"],
                    NEOTOMA_AAUTH_SUB=ident["sub"], NEOTOMA_AAUTH_KID=ident["kid"])
@@ -383,12 +399,24 @@ def signed_request(
 
     ``principal_pin`` is optional and, when omitted, changes nothing. A caller that
     retries one logical write under one idempotency key passes the SAME
-    :class:`PrincipalPin` to each attempt: the preparer reports the principal it
-    resolved, and an attempt whose principal differs from the pinned one raises
-    ``identity_changed`` before the helper is authorized to start, so no request is
-    sent. The check compares the principal resolved by the preparer immediately
-    before transport; the helper then reads the same key file, so the only remaining
-    window is the helper's own start-up.
+    :class:`PrincipalPin` to each attempt. Two checks bind an attempt to the pinned
+    principal (subject plus key thumbprint, what the server de-duplicates under):
+
+    * the preparer reports the principal it resolved, and an attempt that differs
+      from the pinned one raises ``identity_changed`` before the helper is
+      authorized, so no helper is started;
+    * the authorized helper is given the pinned thumbprint, reads the key ONCE into
+      memory, compares that in-memory key's thumbprint, and signs with that same
+      in-memory key (not by opening the pathname again). A key that changed after
+      the preparer's fingerprint therefore aborts before anything is signed or
+      sent, with the same ``identity_changed`` code.
+
+    Limits: the subject is fixed per attempt by the preparer's single resolution and
+    handed to the helper by value; the issuer is not part of the pin. Verification
+    needs a signer that exports ``loadCliSignerConfig`` and honours
+    ``configOverride`` (the neotoma RC build does); a pinned call against a signer
+    without them fails closed rather than signing unverified. A key that cannot be
+    fingerprinted (not EC, unreadable) cannot be pinned and fails ``no_key``.
     """
     clock = clock or time.monotonic
     operation_deadline = min(deadline if deadline is not None else float("inf"), clock() + timeout)
@@ -466,7 +494,8 @@ def signed_request(
                     if principal_pin is not None and not principal_pin.admit(
                             tuple(message[1]) if len(message) > 1 else None):
                         raise SignedRequestError("signing principal changed", "identity_changed")
-                    receiver.send(("run", time.monotonic() + check()))
+                    receiver.send(("run", time.monotonic() + check(),
+                                   principal_pin.principal[1] if principal_pin is not None else None))
                     continue
                 if message[0] == "error":
                     raise SignedRequestError("no AAuth key" if message[1] == "no_key"

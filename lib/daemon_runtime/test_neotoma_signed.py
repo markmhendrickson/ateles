@@ -148,6 +148,87 @@ class NeotomaSignedTest(unittest.TestCase):
             self.assertEqual(caught.exception.code, "identity_changed")
             self.assertFalse(effect.exists())
 
+    def _swap_key_after_admission(self, agent, swapped_x="x-swapped"):
+        """Run the real admit, then replace the key file: the swap lands after the
+        preparer fingerprinted the key and before transport is authorized, so before
+        the helper reads it."""
+        real_admit = ns.PrincipalPin.admit
+
+        def admit(pin, principal):
+            allowed = real_admit(pin, principal)
+            self._write_public_key(agent, x=swapped_x)
+            return allowed
+
+        return mock.patch.object(ns.PrincipalPin, "admit", admit)
+
+    def test_helper_refuses_a_key_swapped_after_the_preparers_fingerprint(self):
+        """The residual the preparer's check cannot close: the key file changes after the
+        fingerprint and before the helper reads it. The helper verifies the key it
+        actually read and aborts before signing; nothing is sent."""
+        root, effect = self._real_helper_fixture()
+        self._write_public_key("apus")
+        pin = ns.PrincipalPin()
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            # Control: an unchanged key is signed, and signed with the in-memory key.
+            self.assertEqual(ns.signed_request("POST", "http://fixture.invalid", {},
+                                               agent_name="apus", principal_pin=pin), (200, {}))
+            self.assertEqual(json.loads(effect.read_text())["signed_x"], "x-one")
+            effect.unlink()
+            with self._swap_key_after_admission("apus"):
+                with self.assertRaises(ns.SignedRequestError) as caught:
+                    ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                      principal_pin=pin)
+            self.assertEqual(caught.exception.code, "identity_changed")
+            self.assertNotIn("x-swapped", str(caught.exception))
+            self.assertFalse(effect.exists(), "a swapped key was signed with")
+
+    def test_planted_red_without_the_helper_check_the_swapped_key_signs(self):
+        """With the helper's verification removed the same swap is signed and sent,
+        under a key whose thumbprint the pin never admitted."""
+        root, effect = self._real_helper_fixture()
+        self._write_public_key("apus")
+        pin = ns.PrincipalPin()
+        source = (Path(ns.__file__).resolve().parent / "signed_fetch.mjs").read_text()
+        needle = "ecThumbprint(configOverride.privateJwk) !== spec.expect_thumbprint"
+        self.assertIn(needle, source)
+        unchecked = Path(self._tmp.name) / "unchecked" / "signed_fetch.mjs"
+        unchecked.parent.mkdir()
+        unchecked.write_text(source.replace(needle, "false"))
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
+            ns, "_HELPER", unchecked
+        ):
+            ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                              principal_pin=pin)
+            effect.unlink()
+            with self._swap_key_after_admission("apus"):
+                result = ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                           principal_pin=pin)
+        self.assertEqual(result, (200, {}))
+        self.assertEqual(json.loads(effect.read_text())["signed_x"], "x-swapped")
+
+    def test_a_pinned_call_fails_closed_when_the_signer_cannot_load_the_key_it_signs_with(self):
+        root, effect = self._real_helper_fixture()
+        (root / "dist" / "cli" / "aauth_signer.js").write_text(
+            'import fs from "node:fs";\n'
+            'export async function cliSignedFetch(url, options) {\n'
+            '  fs.writeFileSync(process.env.ATELES_SIGNED_TEST_EFFECT, "signed");\n'
+            '  return {status: 200, ok: true, text: async () => "{}"};\n}\n')
+        self._write_public_key("apus")
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            with self.assertRaises(ns.SignedRequestError):
+                ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                  principal_pin=ns.PrincipalPin())
+        self.assertFalse(effect.exists(), "an unverifiable pinned call signed anyway")
+
+    def test_a_pinned_call_with_a_key_that_cannot_be_fingerprinted_is_refused(self):
+        root, effect = self._real_helper_fixture()  # writes a key without x/y
+        with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)):
+            with self.assertRaises(ns.SignedRequestError) as caught:
+                ns.signed_request("POST", "http://fixture.invalid", {}, agent_name="apus",
+                                  principal_pin=ns.PrincipalPin())
+        self.assertEqual(caught.exception.code, "no_key")
+        self.assertFalse(effect.exists())
+
     def test_without_a_pin_a_changed_key_is_not_checked(self):
         """Callers that pass no pin (the loader) keep exactly their previous behavior."""
         root, effect = self._real_helper_fixture()
@@ -217,10 +298,14 @@ class NeotomaSignedTest(unittest.TestCase):
         (root / "package.json").write_text('{"type":"module"}')
         module.write_text(
             'import fs from "node:fs";\n'
+            'export async function loadCliSignerConfig() {\n'
+            '  return {privateJwk: JSON.parse(fs.readFileSync(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH, "utf8"))};\n'
+            '}\n'
             'export async function cliSignedFetch(url, options) {\n'
             '  if (process.env.ATELES_SIGNED_TEST_ERROR) throw new Error(process.env.ATELES_SIGNED_TEST_ERROR);\n'
             '  fs.writeFileSync(process.env.ATELES_SIGNED_TEST_EFFECT,\n'
-            '    JSON.stringify({pid: process.pid, method: options.method, sub: process.env.NEOTOMA_AAUTH_SUB, key: process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH}));\n'
+            '    JSON.stringify({pid: process.pid, method: options.method, sub: process.env.NEOTOMA_AAUTH_SUB, key: process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH,\n'
+            '      signed_x: options.configOverride ? options.configOverride.privateJwk.x : null}));\n'
             '  return {status: 200, ok: true, text: async () => process.env.ATELES_SIGNED_TEST_BODY || "{}"};\n'
             '}\n'
         )

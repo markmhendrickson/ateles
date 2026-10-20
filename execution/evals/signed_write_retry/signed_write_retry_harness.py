@@ -250,11 +250,15 @@ def check(scenario: dict, obs: dict) -> list[str]:
 
 
 def delayed_preparation_identity(agent_name, *, sub=None, keys_dir=None):
-    """Synthetic, spawn-safe resolver used only by the offline timing eval."""
+    """Synthetic, spawn-safe resolver used only by the offline timing eval.
+
+    Its key is a synthetic public JWK, so a pinned request can fingerprint it."""
     import time
     (Path(keys_dir) / "started").write_text("started")
     time.sleep(2)
-    return {"key": "synthetic-unused", "sub": sub or "synthetic", "kid": "synthetic"}
+    key = Path(keys_dir) / "synthetic-eval.jwk.json"
+    key.write_text(json.dumps({"kty": "EC", "crv": "P-256", "x": "synthetic-x", "y": "synthetic-y"}))
+    return {"key": str(key), "sub": sub or "synthetic", "kid": "synthetic"}
 
 
 def run_preparation_boundary(directory, *, mutation=False, cancel=False):
@@ -351,6 +355,9 @@ def _write_helper_fixture(directory):
     (directory / "package.json").write_text('{"type":"module"}')
     module.write_text('''import fs from "node:fs";
 import {spawn} from "node:child_process";
+export async function loadCliSignerConfig() {
+  return { privateJwk: JSON.parse(fs.readFileSync(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH, "utf8")) };
+}
 export async function cliSignedFetch(url, options) {
   if (process.env.ATELES_SIGNED_EVAL_DESCENDANT === "1") {
     const script = `const fs=require("node:fs");
@@ -568,18 +575,26 @@ def check_complete_boundary(observation):
     return bad
 
 
-def _write_rotating_helper(directory, *, rotate):
-    """A Node helper that records each launch. Its first launch loses the response
-    (a transport error after the write 'landed') and, when ``rotate``, replaces the
-    lens's key file, so the next attempt would be signed by another principal."""
+def _write_rotating_helper(directory):
+    """A Node signer fixture that records each time it is asked to SIGN. Its first
+    call loses the response (a transport error after the write 'landed') and, when
+    ATELES_SIGNED_EVAL_ROTATE is 1, replaces the lens's key file, so the next attempt
+    would be signed by another principal. Like the real signer it exports
+    ``loadCliSignerConfig`` (reads the key file once) and honours ``configOverride``;
+    the repo's own ``signed_fetch.mjs`` is the helper under test, unmodified."""
     module = directory / "dist" / "cli" / "aauth_signer.js"
     module.parent.mkdir(parents=True, exist_ok=True)
     (directory / "package.json").write_text('{"type":"module"}')
     module.write_text('''import fs from "node:fs";
+export async function loadCliSignerConfig() {
+  const privateJwk = JSON.parse(fs.readFileSync(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH, "utf8"));
+  return { privateJwk, sub: process.env.NEOTOMA_AAUTH_SUB };
+}
 export async function cliSignedFetch(url, options) {
   const launches = process.env.ATELES_SIGNED_EVAL_LAUNCHES;
   const first = !fs.existsSync(launches);
-  fs.appendFileSync(launches, "launch\\n");
+  const config = options.configOverride ?? (await loadCliSignerConfig());
+  fs.appendFileSync(launches, config.privateJwk.x + "\\n");
   if (first) {
     if (process.env.ATELES_SIGNED_EVAL_ROTATE === "1") {
       fs.writeFileSync(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH,
@@ -590,17 +605,40 @@ export async function cliSignedFetch(url, options) {
   return {status: 200, ok: true, text: async () => "{}"};
 }
 ''')
-    (directory / "synthetic.jwk.json").write_text(
-        json.dumps({"kty": "EC", "crv": "P-256", "x": "original-x", "y": "synthetic-y", "kid": "synthetic"}))
+    (directory / "synthetic.jwk.json").write_text(_KEY_ORIGINAL)
 
 
-def run_identity_boundary(directory, *, rotate=True, mutation=False):
-    """The REAL gate write -> real spawned preparer -> real Node helper, where the
-    lens's signing key changes between a first attempt (which lost its response)
-    and the retry. Offline: the key is a synthetic public JWK, the helper an inert
-    recorder. ``mutation`` removes the principal check (the planted control)."""
+_KEY_ORIGINAL = json.dumps({"kty": "EC", "crv": "P-256", "x": "original-x", "y": "synthetic-y", "kid": "synthetic"})
+_KEY_SWAPPED = json.dumps({"kty": "EC", "crv": "P-256", "x": "swapped-x", "y": "synthetic-y", "kid": "synthetic"})
+
+
+def helper_without_key_check(directory):
+    """The repo's own helper with only its key verification removed (planted red)."""
+    source = (Path(ns.__file__).resolve().parent / "signed_fetch.mjs").read_text()
+    needle = "ecThumbprint(configOverride.privateJwk) !== spec.expect_thumbprint"
+    assert needle in source, "the helper's verification moved; update the planted control"
+    stripped = directory / "unchecked" / "signed_fetch.mjs"
+    stripped.parent.mkdir(exist_ok=True)
+    stripped.write_text(source.replace(needle, "false"))
+    return stripped
+
+
+def run_identity_boundary(directory, *, rotate=False, swap=False, mutation=False):
+    """The REAL gate write -> real spawned preparer -> real signed_fetch.mjs helper,
+    with an inert signer fixture, where the lens's signing key changes
+
+    * ``rotate``: between a first attempt (which lost its response) and the retry's
+      preparer, so the preparer's own comparison must stop it; or
+    * ``swap``: AFTER the retry's preparer fingerprinted the key and BEFORE the helper
+      reads it (the swap runs in the parent right after the pin admitted the principal
+      and before transport is authorized), so only the helper's check can stop it.
+
+    Offline: the key is a synthetic public JWK. ``mutation`` True removes the pin's
+    preparer-side comparison; ``"no_helper_check"`` removes the helper's key check;
+    ``"no_checks"`` removes both.
+    """
     import time
-    _write_rotating_helper(directory, rotate=rotate)
+    _write_rotating_helper(directory)
     capture = base._Capture()
     logger = logging.getLogger("apis.gate_waive")
     logger.addHandler(capture)
@@ -616,8 +654,19 @@ def run_identity_boundary(directory, *, rotate=True, mutation=False):
         mp.setattr(gate_waive, "_monotonic", time.monotonic)
         mp.setenv("ATELES_SIGNED_EVAL_LAUNCHES", str(directory / "launches"))
         mp.setenv("ATELES_SIGNED_EVAL_ROTATE", "1" if rotate else "0")
-        if mutation:
-            mp.setattr(ns.PrincipalPin, "admit", lambda self, principal: True)
+        real_admit = ns.PrincipalPin.admit
+        admissions = {"n": 0}
+
+        def admit(self, principal):
+            allowed = real_admit(self, principal) or mutation in (True, "no_checks")
+            admissions["n"] += 1
+            if swap and admissions["n"] == 2:
+                (directory / "synthetic.jwk.json").write_text(_KEY_SWAPPED)
+            return allowed
+
+        mp.setattr(ns.PrincipalPin, "admit", admit)
+        if mutation in ("no_helper_check", "no_checks"):
+            mp.setattr(ns, "_HELPER", helper_without_key_check(directory))
         try:
             observation["result"] = asyncio.run(
                 gate_waive.IssueGateStore("http://unused.invalid", "")._sign_off_write(
@@ -626,20 +675,24 @@ def run_identity_boundary(directory, *, rotate=True, mutation=False):
         finally:
             logger.removeHandler(capture)
     launches = directory / "launches"
-    observation["launches"] = len(launches.read_text().split()) if launches.exists() else 0
+    observation["signed_with"] = launches.read_text().split() if launches.exists() else []
+    observation["launches"] = len(observation["signed_with"])
     observation["log"] = "\n".join(capture.lines)
     return observation
 
 
-def check_identity_boundary(observation, *, rotate):
-    if rotate:
+def check_identity_boundary(observation, *, blocked):
+    """``blocked``: the retry must not be signed or sent, and the write fails closed."""
+    if blocked:
         expected = {"result": gate_waive.SIGN_OFF_SIGNING_FAILED, "launches": 1}
     else:
         expected = {"result": "", "launches": 2}
     bad = [f"{key}: {observation.get(key)!r}" for key, value in expected.items()
            if observation.get(key) != value]
-    if rotate and "reason=identity_changed" not in observation["log"]:
+    if blocked and "reason=identity_changed" not in observation["log"]:
         bad.append("the failure was not reported as identity_changed")
-    if "rotated-x" in observation["log"] or "original-x" in observation["log"]:
+    if blocked and "swapped-x" in observation["signed_with"]:
+        bad.append("the retry was signed with the swapped key")
+    if any(word in observation["log"] for word in ("rotated-x", "original-x", "swapped-x")):
         bad.append("the log carries key material")
     return bad

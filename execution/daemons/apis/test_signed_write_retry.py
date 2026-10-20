@@ -950,7 +950,9 @@ def _delayed_preparation_identity(agent_name, *, sub=None, keys_dir=None):
     marker = Path(keys_dir or gate_waive._ns.AAUTH_KEYS_DIR) / "preparation-started"
     marker.write_text("started")
     time.sleep(2)
-    return {"key": "synthetic-unused", "sub": sub or "synthetic", "kid": "synthetic"}
+    key = Path(keys_dir or gate_waive._ns.AAUTH_KEYS_DIR) / "synthetic.jwk.json"
+    key.write_text('{"kty": "EC", "crv": "P-256", "x": "synthetic-x", "y": "synthetic-y"}')
+    return {"key": str(key), "sub": sub or "synthetic", "kid": "synthetic"}
 
 
 def test_real_signing_preparation_cannot_outlive_or_launch_after_deadline(monkeypatch, tmp_path):
