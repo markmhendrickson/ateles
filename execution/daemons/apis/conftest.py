@@ -166,7 +166,8 @@ def _isolate_codex_login(monkeypatch, tmp_path):
 # The roles the operator provisioned own Neotoma tokens for (2026-10-20), plus
 # the fixture role many tests dispatch.
 _TEST_ROLE_TOKEN_ROLES = ("waxwing", "falco", "cicada", "phoenicurus", "pavo", "accipiter",
-                          "lanius", "corvus", "vanellus", "buteo", "gryllus")
+                          "lanius", "corvus", "vanellus", "buteo",
+                          "gryllus")  # roster-ok: an existing test-fixture role name
 
 
 @pytest.fixture(autouse=True)
