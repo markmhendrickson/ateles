@@ -60,6 +60,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
+from lib.daemon_runtime.memory_guard import NeotomaGuard, AMG_AVAILABLE
 
 try:
     from lib.notify import Notifier
@@ -551,16 +552,28 @@ def create_neotoma_task(title: str, description: str, due_date: str, priority: s
     if not NEOTOMA_BEARER_TOKEN or not NEOTOMA_BASE_URL:
         return None
 
+    entity = {
+        "entity_type": "task",
+        "name": title,
+        "description": description,
+        "due_date": due_date,
+        "priority": priority,
+        "status": "open",
+        "domain": "preparation",
+    }
+
+    # Screen through AMG before storing
+    if AMG_AVAILABLE:
+        try:
+            from agent_memory_guard import PolicyViolation, SourceClass
+            guard = NeotomaGuard()
+            guard.screen_entity(entity, source_class=SourceClass.EXTERNAL_TOOL, daemon="cotinga")
+        except (PolicyViolation, RuntimeError) as exc:
+            log.warning(f"Task blocked by memory guard: {title!r}: {exc}")
+            return None
+
     payload = json.dumps({
-        "entities": [{
-            "entity_type": "task",
-            "name": title,
-            "description": description,
-            "due_date": due_date,
-            "priority": priority,
-            "status": "open",
-            "domain": "preparation",
-        }],
+        "entities": [entity],
         "idempotency_key": f"cotinga-task-{title[:40].replace(' ', '-')}-{due_date}",
     }).encode()
 
