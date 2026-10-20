@@ -236,6 +236,48 @@
         ],
         "one_workspace": true
       }
+    },
+    {
+      "id": "seated_codex_review_uses_the_roles_own_token",
+      "description": "A seated Codex review (the gate-owning deny of `correct`) of a role with its own token launches with exactly the record server, authenticated with the role's own token; the shared bearer never reaches the child.",
+      "provider": "codex",
+      "seated": true,
+      "expect": {
+        "exit": 0,
+        "spawned": true,
+        "child_servers": [
+          "mcpsrv_neotoma"
+        ],
+        "child_bearer": "role"
+      }
+    },
+    {
+      "id": "seated_codex_review_without_own_token_is_refused_before_launch",
+      "description": "A seated Codex review of a role with no token of its own is refused before any child starts, as a configuration repair naming the setting; the shared bearer is never substituted.",
+      "provider": "codex",
+      "seated": true,
+      "settings": {
+        "LANIUS_NEOTOMA_TOKEN": null
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "LANIUS_NEOTOMA_TOKEN"
+      }
+    },
+    {
+      "id": "seated_codex_review_with_a_blank_token_is_refused_before_launch",
+      "description": "A blank own token is refused exactly like a missing one.",
+      "provider": "codex",
+      "seated": true,
+      "settings": {
+        "LANIUS_NEOTOMA_TOKEN": "   "
+      },
+      "expect": {
+        "exit": 1,
+        "spawned": false,
+        "repair_contains": "LANIUS_NEOTOMA_TOKEN"
+      }
     }
   ]
 }

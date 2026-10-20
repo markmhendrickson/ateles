@@ -83,7 +83,10 @@ def test_the_scenario_set_covers_the_required_cases():
             "cursor_zero_port_is_refused_before_launch",
             "malformed_endpoint_fails_over_and_keeps_every_repair",
             "cursor_relative_workspace_resolves_to_one_absolute_path",
-            "codex_relative_workspace_resolves_to_one_absolute_path"} <= ids
+            "codex_relative_workspace_resolves_to_one_absolute_path",
+            "seated_codex_review_uses_the_roles_own_token",
+            "seated_codex_review_without_own_token_is_refused_before_launch",
+            "seated_codex_review_with_a_blank_token_is_refused_before_launch"} <= ids
 
 
 def test_the_judge_goes_red_when_the_child_gets_a_different_workspace(tmp_path, monkeypatch):
@@ -100,3 +103,13 @@ def test_the_judge_goes_red_when_a_refused_value_is_echoed(tmp_path, monkeypatch
     echoed = dataclasses.replace(trace, output_text=trace.output_text + " neotoma.eval.invalid:bad",
                                  envelope={**trace.envelope, "cooled_until": "soon"})
     assert len(runner.judge(scenario, echoed)) >= 2
+
+
+def test_the_judge_goes_red_when_a_seated_child_gets_the_shared_bearer(tmp_path, monkeypatch):
+    import hashlib
+
+    scenario = _by_id("seated_codex_review_uses_the_roles_own_token")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    shared = hashlib.sha256(runner.SHARED_BEARER.encode()).hexdigest()
+    swapped = dataclasses.replace(trace, child={**trace.child, "bearer_digest": shared})
+    assert len(runner.judge(scenario, swapped)) >= 2

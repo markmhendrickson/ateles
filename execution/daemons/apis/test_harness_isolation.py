@@ -578,3 +578,134 @@ def test_a_workspace_flag_that_differs_from_the_checked_one_refuses(provider, fl
     for other in ("ws", "./ws", "/abs/other"):
         assert skill_runner.launch_workspace_mismatch(provider, ["x", flag, other], checked)
     assert skill_runner.launch_workspace_mismatch(provider, ["x", flag], checked)
+
+
+# ── Seated reviews and every other local child: the role's own token only ────
+
+# The roles that dispatch today; the operator provisioned each its own token.
+DISPATCHING_ROLES = ("waxwing", "falco", "cicada", "phoenicurus", "pavo", "accipiter",
+                     "lanius", "corvus", "vanellus", "buteo")
+
+
+@pytest.mark.parametrize("role", DISPATCHING_ROLES)
+def test_dispatching_roles_resolve_their_own_token_names(role):
+    assert skill_runner.neotoma_token_env_name(role) == f"{role.upper()}_NEOTOMA_TOKEN"
+
+
+def _env_child(tmp_path):
+    """A stand-in CLI that records its environment's Neotoma bearers."""
+    stand_in = tmp_path / "env-stand-in"
+    record = tmp_path / "child-env.json"
+    stand_in.write_text(
+        "#!%s\nimport json, os, pathlib\n"
+        "pathlib.Path(%r).write_text(json.dumps({k: v for k, v in os.environ.items()"
+        " if 'NEOTOMA' in k}))\nprint('ran')\n" % (sys.executable, str(record)),
+        encoding="utf-8")  # fmt: skip
+    stand_in.chmod(0o755)
+    return stand_in, record
+
+
+def _seated(monkeypatch, tmp_path, *, role="lanius", provider="codex", seated=True):
+    stand_in, record = _env_child(tmp_path)
+    marker, notified = _seam(monkeypatch, tmp_path)
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", str(stand_in))
+    monkeypatch.setattr(skill_runner, "CURSOR_BIN", str(stand_in))
+    (tmp_path / ".claude" / "skills" / role).mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".claude" / "skills" / role / "SKILL.md").write_text(f"# {role}\n")
+    result = asyncio.run(skill_runner.run_skill(role, "review", role=role, provider=provider,
+                                                seated_reviewer=seated))  # fmt: skip
+    seen = json.loads(record.read_text()) if record.exists() else None
+    return result, seen, notified
+
+
+@pytest.mark.parametrize("token", [None, "", "   "])
+def test_a_seated_codex_review_without_its_own_token_is_refused(operator_home, monkeypatch,
+                                                                tmp_path, token):  # fmt: skip
+    if token is None:
+        monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+    else:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", token)
+    result, seen, notified = _seated(monkeypatch, tmp_path)
+    assert not result.ok and seen is None  # no child started
+    assert "LANIUS_NEOTOMA_TOKEN" in result.configuration_repair
+    assert not result.cooled_until
+    for text in (result.error, result.configuration_repair, notified[0]["stderr"]):
+        assert SHARED_BEARER not in text
+    import harness_router
+
+    assert "codex" not in harness_router.cooling_providers()
+
+
+def test_a_seated_codex_review_with_an_invalid_endpoint_is_refused(operator_home, monkeypatch,
+                                                                   tmp_path):  # fmt: skip
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test:bad")
+    result, seen, _ = _seated(monkeypatch, tmp_path)
+    assert not result.ok and seen is None
+    assert "NEOTOMA_BASE_URL" in result.configuration_repair
+
+
+def test_a_seated_codex_review_with_its_own_token_launches_with_it(operator_home, monkeypatch,
+                                                                   tmp_path):  # fmt: skip
+    result, seen, _ = _seated(monkeypatch, tmp_path)
+    assert result.ok, result.error
+    assert seen["NEOTOMA_BEARER_TOKEN"] == ROLE_TOKEN  # the record server's bearer: own
+    assert SHARED_BEARER not in json.dumps(seen)
+
+
+@pytest.mark.parametrize("role", DISPATCHING_ROLES)
+def test_every_dispatching_role_still_launches_seated_with_its_token(operator_home, monkeypatch,
+                                                                     tmp_path, role):  # fmt: skip
+    # The operator's ten tokens are set, each equal to the shared value (as on
+    # 2026-10-20): accepted, and every role still launches.
+    for name in DISPATCHING_ROLES:
+        monkeypatch.setenv(f"{name.upper()}_NEOTOMA_TOKEN", SHARED_BEARER)
+    result, seen, _ = _seated(monkeypatch, tmp_path, role=role)
+    assert result.ok, result.error
+    assert seen["NEOTOMA_BEARER_TOKEN"] == SHARED_BEARER  # its own token, equal by choice
+
+
+def test_a_seated_repair_fails_over_without_a_cooldown(operator_home, monkeypatch, tmp_path):
+    monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+    # Seated reviews run on the providers that can deny `correct` (Claude and
+    # Codex); each refuses as a repair, and the dispatch moves on to the next.
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,claude")
+    stand_in, record = _env_child(tmp_path)
+    marker, notified = _seam(monkeypatch, tmp_path)
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", str(stand_in))
+    monkeypatch.setattr(skill_runner, "CLAUDE_BIN", str(stand_in))
+    result = asyncio.run(skill_runner.run_skill("lanius", "review", role="lanius",
+                                                seated_reviewer=True))  # fmt: skip
+    assert not record.exists()
+    assert set(result.attempted_providers) == {"codex", "claude"}
+    assert result.configuration_repair.count("(repair: LANIUS_NEOTOMA_TOKEN)") == 2
+    assert "dispatch not launched: configuration repair needed" in result.error
+    import harness_router
+
+    assert not ({"codex", "claude"} & set(harness_router.cooling_providers()))
+
+
+@pytest.mark.parametrize("provider", ["codex", "cursor"])
+def test_a_local_child_holds_no_bearer_but_its_roles_own(operator_home, monkeypatch, tmp_path,
+                                                         provider):  # fmt: skip
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN_PROD", "shared-prod-bearer-canary")
+    monkeypatch.setenv("PAVO_NEOTOMA_TOKEN", "pavo-token-canary")
+    result, seen, _ = _seated(monkeypatch, tmp_path, provider=provider, seated=False)
+    assert result.ok, result.error
+    assert seen.get("NEOTOMA_BEARER_TOKEN") == ROLE_TOKEN
+    assert "NEOTOMA_BEARER_TOKEN_PROD" not in seen and "PAVO_NEOTOMA_TOKEN" not in seen
+    assert SHARED_BEARER not in json.dumps(seen)
+
+
+def test_a_no_grant_role_child_holds_no_neotoma_bearer_at_all(operator_home, monkeypatch,
+                                                              tmp_path):  # fmt: skip
+    monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN")
+    stand_in, record = _env_child(tmp_path)
+    _seam(monkeypatch, tmp_path, tools="Read,Bash")
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", str(stand_in))
+    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius",
+                                                provider="codex"))  # fmt: skip
+    assert result.ok, result.error
+    seen = json.loads(record.read_text())
+    assert not any(k.endswith("_TOKEN") or k.startswith("NEOTOMA_BEARER") for k in seen
+                   if k != "ATELES_ROLE_NEOTOMA_TOKEN")  # fmt: skip
+    assert SHARED_BEARER not in json.dumps(seen)

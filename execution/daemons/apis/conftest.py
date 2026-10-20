@@ -161,3 +161,25 @@ def _isolate_codex_login(monkeypatch, tmp_path):
     (home / "auth.json").write_text("{}", encoding="utf-8")
     (home / "auth.json").chmod(0o600)
     monkeypatch.setenv("CODEX_HOME", str(home))
+
+
+# The roles the operator provisioned own Neotoma tokens for (2026-10-20), plus
+# the fixture role many tests dispatch.
+_TEST_ROLE_TOKEN_ROLES = ("waxwing", "falco", "cicada", "phoenicurus", "pavo", "accipiter",
+                          "lanius", "corvus", "vanellus", "buteo", "gryllus")
+
+
+@pytest.fixture(autouse=True)
+def _role_neotoma_tokens(monkeypatch):
+    """Placeholder own Neotoma tokens for the dispatching roles.
+
+    A child of a role granted Neotoma tools connects with that role's own
+    token or does not launch; the shared bearer is never substituted. Tests
+    get a placeholder per role (never a real value) unless they set or remove
+    one themselves.
+    """
+    for role in _TEST_ROLE_TOKEN_ROLES:
+        monkeypatch.setenv(f"{role.upper()}_NEOTOMA_TOKEN", f"test-{role}-own-token")
+    # Such a child also needs a valid https endpoint; a placeholder unless the
+    # test sets its own.
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test.invalid")

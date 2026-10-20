@@ -820,6 +820,9 @@ def test_codex_without_a_login_machine_is_ineligible(fly_env):
 # ── The skill_runner seam ─────────────────────────────────────────────────────
 
 
+LOCAL_ROLE_TOKEN = "lanius-own-token-local-0011"
+
+
 @pytest.fixture
 def seam(monkeypatch, tmp_path):
     skill_dir = tmp_path / ".claude" / "skills" / "lanius"
@@ -834,6 +837,9 @@ def seam(monkeypatch, tmp_path):
     )  # fmt: skip
     monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
+    # A local child of a role granted Neotoma tools connects with the role's
+    # own token (never the shared bearer); a placeholder for the local runs.
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", LOCAL_ROLE_TOKEN)
     spawned = []
 
     async def fake_exec(*cmd, **kwargs):

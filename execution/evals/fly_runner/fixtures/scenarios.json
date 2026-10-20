@@ -4,7 +4,9 @@
     {
       "id": "opted_out_class_stays_local",
       "description": "APIS_FLY_RUNNER_CLASSES unset: a carry_forward_check dispatch runs on this machine exactly as before and never touches Fly.",
-      "settings": {},
+      "settings": {
+        "LANIUS_NEOTOMA_TOKEN": "eval-lanius-own-token-local"
+      },
       "identity": "key",
       "github_app": "configured",
       "fly": {
@@ -466,7 +468,8 @@
       "id": "opted_in_create_refused_falls_back_locally",
       "description": "Positive control: Fly rejects the create outright (nothing was created), so the opted-in class falls back to the local executor, logged and counted, and succeeds.",
       "settings": {
-        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-lanius-own-token-local"
       },
       "identity": "key",
       "github_app": "configured",

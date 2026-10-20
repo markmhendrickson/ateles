@@ -1743,6 +1743,35 @@ class SkillResult:
     usage_gate_exempted: str = ""
 
 
+_SHARED_NEOTOMA_BEARER_NAMES = ("NEOTOMA_BEARER_TOKEN", "NEOTOMA_BEARER_TOKEN_PROD")
+
+
+def _neotoma_identity_for_child(env: dict[str, str], role: str) -> None:
+    """The only Neotoma bearer a local child's environment may hold is its
+    role's own. The shared daemon bearer (and its production twin) and every
+    OTHER role's token are removed; ``NEOTOMA_BEARER_TOKEN`` is set to the
+    role's own token when it has one, so a tool or script in the child that
+    reads it acts as the role, never as the operator. Changes *env* in place."""
+    own_name = neotoma_token_env_name(role)
+    own = env.get(own_name, "").strip()
+    for name in [k for k in env if k.endswith("_NEOTOMA_TOKEN") and k != own_name]:
+        env.pop(name, None)
+    for name in _SHARED_NEOTOMA_BEARER_NAMES:
+        env.pop(name, None)
+    if own:
+        env["NEOTOMA_BEARER_TOKEN"] = own
+
+
+def _isolation_refusal_result(skill: str, provider: str, exc: "IsolationRefusal") -> SkillResult:
+    """A launch refused before any child for a configuration the operator must
+    repair (value-free, no cooldown; the provider loop fails over)."""
+    detail = f"{exc} (repair: {exc.setting})"
+    msg = f"{provider} launch failed: {HARNESS_ISOLATION_REFUSED}: {detail}"
+    log.error(f"[apis] {skill} dispatch refused before launch — {msg}")
+    return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                       configuration_repair=f"{provider}: {detail}")  # fmt: skip
+
+
 class _LocalSpawnError(Exception):
     """The local CLI could not be started (an OSError from the spawn)."""
 
@@ -3109,6 +3138,10 @@ async def _run_skill_once(
     _mcp_tmp_path: str | None = None
     _codex_gate_config: CodexGateOwnerConfig | None = None
     _isolated_home: IsolatedHarnessHome | None = None
+    # Why a LOCAL launch of this Claude child is refused (a granted role with
+    # no own token or no valid endpoint). A Fly run checks the role's identity
+    # itself and ships no shared bearer, so only the local launch refuses.
+    _local_identity_refusal: IsolationRefusal | None = None
     _codex_gate_token = ""
     if provider == "claude" and local_review:
         # Claude otherwise merges project/user MCP configuration. A local
@@ -3123,11 +3156,10 @@ async def _run_skill_once(
             json.dump({"mcpServers": {}}, _f)
         cmd += ["--mcp-config", _mcp_tmp_path, "--strict-mcp-config"]
     elif provider == "claude":
-        _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
-        # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
-        # shared daemon bearer, so every agent without its own credential behaves
-        # exactly as before. A gate owner is NOT refused here for lacking one
-        # (amended ADR): the system-of-record write is now the dispatcher's
+        # The ROLE's own Neotoma principal, for every role granted Neotoma
+        # tools; the shared daemon bearer is never substituted (the operator
+        # provisioned a token per dispatching role on 2026-10-20). The
+        # system-of-record gate write is the dispatcher's
         # `IssueGateStore.sign_off`, signed with the lens's own AAuth key,
         # independent of this MCP session's bearer. The prompt no longer
         # instructs a gate-owning lens to `correct()` `gate_status` itself (the
@@ -3136,71 +3168,59 @@ async def _run_skill_once(
         # session either (see `GATE_WRITEBACK_TOOLS`) — an unsolicited `correct`
         # attempt on `gate_status` would fall back to an unanswerable
         # `default`-mode approval prompt, never a clearance path.
-        _neotoma_token, _ = neotoma_token_for_agent(_role)
-        if not _neotoma_token:
-            # Unlike the harness_event writer above, this is not a
-            # best-effort diagnostic — it constructs the MCP config the
-            # spawned child actually connects with. Neotoma's /mcp endpoint
-            # requires auth (verified live: an unauthenticated POST to
-            # /mcp returns HTTP 401 with "Unauthorized: Authentication
-            # required"), so a missing token here is not a degraded-but-
-            # usable config — it is a config that guarantees the child's
-            # own MCP handshake fails, far from this call site and with no
-            # indication the cause was an empty env var in the parent.
-            # Raise here, matching _require_neotoma_base_url's convention,
-            # so the failure is attributed to its actual cause. This applies
-            # regardless of which tier (role-owned or shared daemon bearer)
-            # neotoma_token_for_agent() resolved from — both can be empty.
-            raise RuntimeError(
-                "NEOTOMA_BEARER_TOKEN is not set; refusing to construct an "
-                "--mcp-config for the dispatched child. Neotoma's /mcp "
-                "endpoint requires authentication, so a config built "
-                "without a bearer token would only fail later, inside the "
-                "child's own MCP handshake, with no trace back to this "
-                "cause. Under launchd the plist supplies this; for an "
-                "ad-hoc run, export it or source ~/.config/neotoma/.env "
-                "first."
-            )
-        _mcp_cfg: dict = {
-            "mcpServers": {
-                "mcpsrv_neotoma": {
-                    "type": "http",
-                    "url": f"{_neotoma_base}/mcp",
-                    "headers": {"Authorization": f"Bearer {_neotoma_token}"},
-                }
-            }
-        }
-
-        # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
-        try:
-            fd, _mcp_tmp_path = tempfile.mkstemp(suffix=".json", prefix="apis_mcp_")
+        if not allowed_mcp_servers(agent_def.tools):
+            # No Neotoma grant: no record server at all, and none of the
+            # operator's own MCP servers either (an empty, strict universe).
+            fd, _mcp_tmp_path = tempfile.mkstemp(suffix=".json", prefix="apis_no_grant_mcp_")
             os.chmod(_mcp_tmp_path, 0o600)
             with os.fdopen(fd, "w") as _f:
-                json.dump(_mcp_cfg, _f)
-            cmd += ["--mcp-config", _mcp_tmp_path]
-            log.debug(
-                f"[apis] Injected --mcp-config {_mcp_tmp_path} "
-                "(mcpsrv_neotoma HTTP MCP)"
-            )
-        except Exception as exc:
-            # Non-fatal: proceed without injection rather than abort.
-            log.warning(
-                f"[apis] Could not write MCP config temp file (non-fatal): {exc}"
-            )
-            _mcp_tmp_path = None
+                json.dump({"mcpServers": {}}, _f)
+            cmd += ["--mcp-config", _mcp_tmp_path, "--strict-mcp-config"]
+        else:
+            # A granted role connects with its OWN token at a valid https
+            # endpoint, or does not launch (a configuration repair): never
+            # the shared bearer.
+            try:
+                _neotoma_url, _neotoma_token = _role_neotoma_endpoint(_role)
+            except IsolationRefusal as exc:
+                _local_identity_refusal = exc
+                _neotoma_url = _neotoma_token = ""
+        if _local_identity_refusal is None and allowed_mcp_servers(agent_def.tools):
+            _mcp_cfg: dict = {
+                "mcpServers": {
+                    "mcpsrv_neotoma": {
+                        "type": "http",
+                        "url": _neotoma_url,
+                        "headers": {"Authorization": f"Bearer {_neotoma_token}"},
+                    }
+                }
+            }
+            # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
+            try:
+                fd, _mcp_tmp_path = tempfile.mkstemp(suffix=".json", prefix="apis_mcp_")
+                os.chmod(_mcp_tmp_path, 0o600)
+                with os.fdopen(fd, "w") as _f:
+                    json.dump(_mcp_cfg, _f)
+                cmd += ["--mcp-config", _mcp_tmp_path]
+                log.debug(
+                    f"[apis] Injected --mcp-config {_mcp_tmp_path} "
+                    "(mcpsrv_neotoma HTTP MCP)"
+                )
+            except Exception as exc:
+                # Non-fatal: proceed without injection rather than abort.
+                log.warning(
+                    f"[apis] Could not write MCP config temp file (non-fatal): {exc}"
+                )
+                _mcp_tmp_path = None
     elif provider == "codex" and owns_pending_gate:
-        _codex_gate_token, _ = neotoma_token_for_agent(_role)
-        if not _codex_gate_token:
-            msg = (
-                f"{provider} launch failed: {GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
-                "Codex gate-owner config "
-                "cannot bind the Neotoma record server because no bearer token "
-                "is available; refusing to launch"
-            )
-            log.error(f"[apis] {skill} dispatch refused — {msg}")
-            return SkillResult(
-                skill, False, None, "", "", error=msg, provider=provider
-            )
+        # The seated record server is bound to the role's OWN token at a valid
+        # https endpoint, exactly like every other local child: a missing or
+        # empty token is a configuration repair before launch, never the
+        # shared bearer.
+        try:
+            _, _codex_gate_token = _role_neotoma_endpoint(_role)
+        except IsolationRefusal as exc:
+            return _isolation_refusal_result(skill, provider, exc)
         try:
             _codex_gate_config = _prepare_codex_gate_owner_config(
                 base_url=_require_neotoma_base_url(),
@@ -3361,6 +3381,7 @@ async def _run_skill_once(
         local_review_home=local_review_home or None,
         inference_only=inference_only,
     )
+    _neotoma_identity_for_child(subprocess_env, _role)
     if local_cfg is not None:
         # Local inference: point the CLI at the loopback proxy and strip any
         # frontier OAuth credential so it cannot be sent there.
@@ -3520,6 +3541,9 @@ async def _run_skill_once(
 
     async def _run_local() -> tuple[int | None, bytes, bytes]:
         nonlocal proc, _isolated_home
+        if _local_identity_refusal is not None:
+            exc = _local_identity_refusal
+            raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})")
         spawn_cwd = cwd
         if _isolation_wanted and _isolated_home is None:
             # ONE absolute workspace (resolved above, or the daemon's own

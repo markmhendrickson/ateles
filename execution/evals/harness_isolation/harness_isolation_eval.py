@@ -61,6 +61,9 @@ import json, os, pathlib, sys, tomllib
 pathlib.Path({marker!r}).write_text("1")
 sys.stdin.read()
 report = {{"argv": sys.argv[1:], "cwd": os.path.realpath(os.getcwd())}}
+import hashlib
+_bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+report["bearer_digest"] = hashlib.sha256(_bearer.encode()).hexdigest() if _bearer else ""
 # Resolve the workspace flag as a real CLI does (against the child's own cwd)
 # and note whether a project MCP file sits at the root it would use.
 import subprocess
@@ -196,14 +199,34 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
 
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        pin = ["--provider", provider] if scenario.get("pin", True) else []
-        code = dispatch_role.main(["--role", ROLE, "--task", "Check the gates.", *pin,
-                                   "--cwd", cwd_arg, "--json",
-                                   *scenario.get("args", [])])  # fmt: skip
-    try:
-        envelope = json.loads(out.getvalue())
-    except ValueError:
-        envelope = {}
+        if scenario.get("seated"):
+            # A seated review (gate-owning deny of `correct`) through the real
+            # dispatch entry point that the review lanes use.
+            import asyncio
+
+            result = asyncio.run(dispatch_role.dispatch(
+                ROLE, "Check the gates.", provider=provider, cwd=cwd_arg,
+                seated_reviewer=True))  # fmt: skip
+            code = 0 if result.ok else 1
+            seated_envelope = {
+                "ok": result.ok, "stdout": result.stdout, "error": result.error,
+                "attempted_providers": list(result.attempted_providers),
+                **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
+                **({"configuration_repair": result.configuration_repair}
+                   if result.configuration_repair else {}),
+            }  # fmt: skip
+        else:
+            pin = ["--provider", provider] if scenario.get("pin", True) else []
+            code = dispatch_role.main(["--role", ROLE, "--task", "Check the gates.", *pin,
+                                       "--cwd", cwd_arg, "--json",
+                                       *scenario.get("args", [])])  # fmt: skip
+    if scenario.get("seated"):
+        envelope = seated_envelope
+    else:
+        try:
+            envelope = json.loads(out.getvalue())
+        except ValueError:
+            envelope = {}
     child = None
     for line in str(envelope.get("stdout", "")).splitlines():
         if line.startswith("CHILD "):
@@ -248,6 +271,16 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         everywhere = trace.output_text + json.dumps(trace.notifications)
         if e["value_absent"] in everywhere:
             problems.append("the refused setting's value appeared in the output")
+    if "child_bearer" in e and trace.child is not None:
+        import hashlib
+
+        wanted = {"role": hashlib.sha256(ROLE_TOKEN.encode()).hexdigest(),
+                  "shared": hashlib.sha256(SHARED_BEARER.encode()).hexdigest()}[e["child_bearer"]]
+        if trace.child.get("bearer_digest") != wanted:
+            problems.append(f"the child's Neotoma bearer is not the {e['child_bearer']} token")
+    if trace.child is not None and trace.child.get("bearer_digest") == __import__(
+            "hashlib").sha256(SHARED_BEARER.encode()).hexdigest():  # fmt: skip
+        problems.append("the child was handed the shared bearer")
     if e.get("one_workspace"):
         child = trace.child or {}
         flag_value = child.get("workspace_flag_value")
