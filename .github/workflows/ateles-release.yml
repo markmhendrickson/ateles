@@ -1,93 +1,60 @@
-name: Ateles release
+name: Ateles changelog preparation
 
-# Cuts a dated GitHub Release for the Ateles repo on every push to main, so the
-# swarm's own changes get the same durable, linkable changelog that Neotoma
-# releases have.
-#
-# WHY THIS IS DIFFERENT FROM NEOTOMA'S RELEASE FLOW: Ateles has no package.json
-# and publishes to no registry — it is agent prompts, daemons and skills that run
-# from a checkout, not an installable artifact. So there is nothing to version
-# semantically and nothing to publish. This workflow therefore does the one thing
-# that carries real value here: it tags each state of main and writes the commit
-# log since the previous tag into a GitHub Release, giving every swarm change an
-# auditable, citable point in history.
-#
-# Calendar versioning (vYYYY.MM.DD[.N]) is used deliberately over semver: with no
-# public API surface there is no compatibility contract for semver to express,
-# and a date answers the question actually asked of these releases ("what was the
-# swarm running on day X?").
-#
-# Concurrency is serialized (cancel-in-progress: false) because two runs racing
-# would compute the same tag and one would fail on push.
-
+# Prepare a full-SHA-bound changelog artifact; neither trigger publishes a
+# release or creates a tag. The calendar tag is an unpublished preview only.
+# Actual publication requires separate explicit operator approval; this workflow
+# does not introduce a publisher or treat workflow_dispatch as that approval.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ateles-release
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history for the commit log)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
-      - name: Compute next calendar tag
+      - name: Compute unpublished candidate tag
         id: tag
+        env:
+          SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          if [ "$CHECKED_OUT_SHA" != "$SOURCE_SHA" ]; then
+            printf 'Changelog preparation stopped: checkout SHA %s does not match expected SOURCE_SHA %s. No changelog artifact was created. Verify the source commit and checkout, then re-run preparation for that source.\n' "$CHECKED_OUT_SHA" "$SOURCE_SHA" >&2
+            exit 1
+          fi
           TODAY="$(date -u +%Y.%m.%d)"
-          # Tag/versioning logic lives in tag_utils.py (unit tested in
-          # test_tag_utils.py) rather than inline here — see that module for
-          # the calendar-suffix rules.
           TAG="$(python3 execution/daemons/phoenicurus-release/tag_utils.py compute-tag \
             --today "$TODAY" --existing-tags "$(git tag)")"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          PREV="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          PREV="$(git describe --tags --abbrev=0 "$SOURCE_SHA" 2>/dev/null || true)"
           echo "prev=$PREV" >> "$GITHUB_OUTPUT"
-          echo "Releasing $TAG (previous: ${PREV:-none})"
+          echo "Preparing $TAG at $SOURCE_SHA (previous: ${PREV:-none}); no publication"
 
-      - name: Build release notes
-        id: notes
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-          PREV: ${{ steps.tag.outputs.prev }}
-        run: |
-          set -euo pipefail
-          {
-            echo "## Changes"
-            echo
-            if [ -n "$PREV" ]; then
-              git log --no-merges --pretty=format:'- %s (%h)' "$PREV..HEAD"
-              echo
-              echo
-              echo "**Full diff:** ${{ github.server_url }}/${{ github.repository }}/compare/$PREV...$TAG"
-            else
-              echo "Initial release."
-            fi
-          } > /tmp/notes.md
-          echo "--- notes ---"; cat /tmp/notes.md
-
-      # Skip cutting an empty release when main moved but produced no non-merge
-      # commits since the last tag (e.g. a merge-only push). Guard logic lives
-      # in tag_utils.has_releasable_commits (unit tested).
-      - name: Check there is something to release
+      - name: Check for changelog content
         id: check
         env:
+          SOURCE_SHA: ${{ github.sha }}
           PREV: ${{ steps.tag.outputs.prev }}
         run: |
           set -euo pipefail
           if [ -n "$PREV" ]; then
-            COUNT="$(git rev-list --no-merges --count "$PREV..HEAD")"
+            COUNT="$(git rev-list --no-merges --count "$PREV..$SOURCE_SHA")"
           else
             COUNT=0
           fi
@@ -96,22 +63,45 @@ jobs:
             echo "count=1" >> "$GITHUB_OUTPUT"
           else
             echo "count=0" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -n "$PREV" ]; then
-            echo "$COUNT non-merge commit(s) since $PREV"
-          else
-            echo "No previous tag — proceeding with the initial release"
+            echo "No non-merge changes; skipping notes and artifact"
           fi
 
-      - name: Create GitHub Release
+      - name: Build unpublished changelog
+        id: notes
         if: steps.check.outputs.count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
           TAG: ${{ steps.tag.outputs.tag }}
+          PREV: ${{ steps.tag.outputs.prev }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --notes-file /tmp/notes.md \
-            --target "${{ github.sha }}"
-          echo "Released $TAG"
+          mkdir -p "$RUNNER_TEMP/ateles-release-notes"
+          {
+            echo "# Ateles changelog preparation"
+            echo
+            echo "Source commit: $SOURCE_SHA"
+            echo "Candidate tag: $TAG (not a published release)"
+            echo
+            echo "## Changes"
+            echo
+            if [ -n "$PREV" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "$PREV..$SOURCE_SHA"
+              echo
+              echo
+              echo "**Full diff:** $REPOSITORY_URL/compare/$PREV...$SOURCE_SHA"
+            else
+              echo "Initial changelog preparation."
+              git log --no-merges --pretty=format:'- %s (%h)' "$SOURCE_SHA"
+              echo
+            fi
+          } > "$RUNNER_TEMP/ateles-release-notes/notes.md"
+          cat "$RUNNER_TEMP/ateles-release-notes/notes.md"
+
+      - name: Upload changelog preparation
+        if: steps.check.outputs.count != '0'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ateles-notes-${{ github.sha }}
+          path: ${{ runner.temp }}/ateles-release-notes/notes.md
+          if-no-files-found: error

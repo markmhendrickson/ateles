@@ -48,7 +48,8 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_package_and_validate_fixed_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            # Resolve only the trusted factory root, before planting any inputs.
+            root = Path(directory).resolve()
             source = root / "source"
             destination = root / "data"
             source.mkdir()
@@ -66,7 +67,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_changed_data_after_packaging_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             destination = root / "data"
             source.mkdir()
@@ -79,7 +80,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_symlinked_candidate_input_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             source.mkdir()
             make_source(source)
@@ -98,7 +99,7 @@ class CandidateDataPackerTest(unittest.TestCase):
                 self.subTest(store_name=store_name),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                root = Path(directory)
+                root = Path(directory).resolve()
                 source = root / "source"
                 source.mkdir()
                 for relative in sorted(inputs.EXACT_INPUTS):
@@ -116,7 +117,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_undeclared_destination_file_is_rejected_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             destination = root / "data"
             source.mkdir()
@@ -129,7 +130,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_oversized_input_is_rejected_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             source.mkdir()
             make_source(source)
@@ -140,7 +141,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_oversized_total_is_rejected_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             source.mkdir()
             make_source(source)
@@ -154,7 +155,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_malformed_manifest_is_rejected_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             destination = root / "data"
             source.mkdir()
@@ -185,7 +186,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_missing_exact_input_is_rejected_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             source.mkdir()
             make_source(source)
@@ -197,7 +198,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_existing_destination_is_rejected_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             destination = root / "data"
             source.mkdir()
@@ -216,7 +217,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_path_escape_is_rejected_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             source.mkdir()
             outside = root / "CLAUDE.md"
@@ -227,7 +228,7 @@ class CandidateDataPackerTest(unittest.TestCase):
 
     def test_cli_reports_stable_reason_without_private_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             source.mkdir()
             make_source(source)
@@ -266,7 +267,7 @@ class MeasurementInstrumentTest(unittest.TestCase):
 
     def run_renderer(self, clusters, statements, expected: str) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             output = root / "docs" / "foundation" / "rule_inventory.md"
             output.parent.mkdir(parents=True)
             output.write_text(expected, encoding="utf-8")
@@ -344,7 +345,7 @@ class StableGateOutputTest(unittest.TestCase):
 
     def test_renderer_output_is_captured_and_complete_flag_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             destination = root / "data"
             source.mkdir()
@@ -394,7 +395,7 @@ class StableGateOutputTest(unittest.TestCase):
             99: (2, "rule inventory measurement failed before a safe verdict"),
         }
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             destination = root / "data"
             source.mkdir()

@@ -37,7 +37,7 @@ from lib.daemon_runtime import gating  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
-MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment")
+MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview")
 BINDING = {"claude": {"local": "m-local", "mechanical": "m-mech", "mid": "m-mid", "top": "m-top"}}
 
 
@@ -175,10 +175,69 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
             return _Spawned()
 
         mp.setattr(apis, "_spawn_harness_skill", _spawn)
-        mp.setattr(
-            apis, "resolve_policy_for_agent",
-            lambda _skill: ExecutionPolicy(entity_id="fallback", loaded=False),
+        policy = (
+            gating._parse_policy("eval-policy", {"snapshot": scenario["policy"]})
+            if "policy" in scenario else ExecutionPolicy(entity_id="fallback", loaded=False)
         )
+        mp.setattr(apis, "resolve_policy_for_agent", lambda _skill: policy)
+        real_resolve = apis._resolve_gate_action_type
+
+        def _resolve(skill, snapshot, policy):
+            resolved = real_resolve(skill, snapshot, policy)
+            obs["action"] = {
+                "action_type": resolved.value,
+                "action_type_source": resolved.source,
+                "action_blast_radius": policy.blast_radius_for(resolved.value).value,
+            }
+            return resolved
+
+        mp.setattr(apis, "_resolve_gate_action_type", _resolve)
+        if mutation == "no_content":
+            # Remove escalation while preserving declarations and agent priors.
+            mp.setattr(apis, "_resolve_gate_action_type", lambda skill, snap, p: _resolve(
+                skill, {"action_type": snap.get("action_type")}, p
+            ))
+        if "preview" in scenario:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location(
+                "dispatch_gate_preview", REPO_ROOT / "execution/mcp/ateles/server.py"
+            )
+            preview = importlib.util.module_from_spec(spec)
+            # The eval lane intentionally lacks the transport SDK. Only import
+            # shapes are stubbed; the real MCP handler runs below. The separate
+            # MCP CI lane tests the installed SDK and stdio transport.
+            try:
+                import mcp  # noqa: F401
+            except ImportError:
+                import types
+
+                class _Shape:
+                    def __init__(self, **kwargs):
+                        self.__dict__.update(kwargs)
+
+                sdk = {name: types.ModuleType(name) for name in (
+                    "mcp", "mcp.server", "mcp.server.stdio", "mcp.types"
+                )}
+                sdk["mcp.server"].Server = _Shape
+                sdk["mcp.server.stdio"].stdio_server = None
+                sdk["mcp.types"].Tool = _Shape
+                sdk["mcp.types"].TextContent = _Shape
+                for name, module in sdk.items():
+                    mp.setitem(sys.modules, name, module)
+            spec.loader.exec_module(preview)
+            mp.setattr(preview, "_get_swarm_roster", lambda: {
+                "roles": {"code": "cicada", "dispatcher": "apis"},
+            })
+            mp.setattr(preview, "_retrieve_entities", lambda *a, **kw: [])
+            mp.setattr(preview, "_get", lambda *a: {"snapshot": scenario.get("policy", {})})
+            if mutation == "raw_preview":
+                # Prior MCP implementation treated omitted/empty sets as empty.
+                mp.setattr(preview, "_parse_policy", lambda entity_id, data: ExecutionPolicy(
+                    entity_id=entity_id, high_blast_action_types=frozenset(),
+                    low_blast_action_types=frozenset(), loaded=True,
+                ))
+            obs["preview"] = preview._route_task(**scenario["preview"])
         policy_map = (
             {model_tiering.ACTION_CONFIDENCE_SCORING: config["tier_policy"]}
             if config.get("tier_policy") else {}
@@ -288,6 +347,14 @@ def check(scenario: dict, obs: dict) -> list[str]:
                 fails.append("a mechanical estimate was persisted with a producer source")
     elif exp.get("summary_contains") or exp.get("notification_contains"):
         fails.append("no checkpoint was written to carry the expected text")
+    for needle in exp.get("persisted_summary_contains", []):
+        if not any(needle in record.get("plan_summary", "") for record in obs["persisted"]):
+            fails.append(f"persisted checkpoint summary lacks {needle!r}")
+    for surface in ("action", "preview"):
+        for key, wanted in exp.get(surface, {}).items():
+            got = obs.get(surface, {}).get(key)
+            if got != wanted:
+                fails.append(f"{surface}.{key} {got!r}, expected {wanted!r}")
     if "assessment" in exp:
         fails += _check_assessment(exp["assessment"], obs)
     if "scorer_tier" in exp and obs["scorer_tier"] != exp["scorer_tier"]:

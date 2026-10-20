@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from fly_cleanup_test_support import assert_cleanup
+
 _RUNNER_DIR = Path(__file__).resolve().parents[3] / "deploy" / "fly-runner"
 
 
@@ -199,7 +201,8 @@ def test_leftovers_are_cleared_without_following_links(tmp_path):
     assert sorted(os.listdir(root)) == ["job-new"]
     assert (outside / "keep.txt").read_text() == "keep"
     rd.remove_work(root)
-    assert os.listdir(root) == [] and (outside / "keep.txt").is_file()
+    assert_cleanup(root, present=True)
+    assert (outside / "keep.txt").is_file()
 
 
 # ── Importing the agent's work: the accepted case ───────────────────────────

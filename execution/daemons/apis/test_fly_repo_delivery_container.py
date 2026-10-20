@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from fly_cleanup_test_support import assert_cleanup
+
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux" or os.geteuid() != 0,
     reason="needs root on Linux (runs in a container in CI)",
@@ -108,4 +110,4 @@ def test_the_agent_and_root_sides_stay_separate(tmp_path, monkeypatch):
                 assert TOKEN.encode() not in data and header not in data, name
     finally:
         rd.remove_work(root)
-    assert os.listdir(root) == []
+    assert_cleanup(root, present=True)

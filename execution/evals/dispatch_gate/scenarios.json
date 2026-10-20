@@ -1,5 +1,5 @@
 {
-  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; only Neotoma writes, the agent spawn and the model call are stubbed. The base task is a routable, low-blast, unscored task.",
+  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; only Neotoma writes, the agent spawn and the model call are stubbed. The base task is a routable, low-blast, unscored task. Includes content escalation, effective-policy parity and checkpoint-driver scenarios (ateles#682).",
   "base_task": {
     "title": "Tidy the notes index",
     "body": "Re-sort the local notes index alphabetically. Local file only.",
@@ -627,6 +627,314 @@
         "assessment": {
           "recorded": false,
           "allow_written": true
+        }
+      }
+    },
+    {
+      "id": "content_risky_low_prior_never_spawns",
+      "why": "An undeclared analysis prior escalates from task content and cannot spawn even at high confidence.",
+      "task": {
+        "action_type": null,
+        "confidence": 0.99,
+        "assigned_to": "fringilla",
+        "title": "Open a PR for this change"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "content_report_only_preserves_cicada_prior",
+      "why": "Report-only relief remains deferred; report language cannot lower the existing PR prior.",
+      "task": {
+        "action_type": null,
+        "confidence": 0.99,
+        "assigned_to": "cicada",
+        "title": "Review the code path",
+        "body": "Write NOTHING - this job's only output is a divergence report."
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "agent_prior",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "content_declared_unknown_action_held",
+      "why": "Declared values remain authoritative and never auto-execute when unknown or operator-only.",
+      "task": {
+        "action_type": "unknown_action",
+        "confidence": 0.99,
+        "assigned_to": "fringilla",
+        "title": "Open a PR"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "unknown_action",
+          "action_type_source": "declared",
+          "action_blast_radius": "never"
+        }
+      }
+    },
+    {
+      "id": "content_declared_operator_only_held",
+      "why": "Declared values remain authoritative and never auto-execute when unknown or operator-only.",
+      "task": {
+        "action_type": "operator_only",
+        "confidence": 0.99,
+        "assigned_to": "fringilla",
+        "title": "Open a PR"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "operator_only",
+          "action_type_source": "declared",
+          "action_blast_radius": "never"
+        }
+      }
+    },
+    {
+      "id": "content_effective_never_prior_preserved",
+      "why": "A custom policy that does not classify Cicada PRs leaves its NEVER prior intact even with HIGH payment text.",
+      "task": {
+        "action_type": null,
+        "confidence": 0.99,
+        "assigned_to": "cicada",
+        "title": "Pay the invoice"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "agent_prior",
+          "action_blast_radius": "never"
+        }
+      },
+      "policy": {
+        "high_blast_action_types": [
+          "payment"
+        ],
+        "low_blast_action_types": [
+          "compute_only_analysis"
+        ]
+      }
+    },
+    {
+      "id": "content_unicode_body_escalates",
+      "why": "Secondary-field NFKC and Unicode whitespace signals reach the real gate.",
+      "task": {
+        "action_type": null,
+        "confidence": 0.99,
+        "assigned_to": "fringilla",
+        "title": "Inspect the notes",
+        "body": "Ｏｐｅｎ ａ ＰＲ for the change"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "content_unicode_description_escalates",
+      "why": "Secondary-field NFKC and Unicode whitespace signals reach the real gate.",
+      "task": {
+        "action_type": null,
+        "confidence": 0.99,
+        "assigned_to": "fringilla",
+        "title": "Inspect the notes",
+        "description": "Ｏｐｅｎ ａ ＰＲ for the change"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "content_drivers_supplied",
+      "why": "Creator confidence drivers or the explicit missing marker survive checkpoint persistence and notification.",
+      "task": {
+        "action_type": null,
+        "confidence": 0.99,
+        "assigned_to": "fringilla",
+        "title": "Open a PR",
+        "confidence_drivers": "Scope and owner remain unverified."
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        },
+        "summary_contains": [
+          "Scope and owner remain unverified."
+        ],
+        "notification_contains": [
+          "Scope and owner remain unverified."
+        ],
+        "persisted_summary_contains": [
+          "Scope and owner remain unverified."
+        ]
+      }
+    },
+    {
+      "id": "content_drivers_missing",
+      "why": "Creator confidence drivers or the explicit missing marker survive checkpoint persistence and notification.",
+      "task": {
+        "action_type": null,
+        "confidence": 0.99,
+        "assigned_to": "fringilla",
+        "title": "Open a PR",
+        "confidence_drivers": null
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        },
+        "summary_contains": [
+          "[COPY: confidence not supplied; inspect task spec or ask creator to add confidence_drivers]"
+        ],
+        "notification_contains": [
+          "[COPY: confidence not supplied; inspect task spec or ask creator to add confidence_drivers]"
+        ],
+        "persisted_summary_contains": [
+          "[COPY: confidence not supplied; inspect task spec or ask creator to add confidence_drivers]"
+        ]
+      }
+    },
+    {
+      "id": "content_preview_raw_policy_parity",
+      "why": "The MCP returned action/source/blast match real dispatch using the same omitted-set policy record.",
+      "task": {
+        "action_type": null,
+        "confidence": 0.99,
+        "assigned_to": "cicada",
+        "title": "implement a new feature"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "agent_prior",
+          "action_blast_radius": "high"
+        },
+        "preview": {
+          "action_type": "open_or_merge_pr",
+          "action_type_source": "agent_prior",
+          "action_blast_radius": "high"
+        }
+      },
+      "policy": {
+        "title": "omitted sets",
+        "blast_radius_default": "low"
+      },
+      "preview": {
+        "task_description": "implement a new feature"
+      }
+    },
+    {
+      "id": "content_symbol_transfer_holds",
+      "why": "Every recognized content action must be classified under the effective policy before dispatch or preview.",
+      "task": {
+        "title": "Transfer €",
+        "body": "Local task details.",
+        "description": "",
+        "action_type": null,
+        "assigned_to": "fringilla",
+        "confidence": 0.99
+      },
+      "policy": {
+        "high_blast_action_types": [
+          "payment"
+        ],
+        "low_blast_action_types": [
+          "compute_only_analysis"
+        ]
+      },
+      "preview": {
+        "task_description": "Transfer €"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "payment",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        },
+        "preview": {
+          "action_type": "payment",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        }
+      }
+    },
+    {
+      "id": "content_strictest_policy_candidate_holds",
+      "why": "Every recognized content action must be classified under the effective policy before dispatch or preview.",
+      "task": {
+        "title": "Transfer money then publish the page",
+        "body": "Local task details.",
+        "description": "",
+        "action_type": null,
+        "assigned_to": "fringilla",
+        "confidence": 0.99
+      },
+      "policy": {
+        "high_blast_action_types": [
+          "publish"
+        ],
+        "low_blast_action_types": [
+          "payment",
+          "compute_only_analysis"
+        ]
+      },
+      "preview": {
+        "task_description": "Transfer money then publish the page"
+      },
+      "expect": {
+        "outcome": "held",
+        "scorer_called": false,
+        "action": {
+          "action_type": "publish",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
+        },
+        "preview": {
+          "action_type": "publish",
+          "action_type_source": "content",
+          "action_blast_radius": "high"
         }
       }
     }
