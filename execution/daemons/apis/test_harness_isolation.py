@@ -788,26 +788,18 @@ def test_claude_dispatch_is_unchanged_by_this_isolation(operator_home, monkeypat
 # ── The generated home is mandatory; a caller-supplied one only by opt-in ────
 
 
-def _trusted_home(tmp_path, provider, servers):
-    home = tmp_path / f"trusted-{provider}-home"
-    if provider == "codex":
-        home.mkdir()
-        (home / "auth.json").write_text("{}")
-        (home / "config.toml").write_text("".join(
-            f'[mcp_servers.{n}]\nurl = "https://x.example.test/mcp"\n' for n in servers))
-    else:
-        (home / ".cursor").mkdir(parents=True)
-        (home / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {
-            n: {"url": "https://x.example.test/mcp"} for n in servers}}))
+def _home_dir(tmp_path, provider):
+    home = tmp_path / f"supplied-{provider}-home"
+    home.mkdir()
+    (home / "auth.json").write_text("{}")
     return home
 
 
 @pytest.mark.parametrize("provider", ["codex", "cursor"])
-def test_a_home_in_env_extra_without_the_opt_in_is_refused(operator_home, monkeypatch, tmp_path,
-                                                           provider):  # fmt: skip
+def test_a_home_in_env_extra_is_refused(operator_home, monkeypatch, tmp_path, provider):
     marker, notified = _seam(monkeypatch, tmp_path)
     key = "CODEX_HOME" if provider == "codex" else "HOME"
-    home = _trusted_home(tmp_path, provider, ["mcpsrv_neotoma"])
+    home = _home_dir(tmp_path, provider)
     result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius", provider=provider,
                                                 env_extra={key: str(home)}))  # fmt: skip
     assert not result.ok and not marker.exists()
@@ -818,20 +810,20 @@ def test_a_home_in_env_extra_without_the_opt_in_is_refused(operator_home, monkey
     assert provider not in harness_router.cooling_providers()
 
 
-@pytest.mark.parametrize("provider", ["codex", "cursor"])
-def test_a_trusted_home_with_another_server_is_refused(operator_home, monkeypatch, tmp_path,
-                                                       provider):  # fmt: skip
-    marker, _ = _seam(monkeypatch, tmp_path)
-    home = _trusted_home(tmp_path, provider, ["mcpsrv_neotoma", "client-hosted"])
-    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius", provider=provider,
-                                                trusted_harness_home=str(home)))  # fmt: skip
-    assert not result.ok and not marker.exists()
-    assert "(repair: trusted_harness_home)" in result.configuration_repair
+def test_run_skill_offers_no_way_to_supply_another_home():
+    import inspect
+
+    params = inspect.signature(skill_runner.run_skill).parameters
+    assert not [p for p in params if "home" in p.lower()]
+    with pytest.raises(TypeError):
+        asyncio.run(skill_runner.run_skill("lanius", "task", trusted_harness_home="/tmp/x"))
 
 
 @pytest.mark.parametrize("provider", ["codex", "cursor"])
-def test_a_verified_trusted_home_launches_and_is_left_in_place(operator_home, monkeypatch,
-                                                               tmp_path, provider):  # fmt: skip
+def test_the_lens_runner_local_review_home_is_unchanged(operator_home, monkeypatch, tmp_path,
+                                                        provider):  # fmt: skip
+    """The separately guarded local-review path (the lens runner) still runs
+    with its own home from env_extra; the generated home is not built."""
     stand_in = tmp_path / "home-stand-in"
     record = tmp_path / "home-seen.txt"
     stand_in.write_text("#!%s\nimport os, pathlib\npathlib.Path(%r).write_text("
@@ -841,22 +833,15 @@ def test_a_verified_trusted_home_launches_and_is_left_in_place(operator_home, mo
     _seam(monkeypatch, tmp_path)
     monkeypatch.setattr(skill_runner, "CODEX_BIN", str(stand_in))
     monkeypatch.setattr(skill_runner, "CURSOR_BIN", str(stand_in))
-    home = _trusted_home(tmp_path, provider, ["mcpsrv_neotoma"])
-    result = asyncio.run(skill_runner.run_skill("lanius", "task", role="lanius", provider=provider,
-                                                trusted_harness_home=str(home)))  # fmt: skip
-    assert result.ok, result.error
-    assert Path(record.read_text()) == home.resolve()
-    assert home.exists()  # the caller's home is never removed
-
-
-def test_a_trusted_home_and_a_different_env_extra_home_are_refused(operator_home, monkeypatch,
-                                                                   tmp_path):  # fmt: skip
-    marker, _ = _seam(monkeypatch, tmp_path)
-    home = _trusted_home(tmp_path, "codex", ["mcpsrv_neotoma"])
+    monkeypatch.setattr(skill_runner, "prepare_isolated_harness_home",
+                        lambda *a, **k: pytest.fail("no generated home on the local-review path"))
+    home = _home_dir(tmp_path, provider)
+    key = "CODEX_HOME" if provider == "codex" else "HOME"
     result = asyncio.run(skill_runner.run_skill(
-        "lanius", "task", role="lanius", provider="codex", trusted_harness_home=str(home),
-        env_extra={"CODEX_HOME": str(tmp_path / "elsewhere")}))  # fmt: skip
-    assert not result.ok and not marker.exists() and result.configuration_repair
+        "lanius", "review", role="lanius", provider=provider, local_review=True,
+        env_extra={key: str(home), "ATELES_LOCAL_REVIEW_HOME": str(home)}))  # fmt: skip
+    assert result.ok, result.error
+    assert Path(record.read_text()).resolve() == home.resolve()
 
 
 # ── Repairs carry a fixed reason and the exception class, nothing else ───────
