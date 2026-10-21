@@ -113,7 +113,7 @@
     },
     {
       "id": "shared_role_token_fly_launch_falls_back_with_correction",
-      "description": "A key-only Fly job is refused before launch; the opted-in dispatch corrects its capability notice and completes locally with normal tools, without claiming a Fly result.",
+      "description": "A key-only Fly launch is refused; the opted-in dispatch corrects its capability notice and completes locally with normal tools, without claiming a Fly result.",
       "settings": {
         "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
         "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
@@ -145,7 +145,45 @@
         "in_flight_after": 0,
         "revoked_all_minted": true,
         "dispatch_events": ["key_only_notice", "launch", "local_correction"],
-        "local_key_only_correction": true
+        "local_key_only_correction": "The Fly launch failed; this run fell back to a local run with its normal tools."
+      }
+    },
+    {
+      "id": "shared_role_token_fly_ineligible_falls_back_with_correction",
+      "description": "A key-only Fly run becomes ineligible before any launch request; the opted-in dispatch reports that reason and completes locally with normal tools.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "raise_before_launch": "ineligible"
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "fly_requests": 0,
+        "machines_created": 0,
+        "minted": 0,
+        "in_flight_after": 0,
+        "dispatch_events": ["key_only_notice", "run_attempt", "local_correction"],
+        "local_key_only_correction": "This run was not eligible for Fly, so it ran locally with its normal tools."
       }
     },
     {

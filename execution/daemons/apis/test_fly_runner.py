@@ -1106,6 +1106,48 @@ def test_seam_definite_launch_failure_falls_back_or_fails(fly_env, seam, monkeyp
     assert not forced.ok and forced.error.startswith("fly runner refused: Fly launch failed")
 
 
+@pytest.mark.parametrize("error, correction", [
+    (fly_runner.FlyIneligible,
+     "This run was not eligible for Fly, so it ran locally with its normal tools."),
+    (fly_runner.FlyLaunchError,
+     "The Fly launch failed; this run fell back to a local run with its normal tools."),
+])
+def test_key_only_local_fallback_reports_the_actual_fly_failure(
+        fly_env, seam, monkeypatch, caplog, capsys, error, correction):
+    spawned, fake_exec = seam
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    executor, _, _ = make_executor(FakeFly())
+
+    async def fail_before_result(job):
+        raise error("eval refusal")
+
+    notices = []
+
+    class Notifier:
+        def send(self, message, **kwargs):
+            notices.append(message)
+
+    monkeypatch.setattr(executor, "run", fail_before_result)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with caplog.at_level(logging.WARNING), \
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m",
+                       repository="owner/repo", github_token="t-local",
+                       include_github_contract=True,
+                       notifier=Notifier())
+
+    assert result.ok and result.stdout == "local output" and len(spawned) == 1
+    stderr = capsys.readouterr().err
+    assert correction in stderr
+    assert correction in caplog.text
+    assert correction in notices
+    other = "The Fly launch failed" if error is fly_runner.FlyIneligible else "not eligible for Fly"
+    assert other not in stderr and other not in caplog.text
+    assert all(other not in message for message in notices)
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in result.stdout
+
+
 @pytest.mark.parametrize("terminates", [True, False])
 def test_seam_uncertain_launch_is_never_replayed_locally(fly_env, seam, monkeypatch, terminates):
     """A lost create response on an opted-in class with local fallback on:

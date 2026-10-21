@@ -25,6 +25,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import logging
 import socket
 import stat
 import subprocess
@@ -298,6 +299,8 @@ class Trace:
     exit_codes: list = field(default_factory=list)
     starts: list = field(default_factory=list)
     dispatch_events: list[str] = field(default_factory=list)
+    capability_logs: list[str] = field(default_factory=list)
+    capability_notices: list[str] = field(default_factory=list)
     everything_sent: str = field(repr=False, default="")
 
 
@@ -616,9 +619,14 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
 
     # ── Drive the agent-facing CLI ───────────────────────────────────────────
     dispatch_events: list[str] = []
+    capability_logs: list[str] = []
+    capability_notices: list[str] = []
     real_run = executor.run
 
     async def record_launch(job):
+        if scenario["fly"].get("raise_before_launch") == "ineligible":
+            dispatch_events.append("run_attempt")
+            raise fly_runner.FlyIneligible("eval: role cannot run on Fly")
         dispatch_events.append("launch")
         return await real_run(job)
 
@@ -628,9 +636,28 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         def write(self, value):
             if fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE in value:
                 dispatch_events.append("key_only_notice")
-            if "The Fly launch failed; this run fell back to a local run" in value:
+            if ("The Fly launch failed; this run fell back to a local run" in value
+                    or "This run was not eligible for Fly, so it ran locally" in value):
                 dispatch_events.append("local_correction")
             return super().write(value)
+
+    class CapabilityLog(logging.Handler):
+        def emit(self, record):
+            capability_logs.append(record.getMessage())
+
+    class Notifier:
+        def send(self, message, **kwargs):
+            capability_notices.append(message)
+
+    if scenario["expect"].get("local_key_only_correction"):
+        real_dispatch = dispatch_role.run_skill
+
+        async def dispatch_with_notifier(*args, **kwargs):
+            return await real_dispatch(*args, notifier=Notifier(), **kwargs)
+
+        monkeypatch.setattr(dispatch_role, "run_skill", dispatch_with_notifier)
+    log_handler = CapabilityLog()
+    skill_runner.log.addHandler(log_handler)
 
     out, err = io.StringIO(), io.StringIO()
     provider = scenario.get("provider", "claude")
@@ -650,6 +677,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
             except ValueError:
                 envelopes.append({})
     finally:
+        skill_runner.log.removeHandler(log_handler)
+        if scenario["expect"].get("local_key_only_correction"):
+            monkeypatch.setattr(dispatch_role, "run_skill", real_dispatch)
         for proc in others:
             proc.kill()
             proc.wait()
@@ -695,6 +725,8 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         exit_codes=exit_codes,
         starts=list(fake.starts),
         dispatch_events=dispatch_events,
+        capability_logs=capability_logs,
+        capability_notices=capability_notices,
         argv_max_bytes=_longest_argument(fake.created_configs),
         claude_login_state=str(fake.machines.get("m-claude-login", {}).get("state", "")),
         claude_login_job_files_after=fly_runner._has_job_config(
@@ -788,12 +820,23 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
     if "dispatch_events" in e and trace.dispatch_events != e["dispatch_events"]:
         problems.append(f"dispatch events {trace.dispatch_events!r} != {e['dispatch_events']!r}")
     if e.get("local_key_only_correction"):
-        if "The Fly launch failed; this run fell back to a local run with its normal tools." not in trace.stderr_text:
-            problems.append("local fallback correction was not emitted to stderr")
+        correction = e["local_key_only_correction"]
+        for channel, messages in (("stderr", [trace.stderr_text]),
+                                  ("log", trace.capability_logs),
+                                  ("notifier", trace.capability_notices)):
+            if not any(correction in message for message in messages):
+                problems.append(f"local fallback correction was not emitted to {channel}")
+        visible = "\n".join((trace.stdout_text, trace.stderr_text,
+                             json.dumps(env), *trace.capability_logs,
+                             *trace.capability_notices))
+        if correction.startswith("This run was not eligible"):
+            visible += trace.everything_sent
+        if correction.startswith("This run was not eligible") and "The Fly launch failed" in visible:
+            problems.append("ineligible run falsely reported a failed Fly launch")
         if fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE in str(env.get("stdout", "")):
             problems.append("local result falsely says it ran on Fly key-only")
-        if "LANIUS_NEOTOMA_TOKEN" in trace.stdout_text + trace.stderr_text + json.dumps(env):
-            problems.append("discarded token name appeared in the local result or notice")
+        if "LANIUS_NEOTOMA_TOKEN" in visible or SHARED_BEARER in visible:
+            problems.append("discarded token name or bearer appeared in the local result or notice")
     if "reason_contains" in e:
         reason = f"{env.get('reason', '')} {env.get('error', '')} {env.get('stderr', '')}"
         if e["reason_contains"] not in reason:

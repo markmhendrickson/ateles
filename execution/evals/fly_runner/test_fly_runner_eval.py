@@ -36,6 +36,7 @@ def test_scenario_set_covers_the_required_behaviours():
         "opted_in_class_runs_on_fly",
         "shared_role_token_uses_aauth_key_without_shipping_bearer",
         "shared_role_token_fly_launch_falls_back_with_correction",
+        "shared_role_token_fly_ineligible_falls_back_with_correction",
         "forced_fly_budget_deferral",
         "forced_fly_disconnect_cleans_up",
         "forced_fly_timeout_cleans_up",
@@ -150,6 +151,18 @@ def test_judge_goes_red_when_key_only_notice_is_late_or_fallback_is_uncorrected(
     )})
     assert any("falsely says it ran on Fly" in problem
                for problem in runner.judge(fallback, false_result))
+
+    ineligible = _by_id("shared_role_token_fly_ineligible_falls_back_with_correction")
+    (tmp_path / "ineligible").mkdir()
+    trace = runner.run_scenario(ineligible, tmp_path / "ineligible", monkeypatch)
+    wrong_message = dataclasses.replace(
+        trace,
+        stderr_text=trace.stderr_text.replace(
+            ineligible["expect"]["local_key_only_correction"],
+            "The Fly launch failed; this run fell back to a local run with its normal tools."),
+    )
+    assert any("correction" in problem or "falsely reported" in problem
+               for problem in runner.judge(ineligible, wrong_message))
 
 
 def test_judge_goes_red_when_cleanup_is_skipped(tmp_path, monkeypatch):

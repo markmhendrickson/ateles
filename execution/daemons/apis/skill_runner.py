@@ -3704,9 +3704,14 @@ async def _run_skill_once(
                     if _refusal is not None:
                         return _refusal
                     if _fly_job.neotoma_tools_unavailable:
+                        # FlyIneligible is raised BEFORE any launch is requested;
+                        # only FlyLaunchError means a launch was attempted.
                         _report_fly_capability(
-                            "The Fly launch failed; this run fell back to a local run "
+                            "This run was not eligible for Fly, so it ran locally "
                             "with its normal tools."
+                            if isinstance(exc, fly_runner.FlyIneligible)
+                            else "The Fly launch failed; this run fell back to a "
+                            "local run with its normal tools."
                         )
                     _fly_job = None
                     _start_ns = time.monotonic_ns()
