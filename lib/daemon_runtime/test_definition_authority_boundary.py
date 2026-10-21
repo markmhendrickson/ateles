@@ -1,6 +1,9 @@
 """Real helper/loader controls for completed responses and undeclared authority."""
 from __future__ import annotations
 
+import ast
+import asyncio
+import importlib
 import shutil
 import subprocess
 import time
@@ -102,22 +105,60 @@ def test_daemon_startup_refuses_invalid_capability(monkeypatch, caplog, selector
     assert selector not in caplog.text
 
 
-def test_anthus_entry_refuses_invalid_capability_before_signer(monkeypatch):
-    import asyncio
-    anthus_dir = Path(__file__).resolve().parents[2] / "execution/daemons/anthus"
-    monkeypatch.syspath_prepend(str(anthus_dir))
-    import anthus
+DAEMON_ENTRYPOINTS = {
+    "anthus": "anthus/anthus.py",
+    "apis": "apis/apis.py",
+    "apus": "apus/apus.py",
+    "formica": "formica/formica.py",
+    "gorilla": "gorilla/gorilla.py",
+    "neotoma-agent": "neotoma-agent/neotoma_agent.py",
+    "turdus": "turdus/turdus.py",
+    "tyto": "tyto/tyto.py",
+}
+DAEMONS_DIR = Path(__file__).resolve().parents[2] / "execution/daemons"
 
+
+def test_every_daemon_using_the_fail_closed_loader_has_a_startup_case():
+    callers = {
+        str(path.relative_to(DAEMONS_DIR))
+        for path in DAEMONS_DIR.rglob("*.py")
+        if not path.name.startswith("test_")
+        and any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "load_agent_definition_or_exit"
+            for node in ast.walk(ast.parse(path.read_text()))
+        )
+    }
+    assert callers == set(DAEMON_ENTRYPOINTS.values())
+
+
+@pytest.mark.parametrize("daemon_name", DAEMON_ENTRYPOINTS)
+def test_daemon_entry_refuses_invalid_capability_before_signer(monkeypatch, daemon_name):
+    daemon_file = DAEMONS_DIR / DAEMON_ENTRYPOINTS[daemon_name]
+    monkeypatch.syspath_prepend(str(daemon_file.parent))
+    daemon = importlib.import_module(daemon_file.stem)
+    assert Path(daemon.__file__).resolve() == daemon_file.resolve()
     definition = loader.AgentDefinition(
-        entity_id="ent_fixture", name="anthus", status="active",
+        entity_id="ent_fixture", name=daemon_name, status="active",
         prompt_markdown="A defined role", tool_allowlist=["default"],
     )
-    monkeypatch.setattr(loader.AgentLoader, "load", lambda self: definition)
+    def load(self):
+        assert self.agent_name == daemon_name
+        return definition
+
+    monkeypatch.setattr(loader.AgentLoader, "load", load)
     signer_calls = []
-    monkeypatch.setattr(anthus.AAuthSigner, "from_key_file",
-                        lambda *args: signer_calls.append(args))
+    def unexpected_signer(*args):
+        signer_calls.append(args)
+        pytest.fail(f"{daemon_name} continued startup after rejected capability")
+
+    monkeypatch.setattr(daemon.AAuthSigner, "from_key_file",
+                        unexpected_signer)
+    if daemon_name == "apis":
+        monkeypatch.setattr(daemon, "_require_checkpoint_denial_store", lambda: "fixture")
     with pytest.raises(SystemExit) as refused:
-        asyncio.run(anthus.main())
+        asyncio.run(daemon.main())
     assert refused.value.code == 1
     assert not signer_calls
 
