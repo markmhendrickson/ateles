@@ -994,9 +994,11 @@ def main(argv: list[str] | None = None) -> int:
         emitter.emit_failure(refusal)
         return 1
 
-    # Report the identity actually loaded, so a degraded dispatch (Neotoma
-    # unreachable -> stub definition, wildcard tools) is visible at the point of
-    # dispatch rather than inferred afterwards from a harness_event.
+    # Report the identity actually loaded, so an unavailable definition is
+    # visible at the point of dispatch. This preload is reporting only: work that
+    # needs no definition (the deterministic mechanical path) must still run, and
+    # run_skill refuses independently, before any model launch, when the
+    # definition cannot be loaded (DEFINITION_UNAVAILABLE_PREFIX).
     try:
         agent_def = _load_agent_def(role)
         tools = agent_def.tools

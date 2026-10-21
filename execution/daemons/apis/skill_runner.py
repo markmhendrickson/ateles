@@ -16,9 +16,10 @@ SKILL.md, and (when the definition specifies a restricted tool_allowlist) passes
 Stage 2 (ateles#94): writes a harness_event to Neotoma at dispatch start,
 completion, and failure.
 
-Stage 5 (ateles#94): when no agent_definition loads (empty prompt_markdown),
-emits a notifier WARN and a harness_event with the degraded_generic_subagent
-marker so degraded dispatches are observable. Dispatch still proceeds.
+Canonical execution admission refuses absent, malformed or inactive role
+instructions before child construction. Historical prompt-formatting helpers
+still expose a degraded marker for introspection; that marker grants no
+execution authority.
 
 ateles#257: on a FAILED dispatch the complete child stdout AND stderr are
 persisted to a per-dispatch file under ``~/Library/Logs/ateles/dispatch-failures/``
@@ -64,7 +65,9 @@ from lib.credential_scrub import (  # noqa: E402
     AGENT_CHILD_MARKER_ENV,
     is_generation_credential,
 )
-from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
+from lib.daemon_runtime import (  # noqa: E402
+    AgentDefinition, AgentDefinitionUnavailable, AgentLoader, admit_agent_definition,
+)
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
@@ -868,10 +871,20 @@ _agent_def_cache: dict[str, AgentDefinition] = {}
 
 
 def _load_agent_def(role: str) -> AgentDefinition:
-    """Load (and cache) an AgentDefinition for the given role name."""
-    if role not in _agent_def_cache:
-        _agent_def_cache[role] = AgentLoader(role).load()
-    return _agent_def_cache[role]
+    """Load (and cache) an AgentDefinition for the given role name.
+
+    Raises ``AgentDefinitionUnavailable`` when the definition cannot be loaded
+    (after the loader's short retry). A failure is never cached and never replaced
+    by a stand-in: the next dispatch asks Neotoma again.
+
+    A local SKILL.md does not supply authority for a missing canonical role.
+    Absence markers are refused even if a lower loader returns one.
+    """
+    if role in _agent_def_cache:
+        return admit_agent_definition(_agent_def_cache[role], role)
+    agent_def = admit_agent_definition(AgentLoader(role).load(), role)
+    _agent_def_cache[role] = agent_def
+    return agent_def
 
 
 def _load_active_policy_prompt(role: str) -> str:
@@ -1733,6 +1746,11 @@ class SkillResult:
     # (an uncertain launch, a lost wait, or a missing result record). An
     # unknown outcome is never a success and is never replayed locally.
     remote_outcome_unknown: bool = False
+    # The role's agent_definition could not be loaded, so NOTHING was dispatched.
+    # A repair state: not a success, not a provider capacity limit. It ends the
+    # whole dispatch (no failover to another provider, no cooldown), because every
+    # provider would hit the same missing definition; the task is retried later.
+    definition_unavailable: bool = False
     remote_run_id: str = ""
     remote_machine_state: str = ""
     # A configuration the operator must repair before this dispatch can run
@@ -1758,6 +1776,12 @@ class SkillResult:
     # 2026-10-15). When that reading WOULD have refused this provider
     # locally, what it said; empty when it would have allowed it.
     usage_gate_exempted: str = ""
+
+
+# Leads the error of a dispatch refused because the role's agent_definition could
+# not be loaded. Fixed text: callers and tests match on it, and it carries no
+# response content.
+DEFINITION_UNAVAILABLE_PREFIX = "agent_definition unavailable"
 
 
 _SHARED_NEOTOMA_BEARER_NAMES = ("NEOTOMA_BEARER_TOKEN", "NEOTOMA_BEARER_TOKEN_PROD")
@@ -2658,9 +2682,9 @@ async def _run_skill_once(
     passes ``action_class`` with no ``precomputed_tier`` still gets a fresh
     resolution, unchanged from before.
 
-    Stage 5: when agent_definition carries empty prompt_markdown, logs a WARN,
-    sends a notifier alert (when a notifier is supplied), and records a
-    degraded_generic_subagent harness_event. Dispatch still proceeds.
+    The canonical admission boundary refuses empty role instructions before
+    prompt formatting or provider construction; local skill text cannot supply
+    the missing authority.
 
     ``github_token`` (#109 — per-agent GitHub identity): when supplied and
     non-empty, the token is injected into subprocess_env as both
@@ -2785,7 +2809,18 @@ async def _run_skill_once(
         cwd = resolve_dispatch_workspace(cwd)
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
-    agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    try:
+        agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    except AgentDefinitionUnavailable as exc:
+        msg = (
+            f"{DEFINITION_UNAVAILABLE_PREFIX}: {exc} — nothing was dispatched; "
+            "repair the load, the task is retried"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(
+            skill, False, None, "", "", error=msg, provider=provider,
+            definition_unavailable=True,
+        )
 
     binary = _provider_binaries().get(provider)
     if binary is None:
@@ -4736,6 +4771,12 @@ async def _run_provider_attempts(
         # its text: no cooldown, no failover to another provider, no retry,
         # even when an infrastructure message resembles a provider failure.
         if result.remote_outcome_unknown:
+            return result
+        # The role's definition could not be loaded: nothing ran, and every other
+        # provider would hit the same failure. Ends the dispatch BEFORE any
+        # classification of its text, so it is never read as provider capacity and
+        # never cools a provider down.
+        if result.definition_unavailable:
             return result
         # A launched Fly delivery may have pushed: whatever its status, it
         # ends the dispatch here too. Never failed over to another provider.

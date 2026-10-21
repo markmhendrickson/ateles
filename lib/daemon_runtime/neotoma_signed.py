@@ -158,7 +158,10 @@ def agent_identity(
 
 
 class SignedRequestError(RuntimeError):
-    """A signed request that failed before any HTTP status came back.
+    """A signed request failure, retaining whether HTTP headers were received.
+
+    ``response_received`` is True for an observed response, False only when
+    pre-response failure is known, and None when the boundary is unknown.
 
     ``code`` is a short, fixed, non-sensitive reason a caller may log:
 
@@ -180,9 +183,12 @@ class SignedRequestError(RuntimeError):
     body, a header or a filesystem path, and callers must never log it.
     """
 
-    def __init__(self, message: str, code: str):
+    def __init__(self, message: str, code: str, *, response_received: bool | None = None,
+                 http_status: int | None = None):
         super().__init__(message)
         self.code = code
+        self.response_received = response_received
+        self.http_status = http_status
 
 
 def signing_principal(ident: "dict[str, str]") -> "tuple[str, str | None]":
@@ -277,6 +283,24 @@ def _run_in_signing_worker(call):
         _signed_worker.active = previous
 
 
+def _signed_helper_output(output):
+    """Separate an early HTTP status record from the helper's final envelope."""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    first, separator, rest = (output or "").partition("\n")
+    if separator:
+        try:
+            header = json.loads(first)
+        except (TypeError, ValueError):
+            header = None
+        if isinstance(header, dict) and header.get("response_received") is True:
+            status = header.get("status")
+            if isinstance(status, bool) or not isinstance(status, int):
+                status = None
+            return True, status, rest
+    return False, None, output or ""
+
+
 def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method, url, body,
                             real_deadline, node, helper, rc_dir, environment, popen,
                             report_principal=False):
@@ -331,28 +355,54 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
                 proc.kill()
                 proc.communicate()
                 return
-            stdout, stderr = proc.communicate(input=request_json, timeout=remaining)
+            try:
+                # Reserve time to report an observed status to the parent before
+                # its own deadline revokes this session.
+                report_margin = min(0.25, remaining / 4)
+                stdout, stderr = proc.communicate(
+                    input=request_json, timeout=remaining - report_margin
+                )
+            except subprocess.TimeoutExpired:
+                # TimeoutExpired.stdout is only what communicate consumed. A
+                # complete response may still be unread in the helper pipe.
+                proc.kill()
+                sender.send(("error", "helper_timeout", None, None))
+                return
+        received, status, payload = _signed_helper_output(stdout)
         try:
-            out = json.loads(stdout or "{}")
+            out = json.loads(payload or "{}")
         except json.JSONDecodeError:
-            sender.send(("error", "helper_non_json"))
+            sender.send(("error", "helper_non_json", received, status))
+            return
+        if not isinstance(out, dict):
+            sender.send(("error", "helper_non_json", received, status))
             return
         if out.get("error"):
-            sender.send(("error", _helper_error_code(out["error"])))
+            sender.send(("error", _helper_error_code(out["error"]), received, status))
+            return
+        if out.get("body_error"):
+            sender.send(("error", "response_not_json", True, status))
+            return
+        response_status = out.get("status")
+        if isinstance(response_status, bool) or not isinstance(response_status, int):
+            sender.send(("error", "helper_non_json", received, status))
+            return
+        if received and response_status != status:
+            sender.send(("error", "helper_non_json", True, status))
             return
         try:
             data = json.loads(out["body"]) if out.get("body") else {}
-        except json.JSONDecodeError:
+        except (TypeError, ValueError):
             # The server answered but the body is not JSON (a gateway's HTML error
             # page, say). Its own code, so a caller can treat it as the uncertainty
             # it is rather than as an unclassified helper fault.
-            sender.send(("error", "response_not_json"))
+            sender.send(("error", "response_not_json", True, response_status))
             return
-        sender.send(("result", int(out.get("status", 0)), data))
+        sender.send(("result", response_status, data))
     except BaseException as exc:
         try:
             code = "helper_timeout" if isinstance(exc, subprocess.TimeoutExpired) else "helper_error"
-            sender.send(("error", code))
+            sender.send(("error", code, None, None))
         except (BrokenPipeError, EOFError, OSError):
             pass
     finally:
@@ -499,7 +549,9 @@ def signed_request(
                     continue
                 if message[0] == "error":
                     raise SignedRequestError("no AAuth key" if message[1] == "no_key"
-                                             else "signing request failed", message[1])
+                                             else "signing request failed", message[1],
+                                             response_received=message[2] if len(message) > 2 else False,
+                                             http_status=message[3] if len(message) > 3 else None)
                 if message[0] != "result":
                     raise SignedRequestError("signing helper failed", "helper_error")
                 check()
@@ -519,7 +571,8 @@ def signed_request(
     else:
         permits = _signed_permits
         if not permits.acquire(blocking=False):
-            raise SignedRequestError("no free signing worker", "busy")
+            raise SignedRequestError("no free signing worker", "busy",
+                                     response_received=False)
         try:
             future = _signed_pool.submit(_run_in_signing_worker, perform)
         except BaseException:

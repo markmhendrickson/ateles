@@ -7,6 +7,7 @@ The .tools property must accept array, comma-string, and wildcard shapes.
 """
 
 import httpx
+import pytest
 
 import agent_loader as al
 from agent_loader import AgentDefinition
@@ -56,10 +57,8 @@ def test_json_array_string_with_blanks():
     assert _tools('["a", "", "  ", "b"]') == ["a", "b"]
 
 
-def test_bracketed_non_json_falls_back_to_comma_split():
-    """A bracketed string that isn't valid JSON must not crash; it falls back
-    to the legacy comma-split rather than raising."""
-    assert _tools("[a, b, c]") == ["[a", "b", "c]"]
+def test_bracketed_non_json_grants_no_tools():
+    assert _tools("[a, b, c]") == []
 
 
 def test_wildcard_string():
@@ -67,14 +66,14 @@ def test_wildcard_string():
     assert _tools("  *  ") == ["*"]
 
 
-def test_empty_and_none_default_to_wildcard():
-    assert _tools("") == ["*"]
-    assert _tools(None) == ["*"]
-    assert _tools([]) == ["*"]
+def test_empty_and_none_grant_no_tools():
+    assert _tools("") == []
+    assert _tools(None) == []
+    assert _tools([]) == []
 
 
-def test_default_is_wildcard():
-    assert AgentDefinition(name="t").tools == ["*"]
+def test_default_grants_no_tools():
+    assert AgentDefinition(name="t").tools == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,7 +248,7 @@ def test_successful_load_is_not_a_stub(monkeypatch):
             {
                 "entity_id": "ent_real",
                 "snapshot": {"name": "apis", "prompt_markdown": "# real prompt",
-                             "tool_allowlist": ["Bash"]},
+                             "tool_allowlist": ["Bash"], "status": "active"},
             }
         ]
     }
@@ -261,12 +260,12 @@ def test_successful_load_is_not_a_stub(monkeypatch):
     assert d.prompt_markdown == "# real prompt"
 
 
-def test_failed_load_is_marked_as_a_stub_not_a_success(monkeypatch):
-    """A failed load must be DISTINGUISHABLE from a successful one.
+def test_failed_load_is_refused_not_stood_in_for(monkeypatch):
+    """A failed load must not produce a definition at all.
 
-    FAILS on origin/main: AgentDefinition has no is_stub/load_error field, so a
-    stub with an empty prompt and wildcard tools is indistinguishable from a
-    real definition. A caller cannot tell it dispatched an agent with no prompt.
+    A stand-in carries an empty prompt and wildcard tools, so an agent run on it
+    has no role instructions and unrestricted tools while reporting success. The
+    loader now raises with a fixed reason code instead.
     """
     _no_signing(monkeypatch)
     monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
@@ -276,13 +275,10 @@ def test_failed_load_is_marked_as_a_stub_not_a_success(monkeypatch):
 
     monkeypatch.setattr(al.httpx, "post", boom)
 
-    d = al.AgentLoader("apis").load()
-    # The dangerous shape the stub actually has:
-    assert d.prompt_markdown == ""
-    assert d.tools == ["*"]
-    # ...must be flagged, or a caller reports success while running blind.
-    assert d.is_stub is True
-    assert d.load_error, "a stub must record WHY the load failed"
+    with pytest.raises(al.AgentDefinitionUnavailable) as raised:
+        al.AgentLoader("apis").load()
+    assert raised.value.code == "transport_error"
+    assert "unreachable" not in str(raised.value), "the message must carry no response text"
 
 
 def test_failed_load_is_logged_at_error(monkeypatch, caplog):
@@ -297,15 +293,30 @@ def test_failed_load_is_logged_at_error(monkeypatch, caplog):
         lambda url, **kw: (_ for _ in ()).throw(httpx.ConnectError("down")),
     )
 
-    with caplog.at_level("ERROR"):
+    with caplog.at_level("ERROR"), pytest.raises(al.AgentDefinitionUnavailable):
         al.AgentLoader("apis").load()
 
     msgs = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     assert any("FAILED" in m for m in msgs), msgs
 
 
-def test_no_matching_definition_is_also_a_stub(monkeypatch):
-    """A 200 with no matching name is still a failed load, not a definition."""
+def test_an_empty_200_is_absence_and_only_the_opt_in_accepts_it(monkeypatch):
+    """A well-formed 200 with an empty `entities` list is `not_found`: refused by
+    default, and the "undefined" definition only through the explicit opt-in."""
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp({"entities": []}))
+
+    with pytest.raises(al.AgentDefinitionUnavailable) as raised:
+        al.AgentLoader("apis").load()
+    assert raised.value.code == "not_found"
+
+    d = al.AgentLoader("apis").load(allow_undefined=True)
+    assert d.is_stub is True
+    assert d.load_error == "not_found"
+
+
+def test_a_result_for_a_different_name_is_not_absence(monkeypatch):
     _no_signing(monkeypatch)
     monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
     monkeypatch.setattr(
@@ -313,10 +324,9 @@ def test_no_matching_definition_is_also_a_stub(monkeypatch):
         lambda url, **kw: _Resp({"entities": [{"entity_id": "e",
                                                "snapshot": {"name": "someone-else"}}]}),
     )
-
-    d = al.AgentLoader("apis").load()
-    assert d.is_stub is True
-    assert "no agent_definition" in d.load_error
+    with pytest.raises(al.AgentDefinitionUnavailable) as raised:
+        al.AgentLoader("apis").load(allow_undefined=True)
+    assert raised.value.code == "bad_response"
 
 
 class TestPolicyScoping:

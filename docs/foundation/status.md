@@ -245,11 +245,16 @@ with no verdict written.
 2. **#561, open.** Delegation does not attenuate: the delegate runs on its own full standing grant;
    `agent_grant` has no `scope`, `expiry`, or `delegated_by`; the chain is prose,
    `a2a_executor.py:190` appending `— delegated via A2A by: <caller>` to the task description.
-3. **#669, open; fixed at the loader, not at the caller.** `agent_loader.py` marks a failed load
-   `is_stub=True` and still returns `tool_allowlist="*"`, its docstring saying callers must check. No
-   dispatch caller does: `git grep '\.is_stub'` under `execution/daemons/apis` and `lib/daemon_runtime`
-   finds only `signer.is_stub` (2026-09-03). A timed-out load still dispatches an agent with no
-   instructions and wildcard tools, cached for the process lifetime.
+3. **#669, fixed at the loader.** A definition that cannot be loaded now fails closed:
+   `AgentLoader.load()` retries a transient failure briefly and then raises `AgentDefinitionUnavailable`
+   (a fixed reason code, no response text) instead of returning a stand-in with an empty prompt and
+   `tool_allowlist="*"`. The dispatcher refuses the dispatch (`SkillResult.definition_unavailable`, no
+   spawn, no provider cooldown, nothing cached); daemons exit at startup. Unregistered roles also
+   refuse. A found record must declare a nonempty prompt, status and tool set; missing or malformed
+   authority does not become a wildcard. The library's explicit `allow_undefined=True` returns only
+   an inert absence marker with no tools, never dispatch authority. A signed HTTP response remains
+   final even when its body cannot be parsed; only pre-response helper failures retain bearer
+   fallback. Known legacy planned/proposed/draft status warnings remain (2026-10-16).
 4. **`a2a_gateway.authorize_caller()`, no issue.** Returns `(True, "grant_check_unavailable_advisory")`
    when the checker raises (`a2a_gateway.py:280`).
 5. **`mcp_tool_grant_proxy/proxy.py`, no issue.** `enforce()` returns `(True, "")` when `agent_sub` is

@@ -582,15 +582,11 @@ def test_local_dispatch_accepts_correct_worktree_hygiene_answer(tmp_path):
     assert result.ok and result.provider == LOCAL
 
 
-def test_local_dispatch_with_stub_agent_def_is_reported_degraded(tmp_path, monkeypatch):
-    """A local dispatch for a role whose agent_definition failed to load
-    (stub: empty prompt_markdown, synthesized aauth_sub) must be treated as
-    DEGRADED exactly like a frontier dispatch would be — not silently treated
-    as a healthy load just because the lean prompt never reads
-    prompt_markdown in the first place. Regression: `degraded` was briefly
-    hardcoded False for every claude-local run, which would have (a) skipped
-    the undefined-role alert path and (b) let a stub's synthesized aauth_sub
-    receive AAuth signing-key injection."""
+def test_local_dispatch_with_stub_agent_def_is_refused(tmp_path, monkeypatch):
+    """Even the lean local prompt needs admitted canonical role authority.
+
+    A present signing key must never reach a child for an undefined role.
+    """
     _write_config(tmp_path)
     monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path / "keys"))
     # A JWK IS present at the expected path — if `degraded` were wrongly
@@ -618,16 +614,9 @@ def test_local_dispatch_with_stub_agent_def_is_reported_degraded(tmp_path, monke
             )
         )
 
-    assert result.ok and result.provider == LOCAL
-    (_, env), = spawns.calls
-    assert "NEOTOMA_AAUTH_PRIVATE_JWK_PATH" not in env, (
-        "a stub agent_def must not receive AAuth signing-key injection on the local path"
-    )
-    degraded_events = [e for e in events if e.get("output_summary") == "degraded_generic_subagent"]
-    assert degraded_events, (
-        "a stub agent_def on the local path must still write the degraded_generic_subagent "
-        "harness_event, same as the frontier path"
-    )
+    assert not result.ok and result.definition_unavailable
+    assert spawns.calls == [], "a stub must not receive a child or signing-key injection"
+    assert events == [], "refusal must not masquerade as degraded execution"
 
 
 def test_local_failure_falls_over_to_frontier_and_records_why(tmp_path, fallback_bound):

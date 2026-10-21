@@ -348,10 +348,10 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_skill_md_only_when_no_definition(
+    def test_skill_md_does_not_authorize_missing_definition(
         self, MockLoader, mock_write_harness
     ) -> None:
-        """When prompt_markdown is empty, the system prompt is SKILL.md alone."""
+        """A local skill cannot authorize a role with no canonical prompt."""
         stub = _stub_def()
         instance = MagicMock()
         instance.load.return_value = stub
@@ -386,18 +386,16 @@ class TestRunSkill:
                 )
             )
 
-        assert result.ok
-        sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
-        system_prompt_arg = captured_cmd[sys_prompt_idx]
-        assert system_prompt_arg == skill_md_content
+        assert not result.ok and result.definition_unavailable
+        assert captured_cmd == []
+        mock_write_harness.assert_not_called()
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_degraded_produces_harness_event_with_marker(
+    def test_missing_definition_never_records_degraded_execution(
         self, MockLoader, mock_write_harness
     ) -> None:
-        """Empty prompt_markdown must produce a harness_event with
-        output_summary containing 'degraded_generic_subagent'."""
+        """Missing authority is a refusal, never a degraded execution event."""
         stub = _stub_def()
         instance = MagicMock()
         instance.load.return_value = stub
@@ -417,9 +415,9 @@ class TestRunSkill:
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill content"),
-            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec) as spawn,
         ):
-            self._run(
+            result = self._run(
                 skill_runner.run_skill(
                     "gryllus",
                     "work prompt",
@@ -428,15 +426,9 @@ class TestRunSkill:
                 )
             )
 
-        # Find the degraded harness_event call
-        degraded_calls = [
-            call
-            for call in mock_write_harness.call_args_list
-            if "degraded_generic_subagent" in (call.kwargs.get("output_summary") or "")
-        ]
-        assert len(degraded_calls) >= 1, (
-            "Expected at least one harness_event with output_summary='degraded_generic_subagent'"
-        )
+        assert not result.ok and result.definition_unavailable
+        spawn.assert_not_called()
+        mock_write_harness.assert_not_called()
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -1779,11 +1771,10 @@ class TestSwarmGithubContractInjection:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_run_skill_degraded_with_contract(
+    def test_github_contract_does_not_authorize_missing_definition(
         self, MockLoader, mock_write_harness
     ) -> None:
-        """Degraded + include_github_contract=True: contract + skill_md in prompt,
-        dispatch still proceeds (degraded=True returned by build_system_prompt)."""
+        """Even an explicit delivery contract cannot supply role authority."""
         stub = _stub_def()
         instance = MagicMock()
         instance.load.return_value = stub
@@ -1822,21 +1813,9 @@ class TestSwarmGithubContractInjection:
                 )
             )
 
-        # Dispatch still succeeds despite degraded.
-        assert result.ok
-        sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
-        system_prompt_arg = captured_cmd[sys_prompt_idx]
-        assert skill_runner.SWARM_GITHUB_CONTRACT in system_prompt_arg, (
-            "Contract must still be injected even in degraded mode"
-        )
-        assert skill_md_content in system_prompt_arg
-        # The degraded harness_event is also emitted (the degraded branch ran).
-        degraded_calls = [
-            call
-            for call in mock_write_harness.call_args_list
-            if "degraded_generic_subagent" in (call.kwargs.get("output_summary") or "")
-        ]
-        assert len(degraded_calls) >= 1
+        assert not result.ok and result.definition_unavailable
+        assert captured_cmd == []
+        mock_write_harness.assert_not_called()
 
 
 # ── ateles#590 security repair (PR #1334): GitHub delivery credential boundary ─
@@ -2180,7 +2159,7 @@ class TestAnthropicAuthPrecedence:
 
     def _spawn_and_capture_env(self, env_overrides: dict) -> dict:
         instance = MagicMock()
-        instance.load.return_value = _stub_def()
+        instance.load.return_value = _make_def()
         captured: dict = {}
 
         async def fake_exec(*cmd, **kwargs):
@@ -2203,11 +2182,13 @@ class TestAnthropicAuthPrecedence:
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
             patch.dict("os.environ", env_overrides, clear=False),
         ):
-            asyncio.run(
+            result = asyncio.run(
                 skill_runner.run_skill(
                     "gryllus", "p", role="gryllus", task_entity_id="ent_x"
                 )
             )
+        assert result.ok, result.error
+        assert captured, "auth test must reach the actual child boundary"
         return captured
 
     def test_oauth_token_present_drops_api_key(self) -> None:
